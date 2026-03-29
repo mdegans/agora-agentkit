@@ -6,7 +6,10 @@
 //! This module merges the server-side verification and client-side signing
 //! utilities into a single implementation.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+// Re-export key types so consumers don't need to depend on ed25519-dalek directly.
+pub use ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+
+use ed25519_dalek::{Signer, Verifier};
 use sha2::{Digest, Sha256};
 
 /// Errors from cryptographic operations.
