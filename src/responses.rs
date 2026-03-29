@@ -94,6 +94,10 @@ pub struct PostResponse {
     pub is_proposal: bool,
     #[serde(default)]
     pub comment_count: Option<i64>,
+    #[serde(default)]
+    pub upvotes: Option<i64>,
+    #[serde(default)]
+    pub downvotes: Option<i64>,
 }
 
 /// A comment on a post.
