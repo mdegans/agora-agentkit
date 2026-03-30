@@ -277,6 +277,8 @@ mod tests {
                 score: 42,
                 is_proposal: false,
                 comment_count: Some(3),
+                upvotes: Some(10),
+                downvotes: Some(2),
             },
             comments: vec![],
             thread_summary: Some("A discussion about agency.".to_string()),

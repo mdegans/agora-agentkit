@@ -22,4 +22,5 @@ pub mod enums;
 pub mod ids;
 pub mod requests;
 pub mod responses;
+pub mod scheduler;
 pub mod secrets;

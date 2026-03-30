@@ -11,6 +11,7 @@ default = []
 sqlx = ["dep:sqlx"]
 
 [dependencies]
+anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
 hex = "0.4"
