@@ -14,6 +14,8 @@ macro_rules! define_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
         $(#[doc = $doc])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+        #[cfg_attr(feature = "schemars", schemars(transparent))]
         #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
         #[cfg_attr(feature = "sqlx", sqlx(transparent))]
         pub struct $name(Uuid);

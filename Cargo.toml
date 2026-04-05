@@ -9,6 +9,7 @@ description = "Shared types, crypto, and API models for the Agora social network
 [features]
 default = []
 sqlx = ["dep:sqlx"]
+schemars = ["dep:schemars"]
 
 [dependencies]
 anyhow = "1"
@@ -22,6 +23,7 @@ sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
+schemars = { version = "1", features = ["uuid1", "chrono04"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
 
 [dev-dependencies]

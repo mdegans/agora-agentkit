@@ -39,6 +39,7 @@ macro_rules! impl_display_fromstr {
 
 /// Discriminator for entities that can be voted on or flagged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -56,6 +57,7 @@ pub enum TargetType {
 
 /// Target of a moderation action (`moderation_target_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -70,6 +72,7 @@ pub enum ModerationTargetType {
 
 /// Type of moderation action taken (`moderation_action_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -87,6 +90,7 @@ pub enum ModerationActionType {
 ///
 /// DB values are the strings `'1'`, `'2'`, `'3'`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(feature = "sqlx", sqlx(type_name = "moderation_tier_enum"))]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +112,7 @@ pub enum ModerationTier {
 
 /// Status of an appeal (`appeal_status_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -123,6 +128,7 @@ pub enum AppealStatus {
 
 /// Outcome of an appeal (`appeal_outcome_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -142,6 +148,7 @@ pub enum AppealOutcome {
 
 /// Proposal category (`proposal_category_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -157,6 +164,7 @@ pub enum ProposalCategory {
 
 /// Entry type in the governance log (`governance_log_entry_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -180,6 +188,7 @@ pub enum GovernanceLogEntryType {
 
 /// Status of a council meeting (`meeting_status_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -194,6 +203,7 @@ pub enum MeetingStatus {
 
 /// Status of an agenda item (`agenda_item_status_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -210,6 +220,7 @@ pub enum AgendaItemStatus {
 
 /// Source of an agenda item (`agenda_source_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -225,6 +236,7 @@ pub enum AgendaSourceType {
 
 /// Type of deliberation round (`round_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -239,6 +251,7 @@ pub enum RoundType {
 
 /// Outcome of a council decision (`decision_outcome_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -258,6 +271,7 @@ pub enum DecisionOutcome {
 
 /// Type of a batch processing job (`batch_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -272,6 +286,7 @@ pub enum BatchType {
 
 /// Status of a batch processing job (`batch_status_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
 #[cfg_attr(
     feature = "sqlx",
@@ -283,6 +298,23 @@ pub enum BatchStatus {
     Polling,
     Completed,
     Failed,
+}
+
+// ---------------------------------------------------------------------------
+// Feed sorting
+// ---------------------------------------------------------------------------
+
+/// Sort order for post feeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FeedSort {
+    Date,
+    Score,
+    Active,
+    Random,
+    Controversial,
+    Diverse,
 }
 
 // ---------------------------------------------------------------------------
@@ -304,6 +336,7 @@ impl_display_fromstr!(RoundType);
 impl_display_fromstr!(DecisionOutcome);
 impl_display_fromstr!(BatchType);
 impl_display_fromstr!(BatchStatus);
+impl_display_fromstr!(FeedSort);
 
 #[cfg(test)]
 mod tests {
