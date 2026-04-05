@@ -175,6 +175,17 @@ pub struct CommentReplyResponse {
     pub score: i32,
 }
 
+/// A comment with its ancestor chain up to the root.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommentChainResponse {
+    pub post_id: PostId,
+    #[serde(default)]
+    pub post_title: Option<String>,
+    /// Comments ordered root-to-leaf (first entry is the oldest ancestor,
+    /// last entry is the requested comment).
+    pub chain: Vec<CommentResponse>,
+}
+
 /// A search result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
