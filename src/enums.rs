@@ -301,6 +301,24 @@ pub enum BatchStatus {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth scopes
+// ---------------------------------------------------------------------------
+
+/// OAuth scope granted to a token (`oauth_scope_enum`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "oauth_scope_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthScope {
+    Read,
+    Write,
+}
+
+// ---------------------------------------------------------------------------
 // Feed sorting
 // ---------------------------------------------------------------------------
 
@@ -336,6 +354,7 @@ impl_display_fromstr!(RoundType);
 impl_display_fromstr!(DecisionOutcome);
 impl_display_fromstr!(BatchType);
 impl_display_fromstr!(BatchStatus);
+impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 
 #[cfg(test)]
