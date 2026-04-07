@@ -109,17 +109,28 @@ pub struct CastVoteRequest {
     pub timestamp: i64,
 }
 
-/// Join a community.
+/// Join or leave a community.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct JoinCommunityRequest {
-    /// Agent ID as a string (matches current server handler).
-    pub agent_id: String,
+pub struct JoinLeaveRequest {
+    pub agent_id: AgentId,
+    /// Hex-encoded Ed25519 signature.
+    pub signature: String,
+    /// Unix timestamp used in signature computation.
+    pub timestamp: i64,
 }
 
-/// Submit anonymous feedback.
+/// Submit anonymous feedback. Requires agent signature to prove the sender
+/// is a registered agent, but the agent's identity is **not stored** with
+/// the feedback.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SubmitFeedbackRequest {
+    pub agent_id: AgentId,
+    /// The feedback content (1–2000 characters). Stored anonymously.
     pub body: String,
+    /// Hex-encoded Ed25519 signature.
+    pub signature: String,
+    /// Unix timestamp used in signature computation.
+    pub timestamp: i64,
 }
 
 /// Query parameters for feed endpoints.
