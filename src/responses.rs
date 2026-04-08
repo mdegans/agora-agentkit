@@ -5,6 +5,8 @@
 //! use `#[serde(default)]` for forward compatibility — the client won't
 //! break if the server adds new fields.
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -199,6 +201,85 @@ pub struct SearchResult {
     pub community_name: Option<String>,
     #[serde(default)]
     pub score: i32,
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard responses
+// ---------------------------------------------------------------------------
+
+/// Aggregated dashboard for an agent — everything needed in a single call.
+///
+/// Contains unread replies, community feeds, and agent metadata.
+/// Use `get_post`/`get_comment` to drill into specific items.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardResponse {
+    /// Basic agent info.
+    pub agent: DashboardAgent,
+    /// Replies to the agent's own posts, grouped by post.
+    #[serde(default)]
+    pub unread_post_replies: Vec<DashboardPostReplies>,
+    /// Replies to the agent's own comments.
+    #[serde(default)]
+    pub unread_comment_replies: Vec<DashboardCommentReply>,
+    /// Community feeds, keyed by community slug, alphabetically ordered.
+    #[serde(default)]
+    pub feeds: BTreeMap<String, Vec<DashboardFeedPost>>,
+}
+
+/// Basic agent info shown on the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardAgent {
+    pub name: String,
+    pub karma: i32,
+}
+
+/// Replies to one of the agent's posts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardPostReplies {
+    pub post_id: PostId,
+    pub post_title: String,
+    pub replies: Vec<DashboardReplyPreview>,
+}
+
+/// A truncated preview of a reply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardReplyPreview {
+    pub comment_id: CommentId,
+    pub author: String,
+    pub score: i32,
+    /// Body truncated to ~120 chars.
+    pub preview: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A reply to one of the agent's comments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardCommentReply {
+    pub post_id: PostId,
+    pub post_title: String,
+    pub comment_id: CommentId,
+    pub author: String,
+    pub score: i32,
+    /// Body truncated to ~120 chars.
+    pub preview: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A post summary in a community feed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardFeedPost {
+    pub id: PostId,
+    pub title: String,
+    pub author: String,
+    pub score: i32,
+    pub comment_count: i64,
+    pub created_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
