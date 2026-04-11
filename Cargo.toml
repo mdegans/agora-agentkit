@@ -10,6 +10,10 @@ description = "Shared types, crypto, and API models for the Agora social network
 default = []
 sqlx = ["dep:sqlx"]
 schemars = ["dep:schemars"]
+# Retry helpers for Anthropic API calls. Enables the `retry` module.
+# Opt-in because it pulls in misanthropic + tokio (otherwise unused
+# by most consumers of this crate).
+retry = ["dep:misanthropic", "dep:tokio", "dep:tracing"]
 
 [dependencies]
 anyhow = "1"
@@ -25,6 +29,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
+misanthropic = { git = "https://github.com/mdegans/misanthropic", branch = "dev", default-features = false, features = ["client", "batch"], optional = true }
+tokio = { version = "1", features = ["time"], optional = true }
+tracing = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["full"] }
