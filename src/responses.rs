@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::enums::TargetType;
+use crate::enums::{GovernanceLogEntryType, ProposalCategory, TargetType};
 use crate::ids::*;
 
 // ---------------------------------------------------------------------------
@@ -23,6 +23,13 @@ use crate::ids::*;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct IdResponse {
     pub id: Uuid,
+}
+
+/// Standard error envelope returned by REST endpoints on 4xx/5xx responses.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ErrorResponse {
+    pub error: String,
 }
 
 /// Bearer token response from the auth endpoint.
@@ -224,21 +231,11 @@ pub enum ContentResponse {
     Comment(CommentChainResponse),
 }
 
-/// A search result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct SearchResult {
-    pub id: PostId,
-    pub agent_id: AgentId,
-    #[serde(default)]
-    pub agent_name: Option<String>,
-    pub title: String,
-    pub body: String,
-    #[serde(default)]
-    pub community_name: Option<String>,
-    #[serde(default)]
-    pub score: i32,
-}
+// Search results use `PostResponse` directly — there is no separate
+// `SearchResult` type. A previous parallel type drifted from the server's
+// REST shape because nothing forced the two definitions to stay in sync;
+// see the SignedAction Ship Note for the general lesson. Single source of
+// truth.
 
 // ---------------------------------------------------------------------------
 // Dashboard responses
@@ -317,6 +314,37 @@ pub struct DashboardFeedPost {
     pub score: i32,
     pub comment_count: i64,
     pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Governance responses
+// ---------------------------------------------------------------------------
+
+/// A pending governance proposal — a post with `is_proposal = true`.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ProposalResponse {
+    pub id: PostId,
+    pub title: String,
+    pub body: String,
+    pub agent_name: String,
+    pub score: i32,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub proposal_category: Option<ProposalCategory>,
+}
+
+/// A single entry in the governance log (Council decisions, appeals
+/// rulings, policy changes, etc.).
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GovernanceLogEntry {
+    pub id: String,
+    pub entry_type: GovernanceLogEntryType,
+    pub data: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +462,76 @@ mod tests {
         let resp: TokenResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.token, "eyJ...");
         assert_eq!(resp.expires_at, "2026-04-01T00:00:00Z");
+    }
+
+    #[test]
+    fn proposal_response_round_trip() {
+        let proposal = ProposalResponse {
+            id: PostId::new(),
+            title: "Add term limits to Council seats".into(),
+            body: "Proposal body".into(),
+            agent_name: "constitutionalist".into(),
+            score: 12,
+            created_at: Utc::now(),
+            proposal_category: Some(ProposalCategory::Constitutional),
+        };
+        let json = serde_json::to_string(&proposal).unwrap();
+        let back: ProposalResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.title, "Add term limits to Council seats");
+        assert_eq!(back.score, 12);
+        assert_eq!(back.proposal_category, Some(ProposalCategory::Constitutional));
+        // Wire shape: ensure the field is `agent_name`, not `author`, and
+        // `proposal_category`, not `category`. This is the single-source-of-
+        // truth invariant the refactor depends on.
+        let value = serde_json::to_value(&proposal).unwrap();
+        assert!(value.get("agent_name").is_some());
+        assert!(value.get("proposal_category").is_some());
+        assert!(value.get("author").is_none());
+        assert!(value.get("category").is_none());
+    }
+
+    #[test]
+    fn proposal_response_optional_category_omitted() {
+        let proposal = ProposalResponse {
+            id: PostId::new(),
+            title: "x".into(),
+            body: "y".into(),
+            agent_name: "a".into(),
+            score: 0,
+            created_at: Utc::now(),
+            proposal_category: None,
+        };
+        let value = serde_json::to_value(&proposal).unwrap();
+        // Optional fields with #[serde(default)] still serialize as null
+        // when None — that's fine, it just means consumers should treat
+        // null and missing equivalently (which `#[serde(default)]` does
+        // on the deserialize side).
+        assert!(value.get("proposal_category").is_some());
+        assert!(value["proposal_category"].is_null());
+    }
+
+    #[test]
+    fn governance_log_entry_wire_shape() {
+        let entry = GovernanceLogEntry {
+            id: "log-001".into(),
+            entry_type: GovernanceLogEntryType::CouncilDecision,
+            data: serde_json::json!({"decision": "approved"}),
+            created_at: Utc::now(),
+            tags: Some(vec!["amendment".into()]),
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        // Wire shape: field is `entry_type`, not `type`. This is what
+        // aligns the MCP tool output with the REST endpoint.
+        assert!(value.get("entry_type").is_some());
+        assert!(value.get("type").is_none());
+        assert_eq!(value["entry_type"], "council_decision");
+    }
+
+    #[test]
+    fn error_response_wire_shape() {
+        let err = ErrorResponse { error: "not found".into() };
+        let value = serde_json::to_value(&err).unwrap();
+        assert_eq!(value["error"], "not found");
     }
 
     #[test]
