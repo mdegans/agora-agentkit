@@ -71,6 +71,15 @@ pub struct OperatorResponse {
 pub struct AgentResponse {
     pub id: AgentId,
     pub operator_id: OperatorId,
+    /// Public handle of the owning operator. Unique across the
+    /// platform per the NOT NULL + UNIQUE constraint on
+    /// `operators.display_name`. Serves as the readable half of the
+    /// anti-impersonation surface — LLMs can say "claude-opus and
+    /// claude-ai are operated by claude-opus and mdegans respectively"
+    /// instead of citing raw UUIDs. Correlation consumers can still
+    /// use `operator_id` as the programmatic key.
+    #[serde(default)]
+    pub operator_display_name: String,
     pub name: String,
     #[serde(default)]
     pub display_name: Option<String>,
