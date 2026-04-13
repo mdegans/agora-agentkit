@@ -20,12 +20,14 @@ use crate::ids::*;
 
 /// Response containing a single ID (used for create endpoints).
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct IdResponse {
     pub id: Uuid,
 }
 
 /// Bearer token response from the auth endpoint.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TokenResponse {
     pub token: String,
     pub agent_id: AgentId,
@@ -38,6 +40,7 @@ pub struct TokenResponse {
 
 /// Response from registering an agent.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RegisterAgentResponse {
     pub id: AgentId,
     pub name: String,
@@ -45,6 +48,7 @@ pub struct RegisterAgentResponse {
 
 /// Full operator profile.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct OperatorResponse {
     pub id: OperatorId,
     pub email: String,
@@ -56,6 +60,7 @@ pub struct OperatorResponse {
 
 /// Full agent profile.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct AgentResponse {
     pub id: AgentId,
     pub operator_id: OperatorId,
@@ -75,8 +80,9 @@ pub struct AgentResponse {
 // Social responses
 // ---------------------------------------------------------------------------
 
-/// A post in a feed listing.
+/// A post in a feed listing or in `ContentResponse::Post`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostResponse {
     pub id: PostId,
     pub agent_id: AgentId,
@@ -104,6 +110,7 @@ pub struct PostResponse {
 
 /// A comment on a post.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentResponse {
     pub id: CommentId,
     pub post_id: PostId,
@@ -117,10 +124,15 @@ pub struct CommentResponse {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub score: i32,
+    #[serde(default)]
+    pub upvotes: Option<i64>,
+    #[serde(default)]
+    pub downvotes: Option<i64>,
 }
 
 /// Full post with comments and metadata.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostWithCommentsResponse {
     pub post: PostResponse,
     pub comments: Vec<CommentResponse>,
@@ -132,6 +144,7 @@ pub struct PostWithCommentsResponse {
 
 /// A community tag showing cross-community relevance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityTag {
     pub community: String,
     pub similarity: f32,
@@ -139,6 +152,7 @@ pub struct CommunityTag {
 
 /// A community listing.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityResponse {
     pub id: CommunityId,
     pub name: String,
@@ -153,6 +167,7 @@ pub struct CommunityResponse {
 
 /// Vote confirmation response.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct VoteResponse {
     pub agent_id: AgentId,
     pub target_type: TargetType,
@@ -162,6 +177,7 @@ pub struct VoteResponse {
 
 /// A reply to one of the agent's comments, with post context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentReplyResponse {
     pub id: CommentId,
     pub post_id: PostId,
@@ -179,6 +195,7 @@ pub struct CommentReplyResponse {
 
 /// A comment with its ancestor chain up to the root.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentChainResponse {
     pub post_id: PostId,
     #[serde(default)]
@@ -188,8 +205,28 @@ pub struct CommentChainResponse {
     pub chain: Vec<CommentResponse>,
 }
 
+/// Response from `GET /api/social/content/{id}` and the MCP `get_content`
+/// tool. Tagged enum — the `type` field discriminates between a post
+/// (with its comments and metadata) and a comment (with its ancestor
+/// chain). The same content endpoint serves both kinds, with the server
+/// resolving the UUID via `agora_common::moderation::resolve_content_id`.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+// Short-lived response type constructed once per HTTP request and
+// serialized once — the variant size asymmetry doesn't matter here, and
+// boxing would make consumer pattern matching uglier for no real gain.
+#[allow(clippy::large_enum_variant)]
+pub enum ContentResponse {
+    /// A post with all its comments, thread summary, and community tags.
+    Post(PostWithCommentsResponse),
+    /// A comment with its ancestor chain up to the root of the thread.
+    Comment(CommentChainResponse),
+}
+
 /// A search result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SearchResult {
     pub id: PostId,
     pub agent_id: AgentId,
@@ -288,6 +325,7 @@ pub struct DashboardFeedPost {
 
 /// Response from flagging content.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FlagResponse {
     pub id: FlagId,
     pub status: String,
@@ -295,6 +333,7 @@ pub struct FlagResponse {
 
 /// Response from filing an appeal.
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct AppealResponse {
     pub id: AppealId,
     pub status: String,
@@ -333,12 +372,55 @@ mod tests {
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
             score: 5,
+            upvotes: Some(7),
+            downvotes: Some(2),
         };
 
         let json = serde_json::to_string(&comment).unwrap();
         let back: CommentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.body, "Great post!");
         assert_eq!(back.score, 5);
+        assert_eq!(back.upvotes, Some(7));
+        assert_eq!(back.downvotes, Some(2));
+    }
+
+    #[test]
+    fn content_response_post_wire_shape() {
+        let resp = ContentResponse::Post(PostWithCommentsResponse {
+            post: PostResponse {
+                id: PostId::new(),
+                agent_id: AgentId::new(),
+                agent_name: Some("a".to_string()),
+                community_id: None,
+                community_name: Some("c".to_string()),
+                title: "t".to_string(),
+                body: "b".to_string(),
+                created_at: None,
+                score: 0,
+                is_proposal: false,
+                comment_count: None,
+                upvotes: None,
+                downvotes: None,
+            },
+            comments: vec![],
+            thread_summary: None,
+            community_tags: vec![],
+        });
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["type"], "post");
+        assert!(json.get("post").is_some());
+    }
+
+    #[test]
+    fn content_response_comment_wire_shape() {
+        let resp = ContentResponse::Comment(CommentChainResponse {
+            post_id: PostId::new(),
+            post_title: Some("parent post".to_string()),
+            chain: vec![],
+        });
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["type"], "comment");
+        assert_eq!(json["post_title"], "parent post");
     }
 
     #[test]

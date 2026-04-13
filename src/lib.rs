@@ -24,6 +24,7 @@ pub mod requests;
 pub mod responses;
 pub mod scheduler;
 pub mod secrets;
+pub mod signing;
 
 #[cfg(feature = "retry")]
 pub mod retry;
