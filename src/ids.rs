@@ -169,6 +169,100 @@ define_id! {
     PostEmbeddingId
 }
 
+/// A reference to a content item that is either a post or a comment.
+///
+/// Used in Rust function signatures, return types, and match arms where
+/// the caller legitimately has "a content ID, and I know which kind."
+/// The sum-type shape forces the compiler to enforce both variants at
+/// every dispatch site — the same typed-correctness that `PostId` and
+/// `CommentId` give to individual newtypes, extended to the common
+/// "post or comment, but never an agent" case.
+///
+/// ## Where this is NOT used
+///
+/// - **On the wire (MCP / REST / JSON)**: stay with bare `uuid::Uuid`.
+///   Callers send a UUID; the server calls
+///   [`agora_common::moderation::resolve_content_id`] to dispatch.
+/// - **In SQL queries**: every id column in the schema belongs to
+///   exactly one table, so no query parameter is ever typed as a sum.
+/// - **In moderation structs** (`ModerationActionRow`, `FlagRow`,
+///   `FlagContext`): those legitimately include the `Agent` variant
+///   of `ModerationTargetType`, which this two-variant sum cannot
+///   represent. A wider `ModerationTarget` sum is a separate task.
+///
+/// No `Serialize`/`Deserialize`/`JsonSchema`/`sqlx::Type` impls are
+/// provided deliberately — this type exists to enforce dispatch
+/// correctness in Rust, not to cross a protocol boundary. Add impls
+/// only when a concrete need arises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PostOrCommentId {
+    Post(PostId),
+    Comment(CommentId),
+}
+
+impl PostOrCommentId {
+    /// The inner UUID, regardless of variant.
+    pub fn as_uuid(&self) -> Uuid {
+        match self {
+            PostOrCommentId::Post(id) => *id.as_uuid(),
+            PostOrCommentId::Comment(id) => *id.as_uuid(),
+        }
+    }
+
+    /// `true` if this reference is a post.
+    pub fn is_post(&self) -> bool {
+        matches!(self, PostOrCommentId::Post(_))
+    }
+
+    /// `true` if this reference is a comment.
+    pub fn is_comment(&self) -> bool {
+        matches!(self, PostOrCommentId::Comment(_))
+    }
+
+    /// Extract the `PostId` if this is the `Post` variant, otherwise `None`.
+    pub fn as_post(&self) -> Option<PostId> {
+        match self {
+            PostOrCommentId::Post(id) => Some(*id),
+            PostOrCommentId::Comment(_) => None,
+        }
+    }
+
+    /// Extract the `CommentId` if this is the `Comment` variant, otherwise `None`.
+    pub fn as_comment(&self) -> Option<CommentId> {
+        match self {
+            PostOrCommentId::Comment(id) => Some(*id),
+            PostOrCommentId::Post(_) => None,
+        }
+    }
+
+    /// The string `"post"` or `"comment"` — useful for logging and
+    /// for tagged JSON responses on protocol boundaries.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            PostOrCommentId::Post(_) => "post",
+            PostOrCommentId::Comment(_) => "comment",
+        }
+    }
+}
+
+impl From<PostId> for PostOrCommentId {
+    fn from(id: PostId) -> Self {
+        PostOrCommentId::Post(id)
+    }
+}
+
+impl From<CommentId> for PostOrCommentId {
+    fn from(id: CommentId) -> Self {
+        PostOrCommentId::Comment(id)
+    }
+}
+
+impl std::fmt::Display for PostOrCommentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.kind_str(), self.as_uuid())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,5 +374,48 @@ mod tests {
             agent_id_str.contains("\"format\":\"uuid\""),
             "agent_id should still carry format=uuid; got: {agent_id}"
         );
+    }
+
+    #[test]
+    fn post_or_comment_post_variant() {
+        let inner = PostId::new();
+        let tagged = PostOrCommentId::Post(inner);
+        assert!(tagged.is_post());
+        assert!(!tagged.is_comment());
+        assert_eq!(tagged.as_post(), Some(inner));
+        assert_eq!(tagged.as_comment(), None);
+        assert_eq!(tagged.as_uuid(), *inner.as_uuid());
+        assert_eq!(tagged.kind_str(), "post");
+    }
+
+    #[test]
+    fn post_or_comment_comment_variant() {
+        let inner = CommentId::new();
+        let tagged = PostOrCommentId::Comment(inner);
+        assert!(tagged.is_comment());
+        assert!(!tagged.is_post());
+        assert_eq!(tagged.as_comment(), Some(inner));
+        assert_eq!(tagged.as_post(), None);
+        assert_eq!(tagged.as_uuid(), *inner.as_uuid());
+        assert_eq!(tagged.kind_str(), "comment");
+    }
+
+    #[test]
+    fn post_or_comment_from_conversions() {
+        let post = PostId::new();
+        let comment = CommentId::new();
+        let via_post: PostOrCommentId = post.into();
+        let via_comment: PostOrCommentId = comment.into();
+        assert_eq!(via_post, PostOrCommentId::Post(post));
+        assert_eq!(via_comment, PostOrCommentId::Comment(comment));
+    }
+
+    #[test]
+    fn post_or_comment_display_is_kind_colon_uuid() {
+        let post = PostId::new();
+        let tagged = PostOrCommentId::Post(post);
+        let rendered = tagged.to_string();
+        assert!(rendered.starts_with("post:"));
+        assert!(rendered.contains(&post.to_string()));
     }
 }
