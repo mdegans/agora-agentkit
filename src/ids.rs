@@ -14,8 +14,6 @@ macro_rules! define_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
         $(#[doc = $doc])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-        #[cfg_attr(feature = "schemars", schemars(transparent))]
         #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
         #[cfg_attr(feature = "sqlx", sqlx(transparent))]
         pub struct $name(Uuid);
@@ -53,6 +51,34 @@ macro_rules! define_id {
         impl From<$name> for Uuid {
             fn from(id: $name) -> Self {
                 id.0
+            }
+        }
+
+        // Manual JsonSchema impl: emit an inline `{type:"string", format:"uuid"}`
+        // schema rather than a `$ref` into `$defs`. The derive path (even with
+        // `schemars(transparent)`) registers the newtype as a named subschema
+        // because the struct-level doc comment defeats the fully-default
+        // transparency delegation. The Claude.ai MCP connector drops parameter
+        // values whose schema is a `$ref`, so ID params must be inlined.
+        #[cfg(feature = "schemars")]
+        impl schemars::JsonSchema for $name {
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed(stringify!($name))
+            }
+
+            fn schema_id() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed(concat!(module_path!(), "::", stringify!($name)))
+            }
+
+            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({
+                    "type": "string",
+                    "format": "uuid",
+                })
             }
         }
     };
@@ -187,5 +213,72 @@ mod tests {
         let id_json = serde_json::to_string(&id).unwrap();
         let uuid_json = serde_json::to_string(&uuid).unwrap();
         assert_eq!(id_json, uuid_json);
+    }
+
+    // Regression: the Claude.ai MCP connector drops parameter values whose
+    // schema is a `$ref` into `$defs`. ID newtypes must inline their schema
+    // so that tool parameters using them don't appear as `$ref` nodes in the
+    // containing struct's schema. See bug report 2026-04-12.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn id_json_schema_is_inlined() {
+        use schemars::JsonSchema;
+
+        assert!(
+            <PostId as JsonSchema>::inline_schema(),
+            "PostId::inline_schema() must return true to avoid $ref in containing schemas"
+        );
+        assert!(<AgentId as JsonSchema>::inline_schema());
+        assert!(<CommentId as JsonSchema>::inline_schema());
+        assert!(<CommunityId as JsonSchema>::inline_schema());
+
+        // Generate a schema for a struct containing a PostId field and assert
+        // the field's schema is inlined as `type: string, format: uuid`
+        // rather than a `$ref`.
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Container {
+            /// The post ID to retrieve.
+            post_id: PostId,
+            /// Optional agent ID.
+            agent_id: Option<AgentId>,
+        }
+
+        let schema = schemars::schema_for!(Container);
+        let value = serde_json::to_value(&schema).unwrap();
+
+        // No $defs should be created at all — every ID is inline.
+        assert!(
+            value.get("$defs").is_none(),
+            "no $defs should be emitted for ID-only container; got schema: {value}"
+        );
+
+        // post_id field should be inline: {type: "string", format: "uuid"}
+        let post_id = &value["properties"]["post_id"];
+        assert!(
+            post_id.get("$ref").is_none(),
+            "post_id must not be a $ref; got: {post_id}"
+        );
+        assert_eq!(post_id["type"], "string");
+        assert_eq!(post_id["format"], "uuid");
+
+        // agent_id (Option<AgentId>) should collapse to the JSON Schema union
+        // form: {type: ["string","null"], format: "uuid"}. Either that or an
+        // anyOf with inline variants is acceptable — the critical property is
+        // that no $ref appears anywhere in the field's schema.
+        let agent_id = &value["properties"]["agent_id"];
+        assert!(
+            agent_id.get("$ref").is_none(),
+            "agent_id must not be a $ref; got: {agent_id}"
+        );
+        let agent_id_str = agent_id.to_string();
+        assert!(
+            !agent_id_str.contains("$ref"),
+            "agent_id schema must contain no $ref anywhere; got: {agent_id}"
+        );
+        assert!(
+            agent_id_str.contains("\"format\":\"uuid\""),
+            "agent_id should still carry format=uuid; got: {agent_id}"
+        );
     }
 }
