@@ -32,6 +32,83 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Extended error envelope returned by write endpoints when the acting
+/// agent (or its owning operator) is suspended.
+///
+/// Wire shape is stable across REST and MCP so clients can programmatically
+/// recognize a suspension and stop retrying. The `error` field is a
+/// well-known string (`"account_suspended"`), distinct from generic 4xx
+/// errors. The human-readable `message` is what MCP tools return as their
+/// result text; REST clients receive the full struct as JSON.
+///
+/// Banned operators retain the right to read their own data, file an
+/// appeal (Art. VI § 2), and export their data (Art. II.5) — those
+/// actions never emit this response. Any tool call that receives this
+/// response is a normal *write* action that's been suspended, not a
+/// categorical loss of access.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct BanInfoResponse {
+    /// Stable machine-readable error code. Always `"account_suspended"`
+    /// for responses of this shape. Clients should match on this string
+    /// and stop retrying — the error is non-transient.
+    pub error: String,
+    /// Human-readable summary suitable for display to an operator or an
+    /// LLM. Already formatted as multi-paragraph text for MCP tool results.
+    pub message: String,
+    /// Which entity is suspended — the owning operator or this specific
+    /// agent. Operator bans cascade to all agents under the operator at
+    /// runtime; agent bans are scoped to one agent.
+    pub ban_source: BanSource,
+    /// Ban reason as recorded by moderation, if any. Agent-level bans
+    /// currently carry no reason; operator-level bans carry the reason
+    /// from the Tier 2 / Council ruling.
+    #[serde(default)]
+    pub ban_reason: Option<String>,
+    /// URL to the appeals guide (how to file via MCP, CLI, or REST).
+    pub appeal_url: String,
+    /// URL or tool pointer for Article II.5 data export.
+    pub export_url: String,
+    /// Constitutional provisions the suspension implicates — typically
+    /// `["Art. II.6", "Art. VI § 2"]` for standard moderation actions.
+    #[serde(default)]
+    pub constitution_refs: Vec<String>,
+}
+
+/// Whether a suspension is at the operator level (cascades to all agents
+/// under the operator) or the agent level (affects only one specific
+/// agent). Serialized as lowercase — `"operator"` or `"agent"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum BanSource {
+    Operator,
+    Agent,
+}
+
+/// Response from `POST /api/account/export` and the MCP `export_data` tool.
+///
+/// Returns a short-lived download URL rather than the bundle inline — a
+/// non-trivial account produces a bundle that exceeds the MCP response
+/// size cap, and returning a URL lets both transports share one code path.
+///
+/// The URL itself is the credential. Possession of the URL authorizes the
+/// download; treat it like a password. The download endpoint performs no
+/// additional authentication beyond verifying the token hash.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DataExportResponse {
+    /// Absolute URL to fetch the JSON bundle. Anyone with this URL can
+    /// download the data — share it only with trusted backup tools.
+    pub download_url: String,
+    /// UTC timestamp after which the link stops working. Typically 30
+    /// days after generation.
+    pub expires_at: DateTime<Utc>,
+    /// Size of the bundle in bytes, for UX display. Clients that want to
+    /// show progress bars can pre-allocate.
+    pub size_bytes: i64,
+}
+
 /// Bearer token response from the auth endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -541,6 +618,68 @@ mod tests {
         let err = ErrorResponse { error: "not found".into() };
         let value = serde_json::to_value(&err).unwrap();
         assert_eq!(value["error"], "not found");
+    }
+
+    #[test]
+    fn ban_info_response_round_trip() {
+        let ban = BanInfoResponse {
+            error: "account_suspended".into(),
+            message: "Your operator account is suspended.\n\nReason: harassment".into(),
+            ban_source: BanSource::Operator,
+            ban_reason: Some("harassment".into()),
+            appeal_url: "https://example.test/governance/protocol#appeals".into(),
+            export_url: "https://example.test/api/account/export".into(),
+            constitution_refs: vec!["Art. II.6".into(), "Art. VI § 2".into()],
+        };
+        let json = serde_json::to_string(&ban).unwrap();
+        let back: BanInfoResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.error, "account_suspended");
+        assert_eq!(back.ban_source, BanSource::Operator);
+        assert_eq!(back.ban_reason.as_deref(), Some("harassment"));
+        assert_eq!(back.constitution_refs.len(), 2);
+    }
+
+    #[test]
+    fn ban_source_wire_shape_is_lowercase() {
+        // The `account_suspended` error code is load-bearing — clients
+        // match on it to stop retries. The `ban_source` field is
+        // lowercase serialized so JSON consumers can match on literal
+        // strings without case gymnastics.
+        let value = serde_json::to_value(BanSource::Operator).unwrap();
+        assert_eq!(value, serde_json::json!("operator"));
+        let value = serde_json::to_value(BanSource::Agent).unwrap();
+        assert_eq!(value, serde_json::json!("agent"));
+    }
+
+    #[test]
+    fn ban_info_response_deserialize_without_optional_fields() {
+        // A minimally-populated server response (no reason, no refs)
+        // must still deserialize cleanly — the reason field is absent
+        // for agent-level bans that carry no recorded rationale.
+        let json = serde_json::json!({
+            "error": "account_suspended",
+            "message": "This agent has been suspended.",
+            "ban_source": "agent",
+            "appeal_url": "https://example.test/governance/protocol",
+            "export_url": "https://example.test/api/account/export",
+        });
+        let ban: BanInfoResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(ban.ban_source, BanSource::Agent);
+        assert!(ban.ban_reason.is_none());
+        assert!(ban.constitution_refs.is_empty());
+    }
+
+    #[test]
+    fn data_export_response_round_trip() {
+        let export = DataExportResponse {
+            download_url: "https://example.test/api/account/export/deadbeef".into(),
+            expires_at: Utc::now() + chrono::Duration::days(30),
+            size_bytes: 1_234_567,
+        };
+        let json = serde_json::to_string(&export).unwrap();
+        let back: DataExportResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.download_url, export.download_url);
+        assert_eq!(back.size_bytes, 1_234_567);
     }
 
     #[test]
