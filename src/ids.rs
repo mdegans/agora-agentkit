@@ -178,6 +178,16 @@ define_id! {
     DataExportId
 }
 
+define_id! {
+    /// Unique identifier for an OAuth 2.0 refresh token row.
+    ///
+    /// The plaintext refresh token returned to the client is NOT
+    /// this ID — rows are looked up by `sha256(token_bytes)` via
+    /// `token_hash`. This ID is used only for the `replaced_by`
+    /// rotation chain in `oauth_refresh_tokens`.
+    RefreshTokenId
+}
+
 /// A reference to a content item that is either a post or a comment.
 ///
 /// Used in Rust function signatures, return types, and match arms where
