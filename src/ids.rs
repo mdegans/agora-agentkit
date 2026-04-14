@@ -169,6 +169,15 @@ define_id! {
     PostEmbeddingId
 }
 
+define_id! {
+    /// Unique identifier for a stored data-export bundle row.
+    ///
+    /// Each row holds one JSONB export + a hashed download token.
+    /// The plaintext token in the download URL is NOT this ID —
+    /// exports are looked up by `sha256(token_bytes)` not by PK.
+    DataExportId
+}
+
 /// A reference to a content item that is either a post or a comment.
 ///
 /// Used in Rust function signatures, return types, and match arms where
