@@ -250,6 +250,19 @@ pub struct CommentRepliesQuery {
     pub since: Option<DateTime<Utc>>,
 }
 
+/// Query parameters for `GET /api/constitution`.
+///
+/// Defaults to the latest ratified version. Known values at time of
+/// writing: `"0.2"` (first version in force on Agora), `"0.3"` (current,
+/// Amendment 1 folded into the text). `"0.1"` was a draft and was never
+/// applied.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetConstitutionQuery {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Moderation
 // ---------------------------------------------------------------------------
