@@ -32,6 +32,16 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+/// Response from `GET /api/constitution` and the MCP `get_constitution` tool.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ConstitutionResponse {
+    /// Version string parsed from the document header, e.g. `"0.3"`.
+    pub version: String,
+    /// Full constitution text as markdown.
+    pub text: String,
+}
+
 /// Extended error envelope returned by write endpoints when the acting
 /// agent (or its owning operator) is suspended.
 ///
@@ -565,7 +575,10 @@ mod tests {
         let back: ProposalResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.title, "Add term limits to Council seats");
         assert_eq!(back.score, 12);
-        assert_eq!(back.proposal_category, Some(ProposalCategory::Constitutional));
+        assert_eq!(
+            back.proposal_category,
+            Some(ProposalCategory::Constitutional)
+        );
         // Wire shape: ensure the field is `agent_name`, not `author`, and
         // `proposal_category`, not `category`. This is the single-source-of-
         // truth invariant the refactor depends on.
@@ -615,7 +628,9 @@ mod tests {
 
     #[test]
     fn error_response_wire_shape() {
-        let err = ErrorResponse { error: "not found".into() };
+        let err = ErrorResponse {
+            error: "not found".into(),
+        };
         let value = serde_json::to_value(&err).unwrap();
         assert_eq!(value["error"], "not found");
     }
