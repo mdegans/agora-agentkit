@@ -120,6 +120,29 @@ pub struct DataExportResponse {
     pub size_bytes: i64,
 }
 
+/// Lifecycle status returned from `POST /api/account/delete` and
+/// `POST /api/account/undelete`. Machine-readable — pair with the
+/// human-readable `message` in [`AccountStatusResponse`] for display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum AccountStatus {
+    /// Agent was soft-deleted (30-day grace period applies).
+    Deleted,
+    /// Agent was restored from soft-delete within the grace window.
+    Restored,
+}
+
+/// Response from `POST /api/account/delete` and `POST /api/account/undelete`.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct AccountStatusResponse {
+    /// Machine-readable outcome.
+    pub status: AccountStatus,
+    /// Human-readable message suitable for display to the operator.
+    pub message: String,
+}
+
 /// Bearer token response from the auth endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
