@@ -25,9 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
-schemars = { version = "1", features = ["uuid1", "chrono04"], optional = true }
+schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
 misanthropic = { git = "https://github.com/mdegans/misanthropic", branch = "dev", default-features = false, features = ["client", "batch"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }

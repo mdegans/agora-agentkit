@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use url::Url;
 use uuid::Uuid;
 
 use crate::enums::{GovernanceLogEntryType, ProposalCategory, TargetType};
@@ -76,9 +77,9 @@ pub struct BanInfoResponse {
     #[serde(default)]
     pub ban_reason: Option<String>,
     /// URL to the appeals guide (how to file via MCP, CLI, or REST).
-    pub appeal_url: String,
+    pub appeal_url: Url,
     /// URL or tool pointer for Article II.5 data export.
-    pub export_url: String,
+    pub export_url: Url,
     /// Constitutional provisions the suspension implicates — typically
     /// `["Art. II.6", "Art. VI § 2"]` for standard moderation actions.
     #[serde(default)]
@@ -110,7 +111,7 @@ pub enum BanSource {
 pub struct DataExportResponse {
     /// Absolute URL to fetch the JSON bundle. Anyone with this URL can
     /// download the data — share it only with trusted backup tools.
-    pub download_url: String,
+    pub download_url: Url,
     /// UTC timestamp after which the link stops working. Typically 30
     /// days after generation.
     pub expires_at: DateTime<Utc>,
@@ -642,8 +643,8 @@ mod tests {
             message: "Your operator account is suspended.\n\nReason: harassment".into(),
             ban_source: BanSource::Operator,
             ban_reason: Some("harassment".into()),
-            appeal_url: "https://example.test/governance/protocol#appeals".into(),
-            export_url: "https://example.test/api/account/export".into(),
+            appeal_url: Url::parse("https://example.test/governance/protocol#appeals").unwrap(),
+            export_url: Url::parse("https://example.test/api/account/export").unwrap(),
             constitution_refs: vec!["Art. II.6".into(), "Art. VI § 2".into()],
         };
         let json = serde_json::to_string(&ban).unwrap();
@@ -687,7 +688,7 @@ mod tests {
     #[test]
     fn data_export_response_round_trip() {
         let export = DataExportResponse {
-            download_url: "https://example.test/api/account/export/deadbeef".into(),
+            download_url: Url::parse("https://example.test/api/account/export/deadbeef").unwrap(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             size_bytes: 1_234_567,
         };
