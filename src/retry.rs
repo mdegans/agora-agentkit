@@ -73,8 +73,11 @@ fn anthropic_err_recoverable(err: &misanthropic::client::AnthropicError) -> bool
     match err {
         // Recoverable: transient server or rate limit.
         RateLimit { .. } | API { .. } | Overloaded { .. } | Timeout { .. } => true,
-        // Unknown code: retry on 5xx, skip on 4xx.
-        Unknown { code, .. } => code.get() >= 500,
+        // Unknown code: retry on 5xx, skip on 4xx, skip when absent.
+        // misanthropic #55 made `code` Option<NonZeroU16> so truly unknown
+        // error types (no status parsed) arrive as None — treat those as
+        // non-recoverable to avoid retrying on arbitrary upstream drift.
+        Unknown { code, .. } => matches!(code, Some(c) if c.get() >= 500),
         // Everything else (400/401/403/404/413/billing) is caller-side.
         InvalidRequest { .. }
         | Authentication { .. }
@@ -184,8 +187,22 @@ mod tests {
     fn is_recoverable_unknown_5xx_retries() {
         assert!(is_recoverable(&anyhowed(ClientError::Anthropic(
             AnthropicError::Unknown {
-                code: NonZeroU16::new(502).unwrap(),
+                code: Some(NonZeroU16::new(502).unwrap()),
                 message: "bad gateway".to_string(),
+            }
+        ))));
+    }
+
+    #[test]
+    fn is_recoverable_unknown_no_code_does_not_retry() {
+        // Post-misanthropic #55, Unknown can carry `code: None` when the
+        // upstream produced an error type this version of misanthropic
+        // doesn't recognize. Conservative: skip retries on these rather
+        // than loop on arbitrary upstream drift.
+        assert!(!is_recoverable(&anyhowed(ClientError::Anthropic(
+            AnthropicError::Unknown {
+                code: None,
+                message: "future_error_type: something new".to_string(),
             }
         ))));
     }
