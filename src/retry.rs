@@ -170,6 +170,7 @@ mod tests {
         assert!(is_recoverable(&anyhowed(ClientError::Anthropic(
             AnthropicError::RateLimit {
                 message: "too many requests".to_string(),
+                retry_after: None,
             }
         ))));
     }
@@ -179,6 +180,7 @@ mod tests {
         assert!(is_recoverable(&anyhowed(ClientError::Anthropic(
             AnthropicError::Overloaded {
                 message: "overloaded".to_string(),
+                retry_after: None,
             }
         ))));
     }
@@ -295,6 +297,7 @@ mod tests {
                 Err(anyhow::Error::new(ClientError::Anthropic(
                     AnthropicError::Overloaded {
                         message: "busy".to_string(),
+                        retry_after: None,
                     },
                 )))
             }
