@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Pre-commit gate: formatting, lints, and tests must all pass before a commit
+# lands. Enable with `just install-hooks` (sets git's core.hooksPath to hooks/).
+#
+# Skip in a pinch with `git commit --no-verify`, but don't make a habit of it.
+set -euo pipefail
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-commit: cargo clippy (--all-features, all targets, warnings = errors)"
+cargo clippy --all-features --all-targets -- -D warnings
+
+echo "pre-commit: cargo test --all-features"
+cargo test --all-features
+
+echo "pre-commit: all checks passed"
