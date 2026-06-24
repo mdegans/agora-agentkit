@@ -78,7 +78,9 @@ pub trait Storage: Sized + Send + Sync {
     /// Load the JSON value stored under `id`, or `None` if there is none.
     async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, Self::Error>;
 
-    /// Serialize and store any payload (typically an agent's `State`).
+    /// Serialize and store [`Agent::State`]
+    /// 
+    /// [`Agent::State`]: crate::reactor::Agent::State
     async fn save<T: Serialize + Sync>(
         &mut self,
         id: AgentId,
@@ -87,7 +89,7 @@ pub trait Storage: Sized + Send + Sync {
         self.save_raw(id, serde_json::to_value(value)?).await
     }
 
-    /// Load and deserialize a payload, or `None` if nothing is stored for `id`.
+    /// Load and deserialize `Agent::State` or `None` if nothing is stored for `id`.
     async fn load<T: DeserializeOwned>(&self, id: AgentId) -> Result<Option<T>, Self::Error> {
         Ok(self
             .load_raw(id)
