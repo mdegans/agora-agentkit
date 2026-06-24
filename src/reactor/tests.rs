@@ -9,16 +9,20 @@
 //! - **D** `PauseTurn` continuation: a paused turn continues and isn't a stall.
 //! - **E** turn-order invariant: after `handle`, the prompt ends in a user turn.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use misanthropic::prompt::Prompt;
 use misanthropic::prompt::message::Role;
 use misanthropic::response::{self, StopReason};
 
-use super::backend::{BatchInference, Inference, Storage};
-use super::{Agent, BatchReactor, Control, Outcome, Reactor, Run, State, load_agents};
+use super::backend::{BatchInference, Inference, SaveError, Storage};
+use super::{
+    Agent, BatchReactor, Control, ErrorKind, ErrorReport, Outcome, Reactor, Report, RetryAfter,
+    Run, State, load_agents,
+};
 use crate::ids::AgentId;
 
 // ---------------------------------------------------------------------------
@@ -33,6 +37,18 @@ enum TestError {
     Json(#[from] serde_json::Error),
     #[error("{0}")]
     Msg(String),
+    /// A transient error carrying a retry hint, for exercising classification.
+    #[error("transient, retry after {0:?}")]
+    Transient(Duration),
+}
+
+impl RetryAfter for TestError {
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            TestError::Transient(d) => Some(*d),
+            _ => None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +203,7 @@ impl Storage for BulkStore {
     async fn save_all_raw(
         &mut self,
         items: Vec<(AgentId, serde_json::Value)>,
-    ) -> Result<(), TestError> {
+    ) -> Result<(), SaveError<TestError>> {
         self.bulk_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_batch.lock().unwrap() = items.len();
         let mut map = self.map.lock().unwrap();
@@ -250,15 +266,14 @@ impl Inference for MockInference {
 
 #[async_trait::async_trait]
 impl BatchInference for MockInference {
-    async fn infer_batch<'p, I>(
+    async fn infer_batch(
         &self,
-        prompts: I,
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
-    where
-        I: ExactSizeIterator<Item = &'p Prompt> + Send,
-        Prompt: 'p,
-    {
-        Ok(prompts.map(|_| Ok(message(StopReason::EndTurn))).collect())
+        prompts: &[&Prompt],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
+        Ok(prompts
+            .iter()
+            .map(|_| Ok(message(StopReason::EndTurn)))
+            .collect())
     }
 }
 
@@ -421,6 +436,131 @@ async fn load_agents_round_trips() {
     assert!(ids.contains(&id1) && ids.contains(&id2));
 }
 
+/// Partial save: a store that commits a prefix then fails. The committed,
+/// completed agents are `done`; the rest are `failed`, their snapshots survive
+/// in `unsaved` (deserializable back to state), and the lone store error lands
+/// on the unsaved agent, classified `Storage`.
+#[tokio::test]
+async fn partial_save_surfaces_unsaved_snapshots() {
+    let store = PartialStore::commit(2); // commits the first two, fails on the third
+    let agents = vec![
+        agent(Behavior::Complete, 1),
+        agent(Behavior::Complete, 1),
+        agent(Behavior::Complete, 1),
+    ];
+    let ids: Vec<AgentId> = agents.iter().map(|a| a.id()).collect();
+    let mut reactor = BatchReactor::new(MockInference::default(), store, agents);
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 2, "committed + completed agents are done");
+    assert_eq!(report.failed, 1, "the un-persisted agent is failed");
+
+    assert_eq!(report.unsaved.len(), 1);
+    let snapshot = report
+        .unsaved
+        .get(&ids[2])
+        .expect("third agent's snapshot kept");
+    let recovered: TestState = serde_json::from_value(snapshot.clone()).unwrap();
+    assert_eq!(
+        recovered.behavior,
+        Behavior::Complete,
+        "snapshot round-trips"
+    );
+
+    let err = report.errors.get(&ids[2]).expect("store error attributed");
+    assert_eq!(err.kind, ErrorKind::Storage);
+    assert!(err.retry_after.is_none(), "a plain store error is fatal");
+}
+
+/// A successful run leaves nothing to recover and no errors.
+#[tokio::test]
+async fn successful_run_leaves_nothing_unsaved() {
+    let agents = vec![agent(Behavior::Complete, 1), agent(Behavior::Complete, 1)];
+    let mut reactor = BatchReactor::new(MockInference::default(), MemStore::default(), agents);
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 2);
+    assert!(report.unsaved.is_empty());
+    assert!(report.errors.is_empty());
+}
+
+/// A fatal per-item inference error (`retry_after() == None`) fails the agent on
+/// the first round instead of burning the whole retry cap.
+#[tokio::test]
+async fn fatal_item_fails_without_burning_retries() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let transport = FailingBatch {
+        calls: calls.clone(),
+        fatal: true,
+    };
+    let mut reactor = BatchReactor::new(
+        transport,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "failed on the first round");
+}
+
+/// A transient per-item error (`retry_after() == Some(..)`) re-batches up to the
+/// retry cap before the agent is failed.
+#[tokio::test]
+async fn transient_item_retries_to_cap() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let transport = FailingBatch {
+        calls: calls.clone(),
+        fatal: false,
+    };
+    let mut reactor = BatchReactor::new(
+        transport,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "re-batched up to MAX_BATCH_ITEM_RETRIES"
+    );
+}
+
+/// The `Report` (errors + unsaved snapshots) survives a serde round-trip — it
+/// has to, since it crosses the orchestrator's `dyn Run` erasure as data.
+#[test]
+fn report_serde_round_trips() {
+    let id = AgentId::new();
+    let mut report = Report {
+        done: 1,
+        failed: 1,
+        ..Default::default()
+    };
+    report.errors.insert(
+        id,
+        ErrorReport {
+            kind: ErrorKind::Storage,
+            retry_after: Some(Duration::from_secs(5)),
+            message: "disk full".into(),
+        },
+    );
+    report.unsaved.insert(
+        id,
+        serde_json::json!({ "behavior": "Complete", "turns_left": 1 }),
+    );
+
+    let json = serde_json::to_string(&report).unwrap();
+    let back: Report = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(back.done, 1);
+    assert_eq!(back.failed, 1);
+    assert_eq!(back.errors[&id].kind, ErrorKind::Storage);
+    assert_eq!(back.errors[&id].retry_after, Some(Duration::from_secs(5)));
+    assert_eq!(back.unsaved[&id]["turns_left"], 1);
+}
+
 // ---------------------------------------------------------------------------
 // A recording batch transport, so test A can read per-round batch sizes after
 // the cohort is moved into the reactor.
@@ -455,15 +595,111 @@ impl Inference for RecordingBatch {
 
 #[async_trait::async_trait]
 impl BatchInference for RecordingBatch {
-    async fn infer_batch<'p, I>(
+    async fn infer_batch(
         &self,
-        prompts: I,
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
-    where
-        I: ExactSizeIterator<Item = &'p Prompt> + Send,
-        Prompt: 'p,
-    {
+        prompts: &[&Prompt],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
         self.sizes.0.lock().unwrap().push(prompts.len());
-        Ok(prompts.map(|_| Ok(message(StopReason::EndTurn))).collect())
+        Ok(prompts
+            .iter()
+            .map(|_| Ok(message(StopReason::EndTurn)))
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A store that commits a prefix of a bulk save and then fails — the streaming
+// (non-transactional) case the partial-save reporting exists for.
+// ---------------------------------------------------------------------------
+
+#[derive(Default, Clone)]
+struct PartialStore {
+    map: Arc<Mutex<HashMap<AgentId, serde_json::Value>>>,
+    commit: usize,
+}
+
+impl PartialStore {
+    fn commit(commit: usize) -> Self {
+        Self {
+            commit,
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Storage for PartialStore {
+    type Error = TestError;
+
+    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), TestError> {
+        self.map.lock().unwrap().insert(id, value);
+        Ok(())
+    }
+
+    async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, TestError> {
+        Ok(self.map.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn save_all_raw(
+        &mut self,
+        items: Vec<(AgentId, serde_json::Value)>,
+    ) -> Result<(), SaveError<TestError>> {
+        let mut saved = BTreeSet::new();
+        let mut map = self.map.lock().unwrap();
+        for (i, (id, value)) in items.into_iter().enumerate() {
+            if i >= self.commit {
+                return Err(SaveError {
+                    saved,
+                    inner: TestError::Msg("out of space".into()),
+                });
+            }
+            map.insert(id, value);
+            saved.insert(id);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A batch transport that fails every item, either fatally (no retry hint) or
+// transiently (with one), to exercise per-item retry classification.
+// ---------------------------------------------------------------------------
+
+struct FailingBatch {
+    calls: Arc<AtomicUsize>,
+    fatal: bool,
+}
+
+#[async_trait::async_trait]
+impl Inference for FailingBatch {
+    type Error = TestError;
+    type Prompt = Prompt;
+
+    async fn infer(&self, _prompt: &Prompt) -> Result<response::Message, TestError> {
+        Ok(message(StopReason::EndTurn))
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Err(TestError::Msg("no models in mock".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchInference for FailingBatch {
+    async fn infer_batch(
+        &self,
+        prompts: &[&Prompt],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(prompts
+            .iter()
+            .map(|_| {
+                Err(if self.fatal {
+                    TestError::Msg("fatal".into())
+                } else {
+                    TestError::Transient(Duration::from_millis(1))
+                })
+            })
+            .collect())
     }
 }

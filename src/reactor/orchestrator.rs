@@ -75,6 +75,7 @@ impl Orchestrator {
                     out.report.done += report.done;
                     out.report.failed += report.failed;
                     out.report.errors.extend(report.errors);
+                    out.report.unsaved.extend(report.unsaved);
                 }
                 Err(e) => out.reactor_errors.push(RunError::to_string(&e)),
             }

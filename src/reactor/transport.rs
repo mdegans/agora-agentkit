@@ -14,7 +14,20 @@ use std::time::Duration;
 
 use misanthropic::{Client, batch, prompt::Prompt, response};
 
+use super::RetryAfter;
 use super::backend::{BatchInference, Inference};
+
+// Forward the `Retry-After` that Anthropic sends on 429/529; everything else is
+// fatal. `AnthropicError::retry_after` is the upstream accessor that turns the
+// header's seconds into a `Duration`.
+impl RetryAfter for misanthropic::client::Error {
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            misanthropic::client::Error::Anthropic(e) => e.retry_after(),
+            _ => None,
+        }
+    }
+}
 
 /// The Messages-API transport: each `infer` is one `Client::message` call.
 pub struct Direct {
@@ -97,39 +110,29 @@ impl Inference for Batch {
 
 #[async_trait::async_trait]
 impl BatchInference for Batch {
-    async fn infer_batch<'p, I>(
+    async fn infer_batch(
         &self,
-        mut prompts: I,
-    ) -> Result<Vec<Result<response::Message, Self::Error>>, Self::Error>
-    where
-        I: ExactSizeIterator<Item = &'p Prompt> + Send,
-        Prompt: 'p,
-    {
+        prompts: &[&Prompt],
+    ) -> Result<Vec<Result<response::Message, Self::Error>>, Self::Error> {
         let chunk = self.max_batch.max(1);
-        // Pre-size to the cohort's exact length (the lower `size_hint` bound is
-        // exact for an `ExactSizeIterator`) so the per-chunk `extend`s below
-        // never reallocate. We pull `chunk` prompts at a time straight off the
-        // iterator, so the full `Vec<&Prompt>` is never materialized.
-        let mut out: Vec<Result<response::Message, Self::Error>> =
-            Vec::with_capacity(prompts.size_hint().0);
+        // Results land here, indexed by the prompt's position in `prompts`.
+        let mut out: Vec<Option<Result<response::Message, Self::Error>>> =
+            (0..prompts.len()).map(|_| None).collect();
 
-        loop {
-            // Tag each prompt in this chunk with a fresh batch id and remember
-            // its position *within the chunk*. `Item = &Prompt` — results route
-            // by id, so we never need the prompts back and never clone them.
-            let mut id_to_local: HashMap<batch::Id, usize> = HashMap::new();
-            let mut items: Vec<(batch::Id, &Prompt)> = Vec::new();
-            for _ in 0..chunk {
-                let Some(prompt) = prompts.next() else { break };
-                let id = batch::Id::default();
-                id_to_local.insert(id, items.len());
-                items.push((id, prompt));
-            }
-            if items.is_empty() {
-                break;
-            }
-            let mut slots: Vec<Option<Result<response::Message, Self::Error>>> =
-                (0..items.len()).map(|_| None).collect();
+        for start in (0..prompts.len()).step_by(chunk) {
+            let end = (start + chunk).min(prompts.len());
+
+            // Tag each prompt with a fresh batch id and remember which position
+            // it maps back to. `P = &Prompt` — results route by id, so we never
+            // need the prompts back and never clone them.
+            let mut id_to_idx: HashMap<batch::Id, usize> = HashMap::new();
+            let items: Vec<(batch::Id, &Prompt)> = (start..end)
+                .map(|i| {
+                    let id = batch::Id::default();
+                    id_to_idx.insert(id, i);
+                    (id, prompts[i])
+                })
+                .collect();
 
             let mut pending = self.client.tagged_batch(items).await?;
             let ready = loop {
@@ -144,26 +147,25 @@ impl BatchInference for Batch {
 
             let (_, results) = ready.decompose();
             for (id, result) in results {
-                if let Some(&local) = id_to_local.get(&id) {
+                if let Some(&idx) = id_to_idx.get(&id) {
                     // `BatchResult -> Result<Message, AnthropicError>`, then
                     // `AnthropicError -> misanthropic::client::Error`.
                     let r: Result<response::Message, misanthropic::client::AnthropicError> =
                         result.into();
-                    slots[local] = Some(r.map_err(Into::into));
+                    out[idx] = Some(r.map_err(Into::into));
                 }
             }
+        }
 
-            // Chunks are consumed in order and each chunk's slots stay in input
-            // order, so appending keeps `out` aligned to the input. A slot still
-            // empty means the provider returned no result for that id; surface
-            // it as an error so the agent re-batches next round.
-            out.extend(slots.into_iter().map(|slot| {
+        // A slot still empty means the provider returned no result for that id;
+        // surface it as an error so the agent re-batches next round.
+        Ok(out
+            .into_iter()
+            .map(|slot| {
                 slot.unwrap_or(Err(misanthropic::client::Error::UnexpectedResponse {
                     message: "batch returned no result for prompt",
                 }))
-            }));
-        }
-
-        Ok(out)
+            })
+            .collect())
     }
 }

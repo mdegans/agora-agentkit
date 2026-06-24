@@ -1,6 +1,22 @@
+use std::collections::BTreeSet;
+
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::ids::AgentId;
+
+/// A failed bulk save. `saved` is the set of ids that *did* commit before the
+/// failure — empty for a transactional store that rolled the whole batch back,
+/// a prefix for a streaming store that got partway (e.g. ran out of disk). The
+/// reactor uses it to tell persisted agents from the ones whose only copy is
+/// still in memory. `inner` is the underlying store error (and carries the
+/// [`RetryAfter`](super::RetryAfter) classification).
+#[derive(Debug, thiserror::Error)]
+#[error("saved {} before failing: {inner}", saved.len())]
+pub struct SaveError<E> {
+    pub saved: BTreeSet<AgentId>,
+    #[source]
+    pub inner: E,
+}
 
 /// A model transport: one prompt in, one assistant response out. The agent that
 /// calls this never learns whether it spoke to the Messages API or rode a
@@ -55,18 +71,10 @@ pub trait BatchInference: Inference {
     /// leaves that agent un-advanced so it re-batches next round — retry for
     /// free, bounded by the agent's own round budget. Implementations chunk
     /// against the provider's batch-size cap internally.
-    ///
-    /// Takes an [`ExactSizeIterator`] rather than a slice so callers can pass a
-    /// lazy `iter().map(..)` over their live cohort without materializing a
-    /// `Vec<&Prompt>` first; the exact length lets implementations size their
-    /// output buffer up front.
-    async fn infer_batch<'p, I>(
+    async fn infer_batch(
         &self,
-        prompts: I,
-    ) -> Result<Vec<Result<misanthropic::response::Message, Self::Error>>, Self::Error>
-    where
-        I: ExactSizeIterator<Item = &'p Self::Prompt> + Send,
-        Self::Prompt: 'p;
+        prompts: &[&Self::Prompt],
+    ) -> Result<Vec<Result<misanthropic::response::Message, Self::Error>>, Self::Error>;
 }
 
 /// Persistence as an opaque key-value store over agent ids. It deals only in
@@ -106,18 +114,25 @@ pub trait Storage: Sized + Send + Sync {
             .transpose()?)
     }
 
-    /// Persist many values at once. **Atomic**: implementations are expected to
-    /// commit the whole batch or none of it, so this returns a single result
-    /// for the cohort rather than per-item. The default loops [`save_raw`];
-    /// override it to do one query (e.g. a multi-row SQL upsert).
+    /// Persist many values at once, reporting exactly which ids committed. On
+    /// failure the returned [`SaveError::saved`] holds the ids that *did* land,
+    /// so the caller can recover the rest. A transactional store should commit
+    /// the whole batch or none (and so return an empty `saved` on rollback); the
+    /// default loops [`save_raw`] and is therefore *not* atomic — it reports the
+    /// prefix it managed before the first failure. Override it to do one query
+    /// (e.g. a multi-row SQL upsert) and return the appropriate `saved` set.
     ///
     /// [`save_raw`]: Storage::save_raw
     async fn save_all_raw(
         &mut self,
         items: Vec<(AgentId, serde_json::Value)>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), SaveError<Self::Error>> {
+        let mut saved = BTreeSet::new();
         for (id, value) in items {
-            self.save_raw(id, value).await?;
+            if let Err(inner) = self.save_raw(id, value).await {
+                return Err(SaveError { saved, inner });
+            }
+            saved.insert(id);
         }
         Ok(())
     }
@@ -140,14 +155,19 @@ pub trait Storage: Sized + Send + Sync {
     }
 
     /// Serialize and store many [`Agent::State`](crate::reactor::Agent::State)s
-    /// in one (atomic) batch.
+    /// in one batch. A serialize failure aborts before anything is written, so
+    /// it surfaces as a `SaveError` with an empty `saved` set.
     async fn save_all<T: Serialize + Send>(
         &mut self,
         items: Vec<(AgentId, T)>,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<(), SaveError<Self::Error>> {
         let mut raw = Vec::with_capacity(items.len());
         for (id, value) in &items {
-            raw.push((*id, serde_json::to_value(value)?));
+            let value = serde_json::to_value(value).map_err(|e| SaveError {
+                saved: BTreeSet::new(),
+                inner: Self::Error::from(e),
+            })?;
+            raw.push((*id, value));
         }
         self.save_all_raw(raw).await
     }

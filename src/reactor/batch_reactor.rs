@@ -17,12 +17,15 @@
 //! would need the agent to expose its cacheable prefix, which the trait does
 //! not yet offer.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use misanthropic::prompt::Prompt;
 
-use super::backend::{BatchInference, Storage};
-use super::{Agent, Control, MAX_STALLS, Outcome, ReactorError, Report, Run, RunError};
+use super::RetryAfter;
+use super::backend::{BatchInference, SaveError, Storage};
+use super::{
+    Agent, Control, ErrorReport, MAX_STALLS, Outcome, ReactorError, Report, Run, RunError,
+};
 use crate::ids::AgentId;
 
 /// How many consecutive *batch-item* failures (canceled / expired / errored
@@ -39,6 +42,9 @@ pub struct BatchReactor<I: BatchInference, S: Storage, A: Agent> {
     done: BTreeMap<AgentId, A>,
     failed: BTreeMap<AgentId, A>,
     errors: BTreeMap<AgentId, ReactorError<I, S, A>>,
+    /// Serialized snapshots of agents whose state didn't persist — populated by
+    /// the persist path on a save failure, drained into [`Report::unsaved`].
+    unsaved: BTreeMap<AgentId, serde_json::Value>,
 }
 
 impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> BatchReactor<I, S, A> {
@@ -51,11 +57,12 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> BatchReactor<I, S
             done: BTreeMap::new(),
             failed: BTreeMap::new(),
             errors: BTreeMap::new(),
+            unsaved: BTreeMap::new(),
         }
     }
 
-    /// Summarize the run: how many agents finished, how many failed, and the
-    /// rendered error for each that errored.
+    /// Summarize the run: counts, the flattened error for each agent that
+    /// errored, and the snapshots of any agents that didn't persist.
     pub fn report(&self) -> Report {
         Report {
             done: self.done.len(),
@@ -63,8 +70,9 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> BatchReactor<I, S
             errors: self
                 .errors
                 .iter()
-                .map(|(id, e)| (*id, e.to_string()))
+                .map(|(id, e)| (*id, ErrorReport::from(e)))
                 .collect(),
+            unsaved: self.unsaved.clone(),
         }
     }
 }
@@ -115,13 +123,15 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
                 continue;
             }
 
-            // Submit the live cohort's prompts as one batch. The lazy
-            // `iter().map(..)` is an `ExactSizeIterator`, so no `Vec<&Prompt>`
-            // is materialized; the immutable borrows it yields end before we
-            // hand responses back (mutable).
+            // Collect prompts and submit them as one batch. A lazy `iter().map`
+            // can't be used here: async_trait boxes `infer_batch` as a `Send`
+            // future, and an iterator borrowing `agents` is only `Send` if
+            // `A: Sync` — which no agent is (its `ToolBox` holds
+            // `Box<dyn Tool + Send>`). The `Vec<&Prompt>` sidesteps that; its
+            // immutable borrows end before we hand responses back (mutable).
             let resps = {
-                let prompts = live.iter().map(|&i| agents[i].prompt());
-                match self.inference.infer_batch(prompts).await {
+                let prompts: Vec<&Prompt> = live.iter().map(|&i| agents[i].prompt()).collect();
+                match self.inference.infer_batch(&prompts).await {
                     Ok(resps) => resps,
                     Err(e) => {
                         // Whole submission failed — the transport is dead. Record
@@ -160,6 +170,12 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
                             }
                         }
                     }
+                    Err(e) if e.retry_after().is_none() => {
+                        // Fatal per-item failure (no retry hint): it will never
+                        // succeed, so fail the agent now rather than burning the
+                        // whole retry cap re-batching a doomed item.
+                        errors.insert(i, ReactorError::InferenceError(e));
+                    }
                     Err(e) => {
                         // Transient per-item failure: leave the agent un-advanced
                         // so it re-batches next round, but cap the retries.
@@ -180,32 +196,56 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
             }
         }
 
-        // Persist all snapshots in one (atomic) bulk save.
-        let snapshots: Vec<(AgentId, A::State)> = agents
-            .iter()
-            .map(|agent| (agent.id(), agent.snapshot()))
-            .collect();
-        let mut save_err = self.storage.save_all(snapshots).await.err();
-        let saved_ok = save_err.is_none();
+        // Persist all snapshots in one bulk save. Serialize each once; a
+        // serialize failure is itself a storage error (that agent can be neither
+        // persisted nor recovered).
+        let mut values: Vec<(AgentId, serde_json::Value)> = Vec::with_capacity(agents.len());
+        for (i, agent) in agents.iter().enumerate() {
+            match serde_json::to_value(agent.snapshot()) {
+                Ok(v) => values.push((agent.id(), v)),
+                Err(e) => {
+                    errors
+                        .entry(i)
+                        .or_insert(ReactorError::StorageError(S::Error::from(e)));
+                }
+            }
+        }
+        let attempted: BTreeSet<AgentId> = values.iter().map(|(id, _)| *id).collect();
 
-        // Bucket every agent. "Failed" = drive error, bulk-save failure, or it
-        // didn't finish with `Outcome::Complete`. The single atomic save error
-        // is attributed to one clean agent.
+        // Persist, learning exactly which ids committed. The clone feeds the
+        // save; the original is drained below into `unsaved`.
+        let (saved, mut save_err) = match self.storage.save_all_raw(values.clone()).await {
+            Ok(()) => (attempted.clone(), None),
+            Err(SaveError { saved, inner }) => (saved, Some(inner)),
+        };
+        // Keep the only in-memory copy of every attempted-but-uncommitted snapshot.
+        for (id, value) in values {
+            if !saved.contains(&id) {
+                self.unsaved.insert(id, value);
+            }
+        }
+
+        // Bucket every agent. `done` = no drive error, finished `Complete`, *and*
+        // persisted. The lone store error (not `Clone`) is pinned on one clean
+        // agent that didn't commit; `unsaved` is the authoritative un-saved set.
         for (i, agent) in agents.into_iter().enumerate() {
             let id = agent.id();
             let drive_err = errors.remove(&i);
-            let failed = drive_err.is_some()
-                || !saved_ok
-                || !matches!(finished.get(&i), Some(Outcome::Complete));
+            let done = drive_err.is_none()
+                && matches!(finished.get(&i), Some(Outcome::Complete))
+                && saved.contains(&id);
             if let Some(e) = drive_err {
                 self.errors.insert(id, e);
-            } else if let Some(e) = save_err.take() {
+            } else if attempted.contains(&id)
+                && !saved.contains(&id)
+                && let Some(e) = save_err.take()
+            {
                 self.errors.insert(id, ReactorError::StorageError(e));
             }
-            if failed {
-                self.failed.insert(id, agent);
-            } else {
+            if done {
                 self.done.insert(id, agent);
+            } else {
+                self.failed.insert(id, agent);
             }
         }
         Ok(self.report())
