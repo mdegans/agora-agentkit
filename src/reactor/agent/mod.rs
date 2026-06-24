@@ -68,10 +68,7 @@ pub trait Agent: Sized + Send {
     /// the reactor counts toward a give-up cap.
     ///
     /// Override only for agents whose step isn't "use tools until quiescent".
-    async fn handle(
-        &mut self,
-        response: response::Message,
-    ) -> Result<Control, Self::Error> {
+    async fn handle(&mut self, response: response::Message) -> Result<Control, Self::Error> {
         // A paused turn is waiting on an in-flight server tool. v1 registers no
         // server tools, so this is a safety net: continue and let the next
         // infer retry (we don't seat the partial turn).
@@ -129,10 +126,7 @@ pub trait Agent: Sized + Send {
     /// a memory rewrite) before deciding.
     ///
     /// The default is a one-shot agent: quiescence means complete.
-    async fn on_quiesce(
-        &mut self,
-        response: &response::Message,
-    ) -> Result<Control, Self::Error> {
+    async fn on_quiesce(&mut self, response: &response::Message) -> Result<Control, Self::Error> {
         let _ = response;
         Ok(Control::Done(Outcome::Complete))
     }

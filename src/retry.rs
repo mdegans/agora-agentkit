@@ -100,11 +100,7 @@ fn anthropic_err_recoverable(err: &misanthropic::client::AnthropicError) -> bool
 ///
 /// `label` is prefixed on every warning / error log so operators can
 /// tell which call site is retrying.
-pub async fn retry_recoverable<F, Fut, T>(
-    label: &str,
-    max_retries: usize,
-    mut f: F,
-) -> Result<T>
+pub async fn retry_recoverable<F, Fut, T>(label: &str, max_retries: usize, mut f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -116,15 +112,11 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 if !is_recoverable(&e) {
-                    tracing::error!(
-                        "{label}: non-recoverable error, not retrying: {e}"
-                    );
+                    tracing::error!("{label}: non-recoverable error, not retrying: {e}");
                     return Err(e);
                 }
                 if attempt >= max_retries {
-                    tracing::error!(
-                        "{label}: giving up after {max_retries} retries: {e}"
-                    );
+                    tracing::error!("{label}: giving up after {max_retries} retries: {e}");
                     return Err(e);
                 }
                 tracing::warn!(
@@ -304,9 +296,6 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(
-            attempts, 1,
-            "max_retries=0 means one attempt, no retries"
-        );
+        assert_eq!(attempts, 1, "max_retries=0 means one attempt, no retries");
     }
 }

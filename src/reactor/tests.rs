@@ -107,10 +107,7 @@ impl Agent for TestAgent {
         (&mut self.tools, &mut self.prompt)
     }
 
-    async fn on_quiesce(
-        &mut self,
-        _response: &response::Message,
-    ) -> Result<Control, TestError> {
+    async fn on_quiesce(&mut self, _response: &response::Message) -> Result<Control, TestError> {
         match self.state.behavior {
             Behavior::ErrHandle => Err(TestError::Msg("boom".into())),
             Behavior::Stall => {
@@ -132,7 +129,14 @@ impl Agent for TestAgent {
 }
 
 fn agent(behavior: Behavior, turns_left: usize) -> TestAgent {
-    TestAgent::new(AgentId::new(), TestState { behavior, turns_left }).unwrap()
+    TestAgent::new(
+        AgentId::new(),
+        TestState {
+            behavior,
+            turns_left,
+        },
+    )
+    .unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -148,11 +152,7 @@ struct MemStore {
 impl Storage for MemStore {
     type Error = TestError;
 
-    async fn save_raw(
-        &mut self,
-        id: AgentId,
-        value: serde_json::Value,
-    ) -> Result<(), TestError> {
+    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), TestError> {
         self.map.lock().unwrap().insert(id, value);
         Ok(())
     }
@@ -175,11 +175,7 @@ struct BulkStore {
 impl Storage for BulkStore {
     type Error = TestError;
 
-    async fn save_raw(
-        &mut self,
-        id: AgentId,
-        value: serde_json::Value,
-    ) -> Result<(), TestError> {
+    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), TestError> {
         self.map.lock().unwrap().insert(id, value);
         Ok(())
     }
@@ -239,7 +235,12 @@ impl Inference for MockInference {
 
     async fn infer(&self, _prompt: &Prompt) -> Result<response::Message, TestError> {
         let round = self.infer_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(message(self.script.get(round).copied().unwrap_or(StopReason::EndTurn)))
+        Ok(message(
+            self.script
+                .get(round)
+                .copied()
+                .unwrap_or(StopReason::EndTurn),
+        ))
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
@@ -253,7 +254,10 @@ impl BatchInference for MockInference {
         &self,
         prompts: &[&Prompt],
     ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
-        Ok(prompts.iter().map(|_| Ok(message(StopReason::EndTurn))).collect())
+        Ok(prompts
+            .iter()
+            .map(|_| Ok(message(StopReason::EndTurn)))
+            .collect())
     }
 }
 
@@ -266,7 +270,9 @@ impl BatchInference for MockInference {
 #[tokio::test]
 async fn batch_sizes_match_live_cohort_each_round() {
     let sizes = SharedSizes::default();
-    let transport = RecordingBatch { sizes: sizes.clone() };
+    let transport = RecordingBatch {
+        sizes: sizes.clone(),
+    };
     let agents = vec![
         agent(Behavior::Complete, 1),
         agent(Behavior::Complete, 2),
@@ -283,8 +289,11 @@ async fn batch_sizes_match_live_cohort_each_round() {
 /// looped forever (the test terminating at all is half the assertion).
 #[tokio::test]
 async fn stall_cap_bounds_retry() {
-    let mut reactor =
-        Reactor::new(MockInference::default(), MemStore::default(), vec![agent(Behavior::Stall, 0)]);
+    let mut reactor = Reactor::new(
+        MockInference::default(),
+        MemStore::default(),
+        vec![agent(Behavior::Stall, 0)],
+    );
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.failed, 1);
@@ -297,7 +306,11 @@ async fn stall_cap_bounds_retry() {
 async fn sequential_contains_one_failure() {
     let bad = agent(Behavior::ErrHandle, 1);
     let bad_id = bad.id();
-    let agents = vec![agent(Behavior::Complete, 1), bad, agent(Behavior::Complete, 1)];
+    let agents = vec![
+        agent(Behavior::Complete, 1),
+        bad,
+        agent(Behavior::Complete, 1),
+    ];
     let mut reactor = Reactor::new(MockInference::default(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
@@ -311,7 +324,11 @@ async fn sequential_contains_one_failure() {
 async fn batch_contains_one_failure() {
     let bad = agent(Behavior::ErrHandle, 1);
     let bad_id = bad.id();
-    let agents = vec![agent(Behavior::Complete, 1), bad, agent(Behavior::Complete, 1)];
+    let agents = vec![
+        agent(Behavior::Complete, 1),
+        bad,
+        agent(Behavior::Complete, 1),
+    ];
     let mut reactor = BatchReactor::new(MockInference::default(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
@@ -328,8 +345,11 @@ async fn pause_turn_continues() {
         script: vec![StopReason::PauseTurn, StopReason::EndTurn],
         ..Default::default()
     };
-    let mut reactor =
-        Reactor::new(inference, MemStore::default(), vec![agent(Behavior::Complete, 1)]);
+    let mut reactor = Reactor::new(
+        inference,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 1);
@@ -369,11 +389,30 @@ async fn load_agents_round_trips() {
     let mut store = MemStore::default();
     let id1 = AgentId::new();
     let id2 = AgentId::new();
-    store.save(id1, &TestState { behavior: Behavior::Complete, turns_left: 1 }).await.unwrap();
-    store.save(id2, &TestState { behavior: Behavior::Stall, turns_left: 0 }).await.unwrap();
+    store
+        .save(
+            id1,
+            &TestState {
+                behavior: Behavior::Complete,
+                turns_left: 1,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .save(
+            id2,
+            &TestState {
+                behavior: Behavior::Stall,
+                turns_left: 0,
+            },
+        )
+        .await
+        .unwrap();
 
-    let (agents, failures): (Vec<TestAgent>, _) =
-        load_agents(&store, &[id1, id2, AgentId::new()]).await.unwrap();
+    let (agents, failures): (Vec<TestAgent>, _) = load_agents(&store, &[id1, id2, AgentId::new()])
+        .await
+        .unwrap();
 
     assert!(failures.is_empty());
     assert_eq!(agents.len(), 2, "missing id skipped");
@@ -420,6 +459,9 @@ impl BatchInference for RecordingBatch {
         prompts: &[&Prompt],
     ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
         self.sizes.0.lock().unwrap().push(prompts.len());
-        Ok(prompts.iter().map(|_| Ok(message(StopReason::EndTurn))).collect())
+        Ok(prompts
+            .iter()
+            .map(|_| Ok(message(StopReason::EndTurn)))
+            .collect())
     }
 }

@@ -51,10 +51,7 @@ type GroupKey = (String, u64, u32);
 /// Items are grouped by the composite key. Within each group, items are
 /// in their original order. The groups themselves are sorted by key
 /// (model first, then prefix_hash, then context_bucket).
-pub fn group_work_items<P>(
-    items: Vec<WorkItem<P>>,
-    config: &GroupingConfig,
-) -> Vec<BatchGroup<P>> {
+pub fn group_work_items<P>(items: Vec<WorkItem<P>>, config: &GroupingConfig) -> Vec<BatchGroup<P>> {
     let bucket_size = config.context_length_bucket.max(1); // avoid div by zero
 
     let mut groups: BTreeMap<GroupKey, Vec<WorkItem<P>>> = BTreeMap::new();
@@ -82,14 +79,10 @@ mod tests {
 
     use crate::ids::AgentId;
 
-    use super::*;
     use super::super::CycleStep;
+    use super::*;
 
-    fn item(
-        model: &str,
-        prefix_hash: u64,
-        token_count: u32,
-    ) -> WorkItem<()> {
+    fn item(model: &str, prefix_hash: u64, token_count: u32) -> WorkItem<()> {
         WorkItem {
             agent_id: AgentId::new(),
             prompt: (),

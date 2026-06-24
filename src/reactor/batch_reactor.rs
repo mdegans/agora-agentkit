@@ -176,8 +176,10 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
         }
 
         // Persist all snapshots in one (atomic) bulk save.
-        let snapshots: Vec<(AgentId, A::State)> =
-            agents.iter().map(|agent| (agent.id(), agent.snapshot())).collect();
+        let snapshots: Vec<(AgentId, A::State)> = agents
+            .iter()
+            .map(|agent| (agent.id(), agent.snapshot()))
+            .collect();
         let mut save_err = self.storage.save_all(snapshots).await.err();
         let saved_ok = save_err.is_none();
 

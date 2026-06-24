@@ -79,7 +79,7 @@ pub trait Storage: Sized + Send + Sync {
     async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, Self::Error>;
 
     /// Serialize and store [`Agent::State`]
-    /// 
+    ///
     /// [`Agent::State`]: crate::reactor::Agent::State
     async fn save<T: Serialize + Sync>(
         &mut self,

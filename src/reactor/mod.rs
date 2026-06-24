@@ -91,10 +91,7 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
     /// past the cap), then teardown. Borrows only `&I` (shared), so callers may
     /// drive many agents concurrently; persistence is deferred to
     /// [`finish`](Self::finish).
-    async fn drive_one(
-        inference: &I,
-        agent: &mut A,
-    ) -> Result<Outcome, ReactorError<I, S, A>> {
+    async fn drive_one(inference: &I, agent: &mut A) -> Result<Outcome, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
         let mut stalls = 0usize;
         let outcome = loop {
@@ -103,7 +100,11 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
                 .infer(agent.prompt())
                 .await
                 .map_err(ReactorError::InferenceError)?;
-            match agent.handle(response).await.map_err(ReactorError::AgentError)? {
+            match agent
+                .handle(response)
+                .await
+                .map_err(ReactorError::AgentError)?
+            {
                 Control::Done(outcome) => break outcome,
                 Control::Continue => stalls = 0,
                 Control::Stalled => {
@@ -114,7 +115,10 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
                 }
             }
         };
-        agent.on_teardown().await.map_err(ReactorError::AgentError)?;
+        agent
+            .on_teardown()
+            .await
+            .map_err(ReactorError::AgentError)?;
         Ok(outcome)
     }
 
@@ -123,8 +127,10 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
     /// recorded per-agent; a bulk-save failure fails the whole cohort's
     /// persistence (it's atomic) and is recorded once, against one clean agent.
     async fn persist_all(&mut self, driven: Vec<(A, Result<Outcome, ReactorError<I, S, A>>)>) {
-        let snapshots: Vec<(AgentId, A::State)> =
-            driven.iter().map(|(agent, _)| (agent.id(), agent.snapshot())).collect();
+        let snapshots: Vec<(AgentId, A::State)> = driven
+            .iter()
+            .map(|(agent, _)| (agent.id(), agent.snapshot()))
+            .collect();
         let mut save_err = self.storage.save_all(snapshots).await.err();
         let saved_ok = save_err.is_none();
 
@@ -168,8 +174,10 @@ pub async fn load_agents<S: Storage, A: Agent>(
                 Ok(agent) => agents.push(agent),
                 Err(e) => failures.push((id, e)),
             },
-            Err(e) => failures
-                .push((id, A::Error::from(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))),
+            Err(e) => failures.push((
+                id,
+                A::Error::from(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+            )),
         }
     }
     Ok((agents, failures))
@@ -212,14 +220,15 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Run for Reactor<I, S, 
         // Drive every agent concurrently (bounded by the transport). Only the
         // shared `&inference` is borrowed here — persistence happens after, so
         // one agent's failure never aborts the cohort.
-        let driven: Vec<(A, Result<Outcome, ReactorError<I, S, A>>)> = futures::stream::iter(agents)
-            .map(|mut agent| async move {
-                let result = Self::drive_one(inference, &mut agent).await;
-                (agent, result)
-            })
-            .buffer_unordered(limit)
-            .collect()
-            .await;
+        let driven: Vec<(A, Result<Outcome, ReactorError<I, S, A>>)> =
+            futures::stream::iter(agents)
+                .map(|mut agent| async move {
+                    let result = Self::drive_one(inference, &mut agent).await;
+                    (agent, result)
+                })
+                .buffer_unordered(limit)
+                .collect()
+                .await;
 
         // Persist all snapshots in one bulk save, then bucket.
         self.persist_all(driven).await;
