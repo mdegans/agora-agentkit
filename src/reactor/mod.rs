@@ -118,25 +118,61 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
         Ok(outcome)
     }
 
-    /// Persist `agent` and file it into done/failed. An agent is "failed" if it
-    /// errored while driving, finished with [`Outcome::Failed`], or failed to
-    /// save. The drive error takes precedence; a save error is recorded only
-    /// when the agent otherwise ran clean.
-    async fn finish(&mut self, agent: A, drive: Result<Outcome, ReactorError<I, S, A>>) {
-        let id = agent.id();
-        let save_err = self.storage.save(id, &agent.snapshot()).await.err();
-        let failed = !matches!(drive, Ok(Outcome::Complete)) || save_err.is_some();
-        if let Err(e) = drive {
-            self.errors.insert(id, e);
-        } else if let Some(e) = save_err {
-            self.errors.insert(id, ReactorError::StorageError(e));
-        }
-        if failed {
-            self.failed.insert(id, agent);
-        } else {
-            self.done.insert(id, agent);
+    /// Persist every driven agent's snapshot in **one** (atomic) bulk save, then
+    /// file each into done/failed. A drive error fails that agent and is
+    /// recorded per-agent; a bulk-save failure fails the whole cohort's
+    /// persistence (it's atomic) and is recorded once, against one clean agent.
+    async fn persist_all(&mut self, driven: Vec<(A, Result<Outcome, ReactorError<I, S, A>>)>) {
+        let snapshots: Vec<(AgentId, A::State)> =
+            driven.iter().map(|(agent, _)| (agent.id(), agent.snapshot())).collect();
+        let mut save_err = self.storage.save_all(snapshots).await.err();
+        let saved_ok = save_err.is_none();
+
+        for (agent, drive) in driven {
+            let id = agent.id();
+            let failed = !matches!(drive, Ok(Outcome::Complete)) || !saved_ok;
+            match drive {
+                Err(e) => {
+                    self.errors.insert(id, e);
+                }
+                // The single atomic save error is attributed to one clean agent.
+                Ok(_) => {
+                    if let Some(e) = save_err.take() {
+                        self.errors.insert(id, ReactorError::StorageError(e));
+                    }
+                }
+            }
+            if failed {
+                self.failed.insert(id, agent);
+            } else {
+                self.done.insert(id, agent);
+            }
         }
     }
+}
+
+/// Bulk-load agents: one [`load_all_raw`](Storage::load_all_raw) query for all
+/// `ids`, then construct each from its state. Per-agent deserialize/construct
+/// failures are returned rather than aborting the batch; ids with nothing stored
+/// are skipped. Hand the constructed agents to a reactor's `new`.
+pub async fn load_agents<S: Storage, A: Agent>(
+    storage: &S,
+    ids: &[AgentId],
+) -> Result<(Vec<A>, Vec<(AgentId, A::Error)>), S::Error> {
+    let raw = storage.load_all_raw(ids).await?;
+    let mut agents = Vec::with_capacity(raw.len());
+    let mut failures = Vec::new();
+    for (id, value) in raw {
+        match serde_json::from_value::<A::State>(value) {
+            Ok(state) => match A::new(id, state) {
+                Ok(agent) => agents.push(agent),
+                Err(e) => failures.push((id, e)),
+            },
+            Err(e) => failures
+                .push((id, A::Error::from(Box::new(e) as Box<dyn std::error::Error + Send + Sync>))),
+        }
+    }
+    Ok((agents, failures))
 }
 
 /// A summary of one reactor run: how many agents finished, how many failed, and
@@ -185,10 +221,8 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Run for Reactor<I, S, 
             .collect()
             .await;
 
-        // Persist + bucket sequentially (needs `&mut self.storage`).
-        for (agent, result) in driven {
-            self.finish(agent, result).await;
-        }
+        // Persist all snapshots in one bulk save, then bucket.
+        self.persist_all(driven).await;
         Ok(self.report())
     }
 }

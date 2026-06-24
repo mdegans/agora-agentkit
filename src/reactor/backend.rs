@@ -97,4 +97,63 @@ pub trait Storage: Sized + Send + Sync {
             .map(serde_json::from_value)
             .transpose()?)
     }
+
+    /// Persist many values at once. **Atomic**: implementations are expected to
+    /// commit the whole batch or none of it, so this returns a single result
+    /// for the cohort rather than per-item. The default loops [`save_raw`];
+    /// override it to do one query (e.g. a multi-row SQL upsert).
+    ///
+    /// [`save_raw`]: Storage::save_raw
+    async fn save_all_raw(
+        &mut self,
+        items: Vec<(AgentId, serde_json::Value)>,
+    ) -> Result<(), Self::Error> {
+        for (id, value) in items {
+            self.save_raw(id, value).await?;
+        }
+        Ok(())
+    }
+
+    /// Load many values at once, skipping ids with nothing stored. The default
+    /// loops [`load_raw`]; override it to do one query (e.g. `WHERE id IN …`).
+    ///
+    /// [`load_raw`]: Storage::load_raw
+    async fn load_all_raw(
+        &self,
+        ids: &[AgentId],
+    ) -> Result<Vec<(AgentId, serde_json::Value)>, Self::Error> {
+        let mut out = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if let Some(value) = self.load_raw(id).await? {
+                out.push((id, value));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Serialize and store many [`Agent::State`](crate::reactor::Agent::State)s
+    /// in one (atomic) batch.
+    async fn save_all<T: Serialize + Send>(
+        &mut self,
+        items: Vec<(AgentId, T)>,
+    ) -> Result<(), Self::Error> {
+        let mut raw = Vec::with_capacity(items.len());
+        for (id, value) in &items {
+            raw.push((*id, serde_json::to_value(value)?));
+        }
+        self.save_all_raw(raw).await
+    }
+
+    /// Load and deserialize many payloads, skipping ids with nothing stored.
+    async fn load_all<T: DeserializeOwned>(
+        &self,
+        ids: &[AgentId],
+    ) -> Result<Vec<(AgentId, T)>, Self::Error> {
+        let raw = self.load_all_raw(ids).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for (id, value) in raw {
+            out.push((id, serde_json::from_value(value)?));
+        }
+        Ok(out)
+    }
 }

@@ -18,7 +18,7 @@ use misanthropic::prompt::message::Role;
 use misanthropic::response::{self, StopReason};
 
 use super::backend::{BatchInference, Inference, Storage};
-use super::{Agent, BatchReactor, Control, Outcome, Reactor, Run, State};
+use super::{Agent, BatchReactor, Control, Outcome, Reactor, Run, State, load_agents};
 use crate::ids::AgentId;
 
 // ---------------------------------------------------------------------------
@@ -159,6 +159,46 @@ impl Storage for MemStore {
 
     async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, TestError> {
         Ok(self.map.lock().unwrap().get(&id).cloned())
+    }
+}
+
+/// A store that overrides `save_all_raw` (as a SQL backend would, with one
+/// query) and records how it was called.
+#[derive(Default, Clone)]
+struct BulkStore {
+    map: Arc<Mutex<HashMap<AgentId, serde_json::Value>>>,
+    bulk_calls: Arc<AtomicUsize>,
+    last_batch: Arc<Mutex<usize>>,
+}
+
+#[async_trait::async_trait]
+impl Storage for BulkStore {
+    type Error = TestError;
+
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), TestError> {
+        self.map.lock().unwrap().insert(id, value);
+        Ok(())
+    }
+
+    async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, TestError> {
+        Ok(self.map.lock().unwrap().get(&id).cloned())
+    }
+
+    async fn save_all_raw(
+        &mut self,
+        items: Vec<(AgentId, serde_json::Value)>,
+    ) -> Result<(), TestError> {
+        self.bulk_calls.fetch_add(1, Ordering::SeqCst);
+        *self.last_batch.lock().unwrap() = items.len();
+        let mut map = self.map.lock().unwrap();
+        for (id, value) in items {
+            map.insert(id, value);
+        }
+        Ok(())
     }
 }
 
@@ -303,6 +343,42 @@ async fn handle_keeps_user_tail() {
     a.handle(message(StopReason::EndTurn)).await.unwrap();
     let last = a.prompt().messages.last().expect("non-empty prompt");
     assert_eq!(last.role, Role::User);
+}
+
+/// Bulk save: the reactor persists the whole cohort in a single `save_all_raw`
+/// call (the override a SQL backend would do as one query), not per-agent.
+#[tokio::test]
+async fn reactor_persists_in_one_bulk_save() {
+    let store = BulkStore::default();
+    let agents = vec![
+        agent(Behavior::Complete, 1),
+        agent(Behavior::Complete, 1),
+        agent(Behavior::Complete, 1),
+    ];
+    let mut reactor = BatchReactor::new(MockInference::default(), store.clone(), agents);
+    reactor.run().await.unwrap();
+
+    assert_eq!(store.bulk_calls.load(Ordering::SeqCst), 1, "one bulk save");
+    assert_eq!(*store.last_batch.lock().unwrap(), 3, "all three in it");
+}
+
+/// Bulk load: `load_agents` reconstructs from one query, skipping ids with
+/// nothing stored.
+#[tokio::test]
+async fn load_agents_round_trips() {
+    let mut store = MemStore::default();
+    let id1 = AgentId::new();
+    let id2 = AgentId::new();
+    store.save(id1, &TestState { behavior: Behavior::Complete, turns_left: 1 }).await.unwrap();
+    store.save(id2, &TestState { behavior: Behavior::Stall, turns_left: 0 }).await.unwrap();
+
+    let (agents, failures): (Vec<TestAgent>, _) =
+        load_agents(&store, &[id1, id2, AgentId::new()]).await.unwrap();
+
+    assert!(failures.is_empty());
+    assert_eq!(agents.len(), 2, "missing id skipped");
+    let ids: Vec<_> = agents.iter().map(|a| a.id()).collect();
+    assert!(ids.contains(&id1) && ids.contains(&id2));
 }
 
 // ---------------------------------------------------------------------------

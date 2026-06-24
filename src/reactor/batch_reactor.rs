@@ -168,22 +168,31 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
             }
         }
 
-        // Teardown, persist, and bucket every agent. An agent is "failed" if it
-        // errored, failed to save, or did not finish with `Outcome::Complete`.
-        for (i, agent) in agents.into_iter().enumerate() {
-            let mut agent = agent;
+        // Teardown every agent (best-effort).
+        for (i, agent) in agents.iter_mut().enumerate() {
             if let Err(e) = agent.on_teardown().await {
                 errors.entry(i).or_insert(ReactorError::AgentError(e));
             }
+        }
+
+        // Persist all snapshots in one (atomic) bulk save.
+        let snapshots: Vec<(AgentId, A::State)> =
+            agents.iter().map(|agent| (agent.id(), agent.snapshot())).collect();
+        let mut save_err = self.storage.save_all(snapshots).await.err();
+        let saved_ok = save_err.is_none();
+
+        // Bucket every agent. "Failed" = drive error, bulk-save failure, or it
+        // didn't finish with `Outcome::Complete`. The single atomic save error
+        // is attributed to one clean agent.
+        for (i, agent) in agents.into_iter().enumerate() {
             let id = agent.id();
-            let save_err = self.storage.save(id, &agent.snapshot()).await.err();
             let drive_err = errors.remove(&i);
             let failed = drive_err.is_some()
-                || save_err.is_some()
+                || !saved_ok
                 || !matches!(finished.get(&i), Some(Outcome::Complete));
             if let Some(e) = drive_err {
                 self.errors.insert(id, e);
-            } else if let Some(e) = save_err {
+            } else if let Some(e) = save_err.take() {
                 self.errors.insert(id, ReactorError::StorageError(e));
             }
             if failed {
