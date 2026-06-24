@@ -20,6 +20,8 @@
 pub mod crypto;
 pub mod enums;
 pub mod ids;
+#[cfg(feature = "misanthropic")]
+pub mod reactor;
 pub mod requests;
 pub mod responses;
 pub mod scheduler;

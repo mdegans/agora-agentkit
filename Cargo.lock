@@ -7,8 +7,10 @@ name = "agora-agentkit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "ed25519-dalek",
+ "futures",
  "hex",
  "misanthropic",
  "rand",
@@ -17,6 +19,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "static_assertions",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
