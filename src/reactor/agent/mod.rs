@@ -4,7 +4,7 @@ pub use state::State;
 use misanthropic::{
     prompt::{
         Prompt,
-        message::{Block, Content, Role},
+        message::{Block, Role},
     },
     response::{self, StopReason},
     tool::{Tool, ToolBox, Use},
@@ -110,7 +110,7 @@ pub trait Agent: Sized + Send {
             results.push(Block::from(result));
         }
         prompt
-            .push_message((Role::User, Content(results)))
+            .push_message((Role::User, results))
             .map_err(|e| Self::Error::from(boxed(e)))?;
 
         Ok(if progressed {
@@ -148,14 +148,14 @@ pub trait Agent: Sized + Send {
     /// Refresh per-turn tool context. Called before each `infer`.
     async fn on_turn(&mut self) -> Result<(), Self::Error> {
         let (tools, prompt) = self.parts();
-        tools.update_turn_context(prompt).await?;
+        tools.on_turn(prompt).await?;
         Ok(())
     }
 
     /// Tear down tools. Called once before the final save.
     async fn on_teardown(&mut self) -> Result<(), Self::Error> {
         let (tools, prompt) = self.parts();
-        tools.teardown_tools(prompt).await?;
+        tools.on_teardown(prompt).await?;
         Ok(())
     }
 
