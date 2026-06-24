@@ -55,10 +55,18 @@ pub trait BatchInference: Inference {
     /// leaves that agent un-advanced so it re-batches next round — retry for
     /// free, bounded by the agent's own round budget. Implementations chunk
     /// against the provider's batch-size cap internally.
-    async fn infer_batch(
+    ///
+    /// Takes an [`ExactSizeIterator`] rather than a slice so callers can pass a
+    /// lazy `iter().map(..)` over their live cohort without materializing a
+    /// `Vec<&Prompt>` first; the exact length lets implementations size their
+    /// output buffer up front.
+    async fn infer_batch<'p, I>(
         &self,
-        prompts: &[&Self::Prompt],
-    ) -> Result<Vec<Result<misanthropic::response::Message, Self::Error>>, Self::Error>;
+        prompts: I,
+    ) -> Result<Vec<Result<misanthropic::response::Message, Self::Error>>, Self::Error>
+    where
+        I: ExactSizeIterator<Item = &'p Self::Prompt> + Send,
+        Self::Prompt: 'p;
 }
 
 /// Persistence as an opaque key-value store over agent ids. It deals only in

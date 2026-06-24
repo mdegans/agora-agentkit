@@ -112,11 +112,13 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
                 continue;
             }
 
-            // Collect prompts and submit them as one batch. The immutable
-            // borrows in `prompts` end before we hand responses back (mutable).
+            // Submit the live cohort's prompts as one batch. The lazy
+            // `iter().map(..)` is an `ExactSizeIterator`, so no `Vec<&Prompt>`
+            // is materialized; the immutable borrows it yields end before we
+            // hand responses back (mutable).
             let resps = {
-                let prompts: Vec<&Prompt> = live.iter().map(|&i| agents[i].prompt()).collect();
-                match self.inference.infer_batch(&prompts).await {
+                let prompts = live.iter().map(|&i| agents[i].prompt());
+                match self.inference.infer_batch(prompts).await {
                     Ok(resps) => resps,
                     Err(e) => {
                         // Whole submission failed — the transport is dead. Record

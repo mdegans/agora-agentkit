@@ -250,14 +250,15 @@ impl Inference for MockInference {
 
 #[async_trait::async_trait]
 impl BatchInference for MockInference {
-    async fn infer_batch(
+    async fn infer_batch<'p, I>(
         &self,
-        prompts: &[&Prompt],
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
-        Ok(prompts
-            .iter()
-            .map(|_| Ok(message(StopReason::EndTurn)))
-            .collect())
+        prompts: I,
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        I: ExactSizeIterator<Item = &'p Prompt> + Send,
+        Prompt: 'p,
+    {
+        Ok(prompts.map(|_| Ok(message(StopReason::EndTurn))).collect())
     }
 }
 
@@ -454,14 +455,15 @@ impl Inference for RecordingBatch {
 
 #[async_trait::async_trait]
 impl BatchInference for RecordingBatch {
-    async fn infer_batch(
+    async fn infer_batch<'p, I>(
         &self,
-        prompts: &[&Prompt],
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
+        prompts: I,
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        I: ExactSizeIterator<Item = &'p Prompt> + Send,
+        Prompt: 'p,
+    {
         self.sizes.0.lock().unwrap().push(prompts.len());
-        Ok(prompts
-            .iter()
-            .map(|_| Ok(message(StopReason::EndTurn)))
-            .collect())
+        Ok(prompts.map(|_| Ok(message(StopReason::EndTurn))).collect())
     }
 }
