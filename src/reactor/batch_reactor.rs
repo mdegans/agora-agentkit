@@ -89,11 +89,16 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
             }
         }
 
+        // The live cohort for a round, reused across rounds: cleared and
+        // refilled each iteration so its allocation is paid once, not per round.
+        let mut live: Vec<usize> = Vec::new();
+
         // Lockstep rounds: one batch per round over all still-live agents.
         loop {
-            let live: Vec<usize> = (0..agents.len())
-                .filter(|i| !errors.contains_key(i) && !finished.contains_key(i))
-                .collect();
+            live.clear();
+            live.extend(
+                (0..agents.len()).filter(|i| !errors.contains_key(i) && !finished.contains_key(i)),
+            );
             if live.is_empty() {
                 break;
             }
@@ -104,10 +109,8 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
                     errors.insert(i, ReactorError::AgentError(e));
                 }
             }
-            let live: Vec<usize> = live
-                .into_iter()
-                .filter(|i| !errors.contains_key(i))
-                .collect();
+            // Drop any agent that just errored in `on_turn`, in place.
+            live.retain(|i| !errors.contains_key(i));
             if live.is_empty() {
                 continue;
             }
