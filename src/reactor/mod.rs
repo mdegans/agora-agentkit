@@ -1,7 +1,7 @@
 mod agent;
 use std::collections::{BTreeMap, VecDeque};
 
-pub use agent::{Affinity, Agent, Outcome, State};
+pub use agent::{Affinity, Agent, Control, Outcome, State};
 
 mod backend;
 pub use backend::{BatchInference, Inference, Storage};
@@ -21,6 +21,11 @@ use crate::ids::AgentId;
 
 pub trait Error: std::error::Error + Send + Sync + 'static {}
 impl<T: std::error::Error + Send + Sync + 'static> Error for T {}
+
+/// Consecutive [`Control::Stalled`] rounds (a turn that made no successful tool
+/// call, or an unparseable response) a single agent may accrue before the
+/// reactor gives up and fails it — the "needs a fresh context" backstop.
+const MAX_STALLS: usize = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReactorError<I: Inference, S: Storage, A: Agent> {
@@ -82,39 +87,45 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
     }
 
     /// Drive one agent to completion against the transport: init, then
-    /// `on_turn → infer → handle` until it reports an [`Outcome`], then
-    /// teardown. Borrows only `&I` (shared), so callers may drive many agents
-    /// concurrently; persistence is deferred to [`finish`](Self::finish).
-    async fn drive_one(inference: &I, agent: &mut A) -> Result<(), ReactorError<I, S, A>> {
+    /// `on_turn → infer → handle` until it reports [`Control::Done`] (or stalls
+    /// past the cap), then teardown. Borrows only `&I` (shared), so callers may
+    /// drive many agents concurrently; persistence is deferred to
+    /// [`finish`](Self::finish).
+    async fn drive_one(
+        inference: &I,
+        agent: &mut A,
+    ) -> Result<Outcome, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
-        while agent.outcome().is_none() {
+        let mut stalls = 0usize;
+        let outcome = loop {
             agent.on_turn().await.map_err(ReactorError::AgentError)?;
             let response = inference
                 .infer(agent.prompt())
                 .await
                 .map_err(ReactorError::InferenceError)?;
-            agent
-                .handle(response)
-                .await
-                .map_err(ReactorError::AgentError)?;
-        }
-        agent
-            .on_teardown()
-            .await
-            .map_err(ReactorError::AgentError)?;
-        Ok(())
+            match agent.handle(response).await.map_err(ReactorError::AgentError)? {
+                Control::Done(outcome) => break outcome,
+                Control::Continue => stalls = 0,
+                Control::Stalled => {
+                    stalls += 1;
+                    if stalls >= MAX_STALLS {
+                        break Outcome::Failed;
+                    }
+                }
+            }
+        };
+        agent.on_teardown().await.map_err(ReactorError::AgentError)?;
+        Ok(outcome)
     }
 
     /// Persist `agent` and file it into done/failed. An agent is "failed" if it
-    /// errored while driving, ended with [`Outcome::Failed`], or failed to
+    /// errored while driving, finished with [`Outcome::Failed`], or failed to
     /// save. The drive error takes precedence; a save error is recorded only
     /// when the agent otherwise ran clean.
-    async fn finish(&mut self, agent: A, drive: Result<(), ReactorError<I, S, A>>) {
+    async fn finish(&mut self, agent: A, drive: Result<Outcome, ReactorError<I, S, A>>) {
         let id = agent.id();
         let save_err = self.storage.save(id, &agent.snapshot()).await.err();
-        let failed = drive.is_err()
-            || save_err.is_some()
-            || matches!(agent.outcome(), Some(Outcome::Failed));
+        let failed = !matches!(drive, Ok(Outcome::Complete)) || save_err.is_some();
         if let Err(e) = drive {
             self.errors.insert(id, e);
         } else if let Some(e) = save_err {
@@ -165,7 +176,7 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Run for Reactor<I, S, 
         // Drive every agent concurrently (bounded by the transport). Only the
         // shared `&inference` is borrowed here — persistence happens after, so
         // one agent's failure never aborts the cohort.
-        let driven: Vec<(A, Result<(), ReactorError<I, S, A>>)> = futures::stream::iter(agents)
+        let driven: Vec<(A, Result<Outcome, ReactorError<I, S, A>>)> = futures::stream::iter(agents)
             .map(|mut agent| async move {
                 let result = Self::drive_one(inference, &mut agent).await;
                 (agent, result)

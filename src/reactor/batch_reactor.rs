@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use misanthropic::prompt::Prompt;
 
 use super::backend::{BatchInference, Storage};
-use super::{Agent, Outcome, ReactorError, Report, Run, RunError};
+use super::{Agent, Control, MAX_STALLS, Outcome, ReactorError, Report, Run, RunError};
 use crate::ids::AgentId;
 
 /// How many consecutive *batch-item* failures (canceled / expired / errored
@@ -73,9 +73,13 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> BatchReactor<I, S
 impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReactor<I, S, A> {
     async fn run(&mut self) -> Result<Report, RunError> {
         let mut agents = std::mem::take(&mut self.agents);
-        // Per-agent drive errors and consecutive batch-item failures, keyed by
-        // the agent's index in `agents` (which stays full-length throughout).
+        // All keyed by the agent's index in `agents` (which stays full-length).
         let mut errors: HashMap<usize, ReactorError<I, S, A>> = HashMap::new();
+        // Agents that reached an outcome (Done, or stall-capped to Failed).
+        let mut finished: HashMap<usize, Outcome> = HashMap::new();
+        // Consecutive `Control::Stalled` rounds, and consecutive transport-level
+        // per-item failures, per agent.
+        let mut stalls: HashMap<usize, usize> = HashMap::new();
         let mut item_failures: HashMap<usize, usize> = HashMap::new();
 
         // Install tools + run each agent's on_init.
@@ -88,7 +92,7 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
         // Lockstep rounds: one batch per round over all still-live agents.
         loop {
             let live: Vec<usize> = (0..agents.len())
-                .filter(|i| !errors.contains_key(i) && agents[*i].outcome().is_none())
+                .filter(|i| !errors.contains_key(i) && !finished.contains_key(i))
                 .collect();
             if live.is_empty() {
                 break;
@@ -132,8 +136,23 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
                 match resp {
                     Ok(message) => {
                         item_failures.remove(&i);
-                        if let Err(e) = agents[i].handle(message).await {
-                            errors.insert(i, ReactorError::AgentError(e));
+                        match agents[i].handle(message).await {
+                            Err(e) => {
+                                errors.insert(i, ReactorError::AgentError(e));
+                            }
+                            Ok(Control::Done(outcome)) => {
+                                finished.insert(i, outcome);
+                            }
+                            Ok(Control::Continue) => {
+                                stalls.remove(&i);
+                            }
+                            Ok(Control::Stalled) => {
+                                let n = stalls.entry(i).or_insert(0);
+                                *n += 1;
+                                if *n >= MAX_STALLS {
+                                    finished.insert(i, Outcome::Failed);
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -161,7 +180,7 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
             let drive_err = errors.remove(&i);
             let failed = drive_err.is_some()
                 || save_err.is_some()
-                || !matches!(agent.outcome(), Some(Outcome::Complete));
+                || !matches!(finished.get(&i), Some(Outcome::Complete));
             if let Some(e) = drive_err {
                 self.errors.insert(id, e);
             } else if let Some(e) = save_err {
