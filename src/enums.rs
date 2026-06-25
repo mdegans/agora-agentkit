@@ -18,7 +18,8 @@ macro_rules! impl_display_fromstr {
     ($ty:ty) => {
         impl fmt::Display for $ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let json = serde_json::to_string(self).expect("enum serialization cannot fail");
+                let json = serde_json::to_string(self)
+                    .expect("enum serialization cannot fail");
                 f.write_str(json.trim_matches('"'))
             }
         }
@@ -467,7 +468,13 @@ mod tests {
         let target_type_enum = value["properties"]["target_type"]["enum"]
             .as_array()
             .expect("target_type should have inline `enum` array");
-        assert!(target_type_enum.contains(&serde_json::Value::String("post".into())));
-        assert!(target_type_enum.contains(&serde_json::Value::String("comment".into())));
+        assert!(
+            target_type_enum
+                .contains(&serde_json::Value::String("post".into()))
+        );
+        assert!(
+            target_type_enum
+                .contains(&serde_json::Value::String("comment".into()))
+        );
     }
 }

@@ -8,7 +8,9 @@ pub use backend::{BatchInference, Inference, SaveError, Storage};
 mod batch_reactor;
 pub use batch_reactor::BatchReactor;
 mod orchestrator;
-pub use orchestrator::{Orchestrator, OrchestratorReport, partition_by_affinity};
+pub use orchestrator::{
+    Orchestrator, OrchestratorReport, partition_by_affinity,
+};
 #[cfg(test)]
 mod tests;
 pub mod transport;
@@ -32,7 +34,10 @@ pub trait RetryAfter {
     }
 }
 
-pub trait Error: std::error::Error + Send + Sync + RetryAfter + 'static {}
+pub trait Error:
+    std::error::Error + Send + Sync + RetryAfter + 'static
+{
+}
 impl<T: std::error::Error + Send + Sync + RetryAfter + 'static> Error for T {}
 
 /// Consecutive [`Control::Stalled`] rounds (a turn that made no successful tool
@@ -84,7 +89,11 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
 impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
     /// Build a reactor over already-constructed transports and a set of agents.
     /// Construction of `I`/`S` is the orchestrator's concern, not this trait's.
-    pub fn new(inference: I, storage: S, agents: impl IntoIterator<Item = A>) -> Self {
+    pub fn new(
+        inference: I,
+        storage: S,
+        agents: impl IntoIterator<Item = A>,
+    ) -> Self {
         Self {
             inference,
             storage,
@@ -111,7 +120,10 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
 
     /// Reconstruct an agent from storage: load its state and build it. Does
     /// *not* run `on_init` — the reactor does that as it drives the agent.
-    pub async fn load_agent(&self, id: AgentId) -> Result<A, ReactorError<I, S, A>> {
+    pub async fn load_agent(
+        &self,
+        id: AgentId,
+    ) -> Result<A, ReactorError<I, S, A>> {
         let state = self
             .storage
             .load::<A::State>(id)
@@ -126,7 +138,10 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
     /// past the cap), then teardown. Borrows only `&I` (shared), so callers may
     /// drive many agents concurrently; persistence is deferred to
     /// [`finish`](Self::finish).
-    async fn drive_one(inference: &I, agent: &mut A) -> Result<Outcome, ReactorError<I, S, A>> {
+    async fn drive_one(
+        inference: &I,
+        agent: &mut A,
+    ) -> Result<Outcome, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
         let mut stalls = 0usize;
         let outcome = loop {
@@ -167,25 +182,30 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
     async fn persist_all(&mut self, driven: Vec<Driven<I, S, A>>) {
         // Serialize each snapshot once. A serialize failure is itself a storage
         // error — that agent can be neither persisted nor recovered.
-        let mut values: Vec<(AgentId, serde_json::Value)> = Vec::with_capacity(driven.len());
+        let mut values: Vec<(AgentId, serde_json::Value)> =
+            Vec::with_capacity(driven.len());
         for (agent, _) in &driven {
             let id = agent.id();
             match serde_json::to_value(agent.snapshot()) {
                 Ok(v) => values.push((id, v)),
                 Err(e) => {
-                    self.errors
-                        .insert(id, ReactorError::StorageError(S::Error::from(e)));
+                    self.errors.insert(
+                        id,
+                        ReactorError::StorageError(S::Error::from(e)),
+                    );
                 }
             }
         }
-        let attempted: BTreeSet<AgentId> = values.iter().map(|(id, _)| *id).collect();
+        let attempted: BTreeSet<AgentId> =
+            values.iter().map(|(id, _)| *id).collect();
 
         // Persist, learning exactly which ids committed. The clone feeds the
         // save; the original is drained below into `unsaved`.
-        let (saved, mut save_err) = match self.storage.save_all_raw(values.clone()).await {
-            Ok(()) => (attempted.clone(), None),
-            Err(SaveError { saved, inner }) => (saved, Some(inner)),
-        };
+        let (saved, mut save_err) =
+            match self.storage.save_all_raw(values.clone()).await {
+                Ok(()) => (attempted.clone(), None),
+                Err(SaveError { saved, inner }) => (saved, Some(inner)),
+            };
         // Keep the only in-memory copy of every attempted-but-uncommitted snapshot.
         for (id, value) in values {
             if !saved.contains(&id) {
@@ -195,7 +215,8 @@ impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Reactor<I, S, A> {
 
         for (agent, drive) in driven {
             let id = agent.id();
-            let done = matches!(drive, Ok(Outcome::Complete)) && saved.contains(&id);
+            let done =
+                matches!(drive, Ok(Outcome::Complete)) && saved.contains(&id);
             match drive {
                 Err(e) => {
                     self.errors.insert(id, e);
@@ -238,7 +259,9 @@ pub async fn load_agents<S: Storage, A: Agent>(
             },
             Err(e) => failures.push((
                 id,
-                A::Error::from(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+                A::Error::from(
+                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                ),
             )),
         }
     }
@@ -267,7 +290,9 @@ pub struct ErrorReport {
     pub message: String,
 }
 
-impl<I: Inference, S: Storage, A: Agent> From<&ReactorError<I, S, A>> for ErrorReport {
+impl<I: Inference, S: Storage, A: Agent> From<&ReactorError<I, S, A>>
+    for ErrorReport
+{
     fn from(e: &ReactorError<I, S, A>) -> Self {
         let kind = match e {
             ReactorError::InferenceError(_) => ErrorKind::Inference,
@@ -321,7 +346,9 @@ static_assertions::assert_obj_safe!(Run);
 /// [`max_concurrency`](Inference::max_concurrency) agents in flight. `Some(1)`
 /// (Ollama) means strictly one-at-a-time, which keeps the KV cache local.
 #[async_trait::async_trait]
-impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Run for Reactor<I, S, A> {
+impl<I: Inference<Prompt = Prompt>, S: Storage, A: Agent> Run
+    for Reactor<I, S, A>
+{
     async fn run(&mut self) -> Result<Report, RunError> {
         let agents = std::mem::take(&mut self.agents);
         let inference = &self.inference;

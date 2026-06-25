@@ -156,11 +156,17 @@ pub trait BatchBackend<P, R>: Send + Sync {
     type Handle: PendingHandle;
 
     /// Submit a batch of work items. Returns a handle for polling.
-    async fn submit(&self, items: Vec<WorkItem<P>>) -> anyhow::Result<Self::Handle>;
+    async fn submit(
+        &self,
+        items: Vec<WorkItem<P>>,
+    ) -> anyhow::Result<Self::Handle>;
 
     /// Poll a pending batch. Returns [`BatchState::Pending`] if still
     /// processing, or [`BatchState::Ready`] with all results.
-    async fn poll(&self, handle: Self::Handle) -> anyhow::Result<BatchState<R, Self::Handle>>;
+    async fn poll(
+        &self,
+        handle: Self::Handle,
+    ) -> anyhow::Result<BatchState<R, Self::Handle>>;
 
     /// Count tokens for a prompt. Used for grouping decisions and
     /// cache eligibility checks.
@@ -331,7 +337,11 @@ mod tests {
         }
     }
 
-    fn make_stale_item(agent_num: u32, model: &str, prefix_hash: u64) -> WorkItem<String> {
+    fn make_stale_item(
+        agent_num: u32,
+        model: &str,
+        prefix_hash: u64,
+    ) -> WorkItem<String> {
         WorkItem {
             agent_id: AgentId::new(),
             prompt: format!("prompt_{agent_num}"),

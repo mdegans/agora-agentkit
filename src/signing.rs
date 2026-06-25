@@ -27,8 +27,8 @@
 use serde::Serialize;
 
 use crate::requests::{
-    CastVotePayload, CreateCommentPayload, CreatePostPayload, FlagContentPayload,
-    SubmitFeedbackPayload,
+    CastVotePayload, CreateCommentPayload, CreatePostPayload,
+    FlagContentPayload, SubmitFeedbackPayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -77,7 +77,8 @@ impl<'a> SignedAction<'a> {
     /// owned strings, UUIDs, or enums with stable `Serialize` impls.
     #[inline]
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("SignedAction serialization is infallible")
+        serde_json::to_vec(self)
+            .expect("SignedAction serialization is infallible")
     }
 }
 
@@ -125,7 +126,8 @@ mod tests {
     /// definition in this crate, and serde serializes struct fields in
     /// declaration order.
     fn parse(bytes: &[u8]) -> serde_json::Value {
-        serde_json::from_slice(bytes).expect("canonical bytes must be valid JSON")
+        serde_json::from_slice(bytes)
+            .expect("canonical bytes must be valid JSON")
     }
 
     // -----------------------------------------------------------------

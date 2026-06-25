@@ -20,8 +20,8 @@ use misanthropic::response::{self, StopReason};
 
 use super::backend::{BatchInference, Inference, SaveError, Storage};
 use super::{
-    Agent, BatchReactor, Control, ErrorKind, ErrorReport, Outcome, Reactor, Report, RetryAfter,
-    Run, State, load_agents,
+    Agent, BatchReactor, Control, ErrorKind, ErrorReport, Outcome, Reactor,
+    Report, RetryAfter, Run, State, load_agents,
 };
 use crate::ids::AgentId;
 
@@ -56,7 +56,9 @@ impl RetryAfter for TestError {
 // agents register no tools, so every response is quiescent).
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 enum Behavior {
     /// Finish cleanly after `turns_left` quiescent responses.
     Complete,
@@ -123,7 +125,10 @@ impl Agent for TestAgent {
         (&mut self.tools, &mut self.prompt)
     }
 
-    async fn on_quiesce(&mut self, _response: &response::Message) -> Result<Control, TestError> {
+    async fn on_quiesce(
+        &mut self,
+        _response: &response::Message,
+    ) -> Result<Control, TestError> {
         match self.state.behavior {
             Behavior::ErrHandle => Err(TestError::Msg("boom".into())),
             Behavior::Stall => {
@@ -168,12 +173,19 @@ struct MemStore {
 impl Storage for MemStore {
     type Error = TestError;
 
-    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), TestError> {
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), TestError> {
         self.map.lock().unwrap().insert(id, value);
         Ok(())
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Option<serde_json::Value>, TestError> {
         Ok(self.map.lock().unwrap().get(&id).cloned())
     }
 }
@@ -191,12 +203,19 @@ struct BulkStore {
 impl Storage for BulkStore {
     type Error = TestError;
 
-    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), TestError> {
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), TestError> {
         self.map.lock().unwrap().insert(id, value);
         Ok(())
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Option<serde_json::Value>, TestError> {
         Ok(self.map.lock().unwrap().get(&id).cloned())
     }
 
@@ -249,7 +268,10 @@ impl Inference for MockInference {
     type Error = TestError;
     type Prompt = Prompt;
 
-    async fn infer(&self, _prompt: &Prompt) -> Result<response::Message, TestError> {
+    async fn infer(
+        &self,
+        _prompt: &Prompt,
+    ) -> Result<response::Message, TestError> {
         let round = self.infer_calls.fetch_add(1, Ordering::SeqCst);
         Ok(message(
             self.script
@@ -327,7 +349,8 @@ async fn sequential_contains_one_failure() {
         bad,
         agent(Behavior::Complete, 1),
     ];
-    let mut reactor = Reactor::new(MockInference::default(), MemStore::default(), agents);
+    let mut reactor =
+        Reactor::new(MockInference::default(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);
@@ -345,7 +368,11 @@ async fn batch_contains_one_failure() {
         bad,
         agent(Behavior::Complete, 1),
     ];
-    let mut reactor = BatchReactor::new(MockInference::default(), MemStore::default(), agents);
+    let mut reactor = BatchReactor::new(
+        MockInference::default(),
+        MemStore::default(),
+        agents,
+    );
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);
@@ -391,7 +418,8 @@ async fn reactor_persists_in_one_bulk_save() {
         agent(Behavior::Complete, 1),
         agent(Behavior::Complete, 1),
     ];
-    let mut reactor = BatchReactor::new(MockInference::default(), store.clone(), agents);
+    let mut reactor =
+        BatchReactor::new(MockInference::default(), store.clone(), agents);
     reactor.run().await.unwrap();
 
     assert_eq!(store.bulk_calls.load(Ordering::SeqCst), 1, "one bulk save");
@@ -426,9 +454,10 @@ async fn load_agents_round_trips() {
         .await
         .unwrap();
 
-    let (agents, failures): (Vec<TestAgent>, _) = load_agents(&store, &[id1, id2, AgentId::new()])
-        .await
-        .unwrap();
+    let (agents, failures): (Vec<TestAgent>, _) =
+        load_agents(&store, &[id1, id2, AgentId::new()])
+            .await
+            .unwrap();
 
     assert!(failures.is_empty());
     assert_eq!(agents.len(), 2, "missing id skipped");
@@ -449,7 +478,8 @@ async fn partial_save_surfaces_unsaved_snapshots() {
         agent(Behavior::Complete, 1),
     ];
     let ids: Vec<AgentId> = agents.iter().map(|a| a.id()).collect();
-    let mut reactor = BatchReactor::new(MockInference::default(), store, agents);
+    let mut reactor =
+        BatchReactor::new(MockInference::default(), store, agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2, "committed + completed agents are done");
@@ -460,7 +490,8 @@ async fn partial_save_surfaces_unsaved_snapshots() {
         .unsaved
         .get(&ids[2])
         .expect("third agent's snapshot kept");
-    let recovered: TestState = serde_json::from_value(snapshot.clone()).unwrap();
+    let recovered: TestState =
+        serde_json::from_value(snapshot.clone()).unwrap();
     assert_eq!(
         recovered.behavior,
         Behavior::Complete,
@@ -475,8 +506,13 @@ async fn partial_save_surfaces_unsaved_snapshots() {
 /// A successful run leaves nothing to recover and no errors.
 #[tokio::test]
 async fn successful_run_leaves_nothing_unsaved() {
-    let agents = vec![agent(Behavior::Complete, 1), agent(Behavior::Complete, 1)];
-    let mut reactor = BatchReactor::new(MockInference::default(), MemStore::default(), agents);
+    let agents =
+        vec![agent(Behavior::Complete, 1), agent(Behavior::Complete, 1)];
+    let mut reactor = BatchReactor::new(
+        MockInference::default(),
+        MemStore::default(),
+        agents,
+    );
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);
@@ -584,7 +620,10 @@ impl Inference for RecordingBatch {
     type Error = TestError;
     type Prompt = Prompt;
 
-    async fn infer(&self, _prompt: &Prompt) -> Result<response::Message, TestError> {
+    async fn infer(
+        &self,
+        _prompt: &Prompt,
+    ) -> Result<response::Message, TestError> {
         Ok(message(StopReason::EndTurn))
     }
 
@@ -631,12 +670,19 @@ impl PartialStore {
 impl Storage for PartialStore {
     type Error = TestError;
 
-    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), TestError> {
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), TestError> {
         self.map.lock().unwrap().insert(id, value);
         Ok(())
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Option<serde_json::Value>, TestError> {
         Ok(self.map.lock().unwrap().get(&id).cloned())
     }
 
@@ -675,7 +721,10 @@ impl Inference for FailingBatch {
     type Error = TestError;
     type Prompt = Prompt;
 
-    async fn infer(&self, _prompt: &Prompt) -> Result<response::Message, TestError> {
+    async fn infer(
+        &self,
+        _prompt: &Prompt,
+    ) -> Result<response::Message, TestError> {
         Ok(message(StopReason::EndTurn))
     }
 

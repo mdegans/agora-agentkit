@@ -23,7 +23,9 @@ use super::{Affinity, Agent, Report, Run, RunError};
 /// Split agents by their declared [`Affinity`] into `(messages, batch)` groups,
 /// ready to hand to a [`Reactor`](super::Reactor) and a
 /// [`BatchReactor`](super::BatchReactor) respectively.
-pub fn partition_by_affinity<A: Agent>(agents: impl IntoIterator<Item = A>) -> (Vec<A>, Vec<A>) {
+pub fn partition_by_affinity<A: Agent>(
+    agents: impl IntoIterator<Item = A>,
+) -> (Vec<A>, Vec<A>) {
     let mut messages = Vec::new();
     let mut batch = Vec::new();
     for agent in agents {
@@ -66,7 +68,10 @@ impl Orchestrator {
 
     /// Run every reactor concurrently and merge the results.
     pub async fn run(&mut self) -> OrchestratorReport {
-        let results = futures::future::join_all(self.reactors.iter_mut().map(|r| r.run())).await;
+        let results = futures::future::join_all(
+            self.reactors.iter_mut().map(|r| r.run()),
+        )
+        .await;
 
         let mut out = OrchestratorReport::default();
         for result in results {

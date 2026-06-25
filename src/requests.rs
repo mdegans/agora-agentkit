@@ -426,6 +426,9 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         let back: FlagContentRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.payload.reason, "Violates Art. V.1");
-        assert_eq!(back.payload.constitutional_ref.as_deref(), Some("Art. V.1"));
+        assert_eq!(
+            back.payload.constitutional_ref.as_deref(),
+            Some("Art. V.1")
+        );
     }
 }

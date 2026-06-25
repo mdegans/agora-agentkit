@@ -74,7 +74,10 @@ pub trait BatchInference: Inference {
     async fn infer_batch(
         &self,
         prompts: &[&Self::Prompt],
-    ) -> Result<Vec<Result<misanthropic::response::Message, Self::Error>>, Self::Error>;
+    ) -> Result<
+        Vec<Result<misanthropic::response::Message, Self::Error>>,
+        Self::Error,
+    >;
 }
 
 /// Persistence as an opaque key-value store over agent ids. It deals only in
@@ -89,10 +92,17 @@ pub trait Storage: Sized + Send + Sync {
     type Error: super::Error + From<serde_json::Error>;
 
     /// Persist an opaque JSON value under `id`, overwriting any prior value.
-    async fn save_raw(&mut self, id: AgentId, value: serde_json::Value) -> Result<(), Self::Error>;
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), Self::Error>;
 
     /// Load the JSON value stored under `id`, or `None` if there is none.
-    async fn load_raw(&self, id: AgentId) -> Result<Option<serde_json::Value>, Self::Error>;
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Option<serde_json::Value>, Self::Error>;
 
     /// Serialize and store [`Agent::State`]
     ///
@@ -106,7 +116,10 @@ pub trait Storage: Sized + Send + Sync {
     }
 
     /// Load and deserialize `Agent::State` or `None` if nothing is stored for `id`.
-    async fn load<T: DeserializeOwned>(&self, id: AgentId) -> Result<Option<T>, Self::Error> {
+    async fn load<T: DeserializeOwned>(
+        &self,
+        id: AgentId,
+    ) -> Result<Option<T>, Self::Error> {
         Ok(self
             .load_raw(id)
             .await?

@@ -60,7 +60,10 @@ impl Inference for Direct {
     type Error = misanthropic::client::Error;
     type Prompt = Prompt;
 
-    async fn infer(&self, prompt: &Prompt) -> Result<response::Message, Self::Error> {
+    async fn infer(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<response::Message, Self::Error> {
         self.client.message(prompt).await
     }
 
@@ -85,7 +88,11 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn new(client: Client, max_batch: usize, poll_period: Duration) -> Self {
+    pub fn new(
+        client: Client,
+        max_batch: usize,
+        poll_period: Duration,
+    ) -> Self {
         Self {
             client,
             max_batch,
@@ -99,7 +106,10 @@ impl Inference for Batch {
     type Error = misanthropic::client::Error;
     type Prompt = Prompt;
 
-    async fn infer(&self, prompt: &Prompt) -> Result<response::Message, Self::Error> {
+    async fn infer(
+        &self,
+        prompt: &Prompt,
+    ) -> Result<response::Message, Self::Error> {
         self.client.message(prompt).await
     }
 
@@ -150,8 +160,10 @@ impl BatchInference for Batch {
                 if let Some(&idx) = id_to_idx.get(&id) {
                     // `BatchResult -> Result<Message, AnthropicError>`, then
                     // `AnthropicError -> misanthropic::client::Error`.
-                    let r: Result<response::Message, misanthropic::client::AnthropicError> =
-                        result.into();
+                    let r: Result<
+                        response::Message,
+                        misanthropic::client::AnthropicError,
+                    > = result.into();
                     out[idx] = Some(r.map_err(Into::into));
                 }
             }
@@ -162,9 +174,11 @@ impl BatchInference for Batch {
         Ok(out
             .into_iter()
             .map(|slot| {
-                slot.unwrap_or(Err(misanthropic::client::Error::UnexpectedResponse {
-                    message: "batch returned no result for prompt",
-                }))
+                slot.unwrap_or(Err(
+                    misanthropic::client::Error::UnexpectedResponse {
+                        message: "batch returned no result for prompt",
+                    },
+                ))
             })
             .collect())
     }

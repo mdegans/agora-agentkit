@@ -24,7 +24,8 @@ use misanthropic::prompt::Prompt;
 use super::RetryAfter;
 use super::backend::{BatchInference, SaveError, Storage};
 use super::{
-    Agent, Control, ErrorReport, MAX_STALLS, Outcome, ReactorError, Report, Run, RunError,
+    Agent, Control, ErrorReport, MAX_STALLS, Outcome, ReactorError, Report,
+    Run, RunError,
 };
 use crate::ids::AgentId;
 
@@ -47,9 +48,15 @@ pub struct BatchReactor<I: BatchInference, S: Storage, A: Agent> {
     unsaved: BTreeMap<AgentId, serde_json::Value>,
 }
 
-impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> BatchReactor<I, S, A> {
+impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent>
+    BatchReactor<I, S, A>
+{
     /// Build a batch reactor over already-constructed transports and a cohort.
-    pub fn new(inference: I, storage: S, agents: impl IntoIterator<Item = A>) -> Self {
+    pub fn new(
+        inference: I,
+        storage: S,
+        agents: impl IntoIterator<Item = A>,
+    ) -> Self {
         Self {
             inference,
             storage,
@@ -78,7 +85,9 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> BatchReactor<I, S
 }
 
 #[async_trait::async_trait]
-impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReactor<I, S, A> {
+impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run
+    for BatchReactor<I, S, A>
+{
     async fn run(&mut self) -> Result<Report, RunError> {
         let mut agents = std::mem::take(&mut self.agents);
         // All keyed by the agent's index in `agents` (which stays full-length).
@@ -104,9 +113,9 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
         // Lockstep rounds: one batch per round over all still-live agents.
         loop {
             live.clear();
-            live.extend(
-                (0..agents.len()).filter(|i| !errors.contains_key(i) && !finished.contains_key(i)),
-            );
+            live.extend((0..agents.len()).filter(|i| {
+                !errors.contains_key(i) && !finished.contains_key(i)
+            }));
             if live.is_empty() {
                 break;
             }
@@ -130,7 +139,8 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
             // `Box<dyn Tool + Send>`). The `Vec<&Prompt>` sidesteps that; its
             // immutable borrows end before we hand responses back (mutable).
             let resps = {
-                let prompts: Vec<&Prompt> = live.iter().map(|&i| agents[i].prompt()).collect();
+                let prompts: Vec<&Prompt> =
+                    live.iter().map(|&i| agents[i].prompt()).collect();
                 match self.inference.infer_batch(&prompts).await {
                     Ok(resps) => resps,
                     Err(e) => {
@@ -199,25 +209,28 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run for BatchReac
         // Persist all snapshots in one bulk save. Serialize each once; a
         // serialize failure is itself a storage error (that agent can be neither
         // persisted nor recovered).
-        let mut values: Vec<(AgentId, serde_json::Value)> = Vec::with_capacity(agents.len());
+        let mut values: Vec<(AgentId, serde_json::Value)> =
+            Vec::with_capacity(agents.len());
         for (i, agent) in agents.iter().enumerate() {
             match serde_json::to_value(agent.snapshot()) {
                 Ok(v) => values.push((agent.id(), v)),
                 Err(e) => {
-                    errors
-                        .entry(i)
-                        .or_insert(ReactorError::StorageError(S::Error::from(e)));
+                    errors.entry(i).or_insert(ReactorError::StorageError(
+                        S::Error::from(e),
+                    ));
                 }
             }
         }
-        let attempted: BTreeSet<AgentId> = values.iter().map(|(id, _)| *id).collect();
+        let attempted: BTreeSet<AgentId> =
+            values.iter().map(|(id, _)| *id).collect();
 
         // Persist, learning exactly which ids committed. The clone feeds the
         // save; the original is drained below into `unsaved`.
-        let (saved, mut save_err) = match self.storage.save_all_raw(values.clone()).await {
-            Ok(()) => (attempted.clone(), None),
-            Err(SaveError { saved, inner }) => (saved, Some(inner)),
-        };
+        let (saved, mut save_err) =
+            match self.storage.save_all_raw(values.clone()).await {
+                Ok(()) => (attempted.clone(), None),
+                Err(SaveError { saved, inner }) => (saved, Some(inner)),
+            };
         // Keep the only in-memory copy of every attempted-but-uncommitted snapshot.
         for (id, value) in values {
             if !saved.contains(&id) {

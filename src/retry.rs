@@ -68,11 +68,15 @@ pub fn is_recoverable(err: &anyhow::Error) -> bool {
     true
 }
 
-fn anthropic_err_recoverable(err: &misanthropic::client::AnthropicError) -> bool {
+fn anthropic_err_recoverable(
+    err: &misanthropic::client::AnthropicError,
+) -> bool {
     use misanthropic::client::AnthropicError::*;
     match err {
         // Recoverable: transient server or rate limit.
-        RateLimit { .. } | API { .. } | Overloaded { .. } | Timeout { .. } => true,
+        RateLimit { .. } | API { .. } | Overloaded { .. } | Timeout { .. } => {
+            true
+        }
         // Unknown code: retry on 5xx, skip on 4xx, skip when absent.
         // misanthropic #55 made `code` Option<NonZeroU16> so truly unknown
         // error types (no status parsed) arrive as None — treat those as
@@ -100,7 +104,11 @@ fn anthropic_err_recoverable(err: &misanthropic::client::AnthropicError) -> bool
 ///
 /// `label` is prefixed on every warning / error log so operators can
 /// tell which call site is retrying.
-pub async fn retry_recoverable<F, Fut, T>(label: &str, max_retries: usize, mut f: F) -> Result<T>
+pub async fn retry_recoverable<F, Fut, T>(
+    label: &str,
+    max_retries: usize,
+    mut f: F,
+) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -112,11 +120,15 @@ where
             Ok(v) => return Ok(v),
             Err(e) => {
                 if !is_recoverable(&e) {
-                    tracing::error!("{label}: non-recoverable error, not retrying: {e}");
+                    tracing::error!(
+                        "{label}: non-recoverable error, not retrying: {e}"
+                    );
                     return Err(e);
                 }
                 if attempt >= max_retries {
-                    tracing::error!("{label}: giving up after {max_retries} retries: {e}");
+                    tracing::error!(
+                        "{label}: giving up after {max_retries} retries: {e}"
+                    );
                     return Err(e);
                 }
                 tracing::warn!(
@@ -127,7 +139,10 @@ where
                 );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
-                delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
+                delay = std::cmp::min(
+                    delay * 2,
+                    std::time::Duration::from_secs(30),
+                );
             }
         }
     }

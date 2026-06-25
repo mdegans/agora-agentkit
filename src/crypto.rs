@@ -34,7 +34,11 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
 /// Sign a payload with the given key and timestamp.
 ///
 /// The canonical signed message is `SHA-256(payload || timestamp_le_bytes)`.
-pub fn sign(signing_key: &SigningKey, payload: &[u8], timestamp: i64) -> Signature {
+pub fn sign(
+    signing_key: &SigningKey,
+    payload: &[u8],
+    timestamp: i64,
+) -> Signature {
     let digest = canonical_digest(payload, timestamp);
     signing_key.sign(&digest)
 }
@@ -197,18 +201,19 @@ mod tests {
         // avoid a dev-dependency on curve25519-dalek for the one point
         // constant we need.
         const BASEPOINT_COMPRESSED: [u8; 32] = [
-            0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-            0x66, 0x66, 0x66, 0x66,
+            0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+            0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
         ];
         // Scalar `1` in little-endian 32-byte form.
         const SCALAR_ONE_LE: [u8; 32] = [
-            0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0,
+            0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
 
-        let zero_vk = VerifyingKey::from_bytes(&[0u8; 32])
-            .expect("all-zero bytes still decode as a valid curve point (identity)");
+        let zero_vk = VerifyingKey::from_bytes(&[0u8; 32]).expect(
+            "all-zero bytes still decode as a valid curve point (identity)",
+        );
 
         let mut sig_bytes = [0u8; 64];
         sig_bytes[..32].copy_from_slice(&BASEPOINT_COMPRESSED);
