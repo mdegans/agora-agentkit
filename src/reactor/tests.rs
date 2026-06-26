@@ -607,6 +607,33 @@ async fn transient_item_retries_to_cap() {
     );
 }
 
+/// A mixed cohort in one `Reactor` runs both paths concurrently: the
+/// batch-capable agent negotiates onto the round-major path (`infer_batch`), the
+/// other onto the agent-major path (`infer`). Both finish.
+#[tokio::test]
+async fn mixed_cohort_runs_both_paths() {
+    let transport = MixedRecorder::default();
+    let agents = vec![
+        batch_agent(Behavior::Complete, 1),
+        agent(Behavior::Complete, 1),
+    ];
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(transport.clone(), MemStore::default(), agents);
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 2, "both agents complete");
+    assert_eq!(
+        transport.batch_sizes.get(),
+        vec![1],
+        "the batch agent ran one round-major batch of size 1"
+    );
+    assert_eq!(
+        transport.infer_calls.load(Ordering::SeqCst),
+        1,
+        "the sequential agent made one infer call"
+    );
+}
+
 /// The `Report` (errors + unsaved snapshots) survives a serde round-trip — it
 /// has to, since it crosses the orchestrator's `dyn Run` erasure as data.
 #[test]
@@ -677,6 +704,48 @@ impl Inference for RecordingBatch {
         P: Serialize + Send + Sync,
     {
         self.sizes.0.lock().unwrap().push(prompts.len());
+        Ok(prompts
+            .iter()
+            .map(|_| Ok(message(StopReason::EndTurn)))
+            .collect())
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Err(TestError::Msg("no models in mock".into()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A transport that records *both* per-round batch sizes and single-prompt infer
+// calls, so a mixed-cohort run can prove each path was exercised.
+// ---------------------------------------------------------------------------
+
+#[derive(Default, Clone)]
+struct MixedRecorder {
+    infer_calls: Arc<AtomicUsize>,
+    batch_sizes: SharedSizes,
+}
+
+#[async_trait::async_trait]
+impl Inference for MixedRecorder {
+    type Error = TestError;
+
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
+        self.infer_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(message(StopReason::EndTurn))
+    }
+
+    async fn infer_batch<P>(
+        &self,
+        prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        P: Serialize + Send + Sync,
+    {
+        self.batch_sizes.0.lock().unwrap().push(prompts.len());
         Ok(prompts
             .iter()
             .map(|_| Ok(message(StopReason::EndTurn)))
