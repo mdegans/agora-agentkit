@@ -22,7 +22,7 @@ use misanthropic::prompt::message::Role;
 use misanthropic::response::{self, StopReason};
 use serde::Serialize;
 
-use super::backend::{BatchInference, Inference, SaveError, Storage};
+use super::backend::{Inference, SaveError, Storage};
 use super::{
     Agent, AgentNotFound, BatchReactor, Control, ErrorKind, ErrorReport,
     Outcome, Reactor, Report, RetryAfter, Run, State, load_agents,
@@ -295,13 +295,6 @@ impl Inference for MockInference {
         ))
     }
 
-    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
-    }
-}
-
-#[async_trait::async_trait]
-impl BatchInference for MockInference {
     async fn infer_batch<P>(
         &self,
         prompts: &[&P],
@@ -313,6 +306,10 @@ impl BatchInference for MockInference {
             .iter()
             .map(|_| Ok(message(StopReason::EndTurn)))
             .collect())
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Err(TestError::Msg("no models in mock".into()))
     }
 }
 
@@ -642,13 +639,6 @@ impl Inference for RecordingBatch {
         Ok(message(StopReason::EndTurn))
     }
 
-    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
-    }
-}
-
-#[async_trait::async_trait]
-impl BatchInference for RecordingBatch {
     async fn infer_batch<P>(
         &self,
         prompts: &[&P],
@@ -661,6 +651,10 @@ impl BatchInference for RecordingBatch {
             .iter()
             .map(|_| Ok(message(StopReason::EndTurn)))
             .collect())
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Err(TestError::Msg("no models in mock".into()))
     }
 }
 
@@ -751,13 +745,6 @@ impl Inference for FailingBatch {
         Ok(message(StopReason::EndTurn))
     }
 
-    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
-    }
-}
-
-#[async_trait::async_trait]
-impl BatchInference for FailingBatch {
     async fn infer_batch<P>(
         &self,
         prompts: &[&P],
@@ -776,5 +763,9 @@ impl BatchInference for FailingBatch {
                 })
             })
             .collect())
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Err(TestError::Msg("no models in mock".into()))
     }
 }

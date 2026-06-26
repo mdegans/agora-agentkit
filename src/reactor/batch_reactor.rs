@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use misanthropic::prompt::Prompt;
 
 use super::RetryAfter;
-use super::backend::{BatchInference, SaveError, Storage};
+use super::backend::{Inference, SaveError, Storage};
 use super::{
     Agent, Control, ErrorReport, Outcome, ReactorError, Report, Run, RunError,
 };
@@ -44,8 +44,8 @@ use crate::ids::{AgentId, ReactorId};
 /// this, an item that always errors would re-batch forever.
 const MAX_BATCH_ITEM_RETRIES: usize = 3;
 
-/// A round-major reactor over a cohort sharing a [`BatchInference`] transport.
-pub struct BatchReactor<I: BatchInference, S: Storage, A: Agent> {
+/// A round-major reactor over a cohort sharing an [`Inference`] transport.
+pub struct BatchReactor<I: Inference, S: Storage, A: Agent> {
     inference: I,
     storage: S,
     agents: Vec<A>,
@@ -58,7 +58,7 @@ pub struct BatchReactor<I: BatchInference, S: Storage, A: Agent> {
     unsaved: BTreeMap<AgentId, serde_json::Value>,
 }
 
-impl<I: BatchInference, S: Storage, A: Agent> BatchReactor<I, S, A> {
+impl<I: Inference, S: Storage, A: Agent> BatchReactor<I, S, A> {
     /// Build a batch reactor over already-constructed transports and a cohort.
     pub fn new(
         inference: I,
@@ -94,7 +94,7 @@ impl<I: BatchInference, S: Storage, A: Agent> BatchReactor<I, S, A> {
 }
 
 #[async_trait::async_trait]
-impl<I: BatchInference, S: Storage, A: Agent> Run for BatchReactor<I, S, A> {
+impl<I: Inference, S: Storage, A: Agent> Run for BatchReactor<I, S, A> {
     fn id(&self) -> ReactorId {
         self.id
     }

@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, num::NonZeroUsize};
 
+use futures::StreamExt;
 use serde::Serialize;
 
 use crate::{ids::AgentId, reactor::Agent};
@@ -37,6 +38,34 @@ pub trait Inference: Send + Sync {
     where
         P: Serialize + Send;
 
+    /// Run `prompts` as one batch, results **aligned to input order**; the outer
+    /// `Err` is a whole-submission failure, a per-item `Err` re-batches that
+    /// agent. The default fans out through [`infer`](Self::infer) bounded by
+    /// [`max_concurrency`](Self::max_concurrency); transports with a cheaper
+    /// native batch override it.
+    async fn infer_batch<P>(
+        &self,
+        prompts: &[&P],
+    ) -> Result<
+        Vec<Result<misanthropic::response::Message, Self::Error>>,
+        Self::Error,
+    >
+    where
+        P: Serialize + Send + Sync,
+    {
+        let limit = self.max_concurrency().get();
+        // Materialize the (lazy) futures eagerly so the closure is invoked at the
+        // method's concrete lifetimes — a closure left inside `stream`/`buffered`
+        // can't satisfy the HRTB an `async_trait` default imposes. `buffered` then
+        // drives the ready-made futures in order, bounded by `limit`.
+        let futs: Vec<_> = prompts.iter().map(|&p| self.infer(p)).collect();
+        let results = futures::stream::iter(futs)
+            .buffered(limit)
+            .collect::<Vec<_>>()
+            .await;
+        Ok(results)
+    }
+
     /// The [`Models`] this [`Inference`] can serve, including any model
     /// [`Capabilities`], like batch, structured output, thinking, etc.
     async fn models(&self) -> Result<misanthropic::model::Models, Self::Error>;
@@ -51,28 +80,6 @@ pub trait Inference: Send + Sync {
     fn max_concurrency(&self) -> NonZeroUsize {
         NonZeroUsize::new(1).unwrap()
     }
-}
-
-/// A transport that can additionally run a *cohort* of prompts as one batch
-/// submission — much cheaper per token on Anthropic. The round-major batch
-/// reactor requires this; the agent never sees it.
-#[async_trait::async_trait]
-pub trait BatchInference: Inference {
-    /// Submit every prompt as one batch and return the results **aligned to
-    /// input order**. The outer `Err` means the whole submission failed (the
-    /// transport is dead); a per-item `Err` (canceled / expired / errored)
-    /// leaves that agent un-advanced so it re-batches next round — retry for
-    /// free, bounded by the agent's own round budget. Implementations chunk
-    /// against the provider's batch-size cap internally.
-    async fn infer_batch<P>(
-        &self,
-        prompts: &[&P],
-    ) -> Result<
-        Vec<Result<misanthropic::response::Message, Self::Error>>,
-        Self::Error,
-    >
-    where
-        P: Serialize + Send + Sync;
 }
 
 /// Error type for when [`Storage`] can't find an agent.

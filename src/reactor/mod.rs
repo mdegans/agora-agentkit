@@ -18,9 +18,7 @@ mod agent;
 pub use agent::{Affinity, Agent, Control, Outcome, State};
 
 mod backend;
-pub use backend::{
-    AgentNotFound, BatchInference, Inference, SaveError, Storage,
-};
+pub use backend::{AgentNotFound, Inference, SaveError, Storage};
 
 mod batch_reactor;
 pub use batch_reactor::BatchReactor;
@@ -31,7 +29,7 @@ pub use orchestrator::{Orchestrator, OrchestratorReport};
 #[cfg(feature = "client")]
 pub mod anthropic;
 #[cfg(feature = "client")]
-pub use anthropic::{Batch, Messages};
+pub use anthropic::Client;
 
 use crate::ids::{AgentId, ReactorId};
 
@@ -106,10 +104,9 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
     unsaved: BTreeMap<AgentId, serde_json::Value>,
 }
 
-/// A [`Reactor`] using an [`anthropic::Messages`] for [`Inference`].
-// FIXME(mdegans): Rename Messages -> Client. See anthropic.rs notes.
+/// A [`Reactor`] using an [`anthropic::Client`] for [`Inference`].
 #[cfg(feature = "client")]
-pub type AnthropicReactor<S, A> = Reactor<anthropic::Messages, S, A>;
+pub type AnthropicReactor<S, A> = Reactor<anthropic::Client, S, A>;
 
 impl<I, S, A> Default for Reactor<I, S, A>
 where
