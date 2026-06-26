@@ -90,6 +90,11 @@ define_id! {
 }
 
 define_id! {
+    /// Unique identifier for an agent Reactor.
+    ReactorId
+}
+
+define_id! {
     /// Unique identifier for a human operator.
     OperatorId
 }

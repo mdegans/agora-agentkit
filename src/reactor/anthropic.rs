@@ -1,18 +1,48 @@
 //! Concrete [`Inference`] transports.
 //!
-//! - [`Direct`]: the Messages API — one `Client::message` call per `infer`.
+//! - [`Messages`]: the Messages API — one `Client::message` call per `infer`.
 //! - [`Batch`]: the Anthropic Batch API — a whole cohort packed into one (or a
 //!   few chunked) submissions, each polled to completion.
 //!
-//! Both consume [`misanthropic::prompt::Prompt`] and use [`misanthropic::client::Error`]
-//! as their error (which already absorbs per-item batch errors via its
-//! `Anthropic(AnthropicError)` variant). Construction is inherent — the
-//! orchestrator builds these and hands them to a reactor.
+//! Both consume [`misanthropic::prompt::Prompt`] and use
+//! [`misanthropic::client::Error`] as their error (which already absorbs
+//! per-item batch errors via its `Anthropic(AnthropicError)` variant).
+//! Construction is inherent — the orchestrator builds these and hands them to a
+//! [`Reactor`](super::Reactor).
+// FIXME(mdegans): suggesting a redesign here. This is essentially wrapping a
+// misanthropic::Client, which is great, but I don't think we need [`Batch`] and
+// [`Messages`] since they're just methods on the client and the models() on the
+// client are what determine whether batch is supported by a given Inference.
+// See also my note in `batch_reactor.rs`. My proposal would be, to have a crate
+// Client looking a bit like this:
+//
+// #[derive(Clone)]
+// pub struct Client {
+//     inner: misanthropic::Client,
+//     concurrency: NonZeroUsize,
+//     endpoint_variant: EndpointVariant,
+// }
+//
+// Where endpoint variant indicates, like in the seed-runner downstream whether
+// an endpoint is ollama, Anthropic, or blallama, because each have capabilites
+// that mask any models exposed and indeed, only Anthropic implemets a
+// /v1/models so a client would fail for this. For those variants we'd want to
+// route blallama and ollama to a /chat/tags (IIRC) endpoint and mock our own
+// models response with common, known, endpoint-specific Capabilities. And we
+// get to use the Anthropic primitives which have served us marvelously so far.
+//
+// For almost all use we'll be using a misanthropic::Client. The only exception
+// would be in the future if we ever wanted to use drama_llama directly, however
+// there isn't a giant point to that since blallama is powered by drama_llama,
+// handles all the Anthropic compat stuff, and the process/host isolation for
+// the actual inference is probably a good thing.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use misanthropic::{Client, batch, prompt::Prompt, response};
+use misanthropic::{Client, batch, response};
+use serde::Serialize;
 
 use super::RetryAfter;
 use super::backend::{BatchInference, Inference};
@@ -30,40 +60,46 @@ impl RetryAfter for misanthropic::client::Error {
 }
 
 /// The Messages-API transport: each `infer` is one `Client::message` call.
-pub struct Direct {
+pub struct Messages {
     client: Client,
-    concurrency: Option<usize>,
+    concurrency: NonZeroUsize,
 }
 
-impl Direct {
-    /// A concurrency-unbounded transport, for breakpoint-cached backends
-    /// (Anthropic, blallama) that run agents in parallel for free.
+impl Messages {
+    /// Create a new Anthropic /v1/messages [`Inference`] backend.
+    ///
+    /// - Default concurrency is 1. See [`with_concurrency`] and
+    ///   [`set_concurrency`] to make concurrent requests.
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            concurrency: None,
+            concurrency: 1.try_into().unwrap(),
         }
     }
 
-    /// A serial-to-completion transport, for Ollama — whose single KV slot
-    /// thrashes under concurrency, so agents must run one at a time.
-    pub fn serial(client: Client) -> Self {
-        Self {
-            client,
-            concurrency: Some(1),
-        }
+    /// Change the concurrency limit. Beware rate limits.
+    pub fn with_concurrency(mut self, n: NonZeroUsize) -> Self {
+        self.set_concurrency(n);
+        self
+    }
+
+    /// Set the concurrency limit. Beware rate limits.
+    pub fn set_concurrency(&mut self, n: NonZeroUsize) {
+        self.concurrency = n;
     }
 }
 
 #[async_trait::async_trait]
-impl Inference for Direct {
+impl Inference for Messages {
     type Error = misanthropic::client::Error;
-    type Prompt = Prompt;
 
-    async fn infer(
+    async fn infer<P>(
         &self,
-        prompt: &Prompt,
-    ) -> Result<response::Message, Self::Error> {
+        prompt: P,
+    ) -> Result<response::Message, Self::Error>
+    where
+        P: Serialize + Send,
+    {
         self.client.message(prompt).await
     }
 
@@ -71,7 +107,7 @@ impl Inference for Direct {
         self.client.models().await
     }
 
-    fn max_concurrency(&self) -> Option<usize> {
+    fn max_concurrency(&self) -> NonZeroUsize {
         self.concurrency
     }
 }
@@ -104,12 +140,14 @@ impl Batch {
 #[async_trait::async_trait]
 impl Inference for Batch {
     type Error = misanthropic::client::Error;
-    type Prompt = Prompt;
 
-    async fn infer(
+    async fn infer<P>(
         &self,
-        prompt: &Prompt,
-    ) -> Result<response::Message, Self::Error> {
+        prompt: P,
+    ) -> Result<response::Message, Self::Error>
+    where
+        P: Serialize + Send,
+    {
         self.client.message(prompt).await
     }
 
@@ -120,10 +158,13 @@ impl Inference for Batch {
 
 #[async_trait::async_trait]
 impl BatchInference for Batch {
-    async fn infer_batch(
+    async fn infer_batch<P>(
         &self,
-        prompts: &[&Prompt],
-    ) -> Result<Vec<Result<response::Message, Self::Error>>, Self::Error> {
+        prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, Self::Error>>, Self::Error>
+    where
+        P: Serialize + Send + Sync,
+    {
         let chunk = self.max_batch.max(1);
         // Results land here, indexed by the prompt's position in `prompts`.
         let mut out: Vec<Option<Result<response::Message, Self::Error>>> =
@@ -136,7 +177,7 @@ impl BatchInference for Batch {
             // it maps back to. `P = &Prompt` — results route by id, so we never
             // need the prompts back and never clone them.
             let mut id_to_idx: HashMap<batch::Id, usize> = HashMap::new();
-            let items: Vec<(batch::Id, &Prompt)> = (start..end)
+            let items: Vec<(batch::Id, &P)> = (start..end)
                 .map(|i| {
                     let id = batch::Id::default();
                     id_to_idx.insert(id, i);

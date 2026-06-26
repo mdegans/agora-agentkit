@@ -1,55 +1,55 @@
-//! Composition layer: run many reactors concurrently and merge their reports.
-//!
-//! A reactor runs one cohort against one transport (one endpoint). The
-//! orchestrator runs a *set* of reactors — typically one per inference endpoint
-//! — at the same time and folds their per-agent results together.
-//!
-//! Routing agents to reactors is partly application-specific: grouping by model
-//! needs the app's model→endpoint map and an agent's model (not part of the
-//! [`Agent`] trait). What *is* reusable lives here: splitting a set of agents by
-//! their declared [`Affinity`] ([`partition_by_affinity`]) and running the
-//! resulting reactors together ([`Orchestrator`]). A typical wiring:
-//!
-//! ```ignore
-//! let (messages, batch) = partition_by_affinity(agents);
-//! let mut orch = Orchestrator::new();
-//! orch.add(Reactor::new(Direct::new(client.clone()), store.clone(), messages));
-//! orch.add(BatchReactor::new(Batch::new(client, 50, poll), store, batch));
-//! let report = orch.run().await;
-//! ```
+//! Run many [`Reactor`]s with an [`Orchestrator`] and merge their [`Report`]s
+//! into an [`OrchestratorReport`] which includes all the necessary state to
+//! resume where [`Agent`]s left off.
 
-use super::{Affinity, Agent, Report, Run, RunError};
+use std::collections::BTreeMap;
 
-/// Split agents by their declared [`Affinity`] into `(messages, batch)` groups,
-/// ready to hand to a [`Reactor`](super::Reactor) and a
-/// [`BatchReactor`](super::BatchReactor) respectively.
-pub fn partition_by_affinity<A: Agent>(
-    agents: impl IntoIterator<Item = A>,
-) -> (Vec<A>, Vec<A>) {
-    let mut messages = Vec::new();
-    let mut batch = Vec::new();
-    for agent in agents {
-        match agent.affinity() {
-            Affinity::Messages => messages.push(agent),
-            Affinity::Batch => batch.push(agent),
-        }
-    }
-    (messages, batch)
-}
+use crate::ids::ReactorId;
 
-/// The merged outcome of running every reactor.
+#[allow(unused_imports)] // for docs
+use super::{Affinity, Agent, Reactor, Report, Run, RunError};
+
+// Split agents by their declared [`Affinity`] into `(messages, batch)` groups,
+// ready to hand to a [`Reactor`](super::Reactor) and a
+// [`BatchReactor`](super::BatchReactor) respectively.
+//
+// FIXME(mdegans): This is actually unused and we need to partition not just by
+// message/batch affinity but also by model, then sort by prefix and for batch
+// endpoints setup prompt priming for common prefixes (breakpoints can be used
+// to easily find these). A whole session should be devoted to this since it's
+// very nuanced and we've screwed it up a whole bunch of times. I'm leaving this
+// for the sake of the compiler warning -- to remind us to implement this
+// properly. Very likely the orchestrator should be responsible for routing
+// agents and this may mean more traits like an Orchestratable supertrait of Run
+// with much more affinity information from the reactor parts. Does the
+// inference endpoint support batch, for example. I don't like the idea of
+// having a separate `BatchReactor`. It leads to too much drift when we can
+// route this at runtime in a single Reactor with two run-paths based on what
+// the inference engine is configured to do.
+// fn partition_by_affinity<A: Agent>(
+//     agents: impl IntoIterator<Item = A>,
+// ) -> (Vec<A>, Vec<A>) {
+//     let mut messages = Vec::new();
+//     let mut batch = Vec::new();
+//     for agent in agents {
+//         match agent.affinity() {
+//             Affinity::Messages => messages.push(agent),
+//             Affinity::Batch => batch.push(agent),
+//         }
+//     }
+//     (messages, batch)
+// }
+
+/// [`Report`]s from every [`Reactor`](crate::reactor::Reactor)
 #[derive(Debug, Default)]
 pub struct OrchestratorReport {
-    /// Per-agent summary, merged across all reactors.
-    pub report: Report,
-    /// Reactor-level (catastrophic) failures, rendered. Normally empty — the
-    /// reactors capture per-agent errors and otherwise return a report.
-    pub reactor_errors: Vec<String>,
+    /// Per-[`Reactor`] [`Report`]s or [`RunError`] if the [`run`](Run::run)
+    /// failed entirely
+    pub report: BTreeMap<ReactorId, Result<Report, RunError>>,
 }
-
-/// Runs a set of reactors concurrently, one future per reactor, merging their
-/// reports. Reactors are type-erased through [`Run`], so a sequential
-/// `Reactor<Direct, ..>` and a `BatchReactor<Batch, ..>` can run side by side.
+// TODO: OrchestratorReport impl. Let the downstream use define what this looks
+// like.
+/// [`run`](Self::run)s a set of [`Reactor`]s concurrently
 #[derive(Default)]
 pub struct Orchestrator {
     reactors: Vec<Box<dyn Run>>,
@@ -60,31 +60,23 @@ impl Orchestrator {
         Self::default()
     }
 
-    /// Add a reactor (one endpoint's cohort) to run alongside the others.
-    pub fn add(&mut self, reactor: impl Run + 'static) -> &mut Self {
+    /// Extend self with a [`Reactor`]
+    pub fn push(&mut self, reactor: impl Run + 'static) -> &mut Self {
         self.reactors.push(Box::new(reactor));
         self
     }
 
-    /// Run every reactor concurrently and merge the results.
+    /// Run every [`Reactor`] concurrently and return a report.
     pub async fn run(&mut self) -> OrchestratorReport {
         let results = futures::future::join_all(
-            self.reactors.iter_mut().map(|r| r.run()),
+            self.reactors
+                .iter_mut()
+                .map(|r| async { (r.id(), r.run().await) }),
         )
         .await;
 
-        let mut out = OrchestratorReport::default();
-        for result in results {
-            match result {
-                Ok(report) => {
-                    out.report.done += report.done;
-                    out.report.failed += report.failed;
-                    out.report.errors.extend(report.errors);
-                    out.report.unsaved.extend(report.unsaved);
-                }
-                Err(e) => out.reactor_errors.push(RunError::to_string(&e)),
-            }
+        OrchestratorReport {
+            report: results.into_iter().collect(),
         }
-        out
     }
 }

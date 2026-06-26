@@ -8,6 +8,9 @@
 //! - **C** error containment: one agent's failure doesn't abort the cohort.
 //! - **D** `PauseTurn` continuation: a paused turn continues and isn't a stall.
 //! - **E** turn-order invariant: after `handle`, the prompt ends in a user turn.
+// FIXME(mdegans): having all our tests in a `tests.rs` file will lead to a
+// giant file. Suggest we only put test-common code here and use it in per-file
+// tests.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,11 +20,12 @@ use std::time::Duration;
 use misanthropic::prompt::Prompt;
 use misanthropic::prompt::message::Role;
 use misanthropic::response::{self, StopReason};
+use serde::Serialize;
 
 use super::backend::{BatchInference, Inference, SaveError, Storage};
 use super::{
-    Agent, BatchReactor, Control, ErrorKind, ErrorReport, Outcome, Reactor,
-    Report, RetryAfter, Run, State, load_agents,
+    Agent, AgentNotFound, BatchReactor, Control, ErrorKind, ErrorReport,
+    Outcome, Reactor, Report, RetryAfter, Run, State, load_agents,
 };
 use crate::ids::AgentId;
 
@@ -35,6 +39,8 @@ enum TestError {
     Tool(#[from] Box<dyn std::error::Error + Send + Sync>),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("not found: {0}")]
+    NotFound(#[from] AgentNotFound),
     #[error("{0}")]
     Msg(String),
     /// A transient error carrying a retry hint, for exercising classification.
@@ -113,8 +119,8 @@ impl Agent for TestAgent {
         self.id
     }
 
-    fn snapshot(&self) -> TestState {
-        self.state.clone()
+    fn state(&self) -> &TestState {
+        &self.state
     }
 
     fn prompt(&self) -> &Prompt {
@@ -185,8 +191,11 @@ impl Storage for MemStore {
     async fn load_raw(
         &self,
         id: AgentId,
-    ) -> Result<Option<serde_json::Value>, TestError> {
-        Ok(self.map.lock().unwrap().get(&id).cloned())
+    ) -> Result<serde_json::Value, TestError> {
+        match self.map.lock().unwrap().get(&id) {
+            Some(value) => Ok(serde_json::from_value(value.clone())?),
+            None => Err(AgentNotFound(id).into()),
+        }
     }
 }
 
@@ -215,14 +224,20 @@ impl Storage for BulkStore {
     async fn load_raw(
         &self,
         id: AgentId,
-    ) -> Result<Option<serde_json::Value>, TestError> {
-        Ok(self.map.lock().unwrap().get(&id).cloned())
+    ) -> Result<serde_json::Value, TestError> {
+        match self.map.lock().unwrap().get(&id) {
+            Some(value) => Ok(serde_json::from_value(value.clone())?),
+            None => Err(AgentNotFound(id).into()),
+        }
     }
 
-    async fn save_all_raw(
+    async fn save_all_raw<It>(
         &mut self,
-        items: Vec<(AgentId, serde_json::Value)>,
-    ) -> Result<(), SaveError<TestError>> {
+        items: It,
+    ) -> Result<(), SaveError<TestError>>
+    where
+        It: ExactSizeIterator<Item = (AgentId, serde_json::Value)> + Send,
+    {
         self.bulk_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_batch.lock().unwrap() = items.len();
         let mut map = self.map.lock().unwrap();
@@ -266,12 +281,11 @@ fn message(stop: StopReason) -> response::Message {
 #[async_trait::async_trait]
 impl Inference for MockInference {
     type Error = TestError;
-    type Prompt = Prompt;
 
-    async fn infer(
-        &self,
-        _prompt: &Prompt,
-    ) -> Result<response::Message, TestError> {
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
         let round = self.infer_calls.fetch_add(1, Ordering::SeqCst);
         Ok(message(
             self.script
@@ -288,10 +302,13 @@ impl Inference for MockInference {
 
 #[async_trait::async_trait]
 impl BatchInference for MockInference {
-    async fn infer_batch(
+    async fn infer_batch<P>(
         &self,
-        prompts: &[&Prompt],
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
+        prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        P: Serialize + Send + Sync,
+    {
         Ok(prompts
             .iter()
             .map(|_| Ok(message(StopReason::EndTurn)))
@@ -327,11 +344,10 @@ async fn batch_sizes_match_live_cohort_each_round() {
 /// looped forever (the test terminating at all is half the assertion).
 #[tokio::test]
 async fn stall_cap_bounds_retry() {
-    let mut reactor = Reactor::new(
-        MockInference::default(),
-        MemStore::default(),
-        vec![agent(Behavior::Stall, 0)],
-    );
+    // Also test Reactor collects from agents when I and S are Default as well
+    // as the into() shortcut for an iterable of A.
+    let mut reactor: Reactor<MockInference, MemStore, TestAgent> =
+        [agent(Behavior::Stall, 0)].into();
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.failed, 1);
@@ -349,7 +365,7 @@ async fn sequential_contains_one_failure() {
         bad,
         agent(Behavior::Complete, 1),
     ];
-    let mut reactor =
+    let mut reactor: Reactor<_, _, TestAgent> =
         Reactor::new(MockInference::default(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
@@ -388,7 +404,7 @@ async fn pause_turn_continues() {
         script: vec![StopReason::PauseTurn, StopReason::EndTurn],
         ..Default::default()
     };
-    let mut reactor = Reactor::new(
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
         inference,
         MemStore::default(),
         vec![agent(Behavior::Complete, 1)],
@@ -434,7 +450,7 @@ async fn load_agents_round_trips() {
     let id1 = AgentId::new();
     let id2 = AgentId::new();
     store
-        .save(
+        .save::<TestAgent>(
             id1,
             &TestState {
                 behavior: Behavior::Complete,
@@ -444,7 +460,7 @@ async fn load_agents_round_trips() {
         .await
         .unwrap();
     store
-        .save(
+        .save::<TestAgent>(
             id2,
             &TestState {
                 behavior: Behavior::Stall,
@@ -455,12 +471,12 @@ async fn load_agents_round_trips() {
         .unwrap();
 
     let (agents, failures): (Vec<TestAgent>, _) =
-        load_agents(&store, &[id1, id2, AgentId::new()])
+        load_agents(&store, [id1, id2, AgentId::new()].into_iter())
             .await
             .unwrap();
 
-    assert!(failures.is_empty());
-    assert_eq!(agents.len(), 2, "missing id skipped");
+    assert_eq!(failures.len(), 1); // for the AgentId::new
+    assert_eq!(agents.len(), 2);
     let ids: Vec<_> = agents.iter().map(|a| a.id()).collect();
     assert!(ids.contains(&id1) && ids.contains(&id2));
 }
@@ -618,12 +634,11 @@ struct RecordingBatch {
 #[async_trait::async_trait]
 impl Inference for RecordingBatch {
     type Error = TestError;
-    type Prompt = Prompt;
 
-    async fn infer(
-        &self,
-        _prompt: &Prompt,
-    ) -> Result<response::Message, TestError> {
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
         Ok(message(StopReason::EndTurn))
     }
 
@@ -634,10 +649,13 @@ impl Inference for RecordingBatch {
 
 #[async_trait::async_trait]
 impl BatchInference for RecordingBatch {
-    async fn infer_batch(
+    async fn infer_batch<P>(
         &self,
-        prompts: &[&Prompt],
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
+        prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        P: Serialize + Send + Sync,
+    {
         self.sizes.0.lock().unwrap().push(prompts.len());
         Ok(prompts
             .iter()
@@ -682,17 +700,23 @@ impl Storage for PartialStore {
     async fn load_raw(
         &self,
         id: AgentId,
-    ) -> Result<Option<serde_json::Value>, TestError> {
-        Ok(self.map.lock().unwrap().get(&id).cloned())
+    ) -> Result<serde_json::Value, TestError> {
+        match self.map.lock().unwrap().get(&id) {
+            Some(value) => Ok(serde_json::from_value(value.clone())?),
+            None => Err(AgentNotFound(id).into()),
+        }
     }
 
-    async fn save_all_raw(
+    async fn save_all_raw<It>(
         &mut self,
-        items: Vec<(AgentId, serde_json::Value)>,
-    ) -> Result<(), SaveError<TestError>> {
+        items: It,
+    ) -> Result<(), SaveError<TestError>>
+    where
+        It: ExactSizeIterator<Item = (AgentId, serde_json::Value)> + Send,
+    {
         let mut saved = BTreeSet::new();
         let mut map = self.map.lock().unwrap();
-        for (i, (id, value)) in items.into_iter().enumerate() {
+        for (i, (id, value)) in items.enumerate() {
             if i >= self.commit {
                 return Err(SaveError {
                     saved,
@@ -719,12 +743,11 @@ struct FailingBatch {
 #[async_trait::async_trait]
 impl Inference for FailingBatch {
     type Error = TestError;
-    type Prompt = Prompt;
 
-    async fn infer(
-        &self,
-        _prompt: &Prompt,
-    ) -> Result<response::Message, TestError> {
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
         Ok(message(StopReason::EndTurn))
     }
 
@@ -735,10 +758,13 @@ impl Inference for FailingBatch {
 
 #[async_trait::async_trait]
 impl BatchInference for FailingBatch {
-    async fn infer_batch(
+    async fn infer_batch<P>(
         &self,
-        prompts: &[&Prompt],
-    ) -> Result<Vec<Result<response::Message, TestError>>, TestError> {
+        prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        P: Serialize + Send + Sync,
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(prompts
             .iter()

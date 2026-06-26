@@ -1,62 +1,55 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroUsize};
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 
-use crate::ids::AgentId;
+use crate::{ids::AgentId, reactor::Agent};
 
-/// A failed bulk save. `saved` is the set of ids that *did* commit before the
-/// failure — empty for a transactional store that rolled the whole batch back,
-/// a prefix for a streaming store that got partway (e.g. ran out of disk). The
-/// reactor uses it to tell persisted agents from the ones whose only copy is
-/// still in memory. `inner` is the underlying store error (and carries the
-/// [`RetryAfter`](super::RetryAfter) classification).
+/// A failed bulk save.
 #[derive(Debug, thiserror::Error)]
 #[error("saved {} before failing: {inner}", saved.len())]
 pub struct SaveError<E> {
+    /// [`AgentId`]s of [`Agent`]s whose [`Agent::State`] was successfully
+    /// saved.
     pub saved: BTreeSet<AgentId>,
     #[source]
     pub inner: E,
 }
 
-/// A model transport: one prompt in, one assistant response out. The agent that
-/// calls this never learns whether it spoke to the Messages API or rode a
-/// batch — batching is an *additional* capability (see [`BatchInference`]),
-/// never visible here, so every agent and reactor step is written against this
-/// one method, identical across transports.
+/// An `Inference` backend for an [`Agent`] [`Reactor`].
 ///
-/// Construction is the orchestrator's concern (inherent constructors on the
-/// concrete transport), deliberately *not* on this trait.
+/// [`Agent`]: super::Agent
+/// [`Reactor`]: super::Reactor
 #[async_trait::async_trait]
 pub trait Inference: Send + Sync {
     type Error: super::Error;
 
-    /// The prompt representation this transport consumes. It lives on the
-    /// trait, not on `infer`, because a batch submission can only pack a
-    /// *single* prompt type — a per-method `<P>` would make batching
-    /// impossible. The common choice is [`misanthropic::prompt::Prompt`].
-    type Prompt: Serialize + Send + Sync;
-
-    /// Run one prompt to a single assistant response (full
-    /// [`response::Message`] — the reactor needs `stop_reason` for quiescence
-    /// and `usage` for cache accounting). Takes `&Self::Prompt` so the agent
-    /// keeps ownership of its prompt across the call.
+    /// Complete a [`misanthropic::response::Message`] for a given `prompt`.
     ///
-    /// [`response::Message`]: misanthropic::response::Message
-    async fn infer(
+    /// Like [`misanthropic::Client::message`] this accepts anything Serialize
+    /// with an additional `Send` bound because the compiler demanded it.
+    /// Typically this should be a [`misanthropic::Prompt`], a
+    /// [`misanthropic::CachedPrompt`] wrapper or even a [`serde_json::Value`]
+    /// if the situation absolutely requires it.
+    async fn infer<P>(
         &self,
-        prompt: &Self::Prompt,
-    ) -> Result<misanthropic::response::Message, Self::Error>;
+        prompt: P,
+    ) -> Result<misanthropic::response::Message, Self::Error>
+    where
+        P: Serialize + Send;
 
-    /// The models this transport can serve, for routing agents by model. Mirrors
-    /// [`misanthropic::Client::models`].
+    /// The [`Models`] this [`Inference`] can serve, including any model
+    /// [`Capabilities`], like batch, structured output, thinking, etc.
     async fn models(&self) -> Result<misanthropic::model::Models, Self::Error>;
 
     /// How many agents this transport will run at once. `Some(1)` forces
-    /// serial-to-completion execution (Ollama, whose single KV slot thrashes
-    /// under concurrency); `None` means unbounded (Anthropic and blallama are
-    /// breakpoint-cached, so concurrency is free).
-    fn max_concurrency(&self) -> Option<usize> {
-        None
+    /// serial-to-completion execution and is the default. None means unbounded.
+    ///
+    /// # Note
+    ///
+    /// In general, especially with the default Anthropic tier and local models,
+    /// the default is optimal.
+    fn max_concurrency(&self) -> NonZeroUsize {
+        NonZeroUsize::new(1).unwrap()
     }
 }
 
@@ -71,60 +64,65 @@ pub trait BatchInference: Inference {
     /// leaves that agent un-advanced so it re-batches next round — retry for
     /// free, bounded by the agent's own round budget. Implementations chunk
     /// against the provider's batch-size cap internally.
-    async fn infer_batch(
+    async fn infer_batch<P>(
         &self,
-        prompts: &[&Self::Prompt],
+        prompts: &[&P],
     ) -> Result<
         Vec<Result<misanthropic::response::Message, Self::Error>>,
         Self::Error,
-    >;
+    >
+    where
+        P: Serialize + Send + Sync;
 }
 
-/// Persistence as an opaque key-value store over agent ids. It deals only in
-/// serializable bytes — it never imports `Agent`, `ToolBox`, or an agent's
-/// error type, so one `Storage` can back many different kinds of agent. The
-/// reactor is the only place a stored payload is turned back into an `Agent`.
+/// Error type for when [`Storage`] can't find an agent.
+#[derive(Debug, thiserror::Error)]
+#[error("Agent was not found in Storage: {0}")]
+pub struct AgentNotFound(pub AgentId);
+
+/// An opaque key-value store over agent ids. It should be able to handle many
+/// different kinds of Agents so it can be shared between all [`Reactor`]s.
 ///
-/// Implementations write just the two `*_raw` methods; the typed `save`/`load`
-/// convenience is provided.
+/// It is only strictly necessary to implement `save_raw` and `load_raw`,
+/// however it's recommended to implement `save_all_raw` and `load_all_raw` if
+/// it's optimal for the storage backend (eg. a single database query).
+///
+/// [`Reactor`]: super::Reactor
 #[async_trait::async_trait]
 pub trait Storage: Sized + Send + Sync {
-    type Error: super::Error + From<serde_json::Error>;
+    type Error: super::Error + From<serde_json::Error> + From<AgentNotFound>;
 
-    /// Persist an opaque JSON value under `id`, overwriting any prior value.
+    /// Persist an opaque JSON value under `id`, overwriting any prior value
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
     ) -> Result<(), Self::Error>;
 
-    /// Load the JSON value stored under `id`, or `None` if there is none.
+    /// Load the JSON value stored under `id`
     async fn load_raw(
         &self,
         id: AgentId,
-    ) -> Result<Option<serde_json::Value>, Self::Error>;
+    ) -> Result<serde_json::Value, Self::Error>;
 
     /// Serialize and store [`Agent::State`]
     ///
     /// [`Agent::State`]: crate::reactor::Agent::State
-    async fn save<T: Serialize + Sync>(
+    async fn save<A: Agent>(
         &mut self,
         id: AgentId,
-        value: &T,
+        state: &A::State,
     ) -> Result<(), Self::Error> {
-        self.save_raw(id, serde_json::to_value(value)?).await
+        self.save_raw(id, serde_json::to_value(state)?).await
     }
 
-    /// Load and deserialize `Agent::State` or `None` if nothing is stored for `id`.
-    async fn load<T: DeserializeOwned>(
+    /// Load and deserialize `Agent::State`
+    async fn load<A: Agent>(
         &self,
         id: AgentId,
-    ) -> Result<Option<T>, Self::Error> {
-        Ok(self
-            .load_raw(id)
-            .await?
-            .map(serde_json::from_value)
-            .transpose()?)
+    ) -> Result<A::State, Self::Error> {
+        let value = self.load_raw(id).await?;
+        Ok(serde_json::from_value(value)?)
     }
 
     /// Persist many values at once, reporting exactly which ids committed. On
@@ -136,10 +134,13 @@ pub trait Storage: Sized + Send + Sync {
     /// (e.g. a multi-row SQL upsert) and return the appropriate `saved` set.
     ///
     /// [`save_raw`]: Storage::save_raw
-    async fn save_all_raw(
+    async fn save_all_raw<It>(
         &mut self,
-        items: Vec<(AgentId, serde_json::Value)>,
-    ) -> Result<(), SaveError<Self::Error>> {
+        items: It,
+    ) -> Result<(), SaveError<Self::Error>>
+    where
+        It: ExactSizeIterator<Item = (AgentId, serde_json::Value)> + Send,
+    {
         let mut saved = BTreeSet::new();
         for (id, value) in items {
             if let Err(inner) = self.save_raw(id, value).await {
@@ -150,50 +151,75 @@ pub trait Storage: Sized + Send + Sync {
         Ok(())
     }
 
-    /// Load many values at once, skipping ids with nothing stored. The default
-    /// loops [`load_raw`]; override it to do one query (e.g. `WHERE id IN …`).
+    /// Load many raw [`Value`](serde_json::Value)s at once.
     ///
     /// [`load_raw`]: Storage::load_raw
-    async fn load_all_raw(
+    async fn load_all_raw<It>(
         &self,
-        ids: &[AgentId],
-    ) -> Result<Vec<(AgentId, serde_json::Value)>, Self::Error> {
-        let mut out = Vec::with_capacity(ids.len());
-        for &id in ids {
-            if let Some(value) = self.load_raw(id).await? {
-                out.push((id, value));
-            }
+        ids: It,
+    ) -> Result<
+        Vec<(AgentId, Result<serde_json::Value, Self::Error>)>,
+        Self::Error,
+    >
+    where
+        It: ExactSizeIterator<Item = AgentId> + Send,
+    {
+        let mut raw = Vec::with_capacity(ids.len());
+        for id in ids {
+            raw.push((id, self.load_raw(id).await))
         }
-        Ok(out)
+        Ok(raw)
     }
 
-    /// Serialize and store many [`Agent::State`](crate::reactor::Agent::State)s
-    /// in one batch. A serialize failure aborts before anything is written, so
-    /// it surfaces as a `SaveError` with an empty `saved` set.
-    async fn save_all<T: Serialize + Send>(
+    /// Batch Serialize and store many [`Agent::State`](super::Agent::State)s.
+    /// If any item fails to Serialize the entire save is aborted.
+    // FIXME: This is called nowhere because it aborts the entire save. Instead
+    // the per-agent failure logic lives in `persist_all`. We *can* fix this
+    // here but we need a way to merge `SaveError`s. We'd filter out the agents
+    // that can't be serialized first, try to save them all raw, and in the
+    // path where we have errors on both, we union saved (empty) and the inner
+    // error. So we might need a Vec<E> for inner. Or we change SaveError so
+    // that it wraps a `BTreeMap<AgentId, E>` and make the SaveError per-agent.
+    // I like that last solution best - mdegans.
+    async fn save_all<It, A: Agent>(
         &mut self,
-        items: Vec<(AgentId, T)>,
-    ) -> Result<(), SaveError<Self::Error>> {
+        items: It,
+    ) -> Result<(), SaveError<Self::Error>>
+    where
+        It: ExactSizeIterator<Item = (AgentId, A::State)> + Send,
+    {
         let mut raw = Vec::with_capacity(items.len());
-        for (id, value) in &items {
+        for (id, value) in items {
             let value = serde_json::to_value(value).map_err(|e| SaveError {
                 saved: BTreeSet::new(),
                 inner: Self::Error::from(e),
             })?;
-            raw.push((*id, value));
+            raw.push((id, value));
         }
-        self.save_all_raw(raw).await
+        self.save_all_raw(raw.into_iter()).await
     }
 
     /// Load and deserialize many payloads, skipping ids with nothing stored.
-    async fn load_all<T: DeserializeOwned>(
+    /// [`Deserialize`] errors are not fatal and will be converted to
+    /// [`Self::Error`]
+    async fn load_all<It, A: Agent>(
         &self,
-        ids: &[AgentId],
-    ) -> Result<Vec<(AgentId, T)>, Self::Error> {
+        ids: It,
+    ) -> Result<Vec<(AgentId, Result<A::State, Self::Error>)>, Self::Error>
+    where
+        It: ExactSizeIterator<Item = AgentId> + Send,
+    {
         let raw = self.load_all_raw(ids).await?;
         let mut out = Vec::with_capacity(raw.len());
         for (id, value) in raw {
-            out.push((id, serde_json::from_value(value)?));
+            match value {
+                Ok(value) => {
+                    let result =
+                        serde_json::from_value(value).map_err(Into::into);
+                    out.push((id, result))
+                }
+                Err(e) => out.push((id, Err(e))),
+            }
         }
         Ok(out)
     }

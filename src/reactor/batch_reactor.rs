@@ -16,6 +16,16 @@
 //! the cache correctly on its own; priming with a separate one-token request
 //! would need the agent to expose its cacheable prefix, which the trait does
 //! not yet offer.
+// FIXME(mdegans): I'm not going to revise this file much as I'd like to remove
+// it. Instead of a BatchReactor we can have a batch_infer method on Reactor
+// with bounds only where I: BatchInference. How do we expose this to the
+// orchestrator? Well. Anthropic has given us a solution with the Models
+// abstraction. [`misanthropic::model::Models`] which contains
+// [`misanthropic::model::Capabilities`] tells us if a model supports batch. So
+// we might not even need a BatchInference trait. Inference always has it but
+// it's only called if the model reports the capability. So we can probably
+// delete this file and that trait to simplify things. This is worth a session
+// to talk about.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -24,10 +34,9 @@ use misanthropic::prompt::Prompt;
 use super::RetryAfter;
 use super::backend::{BatchInference, SaveError, Storage};
 use super::{
-    Agent, Control, ErrorReport, MAX_STALLS, Outcome, ReactorError, Report,
-    Run, RunError,
+    Agent, Control, ErrorReport, Outcome, ReactorError, Report, Run, RunError,
 };
-use crate::ids::AgentId;
+use crate::ids::{AgentId, ReactorId};
 
 /// How many consecutive *batch-item* failures (canceled / expired / errored
 /// results, which never reach the agent's `handle` and so never charge its own
@@ -40,6 +49,7 @@ pub struct BatchReactor<I: BatchInference, S: Storage, A: Agent> {
     inference: I,
     storage: S,
     agents: Vec<A>,
+    id: ReactorId,
     done: BTreeMap<AgentId, A>,
     failed: BTreeMap<AgentId, A>,
     errors: BTreeMap<AgentId, ReactorError<I, S, A>>,
@@ -48,9 +58,7 @@ pub struct BatchReactor<I: BatchInference, S: Storage, A: Agent> {
     unsaved: BTreeMap<AgentId, serde_json::Value>,
 }
 
-impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent>
-    BatchReactor<I, S, A>
-{
+impl<I: BatchInference, S: Storage, A: Agent> BatchReactor<I, S, A> {
     /// Build a batch reactor over already-constructed transports and a cohort.
     pub fn new(
         inference: I,
@@ -60,6 +68,7 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent>
         Self {
             inference,
             storage,
+            id: ReactorId::new(),
             agents: agents.into_iter().collect(),
             done: BTreeMap::new(),
             failed: BTreeMap::new(),
@@ -85,9 +94,11 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent>
 }
 
 #[async_trait::async_trait]
-impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run
-    for BatchReactor<I, S, A>
-{
+impl<I: BatchInference, S: Storage, A: Agent> Run for BatchReactor<I, S, A> {
+    fn id(&self) -> ReactorId {
+        self.id
+    }
+
     async fn run(&mut self) -> Result<Report, RunError> {
         let mut agents = std::mem::take(&mut self.agents);
         // All keyed by the agent's index in `agents` (which stays full-length).
@@ -174,16 +185,15 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run
                             Ok(Control::Stalled) => {
                                 let n = stalls.entry(i).or_insert(0);
                                 *n += 1;
-                                if *n >= MAX_STALLS {
+                                if *n >= super::Reactor::<I, S, A>::MAX_STALLS {
                                     finished.insert(i, Outcome::Failed);
                                 }
                             }
                         }
                     }
-                    Err(e) if e.retry_after().is_none() => {
-                        // Fatal per-item failure (no retry hint): it will never
-                        // succeed, so fail the agent now rather than burning the
-                        // whole retry cap re-batching a doomed item.
+                    Err(e) if e.is_fatal() => {
+                        // TODO: consider handling retry here. See RetryAfter
+                        // trait.
                         errors.insert(i, ReactorError::InferenceError(e));
                     }
                     Err(e) => {
@@ -212,7 +222,7 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run
         let mut values: Vec<(AgentId, serde_json::Value)> =
             Vec::with_capacity(agents.len());
         for (i, agent) in agents.iter().enumerate() {
-            match serde_json::to_value(agent.snapshot()) {
+            match serde_json::to_value(agent.state()) {
                 Ok(v) => values.push((agent.id(), v)),
                 Err(e) => {
                     errors.entry(i).or_insert(ReactorError::StorageError(
@@ -227,7 +237,7 @@ impl<I: BatchInference<Prompt = Prompt>, S: Storage, A: Agent> Run
         // Persist, learning exactly which ids committed. The clone feeds the
         // save; the original is drained below into `unsaved`.
         let (saved, mut save_err) =
-            match self.storage.save_all_raw(values.clone()).await {
+            match self.storage.save_all_raw(values.clone().into_iter()).await {
                 Ok(()) => (attempted.clone(), None),
                 Err(SaveError { saved, inner }) => (saved, Some(inner)),
             };

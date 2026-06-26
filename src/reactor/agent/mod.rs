@@ -1,3 +1,5 @@
+//! [`Agent`] and related traits like [`State`]
+
 mod state;
 pub use state::State;
 
@@ -20,41 +22,46 @@ fn boxed<E: std::error::Error + Send + Sync + 'static>(
     Box::new(e)
 }
 
-/// A "sans-IO" agent: it never holds the inference client. The reactor reads
-/// the agent's next [`prompt`](Agent::prompt), runs it through an
-/// [`Inference`](super::Inference), and hands the response back via
-/// [`handle`](Agent::handle). The agent owns its prompt, tools, and history —
-/// everything that varies — while the reactor owns the loop and the transport.
-///
-/// The only async seam in the per-turn step is [`handle`](Agent::handle); the
-/// lifecycle hooks are provided and normally not overridden.
+/// An `Agent` abstraction.
 #[async_trait::async_trait]
 pub trait Agent: Sized + Send {
+    /// Serializable [`Agent`] `State`. Should include everything necessary to
+    /// save/load the agent in the same functional state.
     type State: State;
-    /// `From<Box<dyn Error + Send + Sync>>` lets the provided lifecycle hooks
-    /// and `handle`'s tool dispatch `?` the `ToolBox`/`Tool` boxed errors.
     type Error: super::Error + From<Box<dyn std::error::Error + Send + Sync>>;
 
     /// Reconstruct from persisted state. Sync and fallible: build the base
     /// prompt and the [`ToolBox`]; defer *all* async setup to
     /// [`on_init`](Agent::on_init).
+    // We might need a `Context` associated type to provide ephemeral things
+    // like a clone of a database client to an agent. Otherwise we need another
+    // impl constructor which the reactor can't know to call. So the `Context`
+    // would be Clone and the reactor would hold it and when it creates the
+    // agent, pass a clone to it. Perhaps also Default.
     fn new(id: AgentId, state: Self::State) -> Result<Self, Self::Error>;
 
+    /// Unique UUID for this [`Agent`]
     fn id(&self) -> AgentId;
 
-    /// A persistable snapshot of this agent's state (including any turn/phase
-    /// counters, so progress survives a save/restore).
-    fn snapshot(&self) -> Self::State;
+    /// [`Agent::State`] accessor for snapshotting.
+    // This might actually need to be async. Consider that toolbox has a
+    // susbcribe() which susbscribes to content pushed from ToolBox tools. So
+    // for example an email might arrive at any time. So the state, which
+    // includes the Prompt, would need to be mutated. So we'd need to lock the
+    // state in this case and acquiring that would be an await.
+    fn state(&self) -> &Self::State;
 
     /// The request to send next. **Invariant: the returned prompt always ends
     /// in a [`Role::User`](misanthropic::prompt::message::Role) message** — the
     /// default [`handle`](Agent::handle) re-establishes this after every
     /// response.
+    // Same reason as above this might actually need to be async, parts below
+    // too.
     fn prompt(&self) -> &Prompt;
 
     /// The toolbox and working prompt, borrowed together so the default
-    /// `handle` and the lifecycle hooks can wire them without a double
-    /// `&mut self`.
+    /// `handle` and the lifecycle hooks can wire them without a double `&mut
+    /// self`.
     fn parts(&mut self) -> (&mut ToolBox, &mut Prompt);
 
     /// Consume one assistant response and tell the reactor what to do next.
@@ -120,15 +127,10 @@ pub trait Agent: Sized + Send {
         })
     }
 
-    /// Decide what happens when the model stops calling tools — the session
-    /// state machine. Seat the next turn (perceive, the multi-turn reflect
-    /// interview, an evolve/survey prompt) and return [`Control::Continue`];
-    /// return [`Control::Stalled`] if the response couldn't be parsed (retry,
-    /// capped by the reactor); or [`Control::Done`] to end the session. The
-    /// quiescent `response` is provided so the agent can parse it (a reflection,
-    /// a memory rewrite) before deciding.
-    ///
-    /// The default is a one-shot agent: quiescence means complete.
+    /// Decide what happens when the model stops calling tools.
+    // We might not need this. It's a common theme downstream to have an
+    // interview after the session (update memory, survey, potential chat),
+    // however that can be implemented in a `handle` override.
     async fn on_quiesce(
         &mut self,
         response: &response::Message,
@@ -160,6 +162,8 @@ pub trait Agent: Sized + Send {
     }
 
     /// Which transport this agent prefers. The orchestrator routes by this.
+    // FIXME: And Capabilities. See notes in anthropic.rs, orchestrator.rs,
+    // and batch_reactor.rs.
     fn affinity(&self) -> Affinity {
         Affinity::Messages
     }
@@ -187,9 +191,8 @@ pub enum Outcome {
     Failed,
 }
 
-/// Which transport an agent wants. Routing is the orchestrator's decision; this
-/// is the agent's declared preference. Some agents *need* batch to be
-/// affordable. (Streaming may join later.)
+/// Which inference mode an agent wants. Realtime agents will want Messages
+/// while deferred, like moderation agents, etc. will want Batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Affinity {
     Messages,
