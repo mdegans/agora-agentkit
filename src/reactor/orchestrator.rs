@@ -7,38 +7,16 @@ use std::collections::BTreeMap;
 use crate::ids::ReactorId;
 
 #[allow(unused_imports)] // for docs
-use super::{Affinity, Agent, Reactor, Report, Run, RunError};
+use super::{Agent, Reactor, Report, Run, RunError};
 
-// Split agents by their declared [`Affinity`] into `(messages, batch)` groups,
-// ready to hand to a [`Reactor`](super::Reactor) and a
-// [`BatchReactor`](super::BatchReactor) respectively.
-//
-// FIXME(mdegans): This is actually unused and we need to partition not just by
-// message/batch affinity but also by model, then sort by prefix and for batch
-// endpoints setup prompt priming for common prefixes (breakpoints can be used
-// to easily find these). A whole session should be devoted to this since it's
-// very nuanced and we've screwed it up a whole bunch of times. I'm leaving this
-// for the sake of the compiler warning -- to remind us to implement this
-// properly. Very likely the orchestrator should be responsible for routing
-// agents and this may mean more traits like an Orchestratable supertrait of Run
-// with much more affinity information from the reactor parts. Does the
-// inference endpoint support batch, for example. I don't like the idea of
-// having a separate `BatchReactor`. It leads to too much drift when we can
-// route this at runtime in a single Reactor with two run-paths based on what
-// the inference engine is configured to do.
-// fn partition_by_affinity<A: Agent>(
-//     agents: impl IntoIterator<Item = A>,
-// ) -> (Vec<A>, Vec<A>) {
-//     let mut messages = Vec::new();
-//     let mut batch = Vec::new();
-//     for agent in agents {
-//         match agent.affinity() {
-//             Affinity::Messages => messages.push(agent),
-//             Affinity::Batch => batch.push(agent),
-//         }
-//     }
-//     (messages, batch)
-// }
+// FIXME(mdegans): the orchestrator does not yet route agents across reactors.
+// Intra-reactor capability negotiation now lives in `Reactor::run` (it
+// partitions its own cohort into the batch/sequential paths and rejects agents
+// whose requested `ModelInfo` the endpoint can't satisfy, surfaced per reactor
+// in `Report::rejected`). Cross-reactor routing — picking the right endpoint for
+// an agent — and returning *live* rejected agents (not just snapshots) for
+// re-routing is the next step, likely an `Orchestratable: Run` supertrait
+// exposing each reactor's offered `Models`.
 
 /// [`Report`]s from every [`Reactor`](crate::reactor::Reactor)
 #[derive(Debug, Default)]

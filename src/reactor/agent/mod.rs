@@ -4,6 +4,7 @@ mod state;
 pub use state::State;
 
 use misanthropic::{
+    model::ModelInfo,
     prompt::{
         Prompt,
         message::{Block, Role},
@@ -161,12 +162,13 @@ pub trait Agent: Sized + Send {
         Ok(())
     }
 
-    /// Which transport this agent prefers. The orchestrator routes by this.
-    // FIXME: And Capabilities. See notes in anthropic.rs, orchestrator.rs,
-    // and batch_reactor.rs.
-    fn affinity(&self) -> Affinity {
-        Affinity::Messages
-    }
+    /// The model and [`Capabilities`] this agent requires. The reactor negotiates
+    /// it against what the endpoint offers ([`Inference::models`]) to route the
+    /// agent to the batch or sequential path, or reject it.
+    ///
+    /// [`Capabilities`]: misanthropic::model::Capabilities
+    /// [`Inference::models`]: super::Inference::models
+    fn model(&self) -> ModelInfo;
 }
 
 /// What the reactor should do after [`Agent::handle`] / [`Agent::on_quiesce`].
@@ -189,12 +191,4 @@ pub enum Outcome {
     /// The session gave up — stall cap hit or an unrecoverable error. The agent
     /// is still persisted, but flagged as failed.
     Failed,
-}
-
-/// Which inference mode an agent wants. Realtime agents will want Messages
-/// while deferred, like moderation agents, etc. will want Batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Affinity {
-    Messages,
-    Batch,
 }

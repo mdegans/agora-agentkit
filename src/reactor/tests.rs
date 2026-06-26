@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use misanthropic::model::ModelInfo;
 use misanthropic::prompt::Prompt;
 use misanthropic::prompt::message::Role;
 use misanthropic::response::{self, StopReason};
@@ -24,8 +25,8 @@ use serde::Serialize;
 
 use super::backend::{Inference, SaveError, Storage};
 use super::{
-    Agent, AgentNotFound, BatchReactor, Control, ErrorKind, ErrorReport,
-    Outcome, Reactor, Report, RetryAfter, Run, State, load_agents,
+    Agent, AgentNotFound, Control, ErrorKind, ErrorReport, Outcome, Reactor,
+    Report, RetryAfter, Run, State, load_agents,
 };
 use crate::ids::AgentId;
 
@@ -87,6 +88,7 @@ struct TestAgent {
     state: TestState,
     prompt: Prompt,
     tools: misanthropic::tool::ToolBox,
+    model: ModelInfo,
 }
 
 impl TestAgent {
@@ -109,6 +111,7 @@ impl Agent for TestAgent {
             state,
             prompt: Prompt::default(),
             tools: misanthropic::tool::ToolBox::new(),
+            model: model_info(false),
         };
         // Establish the "ends in a user turn" invariant.
         agent.push_user("start")?;
@@ -129,6 +132,10 @@ impl Agent for TestAgent {
 
     fn parts(&mut self) -> (&mut misanthropic::tool::ToolBox, &mut Prompt) {
         (&mut self.tools, &mut self.prompt)
+    }
+
+    fn model(&self) -> ModelInfo {
+        self.model.clone()
     }
 
     async fn on_quiesce(
@@ -164,6 +171,32 @@ fn agent(behavior: Behavior, turns_left: usize) -> TestAgent {
         },
     )
     .unwrap()
+}
+
+/// A [`TestAgent`] requesting a batch-capable model, so it negotiates onto the
+/// round-major path.
+fn batch_agent(behavior: Behavior, turns_left: usize) -> TestAgent {
+    let mut a = agent(behavior, turns_left);
+    a.model = model_info(true);
+    a
+}
+
+/// A [`ModelInfo`] requesting (or not) the batch capability — the only field the
+/// interim negotiation reads.
+fn model_info(batch: bool) -> ModelInfo {
+    use misanthropic::model::{Capabilities, Kind, Model};
+    ModelInfo {
+        id: Model::default(),
+        display_name: "test-model".into(),
+        capabilities: Capabilities {
+            batch: batch.into(),
+            ..Default::default()
+        },
+        max_input_tokens: 0,
+        max_tokens: 0,
+        kind: Kind::Model,
+        created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,11 +359,12 @@ async fn batch_sizes_match_live_cohort_each_round() {
         sizes: sizes.clone(),
     };
     let agents = vec![
-        agent(Behavior::Complete, 1),
-        agent(Behavior::Complete, 2),
-        agent(Behavior::Complete, 3),
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 2),
+        batch_agent(Behavior::Complete, 3),
     ];
-    let mut reactor = BatchReactor::new(transport, MemStore::default(), agents);
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(transport, MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 3);
@@ -374,18 +408,15 @@ async fn sequential_contains_one_failure() {
 /// C (batch) — same containment guarantee in the round-major reactor.
 #[tokio::test]
 async fn batch_contains_one_failure() {
-    let bad = agent(Behavior::ErrHandle, 1);
+    let bad = batch_agent(Behavior::ErrHandle, 1);
     let bad_id = bad.id();
     let agents = vec![
-        agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
         bad,
-        agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
     ];
-    let mut reactor = BatchReactor::new(
-        MockInference::default(),
-        MemStore::default(),
-        agents,
-    );
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::default(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);
@@ -427,12 +458,12 @@ async fn handle_keeps_user_tail() {
 async fn reactor_persists_in_one_bulk_save() {
     let store = BulkStore::default();
     let agents = vec![
-        agent(Behavior::Complete, 1),
-        agent(Behavior::Complete, 1),
-        agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
     ];
-    let mut reactor =
-        BatchReactor::new(MockInference::default(), store.clone(), agents);
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::default(), store.clone(), agents);
     reactor.run().await.unwrap();
 
     assert_eq!(store.bulk_calls.load(Ordering::SeqCst), 1, "one bulk save");
@@ -486,13 +517,13 @@ async fn load_agents_round_trips() {
 async fn partial_save_surfaces_unsaved_snapshots() {
     let store = PartialStore::commit(2); // commits the first two, fails on the third
     let agents = vec![
-        agent(Behavior::Complete, 1),
-        agent(Behavior::Complete, 1),
-        agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
     ];
     let ids: Vec<AgentId> = agents.iter().map(|a| a.id()).collect();
-    let mut reactor =
-        BatchReactor::new(MockInference::default(), store, agents);
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::default(), store, agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2, "committed + completed agents are done");
@@ -519,13 +550,12 @@ async fn partial_save_surfaces_unsaved_snapshots() {
 /// A successful run leaves nothing to recover and no errors.
 #[tokio::test]
 async fn successful_run_leaves_nothing_unsaved() {
-    let agents =
-        vec![agent(Behavior::Complete, 1), agent(Behavior::Complete, 1)];
-    let mut reactor = BatchReactor::new(
-        MockInference::default(),
-        MemStore::default(),
-        agents,
-    );
+    let agents = vec![
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
+    ];
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::default(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);
@@ -542,10 +572,10 @@ async fn fatal_item_fails_without_burning_retries() {
         calls: calls.clone(),
         fatal: true,
     };
-    let mut reactor = BatchReactor::new(
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
         transport,
         MemStore::default(),
-        vec![agent(Behavior::Complete, 1)],
+        vec![batch_agent(Behavior::Complete, 1)],
     );
     let report = reactor.run().await.unwrap();
 
@@ -562,10 +592,10 @@ async fn transient_item_retries_to_cap() {
         calls: calls.clone(),
         fatal: false,
     };
-    let mut reactor = BatchReactor::new(
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
         transport,
         MemStore::default(),
-        vec![agent(Behavior::Complete, 1)],
+        vec![batch_agent(Behavior::Complete, 1)],
     );
     let report = reactor.run().await.unwrap();
 

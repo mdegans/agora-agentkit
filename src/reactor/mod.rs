@@ -11,17 +11,16 @@
 //! [`OrchestratorReport`] keyed by [`ReactorId`].
 
 use futures::StreamExt;
+use misanthropic::model::{ModelInfo, Models};
+use misanthropic::prompt::Prompt;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 mod agent;
-pub use agent::{Affinity, Agent, Control, Outcome, State};
+pub use agent::{Agent, Control, Outcome, State};
 
 mod backend;
 pub use backend::{AgentNotFound, Inference, SaveError, Storage};
-
-mod batch_reactor;
-pub use batch_reactor::BatchReactor;
 
 mod orchestrator;
 pub use orchestrator::{Orchestrator, OrchestratorReport};
@@ -85,6 +84,54 @@ impl<I: Inference, S: Storage, A: Agent> RetryAfter for ReactorError<I, S, A> {
 /// An [`Agent`] ready to [`persist_all`](Reactor::persist_all) to [`Storage`]
 type Persist<I, S, A> = (A, Result<Outcome, ReactorError<I, S, A>>);
 
+/// How many consecutive batch-item failures (canceled / expired / errored
+/// results, which never reach the agent's `handle` and so never charge its own
+/// budget) one agent may accrue on the round-major path before the reactor gives
+/// up on it. Without this, an item that always errors would re-batch forever.
+const MAX_BATCH_ITEM_RETRIES: usize = 3;
+
+/// What [`negotiate`] decided for an agent: which run-path, or rejection.
+enum Admission {
+    /// Run on the round-major batch path.
+    Batch,
+    /// Run on the agent-major sequential path.
+    Sequential,
+    /// The endpoint can't satisfy the agent's requested capabilities.
+    // Constructed once the `Some` arm of `negotiate` lands (next session).
+    #[allow(dead_code)]
+    Rejected,
+}
+
+/// Negotiate an agent's requested [`ModelInfo`] against what the endpoint
+/// `offered` ([`Inference::models`]), gstreamer-style, deciding its run-path.
+fn negotiate(offered: Option<&Models>, requested: &ModelInfo) -> Admission {
+    match offered {
+        // The endpoint advertised its catalog: confirm it serves the requested
+        // model and its capabilities satisfy what the agent asked for, else
+        // reject — never downgrade.
+        // TODO(next session): once `Capabilities::satisfies` lands upstream and a
+        // bumped misanthropic ships it, this becomes: find the offered `ModelInfo`
+        // with `id == requested.id`, then
+        //   offered.capabilities.satisfies(&requested.capabilities)
+        //     .then(|| if requested.capabilities.batch.supported {
+        //         Admission::Batch } else { Admission::Sequential })
+        //     .unwrap_or(Admission::Rejected)
+        Some(_offered) => {
+            todo!("capability negotiation via Capabilities::satisfies")
+        }
+        // No advertised catalog (ollama/blallama serve /v1/messages but not
+        // /v1/models; every test mock errors here). Interim scaffolding: trust
+        // the requested `ModelInfo`. Replaced by the `Some` arm next session.
+        None => {
+            if requested.capabilities.batch.supported {
+                Admission::Batch
+            } else {
+                Admission::Sequential
+            }
+        }
+    }
+}
+
 /// An `Reactor` is an engine in an [`Orchestrator`] that drives [`Agent`]s
 ///
 /// - A `Reactor` is Default when I and S are Default
@@ -102,6 +149,9 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
     /// [`State`] of [`Agent`]s whose state didn't persist. Drained into
     /// [`Report::unsaved`].
     unsaved: BTreeMap<AgentId, serde_json::Value>,
+    /// [`State`] of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]).
+    /// Drained into [`Report::rejected`] so the caller can re-route them.
+    rejected: BTreeMap<AgentId, serde_json::Value>,
 }
 
 /// A [`Reactor`] using an [`anthropic::Client`] for [`Inference`].
@@ -168,6 +218,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             failed: BTreeMap::new(),
             errors: BTreeMap::new(),
             unsaved: BTreeMap::new(),
+            rejected: BTreeMap::new(),
         }
         .with_agents(agents)
     }
@@ -203,6 +254,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 .map(|(id, e)| (*id, ErrorReport::from(e)))
                 .collect(),
             unsaved: self.unsaved.clone(),
+            rejected: self.rejected.clone(),
         }
     }
 
@@ -240,6 +292,151 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             .await
             .map_err(ReactorError::AgentError)?;
         Ok(outcome)
+    }
+
+    /// Agent-major path: drive each agent to completion, up to
+    /// [`max_concurrency`](Inference::max_concurrency) in flight. One agent's
+    /// failure never aborts the cohort (persistence happens after).
+    async fn run_agent_major(
+        inference: &I,
+        agents: Vec<A>,
+    ) -> Vec<Persist<I, S, A>> {
+        let limit = inference.max_concurrency().get();
+        futures::stream::iter(agents)
+            .map(|mut agent| async move {
+                let result = Self::drive_one(inference, &mut agent).await;
+                (agent, result)
+            })
+            .buffer_unordered(limit)
+            .collect()
+            .await
+    }
+
+    /// Round-major path: drive the whole cohort in lockstep, collecting each live
+    /// agent's next prompt into one [`infer_batch`](Inference::infer_batch) per
+    /// round and scattering the responses back. Only inference is batched;
+    /// per-agent lifecycle runs sequentially.
+    async fn run_round_major(
+        inference: &I,
+        mut agents: Vec<A>,
+    ) -> Vec<Persist<I, S, A>> {
+        // All keyed by the agent's index in `agents` (which stays full-length).
+        let mut errors: HashMap<usize, ReactorError<I, S, A>> = HashMap::new();
+        // Agents that reached an outcome (Done, or stall-capped to Failed).
+        let mut finished: HashMap<usize, Outcome> = HashMap::new();
+        // Consecutive `Stalled` rounds, and consecutive per-item failures.
+        let mut stalls: HashMap<usize, usize> = HashMap::new();
+        let mut item_failures: HashMap<usize, usize> = HashMap::new();
+
+        for (i, agent) in agents.iter_mut().enumerate() {
+            if let Err(e) = agent.on_init().await {
+                errors.insert(i, ReactorError::AgentError(e));
+            }
+        }
+
+        // The live cohort for a round, reused across rounds.
+        let mut live: Vec<usize> = Vec::new();
+        loop {
+            live.clear();
+            live.extend((0..agents.len()).filter(|i| {
+                !errors.contains_key(i) && !finished.contains_key(i)
+            }));
+            if live.is_empty() {
+                break;
+            }
+
+            for &i in &live {
+                if let Err(e) = agents[i].on_turn().await {
+                    errors.insert(i, ReactorError::AgentError(e));
+                }
+            }
+            live.retain(|i| !errors.contains_key(i));
+            if live.is_empty() {
+                continue;
+            }
+
+            // Collect prompts and submit them as one batch. A lazy `iter().map`
+            // can't be used: `async_trait` boxes `infer_batch` as a `Send`
+            // future, and an iterator borrowing `agents` is only `Send` if
+            // `A: Sync` — which no agent is. The `Vec<&Prompt>` sidesteps that.
+            let resps = {
+                let prompts: Vec<&Prompt> =
+                    live.iter().map(|&i| agents[i].prompt()).collect();
+                match inference.infer_batch(&prompts).await {
+                    Ok(resps) => resps,
+                    Err(e) => {
+                        // Whole submission failed — the transport is dead.
+                        // Record it against one live agent and stop; the rest
+                        // fail out cleanly below.
+                        if let Some(&i) = live.first() {
+                            errors.insert(i, ReactorError::InferenceError(e));
+                        }
+                        break;
+                    }
+                }
+            };
+
+            // Scatter: `resps` is aligned to `live` by input order.
+            for (&i, resp) in live.iter().zip(resps) {
+                match resp {
+                    Ok(message) => {
+                        item_failures.remove(&i);
+                        match agents[i].handle(message).await {
+                            Err(e) => {
+                                errors.insert(i, ReactorError::AgentError(e));
+                            }
+                            Ok(Control::Done(outcome)) => {
+                                finished.insert(i, outcome);
+                            }
+                            Ok(Control::Continue) => {
+                                stalls.remove(&i);
+                            }
+                            Ok(Control::Stalled) => {
+                                let n = stalls.entry(i).or_insert(0);
+                                *n += 1;
+                                if *n >= Self::MAX_STALLS {
+                                    finished.insert(i, Outcome::Failed);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) if e.is_fatal() => {
+                        errors.insert(i, ReactorError::InferenceError(e));
+                    }
+                    Err(e) => {
+                        // Transient per-item failure: leave the agent
+                        // un-advanced so it re-batches, but cap the retries.
+                        let n = item_failures.entry(i).or_insert(0);
+                        *n += 1;
+                        if *n >= MAX_BATCH_ITEM_RETRIES {
+                            errors.insert(i, ReactorError::InferenceError(e));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tear down every agent (best-effort) without clobbering a prior error.
+        for (i, agent) in agents.iter_mut().enumerate() {
+            if let Err(e) = agent.on_teardown().await {
+                errors.entry(i).or_insert(ReactorError::AgentError(e));
+            }
+        }
+
+        // Flatten to `Persist`: errored → Err; finished → Ok(outcome); live but
+        // unfinished after a transport-death break → Ok(Failed). `persist_all`
+        // buckets and serializes from here.
+        agents
+            .into_iter()
+            .enumerate()
+            .map(|(i, agent)| {
+                let result = match errors.remove(&i) {
+                    Some(e) => Err(e),
+                    None => Ok(finished.remove(&i).unwrap_or(Outcome::Failed)),
+                };
+                (agent, result)
+            })
+            .collect()
     }
 
     /// Bulk save agents then calculate, done, failed, etc. for a [`Report`]. Of
@@ -381,6 +578,10 @@ pub struct Report {
     pub failed: usize,
     pub errors: BTreeMap<AgentId, ErrorReport>,
     pub unsaved: BTreeMap<AgentId, serde_json::Value>,
+    /// Snapshots of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]),
+    /// for the caller to re-route. Empty until negotiation lands.
+    #[serde(default)]
+    pub rejected: BTreeMap<AgentId, serde_json::Value>,
 }
 
 impl std::ops::Add<Report> for Report {
@@ -398,6 +599,7 @@ impl std::ops::AddAssign<Report> for Report {
         self.failed += rhs.failed;
         self.errors.extend(rhs.errors);
         self.unsaved.extend(rhs.unsaved);
+        self.rejected.extend(rhs.rejected);
     }
 }
 
@@ -433,20 +635,37 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
 
     async fn run(&mut self) -> Result<Report, RunError> {
         let agents = std::mem::take(&mut self.agents);
-        let inference = &self.inference;
-        let limit = inference.max_concurrency().get();
 
-        // Drive every agent concurrently (bounded by the transport). Only the
-        // shared `&inference` is borrowed here — persistence happens after, so
-        // one agent's failure never aborts the cohort.
-        let to_persist: Vec<Persist<I, S, A>> = futures::stream::iter(agents)
-            .map(|mut agent| async move {
-                let result = Self::drive_one(inference, &mut agent).await;
-                (agent, result)
-            })
-            .buffer_unordered(limit)
-            .collect()
-            .await;
+        // Negotiate each agent's requested capabilities against what the endpoint
+        // offers, partitioning the cohort into the two run-paths (or rejecting).
+        let offered = self.inference.models().await.ok();
+        let mut batch: Vec<A> = Vec::new();
+        let mut sequential: Vec<A> = Vec::new();
+        let mut rejected: Vec<A> = Vec::new();
+        for agent in agents {
+            match negotiate(offered.as_ref(), &agent.model()) {
+                Admission::Batch => batch.push(agent),
+                Admission::Sequential => sequential.push(agent),
+                Admission::Rejected => rejected.push(agent),
+            }
+        }
+
+        // Snapshot rejected agents so the caller can re-route them — they cross
+        // the `dyn Run` erasure as data, like `unsaved`.
+        for agent in rejected {
+            if let Ok(value) = serde_json::to_value(agent.state()) {
+                self.rejected.insert(agent.id(), value);
+            }
+        }
+
+        // Run both paths concurrently; each only borrows `&self.inference`. One
+        // agent's failure never aborts the cohort — persistence happens after.
+        let inference = &self.inference;
+        let (mut to_persist, seq_persist) = futures::join!(
+            Self::run_round_major(inference, batch),
+            Self::run_agent_major(inference, sequential),
+        );
+        to_persist.extend(seq_persist);
 
         // Persist all snapshots in one bulk save, then bucket.
         self.persist_all(to_persist).await;
