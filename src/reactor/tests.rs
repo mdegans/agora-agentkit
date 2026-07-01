@@ -199,6 +199,14 @@ fn model_info(batch: bool) -> ModelInfo {
     }
 }
 
+/// The [`Models`](misanthropic::model::Models) every mock transport offers: one
+/// batch-capable model that [`satisfies`](ModelInfo::satisfies) both the plain
+/// and batch [`model_info`] an agent requests, so negotiation routes rather than
+/// rejects.
+fn offered_models() -> misanthropic::model::Models {
+    [model_info(true)].into_iter().collect()
+}
+
 // ---------------------------------------------------------------------------
 // In-memory store
 // ---------------------------------------------------------------------------
@@ -342,7 +350,7 @@ impl Inference for MockInference {
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
+        Ok(offered_models())
     }
 }
 
@@ -711,7 +719,7 @@ impl Inference for RecordingBatch {
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
+        Ok(offered_models())
     }
 }
 
@@ -753,7 +761,7 @@ impl Inference for MixedRecorder {
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
+        Ok(offered_models())
     }
 }
 
@@ -865,6 +873,6 @@ impl Inference for FailingBatch {
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
-        Err(TestError::Msg("no models in mock".into()))
+        Ok(offered_models())
     }
 }

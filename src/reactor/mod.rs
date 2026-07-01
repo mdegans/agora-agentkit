@@ -103,33 +103,21 @@ enum Admission {
 }
 
 /// Negotiate an agent's requested [`ModelInfo`] against what the endpoint
-/// `offered` ([`Inference::models`]), gstreamer-style, deciding its run-path.
-fn negotiate(offered: Option<&Models>, requested: &ModelInfo) -> Admission {
-    match offered {
-        // The endpoint advertised its catalog: confirm it serves the requested
-        // model and its capabilities satisfy what the agent asked for, else
-        // reject — never downgrade.
-        // TODO(next session): once `Capabilities::satisfies` lands upstream and a
-        // bumped misanthropic ships it, this becomes: find the offered `ModelInfo`
-        // with `id == requested.id`, then
-        //   offered.capabilities.satisfies(&requested.capabilities)
-        //     .then(|| if requested.capabilities.batch.supported {
-        //         Admission::Batch } else { Admission::Sequential })
-        //     .unwrap_or(Admission::Rejected)
-        Some(_offered) => {
-            todo!("capability negotiation via Capabilities::satisfies")
-        }
-        // No advertised catalog (ollama/blallama serve /v1/messages but not
-        // /v1/models; every test mock errors here). Interim scaffolding: trust
-        // the requested `ModelInfo`. Replaced by the `Some` arm next session.
-        None => {
-            if requested.capabilities.batch.supported {
-                Admission::Batch
+/// `offered` ([`Inference::models`]), deciding its run-path.
+fn negotiate(offered: &Models, requested: &ModelInfo) -> Admission {
+    let batch = requested.capabilities.batch.supported;
+
+    for model in offered.iter() {
+        if model.satisfies(requested) {
+            if batch {
+                return Admission::Batch;
             } else {
-                Admission::Sequential
+                return Admission::Sequential;
             }
         }
     }
+
+    Admission::Rejected
 }
 
 /// An `Reactor` is an engine in an [`Orchestrator`] that drives [`Agent`]s
@@ -613,6 +601,23 @@ pub enum RunError {
     StorageError(anyhow::Error),
 }
 
+impl<I, S, A> From<ReactorError<I, S, A>> for RunError
+where
+    I: Inference,
+    S: Storage,
+    A: Agent,
+{
+    fn from(value: ReactorError<I, S, A>) -> Self {
+        match value {
+            ReactorError::InferenceError(e) => {
+                RunError::InferenceError(e.into())
+            }
+            ReactorError::AgentError(e) => RunError::AgentError(e.into()),
+            ReactorError::StorageError(e) => RunError::StorageError(e.into()),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Run: Send {
     /// Return the [`ReactorId`] assocaited with the [`Run`]
@@ -638,12 +643,16 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
 
         // Negotiate each agent's requested capabilities against what the endpoint
         // offers, partitioning the cohort into the two run-paths (or rejecting).
-        let offered = self.inference.models().await.ok();
+        let offered = self
+            .inference
+            .models()
+            .await
+            .map_err(ReactorError::<I, S, A>::InferenceError)?;
         let mut batch: Vec<A> = Vec::new();
         let mut sequential: Vec<A> = Vec::new();
         let mut rejected: Vec<A> = Vec::new();
         for agent in agents {
-            match negotiate(offered.as_ref(), &agent.model()) {
+            match negotiate(&offered, &agent.model()) {
                 Admission::Batch => batch.push(agent),
                 Admission::Sequential => sequential.push(agent),
                 Admission::Rejected => rejected.push(agent),

@@ -36,7 +36,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
-misanthropic = { version = "1.0.0-alpha.3", default-features = false, features = ["batch"], optional = true }
+misanthropic = { version = "1.0.0-alpha.6", default-features = false, features = ["batch"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
 
