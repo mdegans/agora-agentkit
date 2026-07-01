@@ -639,15 +639,18 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
     }
 
     async fn run(&mut self) -> Result<Report, RunError> {
-        let agents = std::mem::take(&mut self.agents);
-
-        // Negotiate each agent's requested capabilities against what the endpoint
-        // offers, partitioning the cohort into the two run-paths (or rejecting).
+        // Probe the endpoint before taking the cohort: a failed probe (e.g. a
+        // transient 429) fails the run but must leave the agents seated in
+        // `self.agents` so the caller can retry — some may exist nowhere else.
         let offered = self
             .inference
             .models()
             .await
             .map_err(ReactorError::<I, S, A>::InferenceError)?;
+
+        // Negotiate each agent's requested capabilities against what the endpoint
+        // offers, partitioning the cohort into the two run-paths (or rejecting).
+        let agents = std::mem::take(&mut self.agents);
         let mut batch: Vec<A> = Vec::new();
         let mut sequential: Vec<A> = Vec::new();
         let mut rejected: Vec<A> = Vec::new();

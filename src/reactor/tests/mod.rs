@@ -27,7 +27,7 @@ use crate::ids::AgentId;
 // Reactor types the test submodules reach through `use super::*` but the harness
 // itself doesn't touch — re-exported so the submodules stay a bare glob import.
 pub(crate) use super::{
-    ErrorKind, ErrorReport, Reactor, Report, Run, load_agents,
+    ErrorKind, ErrorReport, Reactor, Report, Run, RunError, load_agents,
 };
 
 mod errors;
@@ -527,6 +527,50 @@ impl Storage for PartialStore {
             saved.insert(id);
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A transport whose `models()` probe fails before succeeding — the flaky
+// endpoint a run must survive without dropping the cohort.
+// ---------------------------------------------------------------------------
+
+struct FlakyModels {
+    /// `models()` calls left to fail before the probe succeeds.
+    failures_left: AtomicUsize,
+}
+
+impl FlakyModels {
+    fn failing(n: usize) -> Self {
+        Self {
+            failures_left: AtomicUsize::new(n),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Inference for FlakyModels {
+    type Error = TestError;
+
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
+        Ok(message(StopReason::EndTurn))
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        let failing = self
+            .failures_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                n.checked_sub(1)
+            })
+            .is_ok();
+        if failing {
+            Err(TestError::Transient(Duration::from_millis(1)))
+        } else {
+            Ok(offered_models())
+        }
     }
 }
 

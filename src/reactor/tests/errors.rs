@@ -47,6 +47,24 @@ async fn batch_contains_one_failure() {
     assert!(report.errors.contains_key(&bad_id));
 }
 
+/// A failed `models()` probe fails the run but must not cost the cohort: the
+/// agents stay seated in the reactor, so a retry against the recovered
+/// endpoint drives them.
+#[tokio::test]
+async fn failed_models_probe_retains_cohort() {
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        FlakyModels::failing(1),
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1), agent(Behavior::Complete, 1)],
+    );
+
+    let err = reactor.run().await.expect_err("first probe fails the run");
+    assert!(matches!(err, RunError::InferenceError(_)));
+
+    let report = reactor.run().await.unwrap();
+    assert_eq!(report.done, 2, "cohort survived the failed probe");
+}
+
 /// A fatal per-item inference error (`retry_after() == None`) fails the agent on
 /// the first round instead of burning the whole retry cap.
 #[tokio::test]

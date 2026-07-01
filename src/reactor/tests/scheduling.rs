@@ -87,6 +87,35 @@ async fn handle_keeps_user_tail() {
     assert_eq!(last.role, Role::User);
 }
 
+/// An agent whose requested model the endpoint can't satisfy is rejected —
+/// never run, never downgraded — and its snapshot lands in `Report::rejected`
+/// for the caller to re-route.
+#[tokio::test]
+async fn unsatisfiable_agent_is_rejected_not_run() {
+    // Requests more input context than the offered model serves (the offered
+    // fixture advertises 0), so no offered model `satisfies` it.
+    let mut greedy = agent(Behavior::Complete, 1);
+    greedy.model.max_input_tokens = 1;
+    let greedy_id = greedy.id();
+
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        // Only the admitted agent ever infers.
+        MockInference::end_turns(1),
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1), greedy],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 1, "the satisfiable agent ran");
+    assert_eq!(report.failed, 0, "rejection is not failure");
+    let snapshot = report
+        .rejected
+        .get(&greedy_id)
+        .expect("rejected agent's snapshot kept");
+    let state: TestState = serde_json::from_value(snapshot.clone()).unwrap();
+    assert_eq!(state.behavior, Behavior::Complete, "snapshot round-trips");
+}
+
 /// A mixed cohort in one `Reactor` runs both paths concurrently: the
 /// batch-capable agent negotiates onto the round-major path (`infer_batch`), the
 /// other onto the agent-major path (`infer`). Both finish.
