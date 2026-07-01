@@ -33,6 +33,10 @@ pub(crate) use super::{
 mod errors;
 mod persistence;
 mod scheduling;
+// The tool tests build a `#[tool]`-macro tool, which needs its argument struct's
+// `schemars::JsonSchema` — gated on that feature (`--all-features` covers it).
+#[cfg(feature = "schemars")]
+mod tools;
 
 // ---------------------------------------------------------------------------
 // Shared error: serves as Agent::Error, Storage::Error, and Inference::Error.
