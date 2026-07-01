@@ -17,8 +17,10 @@ async fn sequential_contains_one_failure() {
         bad,
         agent(Behavior::Complete, 1),
     ];
+    // Three sequential agents, one `infer` each (the bad one errors in `handle`
+    // after its response lands).
     let mut reactor: Reactor<_, _, TestAgent> =
-        Reactor::new(MockInference::default(), MemStore::default(), agents);
+        Reactor::new(MockInference::end_turns(3), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);

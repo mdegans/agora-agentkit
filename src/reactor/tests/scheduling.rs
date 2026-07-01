@@ -30,27 +30,43 @@ async fn batch_sizes_match_live_cohort_each_round() {
 }
 
 /// B — stall cap: an agent that never progresses is failed after the cap, not
-/// looped forever (the test terminating at all is half the assertion).
+/// looped forever (the test terminating at all is half the assertion). It infers
+/// exactly `MAX_STALLS` times before the cap fires — one response too few would
+/// panic the mock, one too many would be left unconsumed.
 #[tokio::test]
 async fn stall_cap_bounds_retry() {
-    // Also test Reactor collects from agents when I and S are Default as well
-    // as the into() shortcut for an iterable of A.
-    let mut reactor: Reactor<MockInference, MemStore, TestAgent> =
-        [agent(Behavior::Stall, 0)].into();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        MockInference::end_turns(
+            Reactor::<MockInference, MemStore, TestAgent>::MAX_STALLS,
+        ),
+        MemStore::default(),
+        [agent(Behavior::Stall, 0)],
+    );
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.failed, 1);
     assert_eq!(report.done, 0);
 }
 
+/// The `Default`-based `.into()` shortcut collects a `Reactor` from an iterable
+/// of agents (the `From` / `FromIterator` impls). Construction only: a `Default`
+/// mock scripts no responses, so this can't drive inference.
+#[test]
+fn reactor_collects_from_agents_via_into() {
+    let reactor: Reactor<MockInference, MemStore, TestAgent> =
+        [agent(Behavior::Complete, 1), agent(Behavior::Complete, 1)].into();
+    let report = reactor.report();
+    assert_eq!((report.done, report.failed), (0, 0), "constructed, not run");
+}
+
 /// D — a paused turn continues (and is not a stall): scripting PauseTurn then
 /// EndTurn, the agent finishes and is not failed.
 #[tokio::test]
 async fn pause_turn_continues() {
-    let inference = MockInference {
-        script: vec![StopReason::PauseTurn, StopReason::EndTurn],
-        ..Default::default()
-    };
+    let inference = MockInference::scripted([
+        message(StopReason::PauseTurn),
+        message(StopReason::EndTurn),
+    ]);
     let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
         inference,
         MemStore::default(),

@@ -9,7 +9,7 @@
 //!   retry classification.
 //! - [`persistence`] — one bulk save/load, and partial-save recovery.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -294,13 +294,29 @@ impl Storage for BulkStore {
 }
 
 // ---------------------------------------------------------------------------
-// Mock transport: scripts a stop_reason per round.
+// Mock transport: hands out a scripted response per `infer`, popping in order.
 // ---------------------------------------------------------------------------
 
 #[derive(Default)]
 struct MockInference {
-    infer_calls: AtomicUsize,
-    script: Vec<StopReason>,
+    /// Responses handed out one per `infer`, in order. Draining it dry panics —
+    /// an over-long drive loop should fail loudly, not silently `EndTurn`.
+    script: Mutex<VecDeque<response::Message>>,
+}
+
+impl MockInference {
+    /// A mock whose `infer` returns `messages` in order, one per call.
+    fn scripted(messages: impl IntoIterator<Item = response::Message>) -> Self {
+        Self {
+            script: Mutex::new(messages.into_iter().collect()),
+        }
+    }
+
+    /// `n` plain `EndTurn` responses — for drives whose content doesn't matter,
+    /// only that inference is available for `n` rounds.
+    fn end_turns(n: usize) -> Self {
+        Self::scripted((0..n).map(|_| message(StopReason::EndTurn)))
+    }
 }
 
 fn message(stop: StopReason) -> response::Message {
@@ -331,12 +347,8 @@ impl Inference for MockInference {
     where
         P: Serialize + Send,
     {
-        let round = self.infer_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(message(
-            self.script
-                .get(round)
-                .copied()
-                .unwrap_or(StopReason::EndTurn),
+        Ok(self.script.lock().unwrap().pop_front().expect(
+            "mock inference script exhausted: more infer calls than scripted",
         ))
     }
 
