@@ -97,8 +97,6 @@ enum Admission {
     /// Run on the agent-major sequential path.
     Sequential,
     /// The endpoint can't satisfy the agent's requested capabilities.
-    // Constructed once the `Some` arm of `negotiate` lands (next session).
-    #[allow(dead_code)]
     Rejected,
 }
 
@@ -465,7 +463,8 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         // Persist, learning exactly which ids committed. The clone feeds the
         // save; the original is drained below into `unsaved`.
         let (saved, mut save_err) =
-            // `save_all_raw` for now because save_all
+            // `save_all_raw`, not `save_all`: per-agent serialize failures are
+            // handled above (`save_all` aborts the whole batch — see its FIXME).
             match self.storage.save_all_raw(values.clone().into_iter()).await {
                 Ok(()) => (attempted.clone(), None),
                 Err(SaveError { saved, inner }) => (saved, Some(inner)),
@@ -576,7 +575,7 @@ pub struct Report {
     pub errors: BTreeMap<AgentId, ErrorReport>,
     pub unsaved: BTreeMap<AgentId, serde_json::Value>,
     /// Snapshots of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]),
-    /// for the caller to re-route. Empty until negotiation lands.
+    /// for the caller to re-route.
     #[serde(default)]
     pub rejected: BTreeMap<AgentId, serde_json::Value>,
 }
@@ -629,7 +628,7 @@ where
 
 #[async_trait::async_trait]
 pub trait Run: Send {
-    /// Return the [`ReactorId`] assocaited with the [`Run`]
+    /// Return the [`ReactorId`] associated with the [`Run`]
     fn id(&self) -> ReactorId;
 
     /// Run the reactor to completion.

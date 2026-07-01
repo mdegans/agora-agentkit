@@ -45,19 +45,15 @@ pub trait Agent: Sized + Send {
     fn id(&self) -> AgentId;
 
     /// [`Agent::State`] accessor for snapshotting.
-    // This might actually need to be async. Consider that toolbox has a
-    // susbcribe() which susbscribes to content pushed from ToolBox tools. So
-    // for example an email might arrive at any time. So the state, which
-    // includes the Prompt, would need to be mutated. So we'd need to lock the
-    // state in this case and acquiring that would be an await.
+    // Sync by design: content pushed from subscribed tools drains at the turn
+    // boundary (`on_turn`), never mid-accessor.
     fn state(&self) -> &Self::State;
 
     /// The request to send next. **Invariant: the returned prompt always ends
     /// in a [`Role::User`](misanthropic::prompt::message::Role) message** — the
-    /// default [`handle`](Agent::handle) re-establishes this after every
-    /// response.
-    // Same reason as above this might actually need to be async, parts below
-    // too.
+    /// default [`handle`](Agent::handle)'s tool path re-establishes it; an
+    /// [`on_quiesce`](Agent::on_quiesce) override returning
+    /// [`Control::Continue`] must do the same.
     fn prompt(&self) -> &Prompt;
 
     /// The toolbox and working prompt, borrowed together so the default
