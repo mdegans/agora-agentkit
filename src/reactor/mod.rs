@@ -247,14 +247,28 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     }
 
     /// `drive_one` [`Agent`] to completion using the supplied [`Inference`]
-    /// engine
+    /// engine. [`on_teardown`](Agent::on_teardown) runs however the drive
+    /// ends — a stateful tool may hold real resources — and its error never
+    /// clobbers the drive's own.
     async fn drive_one(
+        inference: &I,
+        agent: &mut A,
+    ) -> Result<Outcome, ReactorError<I, S, A>> {
+        let driven = Self::drive_inner(inference, agent).await;
+        let teardown =
+            agent.on_teardown().await.map_err(ReactorError::AgentError);
+        driven.and_then(|outcome| teardown.map(|()| outcome))
+    }
+
+    /// The init + drive loop of [`drive_one`](Self::drive_one), split out so
+    /// teardown can run no matter how it ends.
+    async fn drive_inner(
         inference: &I,
         agent: &mut A,
     ) -> Result<Outcome, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
         let mut stalls = 0usize;
-        let outcome = loop {
+        loop {
             agent.on_turn().await.map_err(ReactorError::AgentError)?;
             let response = inference
                 .infer(agent.prompt())
@@ -265,21 +279,16 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 .await
                 .map_err(ReactorError::AgentError)?
             {
-                Control::Done(outcome) => break outcome,
+                Control::Done(outcome) => break Ok(outcome),
                 Control::Continue => stalls = 0,
                 Control::Stalled => {
                     stalls += 1;
                     if stalls >= Self::MAX_STALLS {
-                        break Outcome::Failed;
+                        break Ok(Outcome::Failed);
                     }
                 }
             }
-        };
-        agent
-            .on_teardown()
-            .await
-            .map_err(ReactorError::AgentError)?;
-        Ok(outcome)
+        }
     }
 
     /// Agent-major path: drive each agent to completion, up to

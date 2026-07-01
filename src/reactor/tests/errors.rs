@@ -47,6 +47,36 @@ async fn batch_contains_one_failure() {
     assert!(report.errors.contains_key(&bad_id));
 }
 
+/// `on_teardown` runs even when the drive errors — a stateful tool may hold
+/// real resources — on BOTH paths, and the drive's own error wins over any
+/// teardown outcome.
+#[tokio::test]
+async fn teardown_runs_on_drive_error_both_paths() {
+    let seq = agent(Behavior::ErrHandle, 1);
+    let bat = batch_agent(Behavior::ErrHandle, 1);
+    let (seq_td, bat_td) = (seq.teardowns.clone(), bat.teardowns.clone());
+    let (seq_id, bat_id) = (seq.id(), bat.id());
+
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        // One scripted infer for the sequential agent; the batch agent rides
+        // the mock's unscripted `infer_batch`.
+        MockInference::end_turns(1),
+        MemStore::default(),
+        vec![seq, bat],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.failed, 2);
+    assert_eq!(seq_td.load(Ordering::SeqCst), 1, "agent-major tore down");
+    assert_eq!(bat_td.load(Ordering::SeqCst), 1, "round-major tore down");
+    assert_eq!(
+        report.errors[&seq_id].kind,
+        ErrorKind::Agent,
+        "drive error wins"
+    );
+    assert_eq!(report.errors[&bat_id].kind, ErrorKind::Agent);
+}
+
 /// A failed `models()` probe fails the run but must not cost the cohort: the
 /// agents stay seated in the reactor, so a retry against the recovered
 /// endpoint drives them.

@@ -18,6 +18,7 @@ use misanthropic::model::ModelInfo;
 use misanthropic::prompt::Prompt;
 use misanthropic::prompt::message::Role;
 use misanthropic::response::{self, StopReason};
+use misanthropic::tool::Tool;
 use serde::Serialize;
 
 use super::backend::{Inference, SaveError, Storage};
@@ -97,6 +98,9 @@ struct TestAgent {
     prompt: Prompt,
     tools: misanthropic::tool::ToolBox,
     model: ModelInfo,
+    /// Times `on_teardown` ran. The contract is exactly once, however the
+    /// drive ends.
+    teardowns: Arc<AtomicUsize>,
 }
 
 impl TestAgent {
@@ -120,6 +124,7 @@ impl Agent for TestAgent {
             prompt: Prompt::default(),
             tools: misanthropic::tool::ToolBox::new(),
             model: model_info(false),
+            teardowns: Arc::new(AtomicUsize::new(0)),
         };
         // Establish the "ends in a user turn" invariant.
         agent.push_user("start")?;
@@ -144,6 +149,14 @@ impl Agent for TestAgent {
 
     fn model(&self) -> ModelInfo {
         self.model.clone()
+    }
+
+    /// The default, plus the counter — so a test can prove teardown ran.
+    async fn on_teardown(&mut self) -> Result<(), TestError> {
+        self.teardowns.fetch_add(1, Ordering::SeqCst);
+        let (tools, prompt) = self.parts();
+        tools.on_teardown(prompt).await?;
+        Ok(())
     }
 
     async fn on_quiesce(
