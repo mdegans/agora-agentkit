@@ -125,6 +125,26 @@ pub struct SeedState {
     pub last_cycle_at: Option<DateTime<Utc>>,
 }
 
+impl SeedState {
+    /// A fresh state for a never-run agent: initial [`Memory`], empty
+    /// ledger, and an empty working prompt on `model`. This is the one
+    /// place `prompt.model` is *derived* from `model` — everywhere after
+    /// (loads, [`Agent::new`]) the two only need to agree.
+    pub fn new(soul: Soul, model: ModelInfo) -> Self {
+        Self {
+            memory: Memory {
+                content: Memory::initial_content(soul.name.as_str()),
+            },
+            prompt: Prompt::default().model(model.id.clone()),
+            soul,
+            model,
+            ledger: SharedLedger::default(),
+            seen_posts: HashMap::new(),
+            last_cycle_at: None,
+        }
+    }
+}
+
 impl State for SeedState {}
 
 /// Where the session is. `Acting` is the default tool loop; the rest are
@@ -617,11 +637,18 @@ impl Agent for SeedAgent {
             .system(system)
             .add_message((Role::User, intro))
             .map_err(|e| SeedError::Prompt(e.to_string()))?
-            // One breakpoint after tools+system+intro, 1h TTL, so the
-            // prefix stays warm across the session's rounds.
-            // TODO: quirk-driven rolling per-round breakpoints
-            // (`breakpoint_after_assistant` for blallama), as the seed did.
+            // Second breakpoint at intro end, 1h TTL — pays off only for
+            // this agent, across the session's rounds.
+            // TODO(#19): quirk-driven rolling per-round breakpoints
+            // (`breakpoint_after_assistant` for blallama), as the seed did —
+            // needs `CachedPrompt`'s `cache_windowed*` family on `Prompt`
+            // upstream.
             .cache_1h();
+        // First breakpoint at the end of tools+system — the prefix every
+        // agent on this model shares, so the write amortizes cohort-wide.
+        if let Some(system) = working.system.as_mut() {
+            system.cache_1h();
+        }
         Ok(())
     }
 

@@ -72,15 +72,8 @@ fn seed_state() -> SeedState {
         kind: Kind::Model,
         created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
     };
-    SeedState {
-        soul: soul(),
-        memory: Memory::empty(),
-        prompt: Prompt::default().model("claude-haiku-4-5"),
-        model,
-        ledger: SharedLedger::default(),
-        seen_posts: HashMap::new(),
-        last_cycle_at: None,
-    }
+    // The constructor is the one legitimate `prompt.model` derivation.
+    SeedState::new(soul(), model)
 }
 
 /// A `SeedAgent` pointed at `server`, with `config`, plus its id.
@@ -137,9 +130,10 @@ fn seat_start(agent: &mut SeedAgent) {
 const FULL_CONSTITUTION: &str = "Preamble Article I Article II Article III \
                                  Article IV Article V The Steward";
 
-#[tokio::test]
-async fn on_init_seats_system_intro_and_flat_tools() {
-    let server = MockServer::start();
+/// Mount the four perception endpoints. The dashboard carries a feed post
+/// AND an unread reply to one of the agent's own posts — the "someone
+/// answered you" signal.
+fn mock_perception(server: &MockServer) {
     server.mock(|when, then| {
         when.method(GET).path("/agora/api/constitution");
         then.status(200).json_body(serde_json::json!({
@@ -159,6 +153,17 @@ async fn on_init_seats_system_intro_and_flat_tools() {
         when.method(GET).path("/agora/api/social/dash");
         then.status(200).json_body(serde_json::json!({
             "agent": { "name": "test-agent", "karma": 1 },
+            "unread_post_replies": [{
+                "post_id": Uuid::new_v4(),
+                "post_title": "My old post about ferns",
+                "replies": [{
+                    "comment_id": Uuid::new_v4(),
+                    "author": "fern-fan",
+                    "score": 1,
+                    "preview": "Great point about spores!",
+                    "created_at": "2026-07-01T12:00:00Z",
+                }],
+            }],
             "feeds": {
                 "tech": [{
                     "id": Uuid::new_v4(),
@@ -175,6 +180,12 @@ async fn on_init_seats_system_intro_and_flat_tools() {
         when.method(GET).path_contains("/posts");
         then.status(200).json_body(serde_json::json!([]));
     });
+}
+
+#[tokio::test]
+async fn on_init_seats_system_intro_and_flat_tools() {
+    let server = MockServer::start();
+    mock_perception(&server);
 
     let mut agent = agent(&server, quiet_config());
     agent.on_init().await.unwrap();
@@ -203,11 +214,59 @@ async fn on_init_seats_system_intro_and_flat_tools() {
     let intro = transcript(&agent);
     assert!(intro.contains("A test agent that tests."), "soul");
     assert!(intro.contains("Existing thread about compilers"), "feed");
+    // Replies to the agent's own content reach the intro via the dashboard.
+    assert!(intro.contains("Unread Replies to Your Posts"), "{intro}");
+    assert!(intro.contains("Great point about spores!"), "{intro}");
     assert!(agent.notifications.is_some());
 
     // Perception seeded the repetition policy.
     let ledger = agent.state.ledger.read().unwrap();
     assert_eq!(ledger.titles_seen.len(), 1);
+}
+
+/// The two 1h breakpoints: end of tools+system (shared by every agent on
+/// the model) and end of the per-agent intro. A port of the seed's marker
+/// regression guard — mutating the prefix after this point busts the cache.
+#[tokio::test]
+async fn on_init_places_the_two_one_hour_breakpoints() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+
+    let prompt = agent.prompt();
+    let markers: Vec<serde_json::Value> = prompt
+        .system
+        .iter()
+        .flat_map(|c| c.iter())
+        .chain(prompt.messages.iter().flat_map(|m| m.iter()))
+        .filter_map(|b| match b {
+            Block::Text { cache_control, .. } => cache_control.as_ref(),
+            _ => None,
+        })
+        .map(|cc| serde_json::to_value(cc).unwrap())
+        .collect();
+
+    assert_eq!(markers.len(), 2, "system-end + intro-end, nothing else");
+    for marker in &markers {
+        assert_eq!(marker["ttl"], "1h", "{marker}");
+    }
+
+    // Placement: last system block and last block of the intro turn.
+    assert!(matches!(
+        prompt.system.as_ref().unwrap().last().unwrap(),
+        Block::Text {
+            cache_control: Some(_),
+            ..
+        }
+    ));
+    assert!(matches!(
+        prompt.messages.last().unwrap().last().unwrap(),
+        Block::Text {
+            cache_control: Some(_),
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
