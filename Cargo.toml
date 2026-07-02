@@ -17,6 +17,11 @@ retry = ["misanthropic", "dep:tokio", "dep:tracing"]
 misanthropic = ["dep:misanthropic", "dep:tokio"]
 # Because for the moment it prevents wasm build
 client = ["misanthropic/client"]
+# The Agora REST client (`crate::client`). Split from `seed` so non-seed
+# consumers (moderation bots, dashboards) get it without the agent.
+agora-client = ["schemars", "dep:reqwest", "dep:tracing"]
+# `SeedAgent` and friends (`reactor::agent::seed`).
+seed = ["agora-client", "client", "serde/rc", "dep:tracing"]
 
 [dependencies]
 anyhow = "1"
@@ -36,10 +41,17 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
-misanthropic = { version = "1.0.0-alpha.6", default-features = false, features = ["batch", "derive"], optional = true }
+misanthropic = { version = "1.0.0-alpha.7", default-features = false, features = ["batch", "derive"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 
 [dev-dependencies]
+httpmock = "0.7"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+
+# TODO: remove once 1.0.0-alpha.7 is on crates.io (mdegans/misanthropic#123).
+[patch.crates-io]
+misanthropic = { path = "../misanthropic/misanthropic" }
+misanthropic-derive = { path = "../misanthropic/misanthropic-derive" }
