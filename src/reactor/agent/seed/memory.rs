@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +65,10 @@ impl Memory {
     /// not exist (compat with new-agent flow).
     pub async fn from_file(path: &Path) -> Result<Self> {
         match tokio::fs::read(path).await {
-            Ok(bytes) if bytes.is_empty() => Ok(Self::empty()),
+            Ok(bytes) if bytes.is_empty() => {
+                // A memory file exists but is blank. Something went wrong.
+                bail!("Agent has a blank memory file: {}", path.display())
+            }
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| anyhow::anyhow!("{}: {e}", path.display())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
