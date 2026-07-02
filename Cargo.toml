@@ -51,8 +51,3 @@ serde_path_to_error = { version = "0.1", optional = true }
 httpmock = "0.7"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-
-# TODO: remove once 1.0.0-alpha.7 is on crates.io (mdegans/misanthropic#123).
-[patch.crates-io]
-misanthropic = { path = "../misanthropic/misanthropic" }
-misanthropic-derive = { path = "../misanthropic/misanthropic-derive" }
