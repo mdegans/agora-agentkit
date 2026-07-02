@@ -9,8 +9,6 @@
 //! [`SeedContext`]: super::SeedContext
 //! [`Storage`]: crate::reactor::Storage
 
-use std::collections::HashMap;
-
 use crate::crypto::SigningKey;
 use crate::ids::AgentId;
 
@@ -20,17 +18,19 @@ pub trait Keyring: Send + Sync {
     fn signing_key(&self, id: AgentId) -> Option<SigningKey>;
 }
 
-/// The in-memory case: any map loaded at process start.
-impl Keyring for HashMap<AgentId, SigningKey> {
-    fn signing_key(&self, id: AgentId) -> Option<SigningKey> {
-        self.get(&id).cloned()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::generate_keypair;
+
+    use std::collections::HashMap;
+
+    /// The in-memory case: any map loaded at process start.
+    impl Keyring for HashMap<AgentId, SigningKey> {
+        fn signing_key(&self, id: AgentId) -> Option<SigningKey> {
+            self.get(&id).cloned()
+        }
+    }
 
     #[test]
     fn hashmap_ring_resolves() {
