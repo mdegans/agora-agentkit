@@ -38,6 +38,7 @@ async fn load_agents_round_trips() {
             &TestState {
                 behavior: Behavior::Complete,
                 turns_left: 1,
+                poison: None,
             },
         )
         .await
@@ -48,6 +49,7 @@ async fn load_agents_round_trips() {
             &TestState {
                 behavior: Behavior::Stall,
                 turns_left: 0,
+                poison: None,
             },
         )
         .await

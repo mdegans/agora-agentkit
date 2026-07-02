@@ -138,3 +138,29 @@ async fn transient_item_retries_to_cap() {
         "re-batched up to MAX_BATCH_ITEM_RETRIES"
     );
 }
+
+/// A rejected agent whose state fails to serialize is not silently dropped:
+/// there's nothing to snapshot into `rejected`, so the failure is recorded as
+/// a `Storage` error against its id — mirroring the persist path.
+#[tokio::test]
+async fn rejected_agent_serialize_failure_is_recorded() {
+    // Rejected (requests more input context than the offered model serves),
+    // with a state that refuses to serialize.
+    let mut greedy = agent(Behavior::Complete, 1);
+    greedy.model.max_input_tokens = 1;
+    greedy.state.poison = Some(());
+    let greedy_id = greedy.id();
+
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        // Only the admitted agent ever infers.
+        MockInference::end_turns(1),
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1), greedy],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 1, "the satisfiable agent still ran");
+    assert!(report.rejected.is_empty(), "no snapshot could be taken");
+    let err = report.errors.get(&greedy_id).expect("never silent");
+    assert_eq!(err.kind, ErrorKind::Storage);
+}

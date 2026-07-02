@@ -92,6 +92,22 @@ enum Behavior {
 struct TestState {
     behavior: Behavior,
     turns_left: usize,
+    /// `Some` makes `Serialize` fail — for proving serialize failures are
+    /// never silent.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "poisoned"
+    )]
+    poison: Option<()>,
+}
+
+/// Only reached when the field is `Some` (`skip_serializing_if` skips `None`).
+fn poisoned<S: serde::Serializer>(
+    _: &Option<()>,
+    _: S,
+) -> Result<S::Ok, S::Error> {
+    Err(serde::ser::Error::custom("poisoned state"))
 }
 
 impl State for TestState {}
@@ -193,6 +209,7 @@ fn agent(behavior: Behavior, turns_left: usize) -> TestAgent {
         TestState {
             behavior,
             turns_left,
+            poison: None,
         },
     )
     .unwrap()

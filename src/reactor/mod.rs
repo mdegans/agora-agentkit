@@ -673,8 +673,18 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
         // Snapshot rejected agents so the caller can re-route them — they cross
         // the `dyn Run` erasure as data, like `unsaved`.
         for agent in rejected {
-            if let Ok(value) = serde_json::to_value(agent.state()) {
-                self.rejected.insert(agent.id(), value);
+            match serde_json::to_value(agent.state()) {
+                Ok(value) => {
+                    self.rejected.insert(agent.id(), value);
+                }
+                // Never silent: as on the persist path, a snapshot that can't
+                // serialize is a storage error against the agent's id.
+                Err(e) => {
+                    self.errors.insert(
+                        agent.id(),
+                        ReactorError::StorageError(S::Error::from(e)),
+                    );
+                }
             }
         }
 
