@@ -3,6 +3,8 @@
 mod state;
 pub use state::State;
 
+use std::num::NonZeroU32;
+
 use misanthropic::{
     model::ModelInfo,
     prompt::{
@@ -64,7 +66,8 @@ pub trait Agent: Sized + Send {
     /// Consume one assistant response and tell the reactor what to do next.
     ///
     /// The **default** is the whole agentic mechanic and rarely needs
-    /// overriding: pass through a `PauseTurn`; otherwise extract `tool_use`
+    /// overriding: pass through a `PauseTurn`; route a `MaxTokens` clip to
+    /// [`on_truncate`](Agent::on_truncate); otherwise extract `tool_use`
     /// blocks, and either dispatch them through the [`ToolBox`] (seating the
     /// `tool_result`-led user turn) or — if the model called no tools — hand
     /// the quiescent response to [`on_quiesce`](Agent::on_quiesce). A round
@@ -81,6 +84,13 @@ pub trait Agent: Sized + Send {
         // infer retry (we don't seat the partial turn).
         if matches!(response.stop_reason, Some(StopReason::PauseTurn)) {
             return Ok(Control::Continue);
+        }
+
+        // Nothing from a clipped turn is seated or dispatched — a truncated
+        // `tool_use` can arrive as valid JSON yet be missing arguments the
+        // model never got to emit.
+        if matches!(response.stop_reason, Some(StopReason::MaxTokens)) {
+            return self.on_truncate(&response).await;
         }
 
         let calls: Vec<Use> = response
@@ -136,6 +146,36 @@ pub trait Agent: Sized + Send {
         Ok(Control::Done(Outcome::Complete))
     }
 
+    /// Decide what happens when the response was clipped by
+    /// [`max_tokens`](Prompt::max_tokens). The default makes the retry
+    /// meaningful rather than blind: double the budget — clamped to the
+    /// [`model`](Agent::model) ceiling, when the agent declares one — and
+    /// return [`Control::Stalled`] so the stall cap still bounds attempts.
+    /// Override to e.g. seat a nudge instead.
+    async fn on_truncate(
+        &mut self,
+        response: &response::Message,
+    ) -> Result<Control, Self::Error> {
+        let _ = response;
+        // 0 = no declared ceiling (`ModelInfo::max_tokens` is
+        // serde-defaulted): double unclamped; the stall cap bounds the growth.
+        let ceiling = self.model().max_tokens;
+        let (_, prompt) = self.parts();
+        let current = prompt.max_tokens.get();
+        let mut raised = current.saturating_mul(2);
+        if ceiling != 0 {
+            raised = raised.min(ceiling);
+        }
+        // At (or past) the ceiling nothing is left to raise and this
+        // degenerates to a plain stall.
+        if let Some(raised) =
+            NonZeroU32::new(raised).filter(|r| r.get() > current)
+        {
+            prompt.max_tokens = raised;
+        }
+        Ok(Control::Stalled)
+    }
+
     /// Install tool definitions and run each tool's `on_init`. Called once by
     /// the reactor right after construction.
     async fn on_init(&mut self) -> Result<(), Self::Error> {
@@ -172,8 +212,9 @@ pub trait Agent: Sized + Send {
 pub enum Control {
     /// Progress was made (tool results seated, or a new turn began). Keep going.
     Continue,
-    /// A round happened but landed no successful tool call / couldn't be parsed.
-    /// The reactor counts consecutive stalls and gives up past a cap.
+    /// A round happened but landed nothing: no successful tool call, couldn't
+    /// be parsed, or the response was clipped. The reactor counts consecutive
+    /// stalls and gives up past a cap.
     Stalled,
     /// The session is over.
     Done(Outcome),

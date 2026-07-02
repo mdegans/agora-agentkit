@@ -8,6 +8,9 @@
 //! - [`errors`] — one agent's failure doesn't abort the cohort, and per-item
 //!   retry classification.
 //! - [`persistence`] — one bulk save/load, and partial-save recovery.
+//! - [`tools`] — the tool-dispatch half of the default `handle`.
+//! - [`truncation`] — the `MaxTokens` path of the default `handle`: budget
+//!   bump, ceiling clamp, and stall.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,6 +41,7 @@ mod scheduling;
 // `schemars::JsonSchema` — gated on that feature (`--all-features` covers it).
 #[cfg(feature = "schemars")]
 mod tools;
+mod truncation;
 
 // ---------------------------------------------------------------------------
 // Shared error: serves as Agent::Error, Storage::Error, and Inference::Error.
@@ -336,15 +340,20 @@ impl MockInference {
     }
 }
 
-fn message(stop: StopReason) -> response::Message {
-    let stop = match stop {
+/// The wire string for a [`StopReason`], for building response fixtures.
+fn stop_str(stop: StopReason) -> &'static str {
+    match stop {
         StopReason::EndTurn => "end_turn",
         StopReason::PauseTurn => "pause_turn",
         StopReason::ToolUse => "tool_use",
         StopReason::MaxTokens => "max_tokens",
         StopReason::StopSequence => "stop_sequence",
         StopReason::Refusal => "refusal",
-    };
+    }
+}
+
+fn message(stop: StopReason) -> response::Message {
+    let stop = stop_str(stop);
     serde_json::from_value(serde_json::json!({
         "id": "msg_test",
         "role": "assistant",

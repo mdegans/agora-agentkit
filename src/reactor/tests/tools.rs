@@ -45,11 +45,12 @@ impl CountingTool {
     }
 }
 
-/// An assistant response calling `name` with `input`, `stop_reason: tool_use`.
+/// An assistant response calling `name` with `input`, ended by `stop`.
 fn tool_use_message(
     id: &str,
     name: &str,
     input: serde_json::Value,
+    stop: StopReason,
 ) -> response::Message {
     serde_json::from_value(serde_json::json!({
         "id": "msg_test",
@@ -61,7 +62,7 @@ fn tool_use_message(
             "input": input,
         }],
         "model": "claude-3-5-haiku-latest",
-        "stop_reason": "tool_use",
+        "stop_reason": stop_str(stop),
         "stop_sequence": null,
     }))
     .expect("valid tool_use response::Message fixture")
@@ -94,6 +95,7 @@ async fn tool_call_dispatches_and_continues() {
             "toolu_1",
             &route,
             serde_json::json!({ "text": "hi" }),
+            StopReason::ToolUse,
         ),
         message(StopReason::EndTurn),
     ]);
@@ -119,6 +121,7 @@ async fn failing_tool_call_stalls_to_cap() {
             &format!("toolu_{i}"),
             &route,
             serde_json::json!({ "text": "hi" }),
+            StopReason::ToolUse,
         )
     }));
     let mut reactor: Reactor<_, _, TestAgent> =
@@ -131,4 +134,33 @@ async fn failing_tool_call_stalls_to_cap() {
         MAX,
         "the tool ran each stalling round"
     );
+}
+
+/// A clipped (`MaxTokens`) response is never dispatched, even when it carries a
+/// well-formed `tool_use` — its arguments may be missing pieces the model never
+/// got to emit. The default `handle` routes it to `on_truncate`: the tool never
+/// runs, nothing is seated, and the round stalls.
+#[tokio::test]
+async fn truncated_tool_use_is_not_dispatched() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut a, route) = tool_agent(calls.clone(), false);
+    let seated = a.prompt.messages.len();
+
+    let control = a
+        .handle(tool_use_message(
+            "toolu_1",
+            &route,
+            serde_json::json!({ "text": "hi" }),
+            StopReason::MaxTokens,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the clipped call never ran"
+    );
+    assert_eq!(a.prompt.messages.len(), seated, "nothing was seated");
 }
