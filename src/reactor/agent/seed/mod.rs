@@ -123,6 +123,14 @@ pub struct SeedState {
     pub seen_posts: HashMap<PostId, i64>,
     #[serde(default)]
     pub last_cycle_at: Option<DateTime<Utc>>,
+    /// Whether the persisted session ran to a clean `Done` — `false` means
+    /// fresh, or the session died first (the run's [`Report`] has the why).
+    /// Cleared by [`Agent::new`]; when #20 lands, the load-time
+    /// clear-vs-resume decision keys off this rather than prompt heuristics.
+    ///
+    /// [`Report`]: crate::reactor::Report
+    #[serde(default)]
+    pub completed: bool,
 }
 
 impl SeedState {
@@ -141,6 +149,7 @@ impl SeedState {
             ledger: SharedLedger::default(),
             seen_posts: HashMap::new(),
             last_cycle_at: None,
+            completed: false,
         }
     }
 }
@@ -327,7 +336,13 @@ impl SeedAgent {
             // No `output_config`: `null` (no feedback) must stay expressible.
             return self.seat_phase(output::SURVEY_MESSAGE, PHASE_MAX_TOKENS);
         }
-        Ok(Control::Done(Outcome::Complete))
+        Ok(self.finish())
+    }
+
+    /// The session ran to a clean end: stamp the snapshot and stop.
+    fn finish(&mut self) -> Control {
+        self.state.completed = true;
+        Control::Done(Outcome::Complete)
     }
 
     /// Consume one phase-tail response: parse it against the current
@@ -450,7 +465,7 @@ impl SeedAgent {
                         // exchanges never persist in the transcript.
                         self.state.prompt.messages.truncate(mark);
                     }
-                    Ok(Control::Done(Outcome::Complete))
+                    Ok(self.finish())
                 }
                 Err(e) => self.phase_failure(&e),
             },
@@ -495,13 +510,16 @@ impl Agent for SeedAgent {
 
         // A session starts fresh: the loaded prompt is last session's
         // transcript (already persisted at rest — the prompt log) and is
-        // superseded here. The system prefix and intro are seated by
-        // `on_init`, which can reach the network.
+        // superseded here, completed or not. The system prefix and intro
+        // are seated by `on_init`, which can reach the network.
+        // TODO(#20): once mid-session checkpoints exist, `!completed`
+        // means resume rather than clear.
         let mut fresh = Prompt::default()
             .model(state.prompt.model.clone())
             .max_tokens(NonZeroU32::new(ACT_MAX_TOKENS).expect("nonzero"));
         fresh.tool_choice = Some(misanthropic::tool::Choice::auto());
         state.prompt = fresh;
+        state.completed = false;
 
         let agora = Agora::new(
             ctx.client.clone(),

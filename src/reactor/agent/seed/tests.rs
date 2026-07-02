@@ -294,6 +294,36 @@ async fn quiescence_walks_the_tail_to_done() {
     assert_eq!(control, Control::Done(Outcome::Complete));
     assert_eq!(agent.state.memory.content, "I tested things.");
     assert!(agent.state.last_cycle_at.is_some());
+    // The snapshot is self-describing: this transcript ended cleanly.
+    assert!(agent.state.completed);
+}
+
+/// A loaded state carrying a completed transcript starts over: fresh
+/// prompt, `completed` cleared. (Until #20 lands, clearing is
+/// unconditional — a mid-session snapshot also starts over.)
+#[tokio::test]
+async fn new_clears_the_completed_snapshot() {
+    let server = MockServer::start();
+    let id = AgentId::new();
+    let (key, _) = generate_keypair();
+    let keys: HashMap<AgentId, SigningKey> = [(id, key)].into_iter().collect();
+    let ctx = SeedContext {
+        client: Client::new(Url::parse(&server.base_url()).unwrap()).unwrap(),
+        keys: Arc::new(keys),
+        config: quiet_config(),
+    };
+
+    // Simulate the at-rest shape: a finished session's transcript.
+    let mut state = seed_state();
+    state.completed = true;
+    state
+        .prompt
+        .push_message((Role::User, "old transcript"))
+        .unwrap();
+
+    let agent = SeedAgent::new(id, state, ctx).unwrap();
+    assert!(!agent.state.completed);
+    assert!(agent.prompt().messages.is_empty(), "fresh session");
 }
 
 #[tokio::test]
@@ -383,6 +413,9 @@ async fn reflect_garbage_stalls_with_a_nudge() {
     assert!(transcript(&agent).contains("Invalid JSON"));
     // The failed response was never seated: the tail is still the user turn.
     assert_eq!(agent.prompt().messages.last().unwrap().role, Role::User);
+    // A stall is not completion — if the reactor's cap fails the session
+    // here, the snapshot says so.
+    assert!(!agent.state.completed);
 }
 
 #[tokio::test]
