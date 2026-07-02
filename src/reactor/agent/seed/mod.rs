@@ -16,6 +16,8 @@ mod output;
 pub mod prompt;
 mod shortstring;
 mod soul;
+#[cfg(test)]
+mod tests;
 mod tool;
 
 pub use keyring::Keyring;
