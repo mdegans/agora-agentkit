@@ -31,7 +31,7 @@ use crate::ids::AgentId;
 // Reactor types the test submodules reach through `use super::*` but the harness
 // itself doesn't touch — re-exported so the submodules stay a bare glob import.
 pub(crate) use super::{
-    ErrorKind, ErrorReport, Reactor, Report, Run, RunError, load_agents,
+    ErrorKind, ErrorReport, Reactor, Report, Run, load_agents,
 };
 
 mod errors;
@@ -610,6 +610,39 @@ impl Inference for FlakyModels {
         } else {
             Ok(offered_models())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A batch transport whose whole submission fails (transiently) — the
+// dead-transport case whose collateral must be attributed to every live agent.
+// ---------------------------------------------------------------------------
+
+struct DeadBatch;
+
+#[async_trait::async_trait]
+impl Inference for DeadBatch {
+    type Error = TestError;
+
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
+        Ok(message(StopReason::EndTurn))
+    }
+
+    async fn infer_batch<P>(
+        &self,
+        _prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        P: Serialize + Send + Sync,
+    {
+        Err(TestError::Transient(Duration::from_millis(1)))
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Ok(offered_models())
     }
 }
 

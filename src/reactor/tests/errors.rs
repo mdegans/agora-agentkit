@@ -89,7 +89,12 @@ async fn failed_models_probe_retains_cohort() {
     );
 
     let err = reactor.run().await.expect_err("first probe fails the run");
-    assert!(matches!(err, RunError::InferenceError(_)));
+    assert_eq!(err.kind, ErrorKind::Inference);
+    assert_eq!(
+        err.retry_after(),
+        Some(Duration::from_millis(1)),
+        "the retry classification survives the erasure"
+    );
 
     let report = reactor.run().await.unwrap();
     assert_eq!(report.done, 2, "cohort survived the failed probe");
@@ -137,6 +142,35 @@ async fn transient_item_retries_to_cap() {
         3,
         "re-batched up to MAX_BATCH_ITEM_RETRIES"
     );
+}
+
+/// A whole-submission batch failure is attributed to *every* live agent, not
+/// just the first: each gets an `Inference`-classified entry with the retry
+/// hint preserved, so collateral of a dead transport stays distinguishable
+/// from genuine per-agent failure.
+#[tokio::test]
+async fn dead_transport_attributes_error_to_all_live_agents() {
+    let agents = vec![
+        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 2),
+        batch_agent(Behavior::Complete, 3),
+    ];
+    let ids: Vec<AgentId> = agents.iter().map(|a| a.id()).collect();
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(DeadBatch, MemStore::default(), agents);
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 0);
+    assert_eq!(report.failed, 3);
+    for id in ids {
+        let err = report.errors.get(&id).expect("every live agent attributed");
+        assert_eq!(err.kind, ErrorKind::Inference);
+        assert_eq!(
+            err.retry_after,
+            Some(Duration::from_millis(1)),
+            "the retry hint survives per agent"
+        );
+    }
 }
 
 /// A rejected agent whose state fails to serialize is not silently dropped:

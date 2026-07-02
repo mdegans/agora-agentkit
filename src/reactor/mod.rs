@@ -69,6 +69,23 @@ pub enum ReactorError<I: Inference, S: Storage, A: Agent> {
     AgentError(A::Error),
     #[error("storage: {0}")]
     StorageError(S::Error),
+    /// One error's data attributed to many agents at once (a whole batch
+    /// submission failing) — pre-projected to [`ErrorReport`] because source
+    /// errors aren't `Clone`
+    #[error("{}", .0.message)]
+    Shared(ErrorReport),
+}
+
+impl<I: Inference, S: Storage, A: Agent> ReactorError<I, S, A> {
+    /// Which reactor operation it came from — the [`ErrorKind`] projection
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            ReactorError::InferenceError(_) => ErrorKind::Inference,
+            ReactorError::AgentError(_) => ErrorKind::Agent,
+            ReactorError::StorageError(_) => ErrorKind::Storage,
+            ReactorError::Shared(report) => report.kind,
+        }
+    }
 }
 
 impl<I: Inference, S: Storage, A: Agent> RetryAfter for ReactorError<I, S, A> {
@@ -77,6 +94,7 @@ impl<I: Inference, S: Storage, A: Agent> RetryAfter for ReactorError<I, S, A> {
             ReactorError::InferenceError(e) => e.retry_after(),
             ReactorError::AgentError(e) => e.retry_after(),
             ReactorError::StorageError(e) => e.retry_after(),
+            ReactorError::Shared(report) => report.retry_after,
         }
     }
 }
@@ -361,10 +379,18 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                     Ok(resps) => resps,
                     Err(e) => {
                         // Whole submission failed — the transport is dead.
-                        // Record it against one live agent and stop; the rest
-                        // fail out cleanly below.
-                        if let Some(&i) = live.first() {
-                            errors.insert(i, ReactorError::InferenceError(e));
+                        // Attribute it to *every* live agent (pre-projected;
+                        // sources aren't `Clone`) so collateral of a dead
+                        // transport stays distinguishable — and retryable —
+                        // per agent.
+                        let report = ErrorReport::from(
+                            &ReactorError::<I, S, A>::InferenceError(e),
+                        );
+                        for &i in &live {
+                            errors.insert(
+                                i,
+                                ReactorError::Shared(report.clone()),
+                            );
                         }
                         break;
                     }
@@ -418,9 +444,8 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             }
         }
 
-        // Flatten to `Persist`: errored → Err; finished → Ok(outcome); live but
-        // unfinished after a transport-death break → Ok(Failed). `persist_all`
-        // buckets and serializes from here.
+        // Flatten to `Persist`: errored → Err; finished → Ok(outcome).
+        // `persist_all` buckets and serializes from here.
         agents
             .into_iter()
             .enumerate()
@@ -554,13 +579,12 @@ impl<I: Inference, S: Storage, A: Agent> From<&ReactorError<I, S, A>>
     for ErrorReport
 {
     fn from(e: &ReactorError<I, S, A>) -> Self {
-        let kind = match e {
-            ReactorError::InferenceError(_) => ErrorKind::Inference,
-            ReactorError::AgentError(_) => ErrorKind::Agent,
-            ReactorError::StorageError(_) => ErrorKind::Storage,
-        };
+        // Already projected — pass it through.
+        if let ReactorError::Shared(report) = e {
+            return report.clone();
+        }
         ErrorReport {
-            kind,
+            kind: e.kind(),
             retry_after: e.retry_after(),
             message: e.to_string(),
         }
@@ -599,14 +623,23 @@ impl std::ops::AddAssign<Report> for Report {
     }
 }
 
+/// A whole-[`run`](Run::run) failure, type-erased to cross the `dyn Run`
+/// boundary. The [`RetryAfter`] classification is evaluated before the
+/// erasure, while the concrete error types are still known.
 #[derive(Debug, thiserror::Error)]
-pub enum RunError {
-    #[error("Backend Error: {0}")]
-    InferenceError(anyhow::Error),
-    #[error("Agent Error: {0}")]
-    AgentError(anyhow::Error),
-    #[error("Storage Error: {0}")]
-    StorageError(anyhow::Error),
+#[error("{kind:?} error: {inner}")]
+pub struct RunError {
+    pub kind: ErrorKind,
+    /// `None` = fatal; `Some(d)` = retry after `d`. See [`RetryAfter`].
+    pub retry_after: Option<std::time::Duration>,
+    /// The erased source.
+    pub inner: anyhow::Error,
+}
+
+impl RetryAfter for RunError {
+    fn retry_after(&self) -> Option<std::time::Duration> {
+        self.retry_after
+    }
 }
 
 impl<I, S, A> From<ReactorError<I, S, A>> for RunError
@@ -616,12 +649,18 @@ where
     A: Agent,
 {
     fn from(value: ReactorError<I, S, A>) -> Self {
-        match value {
-            ReactorError::InferenceError(e) => {
-                RunError::InferenceError(e.into())
-            }
-            ReactorError::AgentError(e) => RunError::AgentError(e.into()),
-            ReactorError::StorageError(e) => RunError::StorageError(e.into()),
+        let kind = value.kind();
+        let retry_after = value.retry_after();
+        let inner = match value {
+            ReactorError::InferenceError(e) => anyhow::Error::new(e),
+            ReactorError::AgentError(e) => anyhow::Error::new(e),
+            ReactorError::StorageError(e) => anyhow::Error::new(e),
+            ReactorError::Shared(report) => anyhow::anyhow!(report.message),
+        };
+        RunError {
+            kind,
+            retry_after,
+            inner,
         }
     }
 }
