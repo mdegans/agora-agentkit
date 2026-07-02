@@ -7,6 +7,8 @@
 //!   continuation, the turn-order invariant, and mixed-cohort routing.
 //! - [`errors`] — one agent's failure doesn't abort the cohort, and per-item
 //!   retry classification.
+//! - [`notifications`] — the drain half of the defaults: pushes seat at turn
+//!   boundaries and a quiescent turn with pending pushes continues.
 //! - [`persistence`] — one bulk save/load, and partial-save recovery.
 //! - [`tools`] — the tool-dispatch half of the default `handle`.
 //! - [`truncation`] — the `MaxTokens` path of the default `handle`: budget
@@ -36,6 +38,7 @@ pub(crate) use super::{
 };
 
 mod errors;
+mod notifications;
 mod persistence;
 mod scheduling;
 // The tool tests build a `#[tool]`-macro tool, which needs its argument struct's

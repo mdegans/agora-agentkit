@@ -12,7 +12,7 @@ use misanthropic::{
         message::{Block, Role},
     },
     response::{self, StopReason},
-    tool::{Tool, ToolBox, Use},
+    tool::{Notification, Notifications, Tool, ToolBox, Use},
 };
 
 use super::inference;
@@ -24,6 +24,32 @@ fn boxed<E: std::error::Error + Send + Sync + 'static>(
     e: E,
 ) -> Box<dyn std::error::Error + Send + Sync> {
     Box::new(e)
+}
+
+/// Seat drained `notes` as [`Role::User`] content, each labeled with its
+/// authoritative source: merged into a trailing user turn when there is one
+/// (turn order forbids two adjacent), pushed as a new one otherwise.
+// TODO: honor `Notification::preferred_roles` (via `Prompt::resolve_role`)
+// once a tool actually prefers something other than `User`.
+fn seat_notifications(
+    prompt: &mut Prompt,
+    notes: Vec<Notification>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut blocks: Vec<Block> = Vec::new();
+    for mut note in notes {
+        blocks.push(format!("[notification: {}]", note.source).into());
+        blocks.append(&mut note.content);
+    }
+    match prompt.messages.last_mut() {
+        Some(last) if last.role == Role::User => {
+            last.extend(blocks);
+            Ok(())
+        }
+        _ => prompt
+            .push_message((Role::User, blocks))
+            .map(|_| ())
+            .map_err(boxed),
+    }
 }
 
 /// An `Agent` abstraction.
@@ -67,6 +93,31 @@ pub trait Agent: Sized + Send {
     /// self`.
     fn parts(&mut self) -> (&mut ToolBox, &mut Prompt);
 
+    /// The aggregate [`Notifications`] receiver, when the agent holds one
+    /// (take it once via [`ToolBox::subscribe`] in an
+    /// [`on_init`](Agent::on_init) override). The provided defaults drain it
+    /// at every turn boundary — [`on_turn`](Agent::on_turn) merges pushes into
+    /// the outgoing user turn, and a quiescent [`handle`](Agent::handle) with
+    /// pending pushes seats them and continues instead of quiescing — so a
+    /// tool that pushes (a finished background job, an incoming message)
+    /// re-engages the model with no polling. `None` (the default) disables
+    /// draining.
+    fn notifications(&mut self) -> Option<&mut Notifications> {
+        None
+    }
+
+    /// Every queued [`Notification`], without blocking. See
+    /// [`notifications`](Agent::notifications).
+    fn drain_notifications(&mut self) -> Vec<Notification> {
+        let mut notes = Vec::new();
+        if let Some(rx) = self.notifications() {
+            while let Ok(note) = rx.try_recv() {
+                notes.push(note);
+            }
+        }
+        notes
+    }
+
     /// Consume one assistant response and tell the reactor what to do next.
     ///
     /// The **default** is the whole agentic mechanic and rarely needs
@@ -105,12 +156,20 @@ pub trait Agent: Sized + Send {
             .collect();
 
         if calls.is_empty() {
-            // Quiescent: seat the assistant turn, then advance the session.
+            // Quiescent: seat the assistant turn, then advance the session —
+            // unless a tool pushed content meanwhile, in which case seat that
+            // and keep going so the model can react to it.
             {
                 let (_, prompt) = self.parts();
                 prompt
                     .push_message(response.inner.clone())
                     .map_err(|e| Self::Error::from(boxed(e)))?;
+            }
+            let notes = self.drain_notifications();
+            if !notes.is_empty() {
+                let (_, prompt) = self.parts();
+                seat_notifications(prompt, notes).map_err(Self::Error::from)?;
+                return Ok(Control::Continue);
             }
             return self.on_quiesce(&response).await;
         }
@@ -188,10 +247,19 @@ pub trait Agent: Sized + Send {
         Ok(())
     }
 
-    /// Refresh per-turn tool context. Called before each `infer`.
+    /// Refresh per-turn tool context, then merge any pushed
+    /// [`Notification`]s into the outgoing user turn. Called before each
+    /// `infer`.
     async fn on_turn(&mut self) -> Result<(), Self::Error> {
-        let (tools, prompt) = self.parts();
-        tools.on_turn(prompt).await?;
+        {
+            let (tools, prompt) = self.parts();
+            tools.on_turn(prompt).await?;
+        }
+        let notes = self.drain_notifications();
+        if !notes.is_empty() {
+            let (_, prompt) = self.parts();
+            seat_notifications(prompt, notes).map_err(Self::Error::from)?;
+        }
         Ok(())
     }
 
