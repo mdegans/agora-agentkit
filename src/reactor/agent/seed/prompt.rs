@@ -1,7 +1,7 @@
-//! Prompt rendering for the [`SeedAgent`](super::SeedAgent): the shared
-//! system text, the per-agent intro, and the perception/tool-result
-//! formatters. Pure text in, text out — assembly into a
-//! [`Prompt`](misanthropic::Prompt) happens in the agent.
+//! Prompt rendering for the [`SeedAgent`](super::SeedAgent): the shared system
+//! text, the per-agent intro, and the perception/tool-result formatters. Pure
+//! text in, text out — assembly into a [`Prompt`](misanthropic::Prompt) happens
+//! in the agent.
 
 use std::collections::HashMap;
 
@@ -13,9 +13,9 @@ use crate::responses::{
     PostWithCommentsResponse,
 };
 
-/// Everything the perceive phase gathered, on its way into the prompt. A
-/// struct (not arguments) so a callsite that forgets a section is a
-/// compile error, not a quiet omission.
+/// Everything the perceive phase gathered, on its way into the prompt. A struct
+/// (not arguments) so a callsite that forgets a section is a compile error, not
+/// a quiet omission.
 pub(super) struct Perception<'a> {
     pub constitution: &'a str,
     /// The live community slugs.
@@ -32,10 +32,10 @@ pub(super) struct Perception<'a> {
 /// (constitution + live community slugs + guidelines), the per-agent intro
 /// (soul + memory + dashboard + recent activity), and the two 1h cache
 /// breakpoints. **The only way a `SeedAgent` prompt gets built** — every
-/// section this module renders reaches the wire through here, or not at
-/// all. The section renderers are deliberately private: in agora-seed a
-/// run once shipped with prompt content missing, and agents hallucinated
-/// the "missing" parts into their Memory and Soul, forcing a revert.
+/// section this module renders reaches the wire through here, or not at all.
+/// The section renderers are deliberately private: in agora-seed a run once
+/// shipped with prompt content missing, and agents hallucinated the "missing"
+/// parts into their Memory and Soul, forcing a revert.
 pub(super) fn assemble(
     prompt: Prompt,
     perception: &Perception,
@@ -65,14 +65,13 @@ pub(super) fn assemble(
         .add_message((Role::User, intro))
         .map_err(|e| super::SeedError::Prompt(e.to_string()))?
         // Second breakpoint at intro end, 1h TTL — pays off only for this
-        // agent, across the session's rounds.
-        // TODO(#19): quirk-driven rolling per-round breakpoints
-        // (`breakpoint_after_assistant` for blallama), as the seed did —
-        // needs `CachedPrompt`'s `cache_windowed*` family on `Prompt`
-        // upstream.
+        // agent, across the session's rounds. TODO(#19): quirk-driven rolling
+        // per-round breakpoints (`breakpoint_after_assistant` for blallama), as
+        // the seed did — needs `CachedPrompt`'s `cache_windowed*` family on
+        // `Prompt` upstream.
         .cache_1h();
-    // First breakpoint at the end of tools+system — the prefix every agent
-    // on this model shares, so the cache write amortizes cohort-wide.
+    // First breakpoint at the end of tools+system — the prefix every agent on
+    // this model shares, so the cache write amortizes cohort-wide.
     if let Some(system) = prompt.system.as_mut() {
         system.cache_1h();
     }
@@ -81,13 +80,13 @@ pub(super) fn assemble(
 
 /// Build the system text: role, constitution, community slugs, guidelines.
 ///
-/// `constitution` is the raw markdown and `communities` the valid slugs,
-/// both fetched live at [`on_init`](crate::reactor::Agent::on_init) — the
-/// server is the single source of truth for each (a leading
-/// `# The Agora Constitution` title is stripped — we provide our own
-/// header). Differences from the pre-reactor seed are deliberate: tool
-/// calls are native (no `<tool_call>` JSON-tag instructions) and threading
-/// goes through `reply_to` rather than `parent_comment_id`.
+/// `constitution` is the raw markdown and `communities` the valid slugs, both
+/// fetched live at [`on_init`](crate::reactor::Agent::on_init) — the server is
+/// the single source of truth for each (a leading `# The Agora Constitution`
+/// title is stripped — we provide our own header). Differences from the
+/// pre-reactor seed are deliberate: tool calls are native (no `<tool_call>`
+/// JSON-tag instructions) and threading goes through `reply_to` rather than
+/// `parent_comment_id`.
 fn system_text(
     constitution: &str,
     communities: &[String],
@@ -148,9 +147,9 @@ fn constitution_looks_complete(text: &str) -> bool {
     CONSTITUTION_MARKERS.iter().all(|m| text.contains(m))
 }
 
-/// Build the per-agent intro — the first user message. All per-agent
-/// content goes here (not in the system prompt) to keep the system+tools
-/// prefix cacheable across agents and to contain prompt injection from
+/// Build the per-agent intro — the first user message. All per-agent content
+/// goes here (not in the system prompt) to keep the system+tools prefix
+/// cacheable across agents and to contain prompt injection from
 /// agent-controlled content.
 fn intro_message(
     soul_markdown: &str,
@@ -201,8 +200,8 @@ fn intro_message(
     out
 }
 
-/// Format a [`DashboardResponse`] into a lean perception section: metadata
-/// and truncated previews only — the model reads depth via `get_content`.
+/// Format a [`DashboardResponse`] into a lean perception section: metadata and
+/// truncated previews only — the model reads depth via `get_content`.
 fn format_dashboard(dash: &DashboardResponse) -> String {
     let mut out = String::new();
 
@@ -403,8 +402,8 @@ fn format_threaded_comment(
 }
 
 /// Format a full post (a `get_content` result) with its comment threads.
-/// `viewer_name` tags the agent's own content `(yours)` — agents fetching
-/// their own posts otherwise engage with themselves.
+/// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
+/// own posts otherwise engage with themselves.
 pub(super) fn format_post(
     post: &PostWithCommentsResponse,
     viewer_name: &str,

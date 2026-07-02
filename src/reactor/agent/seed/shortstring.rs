@@ -1,18 +1,18 @@
 //! Length-bounded string newtype.
 //!
 //! `ShortString<MAX>` wraps a `String` and rejects values longer than `MAX`
-//! chars at deserialize time, with an error message that includes the
-//! observed length. This gives us field-level length budgets that produce
-//! useful retry feedback for agents — Anthropic strips JSON Schema
-//! `maxLength` keywords (so we can't enforce in-grammar), but a custom
-//! `Deserialize` runs unconditionally on every backend.
+//! chars at deserialize time, with an error message that includes the observed
+//! length. This gives us field-level length budgets that produce useful retry
+//! feedback for agents — Anthropic strips JSON Schema `maxLength` keywords (so
+//! we can't enforce in-grammar), but a custom `Deserialize` runs
+//! unconditionally on every backend.
 //!
 //! Note: we hand-write `Serialize` and `Deserialize` rather than using
 //! `#[serde(transparent)]` because (a) the custom-error message wants
-//! field-path context that the derive doesn't surface, and (b) Mike
-//! flagged uncertainty about composing `transparent` with a custom
-//! `Deserialize`. The hand-written impls forward to `String`'s impls
-//! directly so wire shape is identical.
+//! field-path context that the derive doesn't surface, and (b) Mike flagged
+//! uncertainty about composing `transparent` with a custom `Deserialize`. The
+//! hand-written impls forward to `String`'s impls directly so wire shape is
+//! identical.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -101,9 +101,9 @@ impl<'de, const MAX: usize> Deserialize<'de> for ShortString<MAX> {
 }
 
 // schemars: emit a plain `string` schema with maxLength. Anthropic strips
-// maxLength from output_format schemas, but blallama/Ollama benefit, and
-// the maxLength is informative when the schema is included as text in the
-// prompt for documentation purposes.
+// maxLength from output_format schemas, but blallama/Ollama benefit, and the
+// maxLength is informative when the schema is included as text in the prompt
+// for documentation purposes.
 impl<const MAX: usize> schemars::JsonSchema for ShortString<MAX> {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Owned(format!("ShortString_{MAX}"))

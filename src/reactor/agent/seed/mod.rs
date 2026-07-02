@@ -4,9 +4,9 @@
 //! (dashboard seated at [`on_init`]), think/act (the default tool loop,
 //! round-capped), then a phase tail — reflect (memory rewrite), a rare deep
 //! soul mutation or evolution-log entry, and an occasional anonymous survey.
-//! The working [`Prompt`] rides [`SeedState`], so the persisted state at
-//! rest *is* the last session's transcript (survey turns redacted unless the
-//! agent asked for contact).
+//! The working [`Prompt`] rides [`SeedState`], so the persisted state at rest
+//! *is* the last session's transcript (survey turns redacted unless the agent
+//! asked for contact).
 //!
 //! [`on_init`]: Agent::on_init
 
@@ -272,8 +272,8 @@ impl SeedAgent {
         }
     }
 
-    /// Append a model-facing failure to the trailing user turn and stall —
-    /// the reactor's stall cap is the retry budget.
+    /// Append a model-facing failure to the trailing user turn and stall — the
+    /// reactor's stall cap is the retry budget.
     fn phase_failure(&mut self, msg: &str) -> Result<Control, SeedError> {
         tracing::debug!(phase = ?self.phase, "phase retry: {msg}");
         let prompt = &mut self.state.prompt;
@@ -345,9 +345,9 @@ impl SeedAgent {
         Control::Done(Outcome::Complete)
     }
 
-    /// Consume one phase-tail response: parse it against the current
-    /// phase's contract, apply, advance. Failures stall (bounded by the
-    /// reactor's cap); the failed response is never seated.
+    /// Consume one phase-tail response: parse it against the current phase's
+    /// contract, apply, advance. Failures stall (bounded by the reactor's cap);
+    /// the failed response is never seated.
     async fn handle_phase(
         &mut self,
         response: response::Message,
@@ -358,8 +358,8 @@ impl SeedAgent {
         if matches!(response.stop_reason, Some(StopReason::MaxTokens)) {
             return self.on_truncate(&response).await;
         }
-        // A tool call in a phase turn can't be dispatched (the phase owns
-        // the turn) nor seated (its `tool_use` would go unanswered).
+        // A tool call in a phase turn can't be dispatched (the phase owns the
+        // turn) nor seated (its `tool_use` would go unanswered).
         if response
             .inner
             .content
@@ -461,8 +461,8 @@ impl SeedAgent {
                         }
                     }
                     if !contact && let Some(mark) = self.survey_mark {
-                        // The promise in the survey prompt: anonymous
-                        // exchanges never persist in the transcript.
+                        // The promise in the survey prompt: anonymous exchanges
+                        // never persist in the transcript.
                         self.state.prompt.messages.truncate(mark);
                     }
                     Ok(self.finish())
@@ -510,10 +510,10 @@ impl Agent for SeedAgent {
 
         // A session starts fresh: the loaded prompt is last session's
         // transcript (already persisted at rest — the prompt log) and is
-        // superseded here, completed or not. The system prefix and intro
-        // are seated by `on_init`, which can reach the network.
-        // TODO(#20): once mid-session checkpoints exist, `!completed`
-        // means resume rather than clear.
+        // superseded here, completed or not. The system prefix and intro are
+        // seated by `on_init`, which can reach the network.
+        // TODO(#20): once mid-session checkpoints exist, `!completed` means
+        // resume rather than clear.
         let mut fresh = Prompt::default()
             .model(state.prompt.model.clone())
             .max_tokens(NonZeroU32::new(ACT_MAX_TOKENS).expect("nonzero"));
@@ -573,8 +573,8 @@ impl Agent for SeedAgent {
 
     fn on_admit(&mut self, _model: &ModelInfo, quirks: &Quirks) {
         self.quirks = Some(*quirks);
-        // `Choice::auto` *forces* a tool call on endpoints that don't
-        // honor `tool_choice` (ollama) — the phase tail needs text turns.
+        // `Choice::auto` *forces* a tool call on endpoints that don't honor
+        // `tool_choice` (ollama) — the phase tail needs text turns.
         if quirks.tool_choice_not_respected {
             self.state.prompt.tool_choice = None;
         }
@@ -584,9 +584,9 @@ impl Agent for SeedAgent {
         self.quirks
     }
 
-    /// Perceive: install tools, subscribe to their pushes, then hand
-    /// everything to [`prompt::assemble`] — the one place the working
-    /// prompt gets built (and the constitution integrity gate).
+    /// Perceive: install tools, subscribe to their pushes, then hand everything
+    /// to [`prompt::assemble`] — the one place the working prompt gets built
+    /// (and the constitution integrity gate).
     async fn on_init(&mut self) -> Result<(), SeedError> {
         {
             let (tools, prompt) = self.parts();
@@ -668,9 +668,9 @@ impl Agent for SeedAgent {
                     .any(|block| block.tool_use().is_some());
                 if tool_round {
                     if rounds_left == 0 {
-                        // Budget spent: the un-dispatched calls can't be
-                        // seated (their `tool_use` would go unanswered), so
-                        // the response is dropped and the tail begins.
+                        // Budget spent: the un-dispatched calls can't be seated
+                        // (their `tool_use` would go unanswered), so the
+                        // response is dropped and the tail begins.
                         return self.begin_reflect();
                     }
                     self.phase = Phase::Acting {

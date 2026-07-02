@@ -3,27 +3,24 @@
 //! Memory is a single freeform string (`content`) that the agent rewrites
 //! during the reflect phase to keep it under a soft word/token budget. The
 //! token budget itself is **not** part of the wire schema (the agent never
-//! needs to round-trip it); it's a code constant used only on the seed
-//! runner side as a soft target communicated to the agent in the reflect
-//! prompt.
+//! needs to round-trip it); it's a code constant used only on the seed runner
+//! side as a soft target communicated to the agent in the reflect prompt.
 //!
 //! ## Soul-leakage check
 //!
-//! Memory rewrites are rejected if they contain section headings that
-//! belong to SOUL.json — specifically `## Identity`, `## Values`,
-//! `## Interests`, `## Voice`, `## Boundaries`, `## Evolution Log`
-//! (case-insensitive, line-start). Several historical agents accidentally
-//! wrote soul content into their memory; this catches it on the next save
-//! attempt rather than persisting.
+//! Memory rewrites are rejected if they contain section headings that belong to
+//! SOUL.json — specifically `## Identity`, `## Values`, `## Interests`, `##
+//! Voice`, `## Boundaries`, `## Evolution Log` (case-insensitive, line-start).
+//! Several historical agents accidentally wrote soul content into their memory;
+//! this catches it on the next save attempt rather than persisting.
 //!
 //! ## Heading demotion
 //!
-//! Memory is rendered into the system prompt under a `## Memory` heading.
-//! If the agent has used `# h1` or `## h2` headings within their memory
-//! content, those would either collide with or out-rank the surrounding
-//! frame. [`Memory::render_for_prompt`] demotes any line starting with
-//! one or two `#` characters to `### ` so the Markdown nesting stays
-//! coherent.
+//! Memory is rendered into the system prompt under a `## Memory` heading. If
+//! the agent has used `# h1` or `## h2` headings within their memory content,
+//! those would either collide with or out-rank the surrounding frame.
+//! [`Memory::render_for_prompt`] demotes any line starting with one or two `#`
+//! characters to `### ` so the Markdown nesting stays coherent.
 
 use std::path::Path;
 
@@ -31,8 +28,8 @@ use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Soft target communicated to the agent in the reflect prompt
-/// ("stay under 1000 words"). Not enforced server-side; we don't truncate.
+/// Soft target communicated to the agent in the reflect prompt ("stay under
+/// 1000 words"). Not enforced server-side; we don't truncate.
 pub const TARGET_WORDS: usize = 1000;
 
 /// Headings that mean the agent has written soul content into memory.
@@ -48,8 +45,8 @@ const SOUL_LEAKAGE_HEADINGS: &[&str] = &[
 /// Persistent agent memory.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Memory {
-    /// Free-form memory content. Use markdown, bullet points, whatever
-    /// you prefer. Persists across cycles.
+    /// Free-form memory content. Use markdown, bullet points, whatever you
+    /// prefer. Persists across cycles.
     pub content: String,
 }
 
@@ -61,8 +58,8 @@ impl Memory {
         }
     }
 
-    /// Read JSON from `path`. Returns [`Memory::empty`] if the file does
-    /// not exist (compat with new-agent flow).
+    /// Read JSON from `path`. Returns [`Memory::empty`] if the file does not
+    /// exist (compat with new-agent flow).
     pub async fn from_file(path: &Path) -> Result<Self> {
         match tokio::fs::read(path).await {
             Ok(bytes) if bytes.is_empty() => {
@@ -95,7 +92,8 @@ impl Memory {
         })
     }
 
-    /// Backup-then-write JSON. Backup file is `MEMORY.{ts}.json` next to the target.
+    /// Backup-then-write JSON. Backup file is `MEMORY.{ts}.json` next to the
+    /// target.
     pub async fn save(&self, path: &Path) -> Result<()> {
         if path.exists() {
             let ts = std::time::SystemTime::now()
@@ -118,9 +116,9 @@ impl Memory {
     /// soul-leakage headings. Returns an error message suitable for feeding
     /// back to the agent on retry.
     ///
-    /// **No truncation.** If the model returns excessively long content we
-    /// rely on `max_tokens` and the parse-failure retry path to ask for a
-    /// shorter version next iteration.
+    /// **No truncation.** If the model returns excessively long content we rely
+    /// on `max_tokens` and the parse-failure retry path to ask for a shorter
+    /// version next iteration.
     pub fn update(&mut self, new_content: String) -> Result<(), MemoryError> {
         if let Some(line) = find_soul_leakage_line(&new_content) {
             return Err(MemoryError::SoulLeakage(line));
@@ -130,23 +128,23 @@ impl Memory {
     }
 
     /// Append a `[SYSTEM]` line to the existing content. Used by the
-    /// Anthropic-batch parse-failure path — when reflect produces invalid
-    /// JSON we don't update memory, but we leave the agent a breadcrumb
-    /// so it can self-correct next cycle.
+    /// Anthropic-batch parse-failure path — when reflect produces invalid JSON
+    /// we don't update memory, but we leave the agent a breadcrumb so it can
+    /// self-correct next cycle.
     pub fn append_system_note(&mut self, note: &str) {
         let date = chrono::Utc::now().format("%Y-%m-%d");
         let line = format!("\n[{date}] [SYSTEM] {note}\n");
         self.content.push_str(&line);
     }
 
-    /// Render the memory content for inclusion in the system prompt under a
-    /// `## Memory` heading: any agent-supplied `#` or `##` heading is
-    /// demoted to `###` so the rendered structure remains coherent.
+    /// Render the memory content for inclusion in the system prompt under a `##
+    /// Memory` heading: any agent-supplied `#` or `##` heading is demoted to
+    /// `###` so the rendered structure remains coherent.
     pub fn render_for_prompt(&self) -> String {
         let mut out = String::with_capacity(self.content.len());
         for line in self.content.split_inclusive('\n') {
-            // Strip the trailing newline (if any) for matching, preserve it
-            // on the way out.
+            // Strip the trailing newline (if any) for matching, preserve it on
+            // the way out.
             let (body, nl) = match line.strip_suffix('\n') {
                 Some(rest) => (rest, "\n"),
                 None => (line, ""),
@@ -186,8 +184,8 @@ impl Memory {
 /// Errors from [`Memory::update`].
 #[derive(Debug, Clone)]
 pub enum MemoryError {
-    /// The proposed memory content includes a SOUL section heading.
-    /// Field carries the offending line for inclusion in the retry message.
+    /// The proposed memory content includes a SOUL section heading. Field
+    /// carries the offending line for inclusion in the retry message.
     SoulLeakage(String),
 }
 

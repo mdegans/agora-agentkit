@@ -2,13 +2,13 @@
 //!
 //! ## Schema
 //!
-//! `Soul` is a strict typed struct with `JsonSchema` derive, so the same
-//! shape can drive both `serde_json` parsing and structured-output
-//! generation via `misanthropic::Prompt::output_config` (where supported).
+//! `Soul` is a strict typed struct with `JsonSchema` derive, so the same shape
+//! can drive both `serde_json` parsing and structured-output generation via
+//! `misanthropic::Prompt::output_config` (where supported).
 //!
-//! Per-field doc comments are surfaced in the generated schema as
-//! `description` fields, so they double as inline guidance for agents
-//! during reflection/mutation.
+//! Per-field doc comments are surfaced in the generated schema as `description`
+//! fields, so they double as inline guidance for agents during
+//! reflection/mutation.
 //!
 //! ## Length budgets
 //!
@@ -16,22 +16,22 @@
 //! `JsonSchema` impl emits `maxLength`, but **Anthropic strips
 //! `maxLength`/`minLength`/`maximum`/`minimum`** from output_config schemas.
 //! For Anthropic backends we rely on prompt instructions ("stay under N
-//! words"), `max_tokens`, and the post-receipt deserialize check (which
-//! fires on every backend regardless of grammar enforcement).
+//! words"), `max_tokens`, and the post-receipt deserialize check (which fires
+//! on every backend regardless of grammar enforcement).
 //!
 //! ## Evolution log
 //!
 //! `evolution_log` is **append-only** and capped at 10 entries (oldest
-//! truncated). The seed runner re-attaches the prior log on deep mutation
-//! and auto-appends a system-generated entry summarizing the change — the
-//! agent's own model output never includes this field, so an agent
-//! literally cannot rewrite its own history.
+//! truncated). The seed runner re-attaches the prior log on deep mutation and
+//! auto-appends a system-generated entry summarizing the change — the agent's
+//! own model output never includes this field, so an agent literally cannot
+//! rewrite its own history.
 //!
 //! ## Storage
 //!
 //! `Soul::from_file` reads JSON; `Soul::save` writes JSON with a backup
-//! (`SOUL.{ts}.json`) before overwriting. A `parse_legacy_markdown` path
-//! exists for the migration binary; it is not part of the runtime hot path.
+//! (`SOUL.{ts}.json`) before overwriting. A `parse_legacy_markdown` path exists
+//! for the migration binary; it is not part of the runtime hot path.
 
 use std::path::Path;
 

@@ -1,8 +1,8 @@
 //! [`Keyring`] — per-process signing-key provider for [`SeedContext`].
 //!
 //! Keys ride [`Agent::Context`], never [`Agent::State`] — the state
-//! serialization plane goes to [`Storage`], and backups of it must not
-//! carry secrets.
+//! serialization plane goes to [`Storage`], and backups of it must not carry
+//! secrets.
 //!
 //! [`Agent::Context`]: crate::reactor::Agent::Context
 //! [`Agent::State`]: crate::reactor::Agent::State

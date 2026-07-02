@@ -1,8 +1,8 @@
-//! Behavior tests for the [`SeedAgent`] phase machine: perception seating,
-//! the round budget, flat tool dispatch with the dedup ledger, phase-output
-//! parsing/stalling, and survey redaction. The Agora side is an
-//! [`httpmock`] server; inference never happens — responses are handed
-//! straight to [`Agent::handle`].
+//! Behavior tests for the [`SeedAgent`] phase machine: perception seating, the
+//! round budget, flat tool dispatch with the dedup ledger, phase-output
+//! parsing/stalling, and survey redaction. The Agora side is an [`httpmock`]
+//! server; inference never happens — responses are handed straight to
+//! [`Agent::handle`].
 
 use std::collections::HashMap;
 use std::sync::Arc;

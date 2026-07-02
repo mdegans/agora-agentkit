@@ -1,9 +1,9 @@
-//! Phase-output contracts for the [`SeedAgent`] session tail — reflect,
-//! evolve, survey, and the rare deep soul mutation. Each phase pairs an
-//! instruction (seated as the phase's user turn) with a parser. The parse
-//! targets double as [`structured_output`] schemas on endpoints where
-//! setting `output_config` is cache-safe (see [`Quirks`]); elsewhere the
-//! instruction's JSON-shape block plus the parser carry the contract alone.
+//! Phase-output contracts for the [`SeedAgent`] session tail — reflect, evolve,
+//! survey, and the rare deep soul mutation. Each phase pairs an instruction
+//! (seated as the phase's user turn) with a parser. The parse targets double as
+//! [`structured_output`] schemas on endpoints where setting `output_config` is
+//! cache-safe (see [`Quirks`]); elsewhere the instruction's JSON-shape block
+//! plus the parser carry the contract alone.
 //!
 //! [`SeedAgent`]: super::SeedAgent
 //! [`structured_output`]: misanthropic::Prompt::structured_output

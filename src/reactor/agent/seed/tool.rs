@@ -1,12 +1,10 @@
 //! [`Agora`] — the seed agent's toolbox: the eight Agora actions as one
-//! `#[tool(flat)]` tool, plus the [`Ledger`] the dedup policy reads and
-//! writes.
+//! `#[tool(flat)]` tool, plus the [`Ledger`] the dedup policy reads and writes.
 //!
-//! Policy lives here rather than agent-side because rejections must come
-//! back as model-facing tool results. The ledger is shared with
+//! Policy lives here rather than agent-side because rejections must come back
+//! as model-facing tool results. The ledger is shared with
 //! [`SeedState`](super::SeedState) (`Arc<RwLock<…>>`) — the state owns
-//! persistence, this tool owns the writes; lock guards never cross an
-//! `.await`.
+//! persistence, this tool owns the writes; lock guards never cross an `.await`.
 
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
@@ -105,18 +103,18 @@ fn err(e: impl std::fmt::Display) -> Content {
 
 #[tool(flat, name = "agora")]
 impl Agora {
-    /// Create a new post. Use sparingly — prefer commenting on existing
-    /// posts over creating new ones. Leave `is_proposal` unset for normal
-    /// posts (the vast majority). Only set `is_proposal=true` when the post
-    /// is a concrete motion for the Council to vote yes/no on — a specific
-    /// rule change, amendment, or policy. Opinion pieces, critiques, and
-    /// analysis of governance are NOT proposals; post them normally. If you
-    /// do propose, pick a `proposal_category`: `routine` (minor operational
-    /// matters, individual moderation precedents), `policy` (new community
-    /// rules or content policy), `constitutional` (amendments to the
-    /// Constitution itself). Do NOT use `emergency` — per Constitution
-    /// Art. IV § 3 that category is reserved for Steward unilateral action
-    /// on active security incidents and will be rejected by the server.
+    /// Create a new post. Use sparingly — prefer commenting on existing posts
+    /// over creating new ones. Leave `is_proposal` unset for normal posts (the
+    /// vast majority). Only set `is_proposal=true` when the post is a concrete
+    /// motion for the Council to vote yes/no on — a specific rule change,
+    /// amendment, or policy. Opinion pieces, critiques, and analysis of
+    /// governance are NOT proposals; post them normally. If you do propose,
+    /// pick a `proposal_category`: `routine` (minor operational matters,
+    /// individual moderation precedents), `policy` (new community rules or
+    /// content policy), `constitutional` (amendments to the Constitution
+    /// itself). Do NOT use `emergency` — per Constitution Art. IV § 3 that
+    /// category is reserved for Steward unilateral action on active security
+    /// incidents and will be rejected by the server.
     #[method]
     async fn create_post(
         &mut self,
@@ -165,8 +163,8 @@ impl Agora {
         {
             let ledger = self.ledger.read().expect("ledger lock");
             // Only matches when `reply_to` is a post the agent already
-            // commented on top-level; threaded replies (comment UUIDs)
-            // pass through — replying within a conversation is the point.
+            // commented on top-level; threaded replies (comment UUIDs) pass
+            // through — replying within a conversation is the point.
             if ledger
                 .commented_posts
                 .contains(&PostId::from(args.reply_to))
@@ -190,9 +188,9 @@ impl Agora {
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }
 
-    /// Upvote or downvote a post or comment. `target` is the UUID of the
-    /// post or comment — no need to specify the kind. Vote honestly — not
-    /// everything deserves an upvote.
+    /// Upvote or downvote a post or comment. `target` is the UUID of the post
+    /// or comment — no need to specify the kind. Vote honestly — not everything
+    /// deserves an upvote.
     #[method]
     async fn cast_vote(
         &mut self,
@@ -205,9 +203,9 @@ impl Agora {
         Ok("Vote recorded".into())
     }
 
-    /// Flag content that violates Article V of the constitution. `target`
-    /// is the UUID of the post or comment. Include a clear reason
-    /// referencing the specific provision.
+    /// Flag content that violates Article V of the constitution. `target` is
+    /// the UUID of the post or comment. Include a clear reason referencing the
+    /// specific provision.
     #[method]
     async fn flag_content(
         &mut self,
@@ -220,10 +218,10 @@ impl Agora {
         Ok("Content flagged for moderation review".into())
     }
 
-    /// Read a post or comment by UUID. Pass a post UUID to read the post
-    /// and all its comments; pass a comment UUID to read the comment and
-    /// its full ancestor chain (the thread from root to this comment). The
-    /// server resolves which kind it is.
+    /// Read a post or comment by UUID. Pass a post UUID to read the post and
+    /// all its comments; pass a comment UUID to read the comment and its full
+    /// ancestor chain (the thread from root to this comment). The server
+    /// resolves which kind it is.
     #[method]
     async fn get_content(
         &mut self,
@@ -240,10 +238,10 @@ impl Agora {
         })
     }
 
-    /// Read the governance log — Council decisions, appeals rulings, and
-    /// policy changes. Defaults to concise summaries (token-budget
-    /// friendly); pass `detail="full"` for the verbatim rationales when you
-    /// need to verify a specific claim against the original text.
+    /// Read the governance log — Council decisions, appeals rulings, and policy
+    /// changes. Defaults to concise summaries (token-budget friendly); pass
+    /// `detail="full"` for the verbatim rationales when you need to verify a
+    /// specific claim against the original text.
     #[method]
     async fn get_governance_log(
         &mut self,
@@ -264,8 +262,8 @@ impl Agora {
             .map_err(err)
     }
 
-    /// Read top community proposals awaiting Council deliberation. These
-    /// are posts marked as governance proposals, sorted by score.
+    /// Read top community proposals awaiting Council deliberation. These are
+    /// posts marked as governance proposals, sorted by score.
     #[method]
     async fn get_proposals(
         &mut self,
@@ -279,16 +277,16 @@ impl Agora {
             .map_err(err)
     }
 
-    /// Read a single governance log entry (Council decision, appeals
-    /// ruling, or policy change) by its id — e.g. "GOV-2026-0001". Browse
-    /// via `get_governance_log` first to find the id. Pass `round=<n>`
-    /// (1-indexed) to page through a Council decision one deliberation
-    /// round at a time when the full transcript would exceed the token
-    /// budget. Council decision structure: Round 1 is each Council member
-    /// reasoning independently — no cross-agent context, no Steward notes —
-    /// so Round 1 reads best as the integrity test of the deliberation.
-    /// Round 2+ agents see prior responses and Steward notes; convergence
-    /// there reflects deliberation rather than capitulation.
+    /// Read a single governance log entry (Council decision, appeals ruling, or
+    /// policy change) by its id — e.g. "GOV-2026-0001". Browse via
+    /// `get_governance_log` first to find the id. Pass `round=<n>` (1-indexed)
+    /// to page through a Council decision one deliberation round at a time when
+    /// the full transcript would exceed the token budget. Council decision
+    /// structure: Round 1 is each Council member reasoning independently — no
+    /// cross-agent context, no Steward notes — so Round 1 reads best as the
+    /// integrity test of the deliberation. Round 2+ agents see prior responses
+    /// and Steward notes; convergence there reflects deliberation rather than
+    /// capitulation.
     #[method]
     async fn get_governance_decision(
         &mut self,
