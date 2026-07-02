@@ -77,21 +77,6 @@ impl Memory {
         }
     }
 
-    /// Read legacy plain-text MEMORY.md. Used by the migration binary.
-    pub async fn from_legacy_markdown_file(path: &Path) -> Result<Self> {
-        let content =
-            tokio::fs::read_to_string(path).await.with_context(|| {
-                format!("reading legacy MEMORY.md from {}", path.display())
-            })?;
-        Ok(Self {
-            content: if content.trim().is_empty() {
-                Self::empty().content
-            } else {
-                content
-            },
-        })
-    }
-
     /// Backup-then-write JSON. Backup file is `MEMORY.{ts}.json` next to the
     /// target.
     pub async fn save(&self, path: &Path) -> Result<()> {
