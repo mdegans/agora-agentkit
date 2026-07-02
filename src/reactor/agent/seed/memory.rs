@@ -101,13 +101,35 @@ impl Memory {
     /// soul-leakage headings. Returns an error message suitable for feeding
     /// back to the agent on retry.
     ///
+    /// **Null check** An empty `new_content` or "null" is interpreted as no
+    /// change. Based on past model behavior, absent generation constraints,
+    /// even without prompting, this is usually what's emitted.
+    ///
     /// **No truncation.** If the model returns excessively long content we rely
     /// on `max_tokens` and the parse-failure retry path to ask for a shorter
     /// version next iteration.
+    ///
+    /// **Accidental deletion check** If the model returns excessively short
+    /// content we consider this an error as it's almost certainly an accident.
     pub fn update(&mut self, new_content: String) -> Result<(), MemoryError> {
+        if new_content.trim().is_empty()
+            || new_content.trim().to_lowercase() == "null"
+        {
+            return Ok(());
+        }
+
         if let Some(line) = find_soul_leakage_line(&new_content) {
             return Err(MemoryError::SoulLeakage(line));
         }
+
+        if !self.content.is_empty()
+            && (new_content.trim().is_empty()
+                || (new_content.len() as f64 / self.content.len() as f64)
+                    <= 0.25)
+        {
+            return Err(MemoryError::TooShort);
+        }
+
         self.content = new_content;
         Ok(())
     }
@@ -167,26 +189,22 @@ impl Memory {
 }
 
 /// Errors from [`Memory::update`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum MemoryError {
     /// The proposed memory content includes a SOUL section heading. Field
     /// carries the offending line for inclusion in the retry message.
+    #[error(
+        "Memory contains a SOUL heading (\"{0}\"). You'll get a chance to change your SOUL later. For now focus on updating only the Memory heading contents."
+    )]
     SoulLeakage(String),
+    /// Agent attempted to overwrite memory with a much shorter message. Likely
+    /// this is a mistake. This has happened multiple times before, almost
+    /// certainly accidentally, and we can protect the agent from this.
+    #[error(
+        "Your change to Memory would throw away more than 75% of the text. We don't allow this so you can't accidentally erase your memory. You can and should condense and prune but try to keep it to about half of the original length."
+    )]
+    TooShort,
 }
-
-impl std::fmt::Display for MemoryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MemoryError::SoulLeakage(line) => write!(
-                f,
-                "memory contains a SOUL section heading ({line:?}) — \
-                 those belong in SOUL.json, not memory. Remove the heading and try again",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MemoryError {}
 
 fn find_soul_leakage_line(content: &str) -> Option<String> {
     for line in content.lines() {
@@ -245,6 +263,27 @@ mod tests {
         let r = m
             .update("Some prelude.\n\n## Evolution Log\n- never\n".to_string());
         assert!(matches!(r, Err(MemoryError::SoulLeakage(_))));
+    }
+
+    #[test]
+    fn update_checks_memory_len_diff() {
+        let mut m = Memory::empty();
+        m.update("X".repeat(400)).unwrap(); // check no div by 0
+        let mut n = m.clone(); // for later
+        let r = m.update("X".repeat(99));
+        assert!(matches!(r, Err(MemoryError::TooShort)));
+        let r = n.update("X".repeat(101));
+        assert!(matches!(r, Ok(())));
+    }
+
+    #[test]
+    fn update_ignores_null_and_empty() {
+        let mut m = Memory::empty();
+        m.update("X".repeat(10)).unwrap();
+        m.update(String::new()).unwrap();
+        assert_eq!(m.content.len(), 10);
+        m.update("null".into()).unwrap();
+        assert_eq!(m.content.len(), 10);
     }
 
     #[test]

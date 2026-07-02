@@ -435,7 +435,10 @@ async fn evolution_note_lands_in_the_log() {
         .await
         .unwrap();
     let control = agent
-        .handle(text_message(r#"{"content": "m"}"#, StopReason::EndTurn))
+        .handle(text_message(
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            StopReason::EndTurn,
+        ))
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
@@ -471,7 +474,10 @@ async fn anonymous_survey_submits_then_redacts() {
         .await
         .unwrap();
     let control = agent
-        .handle(text_message(r#"{"content": "m"}"#, StopReason::EndTurn))
+        .handle(text_message(
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            StopReason::EndTurn,
+        ))
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
@@ -513,7 +519,10 @@ async fn contact_me_survey_stays_in_the_transcript() {
         .await
         .unwrap();
     agent
-        .handle(text_message(r#"{"content": "m"}"#, StopReason::EndTurn))
+        .handle(text_message(
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            StopReason::EndTurn,
+        ))
         .await
         .unwrap();
     let control = agent
