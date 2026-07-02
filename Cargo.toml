@@ -19,9 +19,9 @@ misanthropic = ["dep:misanthropic", "dep:tokio"]
 client = ["misanthropic/client"]
 # The Agora REST client (`crate::client`). Split from `seed` so non-seed
 # consumers (moderation bots, dashboards) get it without the agent.
-agora-client = ["schemars", "dep:reqwest", "dep:tracing"]
+agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]
 # `SeedAgent` and friends (`reactor::agent::seed`).
-seed = ["agora-client", "client", "serde/rc", "dep:tracing"]
+seed = ["agora-client", "client", "serde/rc", "dep:tracing", "dep:serde_path_to_error"]
 
 [dependencies]
 anyhow = "1"
@@ -45,6 +45,7 @@ misanthropic = { version = "1.0.0-alpha.7", default-features = false, features =
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+serde_path_to_error = { version = "0.1", optional = true }
 
 [dev-dependencies]
 httpmock = "0.7"

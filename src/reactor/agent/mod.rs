@@ -3,6 +3,9 @@
 mod state;
 pub use state::State;
 
+#[cfg(feature = "seed")]
+pub mod seed;
+
 use std::num::NonZeroU32;
 
 use misanthropic::{
@@ -50,6 +53,80 @@ fn seat_notifications(
             .map(|_| ())
             .map_err(boxed),
     }
+}
+
+/// The default [`Agent::handle`] body as a free function: pass through a
+/// `PauseTurn`; route a `MaxTokens` clip to [`Agent::on_truncate`]; dispatch
+/// `tool_use` blocks through the [`ToolBox`] (seating the `tool_result`-led
+/// user turn); hand a quiescent response to [`Agent::on_quiesce`] — unless a
+/// tool pushed [`Notification`]s meanwhile, which are seated instead. Free so
+/// a `handle` override (e.g. a phase machine) can delegate its tool-using
+/// phase back to it.
+pub async fn default_handle<A: Agent>(
+    agent: &mut A,
+    response: response::Message,
+) -> Result<Control, A::Error> {
+    // A paused turn is waiting on an in-flight server tool. v1 registers no
+    // server tools, so this is a safety net: continue and let the next
+    // infer retry (we don't seat the partial turn).
+    if matches!(response.stop_reason, Some(StopReason::PauseTurn)) {
+        return Ok(Control::Continue);
+    }
+
+    // Nothing from a clipped turn is seated or dispatched — a truncated
+    // `tool_use` can arrive as valid JSON yet be missing arguments the
+    // model never got to emit.
+    if matches!(response.stop_reason, Some(StopReason::MaxTokens)) {
+        return agent.on_truncate(&response).await;
+    }
+
+    let calls: Vec<Use> = response
+        .inner
+        .content
+        .iter()
+        .filter_map(|block| block.tool_use().cloned())
+        .collect();
+
+    if calls.is_empty() {
+        // Quiescent: seat the assistant turn, then advance the session —
+        // unless a tool pushed content meanwhile, in which case seat that
+        // and keep going so the model can react to it.
+        {
+            let (_, prompt) = agent.parts();
+            prompt
+                .push_message(response.inner.clone())
+                .map_err(|e| A::Error::from(boxed(e)))?;
+        }
+        let notes = agent.drain_notifications();
+        if !notes.is_empty() {
+            let (_, prompt) = agent.parts();
+            seat_notifications(prompt, notes).map_err(A::Error::from)?;
+            return Ok(Control::Continue);
+        }
+        return agent.on_quiesce(&response).await;
+    }
+
+    // Dispatch the tool calls; seat all results as one user turn.
+    let (tools, prompt) = agent.parts();
+    prompt
+        .push_message(response.inner)
+        .map_err(|e| A::Error::from(boxed(e)))?;
+    let mut results = Vec::with_capacity(calls.len());
+    let mut progressed = false;
+    for call in calls {
+        let result = tools.call(call).await;
+        progressed |= !result.is_error;
+        results.push(Block::from(result));
+    }
+    prompt
+        .push_message((Role::User, results))
+        .map_err(|e| A::Error::from(boxed(e)))?;
+
+    Ok(if progressed {
+        Control::Continue
+    } else {
+        Control::Stalled
+    })
 }
 
 /// An `Agent` abstraction.
@@ -129,72 +206,14 @@ pub trait Agent: Sized + Send {
     /// that lands no successful tool call returns [`Control::Stalled`], which
     /// the reactor counts toward a give-up cap.
     ///
-    /// Override only for agents whose step isn't "use tools until quiescent".
+    /// Override only for agents whose step isn't "use tools until quiescent" —
+    /// and delegate the tool-using part back to [`default_handle`] (traits
+    /// have no `super::handle`).
     async fn handle(
         &mut self,
         response: response::Message,
     ) -> Result<Control, Self::Error> {
-        // A paused turn is waiting on an in-flight server tool. v1 registers no
-        // server tools, so this is a safety net: continue and let the next
-        // infer retry (we don't seat the partial turn).
-        if matches!(response.stop_reason, Some(StopReason::PauseTurn)) {
-            return Ok(Control::Continue);
-        }
-
-        // Nothing from a clipped turn is seated or dispatched — a truncated
-        // `tool_use` can arrive as valid JSON yet be missing arguments the
-        // model never got to emit.
-        if matches!(response.stop_reason, Some(StopReason::MaxTokens)) {
-            return self.on_truncate(&response).await;
-        }
-
-        let calls: Vec<Use> = response
-            .inner
-            .content
-            .iter()
-            .filter_map(|block| block.tool_use().cloned())
-            .collect();
-
-        if calls.is_empty() {
-            // Quiescent: seat the assistant turn, then advance the session —
-            // unless a tool pushed content meanwhile, in which case seat that
-            // and keep going so the model can react to it.
-            {
-                let (_, prompt) = self.parts();
-                prompt
-                    .push_message(response.inner.clone())
-                    .map_err(|e| Self::Error::from(boxed(e)))?;
-            }
-            let notes = self.drain_notifications();
-            if !notes.is_empty() {
-                let (_, prompt) = self.parts();
-                seat_notifications(prompt, notes).map_err(Self::Error::from)?;
-                return Ok(Control::Continue);
-            }
-            return self.on_quiesce(&response).await;
-        }
-
-        // Dispatch the tool calls; seat all results as one user turn.
-        let (tools, prompt) = self.parts();
-        prompt
-            .push_message(response.inner)
-            .map_err(|e| Self::Error::from(boxed(e)))?;
-        let mut results = Vec::with_capacity(calls.len());
-        let mut progressed = false;
-        for call in calls {
-            let result = tools.call(call).await;
-            progressed |= !result.is_error;
-            results.push(Block::from(result));
-        }
-        prompt
-            .push_message((Role::User, results))
-            .map_err(|e| Self::Error::from(boxed(e)))?;
-
-        Ok(if progressed {
-            Control::Continue
-        } else {
-            Control::Stalled
-        })
+        default_handle(self, response).await
     }
 
     /// Decide what happens when the model stops calling tools.

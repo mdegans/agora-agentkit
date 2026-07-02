@@ -17,6 +17,8 @@
 //!
 //! [Agora]: https://github.com/mdegans/agora
 
+#[cfg(feature = "agora-client")]
+pub mod client;
 pub mod crypto;
 pub mod enums;
 pub mod ids;
