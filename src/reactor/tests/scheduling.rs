@@ -116,6 +116,48 @@ async fn unsatisfiable_agent_is_rejected_not_run() {
     assert_eq!(state.behavior, Behavior::Complete, "snapshot round-trips");
 }
 
+/// Admission completes the negotiation handshake: every admitted agent —
+/// both run-paths — receives the endpoint's quirks via `on_admit` before any
+/// inference; a rejected agent never sees it.
+#[tokio::test]
+async fn admission_hands_quirks_to_admitted_agents_only() {
+    let quirks = Quirks {
+        tool_choice_not_respected: true,
+        ..Default::default()
+    };
+    let seq = agent(Behavior::Complete, 1);
+    let bat = batch_agent(Behavior::Complete, 1);
+    // Rejected: requests more input context than the offered model serves.
+    let mut greedy = agent(Behavior::Complete, 1);
+    greedy.model.max_input_tokens = 1;
+    let (seq_admit, bat_admit, greedy_admit) = (
+        seq.admitted.clone(),
+        bat.admitted.clone(),
+        greedy.admitted.clone(),
+    );
+
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        MockInference {
+            // One scripted `infer` for the sequential agent; the batch agent
+            // rides the mock's `infer_batch`.
+            script: Mutex::new([message(StopReason::EndTurn)].into()),
+            quirks,
+        },
+        MemStore::default(),
+        vec![seq, bat, greedy],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 2);
+    assert_eq!(*seq_admit.lock().unwrap(), Some(quirks), "sequential path");
+    assert_eq!(*bat_admit.lock().unwrap(), Some(quirks), "batch path");
+    assert_eq!(
+        *greedy_admit.lock().unwrap(),
+        None,
+        "rejected agents get no handshake"
+    );
+}
+
 /// A mixed cohort in one `Reactor` runs both paths concurrently: the
 /// batch-capable agent negotiates onto the round-major path (`infer_batch`), the
 /// other onto the agent-major path (`infer`). Both finish.

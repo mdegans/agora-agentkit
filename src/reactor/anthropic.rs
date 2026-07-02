@@ -8,28 +8,100 @@
 //! [`Reactor`](super::Reactor).
 //!
 //! [Batch API]: misanthropic::Client::batch
-// FIXME(mdegans): this still assumes an Anthropic endpoint. The next step
-// (deferred) is an `endpoint_variant` so ollama/blallama — which serve
-// /v1/messages but not /v1/models — route `models()` to /chat/tags and
-// synthesize a `Models` (batch always false). When doing so, CLEAR the request
-// headers first so the API key never reaches a localhost/LAN endpoint in the
-// clear.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
+use misanthropic::model::{ModelInfo, Models};
 use misanthropic::{batch, response};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::RetryAfter;
 use super::backend::Inference;
+use super::inference::Quirks;
 
 /// Default [`Client`] batch chunk size — larger cohorts are split across
 /// submissions.
 const DEFAULT_MAX_BATCH: usize = 1000;
 /// Default [`Client`] period between batch polls.
 const DEFAULT_POLL_PERIOD: Duration = Duration::from_secs(5);
+/// A key of valid length that stands in for the real one on local variants,
+/// so the real key can never leak to a localhost/LAN endpoint in the clear.
+const DUMMY_KEY: &str = "sk-ant-api03-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+/// Which `/v1/messages` implementation the [`Client`] points at. Converts to
+/// the data-only [`Quirks`] that crosses to agents — behavioral lore stays
+/// here, behind the `client` gate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EndpointVariant {
+    /// The real Anthropic API.
+    #[default]
+    Anthropic,
+    /// ollama's Anthropic-compat layer.
+    Ollama,
+    /// The `drama_llama` server: Anthropic-conformant, deviations are bugs —
+    /// except improvements.
+    Blallama,
+}
+
+impl From<EndpointVariant> for Quirks {
+    fn from(variant: EndpointVariant) -> Self {
+        let mut quirks = Quirks::default();
+        match variant {
+            EndpointVariant::Anthropic => {}
+            EndpointVariant::Ollama => {
+                quirks.cache_markers_ignored = true;
+                quirks.tool_choice_not_respected = true;
+                quirks.cache_stats_unreported = true;
+            }
+            EndpointVariant::Blallama => {
+                quirks.breakpoint_after_assistant = true;
+                quirks.output_config_cache_safe = true;
+            }
+        }
+        quirks
+    }
+}
+
+/// An ollama/blallama `GET /api/tags` body — the subset [`models`]
+/// synthesizes from.
+///
+/// [`models`]: Inference::models
+#[derive(Deserialize)]
+struct Tags {
+    #[serde(default)]
+    models: Vec<Tag>,
+}
+
+#[derive(Deserialize)]
+struct Tag {
+    name: String,
+    #[serde(default)]
+    modified_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Synthesize [`Models`] from a `/api/tags` body: custom ids, no
+/// [`Capabilities`] (notably batch = false), unreported token ceilings.
+///
+/// [`Capabilities`]: misanthropic::model::Capabilities
+fn models_from_tags(body: &str) -> Result<Models, misanthropic::client::Error> {
+    let tags: Tags = serde_json::from_str(body)?;
+    Ok(tags
+        .models
+        .into_iter()
+        .map(|tag| ModelInfo {
+            id: tag.name.clone().into(),
+            display_name: tag.name.into(),
+            capabilities: Default::default(),
+            max_input_tokens: 0,
+            max_tokens: 0,
+            kind: Default::default(),
+            created_at: tag.modified_at.unwrap_or_default(),
+        })
+        .collect())
+}
 
 // Forward the `Retry-After` that Anthropic sends on 429/529; everything else is
 // fatal. `AnthropicError::retry_after` is the upstream accessor that turns the
@@ -48,6 +120,7 @@ impl RetryAfter for misanthropic::client::Error {
 /// `Client::message`; [`infer_batch`](Inference::infer_batch) uses the Batch API.
 pub struct Client {
     client: misanthropic::Client,
+    variant: EndpointVariant,
     concurrency: NonZeroUsize,
     /// Maximum prompts per batch submission; larger cohorts are chunked.
     max_batch: usize,
@@ -56,17 +129,36 @@ pub struct Client {
 }
 
 impl Client {
-    /// Wrap a [`misanthropic::Client`]. Concurrency defaults to 1; batches chunk
-    /// at [`DEFAULT_MAX_BATCH`] and poll every [`DEFAULT_POLL_PERIOD`]. See
+    /// Wrap a [`misanthropic::Client`]. Variant defaults to Anthropic;
+    /// concurrency to 1; batches chunk at [`DEFAULT_MAX_BATCH`] and poll every
+    /// [`DEFAULT_POLL_PERIOD`]. See [`with_variant`](Self::with_variant) /
     /// [`with_concurrency`](Self::with_concurrency) /
     /// [`with_batch`](Self::with_batch) to tune.
     pub fn new(client: misanthropic::Client) -> Self {
         Self {
             client,
+            variant: EndpointVariant::default(),
             concurrency: 1.try_into().unwrap(),
             max_batch: DEFAULT_MAX_BATCH,
             poll_period: DEFAULT_POLL_PERIOD,
         }
+    }
+
+    /// Set the [`EndpointVariant`]. For non-Anthropic variants this also
+    /// replaces the inner client's API key with [`DUMMY_KEY`] — misanthropic
+    /// attaches the key to every request, and a real key must never reach a
+    /// localhost/LAN endpoint in the clear.
+    pub fn with_variant(mut self, variant: EndpointVariant) -> Self {
+        self.variant = variant;
+        if !matches!(variant, EndpointVariant::Anthropic) {
+            self.client.key = Arc::new(
+                DUMMY_KEY
+                    .to_string()
+                    .try_into()
+                    .expect("DUMMY_KEY has a valid key length"),
+            );
+        }
+        self
     }
 
     /// Change the concurrency limit. Beware rate limits.
@@ -173,10 +265,81 @@ impl Inference for Client {
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, Self::Error> {
-        self.client.models().await
+        match self.variant {
+            EndpointVariant::Anthropic => self.client.models().await,
+            // ollama/blallama don't serve /v1/models; discover via /api/tags.
+            // Deliberately through the bare `inner` and not a keyed helper
+            // like `get_raw`: no API key may reach a local endpoint.
+            EndpointVariant::Ollama | EndpointVariant::Blallama => {
+                let url = self.client.messages_url.join("/api/tags").map_err(
+                    |_| misanthropic::client::Error::UnexpectedResponse {
+                        message: "cannot derive /api/tags from messages_url",
+                    },
+                )?;
+                let body = self
+                    .client
+                    .inner
+                    .get(url)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await?;
+                models_from_tags(&body)
+            }
+        }
+    }
+
+    fn quirks(&self) -> Quirks {
+        self.variant.into()
     }
 
     fn max_concurrency(&self) -> NonZeroUsize {
         self.concurrency
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The variant → quirks lore: Anthropic is the all-`false` default;
+    /// ollama and blallama each deviate exactly where documented.
+    #[test]
+    fn variant_quirks_mapping() {
+        assert_eq!(Quirks::from(EndpointVariant::Anthropic), Quirks::default());
+
+        let ollama = Quirks::from(EndpointVariant::Ollama);
+        assert!(ollama.cache_markers_ignored);
+        assert!(ollama.tool_choice_not_respected);
+        assert!(ollama.cache_stats_unreported);
+        assert!(!ollama.breakpoint_after_assistant);
+        assert!(!ollama.output_config_cache_safe);
+
+        let blallama = Quirks::from(EndpointVariant::Blallama);
+        assert!(blallama.breakpoint_after_assistant);
+        assert!(blallama.output_config_cache_safe);
+        assert!(!blallama.cache_markers_ignored);
+        assert!(!blallama.tool_choice_not_respected);
+        assert!(!blallama.cache_stats_unreported);
+    }
+
+    /// `/api/tags` synthesis: custom ids, batch unsupported, ceilings
+    /// unreported — and a missing `modified_at` doesn't fail the parse.
+    #[test]
+    fn models_from_tags_synthesizes() {
+        let body = r#"{
+            "models": [
+                {"name": "llama3.3:70b", "modified_at": "2026-01-01T00:00:00Z"},
+                {"name": "qwen3:32b"}
+            ]
+        }"#;
+        let models = models_from_tags(body).unwrap();
+        let infos: Vec<&ModelInfo> = models.iter().collect();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].id.name(), "llama3.3:70b");
+        assert!(!infos[0].capabilities.batch.supported, "batch never");
+        assert_eq!(infos[0].max_tokens, 0, "ceiling unreported");
+        assert_eq!(infos[1].id.name(), "qwen3:32b");
     }
 }

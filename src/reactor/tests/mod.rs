@@ -25,6 +25,7 @@ use misanthropic::tool::Tool;
 use serde::Serialize;
 
 use super::backend::{Inference, SaveError, Storage};
+use super::inference::Quirks;
 use super::{Agent, AgentNotFound, Control, Outcome, RetryAfter, State};
 use crate::ids::AgentId;
 
@@ -124,6 +125,8 @@ struct TestAgent {
     /// The [`Agent::Context`] received at construction, for asserting the
     /// plumbing.
     ctx: &'static str,
+    /// What [`Agent::on_admit`] received, for asserting the handshake.
+    admitted: Arc<Mutex<Option<Quirks>>>,
 }
 
 impl TestAgent {
@@ -154,6 +157,7 @@ impl Agent for TestAgent {
             model: model_info(false),
             teardowns: Arc::new(AtomicUsize::new(0)),
             ctx: context,
+            admitted: Arc::new(Mutex::new(None)),
         };
         // Establish the "ends in a user turn" invariant.
         agent.push_user("start")?;
@@ -178,6 +182,11 @@ impl Agent for TestAgent {
 
     fn model(&self) -> ModelInfo {
         self.model.clone()
+    }
+
+    /// The default keeps nothing; the tests want proof of the handshake.
+    fn on_admit(&mut self, _model: &ModelInfo, quirks: &Quirks) {
+        *self.admitted.lock().unwrap() = Some(*quirks);
     }
 
     /// The default, plus the counter — so a test can prove teardown ran.
@@ -350,6 +359,8 @@ struct MockInference {
     /// Responses handed out one per `infer`, in order. Draining it dry panics —
     /// an over-long drive loop should fail loudly, not silently `EndTurn`.
     script: Mutex<VecDeque<response::Message>>,
+    /// What `Inference::quirks` reports, for handshake tests.
+    quirks: Quirks,
 }
 
 impl MockInference {
@@ -357,6 +368,7 @@ impl MockInference {
     fn scripted(messages: impl IntoIterator<Item = response::Message>) -> Self {
         Self {
             script: Mutex::new(messages.into_iter().collect()),
+            ..Default::default()
         }
     }
 
@@ -420,6 +432,10 @@ impl Inference for MockInference {
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
         Ok(offered_models())
+    }
+
+    fn quirks(&self) -> Quirks {
+        self.quirks
     }
 }
 

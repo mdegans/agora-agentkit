@@ -22,6 +22,8 @@ pub use agent::{Agent, Control, Outcome, State};
 mod backend;
 pub use backend::{AgentNotFound, Inference, SaveError, Storage};
 
+pub mod inference;
+
 mod orchestrator;
 pub use orchestrator::{Orchestrator, OrchestratorReport};
 
@@ -108,27 +110,28 @@ type Persist<I, S, A> = (A, Result<Outcome, ReactorError<I, S, A>>);
 /// up on it. Without this, an item that always errors would re-batch forever.
 const MAX_BATCH_ITEM_RETRIES: usize = 3;
 
-/// What [`negotiate`] decided for an agent: which run-path, or rejection.
-enum Admission {
+/// What [`negotiate`] decided for an agent: which run-path (borrowing the
+/// negotiated offered [`ModelInfo`], for [`Agent::on_admit`]), or rejection.
+enum Admission<'a> {
     /// Run on the round-major batch path.
-    Batch,
+    Batch(&'a ModelInfo),
     /// Run on the agent-major sequential path.
-    Sequential,
+    Sequential(&'a ModelInfo),
     /// The endpoint can't satisfy the agent's requested capabilities.
     Rejected,
 }
 
 /// Negotiate an agent's requested [`ModelInfo`] against what the endpoint
 /// `offered` ([`Inference::models`]), deciding its run-path.
-fn negotiate(offered: &Models, requested: &ModelInfo) -> Admission {
+fn negotiate<'a>(offered: &'a Models, requested: &ModelInfo) -> Admission<'a> {
     let batch = requested.capabilities.batch.supported;
 
     for model in offered.iter() {
         if model.satisfies(requested) {
             if batch {
-                return Admission::Batch;
+                return Admission::Batch(model);
             } else {
-                return Admission::Sequential;
+                return Admission::Sequential(model);
             }
         }
     }
@@ -699,14 +702,33 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
 
         // Negotiate each agent's requested capabilities against what the endpoint
         // offers, partitioning the cohort into the two run-paths (or rejecting).
+        // Admission completes the handshake: the agent receives the negotiated
+        // model and the endpoint's quirks before any inference.
+        let quirks = self.inference.quirks();
         let agents = std::mem::take(&mut self.agents);
         let mut batch: Vec<A> = Vec::new();
         let mut sequential: Vec<A> = Vec::new();
         let mut rejected: Vec<A> = Vec::new();
-        for agent in agents {
+        for mut agent in agents {
             match negotiate(&offered, &agent.model()) {
-                Admission::Batch => batch.push(agent),
-                Admission::Sequential => sequential.push(agent),
+                Admission::Batch(model) => {
+                    debug_assert_eq!(
+                        agent.prompt().model.name(),
+                        model.id.name(),
+                        "prompt model diverges from the negotiated model"
+                    );
+                    agent.on_admit(model, &quirks);
+                    batch.push(agent);
+                }
+                Admission::Sequential(model) => {
+                    debug_assert_eq!(
+                        agent.prompt().model.name(),
+                        model.id.name(),
+                        "prompt model diverges from the negotiated model"
+                    );
+                    agent.on_admit(model, &quirks);
+                    sequential.push(agent);
+                }
                 Admission::Rejected => rejected.push(agent),
             }
         }

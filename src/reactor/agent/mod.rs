@@ -15,6 +15,7 @@ use misanthropic::{
     tool::{Tool, ToolBox, Use},
 };
 
+use super::inference;
 use crate::ids::AgentId;
 
 /// Box a concrete error into the boxed trait object the lifecycle hooks and
@@ -208,6 +209,25 @@ pub trait Agent: Sized + Send {
     /// [`Capabilities`]: misanthropic::model::Capabilities
     /// [`Inference::models`]: super::Inference::models
     fn model(&self) -> ModelInfo;
+
+    /// Complete the admission handshake: receive the *negotiated* offered
+    /// `model` and the endpoint's [`Quirks`] after negotiation, before any
+    /// inference. Sync by design — configure the [`Prompt`], stash what
+    /// [`quirks`](Agent::quirks) should return. The default keeps nothing.
+    ///
+    /// [`Quirks`]: inference::Quirks
+    fn on_admit(&mut self, model: &ModelInfo, quirks: &inference::Quirks) {
+        let _ = (model, quirks);
+    }
+
+    /// The endpoint [`Quirks`] this agent was admitted with, if it kept them
+    /// (see [`on_admit`](Agent::on_admit)). Provided defaults consume this
+    /// via `unwrap_or_default`.
+    ///
+    /// [`Quirks`]: inference::Quirks
+    fn quirks(&self) -> Option<inference::Quirks> {
+        None
+    }
 }
 
 /// What the reactor should do after [`Agent::handle`] / [`Agent::on_quiesce`].

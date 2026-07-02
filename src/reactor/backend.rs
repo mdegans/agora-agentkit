@@ -70,6 +70,12 @@ pub trait Inference: Send + Sync {
     /// [`Capabilities`], like batch, structured output, thinking, etc.
     async fn models(&self) -> Result<misanthropic::model::Models, Self::Error>;
 
+    /// The endpoint's behavioral [`Quirks`](super::inference::Quirks). The
+    /// default is canonical Anthropic behavior.
+    fn quirks(&self) -> super::inference::Quirks {
+        super::inference::Quirks::default()
+    }
+
     /// How many agents this transport will run at once. `Some(1)` forces
     /// serial-to-completion execution and is the default. None means unbounded.
     ///
