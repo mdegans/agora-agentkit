@@ -31,17 +31,20 @@ pub trait Agent: Sized + Send {
     /// Serializable [`Agent`] `State`. Should include everything necessary to
     /// save/load the agent in the same functional state.
     type State: State;
+    /// Ephemeral per-process context cloned into every [`new`](Agent::new) —
+    /// shared clients, secret handles: anything that must never ride `State`'s
+    /// serialization plane. `()` when none is needed
+    type Context: Clone + Send;
     type Error: super::Error + From<Box<dyn std::error::Error + Send + Sync>>;
 
-    /// Reconstruct from persisted state. Sync and fallible: build the base
-    /// prompt and the [`ToolBox`]; defer *all* async setup to
-    /// [`on_init`](Agent::on_init).
-    // We might need a `Context` associated type to provide ephemeral things
-    // like a clone of a database client to an agent. Otherwise we need another
-    // impl constructor which the reactor can't know to call. So the `Context`
-    // would be Clone and the reactor would hold it and when it creates the
-    // agent, pass a clone to it. Perhaps also Default.
-    fn new(id: AgentId, state: Self::State) -> Result<Self, Self::Error>;
+    /// Reconstruct from persisted state plus per-process `context`. Sync and
+    /// fallible: build the base prompt and the [`ToolBox`]; defer *all* async
+    /// setup to [`on_init`](Agent::on_init).
+    fn new(
+        id: AgentId,
+        state: Self::State,
+        context: Self::Context,
+    ) -> Result<Self, Self::Error>;
 
     /// Unique UUID for this [`Agent`]
     fn id(&self) -> AgentId;

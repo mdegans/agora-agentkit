@@ -121,6 +121,9 @@ struct TestAgent {
     /// Times `on_teardown` ran. The contract is exactly once, however the
     /// drive ends.
     teardowns: Arc<AtomicUsize>,
+    /// The [`Agent::Context`] received at construction, for asserting the
+    /// plumbing.
+    ctx: &'static str,
 }
 
 impl TestAgent {
@@ -135,9 +138,14 @@ impl TestAgent {
 #[async_trait::async_trait]
 impl Agent for TestAgent {
     type State = TestState;
+    type Context = &'static str;
     type Error = TestError;
 
-    fn new(id: AgentId, state: TestState) -> Result<Self, TestError> {
+    fn new(
+        id: AgentId,
+        state: TestState,
+        context: &'static str,
+    ) -> Result<Self, TestError> {
         let mut agent = Self {
             id,
             state,
@@ -145,6 +153,7 @@ impl Agent for TestAgent {
             tools: misanthropic::tool::ToolBox::new(),
             model: model_info(false),
             teardowns: Arc::new(AtomicUsize::new(0)),
+            ctx: context,
         };
         // Establish the "ends in a user turn" invariant.
         agent.push_user("start")?;
@@ -211,6 +220,7 @@ fn agent(behavior: Behavior, turns_left: usize) -> TestAgent {
             turns_left,
             poison: None,
         },
+        "",
     )
     .unwrap()
 }

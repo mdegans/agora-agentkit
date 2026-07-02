@@ -56,7 +56,7 @@ async fn load_agents_round_trips() {
         .unwrap();
 
     let (agents, failures): (Vec<TestAgent>, _) =
-        load_agents(&store, [id1, id2, AgentId::new()].into_iter())
+        load_agents(&store, "shared", [id1, id2, AgentId::new()].into_iter())
             .await
             .unwrap();
 
@@ -64,6 +64,10 @@ async fn load_agents_round_trips() {
     assert_eq!(agents.len(), 2);
     let ids: Vec<_> = agents.iter().map(|a| a.id()).collect();
     assert!(ids.contains(&id1) && ids.contains(&id2));
+    assert!(
+        agents.iter().all(|a| a.ctx == "shared"),
+        "the context reached every construction"
+    );
 }
 
 /// Partial save: a store that commits a prefix then fails. The committed,

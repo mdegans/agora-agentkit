@@ -529,9 +529,11 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     }
 }
 
-/// Bulk-load [`Agent`]s. A Deserialize failure will abort the entire batch
+/// Bulk-load [`Agent`]s, cloning `context` into each construction (see
+/// [`Agent::Context`]). A Deserialize failure will abort the entire batch
 pub async fn load_agents<S: Storage, A: Agent>(
     storage: &S,
+    context: A::Context,
     ids: impl ExactSizeIterator<Item = AgentId> + Send,
 ) -> Result<(Vec<A>, Vec<(AgentId, A::Error)>), S::Error> {
     let raw = storage.load_all::<_, A>(ids).await?;
@@ -539,7 +541,7 @@ pub async fn load_agents<S: Storage, A: Agent>(
     let mut failures = Vec::new();
     for (id, result) in raw {
         match result {
-            Ok(state) => match A::new(id, state) {
+            Ok(state) => match A::new(id, state, context.clone()) {
                 Ok(agent) => agents.push(agent),
                 Err(e) => failures.push((id, e)),
             },
