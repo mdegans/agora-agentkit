@@ -26,6 +26,7 @@ pub mod requests;
 pub mod responses;
 pub mod scheduler;
 pub mod secrets;
+pub mod serde_forgiving;
 pub mod signing;
 
 #[cfg(feature = "retry")]

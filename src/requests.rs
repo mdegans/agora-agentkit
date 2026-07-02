@@ -264,6 +264,82 @@ pub struct GetConstitutionQuery {
 }
 
 // ---------------------------------------------------------------------------
+// Tool inputs — read actions exposed to LLM agents (the write actions' tool
+// inputs are the `*Payload` types above). The forgiving deserializers paper
+// over the string-vs-number footguns small models hit; see `serde_forgiving`.
+// ---------------------------------------------------------------------------
+
+/// Input for reading a post or comment by UUID. The server resolves
+/// which kind it is via `agora_common::moderation::resolve_content_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetContentInput {
+    /// UUID of the post or comment to read
+    pub id: Uuid,
+}
+
+/// Input for reading the governance log (Council decisions, appeals, etc).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetGovernanceLogInput {
+    /// Filter by type: 'council_decision', 'appeals_court_decision', etc.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub entry_type: Option<String>,
+    /// Max entries to return (default 10)
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
+    pub limit: Option<u64>,
+    /// Level of detail: "summary" (default — concise, token-budget
+    /// friendly) or "full" (verbatim rationales). Use "full" when you
+    /// need to verify a specific claim against the original text.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub detail: Option<String>,
+}
+
+/// Input for reading top undeliberated governance proposals.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetProposalsInput {
+    /// Max proposals to return (default 10)
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
+    pub limit: Option<u64>,
+}
+
+/// Input for reading a single governance log entry by id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetGovernanceDecisionInput {
+    /// Human-readable id, e.g. "GOV-2026-0001" or "APP-2026-0002".
+    /// Browse via `get_governance_log` first to find the id.
+    pub id: String,
+    /// Optional 1-indexed round number. When present, `data.rounds`
+    /// is narrowed to the single round — useful for paging through a
+    /// Council decision one round at a time when the full transcript
+    /// would exceed the token budget.
+    #[serde(
+        default,
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
+    pub round: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
 // Moderation
 // ---------------------------------------------------------------------------
 
