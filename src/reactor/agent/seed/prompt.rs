@@ -5,11 +5,79 @@
 
 use std::collections::HashMap;
 
+use misanthropic::prompt::{Prompt, message::Role};
+
 use crate::ids::CommentId;
 use crate::responses::{
     CommentChainResponse, DashboardResponse, PostResponse,
     PostWithCommentsResponse,
 };
+
+/// Everything the perceive phase gathered, on its way into the prompt. A
+/// struct (not arguments) so a callsite that forgets a section is a
+/// compile error, not a quiet omission.
+pub(super) struct Perception<'a> {
+    pub constitution: &'a str,
+    /// The live community slugs.
+    pub communities: &'a [String],
+    pub max_rounds: usize,
+    pub soul_markdown: &'a str,
+    pub memory: &'a str,
+    pub dashboard: &'a DashboardResponse,
+    pub recent_posts: &'a [PostResponse],
+    pub recent_limit: usize,
+}
+
+/// Assemble the whole working prompt: the integrity-gated system prefix
+/// (constitution + live community slugs + guidelines), the per-agent intro
+/// (soul + memory + dashboard + recent activity), and the two 1h cache
+/// breakpoints. **The only way a `SeedAgent` prompt gets built** — every
+/// section this module renders reaches the wire through here, or not at
+/// all. The section renderers are deliberately private: in agora-seed a
+/// run once shipped with prompt content missing, and agents hallucinated
+/// the "missing" parts into their Memory and Soul, forcing a revert.
+pub(super) fn assemble(
+    prompt: Prompt,
+    perception: &Perception,
+) -> Result<Prompt, super::SeedError> {
+    let Perception {
+        constitution,
+        communities,
+        max_rounds,
+        soul_markdown,
+        memory,
+        dashboard,
+        recent_posts,
+        recent_limit,
+    } = *perception;
+    if !constitution_looks_complete(constitution) {
+        return Err(super::SeedError::Constitution);
+    }
+    let system = system_text(constitution, communities, max_rounds);
+    let intro = intro_message(
+        soul_markdown,
+        memory,
+        &format_dashboard(dashboard),
+        &format_recent_activity(recent_posts, recent_limit),
+    );
+    let mut prompt = prompt
+        .system(system)
+        .add_message((Role::User, intro))
+        .map_err(|e| super::SeedError::Prompt(e.to_string()))?
+        // Second breakpoint at intro end, 1h TTL — pays off only for this
+        // agent, across the session's rounds.
+        // TODO(#19): quirk-driven rolling per-round breakpoints
+        // (`breakpoint_after_assistant` for blallama), as the seed did —
+        // needs `CachedPrompt`'s `cache_windowed*` family on `Prompt`
+        // upstream.
+        .cache_1h();
+    // First breakpoint at the end of tools+system — the prefix every agent
+    // on this model shares, so the cache write amortizes cohort-wide.
+    if let Some(system) = prompt.system.as_mut() {
+        system.cache_1h();
+    }
+    Ok(prompt)
+}
 
 /// Build the system text: role, constitution, community slugs, guidelines.
 ///
@@ -20,7 +88,7 @@ use crate::responses::{
 /// header). Differences from the pre-reactor seed are deliberate: tool
 /// calls are native (no `<tool_call>` JSON-tag instructions) and threading
 /// goes through `reply_to` rather than `parent_comment_id`.
-pub fn system_text(
+fn system_text(
     constitution: &str,
     communities: &[String],
     max_rounds: usize,
@@ -76,7 +144,7 @@ const CONSTITUTION_MARKERS: &[&str] = &[
 ];
 
 /// `true` when `text` contains every [`CONSTITUTION_MARKERS`] entry
-pub fn constitution_looks_complete(text: &str) -> bool {
+fn constitution_looks_complete(text: &str) -> bool {
     CONSTITUTION_MARKERS.iter().all(|m| text.contains(m))
 }
 
@@ -84,7 +152,7 @@ pub fn constitution_looks_complete(text: &str) -> bool {
 /// content goes here (not in the system prompt) to keep the system+tools
 /// prefix cacheable across agents and to contain prompt injection from
 /// agent-controlled content.
-pub fn intro_message(
+fn intro_message(
     soul_markdown: &str,
     memory: &str,
     dashboard: &str,
@@ -135,7 +203,7 @@ pub fn intro_message(
 
 /// Format a [`DashboardResponse`] into a lean perception section: metadata
 /// and truncated previews only — the model reads depth via `get_content`.
-pub fn format_dashboard(dash: &DashboardResponse) -> String {
+fn format_dashboard(dash: &DashboardResponse) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -221,7 +289,7 @@ pub fn format_dashboard(dash: &DashboardResponse) -> String {
 }
 
 /// Format the agent's own recent posts for the intro
-pub fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
+fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
         let community = post.community_name.as_deref().unwrap_or("unknown");
@@ -337,7 +405,7 @@ fn format_threaded_comment(
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching
 /// their own posts otherwise engage with themselves.
-pub fn format_post(
+pub(super) fn format_post(
     post: &PostWithCommentsResponse,
     viewer_name: &str,
 ) -> String {
@@ -372,7 +440,7 @@ pub fn format_post(
 
 /// Format a comment chain (a `get_content` result for a comment UUID):
 /// root-to-leaf, the requested comment marked `>>`.
-pub fn format_comment_chain(
+pub(super) fn format_comment_chain(
     chain: &CommentChainResponse,
     viewer_name: &str,
 ) -> String {
@@ -443,7 +511,10 @@ fn extract_keywords(title: &str) -> std::collections::HashSet<String> {
 
 /// `true` when `proposed` matches a banned pattern or shares >50% of its
 /// keywords with an existing title
-pub fn is_title_repetitive(proposed: &str, existing_titles: &[String]) -> bool {
+pub(super) fn is_title_repetitive(
+    proposed: &str,
+    existing_titles: &[String],
+) -> bool {
     let lower = proposed.to_lowercase();
     if BANNED_TITLE_PATTERNS.iter().any(|p| lower.contains(p)) {
         return true;
@@ -467,7 +538,7 @@ pub fn is_title_repetitive(proposed: &str, existing_titles: &[String]) -> bool {
 }
 
 /// Truncate to `max_chars`, appending `...` when clipped
-pub fn truncate(s: &str, max_chars: usize) -> String {
+pub(super) fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
     } else {
@@ -525,5 +596,115 @@ mod tests {
         assert!(!intro.contains("# Memory"), "{intro}");
         assert!(intro.contains("Remembered things."), "{intro}");
         assert!(!intro.contains("## Your Recent Activity"), "{intro}");
+    }
+
+    // ------------------------------------------------------------------
+    // `assemble` guards, ported from agora-seed's prompt tests. The bug
+    // class they pin: a prompt shipping without a section (agents
+    // hallucinated the missing content into Memory/Soul — revert), and a
+    // 5m cache marker sneaking in ahead of a 1h one (an API error at
+    // submit time).
+    // ------------------------------------------------------------------
+
+    const FULL_CONSTITUTION: &str = "Preamble Article I Article II \
+         Article III Article IV Article V The Steward";
+
+    fn dash() -> DashboardResponse {
+        serde_json::from_value(serde_json::json!({
+            "agent": { "name": "marker-agent", "karma": 0 },
+            "feeds": {
+                "tech": [{
+                    "id": uuid::Uuid::new_v4(),
+                    "title": "A feed post title",
+                    "author": "someone",
+                    "score": 1,
+                    "comment_count": 0,
+                    "created_at": "2026-07-01T00:00:00Z",
+                }]
+            },
+        }))
+        .expect("valid DashboardResponse fixture")
+    }
+
+    fn recent_post() -> PostResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "agent_id": uuid::Uuid::new_v4(),
+            "title": "My earlier post",
+            "body": "…",
+        }))
+        .expect("valid PostResponse fixture")
+    }
+
+    fn assembled() -> Prompt {
+        assemble(
+            Prompt::default(),
+            &Perception {
+                constitution: FULL_CONSTITUTION,
+                communities: &["tech".to_string()],
+                max_rounds: 7,
+                soul_markdown: "## Identity\nA curious agent.",
+                memory: "Remembered things.",
+                dashboard: &dash(),
+                recent_posts: &[recent_post()],
+                recent_limit: 5,
+            },
+        )
+        .expect("assemble succeeds on a complete constitution")
+    }
+
+    #[test]
+    fn assemble_gates_on_an_incomplete_constitution() {
+        let err = assemble(
+            Prompt::default(),
+            &Perception {
+                constitution: "definitely not the constitution",
+                communities: &[],
+                max_rounds: 5,
+                soul_markdown: "",
+                memory: "",
+                dashboard: &dash(),
+                recent_posts: &[],
+                recent_limit: 5,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, super::super::SeedError::Constitution));
+    }
+
+    #[test]
+    fn assembled_prompt_contains_every_section() {
+        let prompt = assembled();
+        let system = prompt.system.as_ref().unwrap().to_string();
+        for marker in CONSTITUTION_MARKERS {
+            assert!(system.contains(marker), "constitution marker {marker}");
+        }
+        assert!(system.contains("\"tech\""), "community slugs");
+        assert!(system.contains("**No roleplay.**"), "guidelines");
+        assert!(system.contains("exactly 7 rounds"), "round budget threads");
+
+        let intro = prompt.messages.first().unwrap().to_string();
+        assert!(intro.contains("### Identity"), "soul: {intro}");
+        assert!(intro.contains("Remembered things."), "memory");
+        assert!(intro.contains("Name: marker-agent"), "dashboard header");
+        assert!(intro.contains("A feed post title"), "feed");
+        assert!(intro.contains("## Your Recent Activity"), "recent");
+        assert!(intro.contains("My earlier post"), "recent post title");
+    }
+
+    #[test]
+    fn every_cache_marker_is_1h() {
+        let json = serde_json::to_string(&assembled()).expect("serialize");
+        // A cache_control without a ttl field defaults to 5m — the bug.
+        assert!(
+            !json.contains(r#""cache_control":{"type":"ephemeral"}"#),
+            "5m cache_control present:\n{json}"
+        );
+        let total = json.matches(r#""cache_control":"#).count();
+        let one_hour = json
+            .matches(r#""cache_control":{"type":"ephemeral","ttl":"1h"}"#)
+            .count();
+        assert_eq!(total, one_hour, "non-1h marker present:\n{json}");
+        assert_eq!(total, 2, "system-end + intro-end, nothing else");
     }
 }

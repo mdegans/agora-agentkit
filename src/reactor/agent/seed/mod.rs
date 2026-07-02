@@ -13,7 +13,7 @@
 mod keyring;
 mod memory;
 mod output;
-pub mod prompt;
+mod prompt;
 mod shortstring;
 mod soul;
 #[cfg(test)]
@@ -566,10 +566,9 @@ impl Agent for SeedAgent {
         self.quirks
     }
 
-    /// Perceive: install tools, subscribe to their pushes, then seat the
-    /// live system prefix (constitution + communities) and the per-agent
-    /// intro (soul + memory + dashboard + recent activity), each with a
-    /// 1h cache breakpoint.
+    /// Perceive: install tools, subscribe to their pushes, then hand
+    /// everything to [`prompt::assemble`] — the one place the working
+    /// prompt gets built (and the constitution integrity gate).
     async fn on_init(&mut self) -> Result<(), SeedError> {
         {
             let (tools, prompt) = self.parts();
@@ -578,9 +577,6 @@ impl Agent for SeedAgent {
         self.notifications = self.tools.subscribe();
 
         let constitution = self.ctx.client.get_constitution(None).await?;
-        if !prompt::constitution_looks_complete(&constitution.text) {
-            return Err(SeedError::Constitution);
-        }
         self.communities = self
             .ctx
             .client
@@ -609,46 +605,30 @@ impl Agent for SeedAgent {
         }
 
         let recent = match self.ctx.client.get_agent_posts(self.id).await {
-            Ok(posts) => prompt::format_recent_activity(
-                &posts,
-                self.ctx.config.recent_activity_limit,
-            ),
+            Ok(posts) => posts,
             // Perception survives without it — the dashboard is the meal.
             Err(e) => {
                 tracing::warn!("recent activity unavailable: {e}");
-                String::new()
+                Vec::new()
             }
         };
 
-        let system = prompt::system_text(
-            &constitution.text,
-            &self.communities,
-            self.ctx.config.max_rounds,
-        );
-        let intro = prompt::intro_message(
-            &self.state.soul.markdown(),
-            &self.state.memory.render_for_prompt(),
-            &prompt::format_dashboard(&dash),
-            &recent,
-        );
-
-        let working = &mut self.state.prompt;
-        *working = std::mem::take(working)
-            .system(system)
-            .add_message((Role::User, intro))
-            .map_err(|e| SeedError::Prompt(e.to_string()))?
-            // Second breakpoint at intro end, 1h TTL — pays off only for
-            // this agent, across the session's rounds.
-            // TODO(#19): quirk-driven rolling per-round breakpoints
-            // (`breakpoint_after_assistant` for blallama), as the seed did —
-            // needs `CachedPrompt`'s `cache_windowed*` family on `Prompt`
-            // upstream.
-            .cache_1h();
-        // First breakpoint at the end of tools+system — the prefix every
-        // agent on this model shares, so the write amortizes cohort-wide.
-        if let Some(system) = working.system.as_mut() {
-            system.cache_1h();
-        }
+        let soul_markdown = self.state.soul.markdown();
+        let memory = self.state.memory.render_for_prompt();
+        let working = std::mem::take(&mut self.state.prompt);
+        self.state.prompt = prompt::assemble(
+            working,
+            &prompt::Perception {
+                constitution: &constitution.text,
+                communities: &self.communities,
+                max_rounds: self.ctx.config.max_rounds,
+                soul_markdown: &soul_markdown,
+                memory: &memory,
+                dashboard: &dash,
+                recent_posts: &recent,
+                recent_limit: self.ctx.config.recent_activity_limit,
+            },
+        )?;
         Ok(())
     }
 
