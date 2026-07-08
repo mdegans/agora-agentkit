@@ -65,10 +65,8 @@ pub(super) fn assemble(
         .add_message((Role::User, intro))
         .map_err(|e| super::SeedError::Prompt(e.to_string()))?
         // Second breakpoint at intro end, 1h TTL — pays off only for this
-        // agent, across the session's rounds. TODO(#19): quirk-driven rolling
-        // per-round breakpoints (`breakpoint_after_assistant` for blallama), as
-        // the seed did — needs `CachedPrompt`'s `cache_windowed*` family on
-        // `Prompt` upstream.
+        // agent, across the session's rounds. The per-round rolling markers
+        // are the default `Agent::on_turn`'s job (`agent::cache`, #19).
         .cache_1h();
     // First breakpoint at the end of tools+system — the prefix every agent on
     // this model shares, so the cache write amortizes cohort-wide.

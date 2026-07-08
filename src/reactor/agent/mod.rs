@@ -1,5 +1,6 @@
 //! [`Agent`] and related traits like [`State`]
 
+pub mod cache;
 mod state;
 pub use state::State;
 
@@ -266,9 +267,12 @@ pub trait Agent: Sized + Send {
         Ok(())
     }
 
-    /// Refresh per-turn tool context, then merge any pushed
-    /// [`Notification`]s into the outgoing user turn. Called before each
-    /// `infer`.
+    /// Refresh per-turn tool context, merge any pushed [`Notification`]s
+    /// into the outgoing user turn, then [`roll_breakpoints`] per the
+    /// admitted [`quirks`](Agent::quirks). Called before each `infer` — an
+    /// override that still wants cached tails must keep the roll last.
+    ///
+    /// [`roll_breakpoints`]: cache::roll_breakpoints
     async fn on_turn(&mut self) -> Result<(), Self::Error> {
         {
             let (tools, prompt) = self.parts();
@@ -279,6 +283,9 @@ pub trait Agent: Sized + Send {
             let (_, prompt) = self.parts();
             seat_notifications(prompt, notes).map_err(Self::Error::from)?;
         }
+        let quirks = self.quirks().unwrap_or_default();
+        let (_, prompt) = self.parts();
+        cache::roll_breakpoints(&quirks, prompt);
         Ok(())
     }
 
