@@ -17,12 +17,18 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 mod agent;
+pub use agent::cache;
 #[cfg(feature = "seed")]
 pub use agent::seed;
 pub use agent::{Agent, Control, Outcome, State, default_handle};
 
 mod backend;
 pub use backend::{AgentNotFound, Inference, SaveError, Storage};
+
+#[cfg(feature = "fs-storage")]
+pub mod storage;
+#[cfg(feature = "fs-storage")]
+pub use storage::FsStorage;
 
 pub mod inference;
 

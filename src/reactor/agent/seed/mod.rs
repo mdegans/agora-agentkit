@@ -20,7 +20,7 @@ mod soul;
 mod tests;
 mod tool;
 
-pub use keyring::Keyring;
+pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use shortstring::{ShortString, ShortStringError};
 pub use soul::{

@@ -17,6 +17,8 @@ retry = ["misanthropic", "dep:tokio", "dep:tracing"]
 misanthropic = ["dep:misanthropic", "dep:tokio"]
 # Because for the moment it prevents wasm build
 client = ["misanthropic/client"]
+# `FsStorage` (`reactor::storage`): the directory-per-agent disk backend.
+fs-storage = ["misanthropic", "tokio/fs"]
 # The Agora REST client (`crate::client`). Split from `seed` so non-seed
 # consumers (moderation bots, dashboards) get it without the agent.
 agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]
