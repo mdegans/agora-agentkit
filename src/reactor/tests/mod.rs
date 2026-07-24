@@ -7,6 +7,8 @@
 //!   continuation, the turn-order invariant, and mixed-cohort routing.
 //! - [`errors`] — one agent's failure doesn't abort the cohort, and per-item
 //!   retry classification.
+//! - [`mixed_models`] — one reactor, an endpoint offering several models:
+//!   per-agent routing by requested id, and rejection of an unoffered id.
 //! - [`notifications`] — the drain half of the defaults: pushes seat at turn
 //!   boundaries and a quiescent turn with pending pushes continues.
 //! - [`persistence`] — one bulk save/load, and partial-save recovery.
@@ -39,6 +41,7 @@ pub(crate) use super::{
 };
 
 mod errors;
+mod mixed_models;
 mod notifications;
 mod persistence;
 mod scheduling;
@@ -246,13 +249,46 @@ fn batch_agent(behavior: Behavior, turns_left: usize) -> TestAgent {
     a
 }
 
-/// A [`ModelInfo`] requesting (or not) the batch capability — the only field the
-/// interim negotiation reads.
+/// A [`TestAgent`] requesting the named (non-batch) model. Both the negotiation
+/// request and the prompt carry the id, upholding the reactor's invariant that
+/// the prompt's model matches the negotiated one.
+fn named_agent(name: &str, behavior: Behavior, turns_left: usize) -> TestAgent {
+    let mut a = agent(behavior, turns_left);
+    a.model = model_info_named(name, false);
+    a.prompt.model = a.model.id.clone();
+    a
+}
+
+/// The round-major counterpart of [`named_agent`]: requests the named model
+/// *with* the batch capability, so it negotiates onto the batch path.
+fn named_batch_agent(
+    name: &str,
+    behavior: Behavior,
+    turns_left: usize,
+) -> TestAgent {
+    let mut a = named_agent(name, behavior, turns_left);
+    a.model = model_info_named(name, true);
+    a
+}
+
+/// The default-id [`ModelInfo`] the shared fixtures request —
+/// [`model_info_named`] under the [`Model`](misanthropic::model::Model)
+/// `Default` id every [`agent`] / [`batch_agent`] and mock transport shares.
 fn model_info(batch: bool) -> ModelInfo {
-    use misanthropic::model::{Capabilities, Kind, Model};
     ModelInfo {
-        id: Model::default(),
-        display_name: "test-model".into(),
+        id: misanthropic::model::Model::default(),
+        ..model_info_named("test-model", batch)
+    }
+}
+
+/// A [`ModelInfo`] with the given wire id, requesting (or not) the batch
+/// capability — the id and that capability are the only fields the interim
+/// negotiation reads.
+fn model_info_named(name: &str, batch: bool) -> ModelInfo {
+    use misanthropic::model::{Capabilities, Kind};
+    ModelInfo {
+        id: name.to_owned().into(),
+        display_name: name.to_owned().into(),
         capabilities: Capabilities {
             batch: batch.into(),
             ..Default::default()
@@ -530,6 +566,83 @@ impl Inference for MixedRecorder {
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
         Ok(offered_models())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A multi-model transport: offers a caller-chosen model list and records the
+// wire `model` id of every incoming prompt — sequential calls and batch rounds
+// separately — so a mixed-model cohort can prove per-agent routing.
+// ---------------------------------------------------------------------------
+
+/// The `model` id of a serialized prompt, read off the wire shape — the same
+/// field a real endpoint would route on.
+fn wire_model<P: Serialize + ?Sized>(prompt: &P) -> String {
+    serde_json::to_value(prompt).expect("prompt serializes")["model"]
+        .as_str()
+        .expect("prompt carries a string model id")
+        .to_owned()
+}
+
+#[derive(Clone)]
+struct ModelRecorder {
+    offered: misanthropic::model::Models,
+    /// The wire `model` of each sequential `infer` prompt, in call order.
+    seq: Arc<Mutex<Vec<String>>>,
+    /// The wire `model`s of each `infer_batch` round, in round order.
+    rounds: Arc<Mutex<Vec<Vec<String>>>>,
+}
+
+impl ModelRecorder {
+    /// A recorder whose `models()` probe offers exactly `models`.
+    fn offering(models: impl IntoIterator<Item = ModelInfo>) -> Self {
+        Self {
+            offered: models.into_iter().collect(),
+            seq: Arc::default(),
+            rounds: Arc::default(),
+        }
+    }
+
+    fn seq_models(&self) -> Vec<String> {
+        self.seq.lock().unwrap().clone()
+    }
+
+    fn round_models(&self) -> Vec<Vec<String>> {
+        self.rounds.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Inference for ModelRecorder {
+    type Error = TestError;
+
+    async fn infer<P>(&self, prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
+        self.seq.lock().unwrap().push(wire_model(&prompt));
+        Ok(message(StopReason::EndTurn))
+    }
+
+    async fn infer_batch<P>(
+        &self,
+        prompts: &[&P],
+    ) -> Result<Vec<Result<response::Message, TestError>>, TestError>
+    where
+        P: Serialize + Send + Sync,
+    {
+        self.rounds
+            .lock()
+            .unwrap()
+            .push(prompts.iter().map(|p| wire_model(*p)).collect());
+        Ok(prompts
+            .iter()
+            .map(|_| Ok(message(StopReason::EndTurn)))
+            .collect())
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Ok(self.offered.clone())
     }
 }
 
