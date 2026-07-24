@@ -388,12 +388,15 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         }
 
         // Prime the shared cache prefix once per distinct model, so the
-        // very first batch reads it instead of writing it N times.
+        // very first batch reads it instead of writing it N times. Sent as
+        // its own (single-submission) batch: batch prefill bills at half
+        // price, and the docs' recommended batch-caching pattern is exactly
+        // this — one shared-prefix request, then the rest once it lands.
         // Best-effort: a failed ping costs nothing — round 1 then writes
         // the prefix exactly as it would have without priming.
-        // Collected first: holding `&A` across the `infer` await would
-        // require `A: Sync` (same async_trait constraint as the batch
-        // prompt collection below).
+        // Collected first: holding `&A` across the await would require
+        // `A: Sync` (same async_trait constraint as the batch prompt
+        // collection below).
         let primes: Vec<Prompt> = {
             let mut primed: BTreeSet<String> = BTreeSet::new();
             agents
@@ -404,13 +407,11 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 .filter(|p| primed.insert(p.model.name().to_string()))
                 .collect()
         };
-        for prompt in &primes {
-            match inference.infer(prompt).await {
-                Ok(_) => {
-                    tracing::info!(model = prompt.model.name(), "cache primed")
-                }
+        if !primes.is_empty() {
+            let prompts: Vec<&Prompt> = primes.iter().collect();
+            match inference.infer_batch(&prompts).await {
+                Ok(_) => tracing::info!(models = primes.len(), "cache primed"),
                 Err(e) => tracing::warn!(
-                    model = prompt.model.name(),
                     error = %e,
                     "cache prime failed"
                 ),
