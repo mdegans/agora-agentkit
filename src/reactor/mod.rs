@@ -387,6 +387,36 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             }
         }
 
+        // Prime the shared cache prefix once per distinct model, so the
+        // very first batch reads it instead of writing it N times.
+        // Best-effort: a failed ping costs nothing — round 1 then writes
+        // the prefix exactly as it would have without priming.
+        // Collected first: holding `&A` across the `infer` await would
+        // require `A: Sync` (same async_trait constraint as the batch
+        // prompt collection below).
+        let primes: Vec<Prompt> = {
+            let mut primed: BTreeSet<String> = BTreeSet::new();
+            agents
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !errors.contains_key(i))
+                .filter_map(|(_, agent)| agent.prime_prompt())
+                .filter(|p| primed.insert(p.model.name().to_string()))
+                .collect()
+        };
+        for prompt in &primes {
+            match inference.infer(prompt).await {
+                Ok(_) => {
+                    tracing::info!(model = prompt.model.name(), "cache primed")
+                }
+                Err(e) => tracing::warn!(
+                    model = prompt.model.name(),
+                    error = %e,
+                    "cache prime failed"
+                ),
+            }
+        }
+
         // The live cohort for a round, reused across rounds.
         let mut live: Vec<usize> = Vec::new();
         loop {

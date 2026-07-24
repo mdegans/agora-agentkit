@@ -234,3 +234,57 @@ async fn orchestrator_report_iterates_and_flattens_rejected() {
     // Consuming iteration hands the results out by value.
     assert_eq!(report.into_iter().count(), 2);
 }
+
+/// The round-major path primes the shared cache prefix once per distinct
+/// model — a sequential `infer` before any batch round — so the first
+/// batch reads the prefix instead of writing it N times.
+#[tokio::test]
+async fn batch_primes_shared_prefix_once_per_model() {
+    let transport = ModelRecorder::offering([
+        model_info_named("model-a", true),
+        model_info_named("model-b", true),
+    ]);
+    let mut agents = vec![
+        named_batch_agent("model-a", Behavior::Complete, 1),
+        named_batch_agent("model-a", Behavior::Complete, 1),
+        named_batch_agent("model-b", Behavior::Complete, 1),
+    ];
+    for a in &mut agents {
+        // The default prime is the tools+system prefix; seat a system so
+        // there is one to prime.
+        a.prompt = std::mem::take(&mut a.prompt).system("shared prefix");
+    }
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(transport.clone(), MemStore::default(), agents);
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 3, "all agents complete");
+    assert_eq!(
+        transport.seq_models(),
+        vec!["model-a", "model-b"],
+        "exactly one prime per distinct model, in cohort order"
+    );
+    assert_eq!(
+        transport.round_models(),
+        vec![vec!["model-a", "model-a", "model-b"]],
+        "one batch round over the whole cohort"
+    );
+}
+
+/// Without a seated system there is no shared prefix to prime: the batch
+/// path makes no sequential calls at all.
+#[tokio::test]
+async fn no_system_means_no_prime() {
+    let transport =
+        ModelRecorder::offering([model_info_named("model-a", true)]);
+    let agents = vec![named_batch_agent("model-a", Behavior::Complete, 1)];
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(transport.clone(), MemStore::default(), agents);
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 1);
+    assert!(
+        transport.seq_models().is_empty(),
+        "no prime without a system"
+    );
+}
