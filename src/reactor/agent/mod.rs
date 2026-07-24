@@ -259,6 +259,25 @@ pub trait Agent: Sized + Send {
         Ok(Control::Stalled)
     }
 
+    /// A minimal prompt whose prefix (tools + system + their pinned cache
+    /// breakpoints) matches what every turn of this agent sends. The
+    /// round-major path uses it to write the shared cache entry once per
+    /// model before the first batch, so round 1 *reads* the prefix instead
+    /// of writing it N times. The default is that prefix — tools + system
+    /// with a one-token ping — since it's what nearly every agent shares;
+    /// `None` (also the default when no system is seated yet) disables
+    /// priming. Only meaningful after [`on_init`](Agent::on_init).
+    fn prime_prompt(&self) -> Option<Prompt> {
+        let p = self.prompt();
+        p.system.as_ref()?;
+        let mut prime = Prompt::default().model(p.model.clone());
+        prime.tools = p.tools.clone();
+        prime.system = p.system.clone();
+        prime.max_tokens = NonZeroU32::new(1).expect("nonzero");
+        prime.push_message((Role::User, "ping")).ok()?;
+        Some(prime)
+    }
+
     /// Install tool definitions and run each tool's `on_init`. Called once by
     /// the reactor right after construction.
     async fn on_init(&mut self) -> Result<(), Self::Error> {
