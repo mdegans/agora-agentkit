@@ -184,3 +184,53 @@ async fn mixed_cohort_runs_both_paths() {
         "the sequential agent made one infer call"
     );
 }
+
+/// The orchestrator-level conveniences: iterating an [`OrchestratorReport`]
+/// yields each reactor's result, and [`rejected`] flattens every reactor's
+/// rejected snapshots into one re-routable view.
+///
+/// [`rejected`]: OrchestratorReport::rejected
+#[tokio::test]
+async fn orchestrator_report_iterates_and_flattens_rejected() {
+    use super::super::Orchestrator;
+
+    let mut greedy = agent(Behavior::Complete, 1);
+    greedy.model.max_input_tokens = 1;
+    let greedy_id = greedy.id();
+
+    let satisfiable: Reactor<_, _, TestAgent> = Reactor::new(
+        MockInference::end_turns(1),
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
+    let mixed: Reactor<_, _, TestAgent> = Reactor::new(
+        MockInference::end_turns(1),
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1), greedy],
+    );
+    let mixed_id = Run::id(&mixed);
+
+    let mut orchestrator = Orchestrator::new();
+    orchestrator.push(satisfiable);
+    orchestrator.push(mixed);
+    let report = orchestrator.run().await;
+
+    // Borrowing iteration: one entry per reactor, all Ok here.
+    assert_eq!((&report).into_iter().count(), 2);
+    assert!((&report).into_iter().all(|(_, r)| r.is_ok()));
+
+    // The flattened rejected view names the reactor, the agent, and a
+    // snapshot that round-trips.
+    let rejected: Vec<_> = report.rejected().collect();
+    let (reactor, agent_id, snapshot) = match rejected.as_slice() {
+        [one] => *one,
+        other => panic!("expected exactly one rejected agent: {other:?}"),
+    };
+    assert_eq!(reactor, mixed_id);
+    assert_eq!(agent_id, greedy_id);
+    let state: TestState = serde_json::from_value(snapshot.clone()).unwrap();
+    assert_eq!(state.behavior, Behavior::Complete);
+
+    // Consuming iteration hands the results out by value.
+    assert_eq!(report.into_iter().count(), 2);
+}
