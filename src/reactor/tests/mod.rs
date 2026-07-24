@@ -34,7 +34,8 @@ use crate::ids::AgentId;
 // Reactor types the test submodules reach through `use super::*` but the harness
 // itself doesn't touch — re-exported so the submodules stay a bare glob import.
 pub(crate) use super::{
-    ErrorKind, ErrorReport, Reactor, Report, Run, load_agents,
+    ErrorKind, ErrorReport, MAX_INFER_RETRIES, Reactor, Report, Run,
+    load_agents,
 };
 
 mod errors;
@@ -639,6 +640,55 @@ impl Inference for FlakyModels {
         } else {
             Ok(offered_models())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A sequential transport whose `infer` fails transiently (with a retry hint)
+// `failures_left` times before succeeding — exercises the drive's inference
+// retry loop.
+// ---------------------------------------------------------------------------
+
+struct FlakyInfer {
+    /// `infer` calls left to fail before responses flow.
+    failures_left: AtomicUsize,
+    /// Total `infer` calls, for asserting the retry count.
+    calls: Arc<AtomicUsize>,
+}
+
+impl FlakyInfer {
+    fn failing(n: usize) -> Self {
+        Self {
+            failures_left: AtomicUsize::new(n),
+            calls: Arc::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Inference for FlakyInfer {
+    type Error = TestError;
+
+    async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let failing = self
+            .failures_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                n.checked_sub(1)
+            })
+            .is_ok();
+        if failing {
+            Err(TestError::Transient(Duration::from_millis(1)))
+        } else {
+            Ok(message(StopReason::EndTurn))
+        }
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Ok(offered_models())
     }
 }
 

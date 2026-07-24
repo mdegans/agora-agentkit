@@ -14,7 +14,7 @@ schemars = ["dep:schemars"]
 # Opt-in because it pulls in misanthropic + tokio (otherwise unused
 # by most consumers of this crate).
 retry = ["misanthropic", "dep:tokio", "dep:tracing"]
-misanthropic = ["dep:misanthropic", "dep:tokio"]
+misanthropic = ["dep:misanthropic", "dep:tokio", "dep:tracing"]
 # Because for the moment it prevents wasm build
 client = ["misanthropic/client"]
 # `FsStorage` (`reactor::storage`): the directory-per-agent disk backend.

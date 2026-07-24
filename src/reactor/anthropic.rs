@@ -103,13 +103,25 @@ fn models_from_tags(body: &str) -> Result<Models, misanthropic::client::Error> {
         .collect())
 }
 
-// Forward the `Retry-After` that Anthropic sends on 429/529; everything else is
-// fatal. `AnthropicError::retry_after` is the upstream accessor that turns the
-// header's seconds into a `Duration`.
+/// Base wait for a header-less 529. The real API emits them (seen live
+/// 2026-06-11) and blallama's "Session is busy" never carries the header;
+/// without a courtesy backoff both read as fatal. Callers scale by attempt.
+const COURTESY_BACKOFF: Duration = Duration::from_secs(10);
+
+// Forward the `Retry-After` that Anthropic sends on 429/529; a header-less
+// 529 falls back to [`COURTESY_BACKOFF`]. A header-less 429 (which should
+// carry the header) and everything else stay fatal.
 impl RetryAfter for misanthropic::client::Error {
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            misanthropic::client::Error::Anthropic(e) => e.retry_after(),
+            misanthropic::client::Error::Anthropic(e) => {
+                e.retry_after().or(match e {
+                    misanthropic::client::AnthropicError::Overloaded {
+                        ..
+                    } => Some(COURTESY_BACKOFF),
+                    _ => None,
+                })
+            }
             _ => None,
         }
     }
@@ -322,6 +334,37 @@ mod tests {
         assert!(!blallama.cache_markers_ignored);
         assert!(!blallama.tool_choice_not_respected);
         assert!(!blallama.cache_stats_unreported);
+    }
+
+    /// The retry classification: header hints pass through; a header-less
+    /// 529 (blallama's "Session is busy", and the real API sometimes) gets
+    /// the courtesy backoff; a header-less 429 and other errors stay fatal.
+    #[test]
+    fn overloaded_without_header_gets_courtesy_backoff() {
+        use misanthropic::client::{AnthropicError, Error};
+
+        let e = Error::Anthropic(AnthropicError::Overloaded {
+            message: "Session is busy.".into(),
+            retry_after: None,
+        });
+        assert_eq!(e.retry_after(), Some(COURTESY_BACKOFF));
+
+        let e = Error::Anthropic(AnthropicError::Overloaded {
+            message: "overloaded".into(),
+            retry_after: Some(3),
+        });
+        assert_eq!(e.retry_after(), Some(Duration::from_secs(3)));
+
+        let e = Error::Anthropic(AnthropicError::RateLimit {
+            message: "slow down".into(),
+            retry_after: None,
+        });
+        assert_eq!(e.retry_after(), None, "header-less 429 stays fatal");
+
+        let e = Error::Anthropic(AnthropicError::API {
+            message: "boom".into(),
+        });
+        assert_eq!(e.retry_after(), None);
     }
 
     /// `/api/tags` synthesis: custom ids, batch unsupported, ceilings

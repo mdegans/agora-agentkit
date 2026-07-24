@@ -118,6 +118,12 @@ type Persist<I, S, A> = (A, Result<Outcome, ReactorError<I, S, A>>);
 /// up on it. Without this, an item that always errors would re-batch forever.
 const MAX_BATCH_ITEM_RETRIES: usize = 3;
 
+/// How many times one turn's inference may be retried on the agent-major
+/// path when the error advertises a wait ([`RetryAfter`]) before the agent
+/// fails. Waits scale linearly with the attempt, so a 10s hint costs at most
+/// 10+20+30+40+50s before giving up.
+pub(crate) const MAX_INFER_RETRIES: u32 = 5;
+
 /// What [`negotiate`] decided for an agent: which run-path (borrowing the
 /// negotiated offered [`ModelInfo`], for [`Agent::on_admit`]), or rejection.
 enum Admission<'a> {
@@ -297,10 +303,33 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         let mut stalls = 0usize;
         loop {
             agent.on_turn().await.map_err(ReactorError::AgentError)?;
-            let response = inference
-                .infer(agent.prompt())
-                .await
-                .map_err(ReactorError::InferenceError)?;
+            // Retry inference while the error advertises a wait (a 429/529
+            // with — or courtesy-defaulted to — a backoff), scaling the wait
+            // linearly per attempt. Fatal errors and exhausted budgets
+            // surface immediately.
+            let mut attempt: u32 = 0;
+            let response = loop {
+                match inference.infer(agent.prompt()).await {
+                    Ok(response) => break response,
+                    Err(e) => match e.retry_after() {
+                        Some(wait) if attempt < MAX_INFER_RETRIES => {
+                            attempt += 1;
+                            let wait = wait * attempt;
+                            tracing::warn!(
+                                agent_id = %agent.id(),
+                                attempt,
+                                wait_secs = wait.as_secs(),
+                                error = %e,
+                                "retryable inference error"
+                            );
+                            tokio::time::sleep(wait).await;
+                        }
+                        _ => {
+                            return Err(ReactorError::InferenceError(e));
+                        }
+                    },
+                }
+            };
             match agent
                 .handle(response)
                 .await

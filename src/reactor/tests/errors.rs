@@ -198,3 +198,44 @@ async fn rejected_agent_serialize_failure_is_recorded() {
     let err = report.errors.get(&greedy_id).expect("never silent");
     assert_eq!(err.kind, ErrorKind::Storage);
 }
+
+/// A transient `infer` error (one with a retry hint) is retried within the
+/// turn on the agent-major path; the agent still completes.
+#[tokio::test]
+async fn sequential_retries_transient_infer() {
+    let inference = FlakyInfer::failing(2);
+    let calls = inference.calls.clone();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        inference,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 1, "{:?}", report.errors);
+    assert_eq!(report.failed, 0);
+    // 2 transient failures + the success.
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+/// The per-turn retry budget is finite: an `infer` that never stops failing
+/// transiently fails the agent after `MAX_INFER_RETRIES` retries, and the
+/// error is recorded as an inference error.
+#[tokio::test]
+async fn sequential_transient_infer_exhausts_budget() {
+    let inference = FlakyInfer::failing(usize::MAX);
+    let calls = inference.calls.clone();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        inference,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 0);
+    assert_eq!(report.failed, 1);
+    let (_, e) = report.errors.iter().next().unwrap();
+    assert_eq!(e.kind, ErrorKind::Inference);
+    // The first attempt + every retry in the budget.
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_INFER_RETRIES as usize + 1);
+}
