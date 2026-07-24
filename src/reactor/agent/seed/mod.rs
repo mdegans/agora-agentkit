@@ -54,14 +54,6 @@ use crate::reactor::{
 };
 use crate::requests::SubmitFeedbackPayload;
 
-/// `max_tokens` for the think/act rounds.
-const ACT_MAX_TOKENS: u32 = 2048;
-/// `max_tokens` for reflect, mutate, and survey (a thought block plus the
-/// JSON payload).
-const PHASE_MAX_TOKENS: u32 = 2048;
-/// `max_tokens` for the evolve phase (a thought plus 1-2 sentences).
-const EVOLVE_MAX_TOKENS: u32 = 1024;
-
 /// Per-process context cloned into every [`SeedAgent`] — see
 /// [`Agent::Context`]
 #[derive(Clone)]
@@ -87,6 +79,14 @@ pub struct SeedConfig {
     pub force_survey: bool,
     /// Own posts shown under "Your Recent Activity".
     pub recent_activity_limit: usize,
+    /// `max_tokens` for the think/act rounds. Must be nonzero.
+    pub act_max_tokens: u32,
+    /// `max_tokens` for reflect, mutate, and survey (a thought block plus
+    /// the JSON payload). Must be nonzero.
+    pub phase_max_tokens: u32,
+    /// `max_tokens` for the evolve phase — sized like the others because an
+    /// evolution can rewrite the SOUL in its entirety. Must be nonzero.
+    pub evolve_max_tokens: u32,
 }
 
 impl Default for SeedConfig {
@@ -98,6 +98,9 @@ impl Default for SeedConfig {
             survey_chance: 10,
             force_survey: false,
             recent_activity_limit: 5,
+            act_max_tokens: 4096,
+            phase_max_tokens: 4096,
+            evolve_max_tokens: 4096,
         }
     }
 }
@@ -292,8 +295,9 @@ impl SeedAgent {
     /// Enter the reflect phase (acting is over, however it ended).
     fn begin_reflect(&mut self) -> Result<Control, SeedError> {
         self.phase = Phase::Reflect;
+        let budget = self.ctx.config.phase_max_tokens;
         let control =
-            self.seat_phase(output::MEMORY_REWRITE_MESSAGE, PHASE_MAX_TOKENS)?;
+            self.seat_phase(output::MEMORY_REWRITE_MESSAGE, budget)?;
         self.constrain::<Memory>();
         Ok(control)
     }
@@ -312,15 +316,16 @@ impl SeedAgent {
             self.phase = Phase::Mutate;
             let instruction =
                 output::build_soul_mutation_prompt(&self.state.soul);
-            let control = self.seat_phase(&instruction, PHASE_MAX_TOKENS)?;
+            let budget = self.ctx.config.phase_max_tokens;
+            let control = self.seat_phase(&instruction, budget)?;
             self.constrain::<Soul>();
             return Ok(control);
         }
         if evolve {
             self.phase = Phase::Evolve;
             // No `output_config`: `null` (no change) must stay expressible.
-            return self
-                .seat_phase(output::EVOLUTION_MESSAGE, EVOLVE_MAX_TOKENS);
+            let budget = self.ctx.config.evolve_max_tokens;
+            return self.seat_phase(output::EVOLUTION_MESSAGE, budget);
         }
         self.maybe_survey()
     }
@@ -334,7 +339,8 @@ impl SeedAgent {
             self.phase = Phase::Survey;
             self.survey_mark = Some(self.state.prompt.messages.len());
             // No `output_config`: `null` (no feedback) must stay expressible.
-            return self.seat_phase(output::SURVEY_MESSAGE, PHASE_MAX_TOKENS);
+            let budget = self.ctx.config.phase_max_tokens;
+            return self.seat_phase(output::SURVEY_MESSAGE, budget);
         }
         Ok(self.finish())
     }
@@ -516,7 +522,9 @@ impl Agent for SeedAgent {
         // resume rather than clear.
         let mut fresh = Prompt::default()
             .model(state.prompt.model.clone())
-            .max_tokens(NonZeroU32::new(ACT_MAX_TOKENS).expect("nonzero"));
+            .max_tokens(
+                NonZeroU32::new(ctx.config.act_max_tokens).expect("nonzero"),
+            );
         fresh.tool_choice = Some(misanthropic::tool::Choice::auto());
         state.prompt = fresh;
         state.completed = false;
@@ -582,6 +590,17 @@ impl Agent for SeedAgent {
 
     fn quirks(&self) -> Option<Quirks> {
         self.quirks
+    }
+
+    /// A clipped response is never seated, so no pop is needed: warn the
+    /// model the attempt was pruned and stall-retry at the same budget (the
+    /// trait default's doubling is unbounded on local endpoints, which
+    /// declare no ceiling). The reactor's stall cap bounds attempts.
+    async fn on_truncate(
+        &mut self,
+        _response: &response::Message,
+    ) -> Result<Control, SeedError> {
+        self.phase_failure(output::TRUNCATION_WARNING)
     }
 
     /// Perceive: install tools, subscribe to their pushes, then hand everything

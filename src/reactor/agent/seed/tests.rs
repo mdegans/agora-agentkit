@@ -573,3 +573,50 @@ async fn missing_key_fails_construction() {
     };
     assert!(matches!(err, SeedError::NoKey(_)));
 }
+
+/// A clipped response seats the truncation warning and stalls — no budget
+/// doubling (the trait default), no clipped text in the transcript.
+#[tokio::test]
+async fn truncation_seats_warning_and_stalls() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let budget_before = agent.prompt().max_tokens;
+
+    let control = agent
+        .handle(text_message(
+            "an over-long ramble that got clip",
+            StopReason::MaxTokens,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(agent.prompt().max_tokens, budget_before);
+    let text = transcript(&agent);
+    assert!(!text.contains("over-long ramble"));
+    assert!(text.contains("pruned from this context"));
+    // The warning merges into the trailing user turn — retry-ready.
+    assert_eq!(agent.prompt().messages.last().unwrap().role, Role::User);
+}
+
+/// Configured budgets reach the prompt: act at construction, phase on the
+/// reflect transition.
+#[tokio::test]
+async fn config_max_tokens_reach_the_prompt() {
+    let server = MockServer::start();
+    let config = SeedConfig {
+        act_max_tokens: 1234,
+        phase_max_tokens: 555,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    assert_eq!(agent.prompt().max_tokens.get(), 1234);
+
+    seat_start(&mut agent);
+    // Acting quiesces → reflect seats with the phase budget.
+    agent
+        .handle(text_message("nothing to do", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(agent.prompt().max_tokens.get(), 555);
+}
