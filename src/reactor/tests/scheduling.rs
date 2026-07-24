@@ -260,15 +260,19 @@ async fn batch_primes_shared_prefix_once_per_model() {
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 3, "all agents complete");
-    assert_eq!(
-        transport.seq_models(),
-        vec!["model-a", "model-b"],
-        "exactly one prime per distinct model, in cohort order"
+    assert!(
+        transport.seq_models().is_empty(),
+        "primes ride the batch path (half-price prefill), not infer"
     );
     assert_eq!(
         transport.round_models(),
-        vec![vec!["model-a", "model-a", "model-b"]],
-        "one batch round over the whole cohort"
+        vec![
+            // One prime submission: one prompt per distinct model, in
+            // cohort order, before any cohort round.
+            vec!["model-a", "model-b"],
+            vec!["model-a", "model-a", "model-b"],
+        ],
+        "prime batch first, then one round over the whole cohort"
     );
 }
 
@@ -291,8 +295,10 @@ async fn no_breakpoint_means_no_prime() {
     let report = reactor.run().await.unwrap();
 
     assert_eq!(report.done, 2);
-    assert!(
-        transport.seq_models().is_empty(),
-        "no prime without a breakpointed system"
+    assert!(transport.seq_models().is_empty());
+    assert_eq!(
+        transport.round_models().len(),
+        1,
+        "no prime submission without a breakpointed system"
     );
 }
