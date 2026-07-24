@@ -269,10 +269,20 @@ pub trait Agent: Sized + Send {
     /// priming. Only meaningful after [`on_init`](Agent::on_init).
     fn prime_prompt(&self) -> Option<Prompt> {
         let p = self.prompt();
-        p.system.as_ref()?;
-        let mut prime = Prompt::default().model(p.model.clone());
-        prime.tools = p.tools.clone();
-        prime.system = p.system.clone();
+        let system = p.system.as_ref()?;
+        if !system.has_cache() {
+            // Nothing can ever read what the ping would write — this
+            // almost always means the prompt assembly forgot the
+            // breakpoint, so say so rather than silently skipping.
+            tracing::warn!("system has no cache breakpoint; skipping prime");
+            return None;
+        }
+        // Clone the prompt wholesale and clear only the messages: any
+        // field that diverges from the real turns (`tool_choice`
+        // especially) keys a different cache entry on Anthropic, and a
+        // prime nothing reads is worse than none.
+        let mut prime = p.clone();
+        prime.messages.clear();
         prime.max_tokens = NonZeroU32::new(1).expect("nonzero");
         prime.push_message((Role::User, "ping")).ok()?;
         Some(prime)

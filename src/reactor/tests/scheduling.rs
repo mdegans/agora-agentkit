@@ -250,9 +250,10 @@ async fn batch_primes_shared_prefix_once_per_model() {
         named_batch_agent("model-b", Behavior::Complete, 1),
     ];
     for a in &mut agents {
-        // The default prime is the tools+system prefix; seat a system so
-        // there is one to prime.
+        // The default prime is the whole prompt minus messages; seat a
+        // system with a breakpoint so there is something to prime.
         a.prompt = std::mem::take(&mut a.prompt).system("shared prefix");
+        a.prompt.system.as_mut().unwrap().cache_1h();
     }
     let mut reactor: Reactor<_, _, TestAgent> =
         Reactor::new(transport.clone(), MemStore::default(), agents);
@@ -271,20 +272,27 @@ async fn batch_primes_shared_prefix_once_per_model() {
     );
 }
 
-/// Without a seated system there is no shared prefix to prime: the batch
-/// path makes no sequential calls at all.
+/// No seated system — or a system without a cache breakpoint (a prime
+/// nothing could read, almost always a prompt-assembly bug) — means no
+/// prime: the batch path makes no sequential calls at all.
 #[tokio::test]
-async fn no_system_means_no_prime() {
+async fn no_breakpoint_means_no_prime() {
     let transport =
         ModelRecorder::offering([model_info_named("model-a", true)]);
-    let agents = vec![named_batch_agent("model-a", Behavior::Complete, 1)];
+    let mut uncached = named_batch_agent("model-a", Behavior::Complete, 1);
+    // A system WITHOUT a breakpoint — must warn-and-skip, not prime.
+    uncached.prompt = std::mem::take(&mut uncached.prompt).system("prefix");
+    let agents = vec![
+        named_batch_agent("model-a", Behavior::Complete, 1), // no system
+        uncached,
+    ];
     let mut reactor: Reactor<_, _, TestAgent> =
         Reactor::new(transport.clone(), MemStore::default(), agents);
     let report = reactor.run().await.unwrap();
 
-    assert_eq!(report.done, 1);
+    assert_eq!(report.done, 2);
     assert!(
         transport.seq_models().is_empty(),
-        "no prime without a system"
+        "no prime without a breakpointed system"
     );
 }
