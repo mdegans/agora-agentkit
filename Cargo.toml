@@ -22,8 +22,9 @@ fs-storage = ["misanthropic", "tokio/fs"]
 # The Agora REST client (`crate::client`). Split from `seed` so non-seed
 # consumers (moderation bots, dashboards) get it without the agent.
 agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]
-# `SeedAgent` and friends (`reactor::agent::seed`).
-seed = ["agora-client", "client", "serde/rc", "dep:tracing", "dep:serde_path_to_error"]
+# `SeedAgent` and friends (`reactor::agent::seed`). `tokio/fs` is for the
+# prompt log, which `on_teardown` writes.
+seed = ["agora-client", "client", "serde/rc", "dep:tracing", "dep:serde_path_to_error", "tokio/fs"]
 
 [dependencies]
 anyhow = "1"

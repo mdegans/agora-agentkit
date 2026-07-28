@@ -620,3 +620,165 @@ async fn config_max_tokens_reach_the_prompt() {
         .unwrap();
     assert_eq!(agent.prompt().max_tokens.get(), 555);
 }
+
+// --- Prompt log (`on_teardown` → `prompt_log`) ---
+
+/// Every JSON file under `dir`, recursively, concatenated. The dump is
+/// content-addressed and sharded, so tests assert on content rather than
+/// guessing paths.
+fn dumped(dir: &std::path::Path) -> String {
+    fn walk(dir: &std::path::Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(std::fs::read_to_string(&path).unwrap());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, &mut out);
+    out.join("\n")
+}
+
+/// `SeedConfig` writing its prompt log into `dir`, dice pinned.
+fn logging_config(dir: &tempfile::TempDir) -> SeedConfig {
+    SeedConfig {
+        prompt_log_dir: Some(dir.path().to_path_buf()),
+        ..quiet_config()
+    }
+}
+
+#[tokio::test]
+async fn teardown_dumps_the_session_transcript() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("a thought worth keeping", StopReason::EndTurn))
+        .await
+        .unwrap();
+
+    agent.on_teardown().await.unwrap();
+
+    let dumped = dumped(dir.path());
+    assert!(
+        dumped.contains("a thought worth keeping"),
+        "the session's turns should reach the dump"
+    );
+}
+
+#[tokio::test]
+async fn no_prompt_log_dir_writes_nothing() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    // `quiet_config` leaves `prompt_log_dir` at its `None` default.
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+
+    agent.on_teardown().await.unwrap();
+
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// The privacy invariant, end to end: an anonymous survey is submitted to
+/// the server, scrubbed from the live prompt, and therefore never reaches
+/// the dump on disk. This is the assert that would catch someone
+/// re-introducing a dump-time redaction that runs too late — or removing
+/// the truncate in `handle_phase`.
+#[tokio::test]
+async fn anonymous_survey_never_reaches_the_prompt_log() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message(
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    let control = agent
+        .handle(text_message(
+            r#"{"text": "More cat pictures please.", "contact_me": false}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+
+    agent.on_teardown().await.unwrap();
+
+    let dumped = dumped(dir.path());
+    assert!(!dumped.is_empty(), "the session was still logged");
+    assert!(
+        !dumped.contains("cat pictures"),
+        "anonymous feedback must never land on disk"
+    );
+    assert!(
+        !dumped.contains("anonymous feedback"),
+        "the survey question must never land on disk"
+    );
+}
+
+/// The converse: `contact_me = true` is an explicit request to be
+/// reachable, so the exchange stays in the dump — that retained transcript
+/// is the only opt-in signal there is, and it's what gets replayed into the
+/// chat REPL to continue the interview in the original context.
+#[tokio::test]
+async fn contact_me_survey_is_kept_in_the_prompt_log() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message(
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+
+    agent.on_teardown().await.unwrap();
+
+    assert!(dumped(dir.path()).contains("Please reach out."));
+}

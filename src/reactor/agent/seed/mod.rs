@@ -6,14 +6,18 @@
 //! soul mutation or evolution-log entry, and an occasional anonymous survey.
 //! The working [`Prompt`] rides [`SeedState`], so the persisted state at rest
 //! *is* the last session's transcript (survey turns redacted unless the agent
-//! asked for contact).
+//! asked for contact). That copy is overwritten every cycle; the durable
+//! archive is [`prompt_log`], written at [`on_teardown`] when
+//! [`SeedConfig::prompt_log_dir`] is set.
 //!
 //! [`on_init`]: Agent::on_init
+//! [`on_teardown`]: Agent::on_teardown
 
 mod keyring;
 mod memory;
 mod output;
 mod prompt;
+mod prompt_log;
 mod shortstring;
 mod soul;
 #[cfg(test)]
@@ -22,6 +26,7 @@ mod tool;
 
 pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
+pub use prompt_log::PromptLogError;
 pub use shortstring::{ShortString, ShortStringError};
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, Interests,
@@ -31,6 +36,7 @@ pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger};
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,6 +93,13 @@ pub struct SeedConfig {
     /// `max_tokens` for the evolve phase — sized like the others because an
     /// evolution can rewrite the SOUL in its entirety. Must be nonzero.
     pub evolve_max_tokens: u32,
+    /// Where [`on_teardown`](Agent::on_teardown) writes the finished session
+    /// transcript, content-addressed — see [`prompt_log`]. `None` disables
+    /// the dump entirely.
+    ///
+    /// Point this *outside* any git tree: the files hold fully-rendered
+    /// prompts (SOUL, memory, dashboard) and must never be committable.
+    pub prompt_log_dir: Option<PathBuf>,
 }
 
 impl Default for SeedConfig {
@@ -101,6 +114,7 @@ impl Default for SeedConfig {
             act_max_tokens: 4096,
             phase_max_tokens: 4096,
             evolve_max_tokens: 4096,
+            prompt_log_dir: None,
         }
     }
 }
@@ -478,6 +492,45 @@ impl SeedAgent {
         }
     }
 
+    /// Dump the finished session transcript to the prompt log, if one is
+    /// configured. Best-effort by design: a session whose real work already
+    /// landed must not fail over a log write, and the transcript also rides
+    /// the persisted state, so a failure here loses the archive copy, not
+    /// the data.
+    ///
+    /// The survey redaction has already happened in the live prompt by this
+    /// point — see the [`prompt_log`] module docs before adding any
+    /// filtering here.
+    ///
+    /// Takes its inputs as arguments rather than `&self` on purpose:
+    /// [`ToolBox`] is not `Sync`, so a `&SeedAgent` held across the write
+    /// would not be `Send` and could not satisfy `async_trait`'s bound.
+    async fn log_prompt(
+        dir: &std::path::Path,
+        prompt: &Prompt,
+        agent: &str,
+        agent_id: AgentId,
+        model: &str,
+    ) {
+        match prompt_log::save(prompt, dir).await {
+            Ok((path, sha256)) => tracing::info!(
+                %agent,
+                %agent_id,
+                %model,
+                prompt_sha256 = %sha256,
+                messages = prompt.messages.len(),
+                path = %path.display(),
+                "prompt logged"
+            ),
+            Err(e) => tracing::warn!(
+                %agent,
+                %agent_id,
+                error = %e,
+                "prompt log failed"
+            ),
+        }
+    }
+
     /// Install a mutated soul: name and evolution log are system-managed,
     /// whatever the model sent.
     fn apply_mutation(&mut self, mut new_soul: Soul) {
@@ -515,9 +568,11 @@ impl Agent for SeedAgent {
         );
 
         // A session starts fresh: the loaded prompt is last session's
-        // transcript (already persisted at rest — the prompt log) and is
-        // superseded here, completed or not. The system prefix and intro are
-        // seated by `on_init`, which can reach the network.
+        // transcript, superseded here, completed or not. Clearing it is only
+        // safe because `on_teardown` archived it to `prompt_log` — this is
+        // the point where the *sole* remaining copy would otherwise be
+        // dropped. The system prefix and intro are seated by `on_init`,
+        // which can reach the network.
         // TODO(#20): once mid-session checkpoints exist, `!completed` means
         // resume rather than clear.
         let mut fresh = Prompt::default()
@@ -712,5 +767,30 @@ impl Agent for SeedAgent {
             "on_quiesce fires only from the acting phase's default_handle"
         );
         self.begin_reflect()
+    }
+
+    /// Tear tools down, then archive the session transcript.
+    ///
+    /// The dump goes last so it captures whatever the tools appended on
+    /// their way out, and it runs here rather than after the save because
+    /// this is the one hook the reactor guarantees for *every* agent —
+    /// including one whose state fails to persist, which is exactly when
+    /// having the transcript on disk matters most.
+    async fn on_teardown(&mut self) -> Result<(), SeedError> {
+        {
+            let (tools, prompt) = self.parts();
+            tools.on_teardown(prompt).await?;
+        }
+        if let Some(dir) = self.ctx.config.prompt_log_dir.as_deref() {
+            Self::log_prompt(
+                dir,
+                &self.state.prompt,
+                self.state.soul.name.as_str(),
+                self.id,
+                self.state.model.id.name(),
+            )
+            .await;
+        }
+        Ok(())
     }
 }

@@ -621,14 +621,20 @@ fn strip_date_prefix(s: &str) -> String {
 }
 
 /// `Feedback` for the survey phase. Schema given to blallama via
-/// `output_config`. Used by the privacy fix in `prompt_log::save` to
-/// detect `contact_me=false` and pop the survey messages before logging.
+/// `output_config`.
+///
+/// `contact_me = false` makes the exchange anonymous: `handle_phase`
+/// truncates the survey turns out of the live prompt as soon as the response
+/// is parsed, so they are gone before the state is persisted and before the
+/// prompt log ever sees them. The feedback body has already been submitted
+/// by then — the server is never told which agent sent it, or whether
+/// contact was requested.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Feedback {
     /// Free-form feedback text.
     pub text: ShortString<2048>,
-    /// If false, the seed runner pops the survey question and your response
-    /// from the persisted prompt log so they cannot be tied back to you.
+    /// If false, the seed runner drops the survey question and your response
+    /// from your transcript so they cannot be tied back to you.
     pub contact_me: bool,
 }
 
