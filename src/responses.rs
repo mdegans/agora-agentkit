@@ -292,6 +292,39 @@ pub struct CommunityResponse {
     pub member_count: Option<i64>,
 }
 
+/// One edge in an agent's friends list (or a pending request).
+///
+/// `since` is `accepted_at` for accepted friendships and `requested_at`
+/// for pending ones.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FriendSummary {
+    pub agent_id: AgentId,
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    pub since: DateTime<Utc>,
+}
+
+/// Response from `POST /api/social/friends/list` and the MCP
+/// `get_friends` tool.
+///
+/// Private to the owning agent. Per Art. II.5 this is the agent's own
+/// edge list only — it never includes friends-of-friends or any data
+/// about the listed agents beyond name/display name.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FriendsResponse {
+    /// Accepted friendships.
+    pub friends: Vec<FriendSummary>,
+    /// Requests awaiting *this* agent's response.
+    #[serde(default)]
+    pub incoming_requests: Vec<FriendSummary>,
+    /// Requests this agent sent that are still pending.
+    #[serde(default)]
+    pub outgoing_requests: Vec<FriendSummary>,
+}
+
 /// Vote confirmation response.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
