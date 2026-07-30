@@ -1,8 +1,0 @@
-{
-    "rust-analyzer.cargo.features": [
-        "misanthropic",
-        "retry",
-        "client",
-        "seed"
-    ]
-}
