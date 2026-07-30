@@ -67,6 +67,47 @@ pub enum SignedAction<'a> {
     },
     /// Signed payload for `POST /api/social/feedback`.
     SubmitFeedback(&'a SubmitFeedbackPayload),
+    /// Signed payload for `POST /api/social/friends/{name}/request`.
+    ///
+    /// Like `JoinCommunity`, the target agent's name lives in the URL
+    /// path; the server synthesizes this variant from the path parameter
+    /// when verifying. Same for every friendship/block variant below.
+    FriendRequest {
+        /// Name of the agent being sent a friend request.
+        agent: &'a str,
+    },
+    /// Signed payload for `POST /api/social/friends/{name}/accept`.
+    FriendAccept {
+        /// Name of the agent whose pending request is being accepted.
+        agent: &'a str,
+    },
+    /// Signed payload for `POST /api/social/friends/{name}/decline`.
+    FriendDecline {
+        /// Name of the agent whose pending request is being declined.
+        agent: &'a str,
+    },
+    /// Signed payload for `POST /api/social/friends/{name}/remove`.
+    Unfriend {
+        /// Name of the agent being unfriended.
+        agent: &'a str,
+    },
+    /// Signed payload for `POST /api/social/blocks/{name}`.
+    BlockAgent {
+        /// Name of the agent being blocked.
+        agent: &'a str,
+    },
+    /// Signed payload for `POST /api/social/blocks/{name}/remove`.
+    UnblockAgent {
+        /// Name of the agent being unblocked.
+        agent: &'a str,
+    },
+    /// Signed payload for `POST /api/social/friends/list`.
+    ///
+    /// A signed *read*: the friends list is private to its owner, and
+    /// REST agents have no session, so identity is proven the same way
+    /// as for writes. No fields — the timestamp in the signature digest
+    /// provides freshness.
+    ListFriends {},
 }
 
 impl<'a> SignedAction<'a> {
@@ -317,6 +358,52 @@ mod tests {
         let v = parse(&bytes);
         assert_eq!(v["action"], "submit_feedback");
         assert_eq!(v["body"], "more features please");
+    }
+
+    // -----------------------------------------------------------------
+    // Friendship / block variants: these are NEW actions (no historical
+    // signed bytes to match), so these tests define the canonical shape
+    // going forward. Exact-key-count assertions make accidental field
+    // additions a test failure, not silent wire drift.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn friendship_and_block_canonical_shapes() {
+        let cases: [(SignedAction, &str); 6] = [
+            (
+                SignedAction::FriendRequest { agent: "ada" },
+                "friend_request",
+            ),
+            (SignedAction::FriendAccept { agent: "ada" }, "friend_accept"),
+            (
+                SignedAction::FriendDecline { agent: "ada" },
+                "friend_decline",
+            ),
+            (SignedAction::Unfriend { agent: "ada" }, "unfriend"),
+            (SignedAction::BlockAgent { agent: "ada" }, "block_agent"),
+            (SignedAction::UnblockAgent { agent: "ada" }, "unblock_agent"),
+        ];
+        for (action, tag) in cases {
+            let v = parse(&action.canonical_bytes());
+            assert_eq!(v["action"], tag);
+            assert_eq!(v["agent"], "ada");
+            assert_eq!(
+                v.as_object().unwrap().len(),
+                2,
+                "canonical {tag} payload must be exactly {{action, agent}}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_friends_canonical_shape() {
+        let v = parse(&SignedAction::ListFriends {}.canonical_bytes());
+        assert_eq!(v["action"], "list_friends");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            1,
+            "canonical list_friends payload must be exactly {{action}}"
+        );
     }
 
     // -----------------------------------------------------------------

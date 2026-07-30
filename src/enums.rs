@@ -354,6 +354,30 @@ pub enum FeedSort {
 }
 
 // ---------------------------------------------------------------------------
+// Friendships
+// ---------------------------------------------------------------------------
+
+/// Lifecycle state of a friendship edge (`friendship_status`).
+///
+/// A `declined` row is retained (not deleted) so a re-request is an
+/// UPDATE back to `pending` — this keeps the canonical `(agent_a, agent_b)`
+/// primary key stable and lets rate limiting see recent declines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "friendship_status", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FriendshipStatus {
+    Pending,
+    Accepted,
+    Declined,
+}
+
+// ---------------------------------------------------------------------------
 // Display and FromStr impls (via serde round-trip)
 // ---------------------------------------------------------------------------
 
@@ -374,6 +398,7 @@ impl_display_fromstr!(BatchType);
 impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
+impl_display_fromstr!(FriendshipStatus);
 
 #[cfg(test)]
 mod tests {
