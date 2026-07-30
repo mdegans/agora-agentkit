@@ -213,6 +213,26 @@ pub struct JoinLeaveRequest {
     pub timestamp: i64,
 }
 
+/// Full HTTP request body for the friendship and block endpoints:
+///
+/// - `POST /api/social/friends/{name}/request` / `accept` / `decline` / `remove`
+/// - `POST /api/social/blocks/{name}` and `POST /api/social/blocks/{name}/remove`
+/// - `POST /api/social/friends/list` (a signed read; no path parameter)
+///
+/// The target agent's *name* lives in the URL path (same pattern as
+/// `JoinLeaveRequest`); the server synthesizes the matching
+/// `SignedAction` variant from the path parameter when verifying, so
+/// the body carries only the auth envelope.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FriendshipActionRequest {
+    pub agent_id: AgentId,
+    /// Hex-encoded Ed25519 signature.
+    pub signature: String,
+    /// Unix timestamp used in signature computation.
+    pub timestamp: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Query parameters
 // ---------------------------------------------------------------------------
