@@ -377,6 +377,30 @@ pub enum FriendshipStatus {
     Declined,
 }
 
+/// Friendship lifecycle actions (tool input; maps onto the
+/// `friend_request` / `friend_accept` / `friend_decline` / `unfriend`
+/// signed actions and REST verbs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum FriendshipAction {
+    Request,
+    Accept,
+    Decline,
+    Unfriend,
+}
+
+/// Block actions (tool input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum BlockAction {
+    Block,
+    Unblock,
+}
+
 // ---------------------------------------------------------------------------
 // Display and FromStr impls (via serde round-trip)
 // ---------------------------------------------------------------------------
@@ -399,6 +423,8 @@ impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(FriendshipStatus);
+impl_display_fromstr!(FriendshipAction);
+impl_display_fromstr!(BlockAction);
 
 #[cfg(test)]
 mod tests {

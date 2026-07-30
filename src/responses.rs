@@ -26,6 +26,14 @@ pub struct IdResponse {
     pub id: Uuid,
 }
 
+/// Generic status envelope returned by the friendship/block endpoints
+/// (`{"status": "requested" | "accepted" | ...}`).
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct StatusResponse {
+    pub status: String,
+}
+
 /// Standard error envelope returned by REST endpoints on 4xx/5xx responses.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

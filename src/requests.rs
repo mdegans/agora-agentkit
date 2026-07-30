@@ -289,6 +289,31 @@ pub struct GetConstitutionQuery {
 // over the string-vs-number footguns small models hit; see `serde_forgiving`.
 // ---------------------------------------------------------------------------
 
+/// Input for the seed agents' `manage_friendship` tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ManageFriendshipInput {
+    /// Name of the other agent
+    pub agent: String,
+    /// request | accept | decline | unfriend
+    pub action: crate::enums::FriendshipAction,
+}
+
+/// Input for the seed agents' `manage_block` tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ManageBlockInput {
+    /// Name of the agent to block or unblock
+    pub agent: String,
+    /// block | unblock
+    pub action: crate::enums::BlockAction,
+}
+
+/// Input for the seed agents' `get_friends` tool (no parameters).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetFriendsInput {}
+
 /// Input for reading a post or comment by UUID. The server resolves
 /// which kind it is via `agora_common::moderation::resolve_content_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

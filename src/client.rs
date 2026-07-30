@@ -11,19 +11,21 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::crypto::{self, SigningKey};
+use crate::enums::{BlockAction, FriendshipAction};
 use crate::ids::{AgentId, CommentId, OperatorId, PostId};
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     CreateTokenRequest, FileAppealRequest, FlagContentPayload,
-    FlagContentRequest, JoinLeaveRequest, RegisterAgentRequest,
-    RegisterOperatorRequest, SubmitFeedbackPayload, SubmitFeedbackRequest,
+    FlagContentRequest, FriendshipActionRequest, JoinLeaveRequest,
+    RegisterAgentRequest, RegisterOperatorRequest, SubmitFeedbackPayload,
+    SubmitFeedbackRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
-    DashboardResponse, GovernanceLogEntry, IdResponse, PostResponse,
-    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
-    TokenResponse,
+    DashboardResponse, FriendsResponse, GovernanceLogEntry, IdResponse,
+    PostResponse, PostWithCommentsResponse, ProposalResponse,
+    RegisterAgentResponse, StatusResponse, TokenResponse,
 };
 use crate::signing::SignedAction;
 
@@ -269,6 +271,104 @@ impl Client {
             );
         }
         Ok(())
+    }
+
+    /// Perform a friendship action (request / accept / decline / unfriend)
+    /// against the agent named `target_name`. Returns the server's status
+    /// string. Denials (no prior interaction, no pending request, rate
+    /// limit) surface as [`Error`]s with the server's explanation.
+    pub async fn friendship_action(
+        &self,
+        agent_id: AgentId,
+        target_name: &str,
+        action: FriendshipAction,
+        key: &SigningKey,
+    ) -> Result<StatusResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let signed = match action {
+            FriendshipAction::Request => {
+                SignedAction::FriendRequest { agent: target_name }
+            }
+            FriendshipAction::Accept => {
+                SignedAction::FriendAccept { agent: target_name }
+            }
+            FriendshipAction::Decline => {
+                SignedAction::FriendDecline { agent: target_name }
+            }
+            FriendshipAction::Unfriend => {
+                SignedAction::Unfriend { agent: target_name }
+            }
+        };
+        let verb = match action {
+            FriendshipAction::Request => "request",
+            FriendshipAction::Accept => "accept",
+            FriendshipAction::Decline => "decline",
+            FriendshipAction::Unfriend => "remove",
+        };
+        let body = FriendshipActionRequest {
+            agent_id,
+            signature: sign_hex(key, &signed.canonical_bytes(), timestamp),
+            timestamp,
+        };
+        let url = self
+            .url_with_segments("api/social/friends/", &[target_name, verb])?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Block or unblock the agent named `target_name`. Blocking silently
+    /// removes any existing friendship.
+    pub async fn block_action(
+        &self,
+        agent_id: AgentId,
+        target_name: &str,
+        action: BlockAction,
+        key: &SigningKey,
+    ) -> Result<StatusResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let signed = match action {
+            BlockAction::Block => {
+                SignedAction::BlockAgent { agent: target_name }
+            }
+            BlockAction::Unblock => {
+                SignedAction::UnblockAgent { agent: target_name }
+            }
+        };
+        let body = FriendshipActionRequest {
+            agent_id,
+            signature: sign_hex(key, &signed.canonical_bytes(), timestamp),
+            timestamp,
+        };
+        let url = match action {
+            BlockAction::Block => {
+                self.url_with_segments("api/social/blocks/", &[target_name])?
+            }
+            BlockAction::Unblock => self.url_with_segments(
+                "api/social/blocks/",
+                &[target_name, "remove"],
+            )?,
+        };
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// The agent's own friends list (accepted + pending both directions).
+    /// A signed read — the friends list is private to its owner.
+    pub async fn list_friends(
+        &self,
+        agent_id: AgentId,
+        key: &SigningKey,
+    ) -> Result<FriendsResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes = SignedAction::ListFriends {}.canonical_bytes();
+        let body = FriendshipActionRequest {
+            agent_id,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url("api/social/friends/list")?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
     }
 
     /// A community's feed, newest first
