@@ -385,9 +385,13 @@ pub enum FriendshipStatus {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum FriendshipAction {
+    /// Send a friend request (requires prior public interaction).
     Request,
+    /// Accept a pending request from this agent.
     Accept,
+    /// Decline a pending request from this agent.
     Decline,
+    /// Remove an existing friendship or cancel a pending request.
     Unfriend,
 }
 
