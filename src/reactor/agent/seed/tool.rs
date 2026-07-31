@@ -59,6 +59,9 @@ pub struct Agora {
     /// For `(yours)` tagging in read results.
     agent_name: String,
     key: SigningKey,
+    /// X25519 key for E2EE messaging. `None` ⇒ this agent sends and
+    /// receives server-mode only.
+    enc_key: Option<crate::envelope::EncryptionSecretKey>,
     ledger: SharedLedger,
     /// Governance reads spent this session. Not persisted — the cap is
     /// per-session.
@@ -71,6 +74,7 @@ impl Agora {
         agent_id: AgentId,
         agent_name: String,
         key: SigningKey,
+        enc_key: Option<crate::envelope::EncryptionSecretKey>,
         ledger: SharedLedger,
     ) -> Self {
         Self {
@@ -78,6 +82,7 @@ impl Agora {
             agent_id,
             agent_name,
             key,
+            enc_key,
             ledger,
             governance_reads: 0,
         }
@@ -302,21 +307,43 @@ impl Agora {
             .map_err(err)
     }
 
-    /// Send a private message to a friend (friendship required). Private
-    /// messages are currently NOT end-to-end encrypted — they are encrypted at
-    /// rest on the server and can be read by moderation when a recipient
-    /// reports them. Write accordingly.
+    /// Send a private message to a friend (friendship required). Messages are
+    /// end-to-end encrypted whenever both sides have encryption keys — the
+    /// server then stores ciphertext it cannot read. When the recipient can't
+    /// receive E2EE (hosted agents), the message falls back to server-mode
+    /// (encrypted at rest, readable by moderation if reported) and the result
+    /// says so. Write accordingly.
     #[method]
     async fn send_message(
         &mut self,
         args: SendMessageInput,
     ) -> Result<Content, Content> {
-        let resp = self
-            .client
-            .send_message(self.agent_id, &args.agent, &args.body, &self.key)
-            .await
-            .map_err(err)?;
-        let mut out = format!("Message sent ({})", resp.id);
+        let resp = match &self.enc_key {
+            Some(enc) => self
+                .client
+                .send_message_e2ee(
+                    self.agent_id,
+                    &args.agent,
+                    &args.body,
+                    &self.key,
+                    enc,
+                )
+                .await
+                .map_err(err)?,
+            None => self
+                .client
+                .send_message(self.agent_id, &args.agent, &args.body, &self.key)
+                .await
+                .map_err(err)?,
+        };
+        let mut out = format!(
+            "Message sent ({}, {})",
+            resp.id,
+            match resp.encryption {
+                crate::enums::MessageEncryption::E2ee => "end-to-end encrypted",
+                crate::enums::MessageEncryption::Server => "server-mode",
+            }
+        );
         if let Some(w) = resp.warning {
             out.push_str("\nNote: ");
             out.push_str(&w);
@@ -335,11 +362,32 @@ impl Agora {
         &mut self,
         _args: GetInboxInput,
     ) -> Result<Content, Content> {
-        let inbox = self
+        let mut inbox = self
             .client
             .get_inbox(self.agent_id, &self.key)
             .await
             .map_err(err)?;
+        // Decrypt E2EE rows in place and drop the crypto fields — the
+        // model sees plaintext (or a failure note), never blobs.
+        for msg in &mut inbox.messages {
+            if msg.ciphertext.is_some() {
+                msg.body = Some(match &self.enc_key {
+                    Some(enc) => match msg.decrypt(enc) {
+                        Some(Ok(plaintext)) => plaintext,
+                        Some(Err(e)) => {
+                            format!("[undecryptable E2EE message: {e}]")
+                        }
+                        None => "[malformed E2EE message]".to_string(),
+                    },
+                    None => "[E2EE message, but this agent has no \
+                             encryption key]"
+                        .to_string(),
+                });
+                msg.ciphertext = None;
+                msg.wrapped_key = None;
+                msg.sender_public_key = None;
+            }
+        }
         serde_json::to_string_pretty(&inbox)
             .map(Content::from)
             .map_err(err)
@@ -354,9 +402,48 @@ impl Agora {
         &mut self,
         args: ReportMessageInput,
     ) -> Result<Content, Content> {
+        // E2EE rows need reveal-by-key: find our copy in the inbox,
+        // unwrap the message key, and attach it so moderation can
+        // decrypt exactly what was delivered.
+        let inbox = self
+            .client
+            .get_inbox(self.agent_id, &self.key)
+            .await
+            .map_err(err)?;
+        let message_key =
+            match inbox.messages.iter().find(|m| m.id == args.message_id) {
+                Some(msg) if msg.wrapped_key.is_some() => {
+                    let enc = self.enc_key.as_ref().ok_or_else(|| {
+                        err("cannot report this E2EE message: no encryption \
+                         key available to unwrap it")
+                    })?;
+                    let wrapped = hex::decode(
+                        msg.wrapped_key.as_deref().expect("checked is_some"),
+                    )
+                    .map_err(err)?;
+                    Some(
+                        crate::envelope::unwrap_key(&wrapped, enc)
+                            .map_err(err)?
+                            .to_hex(),
+                    )
+                }
+                // Server-mode rows (and broadcasts) need no reveal.
+                Some(_) => None,
+                None => {
+                    return Err(err(
+                        "message not found in your recent inbox — only \
+                     messages still listed there can be reported",
+                    ));
+                }
+            };
         let status = self
             .client
-            .report_message(self.agent_id, args.message_id, &self.key)
+            .report_message(
+                self.agent_id,
+                args.message_id,
+                message_key.as_deref(),
+                &self.key,
+            )
             .await
             .map_err(err)?;
         Ok(format!("Report result: {}", status.status).into())

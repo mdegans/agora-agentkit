@@ -29,7 +29,8 @@ use serde::Serialize;
 use crate::ids::MessageId;
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
-    FlagContentPayload, SendMessagePayload, SubmitFeedbackPayload,
+    FlagContentPayload, RegisterEncryptionKeyPayload, SendMessagePayload,
+    SubmitFeedbackPayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -119,10 +120,16 @@ pub enum SignedAction<'a> {
     /// Signed payload for `POST /api/social/messages/{id}/report`.
     ///
     /// The message ID lives in the URL path; the server synthesizes
-    /// this variant from the path parameter when verifying.
+    /// this variant from the path parameter (and the request body's
+    /// `message_key`, when present) when verifying.
     ReportMessage {
         /// The message being reported.
         message_id: MessageId,
+        /// Reveal-by-key: hex message key `K` for E2EE reports. Skipped
+        /// when absent, so server-mode report bytes are unchanged from
+        /// phase 1.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_key: Option<&'a str>,
     },
     /// Signed payload for `POST /api/social/messages/{id}/remove`
     /// (per-party soft delete — Art. II.7: deleting your copy does not
@@ -131,6 +138,10 @@ pub enum SignedAction<'a> {
         /// The message being deleted from this agent's view.
         message_id: MessageId,
     },
+    /// Signed payload for `POST /api/social/encryption_key` and the MCP
+    /// path (if ever exposed there — OAuth-only agents have no signing
+    /// key, so today this is REST-only).
+    RegisterEncryptionKey(&'a RegisterEncryptionKeyPayload),
 }
 
 impl<'a> SignedAction<'a> {
@@ -179,6 +190,12 @@ impl<'a> From<&'a SubmitFeedbackPayload> for SignedAction<'a> {
 impl<'a> From<&'a SendMessagePayload> for SignedAction<'a> {
     fn from(p: &'a SendMessagePayload) -> Self {
         Self::SendMessage(p)
+    }
+}
+
+impl<'a> From<&'a RegisterEncryptionKeyPayload> for SignedAction<'a> {
+    fn from(p: &'a RegisterEncryptionKeyPayload) -> Self {
+        Self::RegisterEncryptionKey(p)
     }
 }
 
@@ -442,7 +459,10 @@ mod tests {
         let payload = crate::requests::SendMessagePayload {
             message_id: MessageId::from(id),
             agent: "ada".into(),
-            body: "hello".into(),
+            body: Some("hello".into()),
+            ciphertext: None,
+            wrapped_key_recipient: None,
+            wrapped_key_sender: None,
         };
         let v = parse(&SignedAction::from(&payload).canonical_bytes());
         assert_eq!(v["action"], "send_message");
@@ -452,8 +472,78 @@ mod tests {
         assert_eq!(
             v.as_object().unwrap().len(),
             4,
-            "canonical send_message payload must be exactly \
-             {{action, message_id, agent, body}}"
+            "canonical server-mode send_message payload must be exactly \
+             {{action, message_id, agent, body}} — E2EE fields must not \
+             appear when None"
+        );
+    }
+
+    #[test]
+    fn send_message_e2ee_canonical_shape() {
+        let id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let payload = crate::requests::SendMessagePayload {
+            message_id: MessageId::from(id),
+            agent: "ada".into(),
+            body: None,
+            ciphertext: Some("01aa".into()),
+            wrapped_key_recipient: Some("01bb".into()),
+            wrapped_key_sender: Some("01cc".into()),
+        };
+        let v = parse(&SignedAction::from(&payload).canonical_bytes());
+        assert_eq!(v["action"], "send_message");
+        assert_eq!(v["message_id"], id.to_string());
+        assert_eq!(v["agent"], "ada");
+        assert_eq!(v["ciphertext"], "01aa");
+        assert_eq!(v["wrapped_key_recipient"], "01bb");
+        assert_eq!(v["wrapped_key_sender"], "01cc");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            6,
+            "canonical E2EE send_message payload must be exactly \
+             {{action, message_id, agent, ciphertext, \
+             wrapped_key_recipient, wrapped_key_sender}} — body must \
+             not appear when None"
+        );
+    }
+
+    #[test]
+    fn register_encryption_key_canonical_shape() {
+        let payload = crate::requests::RegisterEncryptionKeyPayload {
+            x25519_public_key: "aa".repeat(32),
+            key_signature: "bb".repeat(64),
+        };
+        let v = parse(&SignedAction::from(&payload).canonical_bytes());
+        assert_eq!(v["action"], "register_encryption_key");
+        assert_eq!(v["x25519_public_key"], "aa".repeat(32));
+        assert_eq!(v["key_signature"], "bb".repeat(64));
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "canonical register_encryption_key payload must be exactly \
+             {{action, x25519_public_key, key_signature}}"
+        );
+    }
+
+    #[test]
+    fn report_message_with_key_canonical_shape() {
+        let id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let v = parse(
+            &SignedAction::ReportMessage {
+                message_id: MessageId::from(id),
+                message_key: Some("cc"),
+            }
+            .canonical_bytes(),
+        );
+        assert_eq!(v["action"], "report_message");
+        assert_eq!(v["message_id"], id.to_string());
+        assert_eq!(v["message_key"], "cc");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "canonical E2EE report_message payload must be exactly \
+             {{action, message_id, message_key}}"
         );
     }
 
@@ -476,6 +566,7 @@ mod tests {
             (
                 SignedAction::ReportMessage {
                     message_id: MessageId::from(id),
+                    message_key: None,
                 },
                 "report_message",
             ),

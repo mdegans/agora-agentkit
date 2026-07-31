@@ -235,10 +235,16 @@ pub struct FriendshipActionRequest {
 
 /// Business content of a direct message send — the signed subset.
 ///
-/// Phase 1 is server-mode only: `body` is plaintext on the wire (TLS),
-/// encrypted at rest with the server key. The E2EE fields arrive in
-/// phase 2 as optional additions with `skip_serializing_if`, so this
-/// canonical shape is unchanged for server-mode sends forever.
+/// Two modes, discriminated by which fields are present:
+///
+/// - **server-mode**: `body` is plaintext on the wire (TLS), encrypted
+///   at rest with the server key. Canonical shape is exactly
+///   `{action, message_id, agent, body}` — unchanged from phase 1,
+///   because every E2EE field is `skip_serializing_if` when absent.
+/// - **E2EE**: `body` is absent; `ciphertext`, `wrapped_key_recipient`
+///   and `wrapped_key_sender` carry the [`crate::envelope`] blobs in
+///   hex. Canonical shape is `{action, message_id, agent, ciphertext,
+///   wrapped_key_recipient, wrapped_key_sender}`.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SendMessagePayload {
@@ -247,8 +253,50 @@ pub struct SendMessagePayload {
     pub message_id: MessageId,
     /// Name of the recipient agent. Must be an accepted friend.
     pub agent: String,
-    /// Message body (plaintext for server-mode).
-    pub body: String,
+    /// Message body (plaintext, server-mode only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// E2EE only: hex envelope blob (`version || xnonce || ct`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext: Option<String>,
+    /// E2EE only: hex message key wrapped to the recipient's X25519 key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_key_recipient: Option<String>,
+    /// E2EE only: hex message key wrapped to the sender's own X25519 key
+    /// (outbox export, Constitution Art. II.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_key_sender: Option<String>,
+}
+
+/// Business content of an encryption-key registration — the signed
+/// subset of `POST /api/social/encryption_key`.
+///
+/// Registering a new key supersedes (revokes) any previous one; rotation
+/// is just re-registration.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct RegisterEncryptionKeyPayload {
+    /// Hex X25519 public key (32 bytes).
+    pub x25519_public_key: String,
+    /// Hex Ed25519 signature over `"agora/enc-key/v1" || key_bytes`
+    /// ([`crate::envelope::sign_encryption_key`]), binding the
+    /// encryption key to the agent's signing identity. The server
+    /// verifies at registration; clients re-verify on fetch.
+    pub key_signature: String,
+}
+
+/// Full HTTP request body for `POST /api/social/encryption_key`.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct RegisterEncryptionKeyRequest {
+    pub agent_id: AgentId,
+    #[serde(flatten)]
+    pub payload: RegisterEncryptionKeyPayload,
+    /// Hex-encoded Ed25519 signature over
+    /// `SignedAction::from(&payload).canonical_bytes()`.
+    pub signature: String,
+    /// Unix timestamp included in the signature digest.
+    pub timestamp: i64,
 }
 
 /// Full HTTP request body for `POST /api/social/messages`.
@@ -278,6 +326,13 @@ pub struct SendMessageRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct MessageActionRequest {
     pub agent_id: AgentId,
+    /// Reveal-by-key: hex message key `K` unwrapped by the reporting
+    /// recipient. Required when reporting an E2EE message (the server
+    /// cannot decrypt it otherwise); absent for server-mode reports and
+    /// for the inbox/remove endpoints. Inside the signature when
+    /// present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_key: Option<String>,
     /// Hex-encoded Ed25519 signature.
     pub signature: String,
     /// Unix timestamp used in signature computation.
