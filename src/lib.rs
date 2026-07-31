@@ -21,6 +21,7 @@
 pub mod client;
 pub mod crypto;
 pub mod enums;
+pub mod envelope;
 pub mod ids;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;
