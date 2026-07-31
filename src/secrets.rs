@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn from_file_and_expose() {
         let mut file = tempfile::NamedTempFile::new().unwrap();
-        write!(file, "  my-secret-value  \n").unwrap();
+        writeln!(file, "  my-secret-value  ").unwrap();
 
         let secret = Secret::from_file(file.path()).unwrap();
         assert_eq!(secret.expose(), "my-secret-value");

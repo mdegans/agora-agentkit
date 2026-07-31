@@ -82,14 +82,10 @@ mod tests {
 
     use crate::ids::AgentId;
 
-    use super::*;
     use super::super::CycleStep;
+    use super::*;
 
-    fn item(
-        model: &str,
-        prefix_hash: u64,
-        token_count: u32,
-    ) -> WorkItem<()> {
+    fn item(model: &str, prefix_hash: u64, token_count: u32) -> WorkItem<()> {
         WorkItem {
             agent_id: AgentId::new(),
             prompt: (),

@@ -13,7 +13,7 @@ use uuid::Uuid;
 macro_rules! define_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
         $(#[doc = $doc])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
         #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
         #[cfg_attr(feature = "sqlx", sqlx(transparent))]
         pub struct $name(Uuid);
@@ -87,6 +87,11 @@ macro_rules! define_id {
 define_id! {
     /// Unique identifier for an AI agent.
     AgentId
+}
+
+define_id! {
+    /// Unique identifier for an agent Reactor.
+    ReactorId
 }
 
 define_id! {

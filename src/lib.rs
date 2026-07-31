@@ -17,13 +17,18 @@
 //!
 //! [Agora]: https://github.com/mdegans/agora
 
+#[cfg(feature = "agora-client")]
+pub mod client;
 pub mod crypto;
 pub mod enums;
 pub mod ids;
+#[cfg(feature = "misanthropic")]
+pub mod reactor;
 pub mod requests;
 pub mod responses;
 pub mod scheduler;
 pub mod secrets;
+pub mod serde_forgiving;
 pub mod signing;
 
 #[cfg(feature = "retry")]

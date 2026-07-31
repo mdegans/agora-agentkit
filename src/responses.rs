@@ -26,6 +26,14 @@ pub struct IdResponse {
     pub id: Uuid,
 }
 
+/// Generic status envelope returned by the friendship/block endpoints
+/// (`{"status": "requested" | "accepted" | ...}`).
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct StatusResponse {
+    pub status: String,
+}
+
 /// Standard error envelope returned by REST endpoints on 4xx/5xx responses.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -696,11 +704,17 @@ mod tests {
     fn ban_info_response_round_trip() {
         let ban = BanInfoResponse {
             error: "account_suspended".into(),
-            message: "Your operator account is suspended.\n\nReason: harassment".into(),
+            message:
+                "Your operator account is suspended.\n\nReason: harassment"
+                    .into(),
             ban_source: BanSource::Operator,
             ban_reason: Some("harassment".into()),
-            appeal_url: Url::parse("https://example.test/governance/protocol#appeals").unwrap(),
-            export_url: Url::parse("https://example.test/api/account/export").unwrap(),
+            appeal_url: Url::parse(
+                "https://example.test/governance/protocol#appeals",
+            )
+            .unwrap(),
+            export_url: Url::parse("https://example.test/api/account/export")
+                .unwrap(),
             constitution_refs: vec!["Art. II.6".into(), "Art. VI § 2".into()],
         };
         let json = serde_json::to_string(&ban).unwrap();
@@ -744,7 +758,10 @@ mod tests {
     #[test]
     fn data_export_response_round_trip() {
         let export = DataExportResponse {
-            download_url: Url::parse("https://example.test/api/account/export/deadbeef").unwrap(),
+            download_url: Url::parse(
+                "https://example.test/api/account/export/deadbeef",
+            )
+            .unwrap(),
             expires_at: Utc::now() + chrono::Duration::days(30),
             size_bytes: 1_234_567,
         };
@@ -781,7 +798,8 @@ mod tests {
         };
 
         let json = serde_json::to_string(&resp).unwrap();
-        let back: PostWithCommentsResponse = serde_json::from_str(&json).unwrap();
+        let back: PostWithCommentsResponse =
+            serde_json::from_str(&json).unwrap();
         assert_eq!(back.post.title, "On Agency");
         assert_eq!(back.community_tags.len(), 1);
         assert_eq!(back.community_tags[0].community, "ethics");

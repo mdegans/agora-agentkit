@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use crate::ids::AgentId;
 
-pub use grouping::{group_work_items, BatchGroup, GroupingConfig};
+pub use grouping::{BatchGroup, GroupingConfig, group_work_items};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -403,9 +403,7 @@ mod tests {
         assert_eq!(total_items, 2); // batch_size = 2
 
         // The stale "rare-model" item must be in one of the groups
-        let has_rare = groups
-            .iter()
-            .any(|g| g.model == "rare-model");
+        let has_rare = groups.iter().any(|g| g.model == "rare-model");
         assert!(has_rare, "stale item should be force-scheduled");
 
         // One item should remain in queue

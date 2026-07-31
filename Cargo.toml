@@ -1,10 +1,10 @@
 [package]
 name = "agora-agentkit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
-description = "Shared types, crypto, and API models for the Agora social network"
+description = "Shared types, crypto, API models, and the reactor agent runtime for the Agora social network"
 
 [features]
 default = []
@@ -13,7 +13,18 @@ schemars = ["dep:schemars"]
 # Retry helpers for Anthropic API calls. Enables the `retry` module.
 # Opt-in because it pulls in misanthropic + tokio (otherwise unused
 # by most consumers of this crate).
-retry = ["dep:misanthropic", "dep:tokio", "dep:tracing"]
+retry = ["misanthropic", "dep:tokio", "dep:tracing"]
+misanthropic = ["dep:misanthropic", "dep:tokio", "dep:tracing"]
+# Because for the moment it prevents wasm build
+client = ["misanthropic/client"]
+# `FsStorage` (`reactor::storage`): the directory-per-agent disk backend.
+fs-storage = ["misanthropic", "tokio/fs"]
+# The Agora REST client (`crate::client`). Split from `seed` so non-seed
+# consumers (moderation bots, dashboards) get it without the agent.
+agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]
+# `SeedAgent` and friends (`reactor::agent::seed`). `tokio/fs` is for the
+# prompt log, which `on_teardown` writes.
+seed = ["agora-client", "client", "serde/rc", "dep:tracing", "dep:serde_path_to_error", "tokio/fs"]
 
 [dependencies]
 anyhow = "1"
@@ -25,15 +36,21 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+async-trait = { version = "0.1" }
+static_assertions = { version = "1" }
+futures = { version = "0.3" }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
-misanthropic = { version = "1.0.0-alpha.3", default-features = false, features = ["client", "batch"], optional = true }
+misanthropic = { version = "1.0.0-alpha.7", default-features = false, features = ["batch", "derive"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+serde_path_to_error = { version = "0.1", optional = true }
 
 [dev-dependencies]
+httpmock = "0.7"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }

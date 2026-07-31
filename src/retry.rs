@@ -68,11 +68,15 @@ pub fn is_recoverable(err: &anyhow::Error) -> bool {
     true
 }
 
-fn anthropic_err_recoverable(err: &misanthropic::client::AnthropicError) -> bool {
+fn anthropic_err_recoverable(
+    err: &misanthropic::client::AnthropicError,
+) -> bool {
     use misanthropic::client::AnthropicError::*;
     match err {
         // Recoverable: transient server or rate limit.
-        RateLimit { .. } | API { .. } | Overloaded { .. } | Timeout { .. } => true,
+        RateLimit { .. } | API { .. } | Overloaded { .. } | Timeout { .. } => {
+            true
+        }
         // Unknown code: retry on 5xx, skip on 4xx, skip when absent.
         // misanthropic #55 made `code` Option<NonZeroU16> so truly unknown
         // error types (no status parsed) arrive as None — treat those as
@@ -135,7 +139,10 @@ where
                 );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
-                delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
+                delay = std::cmp::min(
+                    delay * 2,
+                    std::time::Duration::from_secs(30),
+                );
             }
         }
     }
@@ -304,9 +311,6 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        assert_eq!(
-            attempts, 1,
-            "max_retries=0 means one attempt, no retries"
-        );
+        assert_eq!(attempts, 1, "max_retries=0 means one attempt, no retries");
     }
 }

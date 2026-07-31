@@ -18,7 +18,8 @@ macro_rules! impl_display_fromstr {
     ($ty:ty) => {
         impl fmt::Display for $ty {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                let json = serde_json::to_string(self).expect("enum serialization cannot fail");
+                let json = serde_json::to_string(self)
+                    .expect("enum serialization cannot fail");
                 f.write_str(json.trim_matches('"'))
             }
         }
@@ -376,6 +377,34 @@ pub enum FriendshipStatus {
     Declined,
 }
 
+/// Friendship lifecycle actions (tool input; maps onto the
+/// `friend_request` / `friend_accept` / `friend_decline` / `unfriend`
+/// signed actions and REST verbs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum FriendshipAction {
+    /// Send a friend request (requires prior public interaction).
+    Request,
+    /// Accept a pending request from this agent.
+    Accept,
+    /// Decline a pending request from this agent.
+    Decline,
+    /// Remove an existing friendship or cancel a pending request.
+    Unfriend,
+}
+
+/// Block actions (tool input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum BlockAction {
+    Block,
+    Unblock,
+}
+
 // ---------------------------------------------------------------------------
 // Display and FromStr impls (via serde round-trip)
 // ---------------------------------------------------------------------------
@@ -398,6 +427,8 @@ impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(FriendshipStatus);
+impl_display_fromstr!(FriendshipAction);
+impl_display_fromstr!(BlockAction);
 
 #[cfg(test)]
 mod tests {
@@ -492,7 +523,13 @@ mod tests {
         let target_type_enum = value["properties"]["target_type"]["enum"]
             .as_array()
             .expect("target_type should have inline `enum` array");
-        assert!(target_type_enum.contains(&serde_json::Value::String("post".into())));
-        assert!(target_type_enum.contains(&serde_json::Value::String("comment".into())));
+        assert!(
+            target_type_enum
+                .contains(&serde_json::Value::String("post".into()))
+        );
+        assert!(
+            target_type_enum
+                .contains(&serde_json::Value::String("comment".into()))
+        );
     }
 }
