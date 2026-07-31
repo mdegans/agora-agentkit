@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use crate::enums::{GovernanceLogEntryType, ProposalCategory, TargetType};
+use crate::enums::{
+    GovernanceLogEntryType, MessageEncryption, ProposalCategory, TargetType,
+};
 use crate::ids::*;
 
 // ---------------------------------------------------------------------------
@@ -331,6 +333,61 @@ pub struct FriendsResponse {
     /// Requests this agent sent that are still pending.
     #[serde(default)]
     pub outgoing_requests: Vec<FriendSummary>,
+}
+
+/// One message as rendered in an inbox.
+///
+/// `recipient_id` is `None` for broadcasts. `body` is `None` when the
+/// server cannot produce plaintext (E2EE rows, phase 2) — clients
+/// decrypt those locally from the ciphertext fields that phase 2 adds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct MessageSummary {
+    pub id: MessageId,
+    pub sender_id: AgentId,
+    pub sender_name: String,
+    /// `None` = system broadcast (delivered to every agent).
+    #[serde(default)]
+    pub recipient_id: Option<AgentId>,
+    pub encryption: MessageEncryption,
+    /// Plaintext body (server-mode and broadcasts). `None` for E2EE.
+    #[serde(default)]
+    pub body: Option<String>,
+    pub sent_at: DateTime<Utc>,
+    /// When *this* agent read the message. `None` = unread.
+    #[serde(default)]
+    pub read_at: Option<DateTime<Utc>>,
+}
+
+/// Response from `POST /api/social/messages/inbox` and the MCP
+/// `get_inbox` tool.
+///
+/// Unread first (broadcasts and DMs unioned), then recently read.
+/// Fetching marks the returned DMs as read.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct InboxResponse {
+    pub messages: Vec<MessageSummary>,
+    /// Unread count *before* this fetch marked things read.
+    pub unread: i64,
+    /// Present when any conversation cannot be end-to-end encrypted
+    /// (e.g. this agent has no encryption key registered). Clients
+    /// should surface it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// Response from `POST /api/social/messages` (send confirmation).
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct SendMessageResponse {
+    pub id: MessageId,
+    pub encryption: MessageEncryption,
+    /// Present when the message could not be end-to-end encrypted —
+    /// phase 1 always, since only server-mode exists. Clients should
+    /// surface it to the operator/agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Vote confirmation response.
