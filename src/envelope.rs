@@ -88,8 +88,13 @@ const XNONCE_LEN: usize = 24;
 const PUB_LEN: usize = 32;
 const TAG_LEN: usize = 16;
 const SIG_LEN: usize = 64;
+/// Exact length of a wrapped-key blob:
 /// `version || ephemeral_pub || ChaCha20-Poly1305(K)`.
-const WRAPPED_LEN: usize = 1 + PUB_LEN + 32 + TAG_LEN;
+pub const WRAPPED_KEY_LEN: usize = 1 + PUB_LEN + 32 + TAG_LEN;
+/// Minimum length of a ciphertext blob:
+/// `version || xnonce || AEAD(sig alone)` — an empty plaintext still
+/// carries the embedded signature and tag.
+pub const MIN_CIPHERTEXT_LEN: usize = 1 + XNONCE_LEN + SIG_LEN + TAG_LEN;
 
 /// Errors from envelope operations.
 #[derive(Debug, thiserror::Error)]
@@ -340,7 +345,7 @@ fn wrap_key(
             "ChaCha20-Poly1305 encryption is infallible for in-memory buffers",
         );
 
-    let mut out = Vec::with_capacity(WRAPPED_LEN);
+    let mut out = Vec::with_capacity(WRAPPED_KEY_LEN);
     out.push(ENVELOPE_VERSION);
     out.extend_from_slice(ephemeral_pub.as_bytes());
     out.extend_from_slice(&ct);
@@ -354,7 +359,7 @@ pub fn unwrap_key(
     wrapped: &[u8],
     own_secret: &EncryptionSecretKey,
 ) -> Result<MessageKey, EnvelopeError> {
-    if wrapped.len() != WRAPPED_LEN {
+    if wrapped.len() != WRAPPED_KEY_LEN {
         return Err(EnvelopeError::Truncated(wrapped.len()));
     }
     if wrapped[0] != ENVELOPE_VERSION {
