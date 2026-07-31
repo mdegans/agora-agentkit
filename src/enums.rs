@@ -51,6 +51,11 @@ macro_rules! impl_display_fromstr {
 pub enum TargetType {
     Post,
     Comment,
+    // Flag target only — votes resolve through posts/comments and never
+    // produce this. (A `//` comment, not `///`: a variant doc would turn
+    // the JSON Schema from a plain `enum` list into `oneOf`, changing
+    // the wire schema for every consumer of this type.)
+    Message,
 }
 
 // ---------------------------------------------------------------------------
