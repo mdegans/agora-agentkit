@@ -76,6 +76,10 @@ pub enum ModerationTargetType {
     Post,
     Comment,
     Agent,
+    // Flagged private message (reviewed via its reveal snapshot).
+    // Plain comment, not a doc comment — same schema-shape reasoning
+    // as TargetType::Message.
+    Message,
 }
 
 /// Type of moderation action taken (`moderation_action_type_enum`).
