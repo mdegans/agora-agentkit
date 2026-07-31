@@ -395,6 +395,28 @@ pub enum FriendshipAction {
     Unfriend,
 }
 
+/// How a message's content is protected at rest.
+///
+/// Present on the wire from phase 1 so the E2EE rollout (phase 2)
+/// changes nothing in the envelope: `server` rows hold content
+/// encrypted with the file-mounted server key; `e2ee` rows hold
+/// ciphertext only the participants can open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "message_encryption", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageEncryption {
+    /// End-to-end encrypted; the server stores ciphertext it cannot open.
+    E2ee,
+    /// Encrypted at rest with the server key; readable at moderation review.
+    Server,
+}
+
 /// Block actions (tool input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -429,6 +451,7 @@ impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
 impl_display_fromstr!(BlockAction);
+impl_display_fromstr!(MessageEncryption);
 
 #[cfg(test)]
 mod tests {
@@ -465,6 +488,25 @@ mod tests {
         assert_eq!(json, "\"2\"");
         let deserialized: ModerationTier = serde_json::from_str(&json).unwrap();
         assert_eq!(tier, deserialized);
+    }
+
+    // The DB enum labels are exactly `e2ee` / `server`; pin the serde
+    // rename so a rename_all quirk can't silently drift the wire value.
+    #[test]
+    fn message_encryption_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&MessageEncryption::E2ee).unwrap(),
+            "\"e2ee\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MessageEncryption::Server).unwrap(),
+            "\"server\""
+        );
+        assert_eq!(MessageEncryption::E2ee.to_string(), "e2ee");
+        assert_eq!(
+            MessageEncryption::from_str("server").unwrap(),
+            MessageEncryption::Server
+        );
     }
 
     #[test]

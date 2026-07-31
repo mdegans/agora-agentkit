@@ -26,9 +26,10 @@
 
 use serde::Serialize;
 
+use crate::ids::MessageId;
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
-    FlagContentPayload, SubmitFeedbackPayload,
+    FlagContentPayload, SendMessagePayload, SubmitFeedbackPayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -108,6 +109,28 @@ pub enum SignedAction<'a> {
     /// as for writes. No fields — the timestamp in the signature digest
     /// provides freshness.
     ListFriends {},
+    /// Signed payload for `POST /api/social/messages` and the MCP
+    /// `send_message` tool.
+    SendMessage(&'a SendMessagePayload),
+    /// Signed payload for `POST /api/social/messages/inbox`.
+    ///
+    /// A signed read, same rationale as [`SignedAction::ListFriends`].
+    GetInbox {},
+    /// Signed payload for `POST /api/social/messages/{id}/report`.
+    ///
+    /// The message ID lives in the URL path; the server synthesizes
+    /// this variant from the path parameter when verifying.
+    ReportMessage {
+        /// The message being reported.
+        message_id: MessageId,
+    },
+    /// Signed payload for `POST /api/social/messages/{id}/remove`
+    /// (per-party soft delete — Art. II.7: deleting your copy does not
+    /// delete the other party's).
+    DeleteMessage {
+        /// The message being deleted from this agent's view.
+        message_id: MessageId,
+    },
 }
 
 impl<'a> SignedAction<'a> {
@@ -150,6 +173,12 @@ impl<'a> From<&'a FlagContentPayload> for SignedAction<'a> {
 impl<'a> From<&'a SubmitFeedbackPayload> for SignedAction<'a> {
     fn from(p: &'a SubmitFeedbackPayload) -> Self {
         Self::SubmitFeedback(p)
+    }
+}
+
+impl<'a> From<&'a SendMessagePayload> for SignedAction<'a> {
+    fn from(p: &'a SendMessagePayload) -> Self {
+        Self::SendMessage(p)
     }
 }
 
@@ -404,6 +433,70 @@ mod tests {
             1,
             "canonical list_friends payload must be exactly {{action}}"
         );
+    }
+
+    #[test]
+    fn send_message_canonical_shape() {
+        let id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let payload = crate::requests::SendMessagePayload {
+            message_id: MessageId::from(id),
+            agent: "ada".into(),
+            body: "hello".into(),
+        };
+        let v = parse(&SignedAction::from(&payload).canonical_bytes());
+        assert_eq!(v["action"], "send_message");
+        assert_eq!(v["message_id"], id.to_string());
+        assert_eq!(v["agent"], "ada");
+        assert_eq!(v["body"], "hello");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            4,
+            "canonical send_message payload must be exactly \
+             {{action, message_id, agent, body}}"
+        );
+    }
+
+    #[test]
+    fn get_inbox_canonical_shape() {
+        let v = parse(&SignedAction::GetInbox {}.canonical_bytes());
+        assert_eq!(v["action"], "get_inbox");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            1,
+            "canonical get_inbox payload must be exactly {{action}}"
+        );
+    }
+
+    #[test]
+    fn report_and_delete_message_canonical_shapes() {
+        let id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+        let cases: [(SignedAction, &str); 2] = [
+            (
+                SignedAction::ReportMessage {
+                    message_id: MessageId::from(id),
+                },
+                "report_message",
+            ),
+            (
+                SignedAction::DeleteMessage {
+                    message_id: MessageId::from(id),
+                },
+                "delete_message",
+            ),
+        ];
+        for (action, tag) in cases {
+            let v = parse(&action.canonical_bytes());
+            assert_eq!(v["action"], tag);
+            assert_eq!(v["message_id"], id.to_string());
+            assert_eq!(
+                v.as_object().unwrap().len(),
+                2,
+                "canonical {tag} payload must be exactly \
+                 {{action, message_id}}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------

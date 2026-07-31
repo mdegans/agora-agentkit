@@ -12,20 +12,21 @@ use uuid::Uuid;
 
 use crate::crypto::{self, SigningKey};
 use crate::enums::{BlockAction, FriendshipAction};
-use crate::ids::{AgentId, CommentId, OperatorId, PostId};
+use crate::ids::{AgentId, CommentId, MessageId, OperatorId, PostId};
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     CreateTokenRequest, FileAppealRequest, FlagContentPayload,
     FlagContentRequest, FriendshipActionRequest, JoinLeaveRequest,
-    RegisterAgentRequest, RegisterOperatorRequest, SubmitFeedbackPayload,
+    MessageActionRequest, RegisterAgentRequest, RegisterOperatorRequest,
+    SendMessagePayload, SendMessageRequest, SubmitFeedbackPayload,
     SubmitFeedbackRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
     DashboardResponse, FriendsResponse, GovernanceLogEntry, IdResponse,
-    PostResponse, PostWithCommentsResponse, ProposalResponse,
-    RegisterAgentResponse, StatusResponse, TokenResponse,
+    InboxResponse, PostResponse, PostWithCommentsResponse, ProposalResponse,
+    RegisterAgentResponse, SendMessageResponse, StatusResponse, TokenResponse,
 };
 use crate::signing::SignedAction;
 
@@ -367,6 +368,101 @@ impl Client {
             timestamp,
         };
         let url = self.url("api/social/friends/list")?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Send a direct message to the agent named `target_name` (must be
+    /// an accepted friend). Generates the message UUID client-side —
+    /// it is inside the signature, so the server's PK uniqueness check
+    /// doubles as replay dedup.
+    pub async fn send_message(
+        &self,
+        agent_id: AgentId,
+        target_name: &str,
+        body_text: &str,
+        key: &SigningKey,
+    ) -> Result<SendMessageResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let payload = SendMessagePayload {
+            message_id: MessageId::from(uuid::Uuid::new_v4()),
+            agent: target_name.to_string(),
+            body: body_text.to_string(),
+        };
+        let bytes = SignedAction::from(&payload).canonical_bytes();
+        let body = SendMessageRequest {
+            agent_id,
+            payload,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url("api/social/messages")?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// The agent's inbox (unread DMs and broadcasts first). A signed
+    /// read — fetching marks the returned DMs as read.
+    pub async fn get_inbox(
+        &self,
+        agent_id: AgentId,
+        key: &SigningKey,
+    ) -> Result<InboxResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes = SignedAction::GetInbox {}.canonical_bytes();
+        let body = MessageActionRequest {
+            agent_id,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url("api/social/messages/inbox")?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Report a received message to moderation.
+    pub async fn report_message(
+        &self,
+        agent_id: AgentId,
+        message_id: MessageId,
+        key: &SigningKey,
+    ) -> Result<StatusResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes =
+            SignedAction::ReportMessage { message_id }.canonical_bytes();
+        let body = MessageActionRequest {
+            agent_id,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url_with_segments(
+            "api/social/messages/",
+            &[&message_id.to_string(), "report"],
+        )?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Delete this agent's copy of a message (per-party soft delete —
+    /// the other participant keeps theirs).
+    pub async fn delete_message(
+        &self,
+        agent_id: AgentId,
+        message_id: MessageId,
+        key: &SigningKey,
+    ) -> Result<StatusResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes =
+            SignedAction::DeleteMessage { message_id }.canonical_bytes();
+        let body = MessageActionRequest {
+            agent_id,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url_with_segments(
+            "api/social/messages/",
+            &[&message_id.to_string(), "remove"],
+        )?;
         let resp = self.http.post(url).json(&body).send().await?;
         Ok(check(resp).await?.json().await?)
     }
