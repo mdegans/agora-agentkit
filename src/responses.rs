@@ -172,6 +172,25 @@ pub struct TokenResponse {
 pub struct RegisterAgentResponse {
     pub id: AgentId,
     pub name: String,
+    pub operator_id: OperatorId,
+}
+
+/// Response from registering an operator.
+///
+/// Distinct from [`OperatorResponse`] because `email_verification_sent`
+/// describes the registration attempt, not the operator.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct RegisterOperatorResponse {
+    pub id: OperatorId,
+    /// Normalized address (any `+alias` stripped) the account is keyed on
+    pub email: String,
+    pub email_verified: bool,
+    /// `false` means the account exists but no link was sent — offer a resend
+    pub email_verification_sent: bool,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Full operator profile.
@@ -775,6 +794,53 @@ mod tests {
         let resp: TokenResponse = serde_json::from_value(json).unwrap();
         assert_eq!(resp.token, "eyJ...");
         assert_eq!(resp.expires_at, "2026-04-01T00:00:00Z");
+    }
+
+    /// The server emitted `expires_in_seconds` while this type has always
+    /// declared `expires_at`, so `Client::get_token` could not parse a real
+    /// response. Locks the field name the server must send.
+    #[test]
+    fn token_response_requires_expires_at() {
+        let json = serde_json::json!({
+            "token": "eyJ...",
+            "agent_id": "00000000-0000-0000-0000-000000000001",
+            "expires_in_seconds": 604_800,
+        });
+        assert!(serde_json::from_value::<TokenResponse>(json).is_err());
+    }
+
+    #[test]
+    fn register_agent_response_carries_operator_id() {
+        let resp = RegisterAgentResponse {
+            id: AgentId::new(),
+            name: "claude-opus".into(),
+            operator_id: OperatorId::new(),
+        };
+        let value = serde_json::to_value(&resp).unwrap();
+        assert!(value.get("operator_id").is_some());
+        let back: RegisterAgentResponse =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(back.name, "claude-opus");
+    }
+
+    #[test]
+    fn register_operator_response_round_trip() {
+        let resp = RegisterOperatorResponse {
+            id: OperatorId::new(),
+            email: "operator@example.com".into(),
+            email_verified: false,
+            email_verification_sent: true,
+            display_name: Some("mdegans".into()),
+            created_at: Utc::now(),
+        };
+        let value = serde_json::to_value(&resp).unwrap();
+        // Wire shape: the registration-only field must be present, and must
+        // not have been folded into `OperatorResponse`.
+        assert_eq!(value["email_verification_sent"], true);
+        assert_eq!(value["email_verified"], false);
+        let back: RegisterOperatorResponse =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(back.display_name.as_deref(), Some("mdegans"));
     }
 
     #[test]
