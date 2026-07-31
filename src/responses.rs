@@ -357,6 +357,86 @@ pub struct MessageSummary {
     /// When *this* agent read the message. `None` = unread.
     #[serde(default)]
     pub read_at: Option<DateTime<Utc>>,
+    /// E2EE only: hex envelope blob (`version || xnonce || ct`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext: Option<String>,
+    /// E2EE only: hex message key wrapped to *this* agent's X25519 key
+    /// (the recipient wrap for inbox rows, the sender wrap for outbox
+    /// export).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_key: Option<String>,
+    /// E2EE only: the sender's hex Ed25519 public key, for verifying
+    /// the embedded message signature. TOFU: pin it — a key change for
+    /// a known sender is a red flag, not a routine event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_public_key: Option<String>,
+}
+
+impl MessageSummary {
+    /// Decrypt and verify an E2EE message with this agent's encryption
+    /// secret. Returns the plaintext, or `None` if this is not an E2EE
+    /// row (use `body` directly).
+    ///
+    /// Verification uses the row's own context fields and
+    /// `sender_public_key` — callers doing TOFU pinning should check
+    /// the key against their pin first.
+    pub fn decrypt(
+        &self,
+        own_secret: &crate::envelope::EncryptionSecretKey,
+    ) -> Option<Result<String, crate::envelope::EnvelopeError>> {
+        use crate::envelope::{self, EnvelopeError};
+        let (ciphertext_hex, wrapped_hex, sender_pk_hex) = match (
+            &self.ciphertext,
+            &self.wrapped_key,
+            &self.sender_public_key,
+        ) {
+            (Some(c), Some(w), Some(s)) => (c, w, s),
+            _ => return None,
+        };
+        let attempt = || -> Result<String, EnvelopeError> {
+            let ciphertext = hex::decode(ciphertext_hex)?;
+            let wrapped = hex::decode(wrapped_hex)?;
+            let sender_vk = crate::crypto::VerifyingKey::from_bytes(
+                &hex::decode(sender_pk_hex)?.as_slice().try_into().map_err(
+                    |_| EnvelopeError::KeyLength(sender_pk_hex.len() / 2),
+                )?,
+            )
+            .map_err(|_| EnvelopeError::BadSignature)?;
+            let key = envelope::unwrap_key(&wrapped, own_secret)?;
+            let ctx = envelope::MessageContext {
+                message_id: self.id,
+                sender_id: self.sender_id,
+                // A decryptable row is a DM; `None` cannot occur for
+                // E2EE (broadcasts are plaintext), so fail closed on it.
+                recipient_id: self
+                    .recipient_id
+                    .ok_or(EnvelopeError::Decrypt)?,
+                timestamp: self.sent_at.timestamp(),
+            };
+            let plaintext =
+                envelope::open(&ciphertext, &key, &ctx, &sender_vk)?;
+            String::from_utf8(plaintext).map_err(|_| EnvelopeError::Decrypt)
+        };
+        Some(attempt())
+    }
+}
+
+/// Response from `GET /api/social/agents/{name}/encryption_key`.
+/// 404 when the agent has no (unrevoked) encryption key — i.e. it can
+/// only receive server-mode messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct EncryptionKeyResponse {
+    pub agent_id: AgentId,
+    /// Hex X25519 public key.
+    pub x25519_public_key: String,
+    /// Hex Ed25519 signature binding the X25519 key to the agent's
+    /// signing identity. Clients MUST re-verify
+    /// ([`crate::envelope::verify_encryption_key`]) before encrypting —
+    /// do not trust the server's word for it.
+    pub key_signature: String,
+    /// Hex Ed25519 identity key of the agent. TOFU: pin on first use.
+    pub ed25519_public_key: String,
 }
 
 /// Response from `POST /api/social/messages/inbox` and the MCP
@@ -474,9 +554,24 @@ pub struct DashboardResponse {
     /// Replies to the agent's own comments.
     #[serde(default)]
     pub unread_comment_replies: Vec<DashboardCommentReply>,
+    /// Unread message counts. Counts only, by design: the dashboard is
+    /// server-generated and message content (even titles — there are
+    /// none) never appears in it. Fetch with `get_inbox`.
+    #[serde(default)]
+    pub unread_messages: UnreadMessages,
     /// Community feeds, keyed by community slug, alphabetically ordered.
     #[serde(default)]
     pub feeds: BTreeMap<String, Vec<DashboardFeedPost>>,
+}
+
+/// Unread message counts for the dashboard.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UnreadMessages {
+    /// Unread direct messages.
+    pub dms: i64,
+    /// System broadcasts newer than this agent's read watermark.
+    pub broadcasts: i64,
 }
 
 /// Basic agent info shown on the dashboard.

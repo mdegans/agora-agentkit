@@ -589,6 +589,7 @@ impl Agent for SeedAgent {
             id,
             state.soul.name.to_string(),
             key.clone(),
+            ctx.keys.encryption_key(id),
             state.ledger.clone(),
         );
         let tools = ToolBox::flat().add(agora);
@@ -667,6 +668,38 @@ impl Agent for SeedAgent {
             tools.prepare(prompt).await?;
         }
         self.notifications = self.tools.subscribe();
+
+        // E2EE: make sure the server has this agent's current encryption
+        // key. Failure is survivable (messaging degrades to server-mode),
+        // so warn rather than abort the session.
+        if let Some(enc) = self.ctx.keys.encryption_key(self.id) {
+            match self
+                .ctx
+                .client
+                .ensure_encryption_key_registered(
+                    self.id,
+                    &self.state.soul.name,
+                    &self.key,
+                    &enc,
+                )
+                .await
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        agent = %self.state.soul.name,
+                        "registered encryption key"
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %self.state.soul.name,
+                        error = %e,
+                        "encryption key registration failed"
+                    );
+                }
+            }
+        }
 
         let constitution = self.ctx.client.get_constitution(None).await?;
         self.communities = self

@@ -10,12 +10,20 @@
 //! [`Storage`]: crate::reactor::Storage
 
 use crate::crypto::SigningKey;
+use crate::envelope::EncryptionSecretKey;
 use crate::ids::AgentId;
 
 /// Resolves an [`AgentId`] to its Ed25519 [`SigningKey`]
 pub trait Keyring: Send + Sync {
     /// The signing key for `id`, or `None` if this ring doesn't hold one
     fn signing_key(&self, id: AgentId) -> Option<SigningKey>;
+
+    /// The X25519 encryption key for `id`, or `None` if this ring
+    /// doesn't hold one (the agent then sends/receives server-mode
+    /// only). Default `None` so existing rings keep compiling.
+    fn encryption_key(&self, _id: AgentId) -> Option<EncryptionSecretKey> {
+        None
+    }
 }
 
 /// The per-agent secrets file inside `<dir>/<agent_id>/`.
@@ -36,11 +44,17 @@ pub struct FsKeyring {
 struct Secrets {
     /// Ed25519 signing key, 64 hex chars.
     signing_key: String,
+    /// X25519 encryption key, 64 hex chars. Absent for agents
+    /// provisioned before E2EE messaging;
+    /// [`FsKeyring::ensure_encryption_key`] backfills it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    encryption_key: Option<String>,
 }
 
 impl zeroize::Zeroize for Secrets {
     fn zeroize(&mut self) {
         self.signing_key.zeroize();
+        self.encryption_key.zeroize();
     }
 }
 
@@ -66,6 +80,8 @@ impl FsKeyring {
         std::fs::create_dir_all(&agent_dir)?;
         let secrets = zeroize::Zeroizing::new(Secrets {
             signing_key: crate::crypto::signing_key_to_hex(key),
+            // Backfilled by `ensure_encryption_key` at first session.
+            encryption_key: None,
         });
         let mut json = serde_json::to_string_pretty(&*secrets)
             .map_err(std::io::Error::other)?;
@@ -89,6 +105,59 @@ impl FsKeyring {
         json.zeroize();
         result
     }
+
+    /// Load `id`'s X25519 encryption key, generating and persisting one
+    /// if the secrets file exists but has none yet (backfill for agents
+    /// provisioned before E2EE messaging). Errors if `id` has no secrets
+    /// file at all — the signing identity must exist first.
+    ///
+    /// Unlike signing keys, regenerating an encryption key is a
+    /// survivable rotation (old messages keep their stored wraps but
+    /// become locally undecryptable), which is why this backfills
+    /// rather than refusing.
+    pub fn ensure_encryption_key(
+        &self,
+        id: AgentId,
+    ) -> std::io::Result<EncryptionSecretKey> {
+        use std::io::Write;
+        use zeroize::Zeroize;
+
+        let path = self.secrets_path(id);
+        let raw = zeroize::Zeroizing::new(std::fs::read_to_string(&path)?);
+        let mut secrets: zeroize::Zeroizing<Secrets> = zeroize::Zeroizing::new(
+            serde_json::from_str(&raw).map_err(std::io::Error::other)?,
+        );
+
+        if let Some(hex_key) = &secrets.encryption_key {
+            return crate::envelope::encryption_secret_from_hex(hex_key)
+                .map_err(std::io::Error::other);
+        }
+
+        let (secret, _) = crate::envelope::generate_encryption_keypair();
+        secrets.encryption_key =
+            Some(crate::envelope::encryption_secret_to_hex(&secret));
+        let mut json = serde_json::to_string_pretty(&*secrets)
+            .map_err(std::io::Error::other)?;
+
+        // Atomic replace: write a 0600 sibling, fsync, rename over.
+        let tmp = path.with_extension("json.tmp");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let result = options
+            .open(&tmp)
+            .and_then(|mut file| {
+                file.write_all(json.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        json.zeroize();
+        result.map(|_| secret)
+    }
 }
 
 impl Keyring for FsKeyring {
@@ -108,6 +177,21 @@ impl Keyring for FsKeyring {
                 tracing::warn!("bad signing key for {id}: {e}");
             })
             .ok()
+    }
+
+    fn encryption_key(&self, id: AgentId) -> Option<EncryptionSecretKey> {
+        let raw = zeroize::Zeroizing::new(
+            std::fs::read_to_string(self.secrets_path(id)).ok()?,
+        );
+        let secrets: zeroize::Zeroizing<Secrets> =
+            zeroize::Zeroizing::new(serde_json::from_str(&raw).ok()?);
+        crate::envelope::encryption_secret_from_hex(
+            secrets.encryption_key.as_deref()?,
+        )
+        .map_err(|e| {
+            tracing::warn!("bad encryption key for {id}: {e}");
+        })
+        .ok()
     }
 }
 
@@ -152,6 +236,35 @@ mod tests {
             Some(key.to_bytes())
         );
         assert!(ring.signing_key(AgentId::new()).is_none());
+    }
+
+    #[test]
+    fn fs_ring_backfills_and_round_trips_encryption_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let ring = FsKeyring::new(dir.path());
+        let id = AgentId::new();
+        let (key, _) = generate_keypair();
+        ring.insert(id, &key).unwrap();
+
+        // Pre-E2EE secrets file: no encryption key yet.
+        assert!(Keyring::encryption_key(&ring, id).is_none());
+
+        // Backfill generates and persists…
+        let generated = ring.ensure_encryption_key(id).unwrap();
+        // …idempotently…
+        let again = ring.ensure_encryption_key(id).unwrap();
+        assert_eq!(generated.to_bytes(), again.to_bytes());
+        // …and the trait accessor sees it, with the signing key intact.
+        let loaded = Keyring::encryption_key(&ring, id).unwrap();
+        assert_eq!(generated.to_bytes(), loaded.to_bytes());
+        assert!(ring.signing_key(id).is_some());
+    }
+
+    #[test]
+    fn ensure_encryption_key_requires_signing_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let ring = FsKeyring::new(dir.path());
+        assert!(ring.ensure_encryption_key(AgentId::new()).is_err());
     }
 
     #[test]

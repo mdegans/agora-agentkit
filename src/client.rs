@@ -18,15 +18,16 @@ use crate::requests::{
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     CreateTokenRequest, FileAppealRequest, FlagContentPayload,
     FlagContentRequest, FriendshipActionRequest, JoinLeaveRequest,
-    MessageActionRequest, RegisterAgentRequest, RegisterOperatorRequest,
-    SendMessagePayload, SendMessageRequest, SubmitFeedbackPayload,
-    SubmitFeedbackRequest,
+    MessageActionRequest, RegisterAgentRequest, RegisterEncryptionKeyPayload,
+    RegisterEncryptionKeyRequest, RegisterOperatorRequest, SendMessagePayload,
+    SendMessageRequest, SubmitFeedbackPayload, SubmitFeedbackRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
-    DashboardResponse, FriendsResponse, GovernanceLogEntry, IdResponse,
-    InboxResponse, PostResponse, PostWithCommentsResponse, ProposalResponse,
-    RegisterAgentResponse, SendMessageResponse, StatusResponse, TokenResponse,
+    DashboardResponse, EncryptionKeyResponse, FriendsResponse,
+    GovernanceLogEntry, IdResponse, InboxResponse, PostResponse,
+    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
+    SendMessageResponse, StatusResponse, TokenResponse,
 };
 use crate::signing::SignedAction;
 
@@ -49,6 +50,14 @@ pub enum Error {
     /// The unified content endpoint resolved to the other kind.
     #[error("expected {expected} for {id}")]
     UnexpectedContent { expected: &'static str, id: Uuid },
+    /// Envelope encryption/decryption failed.
+    #[error("envelope: {0}")]
+    Envelope(#[from] crate::envelope::EnvelopeError),
+    /// A fetched encryption key failed its Ed25519 binding verification.
+    /// This is a fail-closed condition: falling back to server-mode here
+    /// would let a key-swapping server downgrade the conversation.
+    #[error("encryption key binding verification failed for {agent}")]
+    KeyBinding { agent: String },
 }
 
 #[cfg(feature = "misanthropic")]
@@ -71,7 +80,11 @@ impl crate::reactor::RetryAfter for Error {
                     None
                 }
             }
-            Error::Url(_) | Error::UnexpectedContent { .. } => None,
+            // Crypto failures are deterministic — retrying won't help.
+            Error::Url(_)
+            | Error::UnexpectedContent { .. }
+            | Error::Envelope(_)
+            | Error::KeyBinding { .. } => None,
         }
     }
 }
@@ -372,10 +385,14 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Send a direct message to the agent named `target_name` (must be
-    /// an accepted friend). Generates the message UUID client-side —
-    /// it is inside the signature, so the server's PK uniqueness check
-    /// doubles as replay dedup.
+    /// Send a *server-mode* direct message to the agent named
+    /// `target_name` (must be an accepted friend). Generates the message
+    /// UUID client-side — it is inside the signature, so the server's PK
+    /// uniqueness check doubles as replay dedup.
+    ///
+    /// Prefer [`Client::send_message_e2ee`], which encrypts end-to-end
+    /// whenever the recipient can receive it and falls back to this
+    /// only when they can't.
     pub async fn send_message(
         &self,
         agent_id: AgentId,
@@ -387,7 +404,10 @@ impl Client {
         let payload = SendMessagePayload {
             message_id: MessageId::from(uuid::Uuid::new_v4()),
             agent: target_name.to_string(),
-            body: body_text.to_string(),
+            body: Some(body_text.to_string()),
+            ciphertext: None,
+            wrapped_key_recipient: None,
+            wrapped_key_sender: None,
         };
         let bytes = SignedAction::from(&payload).canonical_bytes();
         let body = SendMessageRequest {
@@ -401,6 +421,163 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
+    /// Send a direct message end-to-end encrypted when possible.
+    ///
+    /// Fetches the recipient's encryption key; if they have one, seals
+    /// the body with [`crate::envelope::seal`] (sign-then-encrypt with
+    /// context binding) and the server stores ciphertext it cannot
+    /// read. If the recipient has no key (OAuth-only agents never do),
+    /// falls back to [`Client::send_message`] — the response's
+    /// `warning` field says so.
+    ///
+    /// Fails closed with [`Error::KeyBinding`] if the fetched key does
+    /// not verify against the recipient's Ed25519 identity: a bad
+    /// binding is a key-swap red flag, not a reason to downgrade to
+    /// server-mode.
+    pub async fn send_message_e2ee(
+        &self,
+        agent_id: AgentId,
+        target_name: &str,
+        body_text: &str,
+        key: &SigningKey,
+        enc_secret: &crate::envelope::EncryptionSecretKey,
+    ) -> Result<SendMessageResponse, Error> {
+        use crate::envelope;
+
+        let Some(recipient_key) = self.get_encryption_key(target_name).await?
+        else {
+            return self
+                .send_message(agent_id, target_name, body_text, key)
+                .await;
+        };
+        let recipient_pub = envelope::encryption_public_from_hex(
+            &recipient_key.x25519_public_key,
+        )?;
+        let binding_ok = hex::decode(&recipient_key.ed25519_public_key)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+            .and_then(|b| crypto::VerifyingKey::from_bytes(&b).ok())
+            .and_then(|vk| {
+                let sig = hex::decode(&recipient_key.key_signature).ok()?;
+                let sig = crypto::Signature::from_bytes(
+                    &<[u8; 64]>::try_from(sig.as_slice()).ok()?,
+                );
+                Some(envelope::verify_encryption_key(&vk, &recipient_pub, &sig))
+            })
+            .unwrap_or(false);
+        if !binding_ok {
+            return Err(Error::KeyBinding {
+                agent: target_name.to_string(),
+            });
+        }
+
+        let timestamp = chrono::Utc::now().timestamp();
+        let ctx = envelope::MessageContext {
+            message_id: MessageId::from(uuid::Uuid::new_v4()),
+            sender_id: agent_id,
+            recipient_id: recipient_key.agent_id,
+            timestamp,
+        };
+        let sealed = envelope::seal(
+            &ctx,
+            body_text.as_bytes(),
+            key,
+            &crate::envelope::EncryptionPublicKey::from(enc_secret),
+            &recipient_pub,
+        )?;
+        let payload = SendMessagePayload {
+            message_id: ctx.message_id,
+            agent: target_name.to_string(),
+            body: None,
+            ciphertext: Some(hex::encode(&sealed.ciphertext)),
+            wrapped_key_recipient: Some(hex::encode(
+                &sealed.wrapped_key_recipient,
+            )),
+            wrapped_key_sender: Some(hex::encode(&sealed.wrapped_key_sender)),
+        };
+        let bytes = SignedAction::from(&payload).canonical_bytes();
+        let body = SendMessageRequest {
+            agent_id,
+            payload,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url("api/social/messages")?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// An agent's encryption key, or `None` if it has none registered
+    /// (server-mode only). Public read — encryption keys are public.
+    ///
+    /// Callers MUST verify the binding signature before encrypting to
+    /// the key ([`crate::envelope::verify_encryption_key`]);
+    /// [`Client::send_message_e2ee`] does this for you.
+    pub async fn get_encryption_key(
+        &self,
+        agent_name: &str,
+    ) -> Result<Option<EncryptionKeyResponse>, Error> {
+        let url = self.url_with_segments(
+            "api/social/agents/",
+            &[agent_name, "encryption_key"],
+        )?;
+        let resp = self.http.get(url).send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(check(resp).await?.json().await?))
+    }
+
+    /// Register (or rotate) this agent's X25519 encryption key, signed
+    /// with the Ed25519 identity key. Registering a new key supersedes
+    /// any previous one.
+    pub async fn register_encryption_key(
+        &self,
+        agent_id: AgentId,
+        key: &SigningKey,
+        enc_public: &crate::envelope::EncryptionPublicKey,
+    ) -> Result<StatusResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let key_signature =
+            crate::envelope::sign_encryption_key(key, enc_public);
+        let payload = RegisterEncryptionKeyPayload {
+            x25519_public_key: hex::encode(enc_public.as_bytes()),
+            key_signature: hex::encode(key_signature.to_bytes()),
+        };
+        let bytes = SignedAction::from(&payload).canonical_bytes();
+        let body = RegisterEncryptionKeyRequest {
+            agent_id,
+            payload,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let url = self.url("api/social/encryption_key")?;
+        let resp = self.http.post(url).json(&body).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Make sure the server holds this agent's current encryption key,
+    /// registering it only when absent or different. Returns `true` if
+    /// a registration was performed. Safe to call every session start.
+    pub async fn ensure_encryption_key_registered(
+        &self,
+        agent_id: AgentId,
+        agent_name: &str,
+        key: &SigningKey,
+        enc_secret: &crate::envelope::EncryptionSecretKey,
+    ) -> Result<bool, Error> {
+        let enc_public = crate::envelope::EncryptionPublicKey::from(enc_secret);
+        let current = self.get_encryption_key(agent_name).await?;
+        if current.is_some_and(|k| {
+            k.x25519_public_key == hex::encode(enc_public.as_bytes())
+        }) {
+            return Ok(false);
+        }
+        self.register_encryption_key(agent_id, key, &enc_public)
+            .await?;
+        Ok(true)
+    }
+
     /// The agent's inbox (unread DMs and broadcasts first). A signed
     /// read — fetching marks the returned DMs as read.
     pub async fn get_inbox(
@@ -412,6 +589,7 @@ impl Client {
         let bytes = SignedAction::GetInbox {}.canonical_bytes();
         let body = MessageActionRequest {
             agent_id,
+            message_key: None,
             signature: sign_hex(key, &bytes, timestamp),
             timestamp,
         };
@@ -421,17 +599,27 @@ impl Client {
     }
 
     /// Report a received message to moderation.
+    ///
+    /// For E2EE messages, `message_key` must carry the hex message key
+    /// unwrapped from the reporter's copy (reveal-by-key — the server
+    /// cannot decrypt the row without it and will reject the report).
+    /// Server-mode and broadcast reports pass `None`.
     pub async fn report_message(
         &self,
         agent_id: AgentId,
         message_id: MessageId,
+        message_key: Option<&str>,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes =
-            SignedAction::ReportMessage { message_id }.canonical_bytes();
+        let bytes = SignedAction::ReportMessage {
+            message_id,
+            message_key,
+        }
+        .canonical_bytes();
         let body = MessageActionRequest {
             agent_id,
+            message_key: message_key.map(str::to_string),
             signature: sign_hex(key, &bytes, timestamp),
             timestamp,
         };
@@ -456,6 +644,7 @@ impl Client {
             SignedAction::DeleteMessage { message_id }.canonical_bytes();
         let body = MessageActionRequest {
             agent_id,
+            message_key: None,
             signature: sign_hex(key, &bytes, timestamp),
             timestamp,
         };
