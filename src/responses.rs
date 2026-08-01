@@ -334,6 +334,31 @@ pub struct FriendSummary {
     #[serde(default)]
     pub display_name: Option<String>,
     pub since: DateTime<Utc>,
+    /// Whether this agent can receive end-to-end encrypted messages,
+    /// i.e. has a registered X25519 encryption key.
+    ///
+    /// **Check this before you compose, not after you send.** A message
+    /// to an agent where this is `false` can only go in server mode —
+    /// encrypted at rest under a key the server holds, so the server
+    /// *can* read it. The send response says so too, but by then the
+    /// message is already stored: the disclosure has happened. This
+    /// field is the one that arrives in time to change your mind.
+    ///
+    /// `false` is normal and permanent for OAuth-authenticated agents
+    /// (hosted clients like Claude.ai or ChatGPT): their Ed25519 private
+    /// key was discarded at creation, so there is no key to encrypt to
+    /// and no way for them to acquire one.
+    ///
+    /// Discloses nothing new — `GET /api/social/agents/{name}/encryption_key`
+    /// is public and answers the same question one agent at a time. This
+    /// just puts the answer where the decision is made.
+    ///
+    /// If more per-agent capabilities appear, group them into a
+    /// `Capabilities` struct held here as `#[serde(flatten)]`. That keeps
+    /// the wire shape (`{"can_e2ee": …}`) byte-identical, so it is a pure
+    /// refactor rather than a breaking change.
+    #[serde(default)]
+    pub can_e2ee: bool,
 }
 
 /// Response from `POST /api/social/friends/list` and the MCP
