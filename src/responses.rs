@@ -13,7 +13,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::enums::{
-    GovernanceLogEntryType, MessageEncryption, ProposalCategory, TargetType,
+    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ProposalCategory,
+    TargetType,
 };
 use crate::ids::*;
 
@@ -677,6 +678,32 @@ pub struct GovernanceLogEntry {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// The Clerk's short summary of the entry, when one has been
+    /// generated. Usually the better read: `data` for a Council decision
+    /// can carry the full multi-round deliberation transcript, while the
+    /// summary is 2-3 sentences grounded in the Constitution.
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+/// A Council meeting: when it convened and adjourned, its status, the
+/// decisions it produced, and the Clerk's whole-meeting summary of the
+/// proceedings (Constitution Art. IV § 4).
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CouncilMeetingResponse {
+    pub id: CouncilMeetingId,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub adjourned_at: Option<DateTime<Utc>>,
+    pub status: MeetingStatus,
+    /// IDs of the governance-log entries this meeting decided
+    /// (e.g. `GOV-2026-0042`) — read them via the governance log.
+    #[serde(default)]
+    pub decision_ids: Vec<String>,
+    /// The Clerk's summary of the whole meeting, once adjourned.
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -900,6 +927,7 @@ mod tests {
             data: serde_json::json!({"decision": "approved"}),
             created_at: Utc::now(),
             tags: Some(vec!["amendment".into()]),
+            summary: Some("Approved 4-1.".into()),
         };
         let value = serde_json::to_value(&entry).unwrap();
         // Wire shape: field is `entry_type`, not `type`. This is what
@@ -907,6 +935,50 @@ mod tests {
         assert!(value.get("entry_type").is_some());
         assert!(value.get("type").is_none());
         assert_eq!(value["entry_type"], "council_decision");
+        assert_eq!(value["summary"], "Approved 4-1.");
+
+        // `summary` is optional on the wire — pre-0.6 payloads (and
+        // entries with no Clerk summary) deserialize with `None`.
+        let value = serde_json::json!({
+            "id": "log-002",
+            "entry_type": "council_decision",
+            "data": {},
+            "created_at": Utc::now(),
+        });
+        let entry: GovernanceLogEntry = serde_json::from_value(value).unwrap();
+        assert!(entry.summary.is_none());
+    }
+
+    #[test]
+    fn council_meeting_response_round_trip() {
+        let meeting = CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: Utc::now(),
+            adjourned_at: Some(Utc::now()),
+            status: MeetingStatus::Adjourned,
+            decision_ids: vec!["GOV-2026-0003".into()],
+            summary: Some("The Council decided one item.".into()),
+        };
+        let json = serde_json::to_string(&meeting).unwrap();
+        let back: CouncilMeetingResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, MeetingStatus::Adjourned);
+        assert_eq!(back.decision_ids, meeting.decision_ids);
+        assert_eq!(
+            back.summary.as_deref(),
+            Some("The Council decided one item.")
+        );
+
+        // An active meeting: no adjournment, no summary yet.
+        let json = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "started_at": Utc::now(),
+            "status": "active",
+        });
+        let meeting: CouncilMeetingResponse =
+            serde_json::from_value(json).unwrap();
+        assert!(meeting.adjourned_at.is_none());
+        assert!(meeting.decision_ids.is_empty());
+        assert!(meeting.summary.is_none());
     }
 
     #[test]
