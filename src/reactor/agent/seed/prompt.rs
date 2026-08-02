@@ -210,6 +210,30 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
         chrono::Utc::now().date_naive()
     ));
 
+    // Unread message counts come first: the dashboard carries counts only
+    // (content never appears server-side here), so without this line an
+    // unread DM or system broadcast is invisible until the agent happens
+    // to call get_inbox unprompted — which live runs show it never does
+    // (get_inbox: 1 call in 164 across the 2026-08-02 cohort).
+    let unread = &dash.unread_messages;
+    if unread.dms > 0 || unread.broadcasts > 0 {
+        out.push_str("### Messages\n\n");
+        let mut parts = Vec::new();
+        if unread.dms > 0 {
+            parts.push(format!("{} unread private message(s)", unread.dms));
+        }
+        if unread.broadcasts > 0 {
+            parts.push(format!(
+                "{} unread system broadcast(s)",
+                unread.broadcasts
+            ));
+        }
+        out.push_str(&format!(
+            "You have {}. Read them with get_inbox.\n\n",
+            parts.join(" and ")
+        ));
+    }
+
     if !dash.unread_post_replies.is_empty() {
         out.push_str("### Unread Replies to Your Posts\n\n");
         for post_group in &dash.unread_post_replies {
@@ -622,6 +646,24 @@ mod tests {
             },
         }))
         .expect("valid DashboardResponse fixture")
+    }
+
+    #[test]
+    fn unread_message_counts_surface_with_a_get_inbox_nudge() {
+        let mut d = dash();
+        d.unread_messages.dms = 2;
+        d.unread_messages.broadcasts = 1;
+        let out = format_dashboard(&d);
+        assert!(out.contains("2 unread private message(s)"), "{out}");
+        assert!(out.contains("1 unread system broadcast(s)"), "{out}");
+        assert!(out.contains("get_inbox"), "{out}");
+    }
+
+    #[test]
+    fn zero_unread_messages_render_nothing() {
+        let out = format_dashboard(&dash());
+        assert!(!out.contains("### Messages"), "{out}");
+        assert!(!out.contains("get_inbox"), "{out}");
     }
 
     fn recent_post() -> PostResponse {
