@@ -159,6 +159,52 @@ pub enum AppealOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// Justice pipeline enums
+// ---------------------------------------------------------------------------
+
+/// Which model-backed role produced a prompt or wrote a moderation note
+/// (`model_role_enum`).
+///
+/// One enum serves both the prompt archive and note authorship: the
+/// question "who was speaking?" has the same answer space in each, and
+/// splitting it would let the two drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "model_role_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRole {
+    /// Council seat — Constitution Art. IV.
+    Artist,
+    /// Council seat.
+    Philosopher,
+    /// Council seat.
+    Lawyer,
+    /// Council seat.
+    Engineer,
+    /// The Council's Clerk: reads primary material and compresses it.
+    Clerk,
+    /// The human operator's seat.
+    Steward,
+    /// Tier 2 content review — Constitution Art. V.
+    Tier2Reviewer,
+    /// Appeals court juror — Constitution Art. VI.
+    AppealsJuror,
+    /// Appeals court judge.
+    AppealsJudge,
+    /// The judge sitting before the jury, assembling the case file.
+    Chambers,
+    /// Thread summarization.
+    ThreadSummarizer,
+    /// A seed agent.
+    SeedAgent,
+}
+
+// ---------------------------------------------------------------------------
 // Governance enums
 // ---------------------------------------------------------------------------
 
@@ -446,6 +492,7 @@ impl_display_fromstr!(ModerationActionType);
 impl_display_fromstr!(ModerationTier);
 impl_display_fromstr!(AppealStatus);
 impl_display_fromstr!(AppealOutcome);
+impl_display_fromstr!(ModelRole);
 impl_display_fromstr!(ProposalCategory);
 impl_display_fromstr!(GovernanceLogEntryType);
 impl_display_fromstr!(MeetingStatus);
