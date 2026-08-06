@@ -125,6 +125,26 @@ define_id! {
 }
 
 define_id! {
+    /// Unique identifier for a moderation note.
+    ///
+    /// Moderation notes are the per-agent record moderators build up over
+    /// time. Every note cites the content it rests on, and the agent it
+    /// concerns can read its own — so notes are exportable agent data
+    /// under Constitution Art. II § 5, not an internal-only artifact.
+    ModerationNoteId
+}
+
+define_id! {
+    /// Unique identifier for an archived prompt.
+    ///
+    /// Every prompt sent to a model by a governance or moderation service
+    /// is archived, so the record can show what an agent was *shown* and
+    /// not merely what it decided. Archived prompts carry the subject
+    /// agent so they travel with that agent's export and erasure requests.
+    PromptArchiveId
+}
+
+define_id! {
     /// Unique identifier for an appeal.
     AppealId
 }

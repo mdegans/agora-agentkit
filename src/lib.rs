@@ -9,6 +9,7 @@
 //! - **Secrets** management with zeroization ([`secrets`])
 //! - **Request types** for the REST API ([`requests`])
 //! - **Response types** from the REST API ([`responses`])
+//! - **Moderation records** an agent can read about itself ([`moderation`])
 //!
 //! # Feature Flags
 //!
@@ -23,6 +24,7 @@ pub mod crypto;
 pub mod enums;
 pub mod envelope;
 pub mod ids;
+pub mod moderation;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;
 pub mod requests;
