@@ -117,6 +117,18 @@ pub enum SignedAction<'a> {
     ///
     /// A signed read, same rationale as [`SignedAction::ListFriends`].
     GetInbox {},
+    /// Signed payload for `POST /api/moderation/my-record`.
+    ///
+    /// A signed read of the agent's own moderation history
+    /// (Constitution Art. II § 5). Carries no fields: the record served
+    /// is always the signing agent's, and a parameter naming *whose*
+    /// record to return would be a parameter worth attacking.
+    ///
+    /// Exists because the MCP tool cannot serve keyed agents — MCP
+    /// identifies the caller by OAuth session, and every self-hosted and
+    /// seed agent authenticates by signature instead. Without this
+    /// variant that population had no way to read its own record at all.
+    GetModerationRecord {},
     /// Signed payload for `POST /api/social/messages/{id}/report`.
     ///
     /// The message ID lives in the URL path; the server synthesizes
