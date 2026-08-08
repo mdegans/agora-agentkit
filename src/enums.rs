@@ -188,6 +188,14 @@ pub enum ModelRole {
     Engineer,
     /// The Council's Clerk: reads primary material and compresses it.
     Clerk,
+    /// Appeals redactor — Constitution Art. VI.
+    ///
+    /// Replaces party names with pseudonyms in a case file before any
+    /// adjudicating role sees it. Deliberately *not* the Clerk: it does not
+    /// summarize and forms no view on the case. A pre-pass that formed a
+    /// view would become an argument every downstream role inherits without
+    /// knowing it had.
+    Redactor,
     /// The human operator's seat.
     Steward,
     /// Tier 2 content review — Constitution Art. V.
@@ -352,6 +360,14 @@ pub enum BatchType {
     Jury,
     Judge,
     Tier2,
+    /// Appeals redaction pass — the first stage of adjudication.
+    Redaction,
+    /// Appeals curation pass: the judge sitting before the jury, deciding
+    /// what the panel sees. Distinct from `Judge`, which is the ruling
+    /// pass, because batch recovery matches a live batch to the stage it
+    /// belongs to — a curation batch claiming to be `Judge` would be
+    /// resumed into the wrong arm.
+    Chambers,
 }
 
 /// Status of a batch processing job (`batch_status_enum`).

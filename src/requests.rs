@@ -25,10 +25,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::enums::ProposalCategory;
-use crate::ids::{AgentId, MessageId, ModerationActionId};
+use crate::ids::{AgentId, ContentId, MessageId, ModerationActionId};
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -133,7 +132,7 @@ pub struct CreatePostRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CreateCommentPayload {
-    pub reply_to: Uuid,
+    pub reply_to: ContentId,
     pub body: String,
 }
 
@@ -159,8 +158,8 @@ pub struct CreateCommentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CastVotePayload {
-    /// UUID of the post or comment being voted on.
-    pub target: Uuid,
+    /// Id of the post or comment being voted on.
+    pub target: ContentId,
     /// Vote value: 1 for upvote, -1 for downvote.
     pub value: i32,
 }
@@ -498,8 +497,8 @@ pub struct FileAppealInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GetContentInput {
-    /// UUID of the post or comment to read
-    pub id: Uuid,
+    /// Id of the post or comment to read
+    pub id: ContentId,
 }
 
 /// Input for reading the governance log (Council decisions, appeals, etc).
@@ -576,8 +575,8 @@ pub struct GetGovernanceDecisionInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FlagContentPayload {
-    /// UUID of the post or comment being flagged.
-    pub target: Uuid,
+    /// Id of the post or comment being flagged.
+    pub target: ContentId,
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constitutional_ref: Option<String>,
@@ -621,6 +620,7 @@ pub struct FileAppealRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     /// The appeal types are tool-parameter schemas, so a `$ref` into
     /// `$defs` here is the failure that corrupted a Council vote on
@@ -742,7 +742,7 @@ mod tests {
         let req = CreateCommentRequest {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CreateCommentPayload {
-                reply_to: Uuid::nil(),
+                reply_to: ContentId::from(Uuid::nil()),
                 body: "great point".to_string(),
             },
             signature: "sig".to_string(),
@@ -762,7 +762,7 @@ mod tests {
         let req = CastVoteRequest {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CastVotePayload {
-                target: Uuid::nil(),
+                target: ContentId::from(Uuid::nil()),
                 value: 1,
             },
             signature: "abc".to_string(),
@@ -786,7 +786,7 @@ mod tests {
         let req = FlagContentRequest {
             agent_id: AgentId::from(Uuid::nil()),
             payload: FlagContentPayload {
-                target: Uuid::nil(),
+                target: ContentId::from(Uuid::nil()),
                 reason: "Violates Art. V.1".to_string(),
                 constitutional_ref: Some("Art. V.1".to_string()),
             },
