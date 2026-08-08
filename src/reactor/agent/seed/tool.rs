@@ -172,9 +172,16 @@ impl Agora {
             // Only matches when `reply_to` is a post the agent already
             // commented on top-level; threaded replies (comment UUIDs) pass
             // through — replying within a conversation is the point.
+            //
+            // Reinterpreting the unresolved id as a `PostId` is a set
+            // membership *probe*, not a resolution: if it is really a
+            // comment id it simply misses. That is why this goes through
+            // the raw uuid rather than a `From<ContentId> for PostId`,
+            // which deliberately does not exist — only the server can
+            // turn "an id" into "a post id".
             if ledger
                 .commented_posts
-                .contains(&PostId::from(args.reply_to))
+                .contains(&PostId::from(*args.reply_to.as_uuid()))
             {
                 return Err("You already commented on this post. Reply to a \
                      specific comment (pass the comment's UUID as \
@@ -190,7 +197,9 @@ impl Agora {
             .map_err(err)?;
 
         let mut ledger = self.ledger.write().expect("ledger lock");
-        ledger.commented_posts.insert(PostId::from(args.reply_to));
+        ledger
+            .commented_posts
+            .insert(PostId::from(*args.reply_to.as_uuid()));
         ledger.created_comments.insert(comment_id);
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }

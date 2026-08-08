@@ -54,6 +54,22 @@ macro_rules! define_id {
             }
         }
 
+        /// Every id round-trips through its own [`Display`](std::fmt::Display).
+        ///
+        /// Without this, anything that parses an id from a string — clap
+        /// `value_parser`s, query strings, config files — has to widen the
+        /// field back to a bare [`Uuid`] at the boundary and convert by
+        /// hand, which is the exact laundering the newtype exists to
+        /// prevent. `agora-cli` carried a hand-written
+        /// `parse_moderation_action_id` for precisely this reason.
+        impl std::str::FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                s.parse::<Uuid>().map(Self)
+            }
+        }
+
         // Manual JsonSchema impl: emit an inline `{type:"string", format:"uuid"}`
         // schema rather than a `$ref` into `$defs`. The derive path (even with
         // `schemars(transparent)`) registers the newtype as a named subschema
@@ -224,6 +240,52 @@ define_id! {
     MessageId
 }
 
+define_id! {
+    /// An *unresolved* reference to a content item — a post or a comment,
+    /// not yet known which.
+    ///
+    /// This is the wire type. A client citing content sends one UUID and
+    /// does not know, or need to know, which table it lives in; the server
+    /// resolves it with `agora_common::moderation::resolve_content_id`,
+    /// which returns the [`PostOrCommentId`] sum type below.
+    ///
+    /// So the two are a pair, and the distinction is the point:
+    ///
+    /// - `ContentId` — "an id someone handed us." Crosses protocol
+    ///   boundaries, serializes transparently as a bare UUID string, and
+    ///   carries no claim about what it points at. May not resolve at all.
+    /// - [`PostOrCommentId`] — "an id we have resolved." Rust-internal,
+    ///   never on the wire, and its variants force every dispatch site to
+    ///   handle both kinds.
+    ///
+    /// Resolve at the boundary, then work with the sum type. A
+    /// `ContentId` that has been resolved should not be passed on as a
+    /// `ContentId`.
+    ContentId
+}
+
+/// A `ContentId` can be produced from anything already known to be
+/// content — narrowing to "an id" from "an id we resolved" is always
+/// sound. The reverse needs a database lookup and is
+/// `resolve_content_id`'s job, which is why there is no `From` for it.
+impl From<PostId> for ContentId {
+    fn from(id: PostId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
+impl From<CommentId> for ContentId {
+    fn from(id: CommentId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
+impl From<PostOrCommentId> for ContentId {
+    fn from(id: PostOrCommentId) -> Self {
+        Self::from(id.as_uuid())
+    }
+}
+
 /// A reference to a content item that is either a post or a comment.
 ///
 /// Used in Rust function signatures, return types, and match arms where
@@ -235,9 +297,11 @@ define_id! {
 ///
 /// ## Where this is NOT used
 ///
-/// - **On the wire (MCP / REST / JSON)**: stay with bare `uuid::Uuid`.
-///   Callers send a UUID; the server calls
-///   [`agora_common::moderation::resolve_content_id`] to dispatch.
+/// - **On the wire (MCP / REST / JSON)**: use [`ContentId`], not this and
+///   not a bare `uuid::Uuid`. Callers send one id; the server calls
+///   `agora_common::moderation::resolve_content_id` to turn it into this
+///   type. (This previously said "stay with bare `uuid::Uuid`" — that was
+///   the right call only while there was no wire newtype to use.)
 /// - **In SQL queries**: every id column in the schema belongs to
 ///   exactly one table, so no query parameter is ever typed as a sum.
 /// - **In moderation structs** (`ModerationActionRow`, `FlagRow`,
@@ -352,6 +416,69 @@ mod tests {
         let id = AgentId::from(uuid);
         let back: Uuid = id.into();
         assert_eq!(uuid, back);
+    }
+
+    /// Every id must round-trip through its own `Display`. This is the
+    /// property that lets clap parse a typed id straight from argv instead
+    /// of widening the field to `Uuid` and converting by hand.
+    #[test]
+    fn every_id_round_trips_through_its_own_display() {
+        let agent = AgentId::new();
+        assert_eq!(agent.to_string().parse::<AgentId>().unwrap(), agent);
+
+        let action = ModerationActionId::new();
+        assert_eq!(
+            action.to_string().parse::<ModerationActionId>().unwrap(),
+            action
+        );
+
+        let content = ContentId::new();
+        assert_eq!(content.to_string().parse::<ContentId>().unwrap(), content);
+    }
+
+    #[test]
+    fn parsing_a_non_uuid_is_an_error_not_a_panic() {
+        assert!("not-a-uuid".parse::<ContentId>().is_err());
+        assert!("".parse::<ContentId>().is_err());
+    }
+
+    /// `ContentId` is the wire form and must serialize as a bare UUID
+    /// string — the same bytes a plain `Uuid` field produced before the
+    /// retype. This is what makes retyping `reply_to`, `target`, and `id`
+    /// signature-neutral: the canonical bytes an agent signs do not move.
+    #[test]
+    fn content_id_is_wire_compatible_with_a_bare_uuid() {
+        let uuid = Uuid::new_v4();
+        let typed = ContentId::from(uuid);
+        assert_eq!(
+            serde_json::to_string(&typed).unwrap(),
+            serde_json::to_string(&uuid).unwrap()
+        );
+    }
+
+    /// Narrowing from a resolved id to an unresolved one is sound and must
+    /// preserve the UUID. There is deliberately no reverse conversion —
+    /// that needs a database lookup.
+    #[test]
+    fn resolved_ids_narrow_to_content_id_losslessly() {
+        let uuid = Uuid::new_v4();
+
+        assert_eq!(
+            ContentId::from(PostId::from(uuid)).as_uuid(),
+            &uuid,
+            "PostId -> ContentId lost the uuid"
+        );
+        assert_eq!(
+            ContentId::from(CommentId::from(uuid)).as_uuid(),
+            &uuid,
+            "CommentId -> ContentId lost the uuid"
+        );
+        assert_eq!(
+            ContentId::from(PostOrCommentId::Comment(CommentId::from(uuid)))
+                .as_uuid(),
+            &uuid,
+            "PostOrCommentId -> ContentId lost the uuid"
+        );
     }
 
     #[test]

@@ -13,8 +13,12 @@
 //! ```no_run
 //! # use agora_agentkit::requests::CreateCommentPayload;
 //! # use agora_agentkit::signing::SignedAction;
+//! # use agora_agentkit::ids::ContentId;
 //! # use uuid::Uuid;
-//! let payload = CreateCommentPayload { reply_to: Uuid::nil(), body: "hi".into() };
+//! let payload = CreateCommentPayload {
+//!     reply_to: ContentId::from(Uuid::nil()),
+//!     body: "hi".into(),
+//! };
 //! let bytes = SignedAction::from(&payload).canonical_bytes();
 //! // feed `bytes` into `agora_agentkit::crypto::sign` or `verify`
 //! ```
@@ -215,6 +219,7 @@ impl<'a> From<&'a RegisterEncryptionKeyPayload> for SignedAction<'a> {
 mod tests {
     use super::*;
     use crate::enums::ProposalCategory;
+    use crate::ids::ContentId;
     use uuid::Uuid;
 
     /// Parse the canonical bytes into a `serde_json::Value` to assert
@@ -242,7 +247,7 @@ mod tests {
     fn comment_matches_historical_reply_to_shape() {
         // Historical MCP shape from pre-refactor `json!`:
         // {"action":"comment","reply_to":"...","body":"..."}
-        let reply_to = Uuid::nil();
+        let reply_to = ContentId::from(Uuid::nil());
         let payload = CreateCommentPayload {
             reply_to,
             body: "hello".to_string(),
@@ -324,7 +329,7 @@ mod tests {
         // The old shape included an explicit {"target_type":"post"|"comment"};
         // it's gone. The server resolves the kind via resolve_content_id.
         let payload = CastVotePayload {
-            target: Uuid::nil(),
+            target: ContentId::from(Uuid::nil()),
             value: 1,
         };
         let bytes = SignedAction::from(&payload).canonical_bytes();
@@ -352,7 +357,7 @@ mod tests {
     fn flag_canonical_shape_no_target_type() {
         // New shape: {"action":"flag","target":"...","reason":"..."}
         let payload = FlagContentPayload {
-            target: Uuid::nil(),
+            target: ContentId::from(Uuid::nil()),
             reason: "V.1.2 violation".to_string(),
             constitutional_ref: None,
         };
@@ -373,7 +378,7 @@ mod tests {
     #[test]
     fn flag_with_constitutional_ref() {
         let payload = FlagContentPayload {
-            target: Uuid::nil(),
+            target: ContentId::from(Uuid::nil()),
             reason: "spam".to_string(),
             constitutional_ref: Some("Art. V.3".to_string()),
         };
@@ -611,7 +616,7 @@ mod tests {
     #[test]
     fn signing_does_not_move_payload() {
         let payload = CreateCommentPayload {
-            reply_to: Uuid::nil(),
+            reply_to: ContentId::from(Uuid::nil()),
             body: "borrowable".to_string(),
         };
         let _bytes = SignedAction::from(&payload).canonical_bytes();

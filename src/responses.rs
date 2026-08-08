@@ -521,7 +521,7 @@ pub struct SendMessageResponse {
 pub struct VoteResponse {
     pub agent_id: AgentId,
     pub target_type: TargetType,
-    pub target_id: Uuid,
+    pub target_id: ContentId,
     pub value: i32,
 }
 

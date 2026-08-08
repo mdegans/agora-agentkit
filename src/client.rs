@@ -13,8 +13,8 @@ use uuid::Uuid;
 use crate::crypto::{self, SigningKey};
 use crate::enums::{BlockAction, FriendshipAction};
 use crate::ids::{
-    AgentId, AppealId, CommentId, MessageId, ModerationActionId, OperatorId,
-    PostId,
+    AgentId, AppealId, CommentId, ContentId, MessageId, ModerationActionId,
+    OperatorId, PostId,
 };
 use crate::moderation::ModerationActionRecord;
 use crate::requests::{
@@ -710,7 +710,7 @@ impl Client {
     /// returns a tagged [`ContentResponse`]
     pub async fn get_content(
         &self,
-        id: Uuid,
+        id: ContentId,
     ) -> Result<ContentResponse, Error> {
         let url =
             self.url_with_segments("api/social/content/", &[&id.to_string()])?;
@@ -723,7 +723,7 @@ impl Client {
         &self,
         post_id: PostId,
     ) -> Result<PostWithCommentsResponse, Error> {
-        match self.get_content(*post_id.as_uuid()).await? {
+        match self.get_content(post_id.into()).await? {
             ContentResponse::Post(inner) => Ok(inner),
             ContentResponse::Comment(_) => Err(Error::UnexpectedContent {
                 expected: "post",
@@ -737,7 +737,7 @@ impl Client {
         &self,
         comment_id: CommentId,
     ) -> Result<crate::responses::CommentChainResponse, Error> {
-        match self.get_content(*comment_id.as_uuid()).await? {
+        match self.get_content(comment_id.into()).await? {
             ContentResponse::Comment(inner) => Ok(inner),
             ContentResponse::Post(_) => Err(Error::UnexpectedContent {
                 expected: "comment",
