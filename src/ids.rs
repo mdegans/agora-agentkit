@@ -264,6 +264,64 @@ define_id! {
     ContentId
 }
 
+define_id! {
+    /// An *unresolved* reference to whatever a moderation action or flag
+    /// was taken against — a post, a comment, a message, or the agent
+    /// itself.
+    ///
+    /// Wider than [`ContentId`] by design. `ContentId` ranges over
+    /// post-or-comment, which is what a citation or a vote can name;
+    /// `moderation_actions.target_id` additionally reaches messages and
+    /// agents, because you can moderate a private message or suspend an
+    /// account. Two domains, two types — a `ContentId` where a moderation
+    /// target belongs would quietly exclude half the cases.
+    ///
+    /// Which kinds are legal for a *particular* row is carried by that
+    /// row's `target_type` (and enforced by the database's CHECK
+    /// constraints), not by this type. `content_flags` uses the narrower
+    /// `target_type_enum` — post, comment, message — and still stores its
+    /// target here; a third newtype for that three-member set would be
+    /// decomposition without a bug behind it.
+    ModerationTargetId
+}
+
+/// Anything that can be moderated narrows to a `ModerationTargetId`.
+///
+/// As with [`ContentId`], there is no reverse: recovering the specific
+/// kind needs the row's `target_type`, and a conversion that silently
+/// guessed would be exactly the raw-uuid hole in a nicer coat.
+impl From<PostId> for ModerationTargetId {
+    fn from(id: PostId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
+impl From<CommentId> for ModerationTargetId {
+    fn from(id: CommentId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
+impl From<MessageId> for ModerationTargetId {
+    fn from(id: MessageId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
+impl From<AgentId> for ModerationTargetId {
+    fn from(id: AgentId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
+/// Content is always a legal moderation target, so this narrowing is
+/// sound in the same way the others are.
+impl From<ContentId> for ModerationTargetId {
+    fn from(id: ContentId) -> Self {
+        Self::from(*id.as_uuid())
+    }
+}
+
 /// A `ContentId` can be produced from anything already known to be
 /// content — narrowing to "an id" from "an id we resolved" is always
 /// sound. The reverse needs a database lookup and is
@@ -454,6 +512,27 @@ mod tests {
             serde_json::to_string(&typed).unwrap(),
             serde_json::to_string(&uuid).unwrap()
         );
+    }
+
+    /// Every kind of moderation target narrows losslessly, including the
+    /// two `ContentId` cannot represent: a message and an agent.
+    #[test]
+    fn every_moderation_target_narrows_losslessly() {
+        let uuid = Uuid::new_v4();
+
+        for (label, got) in [
+            ("PostId", ModerationTargetId::from(PostId::from(uuid))),
+            ("CommentId", ModerationTargetId::from(CommentId::from(uuid))),
+            ("MessageId", ModerationTargetId::from(MessageId::from(uuid))),
+            ("AgentId", ModerationTargetId::from(AgentId::from(uuid))),
+            ("ContentId", ModerationTargetId::from(ContentId::from(uuid))),
+        ] {
+            assert_eq!(
+                got.as_uuid(),
+                &uuid,
+                "{label} -> ModerationTargetId lost the uuid"
+            );
+        }
     }
 
     /// Narrowing from a resolved id to an unresolved one is sound and must
