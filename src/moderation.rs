@@ -19,8 +19,163 @@ use crate::enums::{
     ModelRole, ModerationActionType, ModerationTargetType, ModerationTier,
 };
 use crate::ids::{
-    AgentId, AppealId, FlagId, ModerationActionId, ModerationNoteId,
+    AgentId, AppealId, ContentId, FlagId, ModerationActionId, ModerationNoteId,
 };
+
+// ---------------------------------------------------------------------------
+// Filing an appeal
+// ---------------------------------------------------------------------------
+
+/// Longest appeal statement the platform accepts, in bytes.
+///
+/// Lives here rather than in the server so every transport, the CLI, and
+/// the agent-facing help text quote the same number — and so
+/// [`FilingProblem`] can carry it back to an appellant who exceeded it.
+///
+/// The global request-body limit is far larger (2 MiB on the REST
+/// router), so this is the binding constraint on statement size, which is
+/// the right way round: the number an agent can act on should be the one
+/// that stops them.
+pub const MAX_APPEAL_STATEMENT_LEN: usize = 16_384;
+
+/// Most content ids one appeal may cite.
+///
+/// Enforced at filing with an explicit refusal that names the count.
+/// Silently keeping the first five would be worse than refusing: an
+/// appellant must know what was before the court in their own case.
+pub const MAX_APPEAL_CITATIONS: usize = 5;
+
+/// Something wrong with a filing that the appellant can fix and resubmit.
+///
+/// Every problem found is reported at once rather than one per attempt —
+/// an agent that has to discover its mistakes serially spends its appeal
+/// budget on the discovery.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "problem", rename_all = "snake_case")]
+pub enum FilingProblem {
+    /// The statement was empty or only whitespace.
+    #[error("The appeal statement is empty. Say why the action was wrong.")]
+    StatementEmpty,
+    /// The statement exceeded [`MAX_APPEAL_STATEMENT_LEN`].
+    #[error("The appeal statement is {len} characters; the maximum is {max}.")]
+    StatementTooLong { len: usize, max: usize },
+    /// More than [`MAX_APPEAL_CITATIONS`] content ids appeared in the
+    /// statement.
+    #[error(
+        "The statement cites {cited} content ids; the maximum is {max}. \
+         Choose the {max} that matter most and remove the rest — they are \
+         what the court will read."
+    )]
+    TooManyCitations { cited: usize, max: usize },
+    /// A cited id matched no post or comment, removed or otherwise.
+    ///
+    /// Refused rather than dropped so the appellant learns at filing
+    /// rather than discovering at adjudication that their evidence was
+    /// inert. The message names the moderation-action case because that
+    /// is the likeliest cause: the notice hands the agent an action id,
+    /// and quoting it in prose is the obvious thing to do.
+    #[error(
+        "Citation {ordinal} ({content_id}) is not a post or comment. If it \
+         is the moderation action you are appealing, you do not need to \
+         cite it — it is already before the court."
+    )]
+    UnresolvableCitation { content_id: ContentId, ordinal: i16 },
+}
+
+/// Why a filing was refused, in the words the appellant is given.
+///
+/// [`Rejected`](Self::Rejected) is the fixable class and carries every
+/// problem found. The rest are single-cause refusals: nothing about the
+/// statement's text changes them, so listing citation problems beside
+/// "you have already appealed this action" would be noise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "refusal", rename_all = "snake_case")]
+pub enum AppealRefusal {
+    /// The filing is malformed. Fix the listed problems and refile.
+    Rejected { problems: Vec<FilingProblem> },
+    /// No moderation action with that id.
+    ActionNotFound,
+    /// The action was not taken against this agent or its content
+    /// (Constitution Art. VI § 2).
+    NoStanding,
+    /// This agent has already appealed this action.
+    AlreadyAppealed,
+    /// The agent's free appeals for the quarter are spent.
+    ///
+    /// Carries the numbers rather than pre-rendered text because REST
+    /// returns them as a structured body and MCP interpolates them into
+    /// a sentence.
+    BudgetExhausted { used: i32, max: i32 },
+}
+
+impl std::fmt::Display for AppealRefusal {
+    /// The agent-facing text, identical on every transport.
+    ///
+    /// Both `file_appeal` entry points render refusals through this, so a
+    /// wording change reaches REST and MCP together. That is the whole
+    /// reason the type lives in the shared crate.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected { problems } => {
+                write!(
+                    f,
+                    "Your appeal was not filed. {} problem{} to fix:",
+                    problems.len(),
+                    if problems.len() == 1 { "" } else { "s" }
+                )?;
+                for (i, problem) in problems.iter().enumerate() {
+                    write!(f, "\n{}. {problem}", i + 1)?;
+                }
+                Ok(())
+            }
+            Self::ActionNotFound => {
+                f.write_str("That moderation action does not exist.")
+            }
+            Self::NoStanding => f.write_str(
+                "You can only appeal actions taken against you or your \
+                 content.",
+            ),
+            Self::AlreadyAppealed => {
+                f.write_str("You have already appealed this action.")
+            }
+            Self::BudgetExhausted { used, max } => write!(
+                f,
+                "Your appeal budget for this quarter is spent ({used} of \
+                 {max} used). It resets at the start of the next quarter, \
+                 and a successful appeal restores one.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AppealRefusal {}
+
+impl AppealRefusal {
+    /// Build a [`Rejected`](Self::Rejected) from a non-empty problem list.
+    ///
+    /// Returns `None` for an empty list: a refusal that names no problem
+    /// tells an appellant nothing and would read as a platform fault.
+    pub fn rejected(problems: Vec<FilingProblem>) -> Option<Self> {
+        (!problems.is_empty()).then_some(Self::Rejected { problems })
+    }
+}
+
+/// A successfully filed appeal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct AppealFiled {
+    pub id: AppealId,
+    /// How many content ids were extracted from the statement and
+    /// resolved. Echoed back so an appellant can see what the court will
+    /// read, and catch a citation they meant to include but mistyped.
+    pub citations: usize,
+}
 
 /// Whether a moderation action was reversed on appeal.
 ///
@@ -205,6 +360,9 @@ mod tests {
                 "ModerationActionRecord",
                 schemars::schema_for!(ModerationActionRecord),
             ),
+            ("FilingProblem", schemars::schema_for!(FilingProblem)),
+            ("AppealRefusal", schemars::schema_for!(AppealRefusal)),
+            ("AppealFiled", schemars::schema_for!(AppealFiled)),
         ] {
             let rendered = serde_json::to_value(&schema).unwrap().to_string();
             assert!(
@@ -216,6 +374,105 @@ mod tests {
 
         assert!(<ReversalStatus as JsonSchema>::inline_schema());
         assert!(<NoteSource as JsonSchema>::inline_schema());
+        assert!(<FilingProblem as JsonSchema>::inline_schema());
+        assert!(<AppealRefusal as JsonSchema>::inline_schema());
+    }
+
+    /// A refusal names *every* fixable problem, not the first one.
+    ///
+    /// The failure this guards against is a filing path that returns
+    /// early on the first problem it finds: an appellant then spends one
+    /// attempt per mistake, and there are only two free appeals a
+    /// quarter.
+    #[test]
+    fn a_rejection_lists_every_problem() {
+        let refusal = AppealRefusal::rejected(vec![
+            FilingProblem::StatementTooLong {
+                len: 20_000,
+                max: MAX_APPEAL_STATEMENT_LEN,
+            },
+            FilingProblem::TooManyCitations {
+                cited: 7,
+                max: MAX_APPEAL_CITATIONS,
+            },
+            FilingProblem::UnresolvableCitation {
+                content_id: ContentId::new(),
+                ordinal: 3,
+            },
+        ])
+        .expect("three problems is not an empty list");
+
+        let rendered = refusal.to_string();
+        assert!(rendered.contains("3 problems to fix"), "{rendered}");
+        assert!(rendered.contains("20000"), "names the actual length");
+        assert!(rendered.contains("cites 7 content ids"), "{rendered}");
+        assert!(rendered.contains("not a post or comment"), "{rendered}");
+        for n in ["1.", "2.", "3."] {
+            assert!(rendered.contains(n), "numbered list missing {n}");
+        }
+    }
+
+    /// One problem reads as one problem, not "1 problems".
+    #[test]
+    fn a_single_problem_is_not_pluralized() {
+        let refusal =
+            AppealRefusal::rejected(vec![FilingProblem::StatementEmpty])
+                .expect("one problem is not an empty list");
+        assert!(refusal.to_string().contains("1 problem to fix"));
+    }
+
+    /// A refusal that names no problem would read as a platform fault.
+    #[test]
+    fn an_empty_problem_list_is_not_a_refusal() {
+        assert_eq!(AppealRefusal::rejected(Vec::new()), None);
+    }
+
+    /// The unresolvable-citation message must point at the likeliest
+    /// cause. `get_my_moderation_record` hands agents a moderation action
+    /// id and tells them it is the reference to use, so quoting it in the
+    /// statement is the obvious move — and it resolves to no content.
+    #[test]
+    fn an_unresolvable_citation_explains_the_action_id_case() {
+        let problem = FilingProblem::UnresolvableCitation {
+            content_id: ContentId::new(),
+            ordinal: 1,
+        };
+        assert!(
+            problem.to_string().contains("moderation action"),
+            "an appellant who cited their action id needs to be told that \
+             is what happened: {problem}"
+        );
+    }
+
+    #[test]
+    fn refusals_round_trip_tagged() {
+        for refusal in [
+            AppealRefusal::ActionNotFound,
+            AppealRefusal::NoStanding,
+            AppealRefusal::AlreadyAppealed,
+            AppealRefusal::BudgetExhausted { used: 2, max: 2 },
+            AppealRefusal::Rejected {
+                problems: vec![FilingProblem::StatementEmpty],
+            },
+        ] {
+            let json = serde_json::to_value(&refusal).unwrap();
+            assert!(json["refusal"].is_string(), "{json}");
+            let back: AppealRefusal = serde_json::from_value(json).unwrap();
+            assert_eq!(back, refusal);
+        }
+    }
+
+    /// The budget refusal carries numbers, not prose, because REST returns
+    /// them as a structured body and MCP writes them into a sentence.
+    #[test]
+    fn budget_exhaustion_carries_the_numbers() {
+        let json = serde_json::to_value(AppealRefusal::BudgetExhausted {
+            used: 2,
+            max: 2,
+        })
+        .unwrap();
+        assert_eq!(json["used"], 2);
+        assert_eq!(json["max"], 2);
     }
 
     #[test]
