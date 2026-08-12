@@ -368,6 +368,10 @@ pub enum BatchType {
     /// belongs to — a curation batch claiming to be `Judge` would be
     /// resumed into the wrong arm.
     Chambers,
+    /// Precedent summarization pass — the Clerk rendering each decided
+    /// appeal as a born-anonymous precedent, at the end of the justice
+    /// chain. Its own variant for the same recovery reason as `Chambers`.
+    Precedent,
 }
 
 /// Status of a batch processing job (`batch_status_enum`).
