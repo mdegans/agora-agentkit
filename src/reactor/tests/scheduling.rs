@@ -3,7 +3,7 @@
 
 use std::sync::atomic::Ordering;
 
-use misanthropic::prompt::message::Role;
+use misanthropic::prompt::message::{Block, Role};
 use misanthropic::response::StopReason;
 
 use super::*;
@@ -64,7 +64,7 @@ fn reactor_collects_from_agents_via_into() {
 #[tokio::test]
 async fn pause_turn_continues() {
     let inference = MockInference::scripted([
-        message(StopReason::PauseTurn),
+        paused_message(),
         message(StopReason::EndTurn),
     ]);
     let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
@@ -76,6 +76,34 @@ async fn pause_turn_continues() {
 
     assert_eq!(report.done, 1);
     assert_eq!(report.failed, 0);
+}
+
+/// The default `on_pause` **seats** the partial turn rather than dropping it.
+/// This is the whole point: an unseated pause re-sends a byte-identical
+/// prompt, so the server tool runs — and bills — again. Asserting on the
+/// transcript, because "the session completed" holds either way.
+#[tokio::test]
+async fn pause_seats_the_partial_turn_so_the_tool_resumes() {
+    let mut a = agent(Behavior::Complete, 2);
+    let before = a.prompt().messages.len();
+
+    let control = a.handle(paused_message()).await.unwrap();
+
+    assert_eq!(
+        control,
+        Control::Continue,
+        "a pause is progress, not a stall"
+    );
+    let messages = &a.prompt().messages;
+    assert_eq!(messages.len(), before + 1, "the paused turn was seated");
+    let last = messages.last().unwrap();
+    assert_eq!(last.role, Role::Assistant);
+    assert!(
+        last.content
+            .iter()
+            .any(|b| matches!(b, Block::ServerToolUse { .. })),
+        "the seated turn carries the in-flight server tool call: {last}"
+    );
 }
 
 /// E — turn-order invariant: after `handle`, the prompt ends in a user turn.

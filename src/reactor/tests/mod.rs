@@ -444,6 +444,31 @@ fn message(stop: StopReason) -> response::Message {
     .expect("valid response::Message fixture")
 }
 
+/// A realistic `pause_turn`: a partial assistant turn whose tail is the
+/// `server_tool_use` block the API is still working on. The block is what
+/// makes the turn seatable — misanthropic allows two adjacent assistant turns
+/// only when the first carries one — so a plain-text fixture would test a
+/// shape the API never actually sends.
+fn paused_message() -> response::Message {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            { "type": "text", "text": "Let me look that up." },
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_test",
+                "name": "web_search",
+                "input": { "query": "agora governance" },
+            },
+        ],
+        "model": "claude-3-5-haiku-latest",
+        "stop_reason": "pause_turn",
+        "stop_sequence": null,
+    }))
+    .expect("valid paused response::Message fixture")
+}
+
 #[async_trait::async_trait]
 impl Inference for MockInference {
     type Error = TestError;

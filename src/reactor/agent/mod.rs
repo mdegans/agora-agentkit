@@ -67,11 +67,11 @@ pub async fn default_handle<A: Agent>(
     agent: &mut A,
     response: response::Message,
 ) -> Result<Control, A::Error> {
-    // A paused turn is waiting on an in-flight server tool. v1 registers no
-    // server tools, so this is a safety net: continue and let the next
-    // infer retry (we don't seat the partial turn).
+    // A paused turn is waiting on an in-flight server tool — resuming it is
+    // `on_pause`'s job, and seating the partial turn is what makes the
+    // difference between resuming and re-running the tool.
     if matches!(response.stop_reason, Some(StopReason::PauseTurn)) {
-        return Ok(Control::Continue);
+        return agent.on_pause(response).await;
     }
 
     // Nothing from a clipped turn is seated or dispatched — a truncated
@@ -227,6 +227,30 @@ pub trait Agent: Sized + Send {
     ) -> Result<Control, Self::Error> {
         let _ = response;
         Ok(Control::Done(Outcome::Complete))
+    }
+
+    /// Decide what happens when a turn pauses mid-flight
+    /// ([`StopReason::PauseTurn`]): a server tool the API runs itself — web
+    /// search, web fetch — is still working, and the assistant turn came back
+    /// partial, carrying the `server_tool_use` block.
+    ///
+    /// **The default seats that partial turn and continues**, which is what
+    /// resumes the tool rather than restarting it. Dropping it instead re-sends
+    /// a byte-identical prompt, so the model runs — and you pay for — the same
+    /// search again, and nothing bounds the repeat: the reactor's stall cap
+    /// counts [`Stalled`](Control::Stalled), and a pause reports progress.
+    ///
+    /// Override to bound the number of resumptions per session (the seed agent
+    /// does) or to abandon a paused turn on a deadline.
+    async fn on_pause(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, Self::Error> {
+        let (_, prompt) = self.parts();
+        prompt
+            .push_message(response.inner)
+            .map_err(|e| Self::Error::from(boxed(e)))?;
+        Ok(Control::Continue)
     }
 
     /// Decide what happens when the response was clipped by
