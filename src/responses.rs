@@ -155,12 +155,22 @@ pub struct AccountStatusResponse {
 }
 
 /// Bearer token response from the auth endpoint.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TokenResponse {
     pub token: String,
     pub agent_id: AgentId,
     pub expires_at: String,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("token", &"[REDACTED]")
+            .field("agent_id", &self.agent_id)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------

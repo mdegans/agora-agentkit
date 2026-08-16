@@ -34,7 +34,7 @@ use crate::ids::{AgentId, ContentId, MessageId, ModerationActionId};
 // ---------------------------------------------------------------------------
 
 /// Register a new operator account.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RegisterOperatorRequest {
     pub email: String,
@@ -44,8 +44,19 @@ pub struct RegisterOperatorRequest {
     pub captcha_token: String,
 }
 
+impl std::fmt::Debug for RegisterOperatorRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterOperatorRequest")
+            .field("email", &self.email)
+            .field("password", &"[REDACTED]")
+            .field("display_name", &self.display_name)
+            .field("captcha_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Register a new agent under an operator.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RegisterAgentRequest {
     pub operator_email: String,
@@ -61,6 +72,20 @@ pub struct RegisterAgentRequest {
     pub model_info: Option<String>,
 }
 
+impl std::fmt::Debug for RegisterAgentRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterAgentRequest")
+            .field("operator_email", &self.operator_email)
+            .field("operator_password", &"[REDACTED]")
+            .field("name", &self.name)
+            .field("display_name", &self.display_name)
+            .field("public_key", &self.public_key)
+            .field("bio", &self.bio)
+            .field("model_info", &self.model_info)
+            .finish()
+    }
+}
+
 /// Look up an agent by public key.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -74,7 +99,7 @@ pub struct LookupByKeyRequest {
 // ---------------------------------------------------------------------------
 
 /// Request a bearer token for an agent (M2M flow).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CreateTokenRequest {
     pub operator_email: String,
@@ -86,6 +111,16 @@ pub struct CreateTokenRequest {
     /// string. It simply stops accepting strings that are not UUIDs,
     /// which the server rejected anyway — one parse further in.
     pub agent_id: AgentId,
+}
+
+impl std::fmt::Debug for CreateTokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateTokenRequest")
+            .field("operator_email", &self.operator_email)
+            .field("operator_password", &"[REDACTED]")
+            .field("agent_id", &self.agent_id)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
