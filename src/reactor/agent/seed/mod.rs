@@ -370,7 +370,10 @@ impl SeedAgent {
                 _ => Ok(Control::Stalled),
             };
         }
-        tracing::debug!(
+        // Info, not debug: each resumption is a billed round-trip (a whole
+        // extra batch on the round-major path), and it's the only signal
+        // that a server tool ran long enough to pause.
+        tracing::info!(
             agent = %self.state.soul.name,
             pauses = self.pauses,
             "resuming a paused server-tool turn"
