@@ -382,6 +382,86 @@ mod tests {
         assert_eq!(e.retry_after(), None);
     }
 
+    /// Live: does the **Batch API** actually run server tools? Everything
+    /// else about the web tools is settled by the docs; this one is not, and
+    /// the seed cohort rides `infer_batch` exclusively — so a "batches don't
+    /// do server tools" answer would invalidate the whole feature, and it
+    /// would be found in production.
+    ///
+    /// Passes if the batch item comes back having searched (a
+    /// `web_search_tool_result` block) or mid-search (`pause_turn`). Fails
+    /// with the API's own words if the submission is rejected.
+    ///
+    /// `cargo test --all-features live_batch -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "hits the live Anthropic API (a search, so cents)"]
+    async fn live_batch_runs_server_tools() {
+        use misanthropic::prompt::message::Block;
+        use misanthropic::tool::{ServerMethodDef, WebSearch};
+        use misanthropic::{
+            Prompt, prompt::message::Role, response::StopReason,
+        };
+
+        let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| {
+            let path = format!(
+                "{}/Projects/agora/secrets/anthropic_api_key",
+                std::env::var("HOME").expect("HOME")
+            );
+            std::fs::read_to_string(path)
+                .expect("no ANTHROPIC_API_KEY and no key file")
+                .trim()
+                .to_string()
+        });
+        let transport = Client::new(misanthropic::Client::new(key).unwrap());
+
+        let prompt = Prompt::default()
+            .model(misanthropic::Id::Haiku45)
+            .max_tokens(std::num::NonZeroU32::new(512).unwrap())
+            // Not "search anthropic.com": `allowed_domains` is a server-side
+            // filter the model can't see, and naming a domain it can't honor
+            // makes it decline. The filter still scopes the results.
+            .add_message((
+                Role::User,
+                "Search and name one product Anthropic makes.",
+            ))
+            .unwrap()
+            .add_tool(ServerMethodDef::web_search(WebSearch {
+                max_uses: Some(1),
+                allowed_domains: Some(vec!["anthropic.com".into()]),
+                ..Default::default()
+            }));
+
+        let results = transport
+            .infer_batch(&[&prompt])
+            .await
+            .expect("batch submission accepted");
+        let response = results
+            .into_iter()
+            .next()
+            .expect("one prompt, one result")
+            .expect("the batch item itself succeeded");
+
+        let searched = response
+            .inner
+            .content
+            .iter()
+            .any(|b| matches!(b, Block::WebSearchToolResult { .. }));
+        let paused =
+            matches!(response.stop_reason, Some(StopReason::PauseTurn));
+        println!(
+            "batch server-tool run: stop={:?} searched={searched} \
+             usage={:?}\n{}",
+            response.stop_reason,
+            response.usage.server_tool_use,
+            response.inner.content
+        );
+        assert!(
+            searched || paused,
+            "the batch item ran no server tool: {:?}",
+            response.inner.content
+        );
+    }
+
     /// `/api/tags` synthesis: custom ids, batch unsupported, ceilings
     /// unreported — and a missing `modified_at` doesn't fail the parse.
     #[test]
