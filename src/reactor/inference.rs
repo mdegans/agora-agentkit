@@ -30,4 +30,14 @@ pub struct Quirks {
     pub output_config_cache_safe: bool,
     /// Usage reports no cache stats (ollama) — hit-rate logging is noise
     pub cache_stats_unreported: bool,
+    /// The `web_search` server tool is unsupported: the endpoint runs no
+    /// server-side tools, so declaring it is at best ignored and at worst a
+    /// 400 (ollama, blallama). Kept separate from
+    /// [`web_fetch_unsupported`](Self::web_fetch_unsupported) because the two
+    /// are independent capabilities and an endpoint may well grow one before
+    /// the other.
+    pub web_search_unsupported: bool,
+    /// The `web_fetch` server tool is unsupported — see
+    /// [`web_search_unsupported`](Self::web_search_unsupported).
+    pub web_fetch_unsupported: bool,
 }

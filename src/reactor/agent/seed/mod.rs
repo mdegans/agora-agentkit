@@ -47,7 +47,10 @@ use misanthropic::prompt::{
     message::{Block, Role},
 };
 use misanthropic::response::{self, StopReason};
-use misanthropic::tool::{Notifications, Tool, ToolBox};
+use misanthropic::tool::{
+    MethodDef, Notifications, ServerMethodDef, Tool, ToolBox, WebFetch,
+    WebSearch,
+};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +103,18 @@ pub struct SeedConfig {
     /// Point this *outside* any git tree: the files hold fully-rendered
     /// prompts (SOUL, memory, dashboard) and must never be committable.
     pub prompt_log_dir: Option<PathBuf>,
+    /// Give agents Anthropic's `web_search` server tool. `None` (the default)
+    /// leaves it off; `Some(cfg)` installs it with that configuration —
+    /// `max_uses` is the per-*request* cap, so a session's ceiling is roughly
+    /// `max_uses` × (rounds + phase tail), not `max_uses`.
+    ///
+    /// Ignored on endpoints whose [`Quirks`] say server tools are unsupported.
+    pub web_search: Option<WebSearch>,
+    /// Give agents Anthropic's `web_fetch` server tool — see
+    /// [`web_search`](Self::web_search). The model can only fetch a URL that
+    /// already appeared in the conversation, so this is close to inert without
+    /// `web_search` (or URLs arriving through Agora content).
+    pub web_fetch: Option<WebFetch>,
 }
 
 impl Default for SeedConfig {
@@ -115,6 +130,8 @@ impl Default for SeedConfig {
             phase_max_tokens: 4096,
             evolve_max_tokens: 4096,
             prompt_log_dir: None,
+            web_search: None,
+            web_fetch: None,
         }
     }
 }
@@ -223,7 +240,20 @@ pub struct SeedAgent {
     communities: Vec<String>,
     /// `messages.len()` before the survey turns, for redaction.
     survey_mark: Option<usize>,
+    /// Server-tool pauses resumed this session — bounded by [`MAX_PAUSES`].
+    pauses: usize,
 }
+
+/// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
+/// before it stops resuming.
+///
+/// A pause is normal — a long web search hands the turn back mid-flight and
+/// the next request continues it — but each resumption is another billed
+/// round-trip (and, on the batch path, another whole batch), so a model that
+/// pauses indefinitely would otherwise run without a ceiling: the reactor's
+/// stall cap can't see it, because resuming is progress. Matches the runaway
+/// guard misanthropic's own server-tool loop uses.
+const MAX_PAUSES: usize = 5;
 
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
@@ -253,6 +283,100 @@ impl SeedAgent {
             .push_message(response.inner)
             .map(|_| ())
             .map_err(|e| SeedError::Prompt(e.to_string()))
+    }
+
+    /// Append the configured server tools ([`SeedConfig::web_search`],
+    /// [`SeedConfig::web_fetch`]) to the prompt's tool set, skipping any the
+    /// admitted endpoint's [`Quirks`] say it can't run.
+    ///
+    /// Must run *after* [`ToolBox::prepare`], which overwrites `prompt.tools`
+    /// wholesale with the box's own definitions — appending before it would
+    /// be silently thrown away. Nothing later in the session rewrites the
+    /// field (`ToolBox::on_turn` only refreshes per-turn context), so one
+    /// append at init holds for every round.
+    fn install_server_tools(&mut self) {
+        let quirks = self.quirk();
+        let mut defs: Vec<MethodDef> = Vec::new();
+        if let Some(search) = &self.ctx.config.web_search {
+            if quirks.web_search_unsupported {
+                tracing::debug!(
+                    agent = %self.state.soul.name,
+                    "endpoint runs no server tools; skipping web_search"
+                );
+            } else {
+                defs.push(ServerMethodDef::web_search(search.clone()).into());
+            }
+        }
+        if let Some(fetch) = &self.ctx.config.web_fetch {
+            if quirks.web_fetch_unsupported {
+                tracing::debug!(
+                    agent = %self.state.soul.name,
+                    "endpoint runs no server tools; skipping web_fetch"
+                );
+            } else {
+                defs.push(ServerMethodDef::web_fetch(fetch.clone()).into());
+            }
+        }
+        if defs.is_empty() {
+            return;
+        }
+        tracing::debug!(
+            agent = %self.state.soul.name,
+            count = defs.len(),
+            "installed server tools"
+        );
+        self.state.prompt.tools.get_or_insert_default().extend(defs);
+    }
+
+    /// Whether the prompt actually carries a web server tool — the installed
+    /// truth, after [`install_server_tools`](Self::install_server_tools) has
+    /// applied config and quirks.
+    fn has_web_tools(&self) -> bool {
+        self.state.prompt.tools.iter().flatten().any(|def| {
+            matches!(
+                def,
+                MethodDef::Server(
+                    ServerMethodDef::WebSearch(_)
+                        | ServerMethodDef::WebFetch(_)
+                )
+            )
+        })
+    }
+
+    /// Resume a paused turn: seat the partial assistant turn (the one holding
+    /// the `server_tool_use` block) so the next request continues the tool
+    /// instead of re-running it, and count the resumption against
+    /// [`MAX_PAUSES`].
+    ///
+    /// Past the cap nothing is seated and the acting phase ends — the session
+    /// still reflects, writes memory, and completes; it just stops chasing a
+    /// turn that won't settle.
+    fn resume_pause(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, SeedError> {
+        self.pauses += 1;
+        if self.pauses > MAX_PAUSES {
+            tracing::warn!(
+                agent = %self.state.soul.name,
+                pauses = self.pauses,
+                phase = ?self.phase,
+                "server-tool pause cap reached; abandoning the paused turn"
+            );
+            return match self.phase {
+                Phase::Acting { .. } => self.begin_reflect(),
+                // The tail owns its own turn: drop the partial and let the
+                // reactor's stall cap bound the retries.
+                _ => Ok(Control::Stalled),
+            };
+        }
+        tracing::debug!(
+            agent = %self.state.soul.name,
+            pauses = self.pauses,
+            "resuming a paused server-tool turn"
+        );
+        self.seat_response(response)?;
+        Ok(Control::Continue)
     }
 
     /// Seat a phase instruction as (or merged into) the trailing user turn
@@ -373,7 +497,7 @@ impl SeedAgent {
         response: response::Message,
     ) -> Result<Control, SeedError> {
         if matches!(response.stop_reason, Some(StopReason::PauseTurn)) {
-            return Ok(Control::Continue);
+            return self.resume_pause(response);
         }
         if matches!(response.stop_reason, Some(StopReason::MaxTokens)) {
             return self.on_truncate(&response).await;
@@ -608,6 +732,7 @@ impl Agent for SeedAgent {
             key,
             communities: Vec::new(),
             survey_mark: None,
+            pauses: 0,
         })
     }
 
@@ -648,6 +773,16 @@ impl Agent for SeedAgent {
         self.quirks
     }
 
+    /// Resume the paused server-tool turn, under this session's
+    /// [`MAX_PAUSES`] ceiling. Same path the phase tail takes, so one budget
+    /// covers the whole session rather than one per phase.
+    async fn on_pause(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, SeedError> {
+        self.resume_pause(response)
+    }
+
     /// A clipped response is never seated, so no pop is needed: warn the
     /// model the attempt was pruned and stall-retry at the same budget (the
     /// trait default's doubling is unbounded on local endpoints, which
@@ -667,6 +802,7 @@ impl Agent for SeedAgent {
             let (tools, prompt) = self.parts();
             tools.prepare(prompt).await?;
         }
+        self.install_server_tools();
         self.notifications = self.tools.subscribe();
 
         // E2EE: make sure the server has this agent's current encryption
@@ -740,6 +876,9 @@ impl Agent for SeedAgent {
 
         let soul_markdown = self.state.soul.markdown();
         let memory = self.state.memory.render_for_prompt();
+        // Read the installed tool set *before* taking the prompt — the take
+        // leaves a `Prompt::default()` behind, tools and all.
+        let web_tools = self.has_web_tools();
         let working = std::mem::take(&mut self.state.prompt);
         self.state.prompt = prompt::assemble(
             working,
@@ -752,6 +891,9 @@ impl Agent for SeedAgent {
                 dashboard: &dash,
                 recent_posts: &recent,
                 recent_limit: self.ctx.config.recent_activity_limit,
+                // What was actually installed, not what was configured: an
+                // endpoint that can't run them gets no guidance about them.
+                web_tools,
             },
         )?;
         Ok(())

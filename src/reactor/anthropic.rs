@@ -55,10 +55,17 @@ impl From<EndpointVariant> for Quirks {
                 quirks.cache_markers_ignored = true;
                 quirks.tool_choice_not_respected = true;
                 quirks.cache_stats_unreported = true;
+                quirks.web_search_unsupported = true;
+                quirks.web_fetch_unsupported = true;
             }
             EndpointVariant::Blallama => {
                 quirks.breakpoint_after_assistant = true;
                 quirks.output_config_cache_safe = true;
+                // No server-side tool runner yet. Anthropic-conformant
+                // deviations are bugs — except improvements — so expect these
+                // to flip to `false` one tool at a time rather than together.
+                quirks.web_search_unsupported = true;
+                quirks.web_fetch_unsupported = true;
             }
         }
         quirks
@@ -334,6 +341,14 @@ mod tests {
         assert!(!blallama.cache_markers_ignored);
         assert!(!blallama.tool_choice_not_respected);
         assert!(!blallama.cache_stats_unreported);
+
+        // Server tools: Anthropic runs them, the local endpoints don't.
+        assert!(!Quirks::default().web_search_unsupported);
+        assert!(!Quirks::default().web_fetch_unsupported);
+        assert!(ollama.web_search_unsupported);
+        assert!(ollama.web_fetch_unsupported);
+        assert!(blallama.web_search_unsupported);
+        assert!(blallama.web_fetch_unsupported);
     }
 
     /// The retry classification: header hints pass through; a header-less
