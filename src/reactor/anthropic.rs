@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::retry::client_error_recoverable;
 
-use super::RetryAfter;
 use super::backend::Inference;
 use super::inference::Quirks;
 
@@ -115,27 +114,6 @@ fn models_from_tags(body: &str) -> Result<Models, misanthropic::client::Error> {
 /// Base wait for a header-less 529. The real API emits them (seen live
 /// 2026-06-11) and blallama's "Session is busy" never carries the header;
 /// without a courtesy backoff both read as fatal. Callers scale by attempt.
-const COURTESY_BACKOFF: Duration = Duration::from_secs(10);
-
-// Forward the `Retry-After` that Anthropic sends on 429/529; a header-less
-// 529 falls back to [`COURTESY_BACKOFF`]. A header-less 429 (which should
-// carry the header) and everything else stay fatal.
-impl RetryAfter for misanthropic::client::Error {
-    fn retry_after(&self) -> Option<Duration> {
-        match self {
-            misanthropic::client::Error::Anthropic(e) => {
-                e.retry_after().or(match e {
-                    misanthropic::client::AnthropicError::Overloaded {
-                        ..
-                    } => Some(COURTESY_BACKOFF),
-                    _ => None,
-                })
-            }
-            _ => None,
-        }
-    }
-}
-
 /// The Anthropic [`Inference`] transport: a thin wrapper over a
 /// [`misanthropic::Client`]. [`infer`](Inference::infer) is one
 /// `Client::message`; [`infer_batch`](Inference::infer_batch) uses the Batch API.
@@ -396,6 +374,10 @@ impl Inference for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The classification impls live in `reactor` (gated on
+    // `misanthropic`, not `client`); these tests exercise them here
+    // because they are Anthropic-transport behaviour.
+    use super::super::{COURTESY_BACKOFF, RetryAfter};
 
     /// The variant → quirks lore: Anthropic is the all-`false` default;
     /// ollama and blallama each deviate exactly where documented.
@@ -426,35 +408,157 @@ mod tests {
         assert!(blallama.web_fetch_unsupported);
     }
 
-    /// The retry classification: header hints pass through; a header-less
-    /// 529 (blallama's "Session is busy", and the real API sometimes) gets
-    /// the courtesy backoff; a header-less 429 and other errors stay fatal.
+    /// The retry classification. A server-sent hint always wins; the
+    /// transient *classes* get the courtesy backoff even with no header,
+    /// because `retry_after` is the reactor's only retry mechanism — an
+    /// error left fatal here gets no reschedule and, on the batch path,
+    /// no re-batch.
     #[test]
-    fn overloaded_without_header_gets_courtesy_backoff() {
+    fn server_hints_win_over_the_courtesy_backoff() {
         use misanthropic::client::{AnthropicError, Error};
+
+        let e = Error::Anthropic(AnthropicError::Overloaded {
+            message: "overloaded".into(),
+            retry_after: Some(3),
+        });
+        assert_eq!(
+            e.retry_after(),
+            Some(Duration::from_secs(3)),
+            "an explicit Retry-After must not be replaced by the default"
+        );
 
         let e = Error::Anthropic(AnthropicError::Overloaded {
             message: "Session is busy.".into(),
             retry_after: None,
         });
         assert_eq!(e.retry_after(), Some(COURTESY_BACKOFF));
+    }
 
-        let e = Error::Anthropic(AnthropicError::Overloaded {
-            message: "overloaded".into(),
-            retry_after: Some(3),
-        });
-        assert_eq!(e.retry_after(), Some(Duration::from_secs(3)));
+    /// Changed 2026-08-21: these were all fatal, which is why a single
+    /// edge 503 failed 27 of 30 agents — `NonJsonResponse` meant no agent
+    /// re-batched. Each is a class the server may recover from on its own.
+    #[test]
+    fn transient_classes_are_retryable_without_a_header() {
+        use misanthropic::client::{AnthropicError, Error};
+        use std::num::NonZeroU16;
 
-        let e = Error::Anthropic(AnthropicError::RateLimit {
-            message: "slow down".into(),
-            retry_after: None,
-        });
-        assert_eq!(e.retry_after(), None, "header-less 429 stays fatal");
+        let cases: Vec<(&str, Error)> = vec![
+            (
+                "the 2026-08-21 gateway 503",
+                Error::NonJsonResponse {
+                    status: 503,
+                    body: "upstream connect error".into(),
+                },
+            ),
+            (
+                "a non-JSON 429 challenge page",
+                Error::NonJsonResponse {
+                    status: 429,
+                    body: "<html>slow down</html>".into(),
+                },
+            ),
+            (
+                "header-less 429",
+                Error::Anthropic(AnthropicError::RateLimit {
+                    message: "slow down".into(),
+                    retry_after: None,
+                }),
+            ),
+            (
+                "5xx from the API itself",
+                Error::Anthropic(AnthropicError::API {
+                    message: "boom".into(),
+                }),
+            ),
+            (
+                "an unknown 5xx",
+                Error::Anthropic(AnthropicError::Unknown {
+                    code: Some(NonZeroU16::new(502).unwrap()),
+                    message: "bad gateway".into(),
+                }),
+            ),
+        ];
 
-        let e = Error::Anthropic(AnthropicError::API {
-            message: "boom".into(),
+        for (what, e) in cases {
+            assert_eq!(
+                e.retry_after(),
+                Some(COURTESY_BACKOFF),
+                "{what} must be retryable"
+            );
+            assert!(!e.is_fatal(), "{what} must not be fatal");
+        }
+    }
+
+    /// The other half of the same decision: repeating these verbatim
+    /// cannot fix them, so they must stay fatal. A blanket "retry
+    /// everything" would spin on a bad key or a malformed request.
+    #[test]
+    fn caller_side_failures_stay_fatal() {
+        use misanthropic::client::{AnthropicError, Error};
+        use std::num::NonZeroU16;
+
+        let cases: Vec<(&str, Error)> = vec![
+            (
+                "a non-JSON 404 — wrong URL, not a blip",
+                Error::NonJsonResponse {
+                    status: 404,
+                    body: "<html>not found</html>".into(),
+                },
+            ),
+            (
+                "bad request",
+                Error::Anthropic(AnthropicError::InvalidRequest {
+                    message: "malformed".into(),
+                }),
+            ),
+            (
+                "bad key",
+                Error::Anthropic(AnthropicError::Authentication {
+                    message: "nope".into(),
+                }),
+            ),
+            (
+                "an unknown 4xx",
+                Error::Anthropic(AnthropicError::Unknown {
+                    code: Some(NonZeroU16::new(418).unwrap()),
+                    message: "teapot".into(),
+                }),
+            ),
+            (
+                "an unparseable success body",
+                Error::UnexpectedResponse {
+                    message: "stream where a message was expected",
+                },
+            ),
+        ];
+
+        for (what, e) in cases {
+            assert_eq!(e.retry_after(), None, "{what} must stay fatal");
+            assert!(e.is_fatal(), "{what} must be fatal");
+        }
+    }
+
+    /// `retry::client_error_recoverable` delegates to this impl rather
+    /// than classifying separately. Before it did, the two disagreed on
+    /// five variants — including the 503 above, which one called
+    /// retryable and the other fatal.
+    #[test]
+    fn the_retry_helper_agrees_with_retry_after() {
+        use crate::retry::client_error_recoverable;
+        use misanthropic::client::{AnthropicError, Error};
+
+        let transient = Error::NonJsonResponse {
+            status: 503,
+            body: "upstream connect error".into(),
+        };
+        assert!(client_error_recoverable(&transient));
+        assert!(!transient.is_fatal());
+
+        let fatal = Error::Anthropic(AnthropicError::Authentication {
+            message: "nope".into(),
         });
-        assert_eq!(e.retry_after(), None);
+        assert!(!client_error_recoverable(&fatal));
+        assert!(fatal.is_fatal());
     }
 
     /// The 2026-08-21 failure, reproduced: a gateway 503 with a non-JSON

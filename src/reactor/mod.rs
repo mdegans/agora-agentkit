@@ -70,6 +70,79 @@ pub trait RetryAfter {
     }
 }
 
+// Anthropic error classification lives here rather than in
+// `reactor::anthropic` because that module is gated on the `client`
+// feature (misanthropic's HTTP client) while `crate::retry` — which
+// delegates to these impls so the two cannot disagree — is gated on
+// `misanthropic`. The impls need only the error *types*, which are
+// available either way.
+use std::time::Duration;
+
+const COURTESY_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Is this HTTP status worth coming back for? 429 and 5xx are the
+/// server telling us to wait; every other 4xx is our own request being
+/// wrong, and repeating it verbatim cannot fix it.
+fn status_is_transient(status: u16) -> bool {
+    status == 429 || status >= 500
+}
+
+// Forward the `Retry-After` Anthropic sends on 429/529, and treat the
+// transient *classes* as retryable even when no header arrives — the
+// reactor has no other retry mechanism, so anything left `None` here is
+// a per-agent failure with no reschedule and, on the batch path, no
+// re-batch. That is how a single edge 503 failed 27 of 30 agents on
+// 2026-08-21: `NonJsonResponse` was fatal, so nobody re-batched.
+//
+// Deliberately *not* blanket-retryable: a malformed request, a bad key,
+// or an unparseable body will read the same on the tenth attempt.
+// Implemented on `AnthropicError` too, not only the outer `Error`: an
+// `anyhow` chain can surface either, and classifying them in two places is
+// how they drift apart.
+impl RetryAfter for misanthropic::client::AnthropicError {
+    fn retry_after(&self) -> Option<Duration> {
+        use misanthropic::client::AnthropicError as E;
+
+        // The server's own hint wins wherever it sent one.
+        self.retry_after().or(match self {
+            E::Overloaded { .. }
+            | E::RateLimit { .. }
+            | E::API { .. }
+            | E::Timeout { .. } => Some(COURTESY_BACKOFF),
+            // Unknown shapes: 5xx is the server's problem, 4xx ours.
+            E::Unknown { code, .. } => code
+                .filter(|c| status_is_transient(c.get()))
+                .map(|_| COURTESY_BACKOFF),
+            E::InvalidRequest { .. }
+            | E::Authentication { .. }
+            | E::Billing { .. }
+            | E::Permission { .. }
+            | E::NotFound { .. }
+            | E::RequestTooLarge { .. } => None,
+        })
+    }
+}
+
+impl RetryAfter for misanthropic::client::Error {
+    fn retry_after(&self) -> Option<Duration> {
+        use misanthropic::client::Error;
+
+        match self {
+            Error::Anthropic(e) => RetryAfter::retry_after(e),
+            // An edge or proxy answered instead of the API — HTML, a
+            // plaintext gateway notice, a challenge page. The status is
+            // still meaningful, so classify on it rather than guessing.
+            Error::NonJsonResponse { status, .. } => {
+                status_is_transient(*status).then_some(COURTESY_BACKOFF)
+            }
+            // Connection reset, DNS blip, TLS hiccup.
+            Error::HTTP(_) => Some(COURTESY_BACKOFF),
+            // Ours, or a server misbehaving in a way retrying won't fix.
+            Error::Parse(_) | Error::UnexpectedResponse { .. } => None,
+        }
+    }
+}
+
 /// Something went wrong in the [`Agent`] [`Reactor`]
 #[derive(Debug, thiserror::Error)]
 pub enum ReactorError<I: Inference, S: Storage, A: Agent> {
