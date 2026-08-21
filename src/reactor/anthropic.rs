@@ -18,6 +18,8 @@ use misanthropic::model::{ModelInfo, Models};
 use misanthropic::{batch, response};
 use serde::{Deserialize, Serialize};
 
+use crate::retry::client_error_recoverable;
+
 use super::RetryAfter;
 use super::backend::Inference;
 use super::inference::Quirks;
@@ -203,6 +205,20 @@ impl Client {
     }
 }
 
+/// How many times a single batch submit or poll is retried before the chunk
+/// is failed. Bounded on purpose: a batch that cannot be submitted after
+/// this many attempts is not a blip, and the cohort should fail visibly
+/// rather than spin.
+const MAX_BATCH_RETRIES: usize = 5;
+
+/// Exponential backoff for batch submit/poll: 1s, 2s, 4s, 8s, 16s, capped
+/// at 30s. Total worst-case wait across [`MAX_BATCH_RETRIES`] is ~31s on
+/// top of call latency.
+async fn backoff(attempt: usize) {
+    let secs = 1u64 << attempt.min(5);
+    tokio::time::sleep(Duration::from_secs(secs.min(30))).await;
+}
+
 #[async_trait::async_trait]
 impl Inference for Client {
     type Error = misanthropic::client::Error;
@@ -244,13 +260,72 @@ impl Inference for Client {
                 })
                 .collect();
 
-            let mut pending = self.client.tagged_batch(items).await?;
-            let ready = loop {
-                match self.client.batch_poll(pending).await? {
-                    batch::Batch::Ready(ready) => break ready,
-                    batch::Batch::Pending(p) => {
-                        pending = p;
-                        tokio::time::sleep(self.poll_period).await;
+            // Submit with bounded backoff. A transient edge failure here
+            // (gateway 503, reset connection) would otherwise drop the whole
+            // chunk — and because one submission carries the entire cohort,
+            // that means every agent in it fails at once. `items` is cheap to
+            // rebuild: `P = &Prompt`, and the ids were minted above, so a
+            // retried submission routes its results identically.
+            let mut pending = {
+                let mut attempt = 0usize;
+                loop {
+                    match self.client.tagged_batch(items.clone()).await {
+                        Ok(pending) => break pending,
+                        Err(e) => {
+                            if attempt >= MAX_BATCH_RETRIES
+                                || !client_error_recoverable(&e)
+                            {
+                                return Err(e);
+                            }
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                max = MAX_BATCH_RETRIES,
+                                error = %e,
+                                "batch submit failed, retrying"
+                            );
+                            backoff(attempt).await;
+                            attempt += 1;
+                        }
+                    }
+                }
+            };
+
+            let ready = {
+                let mut attempt = 0usize;
+                loop {
+                    match self.client.batch_poll(pending).await {
+                        Ok(batch::Batch::Ready(ready)) => break ready,
+                        Ok(batch::Batch::Pending(p)) => {
+                            pending = p;
+                            // Progress: the batch is alive and answering, so
+                            // the failure budget starts over. Otherwise a long
+                            // batch with occasional blips would exhaust it.
+                            attempt = 0;
+                            tokio::time::sleep(self.poll_period).await;
+                        }
+                        // `batch::Error` hands the batch back rather than
+                        // consuming it, so a failed poll is survivable: the
+                        // work is already submitted and already billed.
+                        Err(batch::Error {
+                            client_error,
+                            pending: p,
+                        }) => {
+                            if attempt >= MAX_BATCH_RETRIES
+                                || !client_error_recoverable(&client_error)
+                            {
+                                return Err(client_error);
+                            }
+                            tracing::warn!(
+                                attempt = attempt + 1,
+                                max = MAX_BATCH_RETRIES,
+                                batch_id = %p.meta().id,
+                                error = %client_error,
+                                "batch poll failed, retrying"
+                            );
+                            pending = p;
+                            backoff(attempt).await;
+                            attempt += 1;
+                        }
                     }
                 }
             };
@@ -380,6 +455,98 @@ mod tests {
             message: "boom".into(),
         });
         assert_eq!(e.retry_after(), None);
+    }
+
+    /// The 2026-08-21 failure, reproduced: a gateway 503 with a non-JSON
+    /// body on the batch *submission*. One submission carries the whole
+    /// cohort, so before the retry loop this failed every agent in it at
+    /// once — 27 of 30, in the same second.
+    ///
+    /// The mock answers 503 forever, so this asserts the two things that
+    /// matter: that the submit is retried at all, and that it is *bounded* —
+    /// exactly `MAX_BATCH_RETRIES` retries after the initial attempt, then
+    /// the error surfaces. `start_paused` lets tokio fast-forward the
+    /// backoff, so the ~31s of sleeps cost no wall-clock.
+    #[tokio::test(start_paused = true)]
+    async fn batch_submit_retries_a_transient_gateway_503() {
+        use httpmock::prelude::*;
+        use misanthropic::{Prompt, prompt::message::Role};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/v1/messages/batches/");
+            then.status(503).body(
+                "upstream connect error or disconnect/reset before headers. \
+                 reset reason: connection termination",
+            );
+        });
+
+        let transport = Client::new(
+            misanthropic::Client::new("x".repeat(108))
+                .unwrap()
+                .base_url(server.base_url())
+                .unwrap(),
+        );
+
+        let prompt = Prompt::default()
+            .model(misanthropic::Id::Haiku45)
+            .max_tokens(std::num::NonZeroU32::new(16).unwrap())
+            .add_message((Role::User, "hi"))
+            .unwrap();
+
+        let error = transport
+            .infer_batch(&[&prompt])
+            .await
+            .expect_err("a permanent 503 must eventually surface");
+
+        assert!(
+            matches!(
+                error,
+                misanthropic::client::Error::NonJsonResponse {
+                    status: 503,
+                    ..
+                }
+            ),
+            "expected the edge 503 to surface unchanged, got: {error:?}"
+        );
+        mock.assert_hits(MAX_BATCH_RETRIES + 1);
+    }
+
+    /// A 4xx is the caller's fault and will not fix itself, so it must fail
+    /// on the first attempt rather than burn the retry budget.
+    #[tokio::test(start_paused = true)]
+    async fn batch_submit_does_not_retry_a_400() {
+        use httpmock::prelude::*;
+        use misanthropic::{Prompt, prompt::message::Role};
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/v1/messages/batches/");
+            then.status(400).json_body(serde_json::json!({
+                "type": "error",
+                "error": { "type": "invalid_request_error", "message": "bad" }
+            }));
+        });
+
+        let transport = Client::new(
+            misanthropic::Client::new("x".repeat(108))
+                .unwrap()
+                .base_url(server.base_url())
+                .unwrap(),
+        );
+
+        let prompt = Prompt::default()
+            .model(misanthropic::Id::Haiku45)
+            .max_tokens(std::num::NonZeroU32::new(16).unwrap())
+            .add_message((Role::User, "hi"))
+            .unwrap();
+
+        transport
+            .infer_batch(&[&prompt])
+            .await
+            .expect_err("a 400 must surface");
+
+        mock.assert_hits(1);
     }
 
     /// Live: does the **Batch API** actually run server tools? Everything
