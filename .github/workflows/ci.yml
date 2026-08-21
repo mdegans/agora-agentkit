@@ -16,11 +16,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: fmt-check
-        run: cargo fmt --all -- --check
+      - uses: taiki-e/install-action@just
 
-      - name: lint
-        run: cargo clippy --all-features --all-targets -- -D warnings
-
-      - name: test
-        run: cargo test --all-features
+      # One command, and it is the same one the pre-commit hook runs, so CI
+      # and the local gate cannot drift. `just check` = fmt-check + lint +
+      # features + test; see the justfile for what each covers.
+      - name: check
+        run: just check
