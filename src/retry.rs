@@ -67,42 +67,26 @@ pub fn is_recoverable(err: &anyhow::Error) -> bool {
 /// cause back into an [`anyhow::Error`] just to ask the question would
 /// allocate to rediscover what the caller already has.
 pub fn client_error_recoverable(err: &misanthropic::client::Error) -> bool {
-    use misanthropic::client::Error as ClientError;
-
-    match err {
-        ClientError::HTTP(_) => true, // network blip
-        ClientError::Parse(_) => false,
-        ClientError::UnexpectedResponse { .. } => false,
-        ClientError::Anthropic(a) => anthropic_err_recoverable(a),
-        // Non-JSON error bodies are almost always transient
-        // edge failures (Cloudflare 502/504 HTML pages,
-        // rate-limit challenge pages, gateway timeouts). Retry.
-        ClientError::NonJsonResponse { .. } => true,
-    }
+    // One source of truth. `RetryAfter` is what the reactor schedules on
+    // (`reactor::Error` requires it), so classifying separately here is
+    // how the two drift: before this delegated, the two disagreed on five
+    // variants — including the `NonJsonResponse` 503 that failed 27 of 30
+    // agents on 2026-08-21, which this said to retry and the reactor
+    // called fatal.
+    //
+    // The layers still differ in *what they do* with the verdict — the
+    // reactor waits out `retry_after()` and re-batches, callers here spin
+    // their own backoff — but they no longer disagree about whether the
+    // failure is worth another attempt.
+    !crate::reactor::RetryAfter::is_fatal(err)
 }
 
 fn anthropic_err_recoverable(
     err: &misanthropic::client::AnthropicError,
 ) -> bool {
-    use misanthropic::client::AnthropicError::*;
-    match err {
-        // Recoverable: transient server or rate limit.
-        RateLimit { .. } | API { .. } | Overloaded { .. } | Timeout { .. } => {
-            true
-        }
-        // Unknown code: retry on 5xx, skip on 4xx, skip when absent.
-        // misanthropic #55 made `code` Option<NonZeroU16> so truly unknown
-        // error types (no status parsed) arrive as None — treat those as
-        // non-recoverable to avoid retrying on arbitrary upstream drift.
-        Unknown { code, .. } => matches!(code, Some(c) if c.get() >= 500),
-        // Everything else (400/401/403/404/413/billing) is caller-side.
-        InvalidRequest { .. }
-        | Authentication { .. }
-        | Billing { .. }
-        | Permission { .. }
-        | NotFound { .. }
-        | RequestTooLarge { .. } => false,
-    }
+    // Same single source of truth as `client_error_recoverable`, for the
+    // case where the anyhow chain surfaces the inner error directly.
+    !crate::reactor::RetryAfter::is_fatal(err)
 }
 
 /// Retry `f` with exponential backoff when it returns a recoverable
