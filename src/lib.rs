@@ -34,5 +34,11 @@ pub mod secrets;
 pub mod serde_forgiving;
 pub mod signing;
 
-#[cfg(feature = "retry")]
+// Gated on `misanthropic` rather than `retry`: the `reactor` module is
+// itself `misanthropic`-gated and needs `client_error_recoverable` for its
+// batch retry loop, and the two features enable an identical dependency set
+// (`anyhow` is unconditional), so this widens availability without pulling
+// anything new in. The `retry` feature still works — it implies
+// `misanthropic`.
+#[cfg(feature = "misanthropic")]
 pub mod retry;

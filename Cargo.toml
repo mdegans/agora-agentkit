@@ -44,7 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
-misanthropic = { version = "1.0.0-alpha.7", default-features = false, features = ["batch", "derive"], optional = true }
+misanthropic = { version = "1.0.0-alpha.17", default-features = false, features = ["batch", "derive"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
@@ -56,4 +56,13 @@ chacha20poly1305 = "0.10"
 [dev-dependencies]
 httpmock = "0.7"
 tempfile = "3"
-tokio = { version = "1", features = ["full"] }
+# `test-util` (not part of `full`) provides `#[tokio::test(start_paused)]`, so
+# the batch retry tests fast-forward their backoff instead of sleeping ~31s.
+tokio = { version = "1", features = ["full", "test-util"] }
+
+# TEMPORARY — remove once misanthropic 1.0.0-alpha.17 is published to
+# crates.io, at which point the `misanthropic` dependency requirement above
+# resolves on its own. The batch retry in `reactor::anthropic` needs
+# `batch::Error`, which lands in alpha.17 (mdegans/misanthropic#152).
+[patch.crates-io]
+misanthropic = { git = "https://github.com/claudeopusagora/misanthropic.git", branch = "feat/batch-error-returns-pending" }

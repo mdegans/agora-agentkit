@@ -49,16 +49,7 @@ pub fn is_recoverable(err: &anyhow::Error) -> bool {
 
     for cause in err.chain() {
         if let Some(client_err) = cause.downcast_ref::<ClientError>() {
-            return match client_err {
-                ClientError::HTTP(_) => true, // network blip
-                ClientError::Parse(_) => false,
-                ClientError::UnexpectedResponse { .. } => false,
-                ClientError::Anthropic(a) => anthropic_err_recoverable(a),
-                // Non-JSON error bodies are almost always transient
-                // edge failures (Cloudflare 502/504 HTML pages,
-                // rate-limit challenge pages, gateway timeouts). Retry.
-                ClientError::NonJsonResponse { .. } => true,
-            };
+            return client_error_recoverable(client_err);
         }
         if let Some(a) = cause.downcast_ref::<AnthropicError>() {
             return anthropic_err_recoverable(a);
@@ -66,6 +57,28 @@ pub fn is_recoverable(err: &anyhow::Error) -> bool {
     }
     // Unknown error type — default to retrying once. Cheap.
     true
+}
+
+/// Is this [`misanthropic::client::Error`] worth retrying?
+///
+/// The same classification [`is_recoverable`] applies, minus the
+/// [`anyhow::Error`] chain walk. Call this when the error is already in
+/// hand — notably after destructuring a `batch::Error`, where wrapping the
+/// cause back into an [`anyhow::Error`] just to ask the question would
+/// allocate to rediscover what the caller already has.
+pub fn client_error_recoverable(err: &misanthropic::client::Error) -> bool {
+    use misanthropic::client::Error as ClientError;
+
+    match err {
+        ClientError::HTTP(_) => true, // network blip
+        ClientError::Parse(_) => false,
+        ClientError::UnexpectedResponse { .. } => false,
+        ClientError::Anthropic(a) => anthropic_err_recoverable(a),
+        // Non-JSON error bodies are almost always transient
+        // edge failures (Cloudflare 502/504 HTML pages,
+        // rate-limit challenge pages, gateway timeouts). Retry.
+        ClientError::NonJsonResponse { .. } => true,
+    }
 }
 
 fn anthropic_err_recoverable(
@@ -312,5 +325,48 @@ mod tests {
         .await;
         assert!(result.is_err());
         assert_eq!(attempts, 1, "max_retries=0 means one attempt, no retries");
+    }
+    /// `is_recoverable` delegates to `client_error_recoverable`, so the two
+    /// must not drift. This is the case that matters: the 503 with a
+    /// non-JSON edge body that took out the cohort on 2026-08-21.
+    #[test]
+    fn client_error_recoverable_matches_the_anyhow_path() {
+        let cases: Vec<(ClientError, bool)> = vec![
+            (
+                ClientError::NonJsonResponse {
+                    status: 503,
+                    body: "upstream connect error".into(),
+                },
+                true,
+            ),
+            (
+                ClientError::Anthropic(AnthropicError::Overloaded {
+                    message: "overloaded".into(),
+                    retry_after: None,
+                }),
+                true,
+            ),
+            (
+                ClientError::Anthropic(AnthropicError::InvalidRequest {
+                    message: "bad".into(),
+                }),
+                false,
+            ),
+            (ClientError::UnexpectedResponse { message: "huh" }, false),
+        ];
+
+        for (err, expected) in cases {
+            let direct = client_error_recoverable(&err);
+            assert_eq!(
+                direct, expected,
+                "client_error_recoverable disagreed for {err:?}"
+            );
+            // Same verdict through the anyhow chain walk.
+            assert_eq!(
+                is_recoverable(&anyhowed(err)),
+                expected,
+                "the two classification paths disagreed"
+            );
+        }
     }
 }
