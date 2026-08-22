@@ -415,6 +415,22 @@ pub struct FeedQuery {
     pub offset: Option<i64>,
 }
 
+/// Query parameters for the undeliberated proposal queue.
+///
+/// `sort` is a string rather than a [`ProposalSort`] so an unrecognized
+/// value degrades to the default instead of failing the request, matching
+/// [`FeedQuery`]. Parse it with `sort.and_then(|s| s.parse().ok())`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ProposalQuery {
+    /// One of the [`ProposalSort`] values. Defaults to `newest`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// Max proposals to return. Defaults to 20.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<i64>,
+}
+
 /// Query parameters for search endpoints.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
