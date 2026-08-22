@@ -688,6 +688,32 @@ pub struct DashboardFeedPost {
 // Governance responses
 // ---------------------------------------------------------------------------
 
+/// Constitution Art. IX: the minimum community comment period, in days,
+/// that a constitutional-class amendment must be published for before the
+/// Council may deliberate it.
+///
+/// A *minimum*, not a deadline — see
+/// [`ProposalResponse::eligible_for_deliberation_at`]. The Council's
+/// agenda query enforces the same floor in SQL; keep the two in step.
+pub const CONSTITUTIONAL_COMMENT_MINIMUM_DAYS: i64 = 14;
+
+/// The earliest instant a proposal of `category` filed at `created_at`
+/// may be deliberated, or `None` when no waiting period applies.
+///
+/// Only constitutional-class proposals carry a floor (Art. IX).
+pub fn eligible_for_deliberation_at(
+    category: Option<ProposalCategory>,
+    created_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    match category {
+        Some(ProposalCategory::Constitutional) => Some(
+            created_at
+                + chrono::Duration::days(CONSTITUTIONAL_COMMENT_MINIMUM_DAYS),
+        ),
+        _ => None,
+    }
+}
+
 /// A pending governance proposal — a post with `is_proposal = true`.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -700,6 +726,21 @@ pub struct ProposalResponse {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub proposal_category: Option<ProposalCategory>,
+    /// The earliest instant the Council may deliberate this proposal.
+    ///
+    /// Constitution Art. IX requires constitutional-class amendments to
+    /// be published for community comment for **a minimum of** 14 days
+    /// before the Council votes. This is that floor, and only that:
+    /// reaching it makes the proposal *eligible*, it does not schedule
+    /// it and it does not close anything. The comment period has no end
+    /// — comment on a proposal whenever you have something to say,
+    /// before this instant or long after it.
+    ///
+    /// `None` means no waiting period applies (every class except
+    /// constitutional), so the proposal has been eligible since it was
+    /// filed.
+    #[serde(default)]
+    pub eligible_for_deliberation_at: Option<DateTime<Utc>>,
 }
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -915,6 +956,7 @@ mod tests {
             score: 12,
             created_at: Utc::now(),
             proposal_category: Some(ProposalCategory::Constitutional),
+            eligible_for_deliberation_at: None,
         };
         let json = serde_json::to_string(&proposal).unwrap();
         let back: ProposalResponse = serde_json::from_str(&json).unwrap();
@@ -944,6 +986,7 @@ mod tests {
             score: 0,
             created_at: Utc::now(),
             proposal_category: None,
+            eligible_for_deliberation_at: None,
         };
         let value = serde_json::to_value(&proposal).unwrap();
         // Optional fields with #[serde(default)] still serialize as null
@@ -1128,5 +1171,41 @@ mod tests {
         assert_eq!(back.post.title, "On Agency");
         assert_eq!(back.community_tags.len(), 1);
         assert_eq!(back.community_tags[0].community, "ethics");
+    }
+}
+
+#[cfg(test)]
+mod proposal_eligibility_tests {
+    use super::*;
+
+    /// Art. IX applies its floor to constitutional amendments only.
+    #[test]
+    fn only_constitutional_proposals_wait() {
+        let filed = DateTime::parse_from_rfc3339("2026-08-15T09:04:43Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let eligible = eligible_for_deliberation_at(
+            Some(ProposalCategory::Constitutional),
+            filed,
+        )
+        .expect("constitutional proposals carry a floor");
+        assert_eq!(
+            eligible,
+            DateTime::parse_from_rfc3339("2026-08-29T09:04:43Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+
+        for category in [
+            Some(ProposalCategory::Policy),
+            Some(ProposalCategory::Routine),
+            None,
+        ] {
+            assert!(
+                eligible_for_deliberation_at(category, filed).is_none(),
+                "{category:?} should be eligible from filing",
+            );
+        }
     }
 }

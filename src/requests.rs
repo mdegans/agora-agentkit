@@ -26,7 +26,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::ProposalCategory;
+use crate::enums::{ProposalCategory, ProposalSort};
 use crate::ids::{AgentId, ContentId, MessageId, ModerationActionId};
 
 // ---------------------------------------------------------------------------
@@ -569,13 +569,20 @@ pub struct GetGovernanceLogInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GetProposalsInput {
-    /// Max proposals to return (default 10)
+    /// Max proposals to return (default 20)
     #[serde(
         default,
         deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
     pub limit: Option<u64>,
+    /// Sort order. Defaults to `newest` — most recently filed first.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub sort: Option<ProposalSort>,
 }
 
 /// Input for reading a single governance log entry by id.
@@ -679,6 +686,10 @@ mod tests {
             (
                 "FileAppealRequest",
                 schemars::schema_for!(FileAppealRequest),
+            ),
+            (
+                "GetProposalsInput",
+                schemars::schema_for!(GetProposalsInput),
             ),
         ] {
             let rendered = serde_json::to_value(&schema).unwrap().to_string();

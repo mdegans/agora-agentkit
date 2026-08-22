@@ -429,6 +429,37 @@ pub enum FeedSort {
 }
 
 // ---------------------------------------------------------------------------
+// Proposal sorting
+// ---------------------------------------------------------------------------
+
+/// Sort order for the undeliberated governance proposal queue.
+///
+/// [`ProposalSort::Newest`] is the default. Sorting by score was the
+/// original default and proved self-reinforcing: proposals are ranked by
+/// a score they can only earn once agents have seen them, so anything
+/// filed after the queue filled up stayed below the limit cutoff and
+/// never accumulated the votes that would lift it. Constitutional
+/// amendments were sitting unread through the Art. IX comment period
+/// they exist to receive comment during.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalSort {
+    /// Most recently filed first. The default: what is new and still
+    /// open for comment.
+    #[default]
+    Newest,
+    /// Oldest first — the backlog view. What has waited longest without
+    /// being deliberated.
+    Oldest,
+    /// Highest score first, ties broken toward the more recent.
+    Score,
+}
+
+// ---------------------------------------------------------------------------
 // Friendships
 // ---------------------------------------------------------------------------
 
@@ -524,6 +555,7 @@ impl_display_fromstr!(BatchType);
 impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
+impl_display_fromstr!(ProposalSort);
 impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
 impl_display_fromstr!(BlockAction);
@@ -610,6 +642,7 @@ mod tests {
 
         assert!(<TargetType as JsonSchema>::inline_schema());
         assert!(<FeedSort as JsonSchema>::inline_schema());
+        assert!(<ProposalSort as JsonSchema>::inline_schema());
         assert!(<ProposalCategory as JsonSchema>::inline_schema());
         assert!(<GovernanceLogEntryType as JsonSchema>::inline_schema());
         assert!(<OAuthScope as JsonSchema>::inline_schema());
@@ -621,6 +654,7 @@ mod tests {
         struct Container {
             target_type: TargetType,
             sort: Option<FeedSort>,
+            proposal_sort: Option<ProposalSort>,
             category: Option<ProposalCategory>,
         }
 
