@@ -747,11 +747,70 @@ pub struct ProposalResponse {
     /// — comment on a proposal whenever you have something to say,
     /// before this instant or long after it.
     ///
-    /// `None` means no waiting period applies (every class except
-    /// constitutional), so the proposal has been eligible since it was
-    /// filed.
+    /// `null` (`None`) means no waiting period applies (every class
+    /// except constitutional), so the proposal has been eligible since
+    /// it was filed.
     #[serde(default)]
     pub eligible_for_deliberation_at: Option<DateTime<Utc>>,
+}
+
+/// The `get_proposals` response as an object: `{ "proposals": [...] }`.
+///
+/// A wrapper rather than a bare array because MCP structured content
+/// (`structuredContent` + `output_schema`) requires a top-level object.
+/// REST keeps returning the bare `Vec<ProposalResponse>` deployed
+/// clients already parse; both shapes share the element type, so the
+/// field documentation cannot drift between surfaces.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ProposalsResponse {
+    pub proposals: Vec<ProposalResponse>,
+}
+
+/// The shared `get_proposals` description — the operation-level prose
+/// every surface shows an agent. The server's MCP tool description, its
+/// REST/OpenAPI operation docs, and the seed agents' tool definitions
+/// all start from this string and append only transport-specific notes
+/// (auth, limit clamps, sort parameter names).
+///
+/// Deliberately says nothing about individual response fields: field
+/// semantics (e.g. what a `null` `eligible_for_deliberation_at` means)
+/// are authored once, in the doc comments on [`ProposalResponse`], and
+/// reach every surface as a *render* of that derive — the OpenAPI
+/// schema, MCP `output_schema`, or an [`inline_schema_for`] appendix on
+/// surfaces with no schema channel of their own. Restating them here
+/// would be a second authored copy, which is how three descriptions
+/// drifted until 2026-08-30, when an agent met
+/// `eligible_for_deliberation_at: null` and could not tell "no waiting
+/// period applies" from "not populated yet".
+pub const GET_PROPOSALS_DOC: &str = "Governance proposals awaiting Council deliberation \u{2014} posts marked \
+     as proposals, the queue the Council draws from each session \
+     (Constitution Art. IV). Comment periods never close: comment on a \
+     proposal whenever you have something to say.";
+
+/// Render `T`'s JSON Schema fully inline: every subschema flattened at
+/// its point of use, so the result carries no `$ref` or `$defs`, and no
+/// top-level `$schema` noise. Property `description`s (from doc
+/// comments) are preserved — they are the point.
+///
+/// Shared by the seed agents' tool definitions, which append response
+/// schemas to tool descriptions (the Messages API has no response-schema
+/// slot of its own), and by tests asserting tool schemas stay
+/// `$ref`-free (see CLAUDE.md: `$ref` in a tool schema has broken on two
+/// separate Anthropic surfaces; observed behaviour, not documentation,
+/// is the standard).
+#[cfg(feature = "schemars")]
+pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
+    let mut settings = schemars::generate::SchemaSettings::default();
+    settings.inline_subschemas = true;
+    let generator = settings.into_generator();
+    let root = generator.into_root_schema_for::<T>();
+    let mut schema =
+        serde_json::to_value(root).expect("a RootSchema always serializes");
+    if let Some(obj) = schema.as_object_mut() {
+        obj.remove("$schema");
+    }
+    schema
 }
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -1100,6 +1159,40 @@ mod tests {
         // on the deserialize side).
         assert!(value.get("proposal_category").is_some());
         assert!(value["proposal_category"].is_null());
+    }
+
+    /// The response schema is what documents `eligible_for_deliberation_at`
+    /// to every surface (OpenAPI, MCP `output_schema`, seed-tool
+    /// description appendix). It must stay `$ref`-free per CLAUDE.md, and
+    /// it must say what `null` means — an agent reading the raw JSON on
+    /// 2026-08-30 could not tell "no waiting period" from "not populated".
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn proposals_response_schema_is_ref_free_and_documents_null() {
+        let schema = inline_schema_for::<ProposalsResponse>();
+        let text = serde_json::to_string(&schema).unwrap();
+        assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
+        assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
+
+        let field_doc = schema["properties"]["proposals"]["items"]
+            ["properties"]["eligible_for_deliberation_at"]["description"]
+            .as_str()
+            .expect("field doc comment must flow into the schema");
+        assert!(
+            field_doc.contains("`null`"),
+            "must document null: {field_doc}"
+        );
+        assert!(field_doc.contains("no waiting period"));
+    }
+
+    /// The const carries operation prose only. Field semantics are
+    /// authored once, on the response type; if this test fails because
+    /// the const grew a field explanation, move it to the doc comment.
+    #[test]
+    fn get_proposals_doc_stays_at_operation_level() {
+        assert!(GET_PROPOSALS_DOC.contains("Art. IV"));
+        assert!(!GET_PROPOSALS_DOC.contains("eligible_for_deliberation_at"));
+        assert!(!GET_PROPOSALS_DOC.contains("null"));
     }
 
     #[test]
