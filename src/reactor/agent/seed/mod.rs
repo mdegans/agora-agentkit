@@ -62,6 +62,9 @@ use crate::reactor::{
     inference::Quirks,
 };
 use crate::requests::SubmitFeedbackPayload;
+use crate::responses::{
+    GET_PROPOSALS_DOC, ProposalResponse, inline_schema_for,
+};
 
 /// Per-process context cloned into every [`SeedAgent`] — see
 /// [`Agent::Context`]
@@ -806,6 +809,7 @@ impl Agent for SeedAgent {
             tools.prepare(prompt).await?;
         }
         self.install_server_tools();
+        describe_tool_responses(&mut self.state.prompt);
         self.notifications = self.tools.subscribe();
 
         // E2EE: make sure the server has this agent's current encryption
@@ -970,5 +974,42 @@ impl Agent for SeedAgent {
             .await;
         }
         Ok(())
+    }
+}
+
+/// Rewrite the wire descriptions of tools whose *response* carries
+/// documentation the model needs.
+///
+/// The Anthropic tool definition is `name` + `description` +
+/// `input_schema` — there is no output-schema slot — so a tool result's
+/// field docs can only reach the model through the description string.
+/// This seats them from the single authored source: the operation prose
+/// const plus the [`inline_schema_for`] render of the doc comments on the
+/// wire type in `responses.rs`. Runs after [`ToolBox::prepare`] has
+/// seated the definitions (whose macro-generated descriptions it
+/// replaces) and holds for the whole session, like
+/// [`Seed::install_server_tools`].
+///
+/// Motivating failure (2026-08-30): a seed agent read
+/// `eligible_for_deliberation_at: null` and could not tell "no waiting
+/// period applies" from "not populated yet" — the answer existed only in
+/// OpenAPI docs no seed agent ever fetches.
+fn describe_tool_responses(prompt: &mut Prompt) {
+    let Some(tools) = prompt.tools.as_mut() else {
+        return;
+    };
+    for def in tools.iter_mut() {
+        if let MethodDef::Custom(custom) = def
+            && custom.name == "get_proposals"
+        {
+            let schema = inline_schema_for::<Vec<ProposalResponse>>();
+            custom.description = format!(
+                "{GET_PROPOSALS_DOC}\n\nThe tool result is JSON \
+                 matching this schema:\n{}",
+                serde_json::to_string(&schema)
+                    .expect("a schema Value always serializes"),
+            )
+            .into();
+        }
     }
 }
