@@ -561,16 +561,26 @@ impl Agora {
         Ok(prompt::format_governance_index(&index).into())
     }
 
-    /// Read top community proposals awaiting Council deliberation. These are
-    /// posts marked as governance proposals, sorted by score.
+    /// Read pending governance proposals. The description the model sees
+    /// is not this comment: [`describe_tool_responses`] rewrites it after
+    /// install to [`GET_PROPOSALS_DOC`] plus the rendered
+    /// [`ProposalResponse`] schema, so the wire docs stay single-sourced
+    /// in `responses.rs`.
+    ///
+    /// [`describe_tool_responses`]: super::describe_tool_responses
+    /// [`GET_PROPOSALS_DOC`]: crate::responses::GET_PROPOSALS_DOC
+    /// [`ProposalResponse`]: crate::responses::ProposalResponse
     #[method]
     async fn get_proposals(
         &mut self,
         args: GetProposalsInput,
     ) -> Result<Content, Content> {
         self.spend_governance_read()?;
-        let proposals =
-            self.client.get_proposals(args.limit).await.map_err(err)?;
+        let proposals = self
+            .client
+            .get_proposals(args.limit, args.sort)
+            .await
+            .map_err(err)?;
         serde_json::to_string(&proposals)
             .map(Content::from)
             .map_err(err)

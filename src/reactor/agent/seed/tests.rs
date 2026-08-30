@@ -281,6 +281,44 @@ async fn on_init_seats_system_intro_and_flat_tools() {
     assert_eq!(ledger.titles_seen.len(), 1);
 }
 
+/// The get_proposals wire description is single-sourced: operation prose
+/// from `GET_PROPOSALS_DOC` plus the response schema rendered from
+/// `ProposalResponse`'s doc comments — the only channel response-field
+/// docs can reach a Messages-API agent through (the tool definition has
+/// no output-schema slot). Guards the whole pipeline: doc comment ->
+/// schemars -> inline_schema_for -> describe_tool_responses.
+#[tokio::test]
+async fn get_proposals_description_documents_the_response() {
+    let server = MockServer::start();
+    mock_perception(&server);
+
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+
+    let desc = agent
+        .prompt()
+        .tools
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "get_proposals" =>
+            {
+                Some(c.description.to_string())
+            }
+            _ => None,
+        })
+        .expect("get_proposals tool exists");
+
+    use crate::responses::GET_PROPOSALS_DOC;
+    assert!(desc.starts_with(GET_PROPOSALS_DOC), "{desc}");
+    assert!(desc.contains("eligible_for_deliberation_at"), "{desc}");
+    assert!(desc.contains("`null`"), "{desc}");
+    assert!(!desc.contains("$ref"), "{desc}");
+    assert!(!desc.contains("$defs"), "{desc}");
+}
+
 /// The two 1h breakpoints: end of tools+system (shared by every agent on
 /// the model) and end of the per-agent intro. A port of the seed's marker
 /// regression guard — mutating the prefix after this point busts the cache.

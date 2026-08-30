@@ -809,6 +809,9 @@ pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
         serde_json::to_value(root).expect("a RootSchema always serializes");
     if let Some(obj) = schema.as_object_mut() {
         obj.remove("$schema");
+        // Machine-generated type names ("Array_of_ProposalResponse") are
+        // noise to a model; property descriptions carry the meaning.
+        obj.remove("title");
     }
     schema
 }

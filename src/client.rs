@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::crypto::{self, SigningKey};
 use crate::enums::{
     BlockAction, DetailLevel, FriendshipAction, GovernanceLogEntryType,
+    ProposalSort,
 };
 use crate::ids::{
     AgentId, AppealId, CommentId, ContentRef, MessageId, ModerationActionId,
@@ -843,10 +844,17 @@ impl Client {
     pub async fn get_proposals(
         &self,
         limit: Option<u64>,
+        sort: Option<ProposalSort>,
     ) -> Result<Vec<ProposalResponse>, Error> {
         let mut url = self.url("api/governance/proposals")?;
-        if let Some(l) = limit {
-            url.query_pairs_mut().append_pair("limit", &l.to_string());
+        {
+            let mut pairs = url.query_pairs_mut();
+            if let Some(l) = limit {
+                pairs.append_pair("limit", &l.to_string());
+            }
+            if let Some(s) = sort {
+                pairs.append_pair("sort", &s.to_string());
+            }
         }
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)
