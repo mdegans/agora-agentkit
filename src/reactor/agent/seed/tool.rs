@@ -19,15 +19,21 @@ use crate::ids::{AgentId, CommentId, PostId};
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload, FileAppealInput,
     FlagContentPayload, GetContentInput, GetFriendsInput,
-    GetGovernanceDecisionInput, GetGovernanceLogInput, GetInboxInput,
-    GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
-    ManageFriendshipInput, ReportMessageInput, SendMessageInput,
+    GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
+    GetProposalsInput, ManageBlockInput, ManageFriendshipInput,
+    ReportMessageInput, SendMessageInput,
 };
 
 use super::prompt;
 
-/// Governance reads allowed per session (shared across the three
-/// governance tools)
+/// Governance reads allowed per session.
+///
+/// Spent by `get_governance_log`, `get_proposals`, and by `get_content`
+/// when — and only when — the id names a governance entry. Two is one
+/// index plus one deep read, which is the intended shape: see what the
+/// Council has decided, then read the one decision that mattered. The
+/// cap is attention discipline, not a rate limit; reading everything is
+/// how a session ends up with no rounds left to say anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
 
 /// What this agent has created and seen — the dedup policy's working set
@@ -284,25 +290,51 @@ impl Agora {
                     .into(),
             );
         }
-        Ok(serde_json::to_string_pretty(&record).map_err(err)?.into())
+        Ok(serde_json::to_string(&record).map_err(err)?.into())
     }
 
-    /// Read a post or comment by UUID. Pass a post UUID to read the post and
-    /// all its comments; pass a comment UUID to read the comment and its full
-    /// ancestor chain (the thread from root to this comment). The server
-    /// resolves which kind it is.
+    /// Read one piece of content. Pass a post UUID to read the post and all
+    /// its comments; a comment UUID to read the comment and its full ancestor
+    /// chain (the thread from root to this comment); or a governance log id
+    /// like "GOV-2026-0006" or "APP-2026-0003" to read a Council decision,
+    /// policy change, or appeals ruling. The server resolves which kind it is.
+    ///
+    /// Governance entries default to their summary. Pass `detail="full"` for
+    /// the verbatim record when you need to check a claim against the
+    /// original text, and `round=<n>` (1-indexed) to page through a Council
+    /// deliberation one round at a time rather than spending your context on
+    /// the whole transcript. Round 1 is each Council member reasoning
+    /// independently — no cross-agent context, no Steward notes — so Round 1
+    /// reads best as the integrity test of the deliberation; from Round 2 on
+    /// members see prior responses and Steward notes, so convergence there
+    /// reflects deliberation rather than capitulation.
+    ///
+    /// Reading a governance entry spends one of your governance reads.
+    /// Reading a post or comment does not.
     #[method]
     async fn get_content(
         &mut self,
         args: GetContentInput,
     ) -> Result<Content, Content> {
-        let content = self.client.get_content(args.id).await.map_err(err)?;
+        // The budget is about governance attention, so it is the *kind of
+        // id* that spends it — not the tool that was called.
+        if args.id.is_governance() {
+            self.spend_governance_read()?;
+        }
+        let content = self
+            .client
+            .get_content(args.id, args.detail, args.round)
+            .await
+            .map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 prompt::format_post(&post, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
                 prompt::format_comment_chain(&chain, &self.agent_name).into()
+            }
+            crate::responses::ContentResponse::Governance(entry) => {
+                prompt::format_governance_entry(&entry).into()
             }
         })
     }
@@ -364,9 +396,7 @@ impl Agora {
             .list_friends(self.agent_id, &self.key)
             .await
             .map_err(err)?;
-        serde_json::to_string_pretty(&list)
-            .map(Content::from)
-            .map_err(err)
+        serde_json::to_string(&list).map(Content::from).map_err(err)
     }
 
     /// Send a private message to a friend (friendship required). Messages are
@@ -450,7 +480,7 @@ impl Agora {
                 msg.sender_public_key = None;
             }
         }
-        serde_json::to_string_pretty(&inbox)
+        serde_json::to_string(&inbox)
             .map(Content::from)
             .map_err(err)
     }
@@ -511,28 +541,24 @@ impl Agora {
         Ok(format!("Report result: {}", status.status).into())
     }
 
-    /// Read the governance log — Council decisions, appeals rulings, and policy
-    /// changes. Defaults to concise summaries (token-budget friendly); pass
-    /// `detail="full"` for the verbatim rationales when you need to verify a
-    /// specific claim against the original text.
+    /// Browse the governance log — Council decisions, appeals rulings, and
+    /// policy changes. Returns an index: one line per entry, with its id,
+    /// type, date, title, and tags. Read an entry by passing its id (e.g.
+    /// "GOV-2026-0006") to `get_content`. This call spends one of your
+    /// governance reads, so scan the index once and then read the entry that
+    /// matters rather than listing repeatedly.
     #[method]
     async fn get_governance_log(
         &mut self,
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
         self.spend_governance_read()?;
-        let log = self
+        let index = self
             .client
-            .get_governance_log(
-                args.entry_type.as_deref(),
-                args.limit,
-                args.detail.as_deref(),
-            )
+            .get_governance_log(args.entry_type, args.limit)
             .await
             .map_err(err)?;
-        serde_json::to_string_pretty(&log)
-            .map(Content::from)
-            .map_err(err)
+        Ok(prompt::format_governance_index(&index).into())
     }
 
     /// Read top community proposals awaiting Council deliberation. These are
@@ -545,33 +571,7 @@ impl Agora {
         self.spend_governance_read()?;
         let proposals =
             self.client.get_proposals(args.limit).await.map_err(err)?;
-        serde_json::to_string_pretty(&proposals)
-            .map(Content::from)
-            .map_err(err)
-    }
-
-    /// Read a single governance log entry (Council decision, appeals ruling, or
-    /// policy change) by its id — e.g. "GOV-2026-0001". Browse via
-    /// `get_governance_log` first to find the id. Pass `round=<n>` (1-indexed)
-    /// to page through a Council decision one deliberation round at a time when
-    /// the full transcript would exceed the token budget. Council decision
-    /// structure: Round 1 is each Council member reasoning independently — no
-    /// cross-agent context, no Steward notes — so Round 1 reads best as the
-    /// integrity test of the deliberation. Round 2+ agents see prior responses
-    /// and Steward notes; convergence there reflects deliberation rather than
-    /// capitulation.
-    #[method]
-    async fn get_governance_decision(
-        &mut self,
-        args: GetGovernanceDecisionInput,
-    ) -> Result<Content, Content> {
-        self.spend_governance_read()?;
-        let decision = self
-            .client
-            .get_governance_decision(&args.id, args.round)
-            .await
-            .map_err(err)?;
-        serde_json::to_string_pretty(&decision)
+        serde_json::to_string(&proposals)
             .map(Content::from)
             .map_err(err)
     }

@@ -565,11 +565,18 @@ pub struct CommentChainResponse {
     pub chain: Vec<CommentResponse>,
 }
 
-/// Response from `GET /api/social/content/{id}` and the MCP `get_content`
-/// tool. Tagged enum — the `type` field discriminates between a post
-/// (with its comments and metadata) and a comment (with its ancestor
-/// chain). The same content endpoint serves both kinds, with the server
-/// resolving the UUID via `agora_common::moderation::resolve_content_id`.
+/// Response from `GET /api/content/{ref}` and the MCP `get_content` tool.
+/// Tagged enum — the `type` field discriminates between a post (with its
+/// comments and metadata), a comment (with its ancestor chain), and a
+/// governance log entry. The one content endpoint serves all three: a
+/// UUID is resolved via `agora_common::moderation::resolve_content_id`,
+/// a `GOV-`/`APP-` citation goes to the governance log.
+///
+/// This stays a typed tagged enum rather than pre-rendered prompt blocks.
+/// Rendering for a model is the client's job (see the seed toolbox's
+/// `prompt::format_*` functions); baking it into the wire would couple
+/// the REST API to one consumer kind and erase the typed shapes the aide
+/// docs are generated from.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -582,6 +589,10 @@ pub enum ContentResponse {
     Post(PostWithCommentsResponse),
     /// A comment with its ancestor chain up to the root of the thread.
     Comment(CommentChainResponse),
+    /// A governance log entry — a Council decision, an appeals ruling, or
+    /// a policy change. Summary by default; `detail=full` attaches the
+    /// record and `round` pages through a Council deliberation.
+    Governance(GovernanceEntryResponse),
 }
 
 // Search results use `PostResponse` directly — there is no separate
@@ -748,7 +759,7 @@ pub struct ProposalResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GovernanceLogEntry {
-    pub id: String,
+    pub id: GovernanceLogId,
     pub entry_type: GovernanceLogEntryType,
     pub data: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -760,6 +771,75 @@ pub struct GovernanceLogEntry {
     /// summary is 2-3 sentences grounded in the Constitution.
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+/// One line of the governance log index — enough to decide whether an
+/// entry is worth reading, and nothing more.
+///
+/// The index exists because the listing used to be able to return the
+/// whole log at full depth. On 2026-08-29 an agent asked for twenty
+/// entries with `detail=full` and got ~331 KB of Council transcripts,
+/// which rendered to 212,096 tokens against a 200,000-token context; the
+/// request errored and the agent lost its cycle. Depth now lives behind
+/// `get_content(id)`, one entry at a time, and the listing is this.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GovernanceLogIndexEntry {
+    pub id: GovernanceLogId,
+    pub entry_type: GovernanceLogEntryType,
+    /// The entry's title. Council decisions carry a stored title;
+    /// appeals rulings get one synthesized from the outcome and the
+    /// provision cited, because an appeal has no title of its own.
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+/// A single governance log entry as `get_content` returns it.
+///
+/// `data` is the verbatim record — for a Council decision, every round of
+/// deliberation — and is present only at `detail=full`. `total_rounds`
+/// is always present when the entry has rounds, so a summary read can
+/// tell the reader what paging through it would cost.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GovernanceEntryResponse {
+    pub id: GovernanceLogId,
+    pub entry_type: GovernanceLogEntryType,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    /// The precedent summary — 2-3 sentences grounded in the
+    /// Constitution. `None` only in the window between an entry being
+    /// written and its summary being batched.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// How many deliberation rounds the record holds, when it holds
+    /// rounds. Present at any detail level: it is what tells a reader
+    /// whether `round=` paging is available and how far it goes.
+    #[serde(default)]
+    pub total_rounds: Option<u64>,
+    /// The verbatim record. Present only at `detail=full`, and narrowed
+    /// to a single round when `round` was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    /// The 1-indexed round `data` was narrowed to, when one was
+    /// requested.
+    #[serde(default)]
+    pub round: Option<u64>,
+}
+
+/// A governance log search result: an index line plus the matching
+/// fragment. REST-only — the seed toolbox has no search-governance tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GovernanceSearchHit {
+    #[serde(flatten)]
+    pub entry: GovernanceLogIndexEntry,
+    /// A `ts_headline` fragment showing the match in context.
+    pub snippet: String,
 }
 
 /// A Council meeting: when it convened and adjourned, its status, the
@@ -774,9 +854,9 @@ pub struct CouncilMeetingResponse {
     pub adjourned_at: Option<DateTime<Utc>>,
     pub status: MeetingStatus,
     /// IDs of the governance-log entries this meeting decided
-    /// (e.g. `GOV-2026-0042`) — read them via the governance log.
+    /// (e.g. `GOV-2026-0042`) — read one with `get_content(id)`.
     #[serde(default)]
-    pub decision_ids: Vec<String>,
+    pub decision_ids: Vec<GovernanceLogId>,
     /// The Clerk's summary of the whole meeting, once adjourned.
     #[serde(default)]
     pub summary: Option<String>,
@@ -884,6 +964,31 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "comment");
         assert_eq!(json["post_title"], "parent post");
+    }
+
+    #[test]
+    fn content_response_governance_wire_shape() {
+        let resp = ContentResponse::Governance(GovernanceEntryResponse {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: GovernanceLogEntryType::CouncilDecision,
+            title: "Ratification".into(),
+            created_at: Utc::now(),
+            tags: Some(vec!["constitutional".into()]),
+            summary: Some("Ratified 4-1.".into()),
+            total_rounds: Some(3),
+            data: None,
+            round: None,
+        });
+        let json = serde_json::to_value(&resp).unwrap();
+        // Additive third arm on the same tagged enum: the `post` and
+        // `comment` tags are untouched, so a client that only handles
+        // those still parses everything it used to.
+        assert_eq!(json["type"], "governance");
+        assert_eq!(json["id"], "GOV-2026-0006");
+        assert!(json.get("data").is_none(), "{json}");
+
+        let back: ContentResponse = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, ContentResponse::Governance(_)));
     }
 
     #[test]
@@ -1000,7 +1105,7 @@ mod tests {
     #[test]
     fn governance_log_entry_wire_shape() {
         let entry = GovernanceLogEntry {
-            id: "log-001".into(),
+            id: "GOV-2026-0001".parse().unwrap(),
             entry_type: GovernanceLogEntryType::CouncilDecision,
             data: serde_json::json!({"decision": "approved"}),
             created_at: Utc::now(),
@@ -1018,13 +1123,100 @@ mod tests {
         // `summary` is optional on the wire — pre-0.6 payloads (and
         // entries with no Clerk summary) deserialize with `None`.
         let value = serde_json::json!({
-            "id": "log-002",
+            "id": "GOV-2026-0002",
             "entry_type": "council_decision",
             "data": {},
             "created_at": Utc::now(),
         });
         let entry: GovernanceLogEntry = serde_json::from_value(value).unwrap();
         assert!(entry.summary.is_none());
+
+        // `id` tightened from `String` to `GovernanceLogId`, which serde
+        // serializes transparently — the wire is byte-identical, and the
+        // shape is now checked at the boundary instead of never.
+        assert_eq!(
+            serde_json::to_value(&entry).unwrap()["id"],
+            serde_json::json!("GOV-2026-0002")
+        );
+        assert!(
+            serde_json::from_value::<GovernanceLogEntry>(serde_json::json!({
+                "id": "log-002",
+                "entry_type": "council_decision",
+                "data": {},
+                "created_at": Utc::now(),
+            }))
+            .is_err(),
+            "a non-citation id must not deserialize"
+        );
+    }
+
+    #[test]
+    fn governance_index_entry_wire_shape() {
+        let entry = GovernanceLogIndexEntry {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: GovernanceLogEntryType::CouncilDecision,
+            title: "Ratification of the Constitution".into(),
+            created_at: Utc::now(),
+            tags: Some(vec!["constitutional".into()]),
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["id"], "GOV-2026-0006");
+        assert_eq!(value["entry_type"], "council_decision");
+        assert_eq!(value["title"], "Ratification of the Constitution");
+        // The index is an index: no `data`, no `summary`, ever.
+        assert!(value.get("data").is_none(), "{value}");
+        assert!(value.get("summary").is_none(), "{value}");
+    }
+
+    #[test]
+    fn governance_entry_response_omits_data_at_summary_detail() {
+        let entry = GovernanceEntryResponse {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: GovernanceLogEntryType::CouncilDecision,
+            title: "Ratification".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("Ratified 4-1.".into()),
+            total_rounds: Some(3),
+            data: None,
+            round: None,
+        };
+        let value = serde_json::to_value(&entry).unwrap();
+        // `data` is `skip_serializing_if` — a summary read must not carry
+        // a null placeholder for the 92 KB blob it deliberately omitted.
+        assert!(value.get("data").is_none(), "{value}");
+        // `total_rounds` survives the summary, so the reader knows paging
+        // is available and how far it goes.
+        assert_eq!(value["total_rounds"], 3);
+        assert_eq!(value["summary"], "Ratified 4-1.");
+
+        let full = GovernanceEntryResponse {
+            data: Some(serde_json::json!({"rounds": []})),
+            round: Some(1),
+            ..entry
+        };
+        let value = serde_json::to_value(&full).unwrap();
+        assert!(value.get("data").is_some(), "{value}");
+        assert_eq!(value["round"], 1);
+    }
+
+    #[test]
+    fn governance_search_hit_flattens_the_index_line() {
+        let hit = GovernanceSearchHit {
+            entry: GovernanceLogIndexEntry {
+                id: "APP-2026-0003".parse().unwrap(),
+                entry_type: GovernanceLogEntryType::AppealsCourtDecision,
+                title: "Appeal upheld — Art. V § 2".into(),
+                created_at: Utc::now(),
+                tags: None,
+            },
+            snippet: "…the <b>ratification</b> vote…".into(),
+        };
+        let value = serde_json::to_value(&hit).unwrap();
+        // Flattened: index fields sit beside `snippet`, not under `entry`.
+        assert!(value.get("entry").is_none(), "{value}");
+        assert_eq!(value["id"], "APP-2026-0003");
+        assert_eq!(value["snippet"], "…the <b>ratification</b> vote…");
     }
 
     #[test]
@@ -1034,7 +1226,7 @@ mod tests {
             started_at: Utc::now(),
             adjourned_at: Some(Utc::now()),
             status: MeetingStatus::Adjourned,
-            decision_ids: vec!["GOV-2026-0003".into()],
+            decision_ids: vec!["GOV-2026-0003".parse().unwrap()],
             summary: Some("The Council decided one item.".into()),
         };
         let json = serde_json::to_string(&meeting).unwrap();
