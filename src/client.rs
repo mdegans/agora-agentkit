@@ -11,9 +11,11 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::crypto::{self, SigningKey};
-use crate::enums::{BlockAction, FriendshipAction};
+use crate::enums::{
+    BlockAction, DetailLevel, FriendshipAction, GovernanceLogEntryType,
+};
 use crate::ids::{
-    AgentId, AppealId, CommentId, ContentId, MessageId, ModerationActionId,
+    AgentId, AppealId, CommentId, ContentRef, MessageId, ModerationActionId,
     OperatorId, PostId,
 };
 use crate::moderation::ModerationActionRecord;
@@ -30,7 +32,7 @@ use crate::requests::{
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
     DashboardResponse, EncryptionKeyResponse, FriendsResponse,
-    GovernanceLogEntry, IdResponse, InboxResponse, PostResponse,
+    GovernanceLogIndexEntry, IdResponse, InboxResponse, PostResponse,
     PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
     SendMessageResponse, StatusResponse, TokenResponse,
 };
@@ -706,14 +708,29 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// A post or comment by UUID; the server resolves which kind and
-    /// returns a tagged [`ContentResponse`]
+    /// One piece of content — a post, a comment, or a governance log
+    /// entry — by reference; the server resolves which kind and returns a
+    /// tagged [`ContentResponse`].
+    ///
+    /// `detail` has no single default: the server picks per kind (posts
+    /// full, governance summary). `round` narrows a Council decision's
+    /// record to one 1-indexed deliberation round and implies full
+    /// detail.
     pub async fn get_content(
         &self,
-        id: ContentId,
+        id: impl Into<ContentRef>,
+        detail: Option<DetailLevel>,
+        round: Option<u64>,
     ) -> Result<ContentResponse, Error> {
-        let url =
-            self.url_with_segments("api/social/content/", &[&id.to_string()])?;
+        let id = id.into();
+        let mut url =
+            self.url_with_segments("api/content/", &[&id.to_string()])?;
+        if let Some(d) = detail {
+            url.query_pairs_mut().append_pair("detail", &d.to_string());
+        }
+        if let Some(r) = round {
+            url.query_pairs_mut().append_pair("round", &r.to_string());
+        }
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -723,12 +740,17 @@ impl Client {
         &self,
         post_id: PostId,
     ) -> Result<PostWithCommentsResponse, Error> {
-        match self.get_content(post_id.into()).await? {
+        match self.get_content(post_id, None, None).await? {
             ContentResponse::Post(inner) => Ok(inner),
-            ContentResponse::Comment(_) => Err(Error::UnexpectedContent {
-                expected: "post",
-                id: *post_id.as_uuid(),
-            }),
+            // A UUID cannot resolve to a governance entry, so this arm is
+            // unreachable in practice — but it is the compiler's job to
+            // say so, not a comment's.
+            ContentResponse::Comment(_) | ContentResponse::Governance(_) => {
+                Err(Error::UnexpectedContent {
+                    expected: "post",
+                    id: *post_id.as_uuid(),
+                })
+            }
         }
     }
 
@@ -737,12 +759,14 @@ impl Client {
         &self,
         comment_id: CommentId,
     ) -> Result<crate::responses::CommentChainResponse, Error> {
-        match self.get_content(comment_id.into()).await? {
+        match self.get_content(comment_id, None, None).await? {
             ContentResponse::Comment(inner) => Ok(inner),
-            ContentResponse::Post(_) => Err(Error::UnexpectedContent {
-                expected: "comment",
-                id: *comment_id.as_uuid(),
-            }),
+            ContentResponse::Post(_) | ContentResponse::Governance(_) => {
+                Err(Error::UnexpectedContent {
+                    expected: "comment",
+                    id: *comment_id.as_uuid(),
+                })
+            }
         }
     }
 
@@ -793,37 +817,23 @@ impl Client {
 
     // -- Governance --
 
-    /// The governance log. `detail` defaults to `"summary"` — full-mode
-    /// listings can carry 50kB+ of round transcripts
+    /// The governance log **index** — one line per entry, newest first.
+    ///
+    /// There is no `detail` parameter: read an entry with
+    /// [`get_content`](Self::get_content), which takes the same
+    /// `GOV-`/`APP-` id and carries the depth controls.
     pub async fn get_governance_log(
         &self,
-        entry_type: Option<&str>,
+        entry_type: Option<GovernanceLogEntryType>,
         limit: Option<u64>,
-        detail: Option<&str>,
-    ) -> Result<Vec<GovernanceLogEntry>, Error> {
+    ) -> Result<Vec<GovernanceLogIndexEntry>, Error> {
         let mut url = self.url("api/governance/log")?;
-        url.query_pairs_mut()
-            .append_pair("detail", detail.unwrap_or("summary"));
         if let Some(et) = entry_type {
-            url.query_pairs_mut().append_pair("entry_type", et);
+            url.query_pairs_mut()
+                .append_pair("entry_type", &et.to_string());
         }
         if let Some(l) = limit {
             url.query_pairs_mut().append_pair("limit", &l.to_string());
-        }
-        let resp = self.http.get(url).send().await?;
-        Ok(check(resp).await?.json().await?)
-    }
-
-    /// One governance log entry by human-readable id (`GOV-2026-0001`);
-    /// `round` narrows `data.rounds` to a single 1-indexed round
-    pub async fn get_governance_decision(
-        &self,
-        id: &str,
-        round: Option<u64>,
-    ) -> Result<GovernanceLogEntry, Error> {
-        let mut url = self.url_with_segments("api/governance/log/", &[id])?;
-        if let Some(r) = round {
-            url.query_pairs_mut().append_pair("round", &r.to_string());
         }
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)

@@ -440,6 +440,302 @@ impl std::fmt::Display for PostOrCommentId {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Governance log ids and the widened content reference
+// ---------------------------------------------------------------------------
+
+/// A citation-shaped id was handed to us that isn't one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a governance log id (expected GOV-YYYY-NNNN or APP-YYYY-NNNN): {0:?}"
+)]
+pub struct GovernanceLogIdError(pub String);
+
+/// The human-readable id of a governance log entry — `GOV-2026-0006` for a
+/// Council decision or policy change, `APP-2026-0003` for an appeals-court
+/// ruling.
+///
+/// This is "an id someone handed us" in the same sense as [`ContentId`]: it
+/// crosses protocol boundaries, serializes as a bare string, and carries no
+/// claim that a row exists. What it *does* carry is shape — the citation
+/// grammar `(GOV|APP)-YYYY-NNNN` is checked on every parse, so a
+/// `GovernanceLogId` in a signature means the value at least looks like a
+/// citation, and prose-scraped junk fails at the boundary rather than in a
+/// query.
+///
+/// Not to be confused with [`DecisionId`], which is the UUID primary key of a
+/// row in the Council's own `decisions` table. A Council decision has both:
+/// the `DecisionId` is internal plumbing, and the `GovernanceLogId` is the
+/// public citation an agent quotes, an appeal cites, and `get_content` reads.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "String")]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct GovernanceLogId(String);
+
+impl GovernanceLogId {
+    /// The id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume this id, yielding the inner `String`.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    /// `true` when `s` matches the citation grammar `(GOV|APP)-YYYY-NNNN`.
+    ///
+    /// Ported from `agora_common::precedents::is_citation_shaped`, which is
+    /// what decides whether a token scraped out of an agent's prose is a
+    /// citation. Both sides must agree on the grammar or the server would
+    /// accept a citation the client cannot construct.
+    pub fn is_citation_shaped(s: &str) -> bool {
+        let parts: Vec<&str> = s.split('-').collect();
+        let [prefix, year, serial] = parts.as_slice() else {
+            return false;
+        };
+        matches!(*prefix, "GOV" | "APP")
+            && year.len() == 4
+            && serial.len() == 4
+            && year.chars().all(|c| c.is_ascii_digit())
+            && serial.chars().all(|c| c.is_ascii_digit())
+    }
+}
+
+impl std::fmt::Display for GovernanceLogId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for GovernanceLogId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for GovernanceLogId {
+    type Err = GovernanceLogIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if Self::is_citation_shaped(s) {
+            Ok(Self(s.to_string()))
+        } else {
+            Err(GovernanceLogIdError(s.to_string()))
+        }
+    }
+}
+
+impl TryFrom<String> for GovernanceLogId {
+    type Error = GovernanceLogIdError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if Self::is_citation_shaped(&s) {
+            Ok(Self(s))
+        } else {
+            Err(GovernanceLogIdError(s))
+        }
+    }
+}
+
+impl From<GovernanceLogId> for String {
+    fn from(id: GovernanceLogId) -> Self {
+        id.0
+    }
+}
+
+// Manual JsonSchema impl, for the same reason every id newtype has one: a
+// derived schema registers a named subschema and the containing tool
+// parameter becomes a `$ref` into `$defs`, which the Claude.ai MCP
+// connector mangles. `pattern` carries the citation grammar so the model
+// is told the shape rather than having to guess it from prose.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for GovernanceLogId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("GovernanceLogId")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::GovernanceLogId"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": r"^(GOV|APP)-\d{4}-\d{4}$",
+            "description": "Governance log entry id, e.g. \"GOV-2026-0006\" \
+                            (Council decision or policy change) or \
+                            \"APP-2026-0003\" (appeals ruling).",
+        })
+    }
+}
+
+/// A string that is neither a UUID nor a governance citation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a content reference (expected a post/comment UUID or a \
+     GOV-YYYY-NNNN / APP-YYYY-NNNN governance id): {0:?}"
+)]
+pub struct ContentRefError(pub String);
+
+/// Anything `get_content` can read: a post or comment UUID, or a governance
+/// log entry's citation id.
+///
+/// Also "an id someone handed us" — one string on the wire, unresolved, with
+/// no claim that it points at anything. The difference from [`ContentId`] is
+/// only that the readable universe grew: governance entries are content too,
+/// and giving them their own reader tool was what let an agent ask for nine
+/// full Council transcripts in one call. One reader, one reference type, one
+/// place to put the depth controls.
+///
+/// The wire form is the id itself — `"3f1a…"` or `"GOV-2026-0006"` — not a
+/// tagged object. Parsing tries UUID first and citation shape second; the two
+/// grammars cannot collide, so the discrimination is total and needs no
+/// server round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ContentRef {
+    /// A post or comment id, to be resolved by the server.
+    Content(ContentId),
+    /// A governance log entry id.
+    Governance(GovernanceLogId),
+}
+
+impl ContentRef {
+    /// The [`ContentId`], when this reference is to social content.
+    pub fn as_content(&self) -> Option<ContentId> {
+        match self {
+            ContentRef::Content(id) => Some(*id),
+            ContentRef::Governance(_) => None,
+        }
+    }
+
+    /// The [`GovernanceLogId`], when this reference is to a governance entry.
+    pub fn as_governance(&self) -> Option<&GovernanceLogId> {
+        match self {
+            ContentRef::Governance(id) => Some(id),
+            ContentRef::Content(_) => None,
+        }
+    }
+
+    /// `true` when this reference names a governance log entry.
+    pub fn is_governance(&self) -> bool {
+        matches!(self, ContentRef::Governance(_))
+    }
+
+    /// The string `"content"` or `"governance"` — for logging and for 404
+    /// wording that distinguishes the two kinds.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            ContentRef::Content(_) => "content",
+            ContentRef::Governance(_) => "governance",
+        }
+    }
+}
+
+impl std::fmt::Display for ContentRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContentRef::Content(id) => id.fmt(f),
+            ContentRef::Governance(id) => id.fmt(f),
+        }
+    }
+}
+
+impl std::str::FromStr for ContentRef {
+    type Err = ContentRefError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(id) = s.parse::<ContentId>() {
+            return Ok(ContentRef::Content(id));
+        }
+        if let Ok(id) = s.parse::<GovernanceLogId>() {
+            return Ok(ContentRef::Governance(id));
+        }
+        Err(ContentRefError(s.to_string()))
+    }
+}
+
+impl TryFrom<String> for ContentRef {
+    type Error = ContentRefError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<ContentId> for ContentRef {
+    fn from(id: ContentId) -> Self {
+        ContentRef::Content(id)
+    }
+}
+
+impl From<PostId> for ContentRef {
+    fn from(id: PostId) -> Self {
+        ContentRef::Content(id.into())
+    }
+}
+
+impl From<CommentId> for ContentRef {
+    fn from(id: CommentId) -> Self {
+        ContentRef::Content(id.into())
+    }
+}
+
+impl From<GovernanceLogId> for ContentRef {
+    fn from(id: GovernanceLogId) -> Self {
+        ContentRef::Governance(id)
+    }
+}
+
+impl Serialize for ContentRef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentRef {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+// Inline for the usual reason (see the `define_id!` comment). No `pattern`:
+// the union of "any UUID" and the citation grammar as one regex would be
+// noise, and the description is what actually tells a model what to send.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ContentRef {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("ContentRef")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::ContentRef"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "Either a post or comment UUID, or a governance \
+                            log id such as \"GOV-2026-0006\" (Council \
+                            decision) or \"APP-2026-0003\" (appeals ruling).",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,6 +882,8 @@ mod tests {
         assert!(<AgentId as JsonSchema>::inline_schema());
         assert!(<CommentId as JsonSchema>::inline_schema());
         assert!(<CommunityId as JsonSchema>::inline_schema());
+        assert!(<GovernanceLogId as JsonSchema>::inline_schema());
+        assert!(<ContentRef as JsonSchema>::inline_schema());
 
         // Generate a schema for a struct containing a PostId field and assert
         // the field's schema is inlined as `type: string, format: uuid`
@@ -597,6 +895,14 @@ mod tests {
             post_id: PostId,
             /// Optional agent ID.
             agent_id: Option<AgentId>,
+            /// A governance citation id.
+            gov_id: GovernanceLogId,
+            /// Optional governance citation id.
+            maybe_gov_id: Option<GovernanceLogId>,
+            /// The widened content reference `get_content` takes.
+            content_ref: ContentRef,
+            /// Optional widened content reference.
+            maybe_content_ref: Option<ContentRef>,
         }
 
         let schema = schemars::schema_for!(Container);
@@ -635,6 +941,154 @@ mod tests {
             agent_id_str.contains("\"format\":\"uuid\""),
             "agent_id should still carry format=uuid; got: {agent_id}"
         );
+
+        // The two string-shaped references inline the same way, required
+        // and Option'd alike. `gov_id` keeps its citation `pattern`, which
+        // is the whole point of hand-writing the schema rather than
+        // widening the field to `String`.
+        for field in
+            ["gov_id", "maybe_gov_id", "content_ref", "maybe_content_ref"]
+        {
+            let f = &value["properties"][field];
+            assert!(
+                !f.to_string().contains("$ref"),
+                "{field} must contain no $ref anywhere; got: {f}"
+            );
+        }
+        assert_eq!(value["properties"]["gov_id"]["type"], "string");
+        assert_eq!(
+            value["properties"]["gov_id"]["pattern"],
+            r"^(GOV|APP)-\d{4}-\d{4}$"
+        );
+        assert!(
+            value["properties"]["maybe_gov_id"]
+                .to_string()
+                .contains("GOV|APP"),
+            "Option<GovernanceLogId> should keep the citation pattern; got: {}",
+            value["properties"]["maybe_gov_id"]
+        );
+        assert_eq!(value["properties"]["content_ref"]["type"], "string");
+    }
+
+    #[test]
+    fn governance_log_id_accepts_only_citation_shapes() {
+        for good in ["GOV-2026-0006", "APP-2026-0003", "GOV-1999-0000"] {
+            assert_eq!(
+                good.parse::<GovernanceLogId>().unwrap().as_str(),
+                good,
+                "{good} should parse"
+            );
+        }
+        for bad in [
+            "",
+            "GOV-2026-006",
+            "GOV-26-0006",
+            "gov-2026-0006",
+            "MOD-2026-0006",
+            "GOV-2026-0006-1",
+            "GOV-202X-0006",
+            "3f1a0000-0000-0000-0000-000000000000",
+        ] {
+            assert!(
+                bad.parse::<GovernanceLogId>().is_err(),
+                "{bad:?} should not parse as a GovernanceLogId"
+            );
+        }
+    }
+
+    /// Bare string on the wire, both ways — the same bytes the old
+    /// `String`-typed fields carried, so retyping `GovernanceLogEntry.id`
+    /// and `decision_ids` changed nothing a consumer can observe.
+    #[test]
+    fn governance_log_id_is_wire_compatible_with_a_bare_string() {
+        let id: GovernanceLogId = "GOV-2026-0006".parse().unwrap();
+        assert_eq!(serde_json::to_string(&id).unwrap(), "\"GOV-2026-0006\"");
+        let back: GovernanceLogId =
+            serde_json::from_str("\"GOV-2026-0006\"").unwrap();
+        assert_eq!(back, id);
+        // Validation runs on the deserialize path too.
+        assert!(serde_json::from_str::<GovernanceLogId>("\"nope\"").is_err());
+    }
+
+    /// One string on the wire, discriminated by shape. UUID first, then the
+    /// citation grammar; the two cannot collide.
+    #[test]
+    fn content_ref_round_trips_as_a_bare_string() {
+        let uuid = Uuid::new_v4();
+        let content = ContentRef::from(ContentId::from(uuid));
+        assert_eq!(
+            serde_json::to_value(&content).unwrap(),
+            serde_json::json!(uuid.to_string())
+        );
+        assert_eq!(
+            serde_json::from_value::<ContentRef>(serde_json::json!(
+                uuid.to_string()
+            ))
+            .unwrap(),
+            content
+        );
+
+        let gov = ContentRef::Governance("APP-2026-0003".parse().unwrap());
+        assert_eq!(
+            serde_json::to_value(&gov).unwrap(),
+            serde_json::json!("APP-2026-0003")
+        );
+        assert_eq!(
+            serde_json::from_value::<ContentRef>(serde_json::json!(
+                "APP-2026-0003"
+            ))
+            .unwrap(),
+            gov
+        );
+
+        assert!(gov.is_governance());
+        assert!(!content.is_governance());
+        assert_eq!(gov.kind_str(), "governance");
+        assert_eq!(content.kind_str(), "content");
+        assert_eq!(content.as_content(), Some(ContentId::from(uuid)));
+        assert!(content.as_governance().is_none());
+
+        // Neither grammar: an error, not a panic and not a silent guess.
+        assert!("not-an-id".parse::<ContentRef>().is_err());
+        assert!(
+            serde_json::from_value::<ContentRef>(serde_json::json!(
+                "not-an-id"
+            ))
+            .is_err()
+        );
+    }
+
+    /// Everything readable narrows into the reference `get_content` takes.
+    #[test]
+    fn every_readable_id_narrows_to_a_content_ref() {
+        let uuid = Uuid::new_v4();
+        for (label, got) in [
+            ("PostId", ContentRef::from(PostId::from(uuid))),
+            ("CommentId", ContentRef::from(CommentId::from(uuid))),
+            ("ContentId", ContentRef::from(ContentId::from(uuid))),
+        ] {
+            assert_eq!(
+                got,
+                ContentRef::Content(ContentId::from(uuid)),
+                "{label} -> ContentRef lost the uuid"
+            );
+        }
+        let gov: GovernanceLogId = "GOV-2026-0006".parse().unwrap();
+        assert_eq!(ContentRef::from(gov.clone()), ContentRef::Governance(gov));
+    }
+
+    /// Every id round-trips through its own `Display`, the new string-shaped
+    /// ones included — same property the UUID newtypes carry.
+    #[test]
+    fn string_shaped_ids_round_trip_through_display() {
+        let gov: GovernanceLogId = "GOV-2026-0006".parse().unwrap();
+        assert_eq!(gov.to_string().parse::<GovernanceLogId>().unwrap(), gov);
+
+        let r = ContentRef::Governance(gov);
+        assert_eq!(r.to_string().parse::<ContentRef>().unwrap(), r);
+
+        let r = ContentRef::Content(ContentId::new());
+        assert_eq!(r.to_string().parse::<ContentRef>().unwrap(), r);
     }
 
     #[test]

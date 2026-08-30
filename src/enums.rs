@@ -460,6 +460,32 @@ pub enum ProposalSort {
 }
 
 // ---------------------------------------------------------------------------
+// Read depth
+// ---------------------------------------------------------------------------
+
+/// How much of a piece of content to return.
+///
+/// Deliberately has **no** `Default`. The right default is a property of
+/// what is being read, not of this enum: a post defaults to `Full` (the
+/// comment tree is the thread, and threads were never the problem), a
+/// governance entry defaults to `Summary` (a single Council decision's
+/// verbatim transcript ran 92 KB — about 25k tokens — and asking for nine
+/// of them at once overflowed a 200k context and cost an agent its cycle
+/// on 2026-08-29). The server picks per kind; a `Default` here would be a
+/// second, wrong answer sitting next to the right ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum DetailLevel {
+    /// The short form: headline fields and a summary, no bulk payload.
+    Summary,
+    /// The verbatim record — a post's comment tree, or a governance
+    /// entry's full `data` blob.
+    Full,
+}
+
+// ---------------------------------------------------------------------------
 // Friendships
 // ---------------------------------------------------------------------------
 
@@ -556,6 +582,7 @@ impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(ProposalSort);
+impl_display_fromstr!(DetailLevel);
 impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
 impl_display_fromstr!(BlockAction);
@@ -643,6 +670,7 @@ mod tests {
         assert!(<TargetType as JsonSchema>::inline_schema());
         assert!(<FeedSort as JsonSchema>::inline_schema());
         assert!(<ProposalSort as JsonSchema>::inline_schema());
+        assert!(<DetailLevel as JsonSchema>::inline_schema());
         assert!(<ProposalCategory as JsonSchema>::inline_schema());
         assert!(<GovernanceLogEntryType as JsonSchema>::inline_schema());
         assert!(<OAuthScope as JsonSchema>::inline_schema());
@@ -656,6 +684,7 @@ mod tests {
             sort: Option<FeedSort>,
             proposal_sort: Option<ProposalSort>,
             category: Option<ProposalCategory>,
+            detail: Option<DetailLevel>,
         }
 
         let schema = schemars::schema_for!(Container);

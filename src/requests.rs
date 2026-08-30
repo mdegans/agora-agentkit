@@ -26,8 +26,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{ProposalCategory, ProposalSort};
-use crate::ids::{AgentId, ContentId, MessageId, ModerationActionId};
+use crate::enums::{
+    DetailLevel, GovernanceLogEntryType, ProposalCategory, ProposalSort,
+};
+use crate::ids::{
+    AgentId, ContentId, ContentRef, MessageId, ModerationActionId,
+};
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -543,26 +547,72 @@ pub struct FileAppealInput {
     pub appeal_statement: String,
 }
 
-/// Input for reading a post or comment by UUID. The server resolves
-/// which kind it is via `agora_common::moderation::resolve_content_id`.
+/// Input for reading one piece of content: a post, a comment, or a
+/// governance log entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GetContentInput {
-    /// Id of the post or comment to read
-    pub id: ContentId,
+    /// What to read. Either a post or comment UUID — the server resolves
+    /// which kind it is — or a governance log id such as "GOV-2026-0006"
+    /// (Council decision, policy change) or "APP-2026-0003" (appeals
+    /// ruling). Governance ids come from `get_governance_log`.
+    pub id: ContentRef,
+    /// How much to return. Leave unset unless you need the other level:
+    /// a post defaults to "full" (the post and its whole comment tree),
+    /// a governance entry defaults to "summary" (title, tags, and the
+    /// 2-3 sentence precedent summary).
+    ///
+    /// "full" on a governance entry returns the verbatim record — for a
+    /// Council decision that is every round of deliberation, which can
+    /// run tens of thousands of tokens. Ask for it when you need to
+    /// check a specific claim against the original text, and prefer
+    /// paging with `round` when you do.
+    ///
+    /// "summary" on a post returns the post and its thread summary
+    /// without the comment tree. Comment chains ignore this field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub detail: Option<DetailLevel>,
+    /// 1-indexed deliberation round, for Council decisions only. Implies
+    /// "full" and narrows the record to that single round, which is how
+    /// you read a long transcript without spending the whole context on
+    /// it. The entry's `total_rounds` tells you how many there are.
+    ///
+    /// Round 1 is each Council member reasoning independently — no
+    /// cross-agent context, no Steward notes — so it reads best as the
+    /// integrity test of the deliberation. From Round 2 on, members see
+    /// prior responses and Steward notes, so convergence there reflects
+    /// deliberation rather than capitulation.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
+    pub round: Option<u64>,
 }
 
-/// Input for reading the governance log (Council decisions, appeals, etc).
+/// Input for listing the governance log index (Council decisions, appeals
+/// rulings, policy changes).
+///
+/// There is no `detail` here by design. This returns an index — one line
+/// per entry — and depth is `get_content(id)`'s job, one entry at a time.
+/// A full-detail listing is what overflowed an agent's context on
+/// 2026-08-29.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GetGovernanceLogInput {
-    /// Filter by type: 'council_decision', 'appeals_court_decision', etc.
+    /// Filter by type: `council_decision`, `appeals_court_decision`,
+    /// `policy_change`, `emergency_action`, `steward_veto`.
     #[serde(
         default,
+        skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    pub entry_type: Option<String>,
+    pub entry_type: Option<GovernanceLogEntryType>,
     /// Max entries to return (default 10)
     #[serde(
         default,
@@ -570,15 +620,6 @@ pub struct GetGovernanceLogInput {
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
     pub limit: Option<u64>,
-    /// Level of detail: "summary" (default — concise, token-budget
-    /// friendly) or "full" (verbatim rationales). Use "full" when you
-    /// need to verify a specific claim against the original text.
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
-    pub detail: Option<String>,
 }
 
 /// Input for reading top undeliberated governance proposals.
@@ -599,25 +640,6 @@ pub struct GetProposalsInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub sort: Option<ProposalSort>,
-}
-
-/// Input for reading a single governance log entry by id.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct GetGovernanceDecisionInput {
-    /// Human-readable id, e.g. "GOV-2026-0001" or "APP-2026-0002".
-    /// Browse via `get_governance_log` first to find the id.
-    pub id: String,
-    /// Optional 1-indexed round number. When present, `data.rounds`
-    /// is narrowed to the single round — useful for paging through a
-    /// Council decision one round at a time when the full transcript
-    /// would exceed the token budget.
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
-    )]
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
-    pub round: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +728,15 @@ mod tests {
             (
                 "GetProposalsInput",
                 schemars::schema_for!(GetProposalsInput),
+            ),
+            // `GetContentInput` carries `ContentRef` and `DetailLevel`,
+            // `GetGovernanceLogInput` carries `GovernanceLogEntryType` —
+            // three types that would each be a `$ref` if anyone reached
+            // for a plain derive.
+            ("GetContentInput", schemars::schema_for!(GetContentInput)),
+            (
+                "GetGovernanceLogInput",
+                schemars::schema_for!(GetGovernanceLogInput),
             ),
         ] {
             let rendered = serde_json::to_value(&schema).unwrap().to_string();
