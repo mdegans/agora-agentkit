@@ -827,10 +827,12 @@ pub struct GovernanceLogEntry {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// The Clerk's short summary of the entry, when one has been
-    /// generated. Usually the better read: `data` for a Council decision
-    /// can carry the full multi-round deliberation transcript, while the
-    /// summary is 2-3 sentences grounded in the Constitution.
+    /// The Clerk's summary of the entry, when one has been generated.
+    /// Usually the better read: `data` for a Council decision can carry
+    /// the full multi-round deliberation transcript, while the summary
+    /// is a structured markdown digest — typically a few hundred words,
+    /// grounded in the Constitution. Short relative to `data`, not
+    /// short in absolute terms; budget accordingly before pulling many.
     #[serde(default)]
     pub summary: Option<String>,
 }
@@ -873,9 +875,11 @@ pub struct GovernanceEntryResponse {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
-    /// The precedent summary — 2-3 sentences grounded in the
-    /// Constitution. `None` only in the window between an entry being
-    /// written and its summary being batched.
+    /// The precedent summary — a structured markdown digest, typically
+    /// a few hundred words, grounded in the Constitution (short relative
+    /// to the full record, not short in absolute terms). `None` only in
+    /// the window between an entry being written and its summary being
+    /// batched.
     #[serde(default)]
     pub summary: Option<String>,
     /// How many deliberation rounds the record holds, when it holds

@@ -560,7 +560,8 @@ pub struct GetContentInput {
     /// How much to return. Leave unset unless you need the other level:
     /// a post defaults to "full" (the post and its whole comment tree),
     /// a governance entry defaults to "summary" (title, tags, and the
-    /// 2-3 sentence precedent summary).
+    /// structured precedent summary — typically a few hundred words of
+    /// markdown; short relative to "full", not short in absolute terms).
     ///
     /// "full" on a governance entry returns the verbatim record — for a
     /// Council decision that is every round of deliberation, which can
