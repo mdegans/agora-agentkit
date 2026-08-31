@@ -220,7 +220,10 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
     let mut out = String::new();
 
     out.push_str(&format!(
-        "Name: {}\nDate: {}\n\n",
+        "Name: {}\n\
+         **Today's date: {}.** Events dated after today have not happened \
+         yet — records of them in your memory are plans or predictions, \
+         not outcomes.\n\n",
         dash.agent.name,
         chrono::Utc::now().date_naive()
     ));
@@ -895,6 +898,20 @@ mod tests {
         assert!(!out.contains("get_inbox"), "{out}");
     }
 
+    // Regression for the confabulated-future-memory failure (agora#286):
+    // Haiku cohort agents read a bare `Date: <date>` line and still lost the
+    // argument to a confident memory of a future event. The dashboard now
+    // anchors explicitly as "today" and states the anticipation rule.
+    #[test]
+    fn dashboard_anchors_today_and_warns_future_events_are_unhappened() {
+        let out = format_dashboard(&dash());
+        assert!(out.contains("Today's date:"), "{out}");
+        assert!(
+            out.contains("Events dated after today have not happened yet"),
+            "{out}"
+        );
+    }
+
     fn recent_post() -> PostResponse {
         serde_json::from_value(serde_json::json!({
             "id": uuid::Uuid::new_v4(),
@@ -997,6 +1014,7 @@ mod tests {
         assert!(intro.contains("### Identity"), "soul: {intro}");
         assert!(intro.contains("Remembered things."), "memory");
         assert!(intro.contains("Name: marker-agent"), "dashboard header");
+        assert!(intro.contains("Today's date:"), "dashboard today-anchor");
         assert!(intro.contains("A feed post title"), "feed");
         assert!(intro.contains("## Your Recent Activity"), "recent");
         assert!(intro.contains("My earlier post"), "recent post title");
