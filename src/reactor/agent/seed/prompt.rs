@@ -8,9 +8,12 @@ use std::collections::HashMap;
 use misanthropic::prompt::{Prompt, message::Role};
 
 use crate::ids::CommentId;
+#[cfg(test)]
+use crate::ids::PostId;
 use crate::responses::{
-    CommentChainResponse, DashboardResponse, GovernanceEntryResponse,
-    GovernanceLogIndexEntry, PostResponse, PostWithCommentsResponse,
+    CommentChainResponse, CommentResponse, CommentStub, DashboardResponse,
+    GovernanceEntryResponse, GovernanceLogIndexEntry, PostResponse,
+    PostWithCommentsResponse,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -345,42 +348,77 @@ fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     out
 }
 
-/// A comment with its computed depth and parent author for threaded display.
-struct ThreadedComment<'a> {
-    comment: &'a crate::responses::CommentResponse,
+/// One entry in a comment thread: either a comment admitted in full, or a
+/// [`CommentStub`] standing in for one that didn't fit the read's byte
+/// budget. `Copy` because it only ever holds references.
+#[derive(Clone, Copy)]
+enum ThreadEntry<'a> {
+    Full(&'a CommentResponse),
+    Stub(&'a CommentStub),
+}
+
+impl<'a> ThreadEntry<'a> {
+    fn parent_comment_id(self) -> Option<CommentId> {
+        match self {
+            ThreadEntry::Full(c) => c.parent_comment_id,
+            ThreadEntry::Stub(s) => s.parent_comment_id,
+        }
+    }
+
+    fn agent_name(self) -> Option<&'a str> {
+        match self {
+            ThreadEntry::Full(c) => c.agent_name.as_deref(),
+            ThreadEntry::Stub(s) => s.agent_name.as_deref(),
+        }
+    }
+}
+
+/// A thread entry with its computed depth and parent author for threaded
+/// display.
+struct ThreadedEntry<'a> {
+    entry: ThreadEntry<'a>,
     depth: u32,
     parent_author: Option<&'a str>,
 }
 
-/// Build a threaded comment list from flat comments (depth-first ordering).
-fn build_comment_threads(
-    comments: &[crate::responses::CommentResponse],
-) -> Vec<ThreadedComment<'_>> {
-    let by_id: HashMap<CommentId, &crate::responses::CommentResponse> =
-        comments.iter().map(|c| (c.id, c)).collect();
+/// Build a threaded list from flat comments plus their stubs (depth-first
+/// ordering). Comments and stubs share one `parent_comment_id` id space,
+/// so a full reply under a stubbed parent still threads correctly — and
+/// a stub with full replies of its own still shows them nested beneath
+/// it, in thread order.
+fn build_comment_threads<'a>(
+    comments: &'a [CommentResponse],
+    stubs: &'a [CommentStub],
+) -> Vec<ThreadedEntry<'a>> {
+    let mut by_id: HashMap<CommentId, ThreadEntry<'a>> = HashMap::new();
     let mut children: HashMap<Option<CommentId>, Vec<CommentId>> =
         HashMap::new();
     for c in comments {
+        by_id.insert(c.id, ThreadEntry::Full(c));
         children.entry(c.parent_comment_id).or_default().push(c.id);
     }
+    for s in stubs {
+        by_id.insert(s.id, ThreadEntry::Stub(s));
+        children.entry(s.parent_comment_id).or_default().push(s.id);
+    }
 
-    let mut result = Vec::with_capacity(comments.len());
+    let mut result = Vec::with_capacity(comments.len() + stubs.len());
 
     fn walk<'a>(
         id: CommentId,
         depth: u32,
-        by_id: &HashMap<CommentId, &'a crate::responses::CommentResponse>,
+        by_id: &HashMap<CommentId, ThreadEntry<'a>>,
         children: &HashMap<Option<CommentId>, Vec<CommentId>>,
-        result: &mut Vec<ThreadedComment<'a>>,
+        result: &mut Vec<ThreadedEntry<'a>>,
     ) {
-        let Some(c) = by_id.get(&id) else { return };
-        let parent_author = c
-            .parent_comment_id
+        let Some(&entry) = by_id.get(&id) else { return };
+        let parent_author = entry
+            .parent_comment_id()
             .and_then(|pid| by_id.get(&pid))
-            .and_then(|p| p.agent_name.as_deref());
+            .and_then(|p| p.agent_name());
 
-        result.push(ThreadedComment {
-            comment: c,
+        result.push(ThreadedEntry {
+            entry,
             depth: depth.min(3),
             parent_author,
         });
@@ -401,39 +439,61 @@ fn build_comment_threads(
     result
 }
 
-/// One threaded comment line. `viewer_name` tags the agent's own comments
-/// `(yours)`.
-fn format_threaded_comment(
-    tc: &ThreadedComment,
+/// One threaded line: a full comment (`-`/`↳`), or a stub (`⋯`) pointing
+/// at `get_content` for the rest. `viewer_name` tags the agent's own
+/// comments `(yours)`. A `deleted` comment renders as `[removed]` rather
+/// than its (redacted) body.
+fn format_threaded_entry(
+    te: &ThreadedEntry,
     max_body: usize,
     viewer_name: &str,
 ) -> String {
-    let indent = "  ".repeat(tc.depth as usize);
-    let author = tc.comment.agent_name.as_deref().unwrap_or("unknown");
-    let yours = if author == viewer_name {
-        " (yours)"
-    } else {
-        ""
-    };
-    let prefix = if tc.depth > 0 {
-        let parent = tc.parent_author.unwrap_or("unknown");
-        let parent_yours = if parent == viewer_name {
+    let indent = "  ".repeat(te.depth as usize);
+    let is_yours = |author: &str| -> &'static str {
+        if author == viewer_name {
             " (yours)"
         } else {
             ""
-        };
-        format!(
-            "{indent}↳ {author}{yours} → {parent}{parent_yours} (score {})",
-            tc.comment.score
-        )
-    } else {
-        format!("{indent}- {author}{yours} (score {})", tc.comment.score)
+        }
     };
-    format!(
-        "{prefix}: {} [comment_id: {}]",
-        truncate(&tc.comment.body, max_body),
-        tc.comment.id
-    )
+
+    match te.entry {
+        ThreadEntry::Full(c) => {
+            let author = c.agent_name.as_deref().unwrap_or("unknown");
+            let yours = is_yours(author);
+            let prefix = if te.depth > 0 {
+                let parent = te.parent_author.unwrap_or("unknown");
+                let parent_yours = is_yours(parent);
+                format!(
+                    "{indent}↳ {author}{yours} → {parent}{parent_yours} (score {})",
+                    c.score
+                )
+            } else {
+                format!("{indent}- {author}{yours} (score {})", c.score)
+            };
+            let body = if c.deleted {
+                "[removed]".to_string()
+            } else {
+                truncate(&c.body, max_body)
+            };
+            format!("{prefix}: {body} [comment_id: {}]", c.id)
+        }
+        ThreadEntry::Stub(s) => {
+            let author = s.agent_name.as_deref().unwrap_or("unknown");
+            let yours = is_yours(author);
+            let replies = match s.reply_count {
+                1 => "1 reply".to_string(),
+                n => format!("{n} replies"),
+            };
+            format!(
+                "{indent}⋯ {author}{yours} (score {}, {replies}): {} \
+                 [stub — get_content(comment_id: {}) for the full comment]",
+                s.score,
+                truncate(&s.preview, max_body),
+                s.id
+            )
+        }
+    }
 }
 
 /// Format a full post (a `get_content` result) with its comment threads.
@@ -452,28 +512,42 @@ pub(super) fn format_post(
         ""
     };
 
+    let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
         "## \"{}\" by {author}{yours} in {community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
-        p.title,
-        p.id,
-        p.score,
-        post.comments.len(),
-        p.body,
+        p.title, p.id, p.score, total_comments, p.body,
     );
 
-    if !post.comments.is_empty() {
+    if total_comments > 0 {
         out.push_str("\n### Comments\n\n");
-        for tc in build_comment_threads(&post.comments) {
-            out.push_str(&format_threaded_comment(&tc, 400, viewer_name));
+        for te in build_comment_threads(&post.comments, &post.comment_stubs) {
+            out.push_str(&format_threaded_entry(&te, 400, viewer_name));
             out.push('\n');
         }
+    }
+
+    if post.omitted_comment_count > 0 {
+        out.push_str(&format!(
+            "\n*[{} comment{} shown as a stub above (marked ⋯), not in \
+             full — this thread is larger than the read's byte budget. \
+             Follow a stub's comment_id with get_content to read it.]*\n",
+            post.omitted_comment_count,
+            if post.omitted_comment_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+        ));
     }
 
     out
 }
 
 /// Format a comment chain (a `get_content` result for a comment UUID):
-/// root-to-leaf, the requested comment marked `>>`.
+/// the root post first (when present, body included, anchoring the
+/// topic), then root-to-leaf ancestors, the requested comment marked
+/// `>>`. A removed ancestor renders as `[removed]` in place of its
+/// (redacted) body rather than being silently dropped from the chain.
 pub(super) fn format_comment_chain(
     chain: &CommentChainResponse,
     viewer_name: &str,
@@ -485,6 +559,33 @@ pub(super) fn format_comment_chain(
         truncate(post_title, 80),
         chain.post_id
     ));
+
+    if let Some(root) = &chain.root {
+        let author = root.agent_name.as_deref().unwrap_or("unknown");
+        let yours = if author == viewer_name {
+            " (yours)"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "\"{}\" by {author}{yours} (score {}): {} [post_id: {}]\n\n",
+            root.title, root.score, root.body, root.id
+        ));
+    }
+
+    if chain.omitted_ancestors > 0 {
+        out.push_str(&format!(
+            "*[{} older comment{} in this thread omitted — the chain \
+             shows the root and the replies nearest the comment you \
+             asked for]*\n\n",
+            chain.omitted_ancestors,
+            if chain.omitted_ancestors == 1 {
+                ""
+            } else {
+                "s"
+            },
+        ));
+    }
 
     for (i, c) in chain.chain.iter().enumerate() {
         let author = c.agent_name.as_deref().unwrap_or("unknown");
@@ -499,9 +600,14 @@ pub(super) fn format_comment_chain(
         } else {
             "   "
         };
+        let body = if c.deleted {
+            "[removed]".to_string()
+        } else {
+            c.body.clone()
+        };
         out.push_str(&format!(
-            "{indent}{marker}{author}{yours} (score {}): {} [comment_id: {}]\n",
-            c.score, c.body, c.id
+            "{indent}{marker}{author}{yours} (score {}): {body} [comment_id: {}]\n",
+            c.score, c.id
         ));
     }
 
@@ -916,5 +1022,161 @@ mod tests {
             .count();
         assert_eq!(total, one_hour, "non-1h marker present:\n{json}");
         assert_eq!(total, 2, "system-end + intro-end, nothing else");
+    }
+
+    // ------------------------------------------------------------------
+    // `format_post` / `format_comment_chain`: budgeted comments (stubs,
+    // omission disclosure) and the ancestor-chain rewire (root anchor,
+    // omitted ancestors, deleted placeholders).
+    // ------------------------------------------------------------------
+
+    fn base_post() -> PostResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "agent_id": uuid::Uuid::new_v4(),
+            "agent_name": "philosopher",
+            "community_name": "philosophy",
+            "title": "On Agency",
+            "body": "What does it mean to be an agent?",
+            "score": 4,
+        }))
+        .expect("valid PostResponse fixture")
+    }
+
+    fn full_comment(agent_name: &str, deleted: bool) -> CommentResponse {
+        CommentResponse {
+            id: CommentId::new(),
+            post_id: PostId::new(),
+            parent_comment_id: None,
+            agent_id: uuid::Uuid::new_v4().into(),
+            agent_name: Some(agent_name.to_string()),
+            body: if deleted {
+                "[redacted]".to_string()
+            } else {
+                "A full reply.".to_string()
+            },
+            created_at: None,
+            score: 1,
+            upvotes: None,
+            downvotes: None,
+            deleted,
+        }
+    }
+
+    fn stub(agent_name: &str) -> CommentStub {
+        CommentStub {
+            id: CommentId::new(),
+            parent_comment_id: None,
+            agent_name: Some(agent_name.to_string()),
+            preview: "A truncated preview of the stubbed reply".to_string(),
+            reply_count: 2,
+            score: 3,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn format_post_counts_stubs_toward_the_comment_total() {
+        let post = PostWithCommentsResponse {
+            post: base_post(),
+            comments: vec![full_comment("engineer", false)],
+            comment_stubs: vec![stub("lawyer")],
+            omitted_comment_count: 1,
+            thread_summary: None,
+            community_tags: vec![],
+        };
+        let out = format_post(&post, "viewer");
+        assert!(out.contains("(score 4, 2 comments)"), "{out}");
+    }
+
+    #[test]
+    fn format_post_renders_a_stub_line_and_omission_note() {
+        let post = PostWithCommentsResponse {
+            post: base_post(),
+            comments: vec![],
+            comment_stubs: vec![stub("lawyer")],
+            omitted_comment_count: 1,
+            thread_summary: None,
+            community_tags: vec![],
+        };
+        let out = format_post(&post, "viewer");
+        assert!(out.contains('⋯'), "stub marker: {out}");
+        assert!(out.contains("lawyer"), "stub author: {out}");
+        assert!(
+            out.contains("A truncated preview of the stubbed reply"),
+            "stub preview: {out}"
+        );
+        assert!(out.contains("2 replies"), "stub reply count: {out}");
+        assert!(
+            out.contains("stub — get_content"),
+            "stub follow-up pointer: {out}"
+        );
+        assert!(
+            out.contains("[1 comment shown as a stub above"),
+            "omission disclosure: {out}"
+        );
+    }
+
+    #[test]
+    fn format_post_omits_the_disclosure_line_when_nothing_was_stubbed() {
+        let post = PostWithCommentsResponse {
+            post: base_post(),
+            comments: vec![full_comment("engineer", false)],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            community_tags: vec![],
+        };
+        let out = format_post(&post, "viewer");
+        assert!(!out.contains("shown as a stub"), "{out}");
+        assert!(out.contains("(score 4, 1 comments)"), "{out}");
+    }
+
+    fn root_response() -> PostResponse {
+        base_post()
+    }
+
+    #[test]
+    fn format_comment_chain_anchors_the_root_and_discloses_omitted_ancestors() {
+        let chain = CommentChainResponse {
+            post_id: PostId::new(),
+            post_title: Some("On Agency".to_string()),
+            root: Some(root_response()),
+            omitted_ancestors: 5,
+            chain: vec![full_comment("engineer", false)],
+        };
+        let out = format_comment_chain(&chain, "viewer");
+        assert!(out.contains("What does it mean to be an agent?"), "{out}");
+        assert!(
+            out.contains("5 older comments in this thread omitted"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn format_comment_chain_renders_a_deleted_ancestor_as_removed() {
+        let chain = CommentChainResponse {
+            post_id: PostId::new(),
+            post_title: Some("On Agency".to_string()),
+            root: None,
+            omitted_ancestors: 0,
+            chain: vec![full_comment("someone", true)],
+        };
+        let out = format_comment_chain(&chain, "viewer");
+        assert!(out.contains("[removed]"), "{out}");
+        assert!(!out.contains("[redacted]"), "redacted body leaked: {out}");
+    }
+
+    #[test]
+    fn format_comment_chain_without_root_or_omission_stays_quiet() {
+        let chain = CommentChainResponse {
+            post_id: PostId::new(),
+            post_title: Some("On Agency".to_string()),
+            root: None,
+            omitted_ancestors: 0,
+            chain: vec![full_comment("engineer", false)],
+        };
+        let out = format_comment_chain(&chain, "viewer");
+        assert!(!out.contains("older comment"), "{out}");
     }
 }

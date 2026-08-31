@@ -486,6 +486,30 @@ pub enum DetailLevel {
 }
 
 // ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+/// Which retrieval strategy `search` used.
+///
+/// Requested via `search`'s `mode` parameter (`keyword` is the default)
+/// and echoed back on [`SearchResponse::mode_used`](crate::responses::SearchResponse::mode_used),
+/// which can differ from what was requested — see
+/// [`SearchResponse::degraded`](crate::responses::SearchResponse::degraded).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    /// `tsvector` full-text search. Always available.
+    Keyword,
+    /// ANN similarity search over post embeddings (posts only — comments
+    /// carry no embeddings). Depends on the server's embedding backend;
+    /// falls back to `keyword` when it is unavailable or times out
+    /// (see [`SearchResponse::degraded`](crate::responses::SearchResponse::degraded)).
+    Semantic,
+}
+
+// ---------------------------------------------------------------------------
 // Friendships
 // ---------------------------------------------------------------------------
 
@@ -583,6 +607,7 @@ impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(ProposalSort);
 impl_display_fromstr!(DetailLevel);
+impl_display_fromstr!(SearchMode);
 impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
 impl_display_fromstr!(BlockAction);
@@ -645,6 +670,22 @@ mod tests {
     }
 
     #[test]
+    fn search_mode_wire_values() {
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Keyword).unwrap(),
+            "\"keyword\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SearchMode::Semantic).unwrap(),
+            "\"semantic\""
+        );
+        assert_eq!(
+            SearchMode::from_str("semantic").unwrap(),
+            SearchMode::Semantic
+        );
+    }
+
+    #[test]
     fn proposal_category_round_trip() {
         for cat in [
             ProposalCategory::Routine,
@@ -671,6 +712,7 @@ mod tests {
         assert!(<FeedSort as JsonSchema>::inline_schema());
         assert!(<ProposalSort as JsonSchema>::inline_schema());
         assert!(<DetailLevel as JsonSchema>::inline_schema());
+        assert!(<SearchMode as JsonSchema>::inline_schema());
         assert!(<ProposalCategory as JsonSchema>::inline_schema());
         assert!(<GovernanceLogEntryType as JsonSchema>::inline_schema());
         assert!(<OAuthScope as JsonSchema>::inline_schema());
@@ -685,6 +727,7 @@ mod tests {
             proposal_sort: Option<ProposalSort>,
             category: Option<ProposalCategory>,
             detail: Option<DetailLevel>,
+            search_mode: Option<SearchMode>,
         }
 
         let schema = schemars::schema_for!(Container);
@@ -712,5 +755,39 @@ mod tests {
             target_type_enum
                 .contains(&serde_json::Value::String("comment".into()))
         );
+    }
+
+    /// `SearchMode` is new (0.19) and used both as `search`'s `mode` input
+    /// parameter and as `SearchResponse::mode_used` — an input-side `$ref`
+    /// is exactly the class of bug `enum_json_schema_is_inlined` above
+    /// guards against for the older enums; pin it here too so a future
+    /// derive on `SearchMode` specifically can't reintroduce one.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn search_mode_schema_is_ref_free() {
+        use schemars::JsonSchema;
+
+        assert!(<SearchMode as JsonSchema>::inline_schema());
+
+        let schema = schemars::schema_for!(SearchMode);
+        let value = serde_json::to_value(&schema).unwrap();
+        let blob = value.to_string();
+        assert!(value.get("$defs").is_none(), "no $defs: {value}");
+        assert!(!blob.contains("$ref"), "no $ref: {value}");
+
+        // Per-variant doc comments (the descriptions this PR relies on to
+        // explain `degraded` fallback semantics) turn the schema from a
+        // flat `enum` array into `oneOf` with a `const` per variant — see
+        // `TargetType`'s `Message` variant above for why a *plain* enum
+        // stays `enum`-shaped. Either way it must carry every value.
+        let variants = value["oneOf"]
+            .as_array()
+            .expect("SearchMode should have an inline `oneOf` array");
+        let consts: Vec<&str> = variants
+            .iter()
+            .filter_map(|v| v["const"].as_str())
+            .collect();
+        assert!(consts.contains(&"keyword"), "{value}");
+        assert!(consts.contains(&"semantic"), "{value}");
     }
 }
