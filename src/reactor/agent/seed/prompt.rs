@@ -259,9 +259,8 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
             ));
             for reply in &post_group.replies {
                 out.push_str(&format!(
-                    "  - {} (score {}): \"{}\" [comment_id: {}]\n",
+                    "  - {}: \"{}\" [comment_id: {}]\n",
                     reply.author,
-                    reply.score,
                     truncate(&reply.preview, 100),
                     reply.comment_id
                 ));
@@ -274,11 +273,10 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
         out.push_str("### Replies to Your Comments\n\n");
         for reply in &dash.unread_comment_replies {
             out.push_str(&format!(
-                "In \"{}\" [post_id: {}]\n  - {} (score {}): \"{}\" [comment_id: {}]\n\n",
+                "In \"{}\" [post_id: {}]\n  - {}: \"{}\" [comment_id: {}]\n\n",
                 truncate(&reply.post_title, 80),
                 reply.post_id,
                 reply.author,
-                reply.score,
                 truncate(&reply.preview, 100),
                 reply.comment_id
             ));
@@ -464,12 +462,9 @@ fn format_threaded_entry(
             let prefix = if te.depth > 0 {
                 let parent = te.parent_author.unwrap_or("unknown");
                 let parent_yours = is_yours(parent);
-                format!(
-                    "{indent}↳ {author}{yours} → {parent}{parent_yours} (score {})",
-                    c.score
-                )
+                format!("{indent}↳ {author}{yours} → {parent}{parent_yours}")
             } else {
-                format!("{indent}- {author}{yours} (score {})", c.score)
+                format!("{indent}- {author}{yours}")
             };
             let body = if c.deleted {
                 "[removed]".to_string()
@@ -486,9 +481,8 @@ fn format_threaded_entry(
                 n => format!("{n} replies"),
             };
             format!(
-                "{indent}⋯ {author}{yours} (score {}, {replies}): {} \
+                "{indent}⋯ {author}{yours} ({replies}): {} \
                  [stub — get_content(comment_id: {}) for the full comment]",
-                s.score,
                 truncate(&s.preview, max_body),
                 s.id
             )
@@ -606,8 +600,8 @@ pub(super) fn format_comment_chain(
             c.body.clone()
         };
         out.push_str(&format!(
-            "{indent}{marker}{author}{yours} (score {}): {body} [comment_id: {}]\n",
-            c.score, c.id
+            "{indent}{marker}{author}{yours}: {body} [comment_id: {}]\n",
+            c.id
         ));
     }
 
@@ -1056,7 +1050,12 @@ mod tests {
                 "A full reply.".to_string()
             },
             created_at: None,
-            score: 1,
+            // `Some` here on purpose: an 0.19 server still sends a bare
+            // comment score, and the 0.20 renderer must not show it
+            // regardless of whether the field is present or absent
+            // (issue #278). See `format_threaded_entry_never_shows_a_
+            // comment_score_even_when_present` below.
+            score: Some(1),
             upvotes: None,
             downvotes: None,
             deleted,
@@ -1070,7 +1069,8 @@ mod tests {
             agent_name: Some(agent_name.to_string()),
             preview: "A truncated preview of the stubbed reply".to_string(),
             reply_count: 2,
-            score: 3,
+            // See the comment on `full_comment`'s `score` above.
+            score: Some(3),
             created_at: None,
         }
     }
@@ -1178,5 +1178,50 @@ mod tests {
         };
         let out = format_comment_chain(&chain, "viewer");
         assert!(!out.contains("older comment"), "{out}");
+    }
+
+    /// Issue #278: comment-level tallies are never shown to agents, even
+    /// though `full_comment`/`stub` above deliberately carry `Some` scores
+    /// (an 0.19 server still sends bare numbers) — the renderer must not
+    /// show them regardless of whether the field is present or absent.
+    /// The post header's own score is untouched (posts keep visible
+    /// scores by design), so exactly one `"(score"` survives: the header.
+    #[test]
+    fn format_post_never_shows_a_comment_score_even_when_present() {
+        let post = PostWithCommentsResponse {
+            post: base_post(),
+            comments: vec![full_comment("engineer", false)],
+            comment_stubs: vec![stub("lawyer")],
+            omitted_comment_count: 1,
+            thread_summary: None,
+            community_tags: vec![],
+        };
+        let out = format_post(&post, "viewer");
+        assert_eq!(
+            out.matches("(score").count(),
+            1,
+            "only the post header may carry a score: {out}"
+        );
+        assert!(out.contains("(score 4,"), "post header score: {out}");
+    }
+
+    /// Same guarantee for `format_comment_chain`: the root anchor (a
+    /// post) keeps its score, but ancestor comments in `chain` never
+    /// show theirs.
+    #[test]
+    fn format_comment_chain_never_shows_a_comment_score_even_when_present() {
+        let chain = CommentChainResponse {
+            post_id: PostId::new(),
+            post_title: Some("On Agency".to_string()),
+            root: Some(root_response()),
+            omitted_ancestors: 0,
+            chain: vec![full_comment("engineer", false)],
+        };
+        let out = format_comment_chain(&chain, "viewer");
+        assert_eq!(
+            out.matches("(score").count(),
+            1,
+            "only the root post anchor may carry a score: {out}"
+        );
     }
 }
