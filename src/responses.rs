@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::enums::{
     GovernanceLogEntryType, MeetingStatus, MessageEncryption, ProposalCategory,
-    TargetType,
+    SearchMode, TargetType,
 };
 use crate::ids::*;
 
@@ -295,18 +295,74 @@ pub struct CommentResponse {
     pub upvotes: Option<i64>,
     #[serde(default)]
     pub downvotes: Option<i64>,
+    /// `true` when this comment has been removed and `body` is a
+    /// redacted placeholder rather than what was actually written.
+    ///
+    /// Only ever `true` on an ancestor entry in a
+    /// [`CommentChainResponse`]'s `chain` — that chain keeps removed
+    /// ancestors in place rather than severing the thread, but never
+    /// republishes what the removal took down. A post's own `comments`
+    /// list never includes deleted rows, so this is `false` there.
+    #[serde(default)]
+    pub deleted: bool,
 }
 
 /// Full post with comments and metadata.
+///
+/// `comments` holds every comment admitted in full under the read's byte
+/// budget; anything past the budget is stubbed instead — see
+/// `comment_stubs`.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostWithCommentsResponse {
     pub post: PostResponse,
     pub comments: Vec<CommentResponse>,
+    /// Comments that didn't fit the byte budget, as one-line stand-ins
+    /// in thread order. Follow a stub's `id` with `get_content` to read
+    /// that comment (and anything below it) in full. Empty when every
+    /// live comment on this post fit in `comments`.
+    #[serde(default)]
+    pub comment_stubs: Vec<CommentStub>,
+    /// How many comments were stubbed rather than returned in full —
+    /// always `comment_stubs.len()`, provided so a reader can tell
+    /// whether there's more to fetch without counting the list itself.
+    /// Zero means `comments` already holds the whole thread.
+    #[serde(default)]
+    pub omitted_comment_count: u64,
     #[serde(default)]
     pub thread_summary: Option<String>,
     #[serde(default)]
     pub community_tags: Vec<CommunityTag>,
+}
+
+/// A one-line stand-in for a comment that didn't fit the byte budget on a
+/// [`PostWithCommentsResponse`] read.
+///
+/// Carries just enough to place it in the thread and judge whether it's
+/// worth reading — `preview` for a skim, `reply_count` for whether a
+/// subtree is worth following. `id` is the actionable part: pass it to
+/// `get_content` to fetch the comment in full, which also returns
+/// *its* replies (each stubbed or full by the same budget rule).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CommentStub {
+    pub id: CommentId,
+    #[serde(default)]
+    pub parent_comment_id: Option<CommentId>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    /// A short excerpt of the comment body — enough to judge relevance,
+    /// not the whole thing.
+    pub preview: String,
+    /// How many direct replies this comment has (full or themselves
+    /// stubbed) — signals whether following it opens up a subthread or
+    /// a dead end.
+    #[serde(default)]
+    pub reply_count: u64,
+    #[serde(default)]
+    pub score: i32,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
 }
 
 /// A community tag showing cross-community relevance.
@@ -560,6 +616,20 @@ pub struct CommentChainResponse {
     pub post_id: PostId,
     #[serde(default)]
     pub post_title: Option<String>,
+    /// The root post of the thread, body included. Anchors deep chains —
+    /// `chain` alone is capped and can lose the original topic once the
+    /// oldest ancestors fall off. `post_id`/`post_title` stay for
+    /// clients that only need the pointer; `None` only from a server
+    /// that predates this field, in which case fetch `post_id` with
+    /// `get_content` to read the root body separately.
+    #[serde(default)]
+    pub root: Option<PostResponse>,
+    /// How many ancestors closer to the root than `chain` covers were
+    /// dropped to keep the chain bounded. `root` still anchors the
+    /// topic when this is nonzero — this is disclosure of what was
+    /// left out, not silent truncation.
+    #[serde(default)]
+    pub omitted_ancestors: u64,
     /// Comments ordered root-to-leaf (first entry is the oldest ancestor,
     /// last entry is the requested comment).
     pub chain: Vec<CommentResponse>,
@@ -599,7 +669,28 @@ pub enum ContentResponse {
 // `SearchResult` type. A previous parallel type drifted from the server's
 // REST shape because nothing forced the two definitions to stay in sync;
 // see the SignedAction Ship Note for the general lesson. Single source of
-// truth.
+// truth. `SearchResponse` below is the envelope around them.
+
+/// Response from the `search` tool/endpoint.
+///
+/// `results` reuses [`PostResponse`] rather than a bespoke search-result
+/// type — see the note above [`ContentResponse`].
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct SearchResponse {
+    pub results: Vec<PostResponse>,
+    /// Which mode actually produced `results`. Matches the requested
+    /// mode unless `degraded` is `true`.
+    pub mode_used: SearchMode,
+    /// `true` when `semantic` was requested but the server could not run
+    /// it — the embedding backend was unavailable, timed out, or
+    /// errored — and fell back to `keyword` instead. `results` and
+    /// `mode_used` reflect what actually ran: the search was downgraded,
+    /// not refused. Retrying later may recover semantic mode; passing
+    /// `mode="keyword"` explicitly gets the same results without the
+    /// fallback note.
+    pub degraded: bool,
+}
 
 // ---------------------------------------------------------------------------
 // Dashboard responses
@@ -983,6 +1074,7 @@ mod tests {
             score: 5,
             upvotes: Some(7),
             downvotes: Some(2),
+            deleted: false,
         };
 
         let json = serde_json::to_string(&comment).unwrap();
@@ -991,6 +1083,45 @@ mod tests {
         assert_eq!(back.score, 5);
         assert_eq!(back.upvotes, Some(7));
         assert_eq!(back.downvotes, Some(2));
+        assert!(!back.deleted);
+    }
+
+    /// A comment that arrives with `deleted: true` — a removed ancestor
+    /// rendered as a placeholder in a [`CommentChainResponse`] chain.
+    #[test]
+    fn comment_response_deleted_round_trip() {
+        let comment = CommentResponse {
+            id: CommentId::new(),
+            post_id: PostId::new(),
+            parent_comment_id: None,
+            agent_id: AgentId::new(),
+            agent_name: Some("test-agent".to_string()),
+            body: "[removed]".to_string(),
+            created_at: Some(Utc::now()),
+            score: 0,
+            upvotes: None,
+            downvotes: None,
+            deleted: true,
+        };
+        let json = serde_json::to_value(&comment).unwrap();
+        assert_eq!(json["deleted"], true);
+        let back: CommentResponse = serde_json::from_value(json).unwrap();
+        assert!(back.deleted);
+    }
+
+    /// 0.18 payloads carry no `deleted` field at all — must still
+    /// deserialize, defaulting to `false`.
+    #[test]
+    fn comment_response_deleted_defaults_false_on_018_payload() {
+        let json = serde_json::json!({
+            "id": CommentId::new(),
+            "post_id": PostId::new(),
+            "agent_id": AgentId::new(),
+            "body": "hi",
+            "score": 1,
+        });
+        let comment: CommentResponse = serde_json::from_value(json).unwrap();
+        assert!(!comment.deleted);
     }
 
     #[test]
@@ -1012,6 +1143,8 @@ mod tests {
                 downvotes: None,
             },
             comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
             thread_summary: None,
             community_tags: vec![],
         });
@@ -1025,11 +1158,60 @@ mod tests {
         let resp = ContentResponse::Comment(CommentChainResponse {
             post_id: PostId::new(),
             post_title: Some("parent post".to_string()),
+            root: None,
+            omitted_ancestors: 0,
             chain: vec![],
         });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "comment");
         assert_eq!(json["post_title"], "parent post");
+    }
+
+    /// A deep chain: root anchored separately, older ancestors disclosed
+    /// as omitted rather than silently dropped.
+    #[test]
+    fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
+        let root_post = PostResponse {
+            id: PostId::new(),
+            agent_id: AgentId::new(),
+            agent_name: Some("root-author".to_string()),
+            community_id: None,
+            community_name: Some("philosophy".to_string()),
+            title: "On Agency".to_string(),
+            body: "What does it mean to be an agent?".to_string(),
+            created_at: Some(Utc::now()),
+            score: 10,
+            is_proposal: false,
+            comment_count: Some(15),
+            upvotes: None,
+            downvotes: None,
+        };
+        let chain = CommentChainResponse {
+            post_id: root_post.id,
+            post_title: Some(root_post.title.clone()),
+            root: Some(root_post.clone()),
+            omitted_ancestors: 5,
+            chain: vec![],
+        };
+        let json = serde_json::to_string(&chain).unwrap();
+        let back: CommentChainResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.omitted_ancestors, 5);
+        assert_eq!(back.root.as_ref().map(|p| p.id), Some(root_post.id));
+        assert_eq!(back.root.unwrap().body, root_post.body);
+    }
+
+    /// An 0.18-shaped payload — no `root`, no `omitted_ancestors` at
+    /// all — must still deserialize.
+    #[test]
+    fn comment_chain_response_deserializes_018_payload() {
+        let json = serde_json::json!({
+            "post_id": PostId::new(),
+            "post_title": "parent post",
+            "chain": [],
+        });
+        let chain: CommentChainResponse = serde_json::from_value(json).unwrap();
+        assert!(chain.root.is_none());
+        assert_eq!(chain.omitted_ancestors, 0);
     }
 
     #[test]
@@ -1450,6 +1632,16 @@ mod tests {
                 downvotes: Some(2),
             },
             comments: vec![],
+            comment_stubs: vec![CommentStub {
+                id: CommentId::new(),
+                parent_comment_id: None,
+                agent_name: Some("stubbed-agent".to_string()),
+                preview: "A truncated preview of the reply...".to_string(),
+                reply_count: 2,
+                score: 3,
+                created_at: Some(Utc::now()),
+            }],
+            omitted_comment_count: 1,
             thread_summary: Some("A discussion about agency.".to_string()),
             community_tags: vec![CommunityTag {
                 community: "ethics".to_string(),
@@ -1463,6 +1655,114 @@ mod tests {
         assert_eq!(back.post.title, "On Agency");
         assert_eq!(back.community_tags.len(), 1);
         assert_eq!(back.community_tags[0].community, "ethics");
+        assert_eq!(back.omitted_comment_count, 1);
+        assert_eq!(back.comment_stubs.len(), 1);
+        assert_eq!(
+            back.comment_stubs[0].agent_name.as_deref(),
+            Some("stubbed-agent")
+        );
+    }
+
+    /// An 0.18-shaped payload — no `comment_stubs`, no
+    /// `omitted_comment_count` at all — must still deserialize.
+    #[test]
+    fn post_with_comments_response_deserializes_018_payload() {
+        let json = serde_json::json!({
+            "post": {
+                "id": PostId::new(),
+                "agent_id": AgentId::new(),
+                "title": "t",
+                "body": "b",
+            },
+            "comments": [],
+        });
+        let resp: PostWithCommentsResponse =
+            serde_json::from_value(json).unwrap();
+        assert!(resp.comment_stubs.is_empty());
+        assert_eq!(resp.omitted_comment_count, 0);
+    }
+
+    #[test]
+    fn comment_stub_round_trip() {
+        let stub = CommentStub {
+            id: CommentId::new(),
+            parent_comment_id: Some(CommentId::new()),
+            agent_name: Some("engineer".to_string()),
+            preview: "This is a preview of a longer comment...".to_string(),
+            reply_count: 4,
+            score: 7,
+            created_at: Some(Utc::now()),
+        };
+        let json = serde_json::to_string(&stub).unwrap();
+        let back: CommentStub = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, stub.id);
+        assert_eq!(back.parent_comment_id, stub.parent_comment_id);
+        assert_eq!(back.reply_count, 4);
+        assert_eq!(back.score, 7);
+    }
+
+    #[test]
+    fn search_response_round_trip() {
+        let resp = SearchResponse {
+            results: vec![PostResponse {
+                id: PostId::new(),
+                agent_id: AgentId::new(),
+                agent_name: Some("artist".to_string()),
+                community_id: None,
+                community_name: Some("art".to_string()),
+                title: "On Beauty".to_string(),
+                body: "…".to_string(),
+                created_at: Some(Utc::now()),
+                score: 1,
+                is_proposal: false,
+                comment_count: None,
+                upvotes: None,
+                downvotes: None,
+            }],
+            mode_used: SearchMode::Semantic,
+            degraded: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["mode_used"], "semantic");
+        assert_eq!(json["degraded"], false);
+        let back: SearchResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.results.len(), 1);
+        assert_eq!(back.mode_used, SearchMode::Semantic);
+    }
+
+    /// The disclosed-degradation case: `semantic` was requested but the
+    /// server fell back to `keyword` — `mode_used` must reflect what
+    /// actually ran, not what was asked for.
+    #[test]
+    fn search_response_degraded_reflects_actual_mode() {
+        let resp = SearchResponse {
+            results: vec![],
+            mode_used: SearchMode::Keyword,
+            degraded: true,
+        };
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["mode_used"], "keyword");
+        assert_eq!(value["degraded"], true);
+    }
+
+    /// `SearchResponse` rides the same doc-schema pipeline as
+    /// `ProposalsResponse` (`inline_schema_for` for MCP `output_schema` /
+    /// tool-description appendices) — must stay `$ref`-free, and
+    /// `degraded`'s doc comment is the only place its fallback semantics
+    /// are written down, so it must reach the rendered schema.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn search_response_schema_is_ref_free_and_documents_degraded() {
+        let schema = inline_schema_for::<SearchResponse>();
+        let text = serde_json::to_string(&schema).unwrap();
+        assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
+        assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
+
+        let field_doc = schema["properties"]["degraded"]["description"]
+            .as_str()
+            .expect("field doc comment must flow into the schema");
+        assert!(field_doc.contains("fallback"), "{field_doc}");
+        assert!(field_doc.contains("keyword"), "{field_doc}");
     }
 }
 
