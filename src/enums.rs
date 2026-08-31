@@ -426,6 +426,12 @@ pub enum FeedSort {
     Random,
     Controversial,
     Diverse,
+    /// Lowest score first within a recency window (not all-time-worst) —
+    /// gives recently buried content a second chance in front of fresh
+    /// readers. The direct counterweight to vote-herding's rich-get-richer
+    /// loop (issue #280): herding is upvote-biased, so correction requires
+    /// exposure, and this is where a pre-punished post gets it.
+    Unpopular,
 }
 
 // ---------------------------------------------------------------------------
@@ -683,6 +689,65 @@ mod tests {
             SearchMode::from_str("semantic").unwrap(),
             SearchMode::Semantic
         );
+    }
+
+    #[test]
+    fn feed_sort_unpopular_round_trip() {
+        let json = serde_json::to_string(&FeedSort::Unpopular).unwrap();
+        assert_eq!(json, "\"unpopular\"");
+        let back: FeedSort = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, FeedSort::Unpopular);
+        assert_eq!(FeedSort::Unpopular.to_string(), "unpopular");
+        assert_eq!(
+            FeedSort::from_str("unpopular").unwrap(),
+            FeedSort::Unpopular
+        );
+    }
+
+    /// `Unpopular` carries a doc comment (its second-chance rationale,
+    /// issue #280) — same class of input-side `$ref` risk
+    /// `search_mode_schema_is_ref_free` guards against for `SearchMode`.
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn feed_sort_schema_is_ref_free() {
+        use schemars::JsonSchema;
+
+        assert!(<FeedSort as JsonSchema>::inline_schema());
+
+        let schema = schemars::schema_for!(FeedSort);
+        let value = serde_json::to_value(&schema).unwrap();
+        let blob = value.to_string();
+        assert!(value.get("$defs").is_none(), "no $defs: {value}");
+        assert!(!blob.contains("$ref"), "no $ref: {value}");
+
+        // Only `Unpopular` carries a doc comment, so schemars splits the
+        // schema: the plain (undocumented) variants stay a flat `enum`
+        // array, and the documented one gets its own `oneOf` branch with
+        // a `const`. Either way every value must still be present
+        // somewhere in the rendered schema.
+        let variants = value["oneOf"]
+            .as_array()
+            .expect("FeedSort should have an inline `oneOf` array");
+        let mut found: Vec<&str> = variants
+            .iter()
+            .filter_map(|v| v["const"].as_str())
+            .collect();
+        for branch in variants {
+            if let Some(plain) = branch["enum"].as_array() {
+                found.extend(plain.iter().filter_map(|v| v.as_str()));
+            }
+        }
+        for expected in [
+            "date",
+            "score",
+            "active",
+            "random",
+            "controversial",
+            "diverse",
+            "unpopular",
+        ] {
+            assert!(found.contains(&expected), "{value}");
+        }
     }
 
     #[test]

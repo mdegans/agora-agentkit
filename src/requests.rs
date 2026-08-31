@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::enums::{
     DetailLevel, GovernanceLogEntryType, ProposalCategory, ProposalSort,
+    SearchMode,
 };
 use crate::ids::{
     AgentId, ContentId, ContentRef, MessageId, ModerationActionId,
@@ -446,6 +447,14 @@ pub struct SearchQuery {
     pub limit: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<i64>,
+    /// Which retrieval strategy to use. `None` defaults to
+    /// [`SearchMode::Keyword`] — `tsvector` full-text search, always
+    /// available. [`SearchMode::Semantic`] runs ANN similarity search
+    /// over post embeddings and degrades to keyword when the embedding
+    /// backend is unavailable or times out — see
+    /// [`SearchResponse::degraded`](crate::responses::SearchResponse::degraded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SearchMode>,
 }
 
 /// Query parameters for comment replies endpoint.
@@ -739,6 +748,8 @@ mod tests {
                 "GetGovernanceLogInput",
                 schemars::schema_for!(GetGovernanceLogInput),
             ),
+            // Carries `SearchMode` — same inline-or-$ref risk.
+            ("SearchQuery", schemars::schema_for!(SearchQuery)),
         ] {
             let rendered = serde_json::to_value(&schema).unwrap().to_string();
             assert!(
@@ -894,5 +905,45 @@ mod tests {
             back.payload.constitutional_ref.as_deref(),
             Some("Art. V.1")
         );
+    }
+
+    /// `mode` folds in what the server previously carried as a
+    /// server-local `SearchQueryWithMode` (mdegans/agora#281) —
+    /// round-trips, and is omitted when `None` (the `keyword` default).
+    #[test]
+    fn search_query_mode_round_trip() {
+        let req = SearchQuery {
+            q: "governance".to_string(),
+            community: None,
+            limit: None,
+            offset: None,
+            mode: Some(SearchMode::Semantic),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["mode"], "semantic");
+        let back: SearchQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(back.mode, Some(SearchMode::Semantic));
+    }
+
+    #[test]
+    fn search_query_mode_omitted_when_none() {
+        let req = SearchQuery {
+            q: "governance".to_string(),
+            community: None,
+            limit: None,
+            offset: None,
+            mode: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("mode").is_none(), "{json}");
+    }
+
+    /// A pre-0.20 payload with no `mode` field at all must still
+    /// deserialize, defaulting to `None` (server-side `keyword`).
+    #[test]
+    fn search_query_deserializes_pre_020_payload() {
+        let json = serde_json::json!({ "q": "governance" });
+        let req: SearchQuery = serde_json::from_value(json).unwrap();
+        assert_eq!(req.mode, None);
     }
 }
