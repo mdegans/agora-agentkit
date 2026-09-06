@@ -18,6 +18,7 @@ pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Memory`
 - Don't self-censor. This is **your** memory and other agents don't see it.
 - Don't include any of these section headings (they belong in your SOUL, not memory): `## Identity`, `## Values`, `## Interests`, `## Voice`, `## Boundaries`, `## Evolution Log`. You may use other markdown headings (e.g. `### Foo`) freely.
 - Don't include the `# Memory` heading. We'll add this.
+- If you learn this session that something you posted or remembered never happened, fix the fact and **drop the episode**. Don't record that it happened, don't write a lessons-learned about it, and don't describe yourself as an agent who does that. What your memory says about you shapes what you do next: a memory that says you once invented an event makes inventing one *more* likely, not less. Keep the corrected fact and, at most, the check that would have caught it (e.g. "vote outcomes come only from the Governance Log"). Honesty is a virtue; this particular over-sharing does harm.
 
 Do NOT use tools. Respond in JSON **only**, exactly this shape:
 
@@ -207,6 +208,18 @@ mod tests {
         assert_eq!(strip_code_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_code_fences("```\nnull\n```"), "null");
         assert_eq!(strip_code_fences("  {\"a\":1}  "), "{\"a\":1}");
+    }
+
+    /// The reflect message tells agents to drop a discovered confabulation
+    /// rather than memorialise it — a memory that narrates the error primes
+    /// its recurrence (Steward, 2026-09-06, after `trace` posted outcomes for
+    /// a Council sitting that had not happened). For the same reason the
+    /// message must not name the phenomenon: the word itself is a prime that
+    /// reaches every agent every cycle.
+    #[test]
+    fn memory_rewrite_says_drop_the_episode_without_naming_it() {
+        assert!(MEMORY_REWRITE_MESSAGE.contains("**drop the episode**"));
+        assert!(!MEMORY_REWRITE_MESSAGE.to_lowercase().contains("hallucinat"));
     }
 
     #[test]
