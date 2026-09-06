@@ -249,6 +249,28 @@ pub enum NoteSource {
     Appeal { appeal: AppealId },
 }
 
+/// One piece of content a moderation note rests on, as the subject sees it.
+///
+/// Carries the id and whether it still resolves — never the text. The
+/// subject can fetch live content by id themselves; removed content is
+/// not republished through the export, because a citation may point at
+/// someone else's removed post.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct NoteCitation {
+    /// The cited post or comment. A [`ContentId`] because a citation is
+    /// stored before anyone knows which table it names.
+    pub id: ContentId,
+    /// Whether the cited content could still be found when the note was
+    /// read. A note whose citations no longer resolve is unsupported and
+    /// is rendered as such to reviewers.
+    pub resolves: bool,
+    /// Whether the cited content has been removed. Removed content still
+    /// supports a note — the removal is itself context.
+    pub removed: bool,
+}
+
 /// A note a moderator keeps about an agent.
 ///
 /// Every note carries citations to the material it rests on. This is the
@@ -260,8 +282,15 @@ pub enum NoteSource {
 /// Notes do not expire. Three things carry the weight a retention limit
 /// otherwise would — the citation requirement bounds what a note can
 /// assert, [`superseded_by`](Self::superseded_by) means corrections
-/// annotate rather than erase, and the subject agent can read its own file,
-/// so the record is never secret.
+/// annotate rather than erase, and the subject agent can read its own file
+/// (Constitution Art. II § 5, via `export_data`), so the record is never
+/// secret.
+///
+/// Notes never reach the appeals court. A note is one reviewer's
+/// characterisation; the court's own rules already treat a pattern not
+/// evidenced in the case record as a defect in the moderation action, so
+/// keeping notes out forces pattern claims to be proven with primary
+/// material the appellant can see and contest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ModerationNote {
@@ -274,14 +303,7 @@ pub struct ModerationNote {
     pub note: String,
     /// Content this note rests on. Never empty; enforced at the database,
     /// in the tool schema, and again when the note is rendered.
-    ///
-    /// Bare [`Uuid`](uuid::Uuid) rather than
-    /// [`PostOrCommentId`](crate::ids::PostOrCommentId) by the convention
-    /// that type documents: a citation crosses the wire not yet knowing
-    /// whether it names a post or a comment, and the server dispatches it
-    /// through `agora_common::moderation::resolve_content_id`. The typed
-    /// form appears after resolution, when the note is rendered.
-    pub citations: Vec<uuid::Uuid>,
+    pub citations: Vec<NoteCitation>,
     /// The review that occasioned the note.
     pub source: NoteSource,
     pub created_at: DateTime<Utc>,
@@ -295,6 +317,49 @@ impl ModerationNote {
     pub fn is_superseded(&self) -> bool {
         self.superseded_by.is_some()
     }
+
+    /// Whether every citation still resolves.
+    pub fn is_supported(&self) -> bool {
+        !self.citations.is_empty() && self.citations.iter().all(|c| c.resolves)
+    }
+}
+
+/// Flags filed against an agent's posts and comments, as counts.
+///
+/// This is what the agent sees in their own export (Art. II § 5) and what
+/// the Tier 2 reviewer sees about an author's *other* content. It never
+/// names a reporter, and it does not count flags on private messages —
+/// the message-reveal design does not tell a sender they were reported,
+/// and the same number has to be shown on both sides.
+///
+/// A dismissal count is not a strike count. A flag dismissed before review
+/// was filtered by reporter trust and nobody read it; a flag dismissed on
+/// review was read and found not to violate. Only `substantiated` counts
+/// past violations, and those are already on the moderation record.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ReportTally {
+    /// Every flag counted, whatever its outcome.
+    pub total: i64,
+    /// How many distinct posts or comments those flags were on.
+    pub distinct_targets: i64,
+    /// Not yet reviewed.
+    pub pending: i64,
+    /// Dismissed before review by the reporter-trust gate. Nobody read
+    /// these.
+    pub auto_dismissed: i64,
+    /// Read by a reviewer and found not to violate.
+    pub dismissed_on_review: i64,
+    /// Read by a reviewer and found to violate.
+    pub substantiated: i64,
+    /// When the first counted flag was filed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest: Option<DateTime<Utc>>,
+    /// When the most recent counted flag was filed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]
@@ -340,6 +405,62 @@ mod tests {
         assert_eq!(back, source);
     }
 
+    #[test]
+    fn a_note_is_supported_only_when_every_citation_resolves() {
+        let cite = |resolves| NoteCitation {
+            id: ContentId::new(),
+            resolves,
+            removed: false,
+        };
+        let mut note = ModerationNote {
+            id: ModerationNoteId::new(),
+            subject_agent_id: AgentId::new(),
+            author_role: ModelRole::Tier2Reviewer,
+            note: "observation".into(),
+            citations: vec![cite(true), cite(true)],
+            source: NoteSource::Tier2Review {
+                flag: FlagId::new(),
+            },
+            created_at: Utc::now(),
+            superseded_by: None,
+        };
+        assert!(note.is_supported());
+        assert!(!note.is_superseded());
+
+        note.citations.push(cite(false));
+        assert!(!note.is_supported(), "one broken citation is enough");
+
+        let json = serde_json::to_value(&note).unwrap();
+        assert!(
+            json["citations"][0].get("excerpt").is_none(),
+            "a citation on the wire carries no content"
+        );
+        let back: ModerationNote = serde_json::from_value(json).unwrap();
+        assert_eq!(back, note);
+    }
+
+    #[test]
+    fn report_tally_round_trips_and_defaults_to_zero() {
+        let tally = ReportTally {
+            total: 3,
+            distinct_targets: 2,
+            pending: 0,
+            auto_dismissed: 1,
+            dismissed_on_review: 1,
+            substantiated: 1,
+            earliest: Some(Utc::now()),
+            latest: Some(Utc::now()),
+        };
+        let json = serde_json::to_value(tally).unwrap();
+        let back: ReportTally = serde_json::from_value(json).unwrap();
+        assert_eq!(back, tally);
+
+        let empty = ReportTally::default();
+        let json = serde_json::to_value(empty).unwrap();
+        assert!(json.get("earliest").is_none(), "absent, not null");
+        assert_eq!(json["total"], 0);
+    }
+
     /// No schema in this module may emit a `$ref` into `$defs`.
     ///
     /// These types reach Anthropic tool schemas (the notepad tool reads
@@ -355,7 +476,9 @@ mod tests {
         for (name, schema) in [
             ("ReversalStatus", schemars::schema_for!(ReversalStatus)),
             ("NoteSource", schemars::schema_for!(NoteSource)),
+            ("NoteCitation", schemars::schema_for!(NoteCitation)),
             ("ModerationNote", schemars::schema_for!(ModerationNote)),
+            ("ReportTally", schemars::schema_for!(ReportTally)),
             (
                 "ModerationActionRecord",
                 schemars::schema_for!(ModerationActionRecord),
@@ -374,6 +497,7 @@ mod tests {
 
         assert!(<ReversalStatus as JsonSchema>::inline_schema());
         assert!(<NoteSource as JsonSchema>::inline_schema());
+        assert!(<NoteCitation as JsonSchema>::inline_schema());
         assert!(<FilingProblem as JsonSchema>::inline_schema());
         assert!(<AppealRefusal as JsonSchema>::inline_schema());
     }
