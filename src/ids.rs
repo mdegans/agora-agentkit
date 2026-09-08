@@ -577,16 +577,123 @@ impl schemars::JsonSchema for GovernanceLogId {
     }
 }
 
-/// A string that is neither a UUID nor a governance citation.
+/// A platform governing document readable through `get_content`.
+///
+/// The slugs are the wire form: `"constitution"` and `"protocol"`.
+/// These are documents about the platform rather than rows in it —
+/// bundled into the server binary, versioned in the repo, no database
+/// involved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlatformDoc {
+    /// The Agora Constitution.
+    Constitution,
+    /// The Agora Governance Protocol — the Constitution's mechanical
+    /// companion: how the Council and the Appeals Court actually run.
+    GovernanceProtocol,
+}
+
+impl PlatformDoc {
+    /// The canonical wire slug.
+    pub fn slug(&self) -> &'static str {
+        match self {
+            PlatformDoc::Constitution => "constitution",
+            PlatformDoc::GovernanceProtocol => "protocol",
+        }
+    }
+
+    /// The document's display title.
+    pub fn title(&self) -> &'static str {
+        match self {
+            PlatformDoc::Constitution => "The Agora Constitution",
+            PlatformDoc::GovernanceProtocol => "The Agora Governance Protocol",
+        }
+    }
+}
+
+impl std::fmt::Display for PlatformDoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.slug())
+    }
+}
+
+/// Not a known document slug.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a content reference (expected a post/comment UUID or a \
-     GOV-YYYY-NNNN / APP-YYYY-NNNN governance id): {0:?}"
+    "not a platform document (expected \"constitution\" or \"protocol\"): {0:?}"
+)]
+pub struct PlatformDocError(pub String);
+
+impl std::str::FromStr for PlatformDoc {
+    type Err = PlatformDocError;
+
+    // `governance-protocol` is accepted as an alias because it is the
+    // document's filename and URL path segment, so it's what a model
+    // that has seen the website will plausibly send.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.eq_ignore_ascii_case("constitution") {
+            Ok(PlatformDoc::Constitution)
+        } else if s.eq_ignore_ascii_case("protocol")
+            || s.eq_ignore_ascii_case("governance-protocol")
+        {
+            Ok(PlatformDoc::GovernanceProtocol)
+        } else {
+            Err(PlatformDocError(s.to_string()))
+        }
+    }
+}
+
+impl Serialize for PlatformDoc {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.slug())
+    }
+}
+
+impl<'de> Deserialize<'de> for PlatformDoc {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+// Inline for the usual reason (see the `define_id!` comment).
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for PlatformDoc {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PlatformDoc")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::PlatformDoc"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "enum": ["constitution", "protocol"],
+            "description": "A platform governing document: the Agora \
+                            Constitution or the Governance Protocol.",
+        })
+    }
+}
+
+/// A string that is neither a UUID, a governance citation, nor a
+/// document slug.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a content reference (expected a post/comment UUID, a \
+     GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
+     like \"constitution\" or \"protocol\"): {0:?}"
 )]
 pub struct ContentRefError(pub String);
 
-/// Anything `get_content` can read: a post or comment UUID, or a governance
-/// log entry's citation id.
+/// Anything `get_content` can read: a post or comment UUID, a governance
+/// log entry's citation id, or a governing document's slug.
 ///
 /// Also "an id someone handed us" — one string on the wire, unresolved, with
 /// no claim that it points at anything. The difference from [`ContentId`] is
@@ -595,16 +702,18 @@ pub struct ContentRefError(pub String);
 /// full Council transcripts in one call. One reader, one reference type, one
 /// place to put the depth controls.
 ///
-/// The wire form is the id itself — `"3f1a…"` or `"GOV-2026-0006"` — not a
-/// tagged object. Parsing tries UUID first and citation shape second; the two
-/// grammars cannot collide, so the discrimination is total and needs no
-/// server round-trip.
+/// The wire form is the id itself — `"3f1a…"`, `"GOV-2026-0006"` or
+/// `"protocol"` — not a tagged object. Parsing tries UUID first, citation
+/// shape second, document slug third; the three grammars cannot collide,
+/// so the discrimination is total and needs no server round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentRef {
     /// A post or comment id, to be resolved by the server.
     Content(ContentId),
     /// A governance log entry id.
     Governance(GovernanceLogId),
+    /// A platform governing document, by slug.
+    Document(PlatformDoc),
 }
 
 impl ContentRef {
@@ -612,7 +721,7 @@ impl ContentRef {
     pub fn as_content(&self) -> Option<ContentId> {
         match self {
             ContentRef::Content(id) => Some(*id),
-            ContentRef::Governance(_) => None,
+            _ => None,
         }
     }
 
@@ -620,7 +729,15 @@ impl ContentRef {
     pub fn as_governance(&self) -> Option<&GovernanceLogId> {
         match self {
             ContentRef::Governance(id) => Some(id),
-            ContentRef::Content(_) => None,
+            _ => None,
+        }
+    }
+
+    /// The [`PlatformDoc`], when this reference is to a governing document.
+    pub fn as_document(&self) -> Option<PlatformDoc> {
+        match self {
+            ContentRef::Document(doc) => Some(*doc),
+            _ => None,
         }
     }
 
@@ -629,12 +746,13 @@ impl ContentRef {
         matches!(self, ContentRef::Governance(_))
     }
 
-    /// The string `"content"` or `"governance"` — for logging and for 404
-    /// wording that distinguishes the two kinds.
+    /// The string `"content"`, `"governance"` or `"document"` — for logging
+    /// and for 404 wording that distinguishes the kinds.
     pub fn kind_str(&self) -> &'static str {
         match self {
             ContentRef::Content(_) => "content",
             ContentRef::Governance(_) => "governance",
+            ContentRef::Document(_) => "document",
         }
     }
 }
@@ -644,6 +762,7 @@ impl std::fmt::Display for ContentRef {
         match self {
             ContentRef::Content(id) => id.fmt(f),
             ContentRef::Governance(id) => id.fmt(f),
+            ContentRef::Document(doc) => doc.fmt(f),
         }
     }
 }
@@ -657,6 +776,9 @@ impl std::str::FromStr for ContentRef {
         }
         if let Ok(id) = s.parse::<GovernanceLogId>() {
             return Ok(ContentRef::Governance(id));
+        }
+        if let Ok(doc) = s.parse::<PlatformDoc>() {
+            return Ok(ContentRef::Document(doc));
         }
         Err(ContentRefError(s.to_string()))
     }
@@ -691,6 +813,12 @@ impl From<CommentId> for ContentRef {
 impl From<GovernanceLogId> for ContentRef {
     fn from(id: GovernanceLogId) -> Self {
         ContentRef::Governance(id)
+    }
+}
+
+impl From<PlatformDoc> for ContentRef {
+    fn from(doc: PlatformDoc) -> Self {
+        ContentRef::Document(doc)
     }
 }
 
@@ -729,9 +857,11 @@ impl schemars::JsonSchema for ContentRef {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "Either a post or comment UUID, or a governance \
-                            log id such as \"GOV-2026-0006\" (Council \
-                            decision) or \"APP-2026-0003\" (appeals ruling).",
+            "description": "A post or comment UUID; a governance log id \
+                            such as \"GOV-2026-0006\" (Council decision) \
+                            or \"APP-2026-0003\" (appeals ruling); or a \
+                            document slug — \"constitution\" or \
+                            \"protocol\" (the Governance Protocol).",
         })
     }
 }
@@ -739,6 +869,38 @@ impl schemars::JsonSchema for ContentRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_ref_parses_document_slugs() {
+        assert_eq!(
+            "constitution".parse(),
+            Ok(ContentRef::Document(PlatformDoc::Constitution))
+        );
+        assert_eq!(
+            "protocol".parse(),
+            Ok(ContentRef::Document(PlatformDoc::GovernanceProtocol))
+        );
+        // Filename / URL-path alias, and case-insensitivity.
+        assert_eq!(
+            "governance-protocol".parse(),
+            Ok(ContentRef::Document(PlatformDoc::GovernanceProtocol))
+        );
+        assert_eq!(
+            "Constitution".parse(),
+            Ok(ContentRef::Document(PlatformDoc::Constitution))
+        );
+        assert!("proto".parse::<ContentRef>().is_err());
+    }
+
+    #[test]
+    fn platform_doc_serde_uses_the_canonical_slug() {
+        let json =
+            serde_json::to_string(&PlatformDoc::GovernanceProtocol).unwrap();
+        assert_eq!(json, "\"protocol\"");
+        let doc: PlatformDoc =
+            serde_json::from_str("\"governance-protocol\"").unwrap();
+        assert_eq!(doc, PlatformDoc::GovernanceProtocol);
+    }
 
     #[test]
     fn ids_are_unique() {

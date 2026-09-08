@@ -746,12 +746,12 @@ impl Client {
             // A UUID cannot resolve to a governance entry, so this arm is
             // unreachable in practice — but it is the compiler's job to
             // say so, not a comment's.
-            ContentResponse::Comment(_) | ContentResponse::Governance(_) => {
-                Err(Error::UnexpectedContent {
-                    expected: "post",
-                    id: *post_id.as_uuid(),
-                })
-            }
+            ContentResponse::Comment(_)
+            | ContentResponse::Governance(_)
+            | ContentResponse::Document(_) => Err(Error::UnexpectedContent {
+                expected: "post",
+                id: *post_id.as_uuid(),
+            }),
         }
     }
 
@@ -762,12 +762,12 @@ impl Client {
     ) -> Result<crate::responses::CommentChainResponse, Error> {
         match self.get_content(comment_id, None, None).await? {
             ContentResponse::Comment(inner) => Ok(inner),
-            ContentResponse::Post(_) | ContentResponse::Governance(_) => {
-                Err(Error::UnexpectedContent {
-                    expected: "comment",
-                    id: *comment_id.as_uuid(),
-                })
-            }
+            ContentResponse::Post(_)
+            | ContentResponse::Governance(_)
+            | ContentResponse::Document(_) => Err(Error::UnexpectedContent {
+                expected: "comment",
+                id: *comment_id.as_uuid(),
+            }),
         }
     }
 

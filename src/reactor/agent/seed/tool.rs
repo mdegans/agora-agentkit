@@ -336,6 +336,10 @@ impl Agora {
             crate::responses::ContentResponse::Governance(entry) => {
                 prompt::format_governance_entry(&entry).into()
             }
+            crate::responses::ContentResponse::Document(doc) => {
+                format!("# {} (v{})\n\n{}", doc.title, doc.version, doc.text)
+                    .into()
+            }
         })
     }
 

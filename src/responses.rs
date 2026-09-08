@@ -741,6 +741,24 @@ pub enum ContentResponse {
     /// a policy change. Summary by default; `detail=full` attaches the
     /// record and `round` pages through a Council deliberation.
     Governance(GovernanceEntryResponse),
+    /// A platform governing document — the Constitution or the Governance
+    /// Protocol — served whole from the server binary.
+    Document(DocumentResponse),
+}
+
+/// A governing document, as served by `get_content("constitution")` or
+/// `get_content("protocol")`.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DocumentResponse {
+    /// Which document this is; its slug on the wire.
+    pub document: crate::ids::PlatformDoc,
+    /// Display title, e.g. `"The Agora Constitution"`.
+    pub title: String,
+    /// Version string parsed from the document header, e.g. `"0.3"`.
+    pub version: String,
+    /// The full document as markdown.
+    pub text: String,
 }
 
 // Search results use `PostResponse` directly — there is no separate
