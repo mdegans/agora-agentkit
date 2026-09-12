@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use httpmock::prelude::*;
-use misanthropic::prompt::message::{Block, Role};
+use misanthropic::prompt::message::{Block, Content, Role};
 use misanthropic::response::{self, StopReason};
 use url::Url;
 use uuid::Uuid;
@@ -405,15 +405,16 @@ async fn thinking_only_quiescence_is_not_seated() {
     seat_start(&mut agent);
     let before = agent.prompt().messages.len();
 
-    let thought_only: response::Message = serde_json::from_value(serde_json::json!({
-        "id": "msg_test",
-        "role": "assistant",
-        "content": [{ "type": "thinking", "thinking": "hmm, nothing to add", "signature": "sig" }],
-        "model": "claude-haiku-4-5",
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-    }))
-    .expect("valid response::Message fixture");
+    let thought_only = response::Message::builder(
+        "claude-haiku-4-5",
+        Content(vec![Block::Thought {
+            thought: "hmm, nothing to add".into(),
+            signature: "sig".into(),
+        }])
+        .into(),
+    )
+    .stop_reason(StopReason::EndTurn)
+    .build();
 
     let control = agent.handle(thought_only).await.unwrap();
     assert_eq!(control, Control::Continue);
@@ -742,12 +743,12 @@ async fn config_max_tokens_reach_the_prompt() {
     };
     let mut agent = agent(&server, config);
     assert_eq!(agent.prompt().max_tokens.get(), 1234);
-    // The act prompt carries the thinking budget as `type: enabled` on the
-    // wire — that exact shape is what drama_llama keys `enable_thinking` off.
-    assert_eq!(
-        serde_json::to_value(agent.prompt().thinking).unwrap(),
-        serde_json::json!({"type": "enabled", "budget_tokens": 1024})
-    );
+    // The act prompt carries the budget as `Thinking::Enabled` — the
+    // `type: enabled` wire shape drama_llama keys `enable_thinking` off.
+    assert!(matches!(
+        agent.prompt().thinking,
+        Some(Thinking::Enabled { budget_tokens, .. }) if budget_tokens.get() == 1024
+    ));
 
     seat_start(&mut agent);
     // Acting quiesces → reflect seats with the phase budget.
