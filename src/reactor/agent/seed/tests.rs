@@ -393,6 +393,41 @@ async fn quiescence_walks_the_tail_to_done() {
     assert!(agent.state.completed);
 }
 
+/// A quiescent reply that is *only* thinking is not seated. Mistral Small 4
+/// produces the shape; its template renders a thought with no answer after
+/// it as an open thought, which blallama rejects on resubmission. The
+/// session still advances (reflect seats), and the transcript never carries
+/// the empty turn.
+#[tokio::test]
+async fn thinking_only_quiescence_is_not_seated() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let before = agent.prompt().messages.len();
+
+    let thought_only: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [{ "type": "thinking", "thinking": "hmm, nothing to add", "signature": "sig" }],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+    }))
+    .expect("valid response::Message fixture");
+
+    let control = agent.handle(thought_only).await.unwrap();
+    assert_eq!(control, Control::Continue);
+    // Reflect merged into the trailing user turn — no assistant turn seated.
+    assert_eq!(agent.prompt().messages.len(), before);
+    assert_eq!(agent.prompt().messages.last().unwrap().role, Role::User);
+    assert!(transcript(&agent).contains("update your `## Memory`"));
+    assert!(
+        !serde_json::to_string(agent.prompt())
+            .unwrap()
+            .contains("\"thinking\"")
+    );
+}
+
 /// A loaded state carrying a completed transcript starts over: fresh
 /// prompt, `completed` cleared. (Until #20 lands, clearing is
 /// unconditional — a mid-session snapshot also starts over.)

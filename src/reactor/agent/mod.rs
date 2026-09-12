@@ -92,11 +92,26 @@ pub async fn default_handle<A: Agent>(
         // Quiescent: seat the assistant turn, then advance the session —
         // unless a tool pushed content meanwhile, in which case seat that
         // and keep going so the model can react to it.
-        {
+        //
+        // A turn that is *only* thinking (no text, no tool call) is not
+        // seated: it carries nothing the next turn can build on, and some
+        // chat templates (Mistral Small 4) render a thought with no answer
+        // after it as an open thought — a client error on resubmission.
+        // Observed 2026-09-12 on blallama with `thinking` enabled; Qwen and
+        // gpt-oss never produce the shape.
+        let visible = response.inner.content.iter().any(|block| {
+            !matches!(
+                block,
+                Block::Thought { .. } | Block::RedactedThought { .. }
+            )
+        });
+        if visible {
             let (_, prompt) = agent.parts();
             prompt
                 .push_message(response.inner.clone())
                 .map_err(|e| A::Error::from(boxed(e)))?;
+        } else {
+            tracing::debug!("thinking-only quiescent turn not seated");
         }
         let notes = agent.drain_notifications();
         if !notes.is_empty() {
