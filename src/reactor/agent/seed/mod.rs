@@ -45,6 +45,7 @@ use misanthropic::model::ModelInfo;
 use misanthropic::prompt::{
     Prompt,
     message::{Block, Role},
+    thinking::Thinking,
 };
 use misanthropic::response::{self, StopReason};
 use misanthropic::tool::{
@@ -99,6 +100,19 @@ pub struct SeedConfig {
     /// `max_tokens` for the evolve phase — sized like the others because an
     /// evolution can rewrite the SOUL in its entirety. Must be nonzero.
     pub evolve_max_tokens: u32,
+    /// Extended-thinking budget for the act rounds. `None` (the default)
+    /// sends no `thinking` field at all — today's behaviour on every
+    /// endpoint. `Some(n)` sends `thinking: {type: enabled, budget_tokens: n}`
+    /// on the act prompt only; reflect, mutate, survey and evolve are
+    /// structured-output phases and stay as they are.
+    ///
+    /// Local backends key their template off this field: drama_llama
+    /// derives `enable_thinking` from it, so without it a Qwen thinking
+    /// model renders the thinking-off stub and reasons in the open. On
+    /// Anthropic it turns on billed extended thinking — keep it per config
+    /// file, not process-wide across cohorts. Should be less than
+    /// [`act_max_tokens`](Self::act_max_tokens).
+    pub thinking_budget_tokens: Option<NonZeroU32>,
     /// Where [`on_teardown`](Agent::on_teardown) writes the finished session
     /// transcript, content-addressed — see [`prompt_log`]. `None` disables
     /// the dump entirely.
@@ -132,6 +146,7 @@ impl Default for SeedConfig {
             act_max_tokens: 4096,
             phase_max_tokens: 4096,
             evolve_max_tokens: 4096,
+            thinking_budget_tokens: None,
             prompt_log_dir: None,
             web_search: None,
             web_fetch: None,
@@ -710,6 +725,9 @@ impl Agent for SeedAgent {
             .max_tokens(
                 NonZeroU32::new(ctx.config.act_max_tokens).expect("nonzero"),
             );
+        if let Some(budget) = ctx.config.thinking_budget_tokens {
+            fresh = fresh.thinking(Thinking::enabled(budget));
+        }
         fresh.tool_choice = Some(misanthropic::tool::Choice::auto());
         state.prompt = fresh;
         state.completed = false;

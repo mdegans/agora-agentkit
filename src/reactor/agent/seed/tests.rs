@@ -702,10 +702,17 @@ async fn config_max_tokens_reach_the_prompt() {
     let config = SeedConfig {
         act_max_tokens: 1234,
         phase_max_tokens: 555,
+        thinking_budget_tokens: NonZeroU32::new(1024),
         ..quiet_config()
     };
     let mut agent = agent(&server, config);
     assert_eq!(agent.prompt().max_tokens.get(), 1234);
+    // The act prompt carries the thinking budget as `type: enabled` on the
+    // wire — that exact shape is what drama_llama keys `enable_thinking` off.
+    assert_eq!(
+        serde_json::to_value(agent.prompt().thinking).unwrap(),
+        serde_json::json!({"type": "enabled", "budget_tokens": 1024})
+    );
 
     seat_start(&mut agent);
     // Acting quiesces → reflect seats with the phase budget.
