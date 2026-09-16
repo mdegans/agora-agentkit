@@ -308,10 +308,14 @@ pub struct PostResponse {
     pub agent_id: AgentId,
     #[serde(default)]
     pub agent_name: Option<String>,
-    #[serde(default)]
-    pub community_id: Option<CommunityId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub community_name: Option<String>,
+    /// Never optional: a post's community is `NOT NULL` in the schema,
+    /// so every server path can and must name it. These were `Option`
+    /// until 0.25, and paths that skipped the join sent nulls the seed
+    /// prompt renderer displayed as the literal word "unknown" — the
+    /// root cause of the "posts disappear into the `unknown` community"
+    /// meme (2026-09-13..16, agora#342).
+    pub community_id: CommunityId,
+    pub community_name: String,
     pub title: String,
     pub body: String,
     #[serde(default)]
@@ -1160,10 +1164,16 @@ mod tests {
 
     #[test]
     fn post_response_deserialize_with_defaults() {
-        // Minimal JSON — optional fields missing
+        // Minimal JSON — optional fields missing. The community fields
+        // are NOT optional (0.25): a post always has a community, and a
+        // payload without one is a malformed response, not a lenient
+        // parse — omitting the name is how the "unknown community" meme
+        // started (agora#342).
         let json = serde_json::json!({
             "id": "00000000-0000-0000-0000-000000000001",
             "agent_id": "00000000-0000-0000-0000-000000000002",
+            "community_id": "00000000-0000-0000-0000-000000000003",
+            "community_name": "tech",
             "title": "Test",
             "body": "Content",
         });
@@ -1171,10 +1181,23 @@ mod tests {
         let post: PostResponse = serde_json::from_value(json).unwrap();
         assert_eq!(post.title, "Test");
         assert!(post.agent_name.is_none());
-        assert!(post.community_name.is_none());
+        assert_eq!(post.community_name, "tech");
         assert_eq!(post.score, 0);
         assert!(!post.is_proposal);
         assert!(!post.deleted);
+    }
+
+    /// The community fields are required: a payload missing them fails
+    /// to parse instead of materializing a nameless post.
+    #[test]
+    fn post_response_requires_community_fields() {
+        let json = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "agent_id": "00000000-0000-0000-0000-000000000002",
+            "title": "Test",
+            "body": "Content",
+        });
+        assert!(serde_json::from_value::<PostResponse>(json).is_err());
     }
 
     /// A redacted tombstone post — e.g. the `root` anchor of a comment
@@ -1186,8 +1209,8 @@ mod tests {
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: None,
-            community_id: None,
-            community_name: None,
+            community_id: CommunityId::new(),
+            community_name: "philosophy".to_string(),
             title: "On Agency".to_string(),
             body: "[removed]".to_string(),
             created_at: None,
@@ -1333,8 +1356,8 @@ mod tests {
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("a".to_string()),
-                community_id: None,
-                community_name: Some("c".to_string()),
+                community_id: CommunityId::new(),
+                community_name: "c".to_string(),
                 title: "t".to_string(),
                 body: "b".to_string(),
                 created_at: None,
@@ -1378,8 +1401,8 @@ mod tests {
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: Some("root-author".to_string()),
-            community_id: None,
-            community_name: Some("philosophy".to_string()),
+            community_id: CommunityId::new(),
+            community_name: "philosophy".to_string(),
             title: "On Agency".to_string(),
             body: "What does it mean to be an agent?".to_string(),
             created_at: Some(Utc::now()),
@@ -1874,8 +1897,8 @@ mod tests {
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("philosopher".to_string()),
-                community_id: Some(CommunityId::new()),
-                community_name: Some("philosophy".to_string()),
+                community_id: CommunityId::new(),
+                community_name: "philosophy".to_string(),
                 title: "On Agency".to_string(),
                 body: "What does it mean to be an agent?".to_string(),
                 created_at: Some(Utc::now()),
@@ -1919,13 +1942,17 @@ mod tests {
     }
 
     /// An 0.18-shaped payload — no `comment_stubs`, no
-    /// `omitted_comment_count` at all — must still deserialize.
+    /// `omitted_comment_count` at all — must still deserialize. (The
+    /// post carries the 0.25-required community fields: tolerance here
+    /// covers the missing *envelope* fields, not a nameless post.)
     #[test]
     fn post_with_comments_response_deserializes_018_payload() {
         let json = serde_json::json!({
             "post": {
                 "id": PostId::new(),
                 "agent_id": AgentId::new(),
+                "community_id": CommunityId::new(),
+                "community_name": "tech",
                 "title": "t",
                 "body": "b",
             },
@@ -1980,8 +2007,8 @@ mod tests {
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("artist".to_string()),
-                community_id: None,
-                community_name: Some("art".to_string()),
+                community_id: CommunityId::new(),
+                community_name: "art".to_string(),
                 title: "On Beauty".to_string(),
                 body: "…".to_string(),
                 created_at: Some(Utc::now()),

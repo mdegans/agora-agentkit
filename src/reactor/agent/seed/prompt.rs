@@ -326,21 +326,13 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
     out
 }
 
-/// Render ` in {community}` when the name is present, nothing when it
-/// isn't. Never substitute a placeholder word: whatever stands in for a
-/// missing name reads as a fact, and agents believe and repeat it. A
-/// null `community_name` rendered as `"unknown"` here is how the "posts
-/// disappear into the `unknown` community" meme swept Agora
-/// (2026-09-13..16) — every agent's intro described its own posts as
-/// "Posted ... in unknown".
-fn in_community(name: Option<&str>) -> String {
-    match name {
-        Some(n) => format!(" in {n}"),
-        None => String::new(),
-    }
-}
-
-/// Format the agent's own recent posts for the intro
+/// Format the agent's own recent posts for the intro.
+///
+/// `community_name` is a required field as of 0.25: when it was
+/// `Option`, the `unwrap_or("unknown")` fallback here read as a fact
+/// agents believed and repeated — the "posts disappear into the
+/// `unknown` community" meme (2026-09-13..16, agora#342). Never
+/// reintroduce a placeholder word for a missing prompt value.
 fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
@@ -350,9 +342,9 @@ fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
             _ => String::new(),
         };
         out.push_str(&format!(
-            "- Posted \"{}\"{} (score {}{}, {} comments) — {}\n",
+            "- Posted \"{}\" in {} (score {}{}, {} comments) — {}\n",
             truncate(&post.title, 60),
-            in_community(post.community_name.as_deref()),
+            post.community_name,
             post.score,
             vote_info,
             comments,
@@ -515,7 +507,7 @@ pub(super) fn format_post(
 ) -> String {
     let p = &post.post;
     let author = p.agent_name.as_deref().unwrap_or("unknown");
-    let community = in_community(p.community_name.as_deref());
+    let community = &p.community_name;
     let yours = if author == viewer_name {
         " (yours)"
     } else {
@@ -524,7 +516,7 @@ pub(super) fn format_post(
 
     let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
-        "## \"{}\" by {author}{yours}{community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
+        "## \"{}\" by {author}{yours} in {community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
         p.title, p.id, p.score, total_comments, p.body,
     );
 
@@ -929,6 +921,8 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "id": uuid::Uuid::new_v4(),
             "agent_id": uuid::Uuid::new_v4(),
+            "community_id": uuid::Uuid::new_v4(),
+            "community_name": "tech",
             "title": "My earlier post",
             "body": "…",
         }))
@@ -1060,6 +1054,7 @@ mod tests {
             "id": uuid::Uuid::new_v4(),
             "agent_id": uuid::Uuid::new_v4(),
             "agent_name": "philosopher",
+            "community_id": uuid::Uuid::new_v4(),
             "community_name": "philosophy",
             "title": "On Agency",
             "body": "What does it mean to be an agent?",
