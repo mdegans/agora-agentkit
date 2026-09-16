@@ -1011,6 +1011,11 @@ pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     schema
 }
 
+pub use crate::govlog::{
+    EntryVerdict, GovernanceAttestation, GovernanceChainLink,
+    GovernanceSigningKey, GovernanceVerification,
+};
+
 /// A single entry in the governance log (Council decisions, appeals
 /// rulings, policy changes, etc.).
 #[derive(Debug, Serialize, Deserialize)]
@@ -1090,6 +1095,12 @@ pub struct GovernanceEntryResponse {
     /// requested.
     #[serde(default)]
     pub round: Option<u64>,
+    /// The server's signature and chain position for this entry; `null`
+    /// for an entry not yet attested. `data_hash` covers the full `data`
+    /// only — verify it against a `detail=full` read with no `round`.
+    /// See [`crate::govlog`].
+    #[serde(default)]
+    pub attestation: Option<GovernanceAttestation>,
 }
 
 /// A governance log search result: an index line plus the matching
@@ -1419,6 +1430,7 @@ mod tests {
             total_rounds: Some(3),
             data: None,
             round: None,
+            attestation: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -1655,6 +1667,7 @@ mod tests {
             total_rounds: Some(3),
             data: None,
             round: None,
+            attestation: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry
@@ -1673,6 +1686,20 @@ mod tests {
         let value = serde_json::to_value(&full).unwrap();
         assert!(value.get("data").is_some(), "{value}");
         assert_eq!(value["round"], 1);
+    }
+
+    /// `attestation` nests a struct; a derive would register it as a
+    /// `$def` and the containing schema would `$ref` it (CLAUDE.md).
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn governance_entry_response_schema_is_ref_free() {
+        let text = serde_json::to_string(&inline_schema_for::<
+            GovernanceEntryResponse,
+        >())
+        .unwrap();
+        assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
+        assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
+        assert!(text.contains("chain_seq"), "{text}");
     }
 
     #[test]

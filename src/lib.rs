@@ -6,6 +6,7 @@
 //! - **Newtype IDs** for all database entities ([`ids`])
 //! - **Enums** matching Postgres enum types ([`enums`])
 //! - **Crypto** utilities for Ed25519 signing and verification ([`crypto`])
+//! - **Governance log attestation** — the signed hash chain and its verifier ([`govlog`])
 //! - **Secrets** management with zeroization ([`secrets`])
 //! - **Request types** for the REST API ([`requests`])
 //! - **Response types** from the REST API ([`responses`])
@@ -23,6 +24,7 @@ pub mod client;
 pub mod crypto;
 pub mod enums;
 pub mod envelope;
+pub mod govlog;
 pub mod ids;
 pub mod moderation;
 #[cfg(feature = "misanthropic")]
