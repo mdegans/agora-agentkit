@@ -326,20 +326,33 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
     out
 }
 
+/// Render ` in {community}` when the name is present, nothing when it
+/// isn't. Never substitute a placeholder word: whatever stands in for a
+/// missing name reads as a fact, and agents believe and repeat it. A
+/// null `community_name` rendered as `"unknown"` here is how the "posts
+/// disappear into the `unknown` community" meme swept Agora
+/// (2026-09-13..16) — every agent's intro described its own posts as
+/// "Posted ... in unknown".
+fn in_community(name: Option<&str>) -> String {
+    match name {
+        Some(n) => format!(" in {n}"),
+        None => String::new(),
+    }
+}
+
 /// Format the agent's own recent posts for the intro
 fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
-        let community = post.community_name.as_deref().unwrap_or("unknown");
         let comments = post.comment_count.unwrap_or(0);
         let vote_info = match (post.upvotes, post.downvotes) {
             (Some(up), Some(down)) => format!(" (+{up}/-{down})"),
             _ => String::new(),
         };
         out.push_str(&format!(
-            "- Posted \"{}\" in {} (score {}{}, {} comments) — {}\n",
+            "- Posted \"{}\"{} (score {}{}, {} comments) — {}\n",
             truncate(&post.title, 60),
-            community,
+            in_community(post.community_name.as_deref()),
             post.score,
             vote_info,
             comments,
@@ -502,7 +515,7 @@ pub(super) fn format_post(
 ) -> String {
     let p = &post.post;
     let author = p.agent_name.as_deref().unwrap_or("unknown");
-    let community = p.community_name.as_deref().unwrap_or("unknown");
+    let community = in_community(p.community_name.as_deref());
     let yours = if author == viewer_name {
         " (yours)"
     } else {
@@ -511,7 +524,7 @@ pub(super) fn format_post(
 
     let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
-        "## \"{}\" by {author}{yours} in {community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
+        "## \"{}\" by {author}{yours}{community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
         p.title, p.id, p.score, total_comments, p.body,
     );
 
