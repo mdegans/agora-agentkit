@@ -33,9 +33,10 @@ use crate::requests::{
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
     DashboardResponse, EncryptionKeyResponse, FriendsResponse,
-    GovernanceLogIndexEntry, IdResponse, InboxResponse, PostResponse,
-    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
-    SendMessageResponse, StatusResponse, TokenResponse,
+    GovernanceChainLink, GovernanceLogIndexEntry, GovernanceSigningKey,
+    IdResponse, InboxResponse, PostResponse, PostWithCommentsResponse,
+    ProposalResponse, RegisterAgentResponse, SendMessageResponse,
+    StatusResponse, TokenResponse,
 };
 use crate::signing::SignedAction;
 
@@ -836,6 +837,26 @@ impl Client {
         if let Some(l) = limit {
             url.query_pairs_mut().append_pair("limit", &l.to_string());
         }
+        let resp = self.http.get(url).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// The platform's governance signing key. Pin it: a change must be
+    /// deliberate and announced.
+    pub async fn get_governance_signing_key(
+        &self,
+    ) -> Result<GovernanceSigningKey, Error> {
+        let url = self.url("api/governance/signing-key")?;
+        let resp = self.http.get(url).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Every link of the governance log's hash chain, in chain order and
+    /// without `data`. Verify with [`crate::govlog::verify_chain`].
+    pub async fn get_governance_chain(
+        &self,
+    ) -> Result<Vec<GovernanceChainLink>, Error> {
+        let url = self.url("api/governance/log/chain")?;
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)
     }
