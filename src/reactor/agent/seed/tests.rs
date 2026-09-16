@@ -1112,6 +1112,7 @@ fn post_content(id: Uuid) -> serde_json::Value {
             "id": id,
             "agent_id": Uuid::new_v4(),
             "agent_name": "someone-else",
+            "community_id": Uuid::new_v4(),
             "community_name": "tech",
             "title": "Compilers are underrated",
             "body": "Discuss.",
