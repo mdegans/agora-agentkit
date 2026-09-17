@@ -785,6 +785,8 @@ pub enum RotationError {
         "a compromise rotation to a key outside the trust anchor authenticates nothing"
     )]
     UnanchoredNewKey,
+    #[error("new_key has already held this chain; a key is never brought back")]
+    ReusedKey,
 }
 
 /// The `data` of a `key_rotation` entry.
@@ -1340,6 +1342,10 @@ struct KeyWalk {
     /// Oldest first; the last entry is the active key
     history: Vec<(GovernanceKeyRecord, VerifyingKey)>,
     unanchored: Vec<PublicKeyHex>,
+    /// Every key that has held the chain, voided ones included. The anchor
+    /// lists retired and compromised keys too, so without this a thief
+    /// could declare a "compromise" that rotates back to the key they stole.
+    seen: HashSet<PublicKeyHex>,
     /// `chain_seq`s inside a compromise window
     repudiated: HashSet<u64>,
 }
@@ -1364,6 +1370,7 @@ impl KeyWalk {
             } else {
                 vec![public_key]
             },
+            seen: HashSet::from([public_key]),
             repudiated: HashSet::new(),
         }
     }
@@ -1434,6 +1441,9 @@ impl KeyWalk {
             .new_key
             .to_verifying_key()
             .map_err(|_| RotationError::BadNewKey)?;
+        if self.seen.contains(&rotation.new_key) {
+            return Err(RotationError::ReusedKey);
+        }
         match rotation.reason {
             RotationReason::Routine => {
                 if rotation.old_key != self.in_force(seq).0 {
@@ -1441,6 +1451,7 @@ impl KeyWalk {
                 }
                 self.close(seq, KeyStatus::Retired, &link.id);
                 self.open(rotation.new_key, new_key, seq + 1, &link.id);
+                self.seen.insert(rotation.new_key);
                 if !anchor.contains(&rotation.new_key) {
                     self.unanchored.push(rotation.new_key);
                 }
@@ -1471,6 +1482,7 @@ impl KeyWalk {
                 self.history.retain(|(r, _)| r.from_seq <= trusted_seq);
                 self.close(trusted_seq, KeyStatus::Compromised, &link.id);
                 self.open(rotation.new_key, new_key, seq, &link.id);
+                self.seen.insert(rotation.new_key);
                 self.repudiated.extend(trusted_seq + 1..seq);
                 Ok(())
             }
@@ -1501,8 +1513,11 @@ pub fn verify_chain(
     links.sort_by_key(|l| l.attestation.chain_seq);
 
     let mut seq_of: HashMap<&str, u64> = HashMap::new();
+    let mut duplicates: HashSet<&str> = HashSet::new();
     for (i, link) in links.iter().enumerate() {
-        seq_of.entry(link.id.as_str()).or_insert(i as u64 + 1);
+        if seq_of.insert(link.id.as_str(), i as u64 + 1).is_some() {
+            duplicates.insert(link.id.as_str());
+        }
     }
 
     let mut walk = KeyWalk::new(genesis_key, anchor);
@@ -1519,6 +1534,9 @@ pub fn verify_chain(
 
         if let Some(problem) = prefix_problem(link) {
             problems.push(problem);
+        }
+        if duplicates.contains(link.id.as_str()) {
+            problems.push(format!("{} appears more than once", link.id));
         }
 
         // The two entry types the verifier has to read. `data` is hashed
@@ -1580,12 +1598,29 @@ pub fn verify_chain(
             .filter(|r| {
                 r.reason == RotationReason::Compromise
                     && anchor.contains(&r.new_key)
+                    && !walk.seen.contains(&r.new_key)
             })
             .and_then(|r| r.new_key.to_verifying_key().ok());
         let (key_hex, key) = match declared_key {
             Some(k) => (PublicKeyHex::from(&k), k),
             None => walk.in_force(expected_seq),
         };
+        // Say why a declaration was not taken at its word; the bad
+        // signature that follows is the consequence, not the cause.
+        if declared_key.is_none()
+            && let Some(r) = rotation
+                .as_ref()
+                .filter(|r| r.reason == RotationReason::Compromise)
+        {
+            problems.push(
+                if walk.seen.contains(&r.new_key) {
+                    RotationError::ReusedKey
+                } else {
+                    RotationError::UnanchoredNewKey
+                }
+                .to_string(),
+            );
+        }
 
         let (hash_ok, signature_valid) = match verify_link(link, &key) {
             Ok(()) => (true, true),
@@ -1618,13 +1653,17 @@ pub fn verify_chain(
         }
         let out_of_order = prev.is_some_and(|p| link.created_at < p.created_at);
 
-        if let Some(rotation) = &rotation
+        // Only an entry that is itself authentic moves the key or amends
+        // anything: a forged one already fails the chain, and must not
+        // also get to describe it.
+        let authentic = signature_valid && link_valid;
+        if let Some(rotation) = rotation.as_ref().filter(|_| authentic)
             && let Err(e) =
                 walk.apply(rotation, link, expected_seq, &links, anchor)
         {
             problems.push(e.to_string());
         }
-        if let Some(amendment) = amendment {
+        if let Some(amendment) = amendment.filter(|_| authentic) {
             match amendment_target(&amendment, expected_seq, &seq_of, &links) {
                 Ok(target) => amendments.push((
                     expected_seq,
@@ -2780,6 +2819,143 @@ mod tests {
         );
         assert_eq!(v.keys[0].retired_by.as_ref(), Some(&rotation_id));
         assert_eq!(v.keys[1].from_seq, 4, "the declaration is its own first");
+    }
+
+    #[test]
+    fn a_stolen_key_cannot_be_rotated_back_in() {
+        // K1 is compromised and replaced by K2. Both are published, so both
+        // are in every anchor. The thief, still holding K1, declares a
+        // "compromise" of K2 naming K1 as the new key.
+        let (k1, k1_pk) = generate_keypair();
+        let (k2, k2_pk) = generate_keypair();
+        let anchor = anchored(&k1_pk).with((&k2_pk).into());
+        let mut c = Chain::new();
+        c.decision(&k1); // 1
+        let real = KeyRotation::compromise(
+            (&k1_pk).into(),
+            &k2,
+            TrustedHead {
+                id: gov(1),
+                chain_seq: 1,
+                entry_hash: c.hash_at(1),
+            },
+            c.prev_hash(),
+            at(25),
+            "signing key exfiltrated",
+        );
+        c.rotate(&k2, &real); // 2
+        c.decision(&k2); // 3
+        let honest = verify_chain(&c.links, &k1_pk, &anchor);
+        assert!(honest.ok, "{honest:#?}");
+
+        let hijack = KeyRotation::compromise(
+            (&k2_pk).into(),
+            &k1,
+            TrustedHead {
+                id: gov(2),
+                chain_seq: 3,
+                entry_hash: c.hash_at(3),
+            },
+            c.prev_hash(),
+            at(45),
+            "the Steward's key is the compromised one, trust me",
+        );
+        c.rotate(&k1, &hijack); // 4 — signed by the stolen key
+        c.decision(&k1); // 5
+
+        let v = verify_chain(&c.links, &k1_pk, &anchor);
+        assert!(!v.ok);
+        assert_eq!(v.public_key, (&k2_pk).into(), "the chain stays with K2");
+        assert!(!v.entries[3].signature_valid, "{:#?}", v.entries[3]);
+        assert!(!v.entries[4].signature_valid, "K1 signs nothing again");
+        assert_eq!(v.keys.len(), 2);
+        assert_eq!(v.keys[1].status, KeyStatus::Active);
+    }
+
+    #[test]
+    fn a_routine_rotation_cannot_reuse_a_key_either() {
+        let (k1, k1_pk) = generate_keypair();
+        let (k2, k2_pk) = generate_keypair();
+        let anchor = anchored(&k1_pk).with((&k2_pk).into());
+        let mut c = Chain::new();
+        c.decision(&k1);
+        let out = KeyRotation::routine(
+            (&k1_pk).into(),
+            &k2,
+            c.prev_hash(),
+            at(15),
+            "",
+        );
+        c.rotate(&k1, &out);
+        let back = KeyRotation::routine(
+            (&k2_pk).into(),
+            &k1,
+            c.prev_hash(),
+            at(25),
+            "",
+        );
+        c.rotate(&k2, &back);
+        let v = verify_chain(&c.links, &k1_pk, &anchor);
+        assert!(!v.ok);
+        assert!(
+            v.entries[2]
+                .problem
+                .as_deref()
+                .unwrap()
+                .contains("never brought back"),
+            "{:#?}",
+            v.entries[2]
+        );
+        assert_eq!(v.public_key, (&k2_pk).into());
+    }
+
+    #[test]
+    fn a_forged_entry_has_no_effects() {
+        let (steward, steward_pk) = generate_keypair();
+        let (forger, _) = generate_keypair();
+        let anchor = anchored(&steward_pk);
+        let mut c = Chain::new();
+        let target = c.decision(&steward); // 1
+        let fake = Amendment::new(
+            target,
+            c.hash_at(1),
+            AmendmentKind::Overruled,
+            "none",
+            "overruled, says nobody with the key",
+        )
+        .unwrap();
+        c.amend(&forger, &fake); // 2 — not signed by the key in force
+        let grab = KeyRotation::routine(
+            (&steward_pk).into(),
+            &forger,
+            c.prev_hash(),
+            at(35),
+            "",
+        );
+        c.rotate(&forger, &grab); // 3 — likewise
+
+        let v = verify_chain(&c.links, &steward_pk, &anchor);
+        assert!(!v.ok);
+        assert!(v.entries[0].amended_by.is_empty(), "{:#?}", v.entries[0]);
+        assert_eq!(v.public_key, (&steward_pk).into());
+        assert_eq!(v.keys.len(), 1);
+        assert!(v.unanchored_keys.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_id_is_a_problem() {
+        let (key, pk) = generate_keypair();
+        let mut c = Chain::new();
+        c.decision(&key);
+        c.gov = 0;
+        c.decision(&key); // GOV-2026-0001 again
+        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        assert!(!v.ok);
+        assert!(v.entries.iter().all(|e| {
+            e.problem
+                .as_deref()
+                .is_some_and(|p| p.contains("more than once"))
+        }));
     }
 
     #[test]
