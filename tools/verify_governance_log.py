@@ -435,7 +435,9 @@ def parse_link(raw):
     if not isinstance(attestation, dict):
         raise InputError("%s: no attestation" % where)
     seq = attestation.get("chain_seq")
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 1:
+    # Unsigned on the wire; 0 is a position that cannot be right rather
+    # than input this verifier refuses to read.
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
         raise InputError("%s: chain_seq is not a position" % where)
     prev = attestation.get("prev_hash")
     if prev is not None:
