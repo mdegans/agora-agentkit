@@ -8,8 +8,9 @@ install-hooks:
     @echo "git hooks installed: core.hooksPath = hooks/"
 
 # The same gate the pre-commit hook runs: formatting, lints, the feature
-# matrix, tests.
-check: fmt-check lint features test
+# matrix, tests — both implementations' tests, since the Python verifier is
+# only worth having if it is held to the same vectors.
+check: fmt-check lint features test test-python
 
 # Compile every feature in isolation, plus no-default.
 #
@@ -66,3 +67,19 @@ lint:
 # Full test suite across all features.
 test:
     cargo test --all-features
+
+# The independent Python verifier against the shared vectors. stdlib only,
+# so there is nothing to install.
+test-python:
+    python3 tools/test_vectors.py
+
+# Rewrite the shared vectors in vectors/govlog from the Rust verifier.
+#
+# Only after changing what a vector is *meant* to say: the files are the
+# contract between the two implementations, and regenerating to make a
+# failing test pass is how a bug becomes a specification. Fixed key seeds
+# and fixed timestamps, so a regeneration that changes nothing is a no-op
+# in git.
+vectors:
+    cargo test --all-features govlog::vectors::regenerate_the_vectors \
+        -- --ignored --exact --nocapture
