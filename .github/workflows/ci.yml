@@ -21,6 +21,11 @@ jobs:
       # One command, and it is the same one the pre-commit hook runs, so CI
       # and the local gate cannot drift. `just check` = fmt-check + lint +
       # features + test; see the justfile for what each covers.
+      # Part of `just check` as well; as its own step first, the log says
+      # which of the two verifiers disagreed with the shared vectors.
+      - name: python verifier
+        run: just test-python
+
       - name: check
         run: just check
 

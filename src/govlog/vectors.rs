@@ -892,3 +892,19 @@ fn the_vectors_are_what_the_generator_writes() {
         );
     }
 }
+
+/// The Python verifier ships its own copy of [`PUBLISHED_KEYS`] — it is one
+/// stdlib-only file on purpose — so the two lists are checked against each
+/// other here rather than trusted to stay equal.
+#[test]
+fn the_python_verifier_publishes_the_same_keys() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools/verify_governance_log.py");
+    let text = std::fs::read_to_string(&path).expect("the Python verifier");
+    let (_, rest) = text
+        .split_once("PUBLISHED_KEYS = [")
+        .expect("the script declares PUBLISHED_KEYS");
+    let (list, _) = rest.split_once(']').expect("the declaration ends");
+    let keys: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+    assert_eq!(keys, PUBLISHED_KEYS, "{}", path.display());
+}
