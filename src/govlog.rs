@@ -894,6 +894,9 @@ impl KeyRotation {
     ///
     /// The entry is signed by the **new** key — the old one proves nothing
     /// any more — so a verifier accepts it only from its [`KeyAnchor`].
+    /// `last_trusted` must name an entry from before any earlier
+    /// compromise window; a reattestation inside one restores the entry,
+    /// not the ability to anchor trust there.
     pub fn compromise(
         old_key: PublicKeyHex,
         new_signing_key: &SigningKey,

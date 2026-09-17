@@ -528,8 +528,9 @@ def parse_amendment(data):
 #   * A compromise declaration is signed by the NEW key — the old one
 #     proves nothing any more — so it is authentic only if the verifier's
 #     out-of-band anchor already vouches for that new key. It names the
-#     last entry the old key is trusted for; everything the old key signed
-#     after that, rotations included, is repudiated and void.
+#     last entry the old key is trusted for — one from before any earlier
+#     compromise window — and everything the old key signed after that,
+#     rotations included, is repudiated and void.
 #   * Either way the new key must prove it exists: `proof` is the new key's
 #     own signature over the rotation statement at this exact chain
 #     position, so a proof cannot be lifted to another one.
@@ -711,6 +712,10 @@ class KeyWalk:
             and links[trusted - 1]["attestation"]["entry_hash"] == head["entry_hash"]
         ):
             return "last_trusted does not name an earlier entry of this chain"
+        # Trust cannot be anchored inside a window nobody trusts: a
+        # reattestation restores the entry, not the ability to name it here.
+        if trusted in self.repudiated:
+            return "last_trusted names an entry an earlier compromise repudiated"
         # The key in force at the last trusted entry: any rotation after it
         # was the thief's, and is void.
         if rotation["old_key"] != self.in_force(trusted):

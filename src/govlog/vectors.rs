@@ -772,6 +772,49 @@ fn cases() -> Vec<Case> {
     ));
 
     let mut c = Chain::new();
+    c.decision(&steward); // 1 — the last entry the first declaration trusts
+    c.decision(&steward); // 2 — inside the first window
+    let first = KeyRotation::compromise(
+        (&steward_pk).into(),
+        &successor,
+        TrustedHead {
+            id: gov(1),
+            chain_seq: 1,
+            entry_hash: c.hash_at(1),
+        },
+        c.prev_hash(),
+        at(35),
+        "signing key exfiltrated",
+    );
+    c.rotate(&successor, &first);
+    let second = KeyRotation::compromise(
+        (&steward_pk).into(),
+        &recovery,
+        TrustedHead {
+            id: gov(2),
+            chain_seq: 2,
+            entry_hash: c.hash_at(2),
+        },
+        c.prev_hash(),
+        at(45),
+        "and trust the old key one entry further, actually",
+    );
+    c.rotate(&recovery, &second);
+    out.push(Case::new(
+        "rotation_v1_second_compromise_inside_the_window",
+        "A second compromise declaration naming, as its last trusted entry, \
+         one the first declaration repudiated. Trust cannot be anchored \
+         inside a window nobody trusts.",
+        &steward_pk,
+        vec![
+            PublicKeyHex::from(&steward_pk),
+            PublicKeyHex::from(&successor_pk),
+            PublicKeyHex::from(&recovery_pk),
+        ],
+        c.links,
+    ));
+
+    let mut c = Chain::new();
     c.decision(&steward);
     let real = KeyRotation::compromise(
         (&steward_pk).into(),
