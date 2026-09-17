@@ -23,3 +23,21 @@ jobs:
       # features + test; see the justfile for what each covers.
       - name: check
         run: just check
+
+  # Separate job on purpose: this one talks to the live platform, so a
+  # failure here means either the network blipped or the governance signing
+  # key moved without agentkit being released first. Neither is a code
+  # failure in `check`.
+  published-keys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@just
+
+      - name: published key parity
+        run: just check-published-keys

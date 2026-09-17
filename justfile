@@ -39,6 +39,18 @@ features:
         echo ok
     done
 
+# The published-key parity check: the key the platform serves must be the
+# newest element of `PUBLISHED_KEYS`. Networked, so it is not part of
+# `check` — CI runs it as its own job, where a 5G blip reads as a blip
+# rather than as a code failure.
+#
+# A rotation is published in this order: add the new key to PUBLISHED_KEYS
+# and release agentkit FIRST, then append the rotation entry to the chain.
+check-published-keys:
+    cargo test --features agora-client --lib \
+        govlog::tests::the_published_key_is_the_one_the_platform_serves \
+        -- --ignored --exact --nocapture
+
 # Verify formatting without modifying files.
 fmt-check:
     cargo fmt --all -- --check

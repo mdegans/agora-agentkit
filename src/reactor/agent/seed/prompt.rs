@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use misanthropic::prompt::{Prompt, message::Role};
 
+use crate::enums::Standing;
 use crate::ids::CommentId;
 #[cfg(test)]
 use crate::ids::PostId;
@@ -640,9 +641,13 @@ pub(super) fn format_governance_index(
     );
     for e in entries {
         out.push_str(&format!(
-            "{} [{}] {} — {}",
+            "{} [{}]{} {} — {}",
             e.id,
             e.entry_type,
+            match e.standing {
+                Standing::InForce => String::new(),
+                other => format!(" [{other}]"),
+            },
             e.created_at.format("%Y-%m-%d"),
             truncate(&e.title, 120),
         ));
@@ -678,6 +683,26 @@ pub(super) fn format_governance_entry(
         entry.created_at.format("%Y-%m-%d"),
         entry.title,
     );
+    // Before anything else a reader might quote: an amended entry read as
+    // if it were in force is a miscitation.
+    if entry.standing != Standing::InForce {
+        out.push_str(&format!(
+            "**Standing: {}** — do not cite this as it stands.\n",
+            entry.standing
+        ));
+    }
+    for a in &entry.amendments {
+        out.push_str(&format!(
+            "**Amended by {} ({})**: {}{}\n",
+            a.id,
+            a.kind,
+            a.note,
+            match &a.authority {
+                Some(authority) => format!(" (authority: {authority})"),
+                None => String::new(),
+            },
+        ));
+    }
     match entry.tags.as_deref() {
         Some(tags) if !tags.is_empty() => {
             out.push_str(&format!("Tags: {}\n", tags.join(", ")));
@@ -809,6 +834,60 @@ pub(super) fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An entry that is no longer in force says so before anything an
+    /// agent might quote out of it.
+    #[test]
+    fn an_amended_entry_renders_its_standing_and_notes() {
+        use crate::enums::AmendmentKind;
+        use crate::responses::AmendmentNotice;
+        use chrono::Utc;
+
+        let entry = GovernanceEntryResponse {
+            id: "APP-2026-0001".parse().unwrap(),
+            entry_type:
+                crate::enums::GovernanceLogEntryType::AppealsCourtDecision,
+            title: "Appeal denied".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("Denied on the merits.".into()),
+            total_rounds: None,
+            data: None,
+            round: None,
+            attestation: None,
+            standing: Standing::NonPrecedential,
+            amendments: vec![AmendmentNotice {
+                id: "AMD-2026-0001".parse().unwrap(),
+                kind: AmendmentKind::NonPrecedential,
+                authority: Some("GOV-2026-0005".parse().unwrap()),
+                basis: "§1 (Red Team Cases Recharacterized)".into(),
+                note: "diagnostic finding — not citable as moderation \
+                       precedent"
+                    .into(),
+                rationale: None,
+                created_at: Utc::now(),
+            }],
+        };
+
+        let out = format_governance_entry(&entry);
+        assert!(out.contains("Standing: non_precedential"), "{out}");
+        assert!(out.contains("do not cite this"), "{out}");
+        assert!(out.contains("Amended by AMD-2026-0001"), "{out}");
+        assert!(out.contains("not citable as moderation precedent"), "{out}");
+        assert!(out.contains("authority: GOV-2026-0005"), "{out}");
+
+        let index = vec![GovernanceLogIndexEntry {
+            id: "APP-2026-0001".parse().unwrap(),
+            entry_type:
+                crate::enums::GovernanceLogEntryType::AppealsCourtDecision,
+            title: "Appeal denied".into(),
+            created_at: Utc::now(),
+            tags: None,
+            standing: Standing::Overruled,
+        }];
+        let out = format_governance_index(&index);
+        assert!(out.contains("[overruled]"), "{out}");
+    }
 
     #[test]
     fn banned_patterns_are_repetitive() {

@@ -252,6 +252,89 @@ pub enum GovernanceLogEntryType {
     EmergencyAction,
     PolicyChange,
     StewardVeto,
+    // An `AMD-` entry amending an earlier one; its `data` is a
+    // `govlog::Amendment`. (Plain comments, not doc comments: a variant doc
+    // turns the JSON Schema from a plain `enum` list into `oneOf`.)
+    Amendment,
+    // A `KEY-` entry rotating the governance signing key; its `data` is a
+    // `govlog::KeyRotation`.
+    KeyRotation,
+}
+
+/// What an amendment does to the entry it names
+/// (`governance_amendment_kind_enum`). See [`crate::govlog::Amendment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(
+        type_name = "governance_amendment_kind_enum",
+        rename_all = "snake_case"
+    )
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AmendmentKind {
+    // Precedential force removed; the decision itself stands.
+    NonPrecedential,
+    // No longer good law, by a later decision.
+    Overruled,
+    // Replaced by a later decision on the same subject.
+    Superseded,
+    // Undoes an earlier non_precedential / overruled / superseded.
+    Reinstated,
+    // Clerical correction noted; the target's data is untouched.
+    Correction,
+    // Content lawfully removed; see `Amendment::redaction`.
+    Redaction,
+    // The Steward vouches, under the current key, for an entry signed
+    // inside a compromise window.
+    Reattested,
+}
+
+/// The precedential force of a governance entry (`governance_standing_enum`),
+/// derived from the amendments naming it — never stored in the envelope.
+///
+/// See [`crate::govlog::standing`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "governance_standing_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Standing {
+    #[default]
+    InForce,
+    NonPrecedential,
+    Overruled,
+    Superseded,
+}
+
+/// Where a governance signing key sits in the rotation history
+/// (`governance_key_status_enum`). See [`crate::govlog::GovernanceKeyRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "governance_key_status_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyStatus {
+    // Signs entries now.
+    Active,
+    // Replaced by a routine rotation; the entries it signed stand.
+    Retired,
+    // Replaced by a compromise declaration; everything it signed after
+    // the last trusted entry is repudiated.
+    Compromised,
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +685,9 @@ impl_display_fromstr!(AppealOutcome);
 impl_display_fromstr!(ModelRole);
 impl_display_fromstr!(ProposalCategory);
 impl_display_fromstr!(GovernanceLogEntryType);
+impl_display_fromstr!(AmendmentKind);
+impl_display_fromstr!(Standing);
+impl_display_fromstr!(KeyStatus);
 impl_display_fromstr!(MeetingStatus);
 impl_display_fromstr!(AgendaItemStatus);
 impl_display_fromstr!(AgendaSourceType);
@@ -764,6 +850,33 @@ mod tests {
         }
     }
 
+    /// The labels the Postgres enums carry, pinned: a rename here is a
+    /// migration there.
+    #[test]
+    fn governance_amendment_and_key_wire_values() {
+        assert_eq!(GovernanceLogEntryType::Amendment.to_string(), "amendment");
+        assert_eq!(
+            GovernanceLogEntryType::KeyRotation.to_string(),
+            "key_rotation"
+        );
+        assert_eq!(
+            AmendmentKind::NonPrecedential.to_string(),
+            "non_precedential"
+        );
+        assert_eq!(AmendmentKind::Reattested.to_string(), "reattested");
+        assert_eq!(
+            "superseded".parse::<AmendmentKind>().unwrap(),
+            AmendmentKind::Superseded
+        );
+        assert_eq!(Standing::default(), Standing::InForce);
+        assert_eq!(Standing::InForce.to_string(), "in_force");
+        assert_eq!(
+            "compromised".parse::<KeyStatus>().unwrap(),
+            KeyStatus::Compromised
+        );
+        assert_eq!(KeyStatus::Retired.to_string(), "retired");
+    }
+
     // Regression: the Claude.ai MCP connector mangles parameter values whose
     // schema is a `$ref` into `$defs` (dropping UUID params to null, enum
     // params to `true`). Every enum must inline its schema so containing
@@ -780,6 +893,9 @@ mod tests {
         assert!(<SearchMode as JsonSchema>::inline_schema());
         assert!(<ProposalCategory as JsonSchema>::inline_schema());
         assert!(<GovernanceLogEntryType as JsonSchema>::inline_schema());
+        assert!(<AmendmentKind as JsonSchema>::inline_schema());
+        assert!(<Standing as JsonSchema>::inline_schema());
+        assert!(<KeyStatus as JsonSchema>::inline_schema());
         assert!(<OAuthScope as JsonSchema>::inline_schema());
         assert!(<ModerationTargetType as JsonSchema>::inline_schema());
         assert!(<ModerationTier as JsonSchema>::inline_schema());

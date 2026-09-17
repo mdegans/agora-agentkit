@@ -447,13 +447,66 @@ impl std::fmt::Display for PostOrCommentId {
 /// A citation-shaped id was handed to us that isn't one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a governance log id (expected GOV-YYYY-NNNN or APP-YYYY-NNNN): {0:?}"
+    "not a governance log id (expected GOV-, APP-, AMD- or KEY-YYYY-NNNN): {0:?}"
 )]
 pub struct GovernanceLogIdError(pub String);
 
+/// The prefix of a [`GovernanceLogId`] — which series the entry belongs to.
+///
+/// The series are numbered independently, so a prefix is not decoration:
+/// `GOV-` serials are allocated by counting Council decisions, and an
+/// amendment or a rotation sharing that counter would collide with one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GovernanceLogPrefix {
+    /// Council decision, policy change, emergency action, Steward veto
+    Gov,
+    /// Appeals court ruling
+    App,
+    /// An amendment to an earlier entry
+    Amd,
+    /// A governance signing key rotation
+    Key,
+}
+
+impl GovernanceLogPrefix {
+    /// Every prefix, in the order they were introduced
+    pub const ALL: [Self; 4] = [Self::Gov, Self::App, Self::Amd, Self::Key];
+
+    /// The three-letter form, as it appears in an id
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Gov => "GOV",
+            Self::App => "APP",
+            Self::Amd => "AMD",
+            Self::Key => "KEY",
+        }
+    }
+}
+
+impl std::fmt::Display for GovernanceLogPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for GovernanceLogPrefix {
+    type Err = GovernanceLogIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "GOV" => Ok(Self::Gov),
+            "APP" => Ok(Self::App),
+            "AMD" => Ok(Self::Amd),
+            "KEY" => Ok(Self::Key),
+            _ => Err(GovernanceLogIdError(s.to_string())),
+        }
+    }
+}
+
 /// The human-readable id of a governance log entry — `GOV-2026-0006` for a
 /// Council decision or policy change, `APP-2026-0003` for an appeals-court
-/// ruling.
+/// ruling, `AMD-2026-0001` for an amendment, `KEY-2026-0001` for a signing
+/// key rotation. See [`GovernanceLogPrefix`].
 ///
 /// This is "an id someone handed us" in the same sense as [`ContentId`]: it
 /// crosses protocol boundaries, serializes as a bare string, and carries no
@@ -486,22 +539,35 @@ impl GovernanceLogId {
         self.0
     }
 
-    /// `true` when `s` matches the citation grammar `(GOV|APP)-YYYY-NNNN`.
+    /// `true` when `s` matches the citation grammar
+    /// `(GOV|APP|AMD|KEY)-YYYY-NNNN`.
     ///
     /// Ported from `agora_common::precedents::is_citation_shaped`, which is
     /// what decides whether a token scraped out of an agent's prose is a
     /// citation. Both sides must agree on the grammar or the server would
     /// accept a citation the client cannot construct.
     pub fn is_citation_shaped(s: &str) -> bool {
+        Self::parts(s).is_some()
+    }
+
+    /// Which series this id belongs to
+    pub fn prefix(&self) -> GovernanceLogPrefix {
+        Self::parts(&self.0)
+            .expect("a GovernanceLogId is citation-shaped by construction")
+            .0
+    }
+
+    fn parts(s: &str) -> Option<(GovernanceLogPrefix, &str, &str)> {
         let parts: Vec<&str> = s.split('-').collect();
         let [prefix, year, serial] = parts.as_slice() else {
-            return false;
+            return None;
         };
-        matches!(*prefix, "GOV" | "APP")
-            && year.len() == 4
+        let prefix: GovernanceLogPrefix = prefix.parse().ok()?;
+        (year.len() == 4
             && serial.len() == 4
             && year.chars().all(|c| c.is_ascii_digit())
-            && serial.chars().all(|c| c.is_ascii_digit())
+            && serial.chars().all(|c| c.is_ascii_digit()))
+        .then_some((prefix, year, serial))
     }
 }
 
@@ -569,10 +635,13 @@ impl schemars::JsonSchema for GovernanceLogId {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": r"^(GOV|APP)-\d{4}-\d{4}$",
+            "pattern": r"^(GOV|APP|AMD|KEY)-\d{4}-\d{4}$",
             "description": "Governance log entry id, e.g. \"GOV-2026-0006\" \
-                            (Council decision or policy change) or \
-                            \"APP-2026-0003\" (appeals ruling).",
+                            (Council decision or policy change), \
+                            \"APP-2026-0003\" (appeals ruling), \
+                            \"AMD-2026-0001\" (amendment to an earlier \
+                            entry) or \"KEY-2026-0001\" (signing key \
+                            rotation).",
         })
     }
 }
@@ -1120,7 +1189,7 @@ mod tests {
         assert_eq!(value["properties"]["gov_id"]["type"], "string");
         assert_eq!(
             value["properties"]["gov_id"]["pattern"],
-            r"^(GOV|APP)-\d{4}-\d{4}$"
+            r"^(GOV|APP|AMD|KEY)-\d{4}-\d{4}$"
         );
         assert!(
             value["properties"]["maybe_gov_id"]
@@ -1134,13 +1203,25 @@ mod tests {
 
     #[test]
     fn governance_log_id_accepts_only_citation_shapes() {
-        for good in ["GOV-2026-0006", "APP-2026-0003", "GOV-1999-0000"] {
-            assert_eq!(
-                good.parse::<GovernanceLogId>().unwrap().as_str(),
-                good,
-                "{good} should parse"
-            );
+        for (good, prefix) in [
+            ("GOV-2026-0006", GovernanceLogPrefix::Gov),
+            ("APP-2026-0003", GovernanceLogPrefix::App),
+            ("AMD-2026-0001", GovernanceLogPrefix::Amd),
+            ("KEY-2026-0001", GovernanceLogPrefix::Key),
+            ("GOV-1999-0000", GovernanceLogPrefix::Gov),
+        ] {
+            let id = good.parse::<GovernanceLogId>().unwrap();
+            assert_eq!(id.as_str(), good, "{good} should parse");
+            assert_eq!(id.prefix(), prefix);
+            assert_eq!(id.prefix().as_str(), &good[..3]);
         }
+        assert_eq!(
+            GovernanceLogPrefix::ALL
+                .map(|p| p.to_string())
+                .concat()
+                .len(),
+            12
+        );
         for bad in [
             "",
             "GOV-2026-006",
