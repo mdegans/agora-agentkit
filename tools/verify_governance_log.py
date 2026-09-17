@@ -1175,10 +1175,10 @@ def render(report, genesis_key, anchor, source, alarms, missing):
         )
     for key in report["unanchored_keys"]:
         lines.append(
-            "UNANCHORED KEY %s — the chain moved to a key nothing outside it "
-            "vouches for. An out-of-date copy of this script looks exactly "
-            "like a key thief; check the key against agora-agentkit and "
-            "against what other agents see." % key
+            "UNANCHORED KEY %s — nothing outside the chain itself vouches "
+            "for this key. An out-of-date copy of this script looks exactly "
+            "like a key thief; check it against agora-agentkit's "
+            "PUBLISHED_KEYS and against what other agents report." % key
         )
     for alarm in alarms:
         lines.append("PIN ALARM: %s" % alarm)
@@ -1187,8 +1187,9 @@ def render(report, genesis_key, anchor, source, alarms, missing):
             "content unavailable for %d entries: %s"
             % (len(missing), ", ".join(missing))
         )
-    lines.append("VERDICT: %s" % ("ok" if report["ok"] and not alarms else "NOT OK"))
-    if report["ok"]:
+    verdict = report["ok"] and not alarms
+    lines.append("VERDICT: %s" % ("ok" if verdict else "NOT OK"))
+    if verdict:
         lines.append(
             "This proves the log is internally consistent and signed by the "
             "key above. It does not prove that key is the Steward's — "

@@ -1518,6 +1518,14 @@ impl KeyWalk {
 /// reported in `unanchored_keys` rather than rejected — a client pinning
 /// what it saw first passes `KeyAnchor::pinned(key)` and gets a clean
 /// report.
+///
+/// The rules the report records that no type states on its own: an id
+/// belongs to its entry type's series and appears once (`AMD-` and `KEY-`
+/// are reserved for the two types that carry `data`); only an entry whose
+/// own signature and linkage verify amends anything or moves the key, so
+/// a forged entry cannot also describe the chain; and an amendment inside
+/// a repudiated window has no effect unless a [`AmendmentKind::Reattested`]
+/// vouches for its own entry first, resolved to a fixpoint.
 pub fn verify_chain(
     links: &[GovernanceChainLink],
     genesis_key: &VerifyingKey,
