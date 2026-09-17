@@ -1,0 +1,184 @@
+{
+  "description": "A compromise declaration signed by an anchored new key: the window after the last trusted entry is repudiated, and a reattestation restores one entry of it.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+  ],
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+        "signature": "eb399e7a14af383a9daea0e6c276473c3e8b45dd7ffa357f95d33780f993706fb35a39dfea6f4d920aa9a707cbe2450133e52da599dcd63e4acf660285f21808",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "GOV-2026-0003",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+        "data_hash": "0ba6ec28efb9d8d99b528ac05d1cdf8b229b5fb81c23e8a02ebad9006e572cb4",
+        "entry_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a",
+        "signature": "7fa71857f00103e4367e0d0f2584e0cb8f1af20e9aaec1495033bd225606c79cf19c99b452dd4fa8973e6c420aba614a8adaeeab2738353cba1617282b201405",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:14:00.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 4,
+        "prev_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a",
+        "data_hash": "22dc9cebb6e7dc53e206f6b7ae1a96b33d5c17b99ba555d1548f47c2468ee5e1",
+        "entry_hash": "4975502260268747e0175eb1756127d93518a10d6305e8de70c2d3c8dc8c19d0",
+        "signature": "797b9b2793995720f8610e1aa4471b112d553482b1ef0beded10a2b4a6b9bd1caa07d0e462939e11d54e55456c46a3580f099f10e87b39fc09bab4124bec4c06",
+        "signed_at": "2023-11-14T22:14:01Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 1,
+        "last_trusted": {
+          "chain_seq": 1,
+          "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+          "id": "GOV-2026-0001"
+        },
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "note": "signing key exfiltrated",
+        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "proof": "5830f85eb7ece77370c4847702ad27f2166bf4ac04d0e8c5212ca3cb149e9261399d8b819877d84b26f02c62569d2ca2db06ebf339103d304a66dc804b95000e",
+        "proof_signed_at": 1700000045,
+        "reason": "compromise"
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:10.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 5,
+        "prev_hash": "4975502260268747e0175eb1756127d93518a10d6305e8de70c2d3c8dc8c19d0",
+        "data_hash": "72f2e6b2c69e59b1c52fdcb440230e929de7263c035f82157264a26fbd7162b2",
+        "entry_hash": "746a389f3566f03d837b11e2984b320cc6a4b236593173670d77987bb0373788",
+        "signature": "ba845ea57b0fa3d0903a62eb5628102a5186b3ff521ccbdc5ebfa81102d8f0adc94835d855a85328eb0b8fe5ad2e11315ec3302e1f1fc79ab38f8f9b3c6a1a0e",
+        "signed_at": "2023-11-14T22:14:11Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 1,
+        "authority": null,
+        "basis": "Art. VII",
+        "kind": "reattested",
+        "note": "independently verified; the Steward vouches for it",
+        "target": "GOV-2026-0003",
+        "target_entry_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a"
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "head": "AMD-2026-0001",
+    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "repudiated": [
+      "GOV-2026-0002"
+    ],
+    "unanchored_keys": [],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "GOV-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": true,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "GOV-2026-0003",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
+        "problem": false
+      },
+      {
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      }
+    ],
+    "standing": {
+      "GOV-2026-0003": "in_force"
+    }
+  }
+}

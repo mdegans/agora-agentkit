@@ -66,3 +66,14 @@ lint:
 # Full test suite across all features.
 test:
     cargo test --all-features
+
+# Rewrite the shared vectors in vectors/govlog from the Rust verifier.
+#
+# Only after changing what a vector is *meant* to say: the files are the
+# contract between the two implementations, and regenerating to make a
+# failing test pass is how a bug becomes a specification. Fixed key seeds
+# and fixed timestamps, so a regeneration that changes nothing is a no-op
+# in git.
+vectors:
+    cargo test --all-features govlog::vectors::regenerate_the_vectors \
+        -- --ignored --exact --nocapture

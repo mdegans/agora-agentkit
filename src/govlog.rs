@@ -49,6 +49,10 @@ use std::collections::{HashMap, HashSet};
 
 pub use crate::enums::{AmendmentKind, KeyStatus, Standing};
 
+/// The shared test vectors in `vectors/govlog`; see [`vectors`]
+#[cfg(test)]
+mod vectors;
+
 /// The envelope version this module produces and verifies
 pub const ENVELOPE_VERSION: u32 = 1;
 
@@ -1776,19 +1780,19 @@ mod tests {
     use crate::crypto::generate_keypair;
     use serde_json::json;
 
-    fn gov(n: u32) -> GovernanceLogId {
+    pub(super) fn gov(n: u32) -> GovernanceLogId {
         format!("GOV-2026-{n:04}").parse().unwrap()
     }
 
-    fn amd(n: u32) -> GovernanceLogId {
+    pub(super) fn amd(n: u32) -> GovernanceLogId {
         format!("AMD-2026-{n:04}").parse().unwrap()
     }
 
-    fn key_id(n: u32) -> GovernanceLogId {
+    pub(super) fn key_id(n: u32) -> GovernanceLogId {
         format!("KEY-2026-{n:04}").parse().unwrap()
     }
 
-    fn at(secs: i64) -> DateTime<Utc> {
+    pub(super) fn at(secs: i64) -> DateTime<Utc> {
         DateTime::from_timestamp(1_700_000_000 + secs, 123_456_789).unwrap()
     }
 
@@ -1797,7 +1801,7 @@ mod tests {
         KeyAnchor::pinned(key.into())
     }
 
-    fn link(
+    pub(super) fn link(
         key: &SigningKey,
         n: u32,
         prev: Option<&GovernanceChainLink>,
@@ -1827,7 +1831,7 @@ mod tests {
         }
     }
 
-    fn chain(key: &SigningKey, n: u32) -> Vec<GovernanceChainLink> {
+    pub(super) fn chain(key: &SigningKey, n: u32) -> Vec<GovernanceChainLink> {
         let mut out: Vec<GovernanceChainLink> = Vec::new();
         for i in 1..=n {
             let data = json!({"title": format!("Decision {i}"), "outcome": "approved"});
@@ -1840,15 +1844,15 @@ mod tests {
     /// A chain under construction: one entry per `push`, each series
     /// numbered on its own, `data` carried for the entries a verifier
     /// reads.
-    struct Chain {
-        links: Vec<GovernanceChainLink>,
+    pub(super) struct Chain {
+        pub(super) links: Vec<GovernanceChainLink>,
         gov: u32,
         amd: u32,
         key: u32,
     }
 
     impl Chain {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 links: Vec::new(),
                 gov: 0,
@@ -1857,21 +1861,21 @@ mod tests {
             }
         }
 
-        fn prev_hash(&self) -> Option<Sha256Hex> {
+        pub(super) fn prev_hash(&self) -> Option<Sha256Hex> {
             self.links.last().map(|l| l.attestation.entry_hash)
         }
 
         /// The `entry_hash` of the 1-indexed link `seq`
-        fn hash_at(&self, seq: usize) -> Sha256Hex {
+        pub(super) fn hash_at(&self, seq: usize) -> Sha256Hex {
             self.links[seq - 1].attestation.entry_hash
         }
 
         /// What [`Chain::amend`] will call the next amendment
-        fn next_amd(&self) -> GovernanceLogId {
+        pub(super) fn next_amd(&self) -> GovernanceLogId {
             amd(self.amd + 1)
         }
 
-        fn push(
+        pub(super) fn push(
             &mut self,
             signer: &SigningKey,
             id: GovernanceLogId,
@@ -1902,7 +1906,7 @@ mod tests {
 
         /// A council decision carrying `data` (which the link does not,
         /// as the chain endpoint does not carry transcripts)
-        fn entry(
+        pub(super) fn entry(
             &mut self,
             signer: &SigningKey,
             data: serde_json::Value,
@@ -1918,12 +1922,15 @@ mod tests {
             )
         }
 
-        fn decision(&mut self, signer: &SigningKey) -> GovernanceLogId {
+        pub(super) fn decision(
+            &mut self,
+            signer: &SigningKey,
+        ) -> GovernanceLogId {
             let data = json!({"title": format!("Decision {}", self.gov + 1)});
             self.entry(signer, data)
         }
 
-        fn amend(
+        pub(super) fn amend(
             &mut self,
             signer: &SigningKey,
             amendment: &Amendment,
@@ -1939,7 +1946,7 @@ mod tests {
             )
         }
 
-        fn rotate(
+        pub(super) fn rotate(
             &mut self,
             signer: &SigningKey,
             rotation: &KeyRotation,

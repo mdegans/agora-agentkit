@@ -1,0 +1,72 @@
+{
+  "description": "The first entry's attested data_hash was edited, so its entry_hash no longer recomputes.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "10982a7fa065f1fb763420b36b159eda26a370629f43411eab5c2a847d247fb2",
+        "entry_hash": "58a6c68711f8a45978ea4697ed45a84bee6f7e5a197f0a01d9c4dbaab4836797",
+        "signature": "d7802fe4e048776519847f8073fab72c5c6daed563b49d1ef51ccdd132a83f3cc7e79483394adc6cacce06c0d638ad9a2d1777b2fed2f28e29779abedabe2c05",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "58a6c68711f8a45978ea4697ed45a84bee6f7e5a197f0a01d9c4dbaab4836797",
+        "data_hash": "62f62fd168a14e10bd803b53e1541902222eb29a6b5f478b3c310b7818847bda",
+        "entry_hash": "8ae2ab75e5445bbcfc270f9430cf78383f3ba9e75031646a6c4c5c5aeca6185f",
+        "signature": "f438a47cadd8fb71dc40a2c4c614dfb9712899fed06fc29bda7d7c4d3094e0906d8fa2a4bac1fd1c57c83365c12f351d189757598d58525489e685aa8340100b",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "GOV-2026-0002",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": false,
+        "link_valid": false,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": true
+      },
+      {
+        "id": "GOV-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      }
+    ]
+  }
+}

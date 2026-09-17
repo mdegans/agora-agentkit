@@ -1,0 +1,118 @@
+{
+  "description": "A rotation back to a key that has already held the chain.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+  ],
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "0c7a6129119e89d194822d50923b7a4100c1c74246171ccd01bc6dd9a3289ec1",
+        "entry_hash": "5108c4def079b1cbd90dea92bdcac5f0e68d3ca5d391cd4cafe07b33139ed8a6",
+        "signature": "c0b07a0539c63b6adbbb2249003dbe6e4e5b846f4f0c3a3fba2f0305df1107b021f8d417041000f2693c016a6255c37c967f670f77c62f5be496b861f9bfca07",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 1,
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "note": "scheduled",
+        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "proof": "f91cc46f0f23b7a064ffa3f36e0c4360f4f7e9378dfd2ca0a5d9098a806c6bbfb1780ee168d13e083c1cde07e8beca3d9b4f056594fa84470db018b855ddc70d",
+        "proof_signed_at": 1700000015,
+        "reason": "routine"
+      }
+    },
+    {
+      "id": "KEY-2026-0002",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "5108c4def079b1cbd90dea92bdcac5f0e68d3ca5d391cd4cafe07b33139ed8a6",
+        "data_hash": "09b9eb5fc05271fcf23de075861e7300a7341cce747008982a5d0ad6091b2b3c",
+        "entry_hash": "440d1361e4302a8d764551b599562b68fd5ca0822b4b9516aa9b4692ee956d3f",
+        "signature": "11099c60f64c1e14f68c05188eb8ae75414f21b2a7427fdf3c8e8a7275b20a02e43c70fa84d54c4cafcfbd11290a1d9666efcb3c2f76d7b2872de76680332803",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 1,
+        "new_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "note": "back to the old key",
+        "old_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "proof": "da87e8c11b65d78858b6ac2b0de366a2874554b6d2cbcafb4925f417296dabd0678bc5b281077e9ac46e788c3ffd763d2fb6061a5929e8c4661e6642cc918d0c",
+        "proof_signed_at": 1700000025,
+        "reason": "routine"
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "KEY-2026-0002",
+    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "KEY-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": true
+      }
+    ]
+  }
+}

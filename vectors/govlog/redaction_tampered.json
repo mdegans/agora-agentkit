@@ -1,0 +1,102 @@
+{
+  "description": "The same redaction, with the redacted entry edited a second time. Neither hash matches.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "360ac060e81f2b2f1a6b38e7ce415cea14abd449e3c3f2095d1a07f5cdedba75",
+        "entry_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b",
+        "signature": "c2672233f9e4c5b1195281b9bc1343994e3188d6f27e18878cd3272deb1794ac6e06a4c65767a9b5dbc1a05bb387ec39ba80ccb08ddc347c0c688d034ba63308",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b",
+        "data_hash": "5c880e1793ae1b392a20a92b77ba70afe9eeda11238b851c8c1b5a88324fd404",
+        "entry_hash": "b637340a476fa153f616bc42ce2d91a36365fd8946cb3e001a56445d381e9a8f",
+        "signature": "4a9a02c5ef2c9170670beebfab85d5dedc9390eac9ed9a83c18a2a6e4d74ffb60b48d00995de879e41bd17d72744dc2d03f8ed939cc22592fece655a67e47102",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 1,
+        "authority": null,
+        "basis": "GDPR Art. 17(1)(a)",
+        "kind": "redaction",
+        "note": "personal data removed on request",
+        "redaction": {
+          "fields": [
+            "/subject/handle",
+            "/subject/detail"
+          ],
+          "resulting_data_hash": "ec42e2dacb763a17075e352c2fafc475268c80c20f59e46fb50f436bc7c4d766"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b"
+      }
+    }
+  ],
+  "contents": {
+    "GOV-2026-0001": {
+      "finding": "overturned",
+      "subject": {
+        "detail": "[redacted by AMD-2026-0001]",
+        "handle": "[redacted by AMD-2026-0001]"
+      }
+    }
+  },
+  "expect": {
+    "ok": false,
+    "head": "AMD-2026-0001",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": false,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": true,
+        "repudiated": false,
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      }
+    ],
+    "standing": {
+      "GOV-2026-0001": "in_force"
+    }
+  }
+}

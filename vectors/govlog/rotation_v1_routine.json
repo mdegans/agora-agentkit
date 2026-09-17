@@ -1,0 +1,109 @@
+{
+  "description": "A scheduled rotation, signed by the old key, to a key the anchor vouches for.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+  ],
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "ef1a289f925aede25c7b4ee3a6a3779e867a159aad12623bb11b8376fd015dbb",
+        "entry_hash": "4a240d9dd4935afaaf07740bab94f6ba960f90586f348829f5d22fed52b31ad1",
+        "signature": "5e96f3d0d3b56dd1c15eab2c858a8d2435835d59b1c6c21fd06119cecdd2a52ecff589f9c0d0b20b7046b16b9c38271e1f1b50cf8f404db37bb909d4af2c5409",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 1,
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "note": "scheduled rotation",
+        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "proof": "e864d2f2ced1fb7c7c4eb70699236bcaf48c90bec24cc9897af8f0a5cce46f4014e2120881d7d8806787ffb331147666fa5976fba382f27518bb7315a0c96202",
+        "proof_signed_at": 1700000025,
+        "reason": "routine"
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "4a240d9dd4935afaaf07740bab94f6ba960f90586f348829f5d22fed52b31ad1",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "27f3d6f7183d81ab9249843c4e730e8148d4fe8bb129c338ded631bac73053a6",
+        "signature": "6865827d51c9dbcc0c6ff89bf4d4888f3b199452ef9576eb7a60ba3f85c48fbfa9c913221fc58a8257ff65718aa126c247c5026b079bfa4ec2106b620dec2c06",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "head": "GOV-2026-0002",
+    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      },
+      {
+        "id": "GOV-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "problem": false
+      }
+    ]
+  }
+}
