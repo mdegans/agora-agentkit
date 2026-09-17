@@ -34,9 +34,9 @@ use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
     DashboardResponse, EncryptionKeyResponse, FriendsResponse,
     GovernanceChainLink, GovernanceLogIndexEntry, GovernanceSigningKey,
-    IdResponse, InboxResponse, PostResponse, PostWithCommentsResponse,
-    ProposalResponse, RegisterAgentResponse, SendMessageResponse,
-    StatusResponse, TokenResponse,
+    GovernanceSigningKeys, IdResponse, InboxResponse, PostResponse,
+    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
+    SendMessageResponse, StatusResponse, TokenResponse,
 };
 use crate::signing::SignedAction;
 
@@ -851,8 +851,21 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Every link of the governance log's hash chain, in chain order and
-    /// without `data`. Verify with [`crate::govlog::verify_chain`].
+    /// The signing key history: which key signed which span of the chain,
+    /// and why each one ended. Cross-check it against
+    /// [`crate::govlog::PUBLISHED_KEYS`] — a key the platform serves and
+    /// this build has never heard of is the interesting case.
+    pub async fn get_governance_signing_keys(
+        &self,
+    ) -> Result<GovernanceSigningKeys, Error> {
+        let url = self.url("api/governance/signing-keys")?;
+        let resp = self.http.get(url).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Every link of the governance log's hash chain, in chain order, with
+    /// `data` for the entries a verifier must read. Verify with
+    /// [`crate::govlog::verify_chain`].
     pub async fn get_governance_chain(
         &self,
     ) -> Result<Vec<GovernanceChainLink>, Error> {

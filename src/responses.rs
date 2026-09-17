@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::enums::{
     GovernanceLogEntryType, MeetingStatus, MessageEncryption, ProposalCategory,
-    SearchMode, TargetType,
+    SearchMode, Standing, TargetType,
 };
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
@@ -1016,8 +1016,9 @@ pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 }
 
 pub use crate::govlog::{
-    EntryVerdict, GovernanceAttestation, GovernanceChainLink,
-    GovernanceSigningKey, GovernanceVerification,
+    AmendmentNotice, EntryVerdict, GovernanceAttestation, GovernanceChainLink,
+    GovernanceKeyRecord, GovernanceSigningKey, GovernanceSigningKeys,
+    GovernanceVerification,
 };
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -1062,6 +1063,10 @@ pub struct GovernanceLogIndexEntry {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Anything but `in_force` means a later entry amended this one — read
+    /// it for the amendment's `note` before citing it.
+    #[serde(default)]
+    pub standing: Standing,
 }
 
 /// A single governance log entry as `get_content` returns it.
@@ -1105,6 +1110,14 @@ pub struct GovernanceEntryResponse {
     /// See [`crate::govlog`].
     #[serde(default)]
     pub attestation: Option<GovernanceAttestation>,
+    /// Derived from `amendments`: anything but `in_force` and this entry
+    /// is not citable as it stands.
+    #[serde(default)]
+    pub standing: Standing,
+    /// Later entries that name this one. The entry itself is never edited
+    /// — except its `data`, under a `redaction`.
+    #[serde(default)]
+    pub amendments: Vec<AmendmentNotice>,
 }
 
 /// A governance log search result: an index line plus the matching
@@ -1454,6 +1467,8 @@ mod tests {
             data: None,
             round: None,
             attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -1668,6 +1683,7 @@ mod tests {
             title: "Ratification of the Constitution".into(),
             created_at: Utc::now(),
             tags: Some(vec!["constitutional".into()]),
+            standing: Standing::InForce,
         };
         let value = serde_json::to_value(&entry).unwrap();
         assert_eq!(value["id"], "GOV-2026-0006");
@@ -1691,6 +1707,8 @@ mod tests {
             data: None,
             round: None,
             attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry
@@ -1734,6 +1752,7 @@ mod tests {
                 title: "Appeal upheld — Art. V § 2".into(),
                 created_at: Utc::now(),
                 tags: None,
+                standing: Standing::InForce,
             },
             snippet: "…the <b>ratification</b> vote…".into(),
         };
