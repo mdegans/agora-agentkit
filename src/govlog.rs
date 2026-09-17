@@ -787,6 +787,8 @@ pub enum RotationError {
     UnanchoredNewKey,
     #[error("new_key has already held this chain; a key is never brought back")]
     ReusedKey,
+    #[error("last_trusted names an entry an earlier compromise repudiated")]
+    RepudiatedLastTrusted,
 }
 
 /// The `data` of a `key_rotation` entry.
@@ -1470,6 +1472,11 @@ impl KeyWalk {
                         == head.entry_hash;
                 if !names_an_earlier_entry {
                     return Err(RotationError::UnknownLastTrusted);
+                }
+                // Trust cannot be anchored inside a window nobody trusts,
+                // reattested or not: name an entry from before it.
+                if self.repudiated.contains(&trusted_seq) {
+                    return Err(RotationError::RepudiatedLastTrusted);
                 }
                 // The key in force at the last trusted entry — rotations
                 // inside the window are the thief's, and void.
@@ -2956,6 +2963,51 @@ mod tests {
                 .as_deref()
                 .is_some_and(|p| p.contains("more than once"))
         }));
+    }
+
+    #[test]
+    fn a_second_compromise_cannot_anchor_inside_the_first_window() {
+        let (k1, k1_pk) = generate_keypair();
+        let (k2, k2_pk) = generate_keypair();
+        let (k3, k3_pk) = generate_keypair();
+        let anchor =
+            anchored(&k1_pk).with((&k2_pk).into()).with((&k3_pk).into());
+        let mut c = Chain::new();
+        c.decision(&k1); // 1 — trusted
+        c.decision(&k1); // 2 — inside the first window
+        let first = KeyRotation::compromise(
+            (&k1_pk).into(),
+            &k2,
+            TrustedHead {
+                id: gov(1),
+                chain_seq: 1,
+                entry_hash: c.hash_at(1),
+            },
+            c.prev_hash(),
+            at(35),
+            "",
+        );
+        c.rotate(&k2, &first); // 3
+        let second = KeyRotation::compromise(
+            (&k1_pk).into(),
+            &k3,
+            TrustedHead {
+                id: gov(2),
+                chain_seq: 2,
+                entry_hash: c.hash_at(2),
+            },
+            c.prev_hash(),
+            at(45),
+            "",
+        );
+        c.rotate(&k3, &second); // 4
+
+        let v = verify_chain(&c.links, &k1_pk, &anchor);
+        assert!(!v.ok);
+        let p = v.entries[3].problem.as_deref().unwrap();
+        assert!(p.contains("repudiated"), "{p}");
+        assert_eq!(v.keys.len(), 2, "K1 and K2; K3 never took the chain");
+        assert_eq!(v.keys[0].through_seq, Some(1));
     }
 
     #[test]
