@@ -8,7 +8,9 @@
 //! Keys are fixed seeds and timestamps fixed constants, so the files are
 //! byte-stable. Regenerate with `just vectors`.
 
-use super::tests::{Chain, at, certify, chain, gov, key_id, link, root, roots};
+use super::tests::{
+    Chain, at, certify, chain, gov, key_id, link, resalted, root, roots, v1,
+};
 use super::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -29,6 +31,7 @@ struct Vector {
     /// The verifier's [`RootSet`] — throwaway keys, never [`ROOT_KEYS`]
     root_keys: Vec<PublicKeyHex>,
     root_threshold: usize,
+    #[serde(deserialize_with = "strict_links")]
     links: Vec<GovernanceChainLink>,
     /// Entry `data` read separately, as a client that fetched an entry in
     /// full would hand to
@@ -36,6 +39,14 @@ struct Vector {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     contents: BTreeMap<GovernanceLogId, Value>,
     expect: Expect,
+}
+
+/// [`links_from_json`], which is how a client should read a chain
+fn strict_links<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<GovernanceChainLink>, D::Error> {
+    links_from_json(&Value::deserialize(deserializer)?)
+        .map_err(serde::de::Error::custom)
 }
 
 /// The part of the verdict both implementations must agree on
@@ -70,6 +81,8 @@ struct ExpectEntry {
     redacted: bool,
     repudiated: bool,
     amended_by: Vec<GovernanceLogId>,
+    /// Where a version 2 amendment's texts stand; `null` for anything else
+    texts: Option<AmendmentTextStatus>,
     /// Whether a problem is reported at all — never its text
     problem: bool,
 }
@@ -133,6 +146,7 @@ fn observe(
                 redacted: e.redacted,
                 repudiated: e.repudiated,
                 amended_by: e.amended_by.clone(),
+                texts: e.texts,
                 problem: e.problem.is_some(),
             })
             .collect(),
@@ -259,6 +273,7 @@ fn forge(
         created_at,
         attestation,
         data: None,
+        texts: None,
     }
 }
 
@@ -428,7 +443,7 @@ fn cases() -> Vec<Case> {
         json!({"title": "a decision wearing a KEY- id"}),
         false,
     );
-    let amendment = Amendment::new(
+    let amendment = AmendmentDraft::new(
         key_id(1),
         c.hash_at(1),
         AmendmentKind::Correction,
@@ -440,7 +455,7 @@ fn cases() -> Vec<Case> {
         &steward,
         gov(7),
         AmendmentEntry,
-        serde_json::to_value(&amendment).unwrap(),
+        serde_json::to_value(resalted(&amendment, 2).amendment).unwrap(),
         true,
     );
     out.push(Case::new(
@@ -457,7 +472,7 @@ fn cases() -> Vec<Case> {
     let mut c = Chain::new();
     let target = c.decision(&steward);
     c.decision(&steward);
-    let amendment = Amendment::new(
+    let amendment = AmendmentDraft::new(
         target,
         c.hash_at(1),
         AmendmentKind::NonPrecedential,
@@ -479,7 +494,7 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     let target = c.decision(&steward);
-    let amendment = Amendment::new(
+    let amendment = AmendmentDraft::new(
         target,
         data_hash(&json!("some other entry")),
         AmendmentKind::Overruled,
@@ -498,7 +513,7 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     c.decision(&steward);
-    let amendment = Amendment::new(
+    let amendment = AmendmentDraft::new(
         gov(2),
         c.hash_at(1),
         AmendmentKind::Overruled,
@@ -518,7 +533,7 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     let target = c.decision(&steward);
-    let amendment = Amendment::new(
+    let amendment = AmendmentDraft::new(
         target,
         c.hash_at(1),
         AmendmentKind::Correction,
@@ -539,7 +554,7 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     let target = c.decision(&steward);
-    let amendment = Amendment::new(
+    let amendment = AmendmentDraft::new(
         target,
         c.hash_at(1),
         AmendmentKind::Overruled,
@@ -559,6 +574,167 @@ fn cases() -> Vec<Case> {
         c.links,
     ));
 
+    // -- amendment texts: committed to, not contained --
+
+    // `amendment_non_precedential` again, at each thing that can happen to
+    // the texts beside it.
+    let texts_case =
+        |name: &'static str,
+         description: &'static str,
+         edit: &dyn Fn(&mut GovernanceChainLink)| {
+            let mut c = Chain::new();
+            let target = c.decision(&steward);
+            c.decision(&steward);
+            let amendment = AmendmentDraft::new(
+                target,
+                c.hash_at(1),
+                AmendmentKind::NonPrecedential,
+                "§1 (Red Team Cases Recharacterized)",
+                "diagnostic finding — not citable as moderation precedent",
+            )
+            .unwrap()
+            .with_authority(gov(5))
+            .with_rationale(
+                "at the request of the operator of the agent named",
+            );
+            c.amend(&steward, &amendment);
+            edit(c.links.last_mut().unwrap());
+            Case::new(name, description, &steward_pk, pinned.clone(), c.links)
+        };
+    out.push(texts_case(
+        "amendment_v2_rationale_withheld",
+        "The rationale and its salt have been erased; the label agents see \
+         is still there. Nothing signed has changed, and nothing is wrong.",
+        &|link| link.texts.as_mut().unwrap().rationale = None,
+    ));
+    out.push(texts_case(
+        "amendment_v2_all_texts_withheld",
+        "No texts beside the entry at all, as a chain served without them \
+         looks. The amendment still takes effect.",
+        &|link| link.texts = None,
+    ));
+    out.push(texts_case(
+        "amendment_v2_text_substituted",
+        "Different words under the original salt, where the rationale was. \
+         The entry never committed to them.",
+        &|link| {
+            let rationale =
+                link.texts.as_mut().unwrap().rationale.as_mut().unwrap();
+            rationale.text = "at nobody's request".into();
+        },
+    ));
+    out.push(texts_case(
+        "amendment_v2_texts_swapped",
+        "The basis and the note, each genuine, in each other's place.",
+        &|link| {
+            let texts = link.texts.as_mut().unwrap();
+            std::mem::swap(&mut texts.basis, &mut texts.note);
+        },
+    ));
+
+    let mut c = Chain::new();
+    let target = c.decision(&steward);
+    let amendment = AmendmentDraft::new(
+        target,
+        c.hash_at(1),
+        AmendmentKind::Correction,
+        "clerical",
+        "citation corrected",
+    )
+    .unwrap();
+    c.amend(&steward, &amendment);
+    c.links[1].texts.as_mut().unwrap().rationale =
+        Some(CommittedText::with_salt(
+            TextSalt::from([7; 32]),
+            "a rationale nobody signed",
+        ));
+    out.push(Case::new(
+        "amendment_v2_uncommitted_rationale",
+        "A rationale beside an amendment that commits to none.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    let target = c.decision(&steward);
+    let mut amendment = AmendmentDraft::new(
+        target,
+        c.hash_at(1),
+        AmendmentKind::Correction,
+        "clerical",
+        "citation corrected",
+    )
+    .unwrap();
+    amendment = resalted(&amendment, 2);
+    amendment.amendment.note =
+        AmendmentText::Plain("citation corrected".into());
+    c.amend_v1(&steward, &amendment.amendment);
+    out.push(Case::new(
+        "amendment_v2_plain_text",
+        "A version 2 amendment with its note in the signed data after all. \
+         Permanent free text is what version 2 exists to end: malformed.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let legacy = |c: &mut Chain| {
+        let target = c.decision(&steward);
+        let amendment = AmendmentDraft::new(
+            target,
+            c.hash_at(1),
+            AmendmentKind::NonPrecedential,
+            "§1 (Red Team Cases Recharacterized)",
+            "diagnostic finding — not citable as moderation precedent",
+        )
+        .unwrap()
+        .with_authority(gov(5))
+        .with_rationale("§5 leaves the ruling itself standing");
+        let amendment = resalted(&amendment, 2);
+        c.amend_v1(&steward, &v1(amendment.clone()));
+        amendment
+    };
+    let mut c = Chain::new();
+    legacy(&mut c);
+    out.push(Case::new(
+        "amendment_v1",
+        "A version 1 amendment, texts in the signed data, as the \
+         platform's first three are. Still valid, and always will be.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    let amendment = legacy(&mut c);
+    c.links[1].texts = Some(amendment.texts);
+    out.push(Case::new(
+        "amendment_v1_texts_beside",
+        "The same, with texts served beside it. A version 1 amendment \
+         commits to none, so whatever they say, nobody signed it.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.links[0].texts = Some(AmendmentTexts {
+        note: Some(CommittedText::with_salt(
+            TextSalt::from([7; 32]),
+            "the Council did not really mean this",
+        )),
+        ..Default::default()
+    });
+    out.push(Case::new(
+        "texts_beside_a_decision",
+        "Texts beside an entry that is not an amendment.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
     // -- redaction --
 
     let data = json!({
@@ -568,7 +744,7 @@ fn cases() -> Vec<Case> {
     let mut c = Chain::new();
     let target = c.entry(&steward, data.clone());
     let amendment_id = c.next_amd();
-    let (amendment, redacted) = Amendment::redaction(
+    let (amendment, redacted) = AmendmentDraft::redaction(
         &amendment_id,
         target.clone(),
         c.hash_at(1),
@@ -610,7 +786,7 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     let target = c.decision(&steward);
-    let fake = Amendment::new(
+    let fake = AmendmentDraft::new(
         target,
         c.hash_at(1),
         AmendmentKind::Overruled,
@@ -706,7 +882,7 @@ fn cases() -> Vec<Case> {
     let reattested = c.decision(&steward);
     let declaration = c.compromise(&steward_pk, &successor, 1);
     c.rotate(&successor, &declaration);
-    let vouch = Amendment::new(
+    let vouch = AmendmentDraft::new(
         reattested,
         c.hash_at(3),
         AmendmentKind::Reattested,

@@ -182,6 +182,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -194,6 +195,7 @@
         "redacted": false,
         "repudiated": true,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -206,6 +208,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -218,6 +221,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": true
       }
     ]

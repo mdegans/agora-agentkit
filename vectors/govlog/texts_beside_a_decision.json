@@ -1,5 +1,5 @@
 {
-  "description": "An amendment served without its `data`, which is the whole record of what it does.",
+  "description": "Texts beside an entry that is not an amendment.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -23,37 +23,18 @@
         "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
         "signed_at": "2023-11-14T22:13:31Z",
         "retroactive": false
-      }
-    },
-    {
-      "id": "AMD-2026-0001",
-      "entry_type": "amendment",
-      "created_at": "2023-11-14T22:13:40.123456Z",
-      "attestation": {
-        "envelope_version": 1,
-        "chain_seq": 2,
-        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "a8c64e4816d7ce8e7427b8a991b2cb452c5f7e0edb4cfd324d25cba9155956f5",
-        "entry_hash": "afcf86b3dc33008b1b212609be400cf3247d8f99c2e6cd6cc4d38515db3ec501",
-        "signature": "fdcb520f5c195e8de5b4ada1eb18c682a2829fa05eeb3a7e6aacb4664b219e2e721a851911ac5b584ffba8732d06da08e5985b672cf1683a0cbb71dcb911f701",
-        "signed_at": "2023-11-14T22:13:41Z",
-        "retroactive": false
       },
       "texts": {
-        "basis": {
-          "salt": "24b53afed7e2f89fcbefbfb75a605c0020fad587505a40314f60ea2ac382c6f3",
-          "text": "clerical"
-        },
         "note": {
-          "salt": "35dd5d8829a2d16adfe6f1af57626fbacd24b42fa67b8c70fd62a3fe4218363d",
-          "text": "typo in the citation"
+          "salt": "0707070707070707070707070707070707070707070707070707070707070707",
+          "text": "the Council did not really mean this"
         }
       }
     }
   ],
   "expect": {
     "ok": false,
-    "head": "AMD-2026-0001",
+    "head": "GOV-2026-0001",
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
     "unanchored_keys": [],
@@ -71,19 +52,6 @@
     "entries": [
       {
         "id": "GOV-2026-0001",
-        "signature_valid": true,
-        "link_valid": true,
-        "content_matches": null,
-        "retroactive": false,
-        "out_of_order": false,
-        "redacted": false,
-        "repudiated": false,
-        "amended_by": [],
-        "texts": null,
-        "problem": false
-      },
-      {
-        "id": "AMD-2026-0001",
         "signature_valid": true,
         "link_valid": true,
         "content_matches": null,

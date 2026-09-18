@@ -25,7 +25,9 @@
 //! are ordinary signed links whose `data` the verifier reads:
 //!
 //! - [`Amendment`] (`AMD-`) names an earlier entry and says what changed
-//!   about its force ([`Standing`]) or its content ([`Redaction`]). A
+//!   about its force ([`Standing`]) or its content ([`Redaction`]). Its
+//!   own free text is committed to, not contained (see [`TextCommitment`]),
+//!   because an amendment is the one thing that can never be redacted. A
 //!   redaction replaces values in the target's `data` in place; the
 //!   original `entry_hash` stays on the row so later links still verify,
 //!   and the amendment's `resulting_data_hash` is what the redacted data
@@ -49,6 +51,12 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub use crate::enums::{AmendmentKind, KeyStatus, Standing};
+
+mod texts;
+pub use texts::{
+    AmendmentText, AmendmentTextStatus, AmendmentTexts, CommittedText,
+    TextCommitment, TextStatus, WITHHELD_TEXT,
+};
 
 mod root;
 pub use root::{
@@ -230,6 +238,13 @@ hex_bytes!(
     32
 );
 
+hex_bytes!(
+    /// The salt of a [`TextCommitment`]: 32 random bytes kept beside the
+    /// text, and deleted with it
+    TextSalt,
+    32
+);
+
 impl Blind {
     /// A fresh value from the operating system's random source
     pub fn random() -> Self {
@@ -237,6 +252,13 @@ impl Blind {
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         Self(bytes)
+    }
+}
+
+impl TextSalt {
+    /// A fresh value from the operating system's random source
+    pub fn random() -> Self {
+        Self(*Blind::random().as_bytes())
     }
 }
 
@@ -456,6 +478,15 @@ pub struct GovernanceChainLink {
     /// verifier nor escape the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// The texts a version 2 [`Amendment`] commits to, as far as the
+    /// platform still holds them. Outside the envelope on purpose: a text
+    /// can be erased without the chain changing.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_as_written"
+    )]
+    pub texts: Option<AmendmentTexts>,
 }
 
 /// The platform's governance signing key, as `GET
@@ -486,14 +517,26 @@ impl GovernanceSigningKey {
 // Amendments
 // ---------------------------------------------------------------------------
 
-/// The [`Amendment`] payload version this module produces and verifies
-pub const AMENDMENT_VERSION: u32 = 1;
+/// The [`Amendment`] payload version this module produces. Version 1,
+/// whose texts are in the signed `data`, still verifies: the platform has
+/// three, all reviewed to hold no personal data.
+pub const AMENDMENT_VERSION: u32 = 2;
 
 /// An amendment is malformed
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AmendmentError {
-    #[error("agora_governance_amendment is {0}, not {AMENDMENT_VERSION}")]
+    #[error("agora_governance_amendment is {0}, not 1 or {AMENDMENT_VERSION}")]
     UnsupportedVersion(u32),
+    #[error(
+        "a version 1 amendment carries its texts and a version \
+         {AMENDMENT_VERSION} one commits to them; this does neither \
+         consistently"
+    )]
+    TextShape,
+    #[error("`{0}` beside the entry is not the text the entry committed to")]
+    TextMismatch(&'static str),
+    #[error("texts beside an entry that commits to none")]
+    UncommittedText,
     #[error("kind `redaction` requires a `redaction`")]
     MissingRedaction,
     #[error("`redaction` is only valid on kind `redaction`")]
@@ -526,14 +569,14 @@ pub struct Amendment {
     #[serde(default)]
     pub authority: Option<GovernanceLogId>,
     /// Section or legal basis, human-readable: `"§1 (Red Team Cases
-    /// Recharacterized)"`, `"GDPR Art. 17(1)(a)"`. Never personal data.
-    pub basis: String,
+    /// Recharacterized)"`, `"GDPR Art. 17(1)(a)"`. Never personal data —
+    /// and erasable, for the day that rule is broken.
+    pub basis: AmendmentText,
     /// The label readers and prompts show next to the target
-    pub note: String,
-    /// Why, at length — `note` is the label, this is the reasoning, and it
-    /// is part of the signed record. Never personal data.
+    pub note: AmendmentText,
+    /// Why, at length — `note` is the label, this is the reasoning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
+    pub rationale: Option<AmendmentText>,
     /// Present iff `kind` is [`AmendmentKind::Redaction`]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redaction: Option<Redaction>,
@@ -552,45 +595,50 @@ pub struct Redaction {
     pub resulting_data_hash: Sha256Hex,
 }
 
-impl Amendment {
+/// An [`Amendment`] and the texts it commits to: what a writer appends,
+/// the first as the entry's `data` and the second beside it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendmentDraft {
+    pub amendment: Amendment,
+    pub texts: AmendmentTexts,
+}
+
+impl AmendmentDraft {
     /// An amendment of `kind` against `target`.
     ///
     /// Redactions go through [`redaction`](Self::redaction) instead, which
     /// is the only way to get a [`Redaction`] whose `resulting_data_hash`
-    /// is the hash of data that actually exists.
+    /// is the hash of data that actually exists. A `&str` or `String`
+    /// text gets a [random](TextSalt::random) salt.
     pub fn new(
         target: GovernanceLogId,
         target_entry_hash: Sha256Hex,
         kind: AmendmentKind,
-        basis: impl Into<String>,
-        note: impl Into<String>,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
     ) -> Result<Self, AmendmentError> {
         if kind == AmendmentKind::Redaction {
             return Err(AmendmentError::MissingRedaction);
         }
+        let (basis, note) = (basis.into(), note.into());
         Ok(Self {
-            agora_governance_amendment: AMENDMENT_VERSION,
-            target,
-            target_entry_hash,
-            kind,
-            authority: None,
-            basis: basis.into(),
-            note: note.into(),
-            rationale: None,
-            redaction: None,
+            amendment: Amendment {
+                agora_governance_amendment: AMENDMENT_VERSION,
+                target,
+                target_entry_hash,
+                kind,
+                authority: None,
+                basis: AmendmentText::Committed(basis.commitment()),
+                note: AmendmentText::Committed(note.commitment()),
+                rationale: None,
+                redaction: None,
+            },
+            texts: AmendmentTexts {
+                basis: Some(basis),
+                note: Some(note),
+                rationale: None,
+            },
         })
-    }
-
-    /// The amendment with the governance entry that authorizes it
-    pub fn with_authority(mut self, authority: GovernanceLogId) -> Self {
-        self.authority = Some(authority);
-        self
-    }
-
-    /// The amendment with its [`rationale`](Self::rationale)
-    pub fn with_rationale(mut self, rationale: impl Into<String>) -> Self {
-        self.rationale = Some(rationale.into());
-        self
     }
 
     /// A redaction of `fields` from the target's `data`, with the redacted
@@ -607,39 +655,73 @@ impl Amendment {
         amendment_id: &GovernanceLogId,
         target: GovernanceLogId,
         target_entry_hash: Sha256Hex,
-        basis: impl Into<String>,
-        note: impl Into<String>,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
         fields: Vec<String>,
         data: &serde_json::Value,
         blind: Blind,
     ) -> Result<(Self, serde_json::Value), RedactError> {
         let redacted = redact_data(data, &fields, amendment_id, blind)?;
+        let (basis, note) = (basis.into(), note.into());
         Ok((
             Self {
-                agora_governance_amendment: AMENDMENT_VERSION,
-                target,
-                target_entry_hash,
-                kind: AmendmentKind::Redaction,
-                authority: None,
-                basis: basis.into(),
-                note: note.into(),
-                rationale: None,
-                redaction: Some(Redaction {
-                    fields,
-                    resulting_data_hash: data_hash(&redacted),
-                }),
+                amendment: Amendment {
+                    agora_governance_amendment: AMENDMENT_VERSION,
+                    target,
+                    target_entry_hash,
+                    kind: AmendmentKind::Redaction,
+                    authority: None,
+                    basis: AmendmentText::Committed(basis.commitment()),
+                    note: AmendmentText::Committed(note.commitment()),
+                    rationale: None,
+                    redaction: Some(Redaction {
+                        fields,
+                        resulting_data_hash: data_hash(&redacted),
+                    }),
+                },
+                texts: AmendmentTexts {
+                    basis: Some(basis),
+                    note: Some(note),
+                    rationale: None,
+                },
             },
             redacted,
         ))
     }
 
-    /// Version and the redaction-shape invariant — everything checkable
-    /// without the rest of the chain
+    /// The draft with the governance entry that authorizes it
+    pub fn with_authority(mut self, authority: GovernanceLogId) -> Self {
+        self.amendment.authority = Some(authority);
+        self
+    }
+
+    /// The draft with its [`rationale`](Amendment::rationale)
+    pub fn with_rationale(
+        mut self,
+        rationale: impl Into<CommittedText>,
+    ) -> Self {
+        let rationale = rationale.into();
+        self.amendment.rationale =
+            Some(AmendmentText::Committed(rationale.commitment()));
+        self.texts.rationale = Some(rationale);
+        self
+    }
+}
+
+impl Amendment {
+    /// Version, the shape of the texts for that version, and the
+    /// redaction-shape invariant — everything checkable without the rest
+    /// of the chain
     pub fn validate(&self) -> Result<(), AmendmentError> {
-        if self.agora_governance_amendment != AMENDMENT_VERSION {
-            return Err(AmendmentError::UnsupportedVersion(
-                self.agora_governance_amendment,
-            ));
+        let plain = match self.agora_governance_amendment {
+            1 => true,
+            AMENDMENT_VERSION => false,
+            other => return Err(AmendmentError::UnsupportedVersion(other)),
+        };
+        let texts =
+            [Some(&self.basis), Some(&self.note), self.rationale.as_ref()];
+        if texts.into_iter().flatten().any(|t| t.is_plain() != plain) {
+            return Err(AmendmentError::TextShape);
         }
         match (self.kind, &self.redaction) {
             (AmendmentKind::Redaction, None) => {
@@ -650,6 +732,49 @@ impl Amendment {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Where each committed text stands given what is `beside` the entry;
+    /// `None` for version 1, whose texts are in the signed `data`.
+    ///
+    /// A text that is beside the entry and is not the one committed to,
+    /// or that the entry never committed to at all, is an error: someone
+    /// put words next to a signed entry that the signer did not write.
+    pub fn text_status(
+        &self,
+        beside: Option<&AmendmentTexts>,
+    ) -> Result<Option<AmendmentTextStatus>, AmendmentError> {
+        let empty = AmendmentTexts::default();
+        let beside = beside.unwrap_or(&empty);
+        let (Some(basis), Some(note)) = (
+            self.basis.status(beside.basis.as_ref()),
+            self.note.status(beside.note.as_ref()),
+        ) else {
+            return if beside.is_empty() {
+                Ok(None)
+            } else {
+                Err(AmendmentError::UncommittedText)
+            };
+        };
+        let rationale = match (&self.rationale, &beside.rationale) {
+            (None, Some(_)) => return Err(AmendmentError::UncommittedText),
+            (None, None) => None,
+            (Some(text), beside) => text.status(beside.as_ref()),
+        };
+        for (name, status) in [
+            ("basis", Some(basis)),
+            ("note", Some(note)),
+            ("rationale", rationale),
+        ] {
+            if status == Some(TextStatus::Mismatch) {
+                return Err(AmendmentError::TextMismatch(name));
+            }
+        }
+        Ok(Some(AmendmentTextStatus {
+            basis,
+            note,
+            rationale,
+        }))
     }
 }
 
@@ -816,18 +941,24 @@ pub struct AmendmentNotice {
 
 impl AmendmentNotice {
     /// The notice for `amendment`, appended as `id` at `created_at`
+    /// A text no longer `beside` the entry reads [`WITHHELD_TEXT`]
     pub fn new(
         id: GovernanceLogId,
         created_at: DateTime<Utc>,
         amendment: &Amendment,
+        beside: Option<&AmendmentTexts>,
     ) -> Self {
+        let beside = beside.cloned().unwrap_or_default();
         Self {
             id,
             kind: amendment.kind,
             authority: amendment.authority.clone(),
-            basis: amendment.basis.clone(),
-            note: amendment.note.clone(),
-            rationale: amendment.rationale.clone(),
+            basis: amendment.basis.resolve(beside.basis.as_ref()).into(),
+            note: amendment.note.resolve(beside.note.as_ref()).into(),
+            rationale: amendment
+                .rationale
+                .as_ref()
+                .map(|r| r.resolve(beside.rationale.as_ref()).into()),
             created_at,
         }
     }
@@ -1298,6 +1429,11 @@ pub struct EntryVerdict {
     /// under a later, trusted key
     #[serde(default)]
     pub reattested_by: Vec<GovernanceLogId>,
+    /// A version 2 amendment's texts: each beside the entry and matching
+    /// what it committed to, or withheld. A text that does not match is a
+    /// `problem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texts: Option<AmendmentTextStatus>,
     /// What failed, when something did
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
@@ -1463,6 +1599,78 @@ pub fn verify_data(
     data: &serde_json::Value,
 ) -> bool {
     data_hash(data) == link.attestation.data_hash
+}
+
+/// Whether `read`, serialized again, has the shape `written` had: an
+/// object wherever it has one, an array of the same length wherever it
+/// has one. Missing and `null` are the same thing.
+///
+/// serde's derived structs also read positionally from an array, so
+/// `[]` is a perfectly good struct of optional fields and `[2, "routine",
+/// …]` a perfectly good rotation. No other implementation would agree,
+/// and two verifiers that disagree about what is well-formed can be shown
+/// two different chains.
+fn same_shape(written: &serde_json::Value, read: &serde_json::Value) -> bool {
+    use serde_json::Value::{Array, Null, Object};
+    match (written, read) {
+        (Object(w), Object(r)) => r.iter().all(|(k, r)| match w.get(k) {
+            Some(w) => same_shape(w, r),
+            None => r.is_null(),
+        }),
+        (Array(w), Array(r)) => {
+            w.len() == r.len() && w.iter().zip(r).all(|(w, r)| same_shape(w, r))
+        }
+        (_, Object(_) | Array(_)) => false,
+        (Object(_) | Array(_), Null) => false,
+        _ => true,
+    }
+}
+
+/// `T` from the JSON it was written as, held to [`same_shape`]
+fn read_strictly<T>(written: &serde_json::Value) -> Result<T, String>
+where
+    T: Serialize + serde::de::DeserializeOwned,
+{
+    let read: T =
+        serde_json::from_value(written.clone()).map_err(|e| e.to_string())?;
+    let again = serde_json::to_value(&read).map_err(|e| e.to_string())?;
+    if same_shape(written, &again) {
+        Ok(read)
+    } else {
+        Err("an array where an object belongs, or the reverse".into())
+    }
+}
+
+/// A chain from the JSON it was served as, held to [`same_shape`]: a
+/// link is an object, and so is everything in it that should be.
+///
+/// Prefer this to deserializing [`GovernanceChainLink`]s directly, which
+/// also accepts a link written as an array of its fields. Nothing serves
+/// one; a verifier that would read it agrees with no other.
+pub fn links_from_json(
+    chain: &serde_json::Value,
+) -> Result<Vec<GovernanceChainLink>, String> {
+    chain
+        .as_array()
+        .ok_or("a chain is an array of links")?
+        .iter()
+        .map(read_strictly)
+        .collect()
+}
+
+/// [`read_strictly`] for a field that is outside any signed `data`
+fn read_as_written<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Serialize + serde::de::DeserializeOwned,
+{
+    let written = serde_json::Value::deserialize(deserializer)?;
+    if written.is_null() {
+        return Ok(None);
+    }
+    read_strictly(&written)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 /// The id series an entry type must use, and must not
@@ -1779,7 +1987,7 @@ pub fn verify_chain(
                 } else {
                     match link.entry_type {
                         GovernanceLogEntryType::Amendment => {
-                            match serde_json::from_value(data.clone()) {
+                            match read_strictly(data) {
                                 Ok(v) => amendment = Some(v),
                                 Err(e) => problems.push(format!(
                                     "amendment `data` is malformed: {e}"
@@ -1787,7 +1995,7 @@ pub fn verify_chain(
                             }
                         }
                         GovernanceLogEntryType::KeyRotation => {
-                            match serde_json::from_value(data.clone()) {
+                            match read_strictly(data) {
                                 Ok(v) => rotation = Some(v),
                                 Err(e) => problems.push(format!(
                                     "key_rotation `data` is malformed: {e}"
@@ -1874,6 +2082,21 @@ pub fn verify_chain(
                 problems.push(problem);
             }
         }
+        // Texts are checked against what the entry signed whether or not
+        // the amendment takes effect: a substituted text is a lie about
+        // the record either way.
+        let mut texts = None;
+        if let Some(amendment) = amendment
+            .as_ref()
+            .filter(|a| authentic && a.validate().is_ok())
+        {
+            match amendment.text_status(link.texts.as_ref()) {
+                Ok(status) => texts = status,
+                Err(e) => problems.push(e.to_string()),
+            }
+        } else if link.texts.as_ref().is_some_and(|t| !t.is_empty()) {
+            problems.push(AmendmentError::UncommittedText.to_string());
+        }
         if let Some(amendment) = amendment.filter(|_| authentic) {
             match amendment_target(&amendment, expected_seq, &seq_of, &links) {
                 Ok(target) => amendments.push((
@@ -1900,6 +2123,7 @@ pub fn verify_chain(
             redacted_data_hash: None,
             repudiated: false,
             reattested_by: Vec::new(),
+            texts,
             problem: (!problems.is_empty()).then(|| problems.join("; ")),
         });
         prev = Some(link);
@@ -2001,6 +2225,50 @@ mod tests {
         KeyAnchor::pinned(key.into())
     }
 
+    /// `draft` under salts fixed by its texts and `seq`, so that a chain
+    /// built twice is the same bytes twice
+    pub(super) fn resalted(draft: &AmendmentDraft, seq: u64) -> AmendmentDraft {
+        let fix = |field: &str, t: &Option<CommittedText>| {
+            t.as_ref().map(|t| {
+                let salt = Sha256::digest(format!("{seq}/{field}/{}", t.text));
+                CommittedText::with_salt(
+                    TextSalt::from(<[u8; 32]>::from(salt)),
+                    t.text.clone(),
+                )
+            })
+        };
+        let texts = AmendmentTexts {
+            basis: fix("basis", &draft.texts.basis),
+            note: fix("note", &draft.texts.note),
+            rationale: fix("rationale", &draft.texts.rationale),
+        };
+        let commit = |t: &Option<CommittedText>| {
+            t.as_ref().map(|t| AmendmentText::Committed(t.commitment()))
+        };
+        AmendmentDraft {
+            amendment: Amendment {
+                basis: commit(&texts.basis).unwrap(),
+                note: commit(&texts.note).unwrap(),
+                rationale: commit(&texts.rationale),
+                ..draft.amendment.clone()
+            },
+            texts,
+        }
+    }
+
+    /// `draft` as version 1 wrote it: the texts in the signed `data`
+    pub(super) fn v1(draft: AmendmentDraft) -> Amendment {
+        let plain =
+            |t: Option<CommittedText>| t.map(|t| AmendmentText::Plain(t.text));
+        Amendment {
+            agora_governance_amendment: 1,
+            basis: plain(draft.texts.basis).unwrap(),
+            note: plain(draft.texts.note).unwrap(),
+            rationale: plain(draft.texts.rationale),
+            ..draft.amendment
+        }
+    }
+
     /// A throwaway root key. Fixed, so the vectors are byte-stable; the
     /// real ones live on hardware and sign nothing in a test.
     pub(super) fn root(n: u8) -> SigningKey {
@@ -2068,6 +2336,7 @@ mod tests {
             created_at,
             attestation,
             data: None,
+            texts: None,
         }
     }
 
@@ -2214,6 +2483,7 @@ mod tests {
                 created_at,
                 attestation,
                 data: carry.then_some(data),
+                texts: None,
             });
             id
         }
@@ -2244,7 +2514,22 @@ mod tests {
             self.entry(signer, data)
         }
 
+        /// `draft`'s amendment as the entry's `data`, its texts beside it
         pub(super) fn amend(
+            &mut self,
+            signer: &SigningKey,
+            draft: &AmendmentDraft,
+        ) -> GovernanceLogId {
+            let draft = resalted(draft, self.next_seq());
+            let id = self.amend_v1(signer, &draft.amendment);
+            let link = self.links.last_mut().unwrap();
+            link.texts = Some(draft.texts);
+            id
+        }
+
+        /// An amendment with nothing beside it: version 1, or a version 2
+        /// whose texts have all been withheld
+        pub(super) fn amend_v1(
             &mut self,
             signer: &SigningKey,
             amendment: &Amendment,
@@ -2560,6 +2845,7 @@ mod tests {
             created_at: created,
             attestation,
             data: None,
+            texts: None,
         };
         second.attestation.retroactive = true; // a lying flag on the wire
         let v = verify_chain(&[first, second], &pk, &anchored(&pk), &roots());
@@ -2588,7 +2874,7 @@ mod tests {
         let mut c = Chain::new();
         let target = c.decision(&key);
         c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::NonPrecedential,
@@ -2609,7 +2895,10 @@ mod tests {
         // The amendment link carries `data`, so its own content is checked.
         assert_eq!(v.entries[2].content_matches, Some(true));
         assert_eq!(v.entries[0].content_matches, None);
-        assert_eq!(standing([amendment.kind]), Standing::NonPrecedential);
+        assert_eq!(
+            standing([amendment.amendment.kind]),
+            Standing::NonPrecedential
+        );
     }
 
     #[test]
@@ -2624,7 +2913,7 @@ mod tests {
 
         let mut c = Chain::new();
         c.decision(&key);
-        let unknown = Amendment::new(
+        let unknown = AmendmentDraft::new(
             gov(99),
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -2643,7 +2932,7 @@ mod tests {
         // Names an entry that does not exist yet.
         let mut c = Chain::new();
         c.decision(&key);
-        let forward = Amendment::new(
+        let forward = AmendmentDraft::new(
             gov(2),
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -2662,7 +2951,7 @@ mod tests {
         // Right id, wrong entry.
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let wrong_hash = Amendment::new(
+        let wrong_hash = AmendmentDraft::new(
             target,
             data_hash(&json!("some other entry")),
             AmendmentKind::Overruled,
@@ -2685,7 +2974,7 @@ mod tests {
         let amend_with = |mutate: &dyn Fn(&mut Amendment)| -> String {
             let mut c = Chain::new();
             let target = c.decision(&key);
-            let mut amendment = Amendment::new(
+            let mut amendment = AmendmentDraft::new(
                 target,
                 c.hash_at(1),
                 AmendmentKind::Correction,
@@ -2693,8 +2982,8 @@ mod tests {
                 "n",
             )
             .unwrap();
-            mutate(&mut amendment);
-            c.amend(&key, &amendment);
+            mutate(&mut amendment.amendment);
+            c.amend_v1(&key, &amendment.amendment);
             let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
             assert!(!v.ok, "{v:#?}");
             v.entries[1].problem.clone().unwrap_or_default()
@@ -2703,7 +2992,7 @@ mod tests {
         // `redaction` is the only way to get a well-formed one, so a
         // redaction kind without a `Redaction` can only be hand-built.
         assert_eq!(
-            Amendment::new(
+            AmendmentDraft::new(
                 gov(1),
                 data_hash(&json!(null)),
                 AmendmentKind::Redaction,
@@ -2723,8 +3012,15 @@ mod tests {
         });
         assert!(p.contains("only valid on kind"), "{p}");
 
-        let p = amend_with(&|a| a.agora_governance_amendment = 2);
-        assert!(p.contains("agora_governance_amendment is 2"), "{p}");
+        let p = amend_with(&|a| a.agora_governance_amendment = 3);
+        assert!(p.contains("agora_governance_amendment is 3"), "{p}");
+
+        // A version says where the texts are, and both ways round it is
+        // held to it.
+        let p = amend_with(&|a| a.agora_governance_amendment = 1);
+        assert!(p.contains("does neither consistently"), "{p}");
+        let p = amend_with(&|a| a.note = AmendmentText::Plain("n".into()));
+        assert!(p.contains("does neither consistently"), "{p}");
     }
 
     #[test]
@@ -2752,7 +3048,7 @@ mod tests {
         let mut c = Chain::new();
         let target = c.entry(&key, data.clone());
         let amendment_id = c.next_amd();
-        let (amendment, redacted) = Amendment::redaction(
+        let (amendment, redacted) = AmendmentDraft::redaction(
             &amendment_id,
             target,
             c.hash_at(1),
@@ -2809,7 +3105,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -2841,7 +3137,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Correction,
@@ -2869,7 +3165,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Correction,
@@ -2881,7 +3177,7 @@ mod tests {
             &key,
             gov(7),
             GovernanceLogEntryType::Amendment,
-            serde_json::to_value(&amendment).unwrap(),
+            serde_json::to_value(&amendment.amendment).unwrap(),
             true,
         );
         let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
@@ -3340,7 +3636,7 @@ mod tests {
         let reattested = c.decision(&old); // 3 — inside, later vouched for
         let rotation = c.compromise(&old_pk, &new, 1);
         let rotation_id = c.rotate(&new, &rotation); // 4 — signed by the NEW key
-        let vouch = Amendment::new(
+        let vouch = AmendmentDraft::new(
             reattested,
             c.hash_at(3),
             AmendmentKind::Reattested,
@@ -3454,7 +3750,7 @@ mod tests {
         let anchor = anchored(&steward_pk);
         let mut c = Chain::new();
         let target = c.decision(&steward); // 1
-        let fake = Amendment::new(
+        let fake = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -3655,6 +3951,27 @@ mod tests {
              \"key\":\"ebb3091dd328f1463362c171121921b2fe14628e3fc4c145deaccefb85c0e78a\",\
              \"last_trusted\":null,\"prev_hash\":null,\"purpose\":\"genesis\"}"
         );
+
+        // The same statement `governance/root/root_sign.py --self-test`
+        // pins in the agora repository: the tool that signs and the
+        // verifiers that check must mean the same bytes.
+        let statement = KeyCertStatement::compromise(
+            Sha256Hex::from([0xab; 32]).to_string().parse().unwrap(),
+            15,
+            Some([0xcd; 32].into()),
+            TrustedHead {
+                id: gov(10),
+                chain_seq: 11,
+                entry_hash: [0xef; 32].into(),
+            },
+        );
+        assert_eq!(
+            Sha256Hex::from(<[u8; 32]>::from(Sha256::digest(
+                statement.signed_bytes()
+            )))
+            .to_string(),
+            "633685771e08be126fd12ca4eb98c77120e5868236ff541ecba85ce6a21e6b68"
+        );
     }
 
     #[test]
@@ -3719,7 +4036,7 @@ mod tests {
     #[test]
     fn amendments_and_rotations_round_trip_as_entry_data() {
         let (key, pk) = generate_keypair();
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             gov(1),
             data_hash(&json!("x")),
             AmendmentKind::Superseded,
@@ -3729,14 +4046,48 @@ mod tests {
         .unwrap()
         .with_authority(gov(9))
         .with_rationale("the later decision covers the same subject");
+        let AmendmentDraft { amendment, texts } = amendment;
         let value = serde_json::to_value(&amendment).unwrap();
         assert_eq!(value["kind"], "superseded");
-        assert_eq!(value["agora_governance_amendment"], 1);
+        assert_eq!(value["agora_governance_amendment"], 2);
         assert!(value.get("redaction").is_none(), "{value}");
+        let text = value.to_string();
+        assert!(!text.contains("Art. VI"), "no text in signed data: {text}");
+        assert!(!text.contains("salt"), "and no salt: {text}");
+        assert_eq!(
+            value["note"]["commitment"],
+            texts
+                .note
+                .as_ref()
+                .unwrap()
+                .commitment()
+                .commitment
+                .to_string()
+        );
         assert_eq!(
             serde_json::from_value::<Amendment>(value).unwrap(),
             amendment
         );
+        let beside = serde_json::to_value(&texts).unwrap();
+        assert_eq!(beside["basis"]["text"], "Art. VI § 2");
+        assert_eq!(
+            serde_json::from_value::<AmendmentTexts>(beside).unwrap(),
+            texts
+        );
+
+        // Version 1, as the platform's three are, still reads.
+        let legacy = json!({
+            "agora_governance_amendment": 1,
+            "target": "GOV-2026-0001",
+            "target_entry_hash": data_hash(&json!("x")),
+            "kind": "non_precedential",
+            "authority": "GOV-2026-0005",
+            "basis": "§1",
+            "note": "diagnostic finding",
+        });
+        let legacy: Amendment = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.validate(), Ok(()));
+        assert_eq!(legacy.basis, AmendmentText::Plain("§1".into()));
 
         let mut c = Chain::new();
         c.decision(&key);
@@ -3757,7 +4108,8 @@ mod tests {
             rotation
         );
 
-        let notice = AmendmentNotice::new(amd(1), at(0), &amendment);
+        let notice =
+            AmendmentNotice::new(amd(1), at(0), &amendment, Some(&texts));
         let value = serde_json::to_value(&notice).unwrap();
         assert_eq!(value["id"], "AMD-2026-0001");
         assert_eq!(value["note"], "superseded by GOV-2026-0009");
@@ -3765,6 +4117,20 @@ mod tests {
             serde_json::from_value::<AmendmentNotice>(value).unwrap(),
             notice
         );
+
+        // The rationale erased: the label stays, and nothing else moves.
+        let erased = AmendmentTexts {
+            rationale: None,
+            ..texts.clone()
+        };
+        let notice =
+            AmendmentNotice::new(amd(1), at(0), &amendment, Some(&erased));
+        assert_eq!(notice.note, "superseded by GOV-2026-0009");
+        assert_eq!(notice.rationale.as_deref(), Some(WITHHELD_TEXT));
+        let notice = AmendmentNotice::new(amd(1), at(0), &amendment, None);
+        assert_eq!(notice.basis, WITHHELD_TEXT);
+        let notice = AmendmentNotice::new(amd(1), at(0), &legacy, None);
+        assert_eq!(notice.note, "diagnostic finding");
     }
 
     /// The verifier hashes the raw `data` value, so a field it has never
@@ -3775,7 +4141,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let bare = Amendment::new(
+        let bare = AmendmentDraft::new(
             target.clone(),
             c.hash_at(1),
             AmendmentKind::Correction,
@@ -3784,7 +4150,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            serde_json::to_value(&bare)
+            serde_json::to_value(&bare.amendment)
                 .unwrap()
                 .get("rationale")
                 .is_none()
@@ -3793,7 +4159,7 @@ mod tests {
         let full = bare.clone().with_rationale("at length: …");
         c.amend(&key, &full);
         // And a field from a future version of the shape.
-        let mut future = serde_json::to_value(&full).unwrap();
+        let mut future = serde_json::to_value(&full.amendment).unwrap();
         future["superseded_by_something_new"] = json!(["later"]);
         c.push(
             &key,
@@ -3871,7 +4237,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Overruled,

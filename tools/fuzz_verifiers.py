@@ -9,6 +9,16 @@ verdict on every mutant. They must agree on all of it: the whole verdict,
 or that the input is not a chain at all. A disagreement means one of them
 is wrong about a rule, which is the only thing this looks for.
 
+Half the mutants are left as they are, which exercises the envelope: almost
+any change breaks a hash or a signature, and both verifiers must say so.
+The other half change a signed payload — an amendment, a rotation, a root
+certificate's statement — and are then RE-SIGNED, link by link and root
+signature by root signature, with the fixed test keys the vectors are built
+from. Those are the mutants that get past the hashes to the rules about
+what a payload may say, which is where two implementations can quietly
+differ. (The keys are test fixtures: `[n; 32]` for the chain, `[0xA0 + n;
+32]` for the throwaway roots. None of them signs anything real.)
+
     python3 tools/fuzz_verifiers.py [--count 4000] [--seed 1] [--keep DIR]
 
 Exit status is 0 if and only if there were no disagreements. Deterministic
@@ -17,6 +27,7 @@ for a given seed and set of vectors.
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import random
@@ -65,11 +76,173 @@ def is_hex(value):
     )
 
 
-def mutate(rng, vector):
+# ---------------------------------------------------------------------------
+# Signing, with the vectors' fixed keys
+# ---------------------------------------------------------------------------
+
+
+def _compress(point):
+    x, y, z, _ = point
+    inverse = pow(z, govlog._P - 2, govlog._P)
+    x, y = x * inverse % govlog._P, y * inverse % govlog._P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+class Signer:
+    """An Ed25519 signing key from its 32-byte seed (RFC 8032 §5.1.5-6)"""
+
+    def __init__(self, seed):
+        digest = hashlib.sha512(seed).digest()
+        scalar = bytearray(digest[:32])
+        scalar[0] &= 248
+        scalar[31] &= 127
+        scalar[31] |= 64
+        self.scalar = int.from_bytes(scalar, "little")
+        self.prefix = digest[32:]
+        self.public = _compress(govlog._point_mul(self.scalar, govlog._G))
+
+    def sign(self, message):
+        r = int.from_bytes(hashlib.sha512(self.prefix + message).digest(), "little") % govlog._L
+        big_r = _compress(govlog._point_mul(r, govlog._G))
+        k = int.from_bytes(
+            hashlib.sha512(big_r + self.public + message).digest(), "little"
+        ) % govlog._L
+        return big_r + ((r + k * self.scalar) % govlog._L).to_bytes(32, "little")
+
+
+SIGNERS = {}
+for _seed in [bytes([n]) * 32 for n in range(1, 6)] + [bytes([0xA0 + n]) * 32 for n in (1, 2)]:
+    _signer = Signer(_seed)
+    SIGNERS[_signer.public.hex()] = _signer
+
+
+def who_signed(link):
+    """The test key whose signature is on `link`, if it is one of ours"""
+    a = link["attestation"]
+    try:
+        message = govlog.signed_message(
+            bytes.fromhex(a["entry_hash"]), govlog.parse_timestamp(a["signed_at"])[1]
+        )
+        signature = bytes.fromhex(a["signature"])
+    except (govlog.InputError, ValueError, TypeError, KeyError):
+        return None
+    for public, signer in SIGNERS.items():
+        if govlog.ed25519_verify(bytes.fromhex(public), message, signature):
+            return signer
+    return None
+
+
+def resign_certificates(data, signed_by_root):
+    """Root signatures over whatever the statements say now, by whichever
+    of our roots had signed them before"""
+    if not isinstance(data, dict):
+        return
+    for name in ("certificate", "outgoing_certificate"):
+        certificate = data.get(name)
+        signers = signed_by_root.get(name) or []
+        if not isinstance(certificate, dict) or not signers:
+            continue
+        try:
+            parsed = govlog._parse_certificate(
+                dict(certificate, signatures=[]), name
+            )
+            message = govlog.root_signed_bytes(parsed["statement"])
+        except (govlog.InputError, TypeError, KeyError, AttributeError):
+            continue
+        certificate["signatures"] = [
+            {"root_key": public, "signature": SIGNERS[public].sign(message).hex()}
+            for public in signers
+        ]
+
+
+def root_signers(data):
+    """Which of our roots validly signed each certificate in `data`"""
+    found = {}
+    if not isinstance(data, dict):
+        return found
+    for name in ("certificate", "outgoing_certificate"):
+        certificate = data.get(name)
+        try:
+            parsed = govlog._parse_certificate(certificate, name)
+        except (govlog.InputError, TypeError, KeyError, AttributeError):
+            continue
+        message = govlog.root_signed_bytes(parsed["statement"])
+        found[name] = [
+            s["root_key"]
+            for s in parsed["signatures"]
+            if s["root_key"] in SIGNERS
+            and govlog.ed25519_verify(
+                bytes.fromhex(s["root_key"]), message, bytes.fromhex(s["signature"])
+            )
+        ]
+    return found
+
+
+def mutate_payload(rng, vector):
+    """One change inside a signed payload, then everything re-signed so
+    that the change is the only thing wrong. None if there is no payload
+    to change or the chain is not one of ours to sign."""
+    links = vector["links"]
+    carrying = [i for i, l in enumerate(links) if isinstance(l.get("data"), (dict, list))]
+    signers = [who_signed(l) for l in links]
+    if not carrying:
+        return None
+    index = rng.choice(carrying)
+    link = links[index]
+    roots_before = root_signers(link["data"])
+
+    holder = {"links": [{"data": link["data"]}]}
+    what = None
+    for _ in range(8):  # a mutation of the payload itself, not of the wrapper
+        trial = copy.deepcopy(holder)
+        described = mutate(rng, trial, structural=False)
+        wrapper = trial["links"][0] if len(trial["links"]) == 1 else None
+        if (
+            isinstance(wrapper, dict)
+            and set(wrapper) == {"data"}
+            and wrapper["data"] is not None
+            and wrapper["data"] != link["data"]
+        ):
+            holder, what = trial, described
+            break
+    if what is None:
+        return None
+    link["data"] = holder["links"][0]["data"]
+    if rng.random() < 0.7:
+        resign_certificates(link["data"], roots_before)
+
+    previous = links[index - 1]["attestation"]["entry_hash"] if index else None
+    for i in range(index, len(links)):
+        current, a = links[i], links[i]["attestation"]
+        if i == index:
+            try:
+                a["data_hash"] = govlog.data_hash(current["data"])
+            except Exception:  # not JSON a verifier can hash; leave it broken
+                return None
+        else:
+            a["prev_hash"] = previous
+        try:
+            a["entry_hash"] = govlog.entry_hash(current)
+            if signers[i] is not None:
+                a["signature"] = signers[i].sign(
+                    govlog.signed_message(
+                        bytes.fromhex(a["entry_hash"]),
+                        govlog.parse_timestamp(a["signed_at"])[1],
+                    )
+                ).hex()
+        except (govlog.InputError, ValueError, TypeError, KeyError):
+            return None
+        previous = a["entry_hash"]
+    return "re-signed payload of link %d: %s" % (index, what.replace("0/data/", "", 1))
+
+
+def mutate(rng, vector, structural=True):
     """One change to `vector["links"]`, described"""
     links = vector["links"]
     op = rng.choice(
-        ["value"] * 12 + ["delete", "unknown", "swap_links", "drop_link", "dup_link", "graft"]
+        ["value"] * 12
+        + ["delete", "delete", "unknown", "graft", "retype", "retype"]
+        + (["swap_links", "drop_link", "dup_link"] if structural else [])
     )
     if op == "swap_links" and len(links) > 1:
         i, j = rng.sample(range(len(links)), 2)
@@ -93,8 +266,21 @@ def mutate(rng, vector):
     if op == "delete":
         del get(links, path[:-1])[path[-1]]
         return "delete %s" % where
+    if op == "retype":
+        # The same content in another JSON shape: serde reads a struct from
+        # an array of its fields, and Python will not.
+        if isinstance(old, dict):
+            new = rng.choice([list(old.values()), [], [old], None])
+        elif isinstance(old, list):
+            new = rng.choice([{str(i): v for i, v in enumerate(old)}, {}, old[:1] or None])
+        else:
+            new = rng.choice([[old], {"value": old}, None])
+        put(links, path, new)
+        return "retype %s: %r -> %r" % (where, old, new)
     if op == "unknown":
         objects = [p for p in paths(links) if isinstance(get(links, p), dict)]
+        if not objects:
+            return "no object left to add a field to"
         target = rng.choice(objects)
         get(links, target)["note"] = "fuzz"
         return "unknown field in %s" % "/".join(str(s) for s in target)
@@ -125,7 +311,18 @@ def mutate(rng, vector):
         new = not old
     elif isinstance(old, int):
         new = rng.choice(
-            [old + 1, old - 1, 0, -1, 2**32, 2**63, 2**64, float(old), str(old), True]
+            [old + 1, old - 1, 0, -1, 2**32, 2**63, str(old), True]
+            # KNOWN DIVERGENCE, deliberately not fuzzed inside a payload
+            # that gets re-signed: a number that is not a 64-bit integer.
+            # Canonical JSON writes numbers the way serde_json does, and
+            # serde_json's float printer changed between releases ("1e21"
+            # became "1e+21"); an integer past u64 is a float to it as
+            # well. The two verifiers can therefore hash such a payload
+            # differently. No governance entry has ever contained one —
+            # every number on the platform's log is an integer — and the
+            # proposed rule is that none ever may. Unsigned, they are fair
+            # game: both verifiers must still refuse them the same way.
+            + ([2**64, float(old)] if structural else [])
         )
     elif isinstance(old, str):
         new = rng.choice([old + "x", "", old.upper(), None, 7, "routine", "compromise", "genesis"])
@@ -144,6 +341,8 @@ def python_verdict(vector):
         verdict = test_vectors.observed(test_vectors.run_vector(vector))
     except govlog.InputError:
         return REFUSED
+    except Exception as e:  # a crash is a finding, never a verdict
+        return "crashed: %s: %s" % (type(e).__name__, e)
     # The vector files leave an empty `standing` out.
     if not verdict["standing"]:
         del verdict["standing"]
@@ -171,7 +370,11 @@ def main(argv=None):
     for n in range(args.count):
         name, seed = seeds[n % len(seeds)]
         vector = copy.deepcopy(seed)
-        what = "; ".join(mutate(rng, vector) for _ in range(rng.choice([1, 1, 1, 2, 3])))
+        what = mutate_payload(rng, vector) if n % 2 else None
+        if what is None:
+            what = "; ".join(
+                mutate(rng, vector) for _ in range(rng.choice([1, 1, 1, 2, 3]))
+            )
         path = os.path.join(corpus, "%05d_%s.json" % (n, name))
         with open(path, "w", encoding="utf-8") as f:
             json.dump(vector, f)
@@ -195,17 +398,23 @@ def main(argv=None):
             rust = json.load(f)
         python = python_verdict(vector)
         refused += python == REFUSED
-        not_ok += python != REFUSED and not python["ok"]
+        not_ok += isinstance(python, dict) and not python["ok"]
         if rust != python:
             disagreements += 1
             print("DISAGREEMENT %s\n  %s" % (os.path.basename(path), what))
-            if REFUSED in (rust, python):
+            if isinstance(rust, str) or isinstance(python, str):
                 print("  rust: %s\n  python: %s" % (
-                    rust if rust == REFUSED else "a verdict",
-                    python if python == REFUSED else "a verdict",
+                    rust if isinstance(rust, str) else "a verdict",
+                    python if isinstance(python, str) else "a verdict",
                 ))
             else:
-                for key in sorted(set(rust) | set(python)):
+                for r, p in zip(rust.get("entries", []), python.get("entries", [])):
+                    for key in sorted(set(r) | set(p)):
+                        if r.get(key) != p.get(key):
+                            print("  %s.%s: rust %s, python %s" % (
+                                r.get("id"), key, json.dumps(r.get(key)), json.dumps(p.get(key))
+                            ))
+                for key in sorted((set(rust) | set(python)) - {"entries"}):
                     if rust.get(key) != python.get(key):
                         print("  %s:\n    rust   %s\n    python %s" % (
                             key, json.dumps(rust.get(key)), json.dumps(python.get(key))

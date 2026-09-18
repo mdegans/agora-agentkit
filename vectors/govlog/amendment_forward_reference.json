@@ -33,20 +33,34 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "ac8c1181b2af9a2eddebf055c01ce21a3553912faf39f105d3c8845ccc3df59b",
-        "entry_hash": "8835c0198cbef8c5429f65f4cb90ebf3c3eb0a4dc69f8f089567f552fe768142",
-        "signature": "4108136cf998e41671d2a7398f186a9dc7097a70503f3cb4f374df57c22da3200374b1df52d45848ce671439b746ed62f5b53be5920bb3885cf0033c2052fd00",
+        "data_hash": "19bf6ed6e4a137c0f78896b4010df555710ff80e277d03ba10f2b2d39cbc2f37",
+        "entry_hash": "180cb63f8e17ca1d5c8d4ba511074dd65d0e8c3e1ae54b94dfa9f2cdaa6b0b25",
+        "signature": "0ab4d9bcb73435d6ec8907d0d787f81db44dd3aa4439a105b7589281e6b39e5ab09c630a99618733d0a4c7094699c90e3c6c13e9fbb295f8bc63ccc45db43509",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_amendment": 1,
+        "agora_governance_amendment": 2,
         "authority": null,
-        "basis": "Art. VI § 2",
+        "basis": {
+          "commitment": "56cb7c6a328b8121b30e4eadd1444fe578a1c322b0c2eb054d267ebb46c33c02"
+        },
         "kind": "overruled",
-        "note": "overruled",
+        "note": {
+          "commitment": "f8fb9b94b6a6bfae9a241454ecb361e7dafb56be3e145080f97713d44c98a262"
+        },
         "target": "GOV-2026-0002",
         "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
+      },
+      "texts": {
+        "basis": {
+          "salt": "2de122c1d842e501bfc6de92c4be2c3558ab2bae3420270b95cd8882fdcc9293",
+          "text": "Art. VI § 2"
+        },
+        "note": {
+          "salt": "abc8eea246911dc709e1818b266e4d84068958049472b679676b0e9e8a058079",
+          "text": "overruled"
+        }
       }
     },
     {
@@ -56,10 +70,10 @@
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 3,
-        "prev_hash": "8835c0198cbef8c5429f65f4cb90ebf3c3eb0a4dc69f8f089567f552fe768142",
+        "prev_hash": "180cb63f8e17ca1d5c8d4ba511074dd65d0e8c3e1ae54b94dfa9f2cdaa6b0b25",
         "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
-        "entry_hash": "b70e8b3e8ce9de02fd97915c9674175d4a2eb6db39b1e803748996346c89dcfe",
-        "signature": "d2d901c511038987df0d35aaf1bf734bf460ffea75fc74cff4229df21c2b314a1b638cbcfbc5943c2b13401af61de51d40a310498fc3cf0e9c80de296ea8070f",
+        "entry_hash": "4e8816291d09f488a8e644cfb7a15a64eba27b2f53a72876d3d1161b802df397",
+        "signature": "c217cfc2345a4db61bc701c7e8f1ddf2a94c8b19374d61b20fed87ec8bf8335205c8eb4a7126f574a1e0fcedde61fc35bf4345dab7d0650f2e62d279e17eff00",
         "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       }
@@ -93,6 +107,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -105,6 +120,10 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
         "problem": true
       },
       {
@@ -117,6 +136,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       }
     ]

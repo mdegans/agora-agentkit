@@ -62,6 +62,7 @@ def observed(report):
                 "redacted": e["redacted"],
                 "repudiated": e["repudiated"],
                 "amended_by": e["amended_by"],
+                "texts": e["texts"],
                 "problem": e["problem"] is not None,
             }
             for e in report["entries"]

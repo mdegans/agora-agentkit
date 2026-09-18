@@ -286,7 +286,7 @@ pub enum AmendmentKind {
     Reinstated,
     // Clerical correction noted; the target's data is untouched.
     Correction,
-    // Content lawfully removed; see `Amendment::redaction`.
+    // Content lawfully removed; see `AmendmentDraft::redaction`.
     Redaction,
     // The Steward vouches, under the current key, for an entry signed
     // inside a compromise window.

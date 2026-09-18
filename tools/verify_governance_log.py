@@ -87,7 +87,10 @@ ROOT_KEYS = [
 ROOT_THRESHOLD = 1
 
 ENVELOPE_VERSION = 1
-AMENDMENT_VERSION = 1
+# Version 1 amendments carry their free text in the signed `data`; version 2
+# commits to it instead (see `text_commitment`). Both verify: the platform
+# has three of the first kind, and they are permanent.
+AMENDMENT_VERSIONS = (1, 2)
 KEY_ROTATION_VERSION = 2
 KEY_CERT_VERSION = 1
 #: An attestation signed more than this long after its entry was recorded
@@ -440,6 +443,88 @@ def _id_field(obj, name, where):
     return value
 
 
+def _parse_texts(raw, where):
+    """The texts beside an amendment entry: for each of basis, note and
+    rationale, the text and the salt its commitment was made with — or
+    nothing, which is what an erased text looks like"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"basis", "note", "rationale"}:
+        raise InputError("%s: texts is not a set of amendment texts" % where)
+    texts = {}
+    for name in ("basis", "note", "rationale"):
+        text = raw.get(name)
+        if text is None:
+            texts[name] = None
+            continue
+        if (
+            not isinstance(text, dict)
+            or set(text) != {"salt", "text"}
+            or not isinstance(text["text"], str)
+        ):
+            raise InputError("%s: texts.%s is not a salt and a text" % (where, name))
+        try:
+            encoded = text["text"].encode("utf-8")
+        except UnicodeEncodeError:
+            raise InputError("%s: texts.%s is not text" % (where, name))
+        texts[name] = {
+            "salt": _hex_field(text, "salt", 32, where),
+            "text": encoded,
+        }
+    return texts
+
+
+def text_commitment(salt_hex, text_bytes):
+    """What a version 2 amendment signs in place of a text:
+    `SHA-256(salt || text)`. The salt is 32 random bytes kept beside the
+    text and deleted with it, so an erased text cannot be confirmed by
+    guessing at it."""
+    return sha256_hex(bytes.fromhex(salt_hex) + text_bytes)
+
+
+def text_status(amendment, texts):
+    """Where each committed text of `amendment` stands given the `texts`
+    beside the entry: `(status, None)`, or `(None, problem)`.
+
+    `status` is None for a version 1 amendment, whose texts are in the
+    signed data. A text that is beside the entry and is not the one
+    committed to — or that the entry never committed to at all — is a
+    problem: somebody put words next to a signed entry that the signer
+    did not write. A text that is simply not there is `withheld`, which
+    is lawful: it is what erasure looks like."""
+    texts = texts or {"basis": None, "note": None, "rationale": None}
+    nothing_beside = all(t is None for t in texts.values())
+
+    def status(name):
+        committed = amendment[name]
+        if not isinstance(committed, dict):  # plain, or absent
+            return None
+        beside = texts[name]
+        if beside is None:
+            return "withheld"
+        if text_commitment(beside["salt"], beside["text"]) == committed["commitment"]:
+            return "present"
+        return "mismatch"
+
+    basis, note = status("basis"), status("note")
+    if basis is None or note is None:
+        if nothing_beside:
+            return None, None
+        return None, "texts beside an entry that commits to none"
+    if amendment["rationale"] is None and texts["rationale"] is not None:
+        return None, "texts beside an entry that commits to none"
+    result = {"basis": basis, "note": note}
+    rationale = status("rationale")
+    if rationale is not None:
+        result["rationale"] = rationale
+    for name, value in result.items():
+        if value == "mismatch":
+            return None, (
+                "`%s` beside the entry is not the text the entry committed to" % name
+            )
+    return result, None
+
+
 def parse_link(raw):
     """One chain link, checked for shape. A malformed link is an input
     error, not a verdict: there is nothing to verify."""
@@ -448,7 +533,7 @@ def parse_link(raw):
     entry_id = _id_field(raw, "id", "link")
     where = "link %s" % entry_id
     entry_type = raw.get("entry_type")
-    if entry_type not in ENTRY_TYPES:
+    if not isinstance(entry_type, str) or entry_type not in ENTRY_TYPES:
         raise InputError("%s: unknown entry_type %r" % (where, entry_type))
     attestation = raw.get("attestation")
     if not isinstance(attestation, dict):
@@ -494,10 +579,26 @@ def parse_link(raw):
             "signed_at": attestation["signed_at"],
         },
         "data": raw.get("data"),
+        "texts": _parse_texts(raw.get("texts"), where),
     }
     parse_timestamp(link["created_at"])
     parse_timestamp(link["attestation"]["signed_at"])
     return link
+
+
+def _amendment_text(data, name, required):
+    """A free-text field: a string (version 1), a commitment (version 2),
+    or — for the rationale only — absent"""
+    value = data.get(name)
+    if value is None:
+        if required:
+            raise InputError("%s is missing" % name)
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and set(value) == {"commitment"}:
+        return {"commitment": _hex_field(value, "commitment", 32, name)}
+    raise InputError("%s is neither a text nor a commitment to one" % name)
 
 
 def parse_amendment(data):
@@ -506,45 +607,64 @@ def parse_amendment(data):
         return None, "amendment `data` is not an object"
     try:
         version = data.get("agora_governance_amendment")
-        if version != AMENDMENT_VERSION:
-            return None, "agora_governance_amendment is %r, not %d" % (
-                version,
-                AMENDMENT_VERSION,
-            )
+        if not _uint(version, _U32):
+            raise InputError("agora_governance_amendment")
+        authority = data.get("authority")
+        if authority is not None:
+            authority = _id_field(data, "authority", "amendment")
         amendment = {
+            "version": version,
             "target": _id_field(data, "target", "amendment"),
             "target_entry_hash": _hex_field(data, "target_entry_hash", 32, "amendment"),
             "kind": data.get("kind"),
-            "basis": data.get("basis"),
-            "note": data.get("note"),
+            "authority": authority,
+            "basis": _amendment_text(data, "basis", True),
+            "note": _amendment_text(data, "note", True),
+            "rationale": _amendment_text(data, "rationale", False),
             "redaction": data.get("redaction"),
         }
     except InputError as e:
         return None, "amendment `data` is malformed: %s" % e
-    if amendment["kind"] not in AMENDMENT_KINDS:
+    if not isinstance(amendment["kind"], str) or amendment["kind"] not in AMENDMENT_KINDS:
         return None, "amendment `data` is malformed: unknown kind %r" % (
             amendment["kind"],
         )
-    if not isinstance(amendment["basis"], str) or not isinstance(amendment["note"], str):
-        return None, "amendment `data` is malformed: basis and note are strings"
+    return amendment, None
+
+
+def validate_amendment(amendment):
+    """Version, where the texts are for that version, and the redaction
+    shape — what is wrong with a well-formed amendment, or None"""
+    if amendment["version"] not in AMENDMENT_VERSIONS:
+        return "agora_governance_amendment is %r, not 1 or 2" % amendment["version"]
+    plain = amendment["version"] == 1
+    for name in ("basis", "note", "rationale"):
+        text = amendment[name]
+        if text is not None and isinstance(text, str) != plain:
+            return (
+                "a version 1 amendment carries its texts and a version 2 one "
+                "commits to them; this does neither consistently"
+            )
     # A redaction says what it left behind; nothing else may claim to.
     if amendment["kind"] == "redaction":
         redaction = amendment["redaction"]
         if redaction is None:
-            return None, "kind `redaction` requires a `redaction`"
-        if not isinstance(redaction, dict) or not isinstance(
-            redaction.get("fields"), list
+            return "kind `redaction` requires a `redaction`"
+        if (
+            not isinstance(redaction, dict)
+            or not isinstance(redaction.get("fields"), list)
+            or not all(isinstance(f, str) for f in redaction["fields"])
         ):
-            return None, "amendment `data` is malformed: redaction.fields"
+            return "amendment `data` is malformed: redaction.fields"
         try:
             amendment["resulting_data_hash"] = _hex_field(
                 redaction, "resulting_data_hash", 32, "redaction"
             )
         except InputError as e:
-            return None, "amendment `data` is malformed: %s" % e
+            return "amendment `data` is malformed: %s" % e
     elif amendment["redaction"] is not None:
-        return None, "`redaction` is only valid on kind `redaction`"
-    return amendment, None
+        return "`redaction` is only valid on kind `redaction`"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -636,17 +756,20 @@ def _exactly(obj, required, optional, where):
 def _parse_certificate(raw, where):
     _exactly(raw, {"statement", "signatures"}, set(), where)
     statement = raw["statement"]
-    _exactly(statement, _STATEMENT_FIELDS, set(), where + " statement")
+    # Missing and null are the same thing: the signed bytes are rebuilt
+    # from the values, with every field present.
+    nullable = {"prev_hash", "last_trusted"}
+    _exactly(statement, _STATEMENT_FIELDS - nullable, nullable, where + " statement")
     if not _uint(statement["agora_governance_key_cert"], _U32):
         raise InputError("%s: agora_governance_key_cert" % where)
     if statement["purpose"] not in ("genesis", "routine", "compromise"):
         raise InputError("%s: unknown purpose %r" % (where, statement["purpose"]))
     if not _uint(statement["from_seq"], _U64):
         raise InputError("%s: from_seq is not a position" % where)
-    prev = statement["prev_hash"]
+    prev = statement.get("prev_hash")
     if prev is not None:
         prev = _hex_field(statement, "prev_hash", 32, where)
-    head = statement["last_trusted"]
+    head = statement.get("last_trusted")
     if head is not None:
         _exactly(head, {"id", "chain_seq", "entry_hash"}, set(), where + " last_trusted")
         if not _uint(head["chain_seq"], _U64):
@@ -1050,6 +1173,10 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
                     problems.append("`data` does not hash to the attested data_hash")
             elif link["entry_type"] == "amendment":
                 amendment, problem = parse_amendment(link["data"])
+                if amendment is not None:
+                    problem = validate_amendment(amendment)
+                    if problem:
+                        amendment = None
                 if problem:
                     problems.append(problem)
             elif link["entry_type"] == "key_rotation":
@@ -1119,6 +1246,17 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
             problem = walk.apply(rotation, link, seq, links)
             if problem and problem not in problems:
                 problems.append(problem)
+        # Texts are checked against what the entry signed whether or not
+        # the amendment goes on to take effect: a substituted text is a lie
+        # about the record either way. Beside anything that commits to no
+        # texts, they are words nobody signed.
+        texts = None
+        if amendment is not None and authentic:
+            texts, problem = text_status(amendment, link["texts"])
+            if problem:
+                problems.append(problem)
+        elif link["texts"] and any(t is not None for t in link["texts"].values()):
+            problems.append("texts beside an entry that commits to none")
         if amendment is not None and authentic:
             target = position.get(amendment["target"])
             if target is None:
@@ -1159,6 +1297,7 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
                 "repudiated": False,
                 "reattested_by": [],
                 "standing": "in_force",
+                "texts": texts,
                 "problem": "; ".join(problems) if problems else None,
             }
         )

@@ -1,5 +1,5 @@
 {
-  "description": "An amendment served without its `data`, which is the whole record of what it does.",
+  "description": "The same, with texts served beside it. A version 1 amendment commits to none, so whatever they say, nobody signed it.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -33,20 +33,34 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "a8c64e4816d7ce8e7427b8a991b2cb452c5f7e0edb4cfd324d25cba9155956f5",
-        "entry_hash": "afcf86b3dc33008b1b212609be400cf3247d8f99c2e6cd6cc4d38515db3ec501",
-        "signature": "fdcb520f5c195e8de5b4ada1eb18c682a2829fa05eeb3a7e6aacb4664b219e2e721a851911ac5b584ffba8732d06da08e5985b672cf1683a0cbb71dcb911f701",
+        "data_hash": "045cdc6147ff0e4f648de39c5fbdd98f161f66b5922ef136dbc1b33e60d3a758",
+        "entry_hash": "d1b89a0cef0dcb8b10ad82f43580ef6d48c1a9d10328dfece579d3665956a232",
+        "signature": "730353471244c4dc80ae3e008a2429f3c2c6b6371ea1e5fc1e565dea705830fbc0bb355e4fde0d759b6ae2b9154ca52a9af52d6bf56ba6c2363243dcb85da306",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
+      "data": {
+        "agora_governance_amendment": 1,
+        "authority": "GOV-2026-0005",
+        "basis": "§1 (Red Team Cases Recharacterized)",
+        "kind": "non_precedential",
+        "note": "diagnostic finding — not citable as moderation precedent",
+        "rationale": "§5 leaves the ruling itself standing",
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
+      },
       "texts": {
         "basis": {
-          "salt": "24b53afed7e2f89fcbefbfb75a605c0020fad587505a40314f60ea2ac382c6f3",
-          "text": "clerical"
+          "salt": "88be04d63fb32c814e4563192fa759cc053dd8e388ea2a47cb2e6dc55fddbc4c",
+          "text": "§1 (Red Team Cases Recharacterized)"
         },
         "note": {
-          "salt": "35dd5d8829a2d16adfe6f1af57626fbacd24b42fa67b8c70fd62a3fe4218363d",
-          "text": "typo in the citation"
+          "salt": "1e2506380d3823e4b044fa0abc25c6db9463e52e2ae3a78cd53ad65dfe24ded0",
+          "text": "diagnostic finding — not citable as moderation precedent"
+        },
+        "rationale": {
+          "salt": "c69b77baf4c44c8f55fe7f51a0bf7b42ae89052ba393aedda1498a867d0c77fd",
+          "text": "§5 leaves the ruling itself standing"
         }
       }
     }
@@ -78,7 +92,9 @@
         "out_of_order": false,
         "redacted": false,
         "repudiated": false,
-        "amended_by": [],
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
         "texts": null,
         "problem": false
       },
@@ -86,7 +102,7 @@
         "id": "AMD-2026-0001",
         "signature_valid": true,
         "link_valid": true,
-        "content_matches": null,
+        "content_matches": true,
         "retroactive": false,
         "out_of_order": false,
         "redacted": false,
@@ -95,6 +111,9 @@
         "texts": null,
         "problem": true
       }
-    ]
+    ],
+    "standing": {
+      "GOV-2026-0001": "non_precedential"
+    }
   }
 }

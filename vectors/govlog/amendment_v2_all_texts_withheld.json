@@ -1,5 +1,5 @@
 {
-  "description": "An amendment served without its `data`, which is the whole record of what it does.",
+  "description": "No texts beside the entry at all, as a chain served without them looks. The amendment still takes effect.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -26,33 +26,54 @@
       }
     },
     {
-      "id": "AMD-2026-0001",
-      "entry_type": "amendment",
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
       "created_at": "2023-11-14T22:13:40.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "a8c64e4816d7ce8e7427b8a991b2cb452c5f7e0edb4cfd324d25cba9155956f5",
-        "entry_hash": "afcf86b3dc33008b1b212609be400cf3247d8f99c2e6cd6cc4d38515db3ec501",
-        "signature": "fdcb520f5c195e8de5b4ada1eb18c682a2829fa05eeb3a7e6aacb4664b219e2e721a851911ac5b584ffba8732d06da08e5985b672cf1683a0cbb71dcb911f701",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+        "signature": "eb399e7a14af383a9daea0e6c276473c3e8b45dd7ffa357f95d33780f993706fb35a39dfea6f4d920aa9a707cbe2450133e52da599dcd63e4acf660285f21808",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+        "data_hash": "f2f8f005f61d4d077503210c502bd1e2aeb6e7e4a0cd109162866d9d064143f4",
+        "entry_hash": "9f123bdc1f54888c845b98354bad3bfc92a479b65949cb257429215077b93c99",
+        "signature": "a4ae156c1ab54f6174595ef44344e691cc48dabb08bfef9b4c968ebd0382710aec4f77267dcfe58eecb56bc59aecb6463ae667541c512d04e3f2bd72ead6ef0c",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
       },
-      "texts": {
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": "GOV-2026-0005",
         "basis": {
-          "salt": "24b53afed7e2f89fcbefbfb75a605c0020fad587505a40314f60ea2ac382c6f3",
-          "text": "clerical"
+          "commitment": "ccf06ffdc7f4b6f61cc37cfc15b06d05eea1b83c7cefc86cabdfae5aff392052"
         },
+        "kind": "non_precedential",
         "note": {
-          "salt": "35dd5d8829a2d16adfe6f1af57626fbacd24b42fa67b8c70fd62a3fe4218363d",
-          "text": "typo in the citation"
-        }
+          "commitment": "c44266d6ef014506d47d8726458474405354641798ada28eb943e13eec0772b4"
+        },
+        "rationale": {
+          "commitment": "258e3c3c99251805b77f034829aa77476f06313a1a760caddcf2f8e03cb46e3d"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
       }
     }
   ],
   "expect": {
-    "ok": false,
+    "ok": true,
     "head": "AMD-2026-0001",
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
@@ -78,12 +99,14 @@
         "out_of_order": false,
         "redacted": false,
         "repudiated": false,
-        "amended_by": [],
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
         "texts": null,
         "problem": false
       },
       {
-        "id": "AMD-2026-0001",
+        "id": "GOV-2026-0002",
         "signature_valid": true,
         "link_valid": true,
         "content_matches": null,
@@ -93,8 +116,28 @@
         "repudiated": false,
         "amended_by": [],
         "texts": null,
-        "problem": true
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "withheld",
+          "note": "withheld",
+          "rationale": "withheld"
+        },
+        "problem": false
       }
-    ]
+    ],
+    "standing": {
+      "GOV-2026-0001": "non_precedential"
+    }
   }
 }

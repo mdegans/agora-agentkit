@@ -33,20 +33,34 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "dd8d58f4e66db47b46406a8c7036e24939a67b7362cc598f789651a2c62fe075",
-        "entry_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
-        "signature": "1393b71681d1d653c5efb58d6ecf9da616f7ac8985249a2d1f806e91b2758f6a6a60ba1af371c17474eda9bbe404b95516c07d2b2b58cfc711c42e9282c6a700",
+        "data_hash": "65fe5dadc863300f969efdaecef1a5ec0d6d97e56e038137a5d981650008c471",
+        "entry_hash": "a27135705c2007acbc4015a26160a163549000ba71fec6d6d5f9c262380fa75f",
+        "signature": "d7824d9db438a06bca8a6dd3f8f5e51c2e15c2f6d4f5959339e1fc78bd175f8cad0cde1c30106f59ddf5e23914e602f3922fa29a19a1dd9bb92cee53f36e0908",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_amendment": 1,
+        "agora_governance_amendment": 2,
         "authority": null,
-        "basis": "none",
+        "basis": {
+          "commitment": "44ecd4b5393e63029685dfb7944ab0937ffda4db04f868fab1c96deb02c24537"
+        },
         "kind": "overruled",
-        "note": "overruled, says nobody with the key",
+        "note": {
+          "commitment": "b56706feaa36095364c6bfddc904a4a5999eeb2b53b282b715b11ea9c5090be9"
+        },
         "target": "GOV-2026-0001",
         "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
+      },
+      "texts": {
+        "basis": {
+          "salt": "b382a8c3bf0efbc883603514d7ffcfb92ee898929dd39ee626cd7cec4f2f0b48",
+          "text": "none"
+        },
+        "note": {
+          "salt": "d0632e0c601b75fe18c9cff02e4a14b9c8b84569dabcf2091e9ae8aede341e30",
+          "text": "overruled, says nobody with the key"
+        }
       }
     },
     {
@@ -56,10 +70,10 @@
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 3,
-        "prev_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
-        "data_hash": "3d27b1fef988f4cc9012377b7feadd5f8894133f7caf332eb9dd61181b6e6e09",
-        "entry_hash": "0b39a412de6e1b69d822b7cc3130da49e3542e5897e4fd64b11adb78807c3076",
-        "signature": "1d10a3702d9ff7cc1c1116edfbbb2b04bbe027035050c6a997aae516f7493a8376be0158e795c68cc1f63775c95e36dd2af55238430a9f6b54a29c34db822500",
+        "prev_hash": "a27135705c2007acbc4015a26160a163549000ba71fec6d6d5f9c262380fa75f",
+        "data_hash": "c0b94c627f311c04b9fe174cb04110f058f7942c3bc7d52ec35f53e4c48bf618",
+        "entry_hash": "124298d71f8f1573004400e8c6960aa129e9a0185d26a3e7490d88bc3b664314",
+        "signature": "499aad58d39257b233dffecb47c27bc07aceaa9578a7d6a0784e581fb4bfda73c912974a51c6442616d0a95a237ea6da49fa05fde07c0f700d42aa4d85846301",
         "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },
@@ -69,7 +83,7 @@
           "signatures": [
             {
               "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
-              "signature": "9613ca976015e50e57cf20098c8f7ca274b391155a5ff89fc7311b1eb5f76659d772ff46b11b3cad626f404009094612fea263f205f834537f27864c2e2ca806"
+              "signature": "ad7739f9c29472d3ad1e6717fa2415c869b7c3ef3a2a423b8ce57ebe1cf2c51ab0c93e4e5832eac563d61e304210d3b774fbc548e15737c552666fcfc440d407"
             }
           ],
           "statement": {
@@ -77,7 +91,7 @@
             "from_seq": 4,
             "key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
             "last_trusted": null,
-            "prev_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
+            "prev_hash": "a27135705c2007acbc4015a26160a163549000ba71fec6d6d5f9c262380fa75f",
             "purpose": "routine"
           }
         },
@@ -99,7 +113,7 @@
             "purpose": "genesis"
           }
         },
-        "proof": "b1cfe1d01d021c8fc5d4f232345ae6f0a17120eeda9d6aafb80ccda12a9209a7228acbf46131bc517ff3f8afdcf2e2de5e5184d4b533190df5db3f54ffa4db09",
+        "proof": "22392e7d5ede4461dd6c2996cc753172f0564ebf20632b2f8e905d2de26523b2258ca98e302670e05641fce7a9337a8a2826569bd80f9c2f41e959a8df117f0d",
         "proof_signed_at": 1700000035,
         "reason": "routine"
       }
@@ -133,6 +147,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -145,6 +160,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": true
       },
       {
@@ -157,6 +173,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": true
       }
     ]

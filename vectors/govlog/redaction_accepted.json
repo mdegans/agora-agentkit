@@ -33,18 +33,22 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b",
-        "data_hash": "e83fee940eb4e07d2d0d66163222b84904c9748a6cc48b4af7df4120c9de5ede",
-        "entry_hash": "d2333497d08d87df69654125d9eef93484d50e60be4411adcf0318a5938818c4",
-        "signature": "92b973ff0c7a0a9c327292193e894b784c8efbbd76424474bbf31aa815a2f768d76881366825500e15ed4f6e2f325c8611e381d650e2ba1a586311e2f68ca10a",
+        "data_hash": "3ca008c8b22338ed2b11ca7b82ea8f3d3bd65a5935d4a6d827011b0f3a7b9f29",
+        "entry_hash": "2edc9043d23fbf71a00991c99e79159f042ea51385849d4dd832b021d9971803",
+        "signature": "406dda53ec2e94f70d149dffafe4010109fa2965f96ccf31920fe97e14f995ddac410ecd96a5d884e94ea149a2f07f01bff4ea4011544f3b59eb60470633e70b",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_amendment": 1,
+        "agora_governance_amendment": 2,
         "authority": null,
-        "basis": "GDPR Art. 17(1)(a)",
+        "basis": {
+          "commitment": "49ee29028cb70b72410178aa52eba416df0c0ec19ce811bbab7cdc523e6446ec"
+        },
         "kind": "redaction",
-        "note": "personal data removed on request",
+        "note": {
+          "commitment": "ccb34262b679aa6156d99bb28689b9308638a773582f75f7e958f22852308806"
+        },
         "redaction": {
           "fields": [
             "/subject/handle",
@@ -54,6 +58,16 @@
         },
         "target": "GOV-2026-0001",
         "target_entry_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b"
+      },
+      "texts": {
+        "basis": {
+          "salt": "b44efae84a950e0f4d232f443cc45b055d7199c969831b4f5c98c893f95eb723",
+          "text": "GDPR Art. 17(1)(a)"
+        },
+        "note": {
+          "salt": "3658e92a4ddde605e16ce2a5ae2649e6c0918e058666a24e3642dd28f018aa89",
+          "text": "personal data removed on request"
+        }
       }
     }
   ],
@@ -97,6 +111,7 @@
         "amended_by": [
           "AMD-2026-0001"
         ],
+        "texts": null,
         "problem": false
       },
       {
@@ -109,6 +124,10 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
         "problem": false
       }
     ],

@@ -122,20 +122,34 @@
         "envelope_version": 1,
         "chain_seq": 5,
         "prev_hash": "c032daf8a3742e032be1c738b3d3acff6ac5df5bff486d81929cae302d9dad35",
-        "data_hash": "72f2e6b2c69e59b1c52fdcb440230e929de7263c035f82157264a26fbd7162b2",
-        "entry_hash": "f027898ed66ada12b13269bb28e967bd4f92da0fbc38f78ad70431dbac64f7b3",
-        "signature": "ef1e363823e45ca7467c7d0f7d708e0985a4f6ce462081860be96b343d5b4648db530e4f7733d9e5ca86c50f09da530f163dd59c5d627f91375122ae3ef81b0a",
+        "data_hash": "bafa5af1d2c5c13657de72b8c2444fe540a6096f4b6d820c42199ec5c1fae598",
+        "entry_hash": "4ad128cdbe78310c50a958954e6b95d9713dfe887c0b80da83333ea32d681b03",
+        "signature": "c96c8ea684450e95447a7cfa6a357b71a492c0b20cef3da309718a1d8cc81341c1b12ed44b235345885f3184d795e1fcb222d60e973dd3d7feae49c8cd07e108",
         "signed_at": "2023-11-14T22:14:11Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_amendment": 1,
+        "agora_governance_amendment": 2,
         "authority": null,
-        "basis": "Art. VII",
+        "basis": {
+          "commitment": "d0370dab6691be0517efb5d491229f7b6ced095a4b9b344e7e4d40d76d2edb37"
+        },
         "kind": "reattested",
-        "note": "independently verified; the Steward vouches for it",
+        "note": {
+          "commitment": "8099bdc08afa1f88f0e9a2d1a2640b651b189da6fdefaabbc165085fd87ccb96"
+        },
         "target": "GOV-2026-0003",
         "target_entry_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a"
+      },
+      "texts": {
+        "basis": {
+          "salt": "59dc5c54df502e69f30dd914d6e718513cde824f0f378fa15d70fae9f939142e",
+          "text": "Art. VII"
+        },
+        "note": {
+          "salt": "bb692d7358d687daec8c02d10fdfc1a80a699a722af09a62fcd10369866c26e6",
+          "text": "independently verified; the Steward vouches for it"
+        }
       }
     }
   ],
@@ -178,6 +192,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -190,6 +205,7 @@
         "redacted": false,
         "repudiated": true,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -204,6 +220,7 @@
         "amended_by": [
           "AMD-2026-0001"
         ],
+        "texts": null,
         "problem": false
       },
       {
@@ -216,6 +233,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -228,6 +246,10 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
         "problem": false
       }
     ],
