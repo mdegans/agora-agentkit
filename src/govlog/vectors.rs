@@ -8,7 +8,7 @@
 //! Keys are fixed seeds and timestamps fixed constants, so the files are
 //! byte-stable. Regenerate with `just vectors`.
 
-use super::tests::{Chain, at, chain, gov, key_id, link};
+use super::tests::{Chain, at, certify, chain, gov, key_id, link, root, roots};
 use super::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -26,6 +26,9 @@ struct Vector {
     genesis_key: PublicKeyHex,
     /// The verifier's out-of-band [`KeyAnchor`]
     anchor: Vec<PublicKeyHex>,
+    /// The verifier's [`RootSet`] — throwaway keys, never [`ROOT_KEYS`]
+    root_keys: Vec<PublicKeyHex>,
+    root_threshold: usize,
     links: Vec<GovernanceChainLink>,
     /// Entry `data` read separately, as a client that fetched an entry in
     /// full would hand to
@@ -44,6 +47,8 @@ struct Expect {
     public_key: PublicKeyHex,
     repudiated: Vec<GovernanceLogId>,
     unanchored_keys: Vec<PublicKeyHex>,
+    /// The signing key history, oldest first
+    keys: Vec<GovernanceKeyRecord>,
     entries: Vec<ExpectEntry>,
     /// [`standing`] of each amended entry — the one derived value that is
     /// not on [`EntryVerdict`]
@@ -74,16 +79,17 @@ fn observe(
     links: &[GovernanceChainLink],
     genesis: &VerifyingKey,
     anchor: &[PublicKeyHex],
+    roots: &RootSet,
     contents: &BTreeMap<GovernanceLogId, Value>,
 ) -> Expect {
     let anchor: KeyAnchor = anchor.iter().copied().collect();
-    let mut report = verify_chain(links, genesis, &anchor);
+    let mut report = verify_chain(links, genesis, &anchor, roots);
     for (id, data) in contents {
-        let link = links
-            .iter()
-            .find(|l| &l.id == id)
-            .expect("`contents` names an entry of the chain");
-        report.check_content(link, data);
+        // A fuzzed chain may have lost the entry; a committed vector's
+        // verdict would then not be the one it records.
+        if let Some(link) = links.iter().find(|l| &l.id == id) {
+            report.check_content(link, data);
+        }
     }
     let report = report.settle();
 
@@ -103,6 +109,7 @@ fn observe(
         public_key: report.public_key,
         repudiated: report.repudiated.clone(),
         unanchored_keys: report.unanchored_keys.clone(),
+        keys: report.keys.clone(),
         standing: report
             .entries
             .iter()
@@ -142,6 +149,7 @@ struct Case {
     description: &'static str,
     genesis: PublicKeyHex,
     anchor: Vec<PublicKeyHex>,
+    root_threshold: usize,
     links: Vec<GovernanceChainLink>,
     contents: BTreeMap<GovernanceLogId, Value>,
 }
@@ -159,9 +167,27 @@ impl Case {
             description,
             genesis: genesis.into(),
             anchor,
+            root_threshold: 1,
             links,
             contents: BTreeMap::new(),
         }
+    }
+
+    /// Verified against a root set that needs `n` signers
+    fn threshold(mut self, n: usize) -> Self {
+        self.root_threshold = n;
+        self
+    }
+
+    fn roots(&self) -> RootSet {
+        RootSet::new(roots().keys().copied(), self.root_threshold)
+    }
+
+    /// Sorted, so the file does not depend on a `HashSet`'s order
+    fn root_keys(&self) -> Vec<PublicKeyHex> {
+        let mut keys: Vec<_> = self.roots().keys().copied().collect();
+        keys.sort_by_key(|k| k.to_string());
+        keys
     }
 
     /// The `data` a client read for `id`, hashed by the content check
@@ -179,12 +205,15 @@ impl Case {
             description: self.description.to_string(),
             genesis_key: self.genesis,
             anchor: self.anchor.clone(),
+            root_keys: self.root_keys(),
+            root_threshold: self.root_threshold,
             links: self.links.clone(),
             contents: self.contents.clone(),
             expect: observe(
                 &self.links,
                 &genesis,
                 &self.anchor,
+                &self.roots(),
                 &self.contents,
             ),
         }
@@ -233,6 +262,23 @@ fn forge(
     }
 }
 
+/// What a version 1 proof of possession covered, for the one vector that
+/// shows a v1 rotation is refused
+#[derive(Serialize)]
+struct RotationStatementV1 {
+    agora_governance_key_rotation: u32,
+    reason: RotationReason,
+    old_key: PublicKeyHex,
+    new_key: PublicKeyHex,
+    prev_hash: Option<Sha256Hex>,
+}
+
+impl RotationStatementV1 {
+    fn preimage(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("it always serializes")
+    }
+}
+
 fn cases() -> Vec<Case> {
     use GovernanceLogEntryType::{
         Amendment as AmendmentEntry, CouncilDecision,
@@ -247,10 +293,6 @@ fn cases() -> Vec<Case> {
     let both = vec![
         PublicKeyHex::from(&steward_pk),
         PublicKeyHex::from(&successor_pk),
-    ];
-    let recovered = vec![
-        PublicKeyHex::from(&steward_pk),
-        PublicKeyHex::from(&recovery_pk),
     ];
     let mut out = Vec::new();
 
@@ -577,90 +619,70 @@ fn cases() -> Vec<Case> {
     )
     .unwrap();
     c.amend(&forger, &fake);
-    let grab = KeyRotation::routine(
-        (&steward_pk).into(),
-        &forger,
-        c.prev_hash(),
-        at(35),
-        "",
-    );
+    let grab = c.routine(&steward_pk, &forger);
     c.rotate(&forger, &grab);
     out.push(Case::new(
         "forged_entries_no_effects",
         "An amendment and a rotation signed by a key the chain never named. \
-         Neither amends nor moves anything.",
+         Neither amends nor moves anything — the rotation is even \
+         root-certified, which is no licence to skip the old key's signature.",
         &steward_pk,
         pinned.clone(),
         c.links,
     ));
 
-    // -- key rotation, v1 --
+    // -- key rotation, v2: the root certifies, nobody else --
 
     let mut c = Chain::new();
     c.decision(&steward);
-    let rotation = KeyRotation::routine(
-        (&steward_pk).into(),
-        &successor,
-        c.prev_hash(),
-        at(25),
-        "scheduled rotation",
-    );
+    let rotation = c.routine(&steward_pk, &successor);
     c.rotate(&steward, &rotation);
     c.decision(&successor);
     let routine = c.links;
     out.push(Case::new(
-        "rotation_v1_routine",
-        "A scheduled rotation, signed by the old key, to a key the anchor \
-         vouches for.",
+        "rotation_v2_routine",
+        "A scheduled rotation, signed by the old key and certified by a \
+         root. The anchor has never heard of the new key and does not \
+         need to.",
         &steward_pk,
-        both.clone(),
+        pinned.clone(),
         routine.clone(),
     ));
     out.push(Case::new(
-        "rotation_v1_routine_unanchored",
-        "The same rotation, to a key this verifier has never heard of: \
-         followed, and reported.",
+        "rotation_v2_genesis_certified",
+        "The same chain to a verifier with no anchor at all: the first \
+         rotation carries the genesis key's retroactive certificate, so \
+         nothing is unanchored.",
         &steward_pk,
-        pinned.clone(),
+        Vec::new(),
         routine,
+    ));
+    out.push(Case::new(
+        "genesis_unanchored",
+        "No rotation, no anchor: the genesis key is reported, not rejected.",
+        &steward_pk,
+        Vec::new(),
+        chain(&steward, 2),
     ));
 
     let mut c = Chain::new();
     c.decision(&steward);
-    let out_key = KeyRotation::routine(
-        (&steward_pk).into(),
-        &successor,
-        c.prev_hash(),
-        at(15),
-        "scheduled",
-    );
+    let out_key = c.routine(&steward_pk, &successor);
     c.rotate(&steward, &out_key);
-    let back = KeyRotation::routine(
-        (&successor_pk).into(),
-        &steward,
-        c.prev_hash(),
-        at(25),
-        "back to the old key",
-    );
+    let back = c.routine(&successor_pk, &steward);
     c.rotate(&successor, &back);
     out.push(Case::new(
-        "rotation_v1_reused_key",
-        "A rotation back to a key that has already held the chain.",
+        "rotation_v2_reused_key",
+        "A certified rotation back to a key that has already held the \
+         chain. Not even the root brings a key back.",
         &steward_pk,
-        both.clone(),
+        pinned.clone(),
         c.links,
     ));
 
     let mut c = Chain::new();
     c.decision(&steward);
-    let mut rotation = KeyRotation::routine(
-        (&steward_pk).into(),
-        &thief,
-        c.prev_hash(),
-        at(25),
-        "scheduled",
-    );
-    rotation.new_key = (&successor_pk).into();
+    let mut rotation = c.routine(&steward_pk, &successor);
     let statement = rotation.statement(c.prev_hash());
     rotation.proof = crypto::sign(
         &steward,
@@ -670,11 +692,11 @@ fn cases() -> Vec<Case> {
     .into();
     c.rotate(&steward, &rotation);
     out.push(Case::new(
-        "rotation_v1_forged_proof",
-        "A rotation to a key nobody holds: the proof of possession is \
-         signed by the old key instead of the new one.",
+        "rotation_v2_forged_proof",
+        "A certified rotation whose proof of possession is signed by the \
+         old key instead of the new one: a key nobody has shown they hold.",
         &steward_pk,
-        both.clone(),
+        pinned.clone(),
         c.links,
     ));
 
@@ -682,18 +704,7 @@ fn cases() -> Vec<Case> {
     c.decision(&steward);
     c.decision(&steward);
     let reattested = c.decision(&steward);
-    let declaration = KeyRotation::compromise(
-        (&steward_pk).into(),
-        &successor,
-        TrustedHead {
-            id: gov(1),
-            chain_seq: 1,
-            entry_hash: c.hash_at(1),
-        },
-        c.prev_hash(),
-        at(45),
-        "signing key exfiltrated",
-    );
+    let declaration = c.compromise(&steward_pk, &successor, 1);
     c.rotate(&successor, &declaration);
     let vouch = Amendment::new(
         reattested,
@@ -704,37 +715,11 @@ fn cases() -> Vec<Case> {
     )
     .unwrap();
     c.amend(&successor, &vouch);
-    let compromise = c.links;
     out.push(Case::new(
-        "rotation_v1_compromise_anchored",
-        "A compromise declaration signed by an anchored new key: the window \
-         after the last trusted entry is repudiated, and a reattestation \
-         restores one entry of it.",
-        &steward_pk,
-        both.clone(),
-        compromise,
-    ));
-
-    let mut c = Chain::new();
-    c.decision(&steward);
-    c.decision(&steward);
-    let declaration = KeyRotation::compromise(
-        (&steward_pk).into(),
-        &successor,
-        TrustedHead {
-            id: gov(1),
-            chain_seq: 1,
-            entry_hash: c.hash_at(1),
-        },
-        c.prev_hash(),
-        at(45),
-        "trust me",
-    );
-    c.rotate(&successor, &declaration);
-    out.push(Case::new(
-        "rotation_v1_compromise_unanchored",
-        "The same declaration, from a key outside the anchor: it \
-         authenticates nothing, and nothing is repudiated on its say-so.",
+        "rotation_v2_compromise",
+        "A compromise declaration signed by the certified new key: the \
+         window after the last trusted entry is repudiated, and a \
+         reattestation restores one entry of it.",
         &steward_pk,
         pinned.clone(),
         c.links,
@@ -742,117 +727,339 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     c.decision(&steward);
-    let stolen = KeyRotation::routine(
-        (&steward_pk).into(),
-        &thief,
-        c.prev_hash(),
-        at(25),
-        "routine",
-    );
-    c.rotate(&steward, &stolen);
-    c.decision(&thief);
-    let declaration = KeyRotation::compromise(
-        (&steward_pk).into(),
-        &recovery,
-        TrustedHead {
-            id: gov(1),
-            chain_seq: 1,
-            entry_hash: c.hash_at(1),
-        },
-        c.prev_hash(),
-        at(55),
-        "key stolen; everything after GOV-2026-0001 is disclaimed",
-    );
-    c.rotate(&recovery, &declaration);
+    c.decision(&steward);
+    let mut declaration = c.compromise(&steward_pk, &thief, 1);
+    let statement = declaration.certificate.statement.clone();
+    declaration.certificate = certify(&[&thief], statement);
+    c.rotate(&thief, &declaration);
     out.push(Case::new(
-        "rotation_v1_thief_rotation_repudiated",
-        "A thief rotates the chain onto their own key; the Steward answers \
-         with a compromise declaration from before the theft.",
-        &steward_pk,
-        recovered,
-        c.links,
-    ));
-
-    let mut c = Chain::new();
-    c.decision(&steward); // 1 — the last entry the first declaration trusts
-    c.decision(&steward); // 2 — inside the first window
-    let first = KeyRotation::compromise(
-        (&steward_pk).into(),
-        &successor,
-        TrustedHead {
-            id: gov(1),
-            chain_seq: 1,
-            entry_hash: c.hash_at(1),
-        },
-        c.prev_hash(),
-        at(35),
-        "signing key exfiltrated",
-    );
-    c.rotate(&successor, &first);
-    let second = KeyRotation::compromise(
-        (&steward_pk).into(),
-        &recovery,
-        TrustedHead {
-            id: gov(2),
-            chain_seq: 2,
-            entry_hash: c.hash_at(2),
-        },
-        c.prev_hash(),
-        at(45),
-        "and trust the old key one entry further, actually",
-    );
-    c.rotate(&recovery, &second);
-    out.push(Case::new(
-        "rotation_v1_second_compromise_inside_the_window",
-        "A second compromise declaration naming, as its last trusted entry, \
-         one the first declaration repudiated. Trust cannot be anchored \
-         inside a window nobody trusts.",
+        "rotation_v2_compromise_uncertified",
+        "The same declaration certified by its own new key instead of a \
+         root — in the anchor, even. It authenticates nothing, and nothing \
+         is repudiated on its say-so.",
         &steward_pk,
         vec![
             PublicKeyHex::from(&steward_pk),
-            PublicKeyHex::from(&successor_pk),
-            PublicKeyHex::from(&recovery_pk),
+            PublicKeyHex::from(&thief.verifying_key()),
         ],
         c.links,
     ));
 
     let mut c = Chain::new();
     c.decision(&steward);
-    let real = KeyRotation::compromise(
-        (&steward_pk).into(),
-        &successor,
-        TrustedHead {
-            id: gov(1),
-            chain_seq: 1,
-            entry_hash: c.hash_at(1),
-        },
-        c.prev_hash(),
-        at(25),
-        "signing key exfiltrated",
-    );
+    c.decision(&steward); // the thief's, as it turns out
+    let routine = c.routine(&steward_pk, &successor);
+    c.rotate(&steward, &routine);
+    c.decision(&successor);
+    let declaration = c.compromise(&steward_pk, &recovery, 1);
+    c.rotate(&recovery, &declaration);
+    out.push(Case::new(
+        "rotation_v2_rotation_inside_the_window",
+        "The key was stolen before anyone knew. The Steward rotates \
+         routinely, then learns of it and names a head from before the \
+         rotation: the rotation is void with the rest of the window, and \
+         the genesis certificate it carried is the root's word all the same.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward); // 1 — the last entry the first declaration trusts
+    c.decision(&steward); // 2 — inside the first window
+    let first = c.compromise(&steward_pk, &successor, 1);
+    c.rotate(&successor, &first);
+    let second = c.compromise(&steward_pk, &recovery, 2);
+    c.rotate(&recovery, &second);
+    out.push(Case::new(
+        "rotation_v2_second_compromise_inside_the_window",
+        "A second, certified compromise declaration naming, as its last \
+         trusted entry, one the first declaration repudiated. Trust cannot \
+         be anchored inside a window nobody trusts.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    let real = c.compromise(&steward_pk, &successor, 1);
     c.rotate(&successor, &real);
     c.decision(&successor);
-    let hijack = KeyRotation::compromise(
-        (&successor_pk).into(),
-        &steward,
-        TrustedHead {
-            id: gov(2),
-            chain_seq: 3,
-            entry_hash: c.hash_at(3),
-        },
-        c.prev_hash(),
-        at(45),
-        "the Steward's key is the compromised one, trust me",
-    );
+    let hijack = c.compromise(&successor_pk, &steward, 3);
     c.rotate(&steward, &hijack);
     c.decision(&steward);
     out.push(Case::new(
-        "rotation_v1_stolen_key_not_restored",
+        "rotation_v2_stolen_key_not_restored",
         "The thief, still holding the compromised key, declares the \
          Steward's replacement compromised and names the stolen key as the \
          new one.",
         &steward_pk,
-        both,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    let rotation = c.routine(&steward_pk, &successor);
+    let mut data = serde_json::to_value(&rotation).unwrap();
+    data["note"] = json!("at the request of the Steward");
+    c.push(
+        &steward,
+        key_id(1),
+        GovernanceLogEntryType::KeyRotation,
+        data,
+        true,
+    );
+    out.push(Case::new(
+        "rotation_v2_free_text",
+        "A well-formed, certified rotation with one extra field. A rotation \
+         can never be redacted, so it carries no free text: malformed.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    let v1 = RotationStatementV1 {
+        agora_governance_key_rotation: 1,
+        reason: RotationReason::Routine,
+        old_key: (&steward_pk).into(),
+        new_key: (&successor_pk).into(),
+        prev_hash: c.prev_hash(),
+    };
+    let proof =
+        crypto::sign(&successor, &Sha256::digest(v1.preimage()), 1_700_000_025);
+    c.push(
+        &steward,
+        key_id(1),
+        GovernanceLogEntryType::KeyRotation,
+        json!({
+            "agora_governance_key_rotation": 1,
+            "reason": "routine",
+            "old_key": PublicKeyHex::from(&steward_pk),
+            "new_key": PublicKeyHex::from(&successor_pk),
+            "proof": SignatureHex::from(proof),
+            "proof_signed_at": 1_700_000_025,
+            "note": "scheduled rotation",
+        }),
+        true,
+    );
+    c.decision(&successor);
+    out.push(Case::new(
+        "rotation_v1_refused",
+        "A version 1 rotation, exactly as 0.26 accepted it: old key's \
+         signature, valid proof of possession, no certificate. It never \
+         appeared on the platform and moves nothing now.",
+        &steward_pk,
+        both.clone(),
+        c.links,
+    ));
+
+    // -- certificates --
+
+    // Each case is `rotation_v2_routine` with one thing wrong with who
+    // signed what.
+    let tamper = |name: &'static str,
+                  description: &'static str,
+                  threshold: usize,
+                  edit: &dyn Fn(&Chain, &mut KeyRotation)| {
+        let mut c = Chain::new();
+        c.decision(&steward);
+        let mut rotation = c.routine(&steward_pk, &successor);
+        if threshold > 1 {
+            rotation.outgoing_certificate = Some(certify(
+                &[&root(1), &root(2)],
+                KeyCertStatement::genesis((&steward_pk).into()),
+            ));
+        }
+        edit(&c, &mut rotation);
+        c.rotate(&steward, &rotation);
+        c.decision(&successor);
+        Case::new(name, description, &steward_pk, pinned.clone(), c.links)
+            .threshold(threshold)
+    };
+    let resign = |rotation: &mut KeyRotation, signers: &[&SigningKey]| {
+        let statement = rotation.certificate.statement.clone();
+        rotation.certificate = certify(signers, statement);
+    };
+
+    out.push(tamper(
+        "certificate_online_key",
+        "What a thief holding the online key can produce: a rotation to \
+         their own key, certified by the key they stole. The online key is \
+         not a root.",
+        1,
+        &|_, r| resign(r, &[&steward]),
+    ));
+    out.push(tamper(
+        "certificate_unknown_root",
+        "Certified by a key that is not in the verifier's root set.",
+        1,
+        &|_, r| resign(r, &[&forger]),
+    ));
+    out.push(tamper(
+        "certificate_unknown_root_beside_a_known_one",
+        "A signature from outside the root set next to a sufficient one: \
+         ignored, not an error — a later root set may overlap this one.",
+        1,
+        &|_, r| resign(r, &[&forger, &root(2)]),
+    ));
+    out.push(tamper(
+        "certificate_wrong_prefix",
+        "A root's valid signature over the statement's canonical JSON \
+         without the domain prefix.",
+        1,
+        &|_, r| {
+            use ed25519_dalek::Signer;
+            let statement = r.certificate.statement.clone();
+            let bare =
+                canonical_json(&serde_json::to_value(&statement).unwrap());
+            r.certificate =
+                KeyCertificate::unsigned(statement).with(RootSignature {
+                    root_key: (&root(1).verifying_key()).into(),
+                    signature: root(1).sign(&bare).into(),
+                });
+        },
+    ));
+    out.push(tamper(
+        "certificate_wrong_position",
+        "A genuine certificate for this key, issued for the position one \
+         entry later.",
+        1,
+        &|c, r| {
+            r.certificate = certify(
+                &[&root(1)],
+                KeyCertStatement::routine(
+                    r.new_key,
+                    c.next_seq() + 1,
+                    c.prev_hash(),
+                ),
+            );
+        },
+    ));
+    out.push(tamper(
+        "certificate_wrong_prev_hash",
+        "A genuine certificate for this key and seq, bound to a different \
+         predecessor: another chain, or this one before it was rewritten.",
+        1,
+        &|c, r| {
+            r.certificate = certify(
+                &[&root(1)],
+                KeyCertStatement::routine(
+                    r.new_key,
+                    c.next_seq(),
+                    Some(data_hash(&json!("another chain"))),
+                ),
+            );
+        },
+    ));
+    out.push(tamper(
+        "certificate_altered_statement",
+        "A genuine certificate for another key, its statement edited \
+         afterwards to name this one.",
+        1,
+        &|c, r| {
+            r.certificate = certify(
+                &[&root(1)],
+                KeyCertStatement::routine(
+                    (&recovery_pk).into(),
+                    c.next_seq(),
+                    c.prev_hash(),
+                ),
+            );
+            r.certificate.statement.key = r.new_key;
+        },
+    ));
+    out.push(tamper(
+        "certificate_wrong_purpose",
+        "A compromise certificate presented for a routine rotation.",
+        1,
+        &|c, r| {
+            r.certificate = certify(
+                &[&root(1)],
+                KeyCertStatement::compromise(
+                    r.new_key,
+                    c.next_seq(),
+                    c.prev_hash(),
+                    c.head(1),
+                ),
+            );
+        },
+    ));
+    out.push(tamper(
+        "certificate_two_of_two",
+        "A root set that needs two signers, and gets them.",
+        2,
+        &|_, r| resign(r, &[&root(1), &root(2)]),
+    ));
+    out.push(tamper(
+        "certificate_below_threshold",
+        "A root set that needs two signers, and gets one.",
+        2,
+        &|_, r| resign(r, &[&root(1)]),
+    ));
+    out.push(tamper(
+        "certificate_duplicate_signer",
+        "A root set that needs two signers, and gets the same one twice.",
+        2,
+        &|_, r| resign(r, &[&root(1), &root(1)]),
+    ));
+    out.push(tamper(
+        "certificate_missing_genesis",
+        "The chain's first rotation without the genesis key's certificate.",
+        1,
+        &|_, r| r.outgoing_certificate = None,
+    ));
+    out.push(tamper(
+        "certificate_genesis_for_another_key",
+        "The chain's first rotation carrying a genuine genesis certificate \
+         — for a key that is not the one the chain started under.",
+        1,
+        &|_, r| {
+            r.outgoing_certificate = Some(certify(
+                &[&root(1)],
+                KeyCertStatement::genesis((&recovery_pk).into()),
+            ));
+        },
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    let first = c.routine(&steward_pk, &successor);
+    let genesis = first.outgoing_certificate.clone().unwrap();
+    c.rotate(&steward, &first);
+    let second = c.routine(&successor_pk, &recovery).with_outgoing(genesis);
+    c.rotate(&successor, &second);
+    out.push(Case::new(
+        "certificate_second_genesis",
+        "A later rotation carrying the genesis certificate again. It \
+         belongs on the first rotation and nowhere else.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    let rotation = c.routine(&steward_pk, &successor);
+    let mut data = serde_json::to_value(&rotation).unwrap();
+    data["certificate"]["statement"]["comment"] = json!("signed at home");
+    c.push(
+        &steward,
+        key_id(1),
+        GovernanceLogEntryType::KeyRotation,
+        data,
+        true,
+    );
+    out.push(Case::new(
+        "certificate_unknown_statement_field",
+        "A statement with a field the verifier does not know. What the \
+         root signed is exactly what the verifier rebuilds, so there is no \
+         room for one: malformed.",
+        &steward_pk,
+        pinned.clone(),
         c.links,
     ));
 
@@ -915,8 +1122,16 @@ fn every_vector_matches_the_verifier() {
             .genesis_key
             .to_verifying_key()
             .expect("a vector's genesis key is a curve point");
-        let actual =
-            observe(&vector.links, &genesis, &vector.anchor, &vector.contents);
+        let actual = observe(
+            &vector.links,
+            &genesis,
+            &vector.anchor,
+            &RootSet::new(
+                vector.root_keys.iter().copied(),
+                vector.root_threshold,
+            ),
+            &vector.contents,
+        );
         assert_eq!(actual, vector.expect, "{}", path.display());
     }
 }
@@ -938,6 +1153,50 @@ fn the_vectors_are_what_the_generator_writes() {
     }
 }
 
+/// The Rust half of `just fuzz`: a verdict, or a refusal, for every mutated
+/// vector `tools/fuzz_verifiers.py` left in `AGORA_FUZZ_DIR`, written next
+/// to it for the Python half to compare with its own.
+#[test]
+#[ignore = "driven by tools/fuzz_verifiers.py; run it with `just fuzz`"]
+fn observe_the_fuzz_corpus() {
+    let dir = PathBuf::from(
+        std::env::var("AGORA_FUZZ_DIR")
+            .expect("AGORA_FUZZ_DIR names the corpus directory"),
+    );
+    for entry in std::fs::read_dir(&dir).expect("a readable corpus") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a readable mutant");
+        // A link that does not parse is not a chain: a refusal, not a
+        // verdict, in both implementations.
+        let verdict = match serde_json::from_str::<Vector>(&text) {
+            Ok(vector) => {
+                let genesis = vector
+                    .genesis_key
+                    .to_verifying_key()
+                    .expect("the fuzzer leaves the genesis key alone");
+                let roots = RootSet::new(
+                    vector.root_keys.iter().copied(),
+                    vector.root_threshold,
+                );
+                serde_json::to_value(observe(
+                    &vector.links,
+                    &genesis,
+                    &vector.anchor,
+                    &roots,
+                    &vector.contents,
+                ))
+                .expect("an Expect always serializes")
+            }
+            Err(_) => json!("refused"),
+        };
+        std::fs::write(path.with_extension("rust"), verdict.to_string())
+            .expect("a writable corpus");
+    }
+}
+
 /// The Python verifier ships its own copy of [`PUBLISHED_KEYS`] — it is one
 /// stdlib-only file on purpose — so the two lists are checked against each
 /// other here rather than trusted to stay equal.
@@ -952,4 +1211,16 @@ fn the_python_verifier_publishes_the_same_keys() {
     let (list, _) = rest.split_once(']').expect("the declaration ends");
     let keys: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
     assert_eq!(keys, PUBLISHED_KEYS, "{}", path.display());
+
+    let (_, rest) = text
+        .split_once("ROOT_KEYS = [")
+        .expect("the script declares ROOT_KEYS");
+    let (list, rest) = rest.split_once(']').expect("the declaration ends");
+    let keys: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+    assert_eq!(keys, ROOT_KEYS, "{}", path.display());
+    assert!(
+        rest.contains(&format!("ROOT_THRESHOLD = {ROOT_THRESHOLD}\n")),
+        "{}",
+        path.display()
+    );
 }

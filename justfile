@@ -73,6 +73,12 @@ test:
 test-python:
     python3 tools/test_vectors.py
 
+# Mutate the shared vectors a few thousand ways and hold the two verifiers
+# to each other on every mutant. Not part of `check` (it takes a minute);
+# run it after touching a verification rule in either implementation.
+fuzz count="4000" seed="1":
+    python3 tools/fuzz_verifiers.py --count {{count}} --seed {{seed}}
+
 # Rewrite the shared vectors in vectors/govlog from the Rust verifier.
 #
 # Only after changing what a vector is *meant* to say: the files are the

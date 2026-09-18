@@ -1,5 +1,5 @@
 {
-  "description": "An amendment and a rotation signed by a key the chain never named. Neither amends nor moves anything — the rotation is even root-certified, which is no licence to skip the old key's signature.",
+  "description": "A certified rotation back to a key that has already held the chain. Not even the root brings a key back.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -26,41 +26,17 @@
       }
     },
     {
-      "id": "AMD-2026-0001",
-      "entry_type": "amendment",
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
       "created_at": "2023-11-14T22:13:40.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "dd8d58f4e66db47b46406a8c7036e24939a67b7362cc598f789651a2c62fe075",
-        "entry_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
-        "signature": "1393b71681d1d653c5efb58d6ecf9da616f7ac8985249a2d1f806e91b2758f6a6a60ba1af371c17474eda9bbe404b95516c07d2b2b58cfc711c42e9282c6a700",
+        "data_hash": "8096430b09713299024e6cf07263acc3a895bf2fe9f49574a6aa66062fe728e4",
+        "entry_hash": "582e0be9afb970dfe77fde8b4a3122a8d096a74667c3a01f094c8a352979d68f",
+        "signature": "d35314228be24d6b89ecc86b638ce88299f54ea2ac31c316fb3bdaa9b0e426be4bdb79bebf212fd18b31bf0dc6bbe91a99e0e83f4270fb9be74365e1101d1209",
         "signed_at": "2023-11-14T22:13:41Z",
-        "retroactive": false
-      },
-      "data": {
-        "agora_governance_amendment": 1,
-        "authority": null,
-        "basis": "none",
-        "kind": "overruled",
-        "note": "overruled, says nobody with the key",
-        "target": "GOV-2026-0001",
-        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
-      }
-    },
-    {
-      "id": "KEY-2026-0001",
-      "entry_type": "key_rotation",
-      "created_at": "2023-11-14T22:13:50.123456Z",
-      "attestation": {
-        "envelope_version": 1,
-        "chain_seq": 3,
-        "prev_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
-        "data_hash": "3d27b1fef988f4cc9012377b7feadd5f8894133f7caf332eb9dd61181b6e6e09",
-        "entry_hash": "0b39a412de6e1b69d822b7cc3130da49e3542e5897e4fd64b11adb78807c3076",
-        "signature": "1d10a3702d9ff7cc1c1116edfbbb2b04bbe027035050c6a997aae516f7493a8376be0158e795c68cc1f63775c95e36dd2af55238430a9f6b54a29c34db822500",
-        "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },
       "data": {
@@ -69,19 +45,19 @@
           "signatures": [
             {
               "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
-              "signature": "9613ca976015e50e57cf20098c8f7ca274b391155a5ff89fc7311b1eb5f76659d772ff46b11b3cad626f404009094612fea263f205f834537f27864c2e2ca806"
+              "signature": "10389db232cd6c6b2bc054454efd641e7ec975b967f5d482ba01dcd0b9971f9a87389aed565eaa3d3c25bc425c46375b4699f988ca579c4a130b9d6d1f796503"
             }
           ],
           "statement": {
             "agora_governance_key_cert": 1,
-            "from_seq": 4,
-            "key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+            "from_seq": 3,
+            "key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
             "last_trusted": null,
-            "prev_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
+            "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
             "purpose": "routine"
           }
         },
-        "new_key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
         "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "outgoing_certificate": {
           "signatures": [
@@ -99,7 +75,46 @@
             "purpose": "genesis"
           }
         },
-        "proof": "b1cfe1d01d021c8fc5d4f232345ae6f0a17120eeda9d6aafb80ccda12a9209a7228acbf46131bc517ff3f8afdcf2e2de5e5184d4b533190df5db3f54ffa4db09",
+        "proof": "0ee69ec5c4ceebe4303d7d734362bc728866420f3f1a2b5158d56c5990a47c35457f89f732c848457b99ecea467027fe8c350ac9df0cf9004bf17ff14a499a06",
+        "proof_signed_at": 1700000025,
+        "reason": "routine"
+      }
+    },
+    {
+      "id": "KEY-2026-0002",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "582e0be9afb970dfe77fde8b4a3122a8d096a74667c3a01f094c8a352979d68f",
+        "data_hash": "b54ac8a3d6801ee3701e46181cf9c82c8ecc45850da3da1187bc079f1a33ace0",
+        "entry_hash": "32308803e9d1acffe17dc3bcb0a0a41e83fd9382ee9f4b31bb7e2546f79c9bbb",
+        "signature": "cade830079965310631498dcc4f3aef1d6fc0af3d33c80007c09df62b971a2e8f88e66d281c9f47502d81751ea19cdca320a3d47e024a8ee2377c141926e8009",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 2,
+        "certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "7b1ce1c77d094144a8175bd0a6d6adc68d27f08f0889d2120729919c3696322a02ad083c50681a3e84c3b29850533acd20c4abaf78e7d125090c81b0011ee208"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 4,
+            "key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            "last_trusted": null,
+            "prev_hash": "582e0be9afb970dfe77fde8b4a3122a8d096a74667c3a01f094c8a352979d68f",
+            "purpose": "routine"
+          }
+        },
+        "new_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "old_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "proof": "1d48113fc7e4928655185657d4b30c1da5f279cfccbdffff73bc1bd2bad7775b362ca86af79dd72a2998d27dfae35589f09bb764a12e8aab60883b58fd699706",
         "proof_signed_at": 1700000035,
         "reason": "routine"
       }
@@ -107,19 +122,28 @@
   ],
   "expect": {
     "ok": false,
-    "head": "KEY-2026-0001",
-    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "head": "KEY-2026-0002",
+    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
     "repudiated": [],
     "unanchored_keys": [],
     "keys": [
       {
         "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "from_seq": 1,
+        "through_seq": 2,
+        "status": "retired",
+        "introduced_by": null,
+        "retired_by": "KEY-2026-0001",
+        "certified": true
+      },
+      {
+        "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "from_seq": 3,
         "through_seq": null,
         "status": "active",
-        "introduced_by": null,
+        "introduced_by": "KEY-2026-0001",
         "retired_by": null,
-        "certified": false
+        "certified": true
       }
     ],
     "entries": [
@@ -136,8 +160,8 @@
         "problem": false
       },
       {
-        "id": "AMD-2026-0001",
-        "signature_valid": false,
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
         "link_valid": true,
         "content_matches": true,
         "retroactive": false,
@@ -145,11 +169,11 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
-        "problem": true
+        "problem": false
       },
       {
-        "id": "KEY-2026-0001",
-        "signature_valid": false,
+        "id": "KEY-2026-0002",
+        "signature_valid": true,
         "link_valid": true,
         "content_matches": true,
         "retroactive": false,

@@ -28,7 +28,11 @@ VECTORS = os.path.join(
 def run_vector(vector):
     """The verdict for one vector file"""
     report = govlog.verify_chain(
-        vector["links"], vector["genesis_key"], vector["anchor"]
+        vector["links"],
+        vector["genesis_key"],
+        vector["anchor"],
+        vector["root_keys"],
+        vector["root_threshold"],
     )
     contents = vector.get("contents") or {}
     for entry_id, data in contents.items():
@@ -46,6 +50,7 @@ def observed(report):
         "public_key": report["public_key"],
         "repudiated": report["repudiated"],
         "unanchored_keys": report["unanchored_keys"],
+        "keys": report["keys"],
         "entries": [
             {
                 "id": e["id"],

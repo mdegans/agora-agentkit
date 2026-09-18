@@ -1,5 +1,5 @@
 {
-  "description": "An amendment and a rotation signed by a key the chain never named. Neither amends nor moves anything — the rotation is even root-certified, which is no licence to skip the old key's signature.",
+  "description": "A genuine certificate for this key and seq, bound to a different predecessor: another chain, or this one before it was rewritten.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -26,41 +26,17 @@
       }
     },
     {
-      "id": "AMD-2026-0001",
-      "entry_type": "amendment",
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
       "created_at": "2023-11-14T22:13:40.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "dd8d58f4e66db47b46406a8c7036e24939a67b7362cc598f789651a2c62fe075",
-        "entry_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
-        "signature": "1393b71681d1d653c5efb58d6ecf9da616f7ac8985249a2d1f806e91b2758f6a6a60ba1af371c17474eda9bbe404b95516c07d2b2b58cfc711c42e9282c6a700",
+        "data_hash": "b17a5e0c8b5ed51228a29fb7c94afd2142bd0be88479a777b9f59684ad0c38ba",
+        "entry_hash": "bbd9b5b20a610d0cca1315c914421158f2b258e2a616e087d3473949de4f2cc4",
+        "signature": "c5a128b6ab3ed4d05f8799f6bfe919ebe0efef8f996dbe9a35f557f7ec761e7ddf46500cf0a89ebff29343ad5ff91ada6806e589339bba71ce62a2900310780a",
         "signed_at": "2023-11-14T22:13:41Z",
-        "retroactive": false
-      },
-      "data": {
-        "agora_governance_amendment": 1,
-        "authority": null,
-        "basis": "none",
-        "kind": "overruled",
-        "note": "overruled, says nobody with the key",
-        "target": "GOV-2026-0001",
-        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
-      }
-    },
-    {
-      "id": "KEY-2026-0001",
-      "entry_type": "key_rotation",
-      "created_at": "2023-11-14T22:13:50.123456Z",
-      "attestation": {
-        "envelope_version": 1,
-        "chain_seq": 3,
-        "prev_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
-        "data_hash": "3d27b1fef988f4cc9012377b7feadd5f8894133f7caf332eb9dd61181b6e6e09",
-        "entry_hash": "0b39a412de6e1b69d822b7cc3130da49e3542e5897e4fd64b11adb78807c3076",
-        "signature": "1d10a3702d9ff7cc1c1116edfbbb2b04bbe027035050c6a997aae516f7493a8376be0158e795c68cc1f63775c95e36dd2af55238430a9f6b54a29c34db822500",
-        "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },
       "data": {
@@ -69,19 +45,19 @@
           "signatures": [
             {
               "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
-              "signature": "9613ca976015e50e57cf20098c8f7ca274b391155a5ff89fc7311b1eb5f76659d772ff46b11b3cad626f404009094612fea263f205f834537f27864c2e2ca806"
+              "signature": "421404fc733e6c6fe81b389b10b4ee77a66fadd3b4d5d3f8802d8e9d88a8d221303ac68b127c54d3c4576a1bd7925347a64d37bc31cf34b972ad8b08c12d4c05"
             }
           ],
           "statement": {
             "agora_governance_key_cert": 1,
-            "from_seq": 4,
-            "key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+            "from_seq": 3,
+            "key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
             "last_trusted": null,
-            "prev_hash": "4013ceb1ee8fa4feec62783a9e4aa9e83acbadaaf537d29d09631c9e9ae10405",
+            "prev_hash": "c8db58f8f2b4e25140fb233788927c218e74e6669f4307aea42b7f826f47f539",
             "purpose": "routine"
           }
         },
-        "new_key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
         "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "outgoing_certificate": {
           "signatures": [
@@ -99,15 +75,30 @@
             "purpose": "genesis"
           }
         },
-        "proof": "b1cfe1d01d021c8fc5d4f232345ae6f0a17120eeda9d6aafb80ccda12a9209a7228acbf46131bc517ff3f8afdcf2e2de5e5184d4b533190df5db3f54ffa4db09",
-        "proof_signed_at": 1700000035,
+        "proof": "0ee69ec5c4ceebe4303d7d734362bc728866420f3f1a2b5158d56c5990a47c35457f89f732c848457b99ecea467027fe8c350ac9df0cf9004bf17ff14a499a06",
+        "proof_signed_at": 1700000025,
         "reason": "routine"
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "bbd9b5b20a610d0cca1315c914421158f2b258e2a616e087d3473949de4f2cc4",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "5b12a95f64522e75cf2c40be21234e1cc84496a0199780b2e3473ced72311959",
+        "signature": "5936abb98f686ed77ba1016406a69ed154963ae5d79774a8ea8f071ce3be66385050d2e924252af34777399e088264e037081ce8a1e53535cf32a146eaca060f",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
       }
     }
   ],
   "expect": {
     "ok": false,
-    "head": "KEY-2026-0001",
+    "head": "GOV-2026-0002",
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
     "unanchored_keys": [],
@@ -136,8 +127,8 @@
         "problem": false
       },
       {
-        "id": "AMD-2026-0001",
-        "signature_valid": false,
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
         "link_valid": true,
         "content_matches": true,
         "retroactive": false,
@@ -148,10 +139,10 @@
         "problem": true
       },
       {
-        "id": "KEY-2026-0001",
+        "id": "GOV-2026-0002",
         "signature_valid": false,
         "link_valid": true,
-        "content_matches": true,
+        "content_matches": null,
         "retroactive": false,
         "out_of_order": false,
         "redacted": false,

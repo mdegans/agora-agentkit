@@ -1,9 +1,7 @@
 {
-  "description": "The second entry was recorded before the first by the clock. Chain order is what is attested, so this is flagged, not broken.",
+  "description": "No rotation, no anchor: the genesis key is reported, not rejected.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-  "anchor": [
-    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
-  ],
+  "anchor": [],
   "root_keys": [
     "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
     "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
@@ -13,30 +11,30 @@
     {
       "id": "GOV-2026-0001",
       "entry_type": "council_decision",
-      "created_at": "2023-11-14T22:15:00.123456Z",
+      "created_at": "2023-11-14T22:13:30.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 1,
         "prev_hash": null,
-        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
-        "entry_hash": "a9a9bcda8ab23f8f0e7aaddfe4266d43da0ee70c14928239eafba3d009cddddf",
-        "signature": "8bdebd748e1a9d1638e7bebc7c54626a4c98ec5c653687ffc5e7b68ce40b515ef966d497663ee72599ebdfe65580547d9f480b3ab887372486936bf518ddce05",
-        "signed_at": "2023-11-14T22:15:01Z",
+        "data_hash": "e5b68e012cc7434cf39f049c52fc00ccb5cf98c3c067937afd2cf92d86f92e53",
+        "entry_hash": "58a6c68711f8a45978ea4697ed45a84bee6f7e5a197f0a01d9c4dbaab4836797",
+        "signature": "d7802fe4e048776519847f8073fab72c5c6daed563b49d1ef51ccdd132a83f3cc7e79483394adc6cacce06c0d638ad9a2d1777b2fed2f28e29779abedabe2c05",
+        "signed_at": "2023-11-14T22:13:31Z",
         "retroactive": false
       }
     },
     {
       "id": "GOV-2026-0002",
       "entry_type": "council_decision",
-      "created_at": "2023-11-14T22:14:10.123456Z",
+      "created_at": "2023-11-14T22:13:40.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 2,
-        "prev_hash": "a9a9bcda8ab23f8f0e7aaddfe4266d43da0ee70c14928239eafba3d009cddddf",
-        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
-        "entry_hash": "027b5cd54b032fedf81ca8a73998d9082f4bdd97bcfaded8978ac4f60e9a6130",
-        "signature": "3ccbe83c7e687cf06b1a47f3da4f26ee2d2ea2f10f153b975f64e4b9faac3f4e19a072abfd5aaeb06fde4fb729cd04a9c93587d483384c2d7534a43ece6cd40c",
-        "signed_at": "2023-11-14T22:14:11Z",
+        "prev_hash": "58a6c68711f8a45978ea4697ed45a84bee6f7e5a197f0a01d9c4dbaab4836797",
+        "data_hash": "62f62fd168a14e10bd803b53e1541902222eb29a6b5f478b3c310b7818847bda",
+        "entry_hash": "8ae2ab75e5445bbcfc270f9430cf78383f3ba9e75031646a6c4c5c5aeca6185f",
+        "signature": "f438a47cadd8fb71dc40a2c4c614dfb9712899fed06fc29bda7d7c4d3094e0906d8fa2a4bac1fd1c57c83365c12f351d189757598d58525489e685aa8340100b",
+        "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       }
     }
@@ -46,7 +44,9 @@
     "head": "GOV-2026-0002",
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
-    "unanchored_keys": [],
+    "unanchored_keys": [
+      "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+    ],
     "keys": [
       {
         "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
@@ -77,7 +77,7 @@
         "link_valid": true,
         "content_matches": null,
         "retroactive": false,
-        "out_of_order": true,
+        "out_of_order": false,
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
