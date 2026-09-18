@@ -534,6 +534,8 @@ fn cases() -> Vec<Case> {
         "personal data removed on request",
         vec!["/subject/handle".into(), "/subject/detail".into()],
         &data,
+        // Fixed, like every key in this file: vectors are reproducible.
+        Blind::from([0x5a; 32]),
     )
     .unwrap();
     c.amend(&steward, &amendment);

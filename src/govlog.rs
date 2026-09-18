@@ -215,6 +215,23 @@ hex_bytes!(
     32
 );
 
+hex_bytes!(
+    /// A blinding value: 32 random bytes carried in a redactable entry's
+    /// `data` under [`BLIND_KEY`]. See [`blind_data`] for what it is for.
+    Blind,
+    32
+);
+
+impl Blind {
+    /// A fresh value from the operating system's random source
+    pub fn random() -> Self {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+}
+
 impl From<Signature> for SignatureHex {
     fn from(sig: Signature) -> Self {
         Self(sig.to_bytes())
@@ -574,7 +591,10 @@ impl Amendment {
     /// `amendment_id` is the id this amendment will be appended under: the
     /// marker left behind names it, so the redaction says who ordered it.
     /// Append both together or neither — the returned `data` is what the
-    /// target's row must hold for [`verify_chain`] to accept it.
+    /// target's row must hold for [`verify_chain`] to accept it. `blind`
+    /// is the target's new [`Blind`]: [random](Blind::random), so a
+    /// rehearsal's `resulting_data_hash` is not the real one's.
+    #[allow(clippy::too_many_arguments)]
     pub fn redaction(
         amendment_id: &GovernanceLogId,
         target: GovernanceLogId,
@@ -583,8 +603,9 @@ impl Amendment {
         note: impl Into<String>,
         fields: Vec<String>,
         data: &serde_json::Value,
+        blind: Blind,
     ) -> Result<(Self, serde_json::Value), RedactError> {
-        let redacted = redact_data(data, &fields, amendment_id)?;
+        let redacted = redact_data(data, &fields, amendment_id, blind)?;
         Ok((
             Self {
                 agora_governance_amendment: AMENDMENT_VERSION,
@@ -648,13 +669,72 @@ pub fn standing(kinds: impl IntoIterator<Item = AmendmentKind>) -> Standing {
         .unwrap_or_default()
 }
 
-/// A JSON pointer in a [`Redaction`] does not resolve
+/// The top-level key of a redactable entry's `data` that holds its
+/// [`Blind`]
+pub const BLIND_KEY: &str = "_blind";
+
+/// Whether entries of this type can be redacted, and so carry a [`Blind`].
+/// Amendments and key rotations cannot: verifiers read their `data`, and a
+/// chain whose own corrections can be edited proves nothing.
+pub fn is_redactable(entry_type: GovernanceLogEntryType) -> bool {
+    !matches!(
+        entry_type,
+        GovernanceLogEntryType::Amendment | GovernanceLogEntryType::KeyRotation
+    )
+}
+
+/// `data` cannot be blinded
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BlindError {
+    #[error("a redactable entry's data must be a JSON object")]
+    NotAnObject,
+    #[error(
+        "data already has a {BLIND_KEY:?} key; the writer supplies it, not the caller"
+    )]
+    AlreadyBlinded,
+}
+
+/// `data` with a [`Blind`] under [`BLIND_KEY`] — what a writer signs and
+/// stores for every [redactable](is_redactable) entry.
+///
+/// An entry's `data_hash` is public and permanent: the chain cannot verify
+/// without it. After a redaction everything in `data` *except* the removed
+/// values is public too, so without a blind anyone could test a guess at a
+/// removed value — a name, a handle — by putting it back and hashing. The
+/// blind is 256 bits of the preimage that [`redact_data`] replaces along
+/// with the values, so the old hash can no longer be reproduced by anyone
+/// who did not already hold the unredacted entry. It is not a secret while
+/// the entry is whole, and it is not part of the envelope: verifiers hash
+/// `data` as they always did.
+///
+/// Entries written before blinding existed have none. Their first
+/// redaction is only as safe as the removed values are hard to guess
+/// (redact the enclosing value when in doubt); it leaves a blind behind,
+/// so later ones are protected.
+pub fn blind_data(
+    data: &serde_json::Value,
+    blind: Blind,
+) -> Result<serde_json::Value, BlindError> {
+    let mut out = data.clone();
+    let object = out.as_object_mut().ok_or(BlindError::NotAnObject)?;
+    if object.contains_key(BLIND_KEY) {
+        return Err(BlindError::AlreadyBlinded);
+    }
+    object.insert(BLIND_KEY.to_string(), blind.to_hex().into());
+    Ok(out)
+}
+
+/// A [`Redaction`] cannot be applied as asked
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RedactError {
     #[error("pointer {0:?} does not resolve in the entry's data")]
     Unresolved(String),
     #[error("the empty pointer would redact the whole entry")]
     WholeEntry,
+    #[error("a redaction names at least one pointer")]
+    NoFields,
+    #[error("{0:?} is the entry's blind; every redaction replaces it already")]
+    BlindPointer(String),
 }
 
 /// The marker a redaction leaves in place of a value
@@ -669,21 +749,42 @@ pub fn redaction_marker(amendment_id: &GovernanceLogId) -> String {
 /// replacement prose is a rewrite tool. The server and every verifier share
 /// this one definition, because what it returns is what the target's
 /// `resulting_data_hash` covers.
+///
+/// The entry's [`Blind`] is replaced by `blind` — a fresh one, not a
+/// marker. Destroying the old value is what stops a removed value being
+/// confirmed against the entry's original `data_hash` (see [`blind_data`]);
+/// leaving a *new* one is what protects the next redaction of the same
+/// entry, whose removed values could otherwise be tested against this
+/// one's public `resulting_data_hash`. An entry that predates blinding
+/// gains one here. `blind` must be [random](Blind::random) outside tests.
 pub fn redact_data(
     data: &serde_json::Value,
     fields: &[String],
     amendment_id: &GovernanceLogId,
+    blind: Blind,
 ) -> Result<serde_json::Value, RedactError> {
+    if fields.is_empty() {
+        return Err(RedactError::NoFields);
+    }
+    let blind_pointer = format!("/{BLIND_KEY}");
     let marker = serde_json::Value::String(redaction_marker(amendment_id));
     let mut out = data.clone();
     for pointer in fields {
         if pointer.is_empty() {
             return Err(RedactError::WholeEntry);
         }
+        if *pointer == blind_pointer {
+            return Err(RedactError::BlindPointer(pointer.clone()));
+        }
         let slot = out
             .pointer_mut(pointer)
             .ok_or_else(|| RedactError::Unresolved(pointer.clone()))?;
         *slot = marker.clone();
+    }
+    // Every entry a writer has produced is an object. Anything else has
+    // nowhere to keep a blind, and staying redactable matters more.
+    if let Some(object) = out.as_object_mut() {
+        object.insert(BLIND_KEY.to_string(), blind.to_hex().into());
     }
     Ok(out)
 }
@@ -2457,9 +2558,11 @@ mod tests {
             "personal data removed on request",
             vec!["/subject/handle".into(), "/subject/detail".into()],
             &data,
+            Blind::from([7; 32]),
         )
         .unwrap();
         assert_eq!(c.amend(&key, &amendment), amendment_id);
+        assert_eq!(redacted[BLIND_KEY], json!(Blind::from([7; 32])));
 
         let mut v = verify_chain(&c.links, &pk, &anchored(&pk));
         assert!(v.ok, "{v:#?}");
@@ -2606,22 +2709,121 @@ mod tests {
     #[test]
     fn redact_data_replaces_whole_values_and_refuses_the_rest() {
         let id = amd(3);
+        let blind = Blind::from([9; 32]);
         let data = json!({"a": {"b": [1, {"c": "secret"}]}, "d/e": "slash"});
-        let out = redact_data(&data, &["/a/b/1/c".into(), "/d~1e".into()], &id)
-            .unwrap();
+        let out = redact_data(
+            &data,
+            &["/a/b/1/c".into(), "/d~1e".into()],
+            &id,
+            blind,
+        )
+        .unwrap();
         assert_eq!(out["a"]["b"][1]["c"], json!(redaction_marker(&id)));
         assert_eq!(out["d/e"], json!(redaction_marker(&id)));
         assert_eq!(out["a"]["b"][0], json!(1), "untouched");
+        assert_eq!(out[BLIND_KEY], json!(blind), "a legacy entry gains one");
 
         assert_eq!(
-            redact_data(&data, &["/a/nope".into()], &id),
+            redact_data(&data, &["/a/nope".into()], &id, blind),
             Err(RedactError::Unresolved("/a/nope".into()))
         );
         assert_eq!(
-            redact_data(&data, &["".into()], &id),
+            redact_data(&data, &["".into()], &id, blind),
             Err(RedactError::WholeEntry)
         );
-        assert_eq!(redact_data(&data, &[], &id).unwrap(), data);
+        assert_eq!(
+            redact_data(&data, &[], &id, blind),
+            Err(RedactError::NoFields)
+        );
+        assert_eq!(
+            redact_data(&data, &["/_blind".into()], &id, blind),
+            Err(RedactError::BlindPointer("/_blind".into()))
+        );
+    }
+
+    #[test]
+    fn blind_data_is_for_objects_and_is_the_writers_to_supply() {
+        let blind = Blind::from([1; 32]);
+        let out = blind_data(&json!({"finding": "upheld"}), blind).unwrap();
+        assert_eq!(out, json!({"finding": "upheld", "_blind": blind}));
+        assert_eq!(
+            blind_data(&json!([1]), blind),
+            Err(BlindError::NotAnObject)
+        );
+        assert_eq!(blind_data(&out, blind), Err(BlindError::AlreadyBlinded));
+        assert_ne!(Blind::random(), Blind::random());
+
+        use GovernanceLogEntryType::*;
+        assert!(!is_redactable(Amendment) && !is_redactable(KeyRotation));
+        assert!(
+            is_redactable(CouncilDecision) && is_redactable(EmergencyAction)
+        );
+    }
+
+    /// The attack blinding exists for, performed. Everything the attacker
+    /// uses is public after a redaction: the redacted data, the entry's
+    /// original `data_hash`, and each redaction's `resulting_data_hash`.
+    #[test]
+    fn a_removed_value_cannot_be_confirmed_by_guessing_it() {
+        // Put a guess back where a marker is and see if a public hash agrees
+        fn confirms(
+            public: &serde_json::Value,
+            pointer: &str,
+            guess: &str,
+            hash: Sha256Hex,
+        ) -> bool {
+            let mut attempt = public.clone();
+            *attempt.pointer_mut(pointer).unwrap() = json!(guess);
+            data_hash(&attempt) == hash
+        }
+        let legacy = json!({"finding": "upheld", "handle": "someone", "city": "Utrecht"});
+
+        // Blinded when written: the right guess confirms nothing.
+        let written = blind_data(&legacy, Blind::random()).unwrap();
+        let first = redact_data(
+            &written,
+            &["/handle".into()],
+            &amd(1),
+            Blind::random(),
+        )
+        .unwrap();
+        assert!(!confirms(&first, "/handle", "someone", data_hash(&written)));
+
+        // A second redaction of the same entry: the first one's
+        // `resulting_data_hash` is public too, and covers the city.
+        let second =
+            redact_data(&first, &["/city".into()], &amd(2), Blind::random())
+                .unwrap();
+        assert!(!confirms(&second, "/city", "Utrecht", data_hash(&first)));
+
+        // An entry from before blinding has nothing to destroy, and gains a
+        // key it never had: strip it and the right guess does confirm. This
+        // is the residual exposure of the entries that predate 0.27...
+        let mut stripped =
+            redact_data(&legacy, &["/handle".into()], &amd(3), Blind::random())
+                .unwrap();
+        let legacy_first = stripped.clone();
+        stripped.as_object_mut().unwrap().remove(BLIND_KEY);
+        assert!(confirms(
+            &stripped,
+            "/handle",
+            "someone",
+            data_hash(&legacy)
+        ));
+        // ...and it ends at the first redaction, which left a blind behind.
+        let legacy_second = redact_data(
+            &legacy_first,
+            &["/city".into()],
+            &amd(4),
+            Blind::random(),
+        )
+        .unwrap();
+        assert!(!confirms(
+            &legacy_second,
+            "/city",
+            "Utrecht",
+            data_hash(&legacy_first)
+        ));
     }
 
     // -- key rotation --

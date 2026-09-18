@@ -28,9 +28,9 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b",
-        "data_hash": "5c880e1793ae1b392a20a92b77ba70afe9eeda11238b851c8c1b5a88324fd404",
-        "entry_hash": "b637340a476fa153f616bc42ce2d91a36365fd8946cb3e001a56445d381e9a8f",
-        "signature": "4a9a02c5ef2c9170670beebfab85d5dedc9390eac9ed9a83c18a2a6e4d74ffb60b48d00995de879e41bd17d72744dc2d03f8ed939cc22592fece655a67e47102",
+        "data_hash": "e83fee940eb4e07d2d0d66163222b84904c9748a6cc48b4af7df4120c9de5ede",
+        "entry_hash": "d2333497d08d87df69654125d9eef93484d50e60be4411adcf0318a5938818c4",
+        "signature": "92b973ff0c7a0a9c327292193e894b784c8efbbd76424474bbf31aa815a2f768d76881366825500e15ed4f6e2f325c8611e381d650e2ba1a586311e2f68ca10a",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
@@ -45,7 +45,7 @@
             "/subject/handle",
             "/subject/detail"
           ],
-          "resulting_data_hash": "ec42e2dacb763a17075e352c2fafc475268c80c20f59e46fb50f436bc7c4d766"
+          "resulting_data_hash": "829896adc996dbcd3884e96d328e6916092d9bd448b68a1eda8ac22311552ca8"
         },
         "target": "GOV-2026-0001",
         "target_entry_hash": "548e2a26b86d85fea856b5ea6ed4e2fe0cb8aa761b08cfae6a1609cbabec9b0b"
@@ -54,6 +54,7 @@
   ],
   "contents": {
     "GOV-2026-0001": {
+      "_blind": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
       "finding": "overturned",
       "subject": {
         "detail": "[redacted by AMD-2026-0001]",
