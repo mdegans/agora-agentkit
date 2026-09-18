@@ -735,6 +735,48 @@ fn cases() -> Vec<Case> {
         c.links,
     ));
 
+    // -- numbers --
+
+    let mut c = Chain::new();
+    let target = c.decision(&steward);
+    let amendment = AmendmentDraft::new(
+        target,
+        c.hash_at(1),
+        AmendmentKind::Correction,
+        "clerical",
+        "citation corrected",
+    )
+    .unwrap();
+    let mut data =
+        serde_json::to_value(resalted(&amendment, 2).amendment).unwrap();
+    data["weight"] = json!(0.5);
+    c.push(&steward, super::tests::amd(1), AmendmentEntry, data, true);
+    out.push(Case::new(
+        "data_non_integer_number",
+        "An amendment, validly signed, with a field holding 0.5. Governance \
+         data never contains a number that is not a 64-bit integer: no two \
+         JSON libraries write a float the same way, so it is reported and \
+         never hashed.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, json!({"title": "Decision", "tally": 3}));
+    out.push(
+        Case::new(
+            "content_non_integer_number",
+            "A decision read in full whose content holds 3.0 where 3 was \
+             attested. Not hashed, so not a match, whatever a library \
+             would have printed for it.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, json!({"title": "Decision", "tally": 3.0})),
+    );
+
     // -- redaction --
 
     let data = json!({

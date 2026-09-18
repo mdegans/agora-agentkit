@@ -311,18 +311,11 @@ def mutate(rng, vector, structural=True):
         new = not old
     elif isinstance(old, int):
         new = rng.choice(
-            [old + 1, old - 1, 0, -1, 2**32, 2**63, str(old), True]
-            # KNOWN DIVERGENCE, deliberately not fuzzed inside a payload
-            # that gets re-signed: a number that is not a 64-bit integer.
-            # Canonical JSON writes numbers the way serde_json does, and
-            # serde_json's float printer changed between releases ("1e21"
-            # became "1e+21"); an integer past u64 is a float to it as
-            # well. The two verifiers can therefore hash such a payload
-            # differently. No governance entry has ever contained one —
-            # every number on the platform's log is an integer — and the
-            # proposed rule is that none ever may. Unsigned, they are fair
-            # game: both verifiers must still refuse them the same way.
-            + ([2**64, float(old)] if structural else [])
+            [old + 1, old - 1, 0, -1, 2**32, 2**63, 2**64, float(old), str(old), True]
+            # 2**64 and the float are numbers governance data never holds:
+            # both verifiers must report them, and neither may hash them —
+            # how a float is written is the one part of canonical JSON no
+            # two libraries agree on.
         )
     elif isinstance(old, str):
         new = rng.choice([old + "x", "", old.upper(), None, 7, "routine", "compromise", "genesis"])

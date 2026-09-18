@@ -1,0 +1,68 @@
+{
+  "description": "A decision read in full whose content holds 3.0 where 3 was attested. Not hashed, so not a match, whatever a library would have printed for it.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "a1477e792b6d4adac8235415a482c146704ebf2ba49dc72c99c3ea9055f48961",
+        "entry_hash": "a28073f49553e7cd696134adf280fd390e23b251ff982f3e86259fdbdcd1d0b2",
+        "signature": "033bfe4423a276b0e8f64927fc708d4f29920abb6e2caa7be6c2934f2b948a9666ae5741d1ebc62cafc5441e3f493dd940f50630ef0428046737fd51f5d25f0c",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    }
+  ],
+  "contents": {
+    "GOV-2026-0001": {
+      "tally": 3.0,
+      "title": "Decision"
+    }
+  },
+  "expect": {
+    "ok": false,
+    "head": "GOV-2026-0001",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": false,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      }
+    ]
+  }
+}

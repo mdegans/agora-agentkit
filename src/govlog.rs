@@ -346,6 +346,49 @@ fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) {
     }
 }
 
+/// The RFC 6901 pointer to the first number in `data` that is not a 64-bit
+/// integer, if there is one.
+///
+/// Governance `data` never contains one. [`canonical_json`] writes a number
+/// the way `serde_json` does, and how that prints a float has changed
+/// between releases (`1e21` became `1e+21`); an integer past `u64` is a
+/// float to it as well, and its float parsing is not exactly rounded. A
+/// hash that is meant to be permanent cannot depend on any of that, so the
+/// writer refuses such `data` ([`blind_data`], [`redact_data`]) and a
+/// verifier reports it without hashing it. A fraction goes in a string.
+pub fn non_integer_number(data: &serde_json::Value) -> Option<String> {
+    fn find(value: &serde_json::Value, path: &mut String) -> bool {
+        use serde_json::Value::{Array, Number, Object};
+        let mark = path.len();
+        match value {
+            Number(n) => return n.is_f64(),
+            Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    path.push_str(&format!("/{i}"));
+                    if find(item, path) {
+                        return true;
+                    }
+                    path.truncate(mark);
+                }
+            }
+            Object(map) => {
+                for (key, item) in map {
+                    path.push('/');
+                    path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                    if find(item, path) {
+                        return true;
+                    }
+                    path.truncate(mark);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+    let mut path = String::new();
+    find(data, &mut path).then_some(path)
+}
+
 /// SHA-256 over [`canonical_json`]
 pub fn data_hash(data: &serde_json::Value) -> Sha256Hex {
     Sha256Hex(Sha256::digest(canonical_json(data)).into())
@@ -825,6 +868,11 @@ pub enum BlindError {
         "data already has a {BLIND_KEY:?} key; the writer supplies it, not the caller"
     )]
     AlreadyBlinded,
+    #[error(
+        "{0:?} is a number that is not a 64-bit integer; governance data \
+         never contains one (put a fraction in a string)"
+    )]
+    NonIntegerNumber(String),
 }
 
 /// `data` with a [`Blind`] under [`BLIND_KEY`] — what a writer signs and
@@ -848,6 +896,9 @@ pub fn blind_data(
     data: &serde_json::Value,
     blind: Blind,
 ) -> Result<serde_json::Value, BlindError> {
+    if let Some(pointer) = non_integer_number(data) {
+        return Err(BlindError::NonIntegerNumber(pointer));
+    }
     let mut out = data.clone();
     let object = out.as_object_mut().ok_or(BlindError::NotAnObject)?;
     if object.contains_key(BLIND_KEY) {
@@ -868,6 +919,11 @@ pub enum RedactError {
     NoFields,
     #[error("{0:?} is the entry's blind; every redaction replaces it already")]
     BlindPointer(String),
+    #[error(
+        "{0:?} is a number that is not a 64-bit integer; governance data \
+         never contains one"
+    )]
+    NonIntegerNumber(String),
 }
 
 /// The marker a redaction leaves in place of a value
@@ -898,6 +954,9 @@ pub fn redact_data(
 ) -> Result<serde_json::Value, RedactError> {
     if fields.is_empty() {
         return Err(RedactError::NoFields);
+    }
+    if let Some(pointer) = non_integer_number(data) {
+        return Err(RedactError::NonIntegerNumber(pointer));
     }
     let blind_pointer = format!("/{BLIND_KEY}");
     let marker = serde_json::Value::String(redaction_marker(amendment_id));
@@ -1497,13 +1556,16 @@ impl GovernanceVerification {
         link: &GovernanceChainLink,
         data: &serde_json::Value,
     ) -> bool {
-        let hash = data_hash(data);
         let Some(entry) = self.entries.iter_mut().find(|e| e.id == link.id)
         else {
             return false;
         };
-        let ok = hash == link.attestation.data_hash
-            || entry.redacted_data_hash == Some(hash);
+        // Never hashed: see `non_integer_number`.
+        let hash = non_integer_number(data).is_none().then(|| data_hash(data));
+        let ok = hash.is_some_and(|hash| {
+            hash == link.attestation.data_hash
+                || entry.redacted_data_hash == Some(hash)
+        });
         entry.content_matches = Some(ok);
         ok
     }
@@ -1974,6 +2036,14 @@ pub fn verify_chain(
         let mut rotation: Option<KeyRotation> = None;
         let mut content_matches: Option<bool> = None;
         match &link.data {
+            Some(data) if non_integer_number(data).is_some() => {
+                content_matches = Some(false);
+                problems.push(format!(
+                    "`data` has a number that is not a 64-bit integer at {:?}; \
+                     governance data never contains one",
+                    non_integer_number(data).unwrap_or_default()
+                ));
+            }
             Some(data) => {
                 let matched = data_hash(data) == a.data_hash;
                 content_matches = Some(matched);
@@ -2169,6 +2239,7 @@ pub fn verify_chain(
         if entries[i].content_matches == Some(false)
             && let (Some(data), Some(hash)) =
                 (&link.data, entries[i].redacted_data_hash)
+            && non_integer_number(data).is_none()
             && data_hash(data) == hash
         {
             entries[i].content_matches = Some(true);
@@ -3021,6 +3092,33 @@ mod tests {
         assert!(p.contains("does neither consistently"), "{p}");
         let p = amend_with(&|a| a.note = AmendmentText::Plain("n".into()));
         assert!(p.contains("does neither consistently"), "{p}");
+    }
+
+    #[test]
+    fn governance_data_holds_no_number_that_is_not_a_64_bit_integer() {
+        let fine = json!({"a": [1, -2, u64::MAX, i64::MIN], "b": {"c": "0.5"}});
+        assert_eq!(non_integer_number(&fine), None);
+        assert!(blind_data(&fine, Blind::random()).is_ok());
+
+        for (text, pointer) in [
+            (r#"{"a": {"b/c": [1, 0.5]}}"#, "/a/b~1c/1"),
+            (r#"{"n": 1.0}"#, "/n"),
+            (r#"{"n": 1e3}"#, "/n"),
+            (r#"{"n": 18446744073709551616}"#, "/n"),
+            (r#"{"n": -9223372036854775809}"#, "/n"),
+        ] {
+            let data: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(non_integer_number(&data).as_deref(), Some(pointer));
+            assert_eq!(
+                blind_data(&data, Blind::random()),
+                Err(BlindError::NonIntegerNumber(pointer.into())),
+                "the writer refuses it"
+            );
+            assert_eq!(
+                redact_data(&data, &["/n".into()], &amd(1), Blind::random()),
+                Err(RedactError::NonIntegerNumber(pointer.into()))
+            );
+        }
     }
 
     #[test]

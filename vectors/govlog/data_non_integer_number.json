@@ -1,0 +1,104 @@
+{
+  "description": "An amendment, validly signed, with a field holding 0.5. Governance data never contains a number that is not a 64-bit integer: no two JSON libraries write a float the same way, so it is reported and never hashed.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "acd835d56e8aa97d5fc08ba6d7949f1b6b3c669958ac55b924695bd52568efbb",
+        "entry_hash": "a2a0dcdc050f9a61b72c99525b2eb585b264fddbbb39ffeef6eb09c8f08c3ed8",
+        "signature": "f7a28c41f742dd4d8e79682f1a5ab18195642a1d7664fa2a1e699a98eff93463c918e94edfbc4fe6bdb85095a07c01452b95bb5ece1e7d32eda4d021c8e9c203",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "8d5101c6a9b1ad545337ff65d4d25a08b5b455a47c3f8f1084db1a7654fc58ec"
+        },
+        "kind": "correction",
+        "note": {
+          "commitment": "ee936679b05b133f2613dc6fa7f2632262aabc228647611f4f81a96dfaaf285d"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "weight": 0.5
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "AMD-2026-0001",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": false,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": true
+      }
+    ]
+  }
+}

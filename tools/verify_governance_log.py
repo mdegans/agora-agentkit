@@ -321,6 +321,28 @@ def _float_json(value):
     return text.replace("e+", "e").replace("e0", "e").replace("e-0", "e-")
 
 
+def non_integer_number(value):
+    """Whether `value` holds a number that is not a 64-bit integer.
+
+    Governance `data` never contains one. A hash over JSON is only as stable
+    as the way its numbers are written, and floats are written differently
+    by different JSON libraries — and by different releases of the same one.
+    Integers that fit an i64 or a u64 are written one way by everybody. So
+    the platform refuses to write anything else, and a verifier that meets
+    one reports it and does not hash it: a fraction belongs in a string."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, float):
+        return True
+    if isinstance(value, int):
+        return not -(2**63) <= value < 2**64
+    if isinstance(value, list):
+        return any(non_integer_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(non_integer_number(item) for item in value.values())
+    return False
+
+
 def sha256_hex(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -1166,7 +1188,13 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
         carries_meaning = link["entry_type"] in ("amendment", "key_rotation")
         amendment = rotation = None
         content_matches = None
-        if link["data"] is not None:
+        if link["data"] is not None and non_integer_number(link["data"]):
+            content_matches = False
+            problems.append(
+                "`data` has a number that is not a 64-bit integer; governance "
+                "data never contains one"
+            )
+        elif link["data"] is not None:
             content_matches = data_hash(link["data"]) == a["data_hash"]
             if not content_matches:
                 if carries_meaning:
@@ -1335,6 +1363,7 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
         if (
             entry["content_matches"] is False
             and link["data"] is not None
+            and not non_integer_number(link["data"])
             and entry["redacted_data_hash"] == data_hash(link["data"])
         ):
             entry["content_matches"] = True
@@ -1381,11 +1410,12 @@ def settle(report):
 def check_content(report, entry_id, data):
     """Record whether `data` is the content the entry attested — or what a
     redaction of it lawfully left behind"""
-    digest = data_hash(data)
+    # Never hashed if it holds a number that is not a 64-bit integer.
+    digest = None if non_integer_number(data) else data_hash(data)
     for entry in report["entries"]:
         if entry["id"] != entry_id:
             continue
-        entry["content_matches"] = digest in (
+        entry["content_matches"] = digest is not None and digest in (
             entry["attested_data_hash"],
             entry["redacted_data_hash"],
         )
