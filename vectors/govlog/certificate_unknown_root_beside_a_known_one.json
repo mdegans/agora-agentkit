@@ -1,5 +1,5 @@
 {
-  "description": "An amendment and a rotation signed by a key the chain never named. Neither amends nor moves anything — the rotation is even root-certified, which is no licence to skip the old key's signature.",
+  "description": "A signature from outside the root set next to a sufficient one: ignored, not an error — a later root set may overlap this one.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -26,55 +26,17 @@
       }
     },
     {
-      "id": "AMD-2026-0001",
-      "entry_type": "amendment",
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
       "created_at": "2023-11-14T22:13:40.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "65fe5dadc863300f969efdaecef1a5ec0d6d97e56e038137a5d981650008c471",
-        "entry_hash": "a27135705c2007acbc4015a26160a163549000ba71fec6d6d5f9c262380fa75f",
-        "signature": "d7824d9db438a06bca8a6dd3f8f5e51c2e15c2f6d4f5959339e1fc78bd175f8cad0cde1c30106f59ddf5e23914e602f3922fa29a19a1dd9bb92cee53f36e0908",
+        "data_hash": "aa8fb31aaada4f995b44902711fc650afc0a53be2838267f848fb3d6a361212b",
+        "entry_hash": "fedcdd2bb7b8d15a0495fa0a48ef30907a5c9dca0a9a254e03efbb3fe9f967ff",
+        "signature": "f88ca9a861e2b96f20bccf8518d405e38cf568d583a48e9feb4ef6f952fd3648a7eacb9e1a56eb405efc68f69f1de18cd3a0bc427fab46f86c18ba582f269005",
         "signed_at": "2023-11-14T22:13:41Z",
-        "retroactive": false
-      },
-      "data": {
-        "agora_governance_amendment": 2,
-        "authority": null,
-        "basis": {
-          "commitment": "44ecd4b5393e63029685dfb7944ab0937ffda4db04f868fab1c96deb02c24537"
-        },
-        "kind": "overruled",
-        "note": {
-          "commitment": "b56706feaa36095364c6bfddc904a4a5999eeb2b53b282b715b11ea9c5090be9"
-        },
-        "target": "GOV-2026-0001",
-        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
-      },
-      "texts": {
-        "basis": {
-          "salt": "b382a8c3bf0efbc883603514d7ffcfb92ee898929dd39ee626cd7cec4f2f0b48",
-          "text": "none"
-        },
-        "note": {
-          "salt": "d0632e0c601b75fe18c9cff02e4a14b9c8b84569dabcf2091e9ae8aede341e30",
-          "text": "overruled, says nobody with the key"
-        }
-      }
-    },
-    {
-      "id": "KEY-2026-0001",
-      "entry_type": "key_rotation",
-      "created_at": "2023-11-14T22:13:50.123456Z",
-      "attestation": {
-        "envelope_version": 1,
-        "chain_seq": 3,
-        "prev_hash": "a27135705c2007acbc4015a26160a163549000ba71fec6d6d5f9c262380fa75f",
-        "data_hash": "c0b94c627f311c04b9fe174cb04110f058f7942c3bc7d52ec35f53e4c48bf618",
-        "entry_hash": "124298d71f8f1573004400e8c6960aa129e9a0185d26a3e7490d88bc3b664314",
-        "signature": "499aad58d39257b233dffecb47c27bc07aceaa9578a7d6a0784e581fb4bfda73c912974a51c6442616d0a95a237ea6da49fa05fde07c0f700d42aa4d85846301",
-        "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },
       "data": {
@@ -82,20 +44,24 @@
         "certificate": {
           "signatures": [
             {
-              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
-              "signature": "ad7739f9c29472d3ad1e6717fa2415c869b7c3ef3a2a423b8ce57ebe1cf2c51ab0c93e4e5832eac563d61e304210d3b774fbc548e15737c552666fcfc440d407"
+              "root_key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+              "signature": "3a382f2d513887165c6f394b70b1872b9ac53987b70a5a4d00cd499b093913807b953f5e0b6f4d698f882246347354c473ce30cf286d5405e4689ae4539a9e04"
+            },
+            {
+              "root_key": "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+              "signature": "4d572ec61e0e1855b167b9f6af8d7310c851beacd4416cb5406055c454a30b56935797b17182b1f596666bb1a872368832c922a5c5730ce38325c3070f3c0c0a"
             }
           ],
           "statement": {
             "agora_governance_key_cert": 1,
-            "from_seq": 4,
-            "key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+            "from_seq": 3,
+            "key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
             "last_trusted": null,
-            "prev_hash": "a27135705c2007acbc4015a26160a163549000ba71fec6d6d5f9c262380fa75f",
+            "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
             "purpose": "routine"
           }
         },
-        "new_key": "6e7a1cdd29b0b78fd13af4c5598feff4ef2a97166e3ca6f2e4fbfccd80505bf1",
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
         "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "outgoing_certificate": {
           "signatures": [
@@ -113,27 +79,51 @@
             "purpose": "genesis"
           }
         },
-        "proof": "22392e7d5ede4461dd6c2996cc753172f0564ebf20632b2f8e905d2de26523b2258ca98e302670e05641fce7a9337a8a2826569bd80f9c2f41e959a8df117f0d",
-        "proof_signed_at": 1700000035,
+        "proof": "0ee69ec5c4ceebe4303d7d734362bc728866420f3f1a2b5158d56c5990a47c35457f89f732c848457b99ecea467027fe8c350ac9df0cf9004bf17ff14a499a06",
+        "proof_signed_at": 1700000025,
         "reason": "routine"
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "fedcdd2bb7b8d15a0495fa0a48ef30907a5c9dca0a9a254e03efbb3fe9f967ff",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "74f70c6972abec7afaad5ed8f18fbd066a7a501df12e3759531932437040e611",
+        "signature": "3b32a814a696ad779624bc30166cb3f3732e7bfa0c50efb56f409e115cb88e93381dd50cfdbc687d216cd1435f9c19ddd1bd9f69a7e70b89e253b4f5176dc809",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
       }
     }
   ],
   "expect": {
-    "ok": false,
-    "head": "KEY-2026-0001",
-    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "ok": true,
+    "head": "GOV-2026-0002",
+    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
     "repudiated": [],
     "unanchored_keys": [],
     "keys": [
       {
         "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "from_seq": 1,
+        "through_seq": 2,
+        "status": "retired",
+        "introduced_by": null,
+        "retired_by": "KEY-2026-0001",
+        "certified": true
+      },
+      {
+        "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "from_seq": 3,
         "through_seq": null,
         "status": "active",
-        "introduced_by": null,
+        "introduced_by": "KEY-2026-0001",
         "retired_by": null,
-        "certified": false
+        "certified": true
       }
     ],
     "entries": [
@@ -151,8 +141,8 @@
         "problem": false
       },
       {
-        "id": "AMD-2026-0001",
-        "signature_valid": false,
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
         "link_valid": true,
         "content_matches": true,
         "retroactive": false,
@@ -161,20 +151,20 @@
         "repudiated": false,
         "amended_by": [],
         "texts": null,
-        "problem": true
+        "problem": false
       },
       {
-        "id": "KEY-2026-0001",
-        "signature_valid": false,
+        "id": "GOV-2026-0002",
+        "signature_valid": true,
         "link_valid": true,
-        "content_matches": true,
+        "content_matches": null,
         "retroactive": false,
         "out_of_order": false,
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
         "texts": null,
-        "problem": true
+        "problem": false
       }
     ]
   }

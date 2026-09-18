@@ -1,0 +1,255 @@
+{
+  "description": "The key was stolen before anyone knew. The Steward rotates routinely, then learns of it and names a head from before the rotation: the rotation is void with the rest of the window, and the genesis certificate it carried is the root's word all the same.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+        "signature": "eb399e7a14af383a9daea0e6c276473c3e8b45dd7ffa357f95d33780f993706fb35a39dfea6f4d920aa9a707cbe2450133e52da599dcd63e4acf660285f21808",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "KEY-2026-0001",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+        "data_hash": "504c89129739739d3c71720e6c02fd82893b89c27c0198255680a743ce41ccb1",
+        "entry_hash": "61d1a9e1edd532dd520ea3be03cef08378d0d1f076f1168eb7e75080a0b3a59e",
+        "signature": "061d757a9582b66f654e6f973f76636adf7f27fb348b45c6bddfeddf9dacdc515bb0c5be47367a2d47d03ce1586d38654ce9addc6095349b5c6dda9d02b88c09",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 2,
+        "certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "9cd589ef47faf7e836db52175d5ce13361330269e5d106913b026cb9e00a10f1c0f880b101e0161d1dd1e53e51d46ac9e201522729787cdb4791cdfad9aa110e"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 4,
+            "key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+            "last_trusted": null,
+            "prev_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
+            "purpose": "routine"
+          }
+        },
+        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "outgoing_certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "fb67cc382d57c42b757d3607de6e7ebc167ff12dbf24101a328b0f5ebb7217c4c81934e8a4ce197b77c6499457213859c166d89820dcc800218b5e7b3f3dab07"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 1,
+            "key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            "last_trusted": null,
+            "prev_hash": null,
+            "purpose": "genesis"
+          }
+        },
+        "proof": "d6d346d52d51850822f8b668aaef0e1588706a6d62e161243cb4a892ae4854b4247a343414e7bec6c9df01daec67a09ec95c207d44f9ee1404746326b0f5e20b",
+        "proof_signed_at": 1700000035,
+        "reason": "routine"
+      }
+    },
+    {
+      "id": "GOV-2026-0003",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:14:00.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 4,
+        "prev_hash": "61d1a9e1edd532dd520ea3be03cef08378d0d1f076f1168eb7e75080a0b3a59e",
+        "data_hash": "0ba6ec28efb9d8d99b528ac05d1cdf8b229b5fb81c23e8a02ebad9006e572cb4",
+        "entry_hash": "3de0fad5cbc153ae4824a4a675bbfbb6b7feed8f48fa55f1933d2b6173a387e9",
+        "signature": "c9a9b748e781dcbe413067301a32fd7eaf05de54495f0ea9cabf118302adcde91d37b55f60ef916b05ed3989a585c551982f6d7be2d90785801d9f4f337b5408",
+        "signed_at": "2023-11-14T22:14:01Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "KEY-2026-0002",
+      "entry_type": "key_rotation",
+      "created_at": "2023-11-14T22:14:10.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 5,
+        "prev_hash": "3de0fad5cbc153ae4824a4a675bbfbb6b7feed8f48fa55f1933d2b6173a387e9",
+        "data_hash": "6ec1273bb300420f330b9bf5b079079061d0c6243d24aa528a3145a58f469153",
+        "entry_hash": "eafaa0f54a59037c9a9a0af896e2cd722dcc3dfaca9e8906ed9f00a13cc5f49e",
+        "signature": "4db26926400b8b54366e7d5131a30b53e5097b3c8cfc8bb3654eb3331984aef25bb924b4f893b6a53885a84d3bfb34cd2e9cfbaa96c28129e0d6179321c12f0d",
+        "signed_at": "2023-11-14T22:14:11Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_key_rotation": 2,
+        "certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "eb52331d69e54fb46c081b5a3b1aa38876ce2d4404f8064741a8bf265a48bffe7e181f799f0de3c74dfccae289732bbfc0763003cb770f32e26005553f8db206"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 5,
+            "key": "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c",
+            "last_trusted": {
+              "chain_seq": 1,
+              "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+              "id": "GOV-2026-0001"
+            },
+            "prev_hash": "3de0fad5cbc153ae4824a4a675bbfbb6b7feed8f48fa55f1933d2b6173a387e9",
+            "purpose": "compromise"
+          }
+        },
+        "new_key": "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c",
+        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "proof": "0bf848b9fec82d3a16da0cd2d36f59c6f1ce720a1c335c4e5e7ebe889bf43b6ddb165704d76c7e0ba8e562f87d9c14397f111ff7a228142c5bbe376378cf290a",
+        "proof_signed_at": 1700000055,
+        "reason": "compromise"
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "head": "KEY-2026-0002",
+    "public_key": "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c",
+    "repudiated": [
+      "GOV-2026-0002",
+      "KEY-2026-0001",
+      "GOV-2026-0003"
+    ],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": 1,
+        "status": "compromised",
+        "introduced_by": null,
+        "retired_by": "KEY-2026-0002",
+        "certified": true
+      },
+      {
+        "public_key": "ca93ac1705187071d67b83c7ff0efe8108e8ec4530575d7726879333dbdabe7c",
+        "from_seq": 5,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": "KEY-2026-0002",
+        "retired_by": null,
+        "certified": true
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "GOV-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": true,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "KEY-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": true,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "GOV-2026-0003",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": true,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "KEY-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      }
+    ]
+  }
+}

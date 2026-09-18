@@ -1,10 +1,14 @@
 {
-  "description": "A rotation to a key nobody holds: the proof of possession is signed by the old key instead of the new one.",
+  "description": "A version 1 amendment, texts in the signed data, as the platform's first three are. Still valid, and always will be.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
-    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-    "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
   ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
   "links": [
     {
       "id": "GOV-2026-0001",
@@ -22,36 +26,48 @@
       }
     },
     {
-      "id": "KEY-2026-0001",
-      "entry_type": "key_rotation",
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
       "created_at": "2023-11-14T22:13:40.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "ea61c0ab0ed4c5353c71caa7a6e87705d1d66586df159d3892863b1eb00c8e0c",
-        "entry_hash": "8b237220a0450c499b571210709afd7826ac0eb989c58fa4b68b1448032fcc4f",
-        "signature": "236ce3ff711b76f5afe7927ff12513685d70464fdd62ed50e22535b8c8709df930b953222f5177289fb85d978ae07ed5ef6d98d21b49068b13861166948e1105",
+        "data_hash": "045cdc6147ff0e4f648de39c5fbdd98f161f66b5922ef136dbc1b33e60d3a758",
+        "entry_hash": "d1b89a0cef0dcb8b10ad82f43580ef6d48c1a9d10328dfece579d3665956a232",
+        "signature": "730353471244c4dc80ae3e008a2429f3c2c6b6371ea1e5fc1e565dea705830fbc0bb355e4fde0d759b6ae2b9154ca52a9af52d6bf56ba6c2363243dcb85da306",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_key_rotation": 1,
-        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
-        "note": "scheduled",
-        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-        "proof": "94d5fbacc73832e256da246fac2899f5ea74ea1159e53411a6b871106928df28323ad1434f5e29a1a22d4fb388233f533f6ebe127a3999346d1b630a47aabb05",
-        "proof_signed_at": 1700000025,
-        "reason": "routine"
+        "agora_governance_amendment": 1,
+        "authority": "GOV-2026-0005",
+        "basis": "§1 (Red Team Cases Recharacterized)",
+        "kind": "non_precedential",
+        "note": "diagnostic finding — not citable as moderation precedent",
+        "rationale": "§5 leaves the ruling itself standing",
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
       }
     }
   ],
   "expect": {
-    "ok": false,
-    "head": "KEY-2026-0001",
+    "ok": true,
+    "head": "AMD-2026-0001",
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
     "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
     "entries": [
       {
         "id": "GOV-2026-0001",
@@ -62,11 +78,14 @@
         "out_of_order": false,
         "redacted": false,
         "repudiated": false,
-        "amended_by": [],
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
+        "texts": null,
         "problem": false
       },
       {
-        "id": "KEY-2026-0001",
+        "id": "AMD-2026-0001",
         "signature_valid": true,
         "link_valid": true,
         "content_matches": true,
@@ -75,8 +94,12 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
-        "problem": true
+        "texts": null,
+        "problem": false
       }
-    ]
+    ],
+    "standing": {
+      "GOV-2026-0001": "non_precedential"
+    }
   }
 }

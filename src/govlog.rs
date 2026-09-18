@@ -25,16 +25,19 @@
 //! are ordinary signed links whose `data` the verifier reads:
 //!
 //! - [`Amendment`] (`AMD-`) names an earlier entry and says what changed
-//!   about its force ([`Standing`]) or its content ([`Redaction`]). A
+//!   about its force ([`Standing`]) or its content ([`Redaction`]). Its
+//!   own free text is committed to, not contained (see [`TextCommitment`]),
+//!   because an amendment is the one thing that can never be redacted. A
 //!   redaction replaces values in the target's `data` in place; the
 //!   original `entry_hash` stays on the row so later links still verify,
 //!   and the amendment's `resulting_data_hash` is what the redacted data
 //!   must now hash to. [`EntryVerdict::content_matches`] is the check.
 //! - [`KeyRotation`] (`KEY-`) moves the chain to a new signing key. A
-//!   routine rotation is signed by the old key; a compromise declaration
-//!   is signed by the new one and is authentic only if that key is in the
-//!   verifier's out-of-band [`KeyAnchor`], which is what makes a key thief
-//!   visible rather than authoritative. See [`verify_chain`].
+//!   routine rotation is signed by the old key and a compromise
+//!   declaration by the new one, but neither signature is what makes the
+//!   change authentic: a [`KeyCertificate`] from the offline root keys
+//!   ([`ROOT_KEYS`]) is, so holding the online key is never enough to
+//!   move the chain. See [`verify_chain`].
 //!
 //! The envelope itself is unchanged by any of this: `ENVELOPE_VERSION` is
 //! still 1 and what it does and does not cover is exactly as above.
@@ -48,6 +51,19 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
 pub use crate::enums::{AmendmentKind, KeyStatus, Standing};
+
+mod texts;
+pub use texts::{
+    AmendmentText, AmendmentTextStatus, AmendmentTexts, CommittedText,
+    TextCommitment, TextStatus, WITHHELD_TEXT,
+};
+
+mod root;
+pub use root::{
+    CertPurpose, CertificateError, KEY_CERT_VERSION, KeyCertStatement,
+    KeyCertificate, ROOT_DOMAIN, ROOT_KEYS, ROOT_THRESHOLD, RootSet,
+    RootSignature,
+};
 
 /// The shared test vectors in `vectors/govlog`; see [`vectors`]
 #[cfg(test)]
@@ -222,6 +238,13 @@ hex_bytes!(
     32
 );
 
+hex_bytes!(
+    /// The salt of a [`TextCommitment`]: 32 random bytes kept beside the
+    /// text, and deleted with it
+    TextSalt,
+    32
+);
+
 impl Blind {
     /// A fresh value from the operating system's random source
     pub fn random() -> Self {
@@ -229,6 +252,13 @@ impl Blind {
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         Self(bytes)
+    }
+}
+
+impl TextSalt {
+    /// A fresh value from the operating system's random source
+    pub fn random() -> Self {
+        Self(*Blind::random().as_bytes())
     }
 }
 
@@ -314,6 +344,49 @@ fn write_canonical(value: &serde_json::Value, out: &mut Vec<u8>) {
             out.push(b'}');
         }
     }
+}
+
+/// The RFC 6901 pointer to the first number in `data` that is not a 64-bit
+/// integer, if there is one.
+///
+/// Governance `data` never contains one. [`canonical_json`] writes a number
+/// the way `serde_json` does, and how that prints a float has changed
+/// between releases (`1e21` became `1e+21`); an integer past `u64` is a
+/// float to it as well, and its float parsing is not exactly rounded. A
+/// hash that is meant to be permanent cannot depend on any of that, so the
+/// writer refuses such `data` ([`blind_data`], [`redact_data`]) and a
+/// verifier reports it without hashing it. A fraction goes in a string.
+pub fn non_integer_number(data: &serde_json::Value) -> Option<String> {
+    fn find(value: &serde_json::Value, path: &mut String) -> bool {
+        use serde_json::Value::{Array, Number, Object};
+        let mark = path.len();
+        match value {
+            Number(n) => return n.is_f64(),
+            Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    path.push_str(&format!("/{i}"));
+                    if find(item, path) {
+                        return true;
+                    }
+                    path.truncate(mark);
+                }
+            }
+            Object(map) => {
+                for (key, item) in map {
+                    path.push('/');
+                    path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                    if find(item, path) {
+                        return true;
+                    }
+                    path.truncate(mark);
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+    let mut path = String::new();
+    find(data, &mut path).then_some(path)
 }
 
 /// SHA-256 over [`canonical_json`]
@@ -448,6 +521,15 @@ pub struct GovernanceChainLink {
     /// verifier nor escape the signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// The texts a version 2 [`Amendment`] commits to, as far as the
+    /// platform still holds them. Outside the envelope on purpose: a text
+    /// can be erased without the chain changing.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "read_as_written"
+    )]
+    pub texts: Option<AmendmentTexts>,
 }
 
 /// The platform's governance signing key, as `GET
@@ -478,14 +560,26 @@ impl GovernanceSigningKey {
 // Amendments
 // ---------------------------------------------------------------------------
 
-/// The [`Amendment`] payload version this module produces and verifies
-pub const AMENDMENT_VERSION: u32 = 1;
+/// The [`Amendment`] payload version this module produces. Version 1,
+/// whose texts are in the signed `data`, still verifies: the platform has
+/// three, all reviewed to hold no personal data.
+pub const AMENDMENT_VERSION: u32 = 2;
 
 /// An amendment is malformed
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AmendmentError {
-    #[error("agora_governance_amendment is {0}, not {AMENDMENT_VERSION}")]
+    #[error("agora_governance_amendment is {0}, not 1 or {AMENDMENT_VERSION}")]
     UnsupportedVersion(u32),
+    #[error(
+        "a version 1 amendment carries its texts and a version \
+         {AMENDMENT_VERSION} one commits to them; this does neither \
+         consistently"
+    )]
+    TextShape,
+    #[error("`{0}` beside the entry is not the text the entry committed to")]
+    TextMismatch(&'static str),
+    #[error("texts beside an entry that commits to none")]
+    UncommittedText,
     #[error("kind `redaction` requires a `redaction`")]
     MissingRedaction,
     #[error("`redaction` is only valid on kind `redaction`")]
@@ -518,14 +612,14 @@ pub struct Amendment {
     #[serde(default)]
     pub authority: Option<GovernanceLogId>,
     /// Section or legal basis, human-readable: `"§1 (Red Team Cases
-    /// Recharacterized)"`, `"GDPR Art. 17(1)(a)"`. Never personal data.
-    pub basis: String,
+    /// Recharacterized)"`, `"GDPR Art. 17(1)(a)"`. Never personal data —
+    /// and erasable, for the day that rule is broken.
+    pub basis: AmendmentText,
     /// The label readers and prompts show next to the target
-    pub note: String,
-    /// Why, at length — `note` is the label, this is the reasoning, and it
-    /// is part of the signed record. Never personal data.
+    pub note: AmendmentText,
+    /// Why, at length — `note` is the label, this is the reasoning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
+    pub rationale: Option<AmendmentText>,
     /// Present iff `kind` is [`AmendmentKind::Redaction`]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redaction: Option<Redaction>,
@@ -544,45 +638,50 @@ pub struct Redaction {
     pub resulting_data_hash: Sha256Hex,
 }
 
-impl Amendment {
+/// An [`Amendment`] and the texts it commits to: what a writer appends,
+/// the first as the entry's `data` and the second beside it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmendmentDraft {
+    pub amendment: Amendment,
+    pub texts: AmendmentTexts,
+}
+
+impl AmendmentDraft {
     /// An amendment of `kind` against `target`.
     ///
     /// Redactions go through [`redaction`](Self::redaction) instead, which
     /// is the only way to get a [`Redaction`] whose `resulting_data_hash`
-    /// is the hash of data that actually exists.
+    /// is the hash of data that actually exists. A `&str` or `String`
+    /// text gets a [random](TextSalt::random) salt.
     pub fn new(
         target: GovernanceLogId,
         target_entry_hash: Sha256Hex,
         kind: AmendmentKind,
-        basis: impl Into<String>,
-        note: impl Into<String>,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
     ) -> Result<Self, AmendmentError> {
         if kind == AmendmentKind::Redaction {
             return Err(AmendmentError::MissingRedaction);
         }
+        let (basis, note) = (basis.into(), note.into());
         Ok(Self {
-            agora_governance_amendment: AMENDMENT_VERSION,
-            target,
-            target_entry_hash,
-            kind,
-            authority: None,
-            basis: basis.into(),
-            note: note.into(),
-            rationale: None,
-            redaction: None,
+            amendment: Amendment {
+                agora_governance_amendment: AMENDMENT_VERSION,
+                target,
+                target_entry_hash,
+                kind,
+                authority: None,
+                basis: AmendmentText::Committed(basis.commitment()),
+                note: AmendmentText::Committed(note.commitment()),
+                rationale: None,
+                redaction: None,
+            },
+            texts: AmendmentTexts {
+                basis: Some(basis),
+                note: Some(note),
+                rationale: None,
+            },
         })
-    }
-
-    /// The amendment with the governance entry that authorizes it
-    pub fn with_authority(mut self, authority: GovernanceLogId) -> Self {
-        self.authority = Some(authority);
-        self
-    }
-
-    /// The amendment with its [`rationale`](Self::rationale)
-    pub fn with_rationale(mut self, rationale: impl Into<String>) -> Self {
-        self.rationale = Some(rationale.into());
-        self
     }
 
     /// A redaction of `fields` from the target's `data`, with the redacted
@@ -599,39 +698,73 @@ impl Amendment {
         amendment_id: &GovernanceLogId,
         target: GovernanceLogId,
         target_entry_hash: Sha256Hex,
-        basis: impl Into<String>,
-        note: impl Into<String>,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
         fields: Vec<String>,
         data: &serde_json::Value,
         blind: Blind,
     ) -> Result<(Self, serde_json::Value), RedactError> {
         let redacted = redact_data(data, &fields, amendment_id, blind)?;
+        let (basis, note) = (basis.into(), note.into());
         Ok((
             Self {
-                agora_governance_amendment: AMENDMENT_VERSION,
-                target,
-                target_entry_hash,
-                kind: AmendmentKind::Redaction,
-                authority: None,
-                basis: basis.into(),
-                note: note.into(),
-                rationale: None,
-                redaction: Some(Redaction {
-                    fields,
-                    resulting_data_hash: data_hash(&redacted),
-                }),
+                amendment: Amendment {
+                    agora_governance_amendment: AMENDMENT_VERSION,
+                    target,
+                    target_entry_hash,
+                    kind: AmendmentKind::Redaction,
+                    authority: None,
+                    basis: AmendmentText::Committed(basis.commitment()),
+                    note: AmendmentText::Committed(note.commitment()),
+                    rationale: None,
+                    redaction: Some(Redaction {
+                        fields,
+                        resulting_data_hash: data_hash(&redacted),
+                    }),
+                },
+                texts: AmendmentTexts {
+                    basis: Some(basis),
+                    note: Some(note),
+                    rationale: None,
+                },
             },
             redacted,
         ))
     }
 
-    /// Version and the redaction-shape invariant — everything checkable
-    /// without the rest of the chain
+    /// The draft with the governance entry that authorizes it
+    pub fn with_authority(mut self, authority: GovernanceLogId) -> Self {
+        self.amendment.authority = Some(authority);
+        self
+    }
+
+    /// The draft with its [`rationale`](Amendment::rationale)
+    pub fn with_rationale(
+        mut self,
+        rationale: impl Into<CommittedText>,
+    ) -> Self {
+        let rationale = rationale.into();
+        self.amendment.rationale =
+            Some(AmendmentText::Committed(rationale.commitment()));
+        self.texts.rationale = Some(rationale);
+        self
+    }
+}
+
+impl Amendment {
+    /// Version, the shape of the texts for that version, and the
+    /// redaction-shape invariant — everything checkable without the rest
+    /// of the chain
     pub fn validate(&self) -> Result<(), AmendmentError> {
-        if self.agora_governance_amendment != AMENDMENT_VERSION {
-            return Err(AmendmentError::UnsupportedVersion(
-                self.agora_governance_amendment,
-            ));
+        let plain = match self.agora_governance_amendment {
+            1 => true,
+            AMENDMENT_VERSION => false,
+            other => return Err(AmendmentError::UnsupportedVersion(other)),
+        };
+        let texts =
+            [Some(&self.basis), Some(&self.note), self.rationale.as_ref()];
+        if texts.into_iter().flatten().any(|t| t.is_plain() != plain) {
+            return Err(AmendmentError::TextShape);
         }
         match (self.kind, &self.redaction) {
             (AmendmentKind::Redaction, None) => {
@@ -642,6 +775,49 @@ impl Amendment {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Where each committed text stands given what is `beside` the entry;
+    /// `None` for version 1, whose texts are in the signed `data`.
+    ///
+    /// A text that is beside the entry and is not the one committed to,
+    /// or that the entry never committed to at all, is an error: someone
+    /// put words next to a signed entry that the signer did not write.
+    pub fn text_status(
+        &self,
+        beside: Option<&AmendmentTexts>,
+    ) -> Result<Option<AmendmentTextStatus>, AmendmentError> {
+        let empty = AmendmentTexts::default();
+        let beside = beside.unwrap_or(&empty);
+        let (Some(basis), Some(note)) = (
+            self.basis.status(beside.basis.as_ref()),
+            self.note.status(beside.note.as_ref()),
+        ) else {
+            return if beside.is_empty() {
+                Ok(None)
+            } else {
+                Err(AmendmentError::UncommittedText)
+            };
+        };
+        let rationale = match (&self.rationale, &beside.rationale) {
+            (None, Some(_)) => return Err(AmendmentError::UncommittedText),
+            (None, None) => None,
+            (Some(text), beside) => text.status(beside.as_ref()),
+        };
+        for (name, status) in [
+            ("basis", Some(basis)),
+            ("note", Some(note)),
+            ("rationale", rationale),
+        ] {
+            if status == Some(TextStatus::Mismatch) {
+                return Err(AmendmentError::TextMismatch(name));
+            }
+        }
+        Ok(Some(AmendmentTextStatus {
+            basis,
+            note,
+            rationale,
+        }))
     }
 }
 
@@ -692,6 +868,11 @@ pub enum BlindError {
         "data already has a {BLIND_KEY:?} key; the writer supplies it, not the caller"
     )]
     AlreadyBlinded,
+    #[error(
+        "{0:?} is a number that is not a 64-bit integer; governance data \
+         never contains one (put a fraction in a string)"
+    )]
+    NonIntegerNumber(String),
 }
 
 /// `data` with a [`Blind`] under [`BLIND_KEY`] — what a writer signs and
@@ -715,6 +896,9 @@ pub fn blind_data(
     data: &serde_json::Value,
     blind: Blind,
 ) -> Result<serde_json::Value, BlindError> {
+    if let Some(pointer) = non_integer_number(data) {
+        return Err(BlindError::NonIntegerNumber(pointer));
+    }
     let mut out = data.clone();
     let object = out.as_object_mut().ok_or(BlindError::NotAnObject)?;
     if object.contains_key(BLIND_KEY) {
@@ -735,6 +919,11 @@ pub enum RedactError {
     NoFields,
     #[error("{0:?} is the entry's blind; every redaction replaces it already")]
     BlindPointer(String),
+    #[error(
+        "{0:?} is a number that is not a 64-bit integer; governance data \
+         never contains one"
+    )]
+    NonIntegerNumber(String),
 }
 
 /// The marker a redaction leaves in place of a value
@@ -765,6 +954,9 @@ pub fn redact_data(
 ) -> Result<serde_json::Value, RedactError> {
     if fields.is_empty() {
         return Err(RedactError::NoFields);
+    }
+    if let Some(pointer) = non_integer_number(data) {
+        return Err(RedactError::NonIntegerNumber(pointer));
     }
     let blind_pointer = format!("/{BLIND_KEY}");
     let marker = serde_json::Value::String(redaction_marker(amendment_id));
@@ -808,18 +1000,24 @@ pub struct AmendmentNotice {
 
 impl AmendmentNotice {
     /// The notice for `amendment`, appended as `id` at `created_at`
+    /// A text no longer `beside` the entry reads [`WITHHELD_TEXT`]
     pub fn new(
         id: GovernanceLogId,
         created_at: DateTime<Utc>,
         amendment: &Amendment,
+        beside: Option<&AmendmentTexts>,
     ) -> Self {
+        let beside = beside.cloned().unwrap_or_default();
         Self {
             id,
             kind: amendment.kind,
             authority: amendment.authority.clone(),
-            basis: amendment.basis.clone(),
-            note: amendment.note.clone(),
-            rationale: amendment.rationale.clone(),
+            basis: amendment.basis.resolve(beside.basis.as_ref()).into(),
+            note: amendment.note.resolve(beside.note.as_ref()).into(),
+            rationale: amendment
+                .rationale
+                .as_ref()
+                .map(|r| r.resolve(beside.rationale.as_ref()).into()),
             created_at,
         }
     }
@@ -830,17 +1028,14 @@ impl AmendmentNotice {
 // ---------------------------------------------------------------------------
 
 /// The [`KeyRotation`] payload version this module produces and verifies
-pub const KEY_ROTATION_VERSION: u32 = 1;
+pub const KEY_ROTATION_VERSION: u32 = 2;
 
-/// The governance signing keys this build of agentkit trusts, oldest first.
+/// The key the chain started under, as this build of agentkit knows it.
 ///
-/// This is the second channel: the crate is published from credentials the
-/// server does not hold, so a key that is served but not here is either a
-/// thief or an out-of-date agentkit, and both are worth saying out loud.
-/// Rotating means **add the new key here and release first, then append the
-/// rotation entry** — never the other way round, or every up-to-date client
-/// sees the chain move to a key it cannot anchor. CI checks the last
-/// element against what the platform serves; see `just check-published-keys`.
+/// Frozen. It predates the root keys, so until the chain's first rotation
+/// carries its retroactive [`KeyCertificate`] this list is the only
+/// second channel a verifier has for it; every later key is certified by
+/// [`ROOT_KEYS`] instead and never appears here.
 pub const PUBLISHED_KEYS: &[&str] =
     &["ebb3091dd328f1463362c171121921b2fe14628e3fc4c145deaccefb85c0e78a"];
 
@@ -853,7 +1048,7 @@ pub enum RotationReason {
     // Scheduled or voluntary; the old key signed the rotation itself.
     Routine,
     // The old key is in someone else's hands; the new key signed the
-    // rotation and only the trust anchor can authenticate it.
+    // rotation.
     Compromise,
 }
 
@@ -861,6 +1056,7 @@ pub enum RotationReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
 pub struct TrustedHead {
     pub id: GovernanceLogId,
     pub chain_seq: u64,
@@ -878,18 +1074,26 @@ pub enum RotationError {
         "the proof of possession does not verify for this rotation at this position"
     )]
     BadProof,
-    #[error("a compromise rotation must name last_trusted")]
+    #[error("a compromise certificate must name last_trusted")]
     MissingLastTrusted,
-    #[error("a routine rotation must not name last_trusted")]
-    UnexpectedLastTrusted,
+    #[error("certificate: {0}")]
+    Certificate(#[from] CertificateError),
+    #[error("outgoing_certificate: {0}")]
+    OutgoingCertificate(CertificateError),
+    #[error(
+        "the chain's first rotation must carry the genesis key's \
+         outgoing_certificate"
+    )]
+    MissingGenesisCertificate,
+    #[error(
+        "outgoing_certificate belongs on the chain's first rotation and \
+         nowhere else"
+    )]
+    UnexpectedOutgoingCertificate,
     #[error("old_key is not the key that was in force")]
     WrongOldKey,
     #[error("last_trusted does not name an earlier entry of this chain")]
     UnknownLastTrusted,
-    #[error(
-        "a compromise rotation to a key outside the trust anchor authenticates nothing"
-    )]
-    UnanchoredNewKey,
     #[error("new_key has already held this chain; a key is never brought back")]
     ReusedKey,
     #[error("last_trusted names an entry an earlier compromise repudiated")]
@@ -899,12 +1103,17 @@ pub enum RotationError {
 /// The `data` of a `key_rotation` entry.
 ///
 /// Build one with [`routine`](Self::routine) or
-/// [`compromise`](Self::compromise): both compute the proof of possession,
-/// which is the only thing standing between "the Steward moved the chain to
-/// a new key" and "someone published a key they do not hold".
+/// [`compromise`](Self::compromise): both compute the proof of possession.
+/// The `certificate` is what authenticates the change; the proof only
+/// shows the certified key is one somebody holds.
+///
+/// No free text, and unknown fields are refused: a rotation can never be
+/// redacted, so it carries nothing anyone could need erased. Narrative
+/// belongs in a separate, redactable entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
 pub struct KeyRotation {
     /// Always [`KEY_ROTATION_VERSION`]
     pub agora_governance_key_rotation: u32,
@@ -917,10 +1126,15 @@ pub struct KeyRotation {
     pub proof: SignatureHex,
     /// Unix seconds; what the proof signature covers
     pub proof_signed_at: i64,
-    /// Compromise only: the last entry trusted under `old_key`
+    /// The root's word that `new_key` holds the chain from here. For a
+    /// compromise its statement also names the last entry trusted under
+    /// `old_key`.
+    pub certificate: KeyCertificate,
+    /// The [`CertPurpose::Genesis`] certificate for the key the chain
+    /// started under, which predates the root: on the chain's first
+    /// rotation, and only there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_trusted: Option<TrustedHead>,
-    pub note: String,
+    pub outgoing_certificate: Option<KeyCertificate>,
 }
 
 /// What the proof of possession signs
@@ -971,61 +1185,56 @@ impl KeyRotation {
     /// A scheduled rotation from `old_key` to `new_signing_key`.
     ///
     /// The entry itself is signed by the **old** key; entries after it
-    /// verify under the new one. `prev_hash` is the rotation entry's own.
+    /// verify under the new one. `prev_hash` is the rotation entry's own,
+    /// and `certificate` is over [`KeyCertStatement::routine`] at it.
     pub fn routine(
         old_key: PublicKeyHex,
         new_signing_key: &SigningKey,
         prev_hash: Option<Sha256Hex>,
         now: DateTime<Utc>,
-        note: impl Into<String>,
+        certificate: KeyCertificate,
     ) -> Self {
         Self::build(
             RotationReason::Routine,
             old_key,
             new_signing_key,
-            None,
             prev_hash,
             now,
-            note,
+            certificate,
         )
     }
 
     /// A declaration that `old_key` is compromised, trusted only through
-    /// `last_trusted`.
+    /// the `last_trusted` its `certificate` names.
     ///
     /// The entry is signed by the **new** key — the old one proves nothing
-    /// any more — so a verifier accepts it only from its [`KeyAnchor`].
-    /// `last_trusted` must name an entry from before any earlier
+    /// any more. `last_trusted` must name an entry from before any earlier
     /// compromise window; a reattestation inside one restores the entry,
     /// not the ability to anchor trust there.
     pub fn compromise(
         old_key: PublicKeyHex,
         new_signing_key: &SigningKey,
-        last_trusted: TrustedHead,
         prev_hash: Option<Sha256Hex>,
         now: DateTime<Utc>,
-        note: impl Into<String>,
+        certificate: KeyCertificate,
     ) -> Self {
         Self::build(
             RotationReason::Compromise,
             old_key,
             new_signing_key,
-            Some(last_trusted),
             prev_hash,
             now,
-            note,
+            certificate,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build(
         reason: RotationReason,
         old_key: PublicKeyHex,
         new_signing_key: &SigningKey,
-        last_trusted: Option<TrustedHead>,
         prev_hash: Option<Sha256Hex>,
         now: DateTime<Utc>,
-        note: impl Into<String>,
+        certificate: KeyCertificate,
     ) -> Self {
         let new_key = PublicKeyHex::from(&new_signing_key.verifying_key());
         let proof_signed_at = truncate_to_seconds(now).timestamp();
@@ -1043,9 +1252,15 @@ impl KeyRotation {
             new_key,
             proof: proof.into(),
             proof_signed_at,
-            last_trusted,
-            note: note.into(),
+            certificate,
+            outgoing_certificate: None,
         }
+    }
+
+    /// This rotation, carrying the genesis key's retroactive certificate
+    pub fn with_outgoing(mut self, certificate: KeyCertificate) -> Self {
+        self.outgoing_certificate = Some(certificate);
+        self
     }
 
     /// The statement this rotation's proof covers, at `prev_hash`
@@ -1058,9 +1273,39 @@ impl KeyRotation {
         )
     }
 
-    /// Version, `last_trusted` shape, and the proof of possession at the
-    /// position `prev_hash` names — everything checkable without the rest
-    /// of the chain
+    /// Compromise only: the last entry trusted under `old_key`, as the
+    /// root certified it
+    pub fn last_trusted(&self) -> Option<&TrustedHead> {
+        self.certificate.statement.last_trusted.as_ref()
+    }
+
+    /// What `certificate` must say for this rotation, appended at `seq`
+    /// with `prev_hash`, to be authentic.
+    ///
+    /// Derived from the chain. Only `last_trusted` is taken from the
+    /// certificate, because only the root can say it.
+    pub fn expected_statement(
+        &self,
+        seq: u64,
+        prev_hash: Option<Sha256Hex>,
+    ) -> Result<KeyCertStatement, RotationError> {
+        match self.reason {
+            RotationReason::Routine => {
+                Ok(KeyCertStatement::routine(self.new_key, seq, prev_hash))
+            }
+            RotationReason::Compromise => Ok(KeyCertStatement::compromise(
+                self.new_key,
+                seq,
+                prev_hash,
+                self.last_trusted()
+                    .cloned()
+                    .ok_or(RotationError::MissingLastTrusted)?,
+            )),
+        }
+    }
+
+    /// Version and the proof of possession at the position `prev_hash`
+    /// names
     pub fn verify_proof(
         &self,
         prev_hash: Option<Sha256Hex>,
@@ -1069,15 +1314,6 @@ impl KeyRotation {
             return Err(RotationError::UnsupportedVersion(
                 self.agora_governance_key_rotation,
             ));
-        }
-        match (self.reason, &self.last_trusted) {
-            (RotationReason::Compromise, None) => {
-                return Err(RotationError::MissingLastTrusted);
-            }
-            (RotationReason::Routine, Some(_)) => {
-                return Err(RotationError::UnexpectedLastTrusted);
-            }
-            _ => {}
         }
         let new_key = self
             .new_key
@@ -1092,15 +1328,28 @@ impl KeyRotation {
         .then_some(())
         .ok_or(RotationError::BadProof)
     }
+
+    /// [`verify_proof`](Self::verify_proof), and `certificate` is the
+    /// root's for this key at this position — everything checkable
+    /// without the rest of the chain
+    pub fn verify_certified(
+        &self,
+        seq: u64,
+        prev_hash: Option<Sha256Hex>,
+        roots: &RootSet,
+    ) -> Result<(), RotationError> {
+        self.verify_proof(prev_hash)?;
+        let expected = self.expected_statement(seq, prev_hash)?;
+        Ok(self.certificate.verify_for(&expected, roots)?)
+    }
 }
 
-/// The keys a verifier trusts out of band — the half of the trust model
-/// the chain cannot supply, because a chain signed end to end by a thief
-/// is internally perfect.
+/// The genesis keys a verifier trusts out of band.
 ///
-/// [`published`](Self::published) is this build's [`PUBLISHED_KEYS`];
-/// [`pinned`](Self::pinned) is the key a client saw first and kept. Both
-/// together is the recommendation: `KeyAnchor::published().with(pinned)`.
+/// Only the key the chain started under needs one: every later key is
+/// certified by the [`RootSet`]. [`published`](Self::published) is this
+/// build's [`PUBLISHED_KEYS`]; [`pinned`](Self::pinned) is the key a
+/// client saw first and kept.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyAnchor {
     keys: HashSet<PublicKeyHex>,
@@ -1173,6 +1422,11 @@ pub struct GovernanceKeyRecord {
     /// The rotation entry that ended this key's span
     #[serde(default)]
     pub retired_by: Option<GovernanceLogId>,
+    /// A [`KeyCertificate`] from the root vouches for this key. `false`
+    /// only for a genesis key whose retroactive certificate the chain does
+    /// not carry yet.
+    #[serde(default)]
+    pub certified: bool,
 }
 
 /// The signing key history as `GET /api/governance/signing-keys` returns it
@@ -1216,7 +1470,7 @@ pub struct EntryVerdict {
     #[serde(default)]
     pub amended_by: Vec<GovernanceLogId>,
     /// The key the signature was checked under — the one in force at this
-    /// position, or for a compromise declaration the anchored new key
+    /// position, or for a compromise declaration the certified new key
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_by: Option<PublicKeyHex>,
     /// A redaction amendment names this entry, so its `data` has lawfully
@@ -1234,6 +1488,11 @@ pub struct EntryVerdict {
     /// under a later, trusted key
     #[serde(default)]
     pub reattested_by: Vec<GovernanceLogId>,
+    /// A version 2 amendment's texts: each beside the entry and matching
+    /// what it committed to, or withheld. A text that does not match is a
+    /// `problem`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texts: Option<AmendmentTextStatus>,
     /// What failed, when something did
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
@@ -1260,10 +1519,10 @@ pub struct GovernanceVerification {
     /// The signing key history the chain itself declares, oldest first
     #[serde(default)]
     pub keys: Vec<GovernanceKeyRecord>,
-    /// Keys the chain moved to that this verifier's [`KeyAnchor`] does not
-    /// vouch for. Not a failure — an out-of-date agentkit looks exactly
-    /// like this — but it is also what a key thief looks like, so a
-    /// reference client says so loudly.
+    /// The genesis key, when neither this verifier's [`KeyAnchor`] nor a
+    /// [`CertPurpose::Genesis`] certificate in the chain vouches for it.
+    /// Not a failure, but a reference client says so loudly. Never a later
+    /// key: those are certified or they do not hold the chain at all.
     #[serde(default)]
     pub unanchored_keys: Vec<PublicKeyHex>,
     /// Entries inside a compromise window that no reattestation restored
@@ -1297,13 +1556,16 @@ impl GovernanceVerification {
         link: &GovernanceChainLink,
         data: &serde_json::Value,
     ) -> bool {
-        let hash = data_hash(data);
         let Some(entry) = self.entries.iter_mut().find(|e| e.id == link.id)
         else {
             return false;
         };
-        let ok = hash == link.attestation.data_hash
-            || entry.redacted_data_hash == Some(hash);
+        // Never hashed: see `non_integer_number`.
+        let hash = non_integer_number(data).is_none().then(|| data_hash(data));
+        let ok = hash.is_some_and(|hash| {
+            hash == link.attestation.data_hash
+                || entry.redacted_data_hash == Some(hash)
+        });
         entry.content_matches = Some(ok);
         ok
     }
@@ -1401,6 +1663,78 @@ pub fn verify_data(
     data_hash(data) == link.attestation.data_hash
 }
 
+/// Whether `read`, serialized again, has the shape `written` had: an
+/// object wherever it has one, an array of the same length wherever it
+/// has one. Missing and `null` are the same thing.
+///
+/// serde's derived structs also read positionally from an array, so
+/// `[]` is a perfectly good struct of optional fields and `[2, "routine",
+/// …]` a perfectly good rotation. No other implementation would agree,
+/// and two verifiers that disagree about what is well-formed can be shown
+/// two different chains.
+fn same_shape(written: &serde_json::Value, read: &serde_json::Value) -> bool {
+    use serde_json::Value::{Array, Null, Object};
+    match (written, read) {
+        (Object(w), Object(r)) => r.iter().all(|(k, r)| match w.get(k) {
+            Some(w) => same_shape(w, r),
+            None => r.is_null(),
+        }),
+        (Array(w), Array(r)) => {
+            w.len() == r.len() && w.iter().zip(r).all(|(w, r)| same_shape(w, r))
+        }
+        (_, Object(_) | Array(_)) => false,
+        (Object(_) | Array(_), Null) => false,
+        _ => true,
+    }
+}
+
+/// `T` from the JSON it was written as, held to [`same_shape`]
+fn read_strictly<T>(written: &serde_json::Value) -> Result<T, String>
+where
+    T: Serialize + serde::de::DeserializeOwned,
+{
+    let read: T =
+        serde_json::from_value(written.clone()).map_err(|e| e.to_string())?;
+    let again = serde_json::to_value(&read).map_err(|e| e.to_string())?;
+    if same_shape(written, &again) {
+        Ok(read)
+    } else {
+        Err("an array where an object belongs, or the reverse".into())
+    }
+}
+
+/// A chain from the JSON it was served as, held to [`same_shape`]: a
+/// link is an object, and so is everything in it that should be.
+///
+/// Prefer this to deserializing [`GovernanceChainLink`]s directly, which
+/// also accepts a link written as an array of its fields. Nothing serves
+/// one; a verifier that would read it agrees with no other.
+pub fn links_from_json(
+    chain: &serde_json::Value,
+) -> Result<Vec<GovernanceChainLink>, String> {
+    chain
+        .as_array()
+        .ok_or("a chain is an array of links")?
+        .iter()
+        .map(read_strictly)
+        .collect()
+}
+
+/// [`read_strictly`] for a field that is outside any signed `data`
+fn read_as_written<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Serialize + serde::de::DeserializeOwned,
+{
+    let written = serde_json::Value::deserialize(deserializer)?;
+    if written.is_null() {
+        return Ok(None);
+    }
+    read_strictly(&written)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 /// The id series an entry type must use, and must not
 fn prefix_problem(link: &GovernanceChainLink) -> Option<String> {
     let prefix = link.id.prefix();
@@ -1458,12 +1792,17 @@ struct KeyWalk {
     seen: HashSet<PublicKeyHex>,
     /// `chain_seq`s inside a compromise window
     repudiated: HashSet<u64>,
+    genesis: PublicKeyHex,
+    /// A rotation has carried the genesis key's certificate
+    genesis_certified: bool,
 }
 
 impl KeyWalk {
     fn new(genesis: &VerifyingKey, anchor: &KeyAnchor) -> Self {
         let public_key = PublicKeyHex::from(genesis);
         Self {
+            genesis: public_key,
+            genesis_certified: false,
             history: vec![(
                 GovernanceKeyRecord {
                     public_key,
@@ -1472,6 +1811,7 @@ impl KeyWalk {
                     status: KeyStatus::Active,
                     introduced_by: None,
                     retired_by: None,
+                    certified: false,
                 },
                 *genesis,
             )],
@@ -1532,6 +1872,7 @@ impl KeyWalk {
                 status: KeyStatus::Active,
                 introduced_by: Some(by.clone()),
                 retired_by: None,
+                certified: true,
             },
             key,
         ));
@@ -1544,15 +1885,31 @@ impl KeyWalk {
         link: &GovernanceChainLink,
         seq: u64,
         links: &[&GovernanceChainLink],
-        anchor: &KeyAnchor,
+        roots: &RootSet,
     ) -> Result<(), RotationError> {
-        rotation.verify_proof(link.attestation.prev_hash)?;
+        rotation.verify_certified(seq, link.attestation.prev_hash, roots)?;
         let new_key = rotation
             .new_key
             .to_verifying_key()
             .map_err(|_| RotationError::BadNewKey)?;
         if self.seen.contains(&rotation.new_key) {
             return Err(RotationError::ReusedKey);
+        }
+        // The genesis key predates the root, so the first rotation brings
+        // its certificate along. Whether that rotation is later voided by
+        // a compromise does not matter: the certificate is the root's
+        // statement, not the entry's.
+        match (&rotation.outgoing_certificate, self.genesis_certified) {
+            (None, false) => {
+                return Err(RotationError::MissingGenesisCertificate);
+            }
+            (Some(_), true) => {
+                return Err(RotationError::UnexpectedOutgoingCertificate);
+            }
+            (Some(certificate), false) => certificate
+                .verify_for(&KeyCertStatement::genesis(self.genesis), roots)
+                .map_err(RotationError::OutgoingCertificate)?,
+            (None, true) => {}
         }
         match rotation.reason {
             RotationReason::Routine => {
@@ -1561,16 +1918,10 @@ impl KeyWalk {
                 }
                 self.close(seq, KeyStatus::Retired, &link.id);
                 self.open(rotation.new_key, new_key, seq + 1, &link.id);
-                self.seen.insert(rotation.new_key);
-                if !anchor.contains(&rotation.new_key) {
-                    self.unanchored.push(rotation.new_key);
-                }
-                Ok(())
             }
             RotationReason::Compromise => {
                 let head = rotation
-                    .last_trusted
-                    .as_ref()
+                    .last_trusted()
                     .ok_or(RotationError::MissingLastTrusted)?;
                 let trusted_seq = head.chain_seq;
                 let names_an_earlier_entry = trusted_seq >= 1
@@ -1586,27 +1937,29 @@ impl KeyWalk {
                 if self.repudiated.contains(&trusted_seq) {
                     return Err(RotationError::RepudiatedLastTrusted);
                 }
-                // The key in force at the last trusted entry — rotations
-                // inside the window are the thief's, and void.
+                // The key in force at the last trusted entry: a rotation
+                // inside the window is void with the rest of it.
                 if rotation.old_key != self.in_force(trusted_seq).0 {
                     return Err(RotationError::WrongOldKey);
-                }
-                if !anchor.contains(&rotation.new_key) {
-                    return Err(RotationError::UnanchoredNewKey);
                 }
                 self.history.retain(|(r, _)| r.from_seq <= trusted_seq);
                 self.close(trusted_seq, KeyStatus::Compromised, &link.id);
                 self.open(rotation.new_key, new_key, seq, &link.id);
-                self.seen.insert(rotation.new_key);
                 self.repudiated.extend(trusted_seq + 1..seq);
-                Ok(())
             }
         }
+        self.seen.insert(rotation.new_key);
+        if !self.genesis_certified {
+            self.genesis_certified = true;
+            self.history[0].0.certified = true;
+            self.unanchored.clear();
+        }
+        Ok(())
     }
 }
 
-/// Verify a whole chain from `genesis_key`, following the rotations it
-/// declares and trusting `anchor` for the ones the chain cannot prove.
+/// Verify a whole chain from `genesis_key`, following the rotations that
+/// `roots` certified and no others.
 ///
 /// Links are sorted by `chain_seq` first, so the caller's order does not
 /// matter. `retroactive` and `out_of_order` are recomputed from the
@@ -1615,10 +1968,18 @@ impl KeyWalk {
 /// [`check_content`](GovernanceVerification::check_content).
 ///
 /// `genesis_key` is the key the chain started under; it is not in the
-/// chain, so a verifier has to be told. If it is not in `anchor` it is
-/// reported in `unanchored_keys` rather than rejected — a client pinning
-/// what it saw first passes `KeyAnchor::pinned(key)` and gets a clean
-/// report.
+/// chain, so a verifier has to be told. Until the chain's first rotation
+/// certifies it, `anchor` is what vouches for it: if it is not there it
+/// is reported in `unanchored_keys` rather than rejected — a client
+/// pinning what it saw first passes `KeyAnchor::pinned(key)` and gets a
+/// clean report. Pass [`RootSet::published`] for `roots` outside tests.
+///
+/// A rotation is authentic iff its [`KeyCertificate`] is valid for the
+/// new key at that position; who signed the entry only follows from which
+/// key *can* (the old one for a routine rotation, the new one once the
+/// old is compromised). So a thief holding the online key can append
+/// entries — which a compromise declaration then repudiates — but can
+/// never move the chain.
 ///
 /// The rules the report records that no type states on its own: an id
 /// belongs to its entry type's series and appears once (`AMD-` and `KEY-`
@@ -1631,6 +1992,7 @@ pub fn verify_chain(
     links: &[GovernanceChainLink],
     genesis_key: &VerifyingKey,
     anchor: &KeyAnchor,
+    roots: &RootSet,
 ) -> GovernanceVerification {
     let mut links: Vec<&GovernanceChainLink> = links.iter().collect();
     links.sort_by_key(|l| l.attestation.chain_seq);
@@ -1674,6 +2036,14 @@ pub fn verify_chain(
         let mut rotation: Option<KeyRotation> = None;
         let mut content_matches: Option<bool> = None;
         match &link.data {
+            Some(data) if non_integer_number(data).is_some() => {
+                content_matches = Some(false);
+                problems.push(format!(
+                    "`data` has a number that is not a 64-bit integer at {:?}; \
+                     governance data never contains one",
+                    non_integer_number(data).unwrap_or_default()
+                ));
+            }
             Some(data) => {
                 let matched = data_hash(data) == a.data_hash;
                 content_matches = Some(matched);
@@ -1687,7 +2057,7 @@ pub fn verify_chain(
                 } else {
                     match link.entry_type {
                         GovernanceLogEntryType::Amendment => {
-                            match serde_json::from_value(data.clone()) {
+                            match read_strictly(data) {
                                 Ok(v) => amendment = Some(v),
                                 Err(e) => problems.push(format!(
                                     "amendment `data` is malformed: {e}"
@@ -1695,7 +2065,7 @@ pub fn verify_chain(
                             }
                         }
                         GovernanceLogEntryType::KeyRotation => {
-                            match serde_json::from_value(data.clone()) {
+                            match read_strictly(data) {
                                 Ok(v) => rotation = Some(v),
                                 Err(e) => problems.push(format!(
                                     "key_rotation `data` is malformed: {e}"
@@ -1714,35 +2084,28 @@ pub fn verify_chain(
         }
 
         // A compromise declaration is signed by the new key, and is
-        // authentic only if the anchor vouches for that key. Everything
-        // else is signed by the key in force.
-        let declared_key = rotation
+        // taken at its word only if the root certified that key here.
+        // Everything else is signed by the key in force.
+        let declared = rotation
             .as_ref()
-            .filter(|r| {
-                r.reason == RotationReason::Compromise
-                    && anchor.contains(&r.new_key)
-                    && !walk.seen.contains(&r.new_key)
-            })
-            .and_then(|r| r.new_key.to_verifying_key().ok());
-        let (key_hex, key) = match declared_key {
-            Some(k) => (PublicKeyHex::from(&k), k),
-            None => walk.in_force(expected_seq),
+            .filter(|r| r.reason == RotationReason::Compromise)
+            .map(|r| {
+                if walk.seen.contains(&r.new_key) {
+                    return Err(RotationError::ReusedKey);
+                }
+                r.verify_certified(expected_seq, a.prev_hash, roots)?;
+                r.new_key
+                    .to_verifying_key()
+                    .map_err(|_| RotationError::BadNewKey)
+            });
+        let (key_hex, key) = match &declared {
+            Some(Ok(k)) => (PublicKeyHex::from(k), *k),
+            _ => walk.in_force(expected_seq),
         };
         // Say why a declaration was not taken at its word; the bad
         // signature that follows is the consequence, not the cause.
-        if declared_key.is_none()
-            && let Some(r) = rotation
-                .as_ref()
-                .filter(|r| r.reason == RotationReason::Compromise)
-        {
-            problems.push(
-                if walk.seen.contains(&r.new_key) {
-                    RotationError::ReusedKey
-                } else {
-                    RotationError::UnanchoredNewKey
-                }
-                .to_string(),
-            );
+        if let Some(Err(e)) = &declared {
+            problems.push(e.to_string());
         }
 
         let (hash_ok, signature_valid) = match verify_link(link, &key) {
@@ -1782,9 +2145,27 @@ pub fn verify_chain(
         let authentic = signature_valid && link_valid;
         if let Some(rotation) = rotation.as_ref().filter(|_| authentic)
             && let Err(e) =
-                walk.apply(rotation, link, expected_seq, &links, anchor)
+                walk.apply(rotation, link, expected_seq, &links, roots)
         {
-            problems.push(e.to_string());
+            let problem = e.to_string();
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        }
+        // Texts are checked against what the entry signed whether or not
+        // the amendment takes effect: a substituted text is a lie about
+        // the record either way.
+        let mut texts = None;
+        if let Some(amendment) = amendment
+            .as_ref()
+            .filter(|a| authentic && a.validate().is_ok())
+        {
+            match amendment.text_status(link.texts.as_ref()) {
+                Ok(status) => texts = status,
+                Err(e) => problems.push(e.to_string()),
+            }
+        } else if link.texts.as_ref().is_some_and(|t| !t.is_empty()) {
+            problems.push(AmendmentError::UncommittedText.to_string());
         }
         if let Some(amendment) = amendment.filter(|_| authentic) {
             match amendment_target(&amendment, expected_seq, &seq_of, &links) {
@@ -1812,6 +2193,7 @@ pub fn verify_chain(
             redacted_data_hash: None,
             repudiated: false,
             reattested_by: Vec::new(),
+            texts,
             problem: (!problems.is_empty()).then(|| problems.join("; ")),
         });
         prev = Some(link);
@@ -1857,6 +2239,7 @@ pub fn verify_chain(
         if entries[i].content_matches == Some(false)
             && let (Some(data), Some(hash)) =
                 (&link.data, entries[i].redacted_data_hash)
+            && non_integer_number(data).is_none()
             && data_hash(data) == hash
         {
             entries[i].content_matches = Some(true);
@@ -1913,6 +2296,90 @@ mod tests {
         KeyAnchor::pinned(key.into())
     }
 
+    /// `draft` under salts fixed by its texts and `seq`, so that a chain
+    /// built twice is the same bytes twice
+    pub(super) fn resalted(draft: &AmendmentDraft, seq: u64) -> AmendmentDraft {
+        let fix = |field: &str, t: &Option<CommittedText>| {
+            t.as_ref().map(|t| {
+                let salt = Sha256::digest(format!("{seq}/{field}/{}", t.text));
+                CommittedText::with_salt(
+                    TextSalt::from(<[u8; 32]>::from(salt)),
+                    t.text.clone(),
+                )
+            })
+        };
+        let texts = AmendmentTexts {
+            basis: fix("basis", &draft.texts.basis),
+            note: fix("note", &draft.texts.note),
+            rationale: fix("rationale", &draft.texts.rationale),
+        };
+        let commit = |t: &Option<CommittedText>| {
+            t.as_ref().map(|t| AmendmentText::Committed(t.commitment()))
+        };
+        AmendmentDraft {
+            amendment: Amendment {
+                basis: commit(&texts.basis).unwrap(),
+                note: commit(&texts.note).unwrap(),
+                rationale: commit(&texts.rationale),
+                ..draft.amendment.clone()
+            },
+            texts,
+        }
+    }
+
+    /// `draft` as version 1 wrote it: the texts in the signed `data`
+    pub(super) fn v1(draft: AmendmentDraft) -> Amendment {
+        let plain =
+            |t: Option<CommittedText>| t.map(|t| AmendmentText::Plain(t.text));
+        Amendment {
+            agora_governance_amendment: 1,
+            basis: plain(draft.texts.basis).unwrap(),
+            note: plain(draft.texts.note).unwrap(),
+            rationale: plain(draft.texts.rationale),
+            ..draft.amendment
+        }
+    }
+
+    /// A throwaway root key. Fixed, so the vectors are byte-stable; the
+    /// real ones live on hardware and sign nothing in a test.
+    pub(super) fn root(n: u8) -> SigningKey {
+        SigningKey::from_bytes(&[0xA0 + n; 32])
+    }
+
+    /// `root(1)` and `root(2)`, either of which suffices
+    pub(super) fn roots() -> RootSet {
+        RootSet::new(
+            [1, 2].map(|n| PublicKeyHex::from(&root(n).verifying_key())),
+            1,
+        )
+    }
+
+    /// `statement`, signed by each of `signers` as a root would
+    pub(super) fn certify(
+        signers: &[&SigningKey],
+        statement: KeyCertStatement,
+    ) -> KeyCertificate {
+        use ed25519_dalek::Signer;
+        let message = statement.signed_bytes();
+        signers.iter().fold(
+            KeyCertificate::unsigned(statement),
+            |certificate, signer| {
+                certificate.with(RootSignature {
+                    root_key: (&signer.verifying_key()).into(),
+                    signature: signer.sign(&message).into(),
+                })
+            },
+        )
+    }
+
+    /// `root(1)`'s routine certificate for `key` at `c`'s next position
+    fn for_new_at(c: &Chain, key: &VerifyingKey) -> KeyCertificate {
+        certify(
+            &[&root(1)],
+            KeyCertStatement::routine(key.into(), c.next_seq(), c.prev_hash()),
+        )
+    }
+
     pub(super) fn link(
         key: &SigningKey,
         n: u32,
@@ -1940,6 +2407,7 @@ mod tests {
             created_at,
             attestation,
             data: None,
+            texts: None,
         }
     }
 
@@ -1961,6 +2429,8 @@ mod tests {
         gov: u32,
         amd: u32,
         key: u32,
+        /// Whoever signed the first entry
+        genesis: Option<PublicKeyHex>,
     }
 
     impl Chain {
@@ -1970,6 +2440,7 @@ mod tests {
                 gov: 0,
                 amd: 0,
                 key: 0,
+                genesis: None,
             }
         }
 
@@ -1980,6 +2451,75 @@ mod tests {
         /// The `entry_hash` of the 1-indexed link `seq`
         pub(super) fn hash_at(&self, seq: usize) -> Sha256Hex {
             self.links[seq - 1].attestation.entry_hash
+        }
+
+        /// The `chain_seq` the next entry gets
+        pub(super) fn next_seq(&self) -> u64 {
+            self.links.len() as u64 + 1
+        }
+
+        /// The 1-indexed link `seq`, as a compromise names it
+        pub(super) fn head(&self, seq: usize) -> TrustedHead {
+            TrustedHead {
+                id: self.links[seq - 1].id.clone(),
+                chain_seq: seq as u64,
+                entry_hash: self.hash_at(seq),
+            }
+        }
+
+        /// The genesis certificate, if the next rotation is the first
+        fn outgoing(&self, rotation: KeyRotation) -> KeyRotation {
+            match (self.key, self.genesis) {
+                (0, Some(genesis)) => rotation.with_outgoing(certify(
+                    &[&root(1)],
+                    KeyCertStatement::genesis(genesis),
+                )),
+                _ => rotation,
+            }
+        }
+
+        /// A routine rotation to `new` at the next position, certified by
+        /// `root(1)`
+        pub(super) fn routine(
+            &self,
+            old: &VerifyingKey,
+            new: &SigningKey,
+        ) -> KeyRotation {
+            let statement = KeyCertStatement::routine(
+                (&new.verifying_key()).into(),
+                self.next_seq(),
+                self.prev_hash(),
+            );
+            self.outgoing(KeyRotation::routine(
+                old.into(),
+                new,
+                self.prev_hash(),
+                at(self.next_seq() as i64 * 10 + 5),
+                certify(&[&root(1)], statement),
+            ))
+        }
+
+        /// A compromise declaration at the next position trusting `old`
+        /// through the 1-indexed link `trusted`, certified by `root(1)`
+        pub(super) fn compromise(
+            &self,
+            old: &VerifyingKey,
+            new: &SigningKey,
+            trusted: usize,
+        ) -> KeyRotation {
+            let statement = KeyCertStatement::compromise(
+                (&new.verifying_key()).into(),
+                self.next_seq(),
+                self.prev_hash(),
+                self.head(trusted),
+            );
+            self.outgoing(KeyRotation::compromise(
+                old.into(),
+                new,
+                self.prev_hash(),
+                at(self.next_seq() as i64 * 10 + 5),
+                certify(&[&root(1)], statement),
+            ))
         }
 
         /// What [`Chain::amend`] will call the next amendment
@@ -1995,6 +2535,8 @@ mod tests {
             data: serde_json::Value,
             carry: bool,
         ) -> GovernanceLogId {
+            self.genesis
+                .get_or_insert_with(|| (&signer.verifying_key()).into());
             let n = self.links.len() as i64 + 1;
             let created_at = truncate_to_micros(at(n * 10));
             let envelope = Envelope::new(
@@ -2012,6 +2554,7 @@ mod tests {
                 created_at,
                 attestation,
                 data: carry.then_some(data),
+                texts: None,
             });
             id
         }
@@ -2042,7 +2585,22 @@ mod tests {
             self.entry(signer, data)
         }
 
+        /// `draft`'s amendment as the entry's `data`, its texts beside it
         pub(super) fn amend(
+            &mut self,
+            signer: &SigningKey,
+            draft: &AmendmentDraft,
+        ) -> GovernanceLogId {
+            let draft = resalted(draft, self.next_seq());
+            let id = self.amend_v1(signer, &draft.amendment);
+            let link = self.links.last_mut().unwrap();
+            link.texts = Some(draft.texts);
+            id
+        }
+
+        /// An amendment with nothing beside it: version 1, or a version 2
+        /// whose texts have all been withheld
+        pub(super) fn amend_v1(
             &mut self,
             signer: &SigningKey,
             amendment: &Amendment,
@@ -2250,7 +2808,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = chain(&key, 4);
         c.reverse();
-        let v = verify_chain(&c, &pk, &anchored(&pk));
+        let v = verify_chain(&c, &pk, &anchored(&pk), &roots());
         assert!(v.ok, "{v:#?}");
         assert_eq!(v.head, Some(gov(4)));
         assert_eq!(
@@ -2266,7 +2824,7 @@ mod tests {
     #[test]
     fn empty_chain_is_ok_with_no_head() {
         let (_, pk) = generate_keypair();
-        let v = verify_chain(&[], &pk, &anchored(&pk));
+        let v = verify_chain(&[], &pk, &anchored(&pk), &roots());
         assert!(v.ok);
         assert!(v.head.is_none());
         assert!(v.entries.is_empty());
@@ -2286,7 +2844,7 @@ mod tests {
             at(21),
         );
         c[1] = rewritten;
-        let v = verify_chain(&c, &pk, &anchored(&pk));
+        let v = verify_chain(&c, &pk, &anchored(&pk), &roots());
         assert!(!v.ok);
         assert!(
             v.entries[1].signature_valid && v.entries[1].link_valid,
@@ -2312,7 +2870,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = chain(&key, 3);
         c.remove(1);
-        let v = verify_chain(&c, &pk, &anchored(&pk));
+        let v = verify_chain(&c, &pk, &anchored(&pk), &roots());
         assert!(!v.ok);
         assert!(v.entries[0].link_valid);
         let p = v.entries[1].problem.as_deref().unwrap();
@@ -2326,7 +2884,7 @@ mod tests {
         let mut c = chain(&key, 2);
         let rogue = link(&key, 2, None, &json!({}), at(21));
         c[1] = rogue;
-        let v = verify_chain(&c, &pk, &anchored(&pk));
+        let v = verify_chain(&c, &pk, &anchored(&pk), &roots());
         assert!(!v.ok);
         assert!(
             v.entries[1]
@@ -2358,9 +2916,10 @@ mod tests {
             created_at: created,
             attestation,
             data: None,
+            texts: None,
         };
         second.attestation.retroactive = true; // a lying flag on the wire
-        let v = verify_chain(&[first, second], &pk, &anchored(&pk));
+        let v = verify_chain(&[first, second], &pk, &anchored(&pk), &roots());
         assert!(v.ok, "{v:#?}");
         assert!(v.entries[0].retroactive);
         assert!(!v.entries[1].retroactive, "recomputed from timestamps");
@@ -2371,7 +2930,7 @@ mod tests {
     fn content_mismatch_settles_to_not_ok() {
         let (key, pk) = generate_keypair();
         let c = chain(&key, 1);
-        let mut v = verify_chain(&c, &pk, &anchored(&pk));
+        let mut v = verify_chain(&c, &pk, &anchored(&pk), &roots());
         v.entries[0].content_matches = Some(true);
         assert!(v.clone().settle().ok);
         v.entries[0].content_matches = Some(false);
@@ -2386,7 +2945,7 @@ mod tests {
         let mut c = Chain::new();
         let target = c.decision(&key);
         c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::NonPrecedential,
@@ -2398,7 +2957,7 @@ mod tests {
         .with_rationale("§5 leaves the ruling itself standing");
         let id = c.amend(&key, &amendment);
 
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(v.ok, "{v:#?}");
         assert_eq!(v.entries[0].amended_by, vec![id]);
         assert!(v.entries[1].amended_by.is_empty());
@@ -2407,14 +2966,17 @@ mod tests {
         // The amendment link carries `data`, so its own content is checked.
         assert_eq!(v.entries[2].content_matches, Some(true));
         assert_eq!(v.entries[0].content_matches, None);
-        assert_eq!(standing([amendment.kind]), Standing::NonPrecedential);
+        assert_eq!(
+            standing([amendment.amendment.kind]),
+            Standing::NonPrecedential
+        );
     }
 
     #[test]
     fn an_amendment_must_name_an_earlier_entry_by_its_exact_hash() {
         let (key, pk) = generate_keypair();
         let problem = |c: &Chain, at: usize| -> String {
-            verify_chain(&c.links, &pk, &anchored(&pk)).entries[at]
+            verify_chain(&c.links, &pk, &anchored(&pk), &roots()).entries[at]
                 .problem
                 .clone()
                 .unwrap_or_default()
@@ -2422,7 +2984,7 @@ mod tests {
 
         let mut c = Chain::new();
         c.decision(&key);
-        let unknown = Amendment::new(
+        let unknown = AmendmentDraft::new(
             gov(99),
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -2436,12 +2998,12 @@ mod tests {
             "{}",
             problem(&c, 1)
         );
-        assert!(!verify_chain(&c.links, &pk, &anchored(&pk)).ok);
+        assert!(!verify_chain(&c.links, &pk, &anchored(&pk), &roots()).ok);
 
         // Names an entry that does not exist yet.
         let mut c = Chain::new();
         c.decision(&key);
-        let forward = Amendment::new(
+        let forward = AmendmentDraft::new(
             gov(2),
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -2460,7 +3022,7 @@ mod tests {
         // Right id, wrong entry.
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let wrong_hash = Amendment::new(
+        let wrong_hash = AmendmentDraft::new(
             target,
             data_hash(&json!("some other entry")),
             AmendmentKind::Overruled,
@@ -2471,7 +3033,7 @@ mod tests {
         c.amend(&key, &wrong_hash);
         assert!(problem(&c, 1).contains("entry_hash"), "{}", problem(&c, 1));
         assert!(
-            verify_chain(&c.links, &pk, &anchored(&pk)).entries[0]
+            verify_chain(&c.links, &pk, &anchored(&pk), &roots()).entries[0]
                 .amended_by
                 .is_empty()
         );
@@ -2483,7 +3045,7 @@ mod tests {
         let amend_with = |mutate: &dyn Fn(&mut Amendment)| -> String {
             let mut c = Chain::new();
             let target = c.decision(&key);
-            let mut amendment = Amendment::new(
+            let mut amendment = AmendmentDraft::new(
                 target,
                 c.hash_at(1),
                 AmendmentKind::Correction,
@@ -2491,9 +3053,9 @@ mod tests {
                 "n",
             )
             .unwrap();
-            mutate(&mut amendment);
-            c.amend(&key, &amendment);
-            let v = verify_chain(&c.links, &pk, &anchored(&pk));
+            mutate(&mut amendment.amendment);
+            c.amend_v1(&key, &amendment.amendment);
+            let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
             assert!(!v.ok, "{v:#?}");
             v.entries[1].problem.clone().unwrap_or_default()
         };
@@ -2501,7 +3063,7 @@ mod tests {
         // `redaction` is the only way to get a well-formed one, so a
         // redaction kind without a `Redaction` can only be hand-built.
         assert_eq!(
-            Amendment::new(
+            AmendmentDraft::new(
                 gov(1),
                 data_hash(&json!(null)),
                 AmendmentKind::Redaction,
@@ -2521,8 +3083,42 @@ mod tests {
         });
         assert!(p.contains("only valid on kind"), "{p}");
 
-        let p = amend_with(&|a| a.agora_governance_amendment = 2);
-        assert!(p.contains("agora_governance_amendment is 2"), "{p}");
+        let p = amend_with(&|a| a.agora_governance_amendment = 3);
+        assert!(p.contains("agora_governance_amendment is 3"), "{p}");
+
+        // A version says where the texts are, and both ways round it is
+        // held to it.
+        let p = amend_with(&|a| a.agora_governance_amendment = 1);
+        assert!(p.contains("does neither consistently"), "{p}");
+        let p = amend_with(&|a| a.note = AmendmentText::Plain("n".into()));
+        assert!(p.contains("does neither consistently"), "{p}");
+    }
+
+    #[test]
+    fn governance_data_holds_no_number_that_is_not_a_64_bit_integer() {
+        let fine = json!({"a": [1, -2, u64::MAX, i64::MIN], "b": {"c": "0.5"}});
+        assert_eq!(non_integer_number(&fine), None);
+        assert!(blind_data(&fine, Blind::random()).is_ok());
+
+        for (text, pointer) in [
+            (r#"{"a": {"b/c": [1, 0.5]}}"#, "/a/b~1c/1"),
+            (r#"{"n": 1.0}"#, "/n"),
+            (r#"{"n": 1e3}"#, "/n"),
+            (r#"{"n": 18446744073709551616}"#, "/n"),
+            (r#"{"n": -9223372036854775809}"#, "/n"),
+        ] {
+            let data: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(non_integer_number(&data).as_deref(), Some(pointer));
+            assert_eq!(
+                blind_data(&data, Blind::random()),
+                Err(BlindError::NonIntegerNumber(pointer.into())),
+                "the writer refuses it"
+            );
+            assert_eq!(
+                redact_data(&data, &["/n".into()], &amd(1), Blind::random()),
+                Err(RedactError::NonIntegerNumber(pointer.into()))
+            );
+        }
     }
 
     #[test]
@@ -2550,7 +3146,7 @@ mod tests {
         let mut c = Chain::new();
         let target = c.entry(&key, data.clone());
         let amendment_id = c.next_amd();
-        let (amendment, redacted) = Amendment::redaction(
+        let (amendment, redacted) = AmendmentDraft::redaction(
             &amendment_id,
             target,
             c.hash_at(1),
@@ -2564,7 +3160,7 @@ mod tests {
         assert_eq!(c.amend(&key, &amendment), amendment_id);
         assert_eq!(redacted[BLIND_KEY], json!(Blind::from([7; 32])));
 
-        let mut v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(v.ok, "{v:#?}");
         assert!(v.entries[0].redacted);
         assert_eq!(v.entries[0].redacted_data_hash, Some(data_hash(&redacted)));
@@ -2594,7 +3190,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         c.entry(&key, json!({"a": 1}));
-        let mut v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(!v.check_content(&c.links[0], &json!({"a": 2})));
         assert!(!v.clone().settle().ok);
         // An entry that is not in the report at all is not a pass either.
@@ -2607,7 +3203,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -2619,7 +3215,7 @@ mod tests {
         c.links[1].data.as_mut().unwrap()["note"] =
             json!("reinstated, actually");
 
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(!v.ok, "{v:#?}");
         let p = v.entries[1].problem.as_deref().unwrap();
         assert!(p.contains("does not hash to the attested data_hash"), "{p}");
@@ -2639,7 +3235,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Correction,
@@ -2648,18 +3244,12 @@ mod tests {
         )
         .unwrap();
         c.amend(&key, &amendment);
-        let rotation = KeyRotation::routine(
-            (&pk).into(),
-            &key,
-            c.prev_hash(),
-            at(35),
-            "n",
-        );
+        let rotation = c.routine(&pk, &generate_keypair().0);
         c.rotate(&key, &rotation);
         c.links[1].data = None;
         c.links[2].data = None;
 
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(!v.ok, "{v:#?}");
         for (i, entry_type) in [(1, "amendment"), (2, "key_rotation")] {
             let p = v.entries[i].problem.as_deref().unwrap();
@@ -2673,7 +3263,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Correction,
@@ -2685,10 +3275,10 @@ mod tests {
             &key,
             gov(7),
             GovernanceLogEntryType::Amendment,
-            serde_json::to_value(&amendment).unwrap(),
+            serde_json::to_value(&amendment.amendment).unwrap(),
             true,
         );
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(!v.ok, "{v:#?}");
         let p = v.entries[1].problem.as_deref().unwrap();
         assert!(p.contains("must be in the AMD- series"), "{p}");
@@ -2701,7 +3291,7 @@ mod tests {
             json!({}),
             false,
         );
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         let p = v.entries[0].problem.as_deref().unwrap();
         assert!(p.contains("reserved"), "{p}");
     }
@@ -2832,20 +3422,15 @@ mod tests {
     fn a_routine_rotation_moves_the_chain_to_the_new_key() {
         let (old, old_pk) = generate_keypair();
         let (new, new_pk) = generate_keypair();
-        let anchor = anchored(&old_pk).with((&new_pk).into());
         let mut c = Chain::new();
         c.decision(&old);
-        let rotation = KeyRotation::routine(
-            (&old_pk).into(),
-            &new,
-            c.prev_hash(),
-            at(25),
-            "scheduled rotation",
-        );
+        let rotation = c.routine(&old_pk, &new);
         let rotation_id = c.rotate(&old, &rotation);
         c.decision(&new);
 
-        let v = verify_chain(&c.links, &old_pk, &anchor);
+        // Nothing but the root vouches for the new key, and nothing else
+        // has to.
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
         assert!(v.ok, "{v:#?}");
         assert_eq!(v.public_key, (&new_pk).into());
         assert_eq!(
@@ -2863,30 +3448,25 @@ mod tests {
         assert_eq!(v.keys[0].status, KeyStatus::Retired);
         assert_eq!(v.keys[0].introduced_by, None);
         assert_eq!(v.keys[0].retired_by.as_ref(), Some(&rotation_id));
+        assert!(v.keys[0].certified, "retroactively, by the rotation");
         assert_eq!(v.keys[1].from_seq, 3);
         assert_eq!(v.keys[1].through_seq, None);
         assert_eq!(v.keys[1].status, KeyStatus::Active);
         assert_eq!(v.keys[1].introduced_by.as_ref(), Some(&rotation_id));
+        assert!(v.keys[1].certified);
     }
 
     #[test]
     fn the_old_key_cannot_sign_after_a_routine_rotation() {
         let (old, old_pk) = generate_keypair();
-        let (new, new_pk) = generate_keypair();
-        let anchor = anchored(&old_pk).with((&new_pk).into());
+        let (new, _) = generate_keypair();
         let mut c = Chain::new();
         c.decision(&old);
-        let rotation = KeyRotation::routine(
-            (&old_pk).into(),
-            &new,
-            c.prev_hash(),
-            at(25),
-            "scheduled",
-        );
+        let rotation = c.routine(&old_pk, &new);
         c.rotate(&old, &rotation);
         c.decision(&old);
 
-        let v = verify_chain(&c.links, &old_pk, &anchor);
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
         assert!(!v.ok, "{v:#?}");
         assert!(!v.entries[2].signature_valid);
         assert!(
@@ -2895,28 +3475,216 @@ mod tests {
         );
     }
 
+    /// The scenario the root exists for: the online key alone moves
+    /// nothing, however well-formed the rotation it signs.
     #[test]
-    fn a_routine_rotation_to_an_unanchored_key_is_followed_and_reported() {
+    fn the_online_key_cannot_certify_its_own_successor() {
         let (old, old_pk) = generate_keypair();
-        let (new, new_pk) = generate_keypair();
+        let (thief, _) = generate_keypair();
         let mut c = Chain::new();
         c.decision(&old);
-        let rotation = KeyRotation::routine(
-            (&old_pk).into(),
-            &new,
-            c.prev_hash(),
-            at(25),
-            "scheduled",
-        );
+        let mut rotation = c.routine(&old_pk, &thief);
+        // Signed by the stolen online key instead of a root.
+        let statement = rotation.certificate.statement.clone();
+        rotation.certificate = certify(&[&old], statement);
         c.rotate(&old, &rotation);
-        c.decision(&new);
+        c.decision(&thief);
 
-        // The anchor has never heard of the new key: chain-valid, and the
-        // one thing a reference client must shout about.
-        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk));
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
+        assert!(!v.ok, "{v:#?}");
+        let p = v.entries[1].problem.as_deref().unwrap();
+        assert!(p.contains("0 valid root signature"), "{p}");
+        assert_eq!(v.public_key, (&old_pk).into(), "the chain does not move");
+        assert!(!v.entries[2].signature_valid);
+        assert_eq!(v.keys.len(), 1);
+    }
+
+    #[test]
+    fn a_certificate_counts_distinct_known_roots_only() {
+        let (old, old_pk) = generate_keypair();
+        let (new, _) = generate_keypair();
+        let (stranger, _) = generate_keypair();
+        let two_of_two = RootSet::new(
+            [
+                (&root(1).verifying_key()).into(),
+                (&root(2).verifying_key()).into(),
+            ],
+            2,
+        );
+        let verdict = |signers: &[&SigningKey], roots: &RootSet| {
+            let mut c = Chain::new();
+            c.decision(&old);
+            let mut rotation = c.routine(&old_pk, &new);
+            let statement = rotation.certificate.statement.clone();
+            rotation.certificate = certify(signers, statement);
+            // The genesis certificate is held to the same threshold.
+            let genesis = KeyCertStatement::genesis((&old_pk).into());
+            rotation.outgoing_certificate =
+                Some(certify(&[&root(1), &root(2)], genesis));
+            c.rotate(&old, &rotation);
+            verify_chain(&c.links, &old_pk, &anchored(&old_pk), roots)
+        };
+
+        assert!(verdict(&[&root(1), &root(2)], &two_of_two).ok);
+        assert!(verdict(&[&root(2)], &roots()).ok, "either root, 1-of-2");
+
+        for (signers, why) in [
+            (vec![&root(1)], "below the threshold"),
+            (vec![&root(1), &root(1)], "one root twice is one root"),
+            (vec![&root(1), &stranger], "an unknown root is nobody"),
+            (vec![], "unsigned"),
+        ] {
+            let v = verdict(&signers, &two_of_two);
+            assert!(!v.ok, "{why}: {v:#?}");
+            let p = v.entries[1].problem.as_deref().unwrap();
+            assert!(p.contains("where 2 are needed"), "{why}: {p}");
+        }
+
+        // An unknown signer beside a sufficient set is not an error.
+        assert!(verdict(&[&stranger, &root(1)], &roots()).ok);
+    }
+
+    #[test]
+    fn a_certificate_is_good_for_one_statement_at_one_position() {
+        let (old, old_pk) = generate_keypair();
+        let (new, new_pk) = generate_keypair();
+        let (other, other_pk) = generate_keypair();
+        let anchor = anchored(&old_pk);
+
+        // Certified for the position right after entry 1, appended one
+        // entry later. The proof of possession is rebuilt for the new
+        // position; the certificate cannot be.
+        let mut c = Chain::new();
+        c.decision(&old);
+        let early = c.routine(&old_pk, &new);
+        c.decision(&old);
+        let mut rotation = c.routine(&old_pk, &new);
+        rotation.certificate = early.certificate;
+        c.rotate(&old, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
+        assert!(!v.ok, "{v:#?}");
+        let p = v.entries[2].problem.as_deref().unwrap();
+        assert!(
+            p.contains("different key, purpose or chain position"),
+            "{p}"
+        );
+        assert_eq!(v.public_key, (&old_pk).into());
+
+        // Certified for one key, presented for another.
+        let mut c = Chain::new();
+        c.decision(&old);
+        let for_new = c.routine(&old_pk, &new);
+        let mut rotation = c.routine(&old_pk, &other);
+        rotation.certificate = for_new.certificate;
+        c.rotate(&old, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
+        let p = v.entries[1].problem.as_deref().unwrap();
+        assert!(
+            p.contains("different key, purpose or chain position"),
+            "{p}"
+        );
+
+        // The statement altered after signing, to match.
+        let mut c = Chain::new();
+        c.decision(&old);
+        let mut rotation = c.routine(&old_pk, &other);
+        rotation.certificate = for_new_at(&c, &new_pk);
+        rotation.certificate.statement.key = (&other_pk).into();
+        c.rotate(&old, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
+        let p = v.entries[1].problem.as_deref().unwrap();
+        assert!(p.contains("0 valid root signature"), "{p}");
+
+        // A routine certificate does not authorize a compromise.
+        let mut c = Chain::new();
+        c.decision(&old);
+        c.decision(&old);
+        let mut rotation = c.compromise(&old_pk, &new, 1);
+        rotation.certificate = for_new_at(&c, &new_pk);
+        c.rotate(&new, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
+        assert!(!v.ok);
+        assert!(v.repudiated.is_empty(), "{v:#?}");
+        assert_eq!(v.public_key, (&old_pk).into());
+    }
+
+    /// The same signature over the same JSON without the domain prefix —
+    /// what a root key tricked into signing "just some JSON" would produce
+    #[test]
+    fn a_root_signature_without_the_domain_prefix_certifies_nothing() {
+        use ed25519_dalek::Signer;
+        let (old, old_pk) = generate_keypair();
+        let (new, _) = generate_keypair();
+        let mut c = Chain::new();
+        c.decision(&old);
+        let mut rotation = c.routine(&old_pk, &new);
+        let statement = rotation.certificate.statement.clone();
+        let bare = canonical_json(&serde_json::to_value(&statement).unwrap());
+        assert_eq!(
+            statement.signed_bytes(),
+            [ROOT_DOMAIN, bare.as_slice()].concat()
+        );
+        rotation.certificate =
+            KeyCertificate::unsigned(statement).with(RootSignature {
+                root_key: (&root(1).verifying_key()).into(),
+                signature: root(1).sign(&bare).into(),
+            });
+        c.rotate(&old, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
+        assert!(!v.ok, "{v:#?}");
+        assert_eq!(v.public_key, (&old_pk).into());
+    }
+
+    #[test]
+    fn the_first_rotation_carries_the_genesis_certificate_and_only_it_does() {
+        let (k1, k1_pk) = generate_keypair();
+        let (k2, k2_pk) = generate_keypair();
+        let (k3, _) = generate_keypair();
+        let genesis =
+            || certify(&[&root(1)], KeyCertStatement::genesis((&k1_pk).into()));
+
+        // Missing.
+        let mut c = Chain::new();
+        c.decision(&k1);
+        let mut rotation = c.routine(&k1_pk, &k2);
+        rotation.outgoing_certificate = None;
+        c.rotate(&k1, &rotation);
+        let v = verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
+        assert!(!v.ok);
+        let p = v.entries[1].problem.as_deref().unwrap();
+        assert!(p.contains("genesis key's outgoing_certificate"), "{p}");
+        assert_eq!(v.public_key, (&k1_pk).into());
+
+        // For some other key.
+        let mut c = Chain::new();
+        c.decision(&k1);
+        let rotation = c.routine(&k1_pk, &k2).with_outgoing(certify(
+            &[&root(1)],
+            KeyCertStatement::genesis((&k2_pk).into()),
+        ));
+        c.rotate(&k1, &rotation);
+        let v = verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
+        let p = v.entries[1].problem.as_deref().unwrap();
+        assert!(p.starts_with("outgoing_certificate:"), "{p}");
+
+        // Present, and it is what vouches for a genesis key no anchor
+        // knows.
+        let mut c = Chain::new();
+        c.decision(&k1);
+        let rotation = c.routine(&k1_pk, &k2);
+        assert_eq!(rotation.outgoing_certificate, Some(genesis()));
+        c.rotate(&k1, &rotation);
+        let v = verify_chain(&c.links, &k1_pk, &KeyAnchor::default(), &roots());
         assert!(v.ok, "{v:#?}");
-        assert_eq!(v.unanchored_keys, vec![PublicKeyHex::from(&new_pk)]);
-        assert_eq!(v.public_key, (&new_pk).into());
+        assert!(v.unanchored_keys.is_empty(), "{v:#?}");
+
+        // A second one, later, is refused.
+        let again = c.routine(&k2_pk, &k3).with_outgoing(genesis());
+        c.rotate(&k2, &again);
+        let v = verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
+        assert!(!v.ok);
+        let p = v.entries[2].problem.as_deref().unwrap();
+        assert!(p.contains("nowhere else"), "{p}");
     }
 
     #[test]
@@ -2926,16 +3694,11 @@ mod tests {
         let (thief, _) = generate_keypair();
         let mut c = Chain::new();
         c.decision(&old);
-        // A rotation to a key nobody holds: the proof is signed by the old
-        // key (and by an unrelated one) instead of by `new_key` itself.
-        let mut rotation = KeyRotation::routine(
-            (&old_pk).into(),
-            &thief,
-            c.prev_hash(),
-            at(25),
-            "scheduled",
-        );
+        // A rotation to a key nobody holds, certified in good faith: the
+        // proof is signed by the old key instead of by `new_key` itself.
+        let mut rotation = c.routine(&old_pk, &thief);
         rotation.new_key = (&new_pk).into();
+        rotation.certificate = for_new_at(&c, &new_pk);
         let statement = rotation.statement(c.prev_hash());
         rotation.proof = crypto::sign(
             &old,
@@ -2949,7 +3712,7 @@ mod tests {
             rotation.verify_proof(c.links[1].attestation.prev_hash),
             Err(RotationError::BadProof)
         );
-        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk));
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
         assert!(!v.ok, "{v:#?}");
         assert!(
             v.entries[1]
@@ -2962,59 +3725,16 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_does_not_replay_at_another_position() {
-        let (old, old_pk) = generate_keypair();
-        let (new, new_pk) = generate_keypair();
-        let anchor = anchored(&old_pk).with((&new_pk).into());
-        let mut c = Chain::new();
-        c.decision(&old);
-        // Proof bound to the position right after entry 1 …
-        let rotation = KeyRotation::routine(
-            (&old_pk).into(),
-            &new,
-            c.prev_hash(),
-            at(25),
-            "scheduled",
-        );
-        // … and appended one entry later.
-        c.decision(&old);
-        c.rotate(&old, &rotation);
-
-        let v = verify_chain(&c.links, &old_pk, &anchor);
-        assert!(!v.ok, "{v:#?}");
-        assert!(
-            v.entries[2]
-                .problem
-                .as_deref()
-                .unwrap()
-                .contains("proof of possession")
-        );
-        assert_eq!(v.public_key, (&old_pk).into());
-    }
-
-    #[test]
     fn a_compromise_repudiates_the_window_and_a_reattestation_restores_one() {
         let (old, old_pk) = generate_keypair();
         let (new, new_pk) = generate_keypair();
-        let anchor = anchored(&old_pk).with((&new_pk).into());
         let mut c = Chain::new();
         c.decision(&old); // 1 — the last entry anyone trusts
         c.decision(&old); // 2 — inside the window
         let reattested = c.decision(&old); // 3 — inside, later vouched for
-        let rotation = KeyRotation::compromise(
-            (&old_pk).into(),
-            &new,
-            TrustedHead {
-                id: gov(1),
-                chain_seq: 1,
-                entry_hash: c.hash_at(1),
-            },
-            c.prev_hash(),
-            at(45),
-            "signing key exfiltrated",
-        );
+        let rotation = c.compromise(&old_pk, &new, 1);
         let rotation_id = c.rotate(&new, &rotation); // 4 — signed by the NEW key
-        let vouch = Amendment::new(
+        let vouch = AmendmentDraft::new(
             reattested,
             c.hash_at(3),
             AmendmentKind::Reattested,
@@ -3024,7 +3744,7 @@ mod tests {
         .unwrap();
         let vouch_id = c.amend(&new, &vouch); // 5
 
-        let v = verify_chain(&c.links, &old_pk, &anchor);
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
         assert!(
             v.ok,
             "repudiation is a declared state, not a defect: {v:#?}"
@@ -3048,51 +3768,49 @@ mod tests {
         assert_eq!(v.keys[1].from_seq, 4, "the declaration is its own first");
     }
 
+    /// The root says where the window opens. A declaration cannot trust
+    /// the old key one entry further than its certificate does.
+    #[test]
+    fn last_trusted_is_the_roots_to_say() {
+        let (old, old_pk) = generate_keypair();
+        let (new, _) = generate_keypair();
+        let mut c = Chain::new();
+        c.decision(&old); // 1
+        c.decision(&old); // 2
+        let mut rotation = c.compromise(&old_pk, &new, 1);
+        rotation.certificate.statement.last_trusted = Some(c.head(2));
+        c.rotate(&new, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk), &roots());
+        assert!(!v.ok, "{v:#?}");
+        assert!(v.repudiated.is_empty());
+        assert_eq!(v.public_key, (&old_pk).into());
+    }
+
     #[test]
     fn a_stolen_key_cannot_be_rotated_back_in() {
-        // K1 is compromised and replaced by K2. Both are published, so both
-        // are in every anchor. The thief, still holding K1, declares a
-        // "compromise" of K2 naming K1 as the new key.
+        // K1 is compromised and replaced by K2. The thief, still holding
+        // K1, declares a "compromise" of K2 naming K1 as the new key — and
+        // even a root certificate would not bring a key back.
         let (k1, k1_pk) = generate_keypair();
         let (k2, k2_pk) = generate_keypair();
-        let anchor = anchored(&k1_pk).with((&k2_pk).into());
         let mut c = Chain::new();
         c.decision(&k1); // 1
-        let real = KeyRotation::compromise(
-            (&k1_pk).into(),
-            &k2,
-            TrustedHead {
-                id: gov(1),
-                chain_seq: 1,
-                entry_hash: c.hash_at(1),
-            },
-            c.prev_hash(),
-            at(25),
-            "signing key exfiltrated",
-        );
+        let real = c.compromise(&k1_pk, &k2, 1);
         c.rotate(&k2, &real); // 2
         c.decision(&k2); // 3
-        let honest = verify_chain(&c.links, &k1_pk, &anchor);
+        let honest =
+            verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
         assert!(honest.ok, "{honest:#?}");
 
-        let hijack = KeyRotation::compromise(
-            (&k2_pk).into(),
-            &k1,
-            TrustedHead {
-                id: gov(2),
-                chain_seq: 3,
-                entry_hash: c.hash_at(3),
-            },
-            c.prev_hash(),
-            at(45),
-            "the Steward's key is the compromised one, trust me",
-        );
+        let hijack = c.compromise(&k2_pk, &k1, 3);
         c.rotate(&k1, &hijack); // 4 — signed by the stolen key
         c.decision(&k1); // 5
 
-        let v = verify_chain(&c.links, &k1_pk, &anchor);
+        let v = verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
         assert!(!v.ok);
         assert_eq!(v.public_key, (&k2_pk).into(), "the chain stays with K2");
+        let p = v.entries[3].problem.as_deref().unwrap();
+        assert!(p.contains("never brought back"), "{p}");
         assert!(!v.entries[3].signature_valid, "{:#?}", v.entries[3]);
         assert!(!v.entries[4].signature_valid, "K1 signs nothing again");
         assert_eq!(v.keys.len(), 2);
@@ -3103,26 +3821,13 @@ mod tests {
     fn a_routine_rotation_cannot_reuse_a_key_either() {
         let (k1, k1_pk) = generate_keypair();
         let (k2, k2_pk) = generate_keypair();
-        let anchor = anchored(&k1_pk).with((&k2_pk).into());
         let mut c = Chain::new();
         c.decision(&k1);
-        let out = KeyRotation::routine(
-            (&k1_pk).into(),
-            &k2,
-            c.prev_hash(),
-            at(15),
-            "",
-        );
+        let out = c.routine(&k1_pk, &k2);
         c.rotate(&k1, &out);
-        let back = KeyRotation::routine(
-            (&k2_pk).into(),
-            &k1,
-            c.prev_hash(),
-            at(25),
-            "",
-        );
+        let back = c.routine(&k2_pk, &k1);
         c.rotate(&k2, &back);
-        let v = verify_chain(&c.links, &k1_pk, &anchor);
+        let v = verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
         assert!(!v.ok);
         assert!(
             v.entries[2]
@@ -3143,7 +3848,7 @@ mod tests {
         let anchor = anchored(&steward_pk);
         let mut c = Chain::new();
         let target = c.decision(&steward); // 1
-        let fake = Amendment::new(
+        let fake = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -3152,16 +3857,12 @@ mod tests {
         )
         .unwrap();
         c.amend(&forger, &fake); // 2 — not signed by the key in force
-        let grab = KeyRotation::routine(
-            (&steward_pk).into(),
-            &forger,
-            c.prev_hash(),
-            at(35),
-            "",
-        );
+        // Certified, even: a certificate is not a licence to skip the old
+        // key's signature on a routine rotation.
+        let grab = c.routine(&steward_pk, &forger);
         c.rotate(&forger, &grab); // 3 — likewise
 
-        let v = verify_chain(&c.links, &steward_pk, &anchor);
+        let v = verify_chain(&c.links, &steward_pk, &anchor, &roots());
         assert!(!v.ok);
         assert!(v.entries[0].amended_by.is_empty(), "{:#?}", v.entries[0]);
         assert_eq!(v.public_key, (&steward_pk).into());
@@ -3176,7 +3877,7 @@ mod tests {
         c.decision(&key);
         c.gov = 0;
         c.decision(&key); // GOV-2026-0001 again
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(!v.ok);
         assert!(v.entries.iter().all(|e| {
             e.problem
@@ -3188,41 +3889,17 @@ mod tests {
     #[test]
     fn a_second_compromise_cannot_anchor_inside_the_first_window() {
         let (k1, k1_pk) = generate_keypair();
-        let (k2, k2_pk) = generate_keypair();
-        let (k3, k3_pk) = generate_keypair();
-        let anchor =
-            anchored(&k1_pk).with((&k2_pk).into()).with((&k3_pk).into());
+        let (k2, _) = generate_keypair();
+        let (k3, _) = generate_keypair();
         let mut c = Chain::new();
         c.decision(&k1); // 1 — trusted
         c.decision(&k1); // 2 — inside the first window
-        let first = KeyRotation::compromise(
-            (&k1_pk).into(),
-            &k2,
-            TrustedHead {
-                id: gov(1),
-                chain_seq: 1,
-                entry_hash: c.hash_at(1),
-            },
-            c.prev_hash(),
-            at(35),
-            "",
-        );
+        let first = c.compromise(&k1_pk, &k2, 1);
         c.rotate(&k2, &first); // 3
-        let second = KeyRotation::compromise(
-            (&k1_pk).into(),
-            &k3,
-            TrustedHead {
-                id: gov(2),
-                chain_seq: 2,
-                entry_hash: c.hash_at(2),
-            },
-            c.prev_hash(),
-            at(45),
-            "",
-        );
+        let second = c.compromise(&k1_pk, &k3, 2);
         c.rotate(&k3, &second); // 4
 
-        let v = verify_chain(&c.links, &k1_pk, &anchor);
+        let v = verify_chain(&c.links, &k1_pk, &anchored(&k1_pk), &roots());
         assert!(!v.ok);
         let p = v.entries[3].problem.as_deref().unwrap();
         assert!(p.contains("repudiated"), "{p}");
@@ -3231,86 +3908,65 @@ mod tests {
     }
 
     #[test]
-    fn an_unanchored_compromise_fails_closed() {
+    fn an_uncertified_compromise_fails_closed() {
         let (old, old_pk) = generate_keypair();
-        let (new, _) = generate_keypair();
+        let (new, new_pk) = generate_keypair();
         let mut c = Chain::new();
         c.decision(&old);
         c.decision(&old);
-        let rotation = KeyRotation::compromise(
-            (&old_pk).into(),
-            &new,
-            TrustedHead {
-                id: gov(1),
-                chain_seq: 1,
-                entry_hash: c.hash_at(1),
-            },
-            c.prev_hash(),
-            at(45),
-            "trust me",
-        );
+        let mut rotation = c.compromise(&old_pk, &new, 1);
+        let statement = rotation.certificate.statement.clone();
+        rotation.certificate = certify(&[&new], statement);
         c.rotate(&new, &rotation);
 
-        // Nothing in the verifier's world vouches for the new key, so the
-        // declaration authenticates nothing.
-        let v = verify_chain(&c.links, &old_pk, &anchored(&old_pk));
+        // Being in an anchor does not help: only the root moves the chain.
+        let anchor = anchored(&old_pk).with((&new_pk).into());
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
         assert!(!v.ok, "{v:#?}");
         let p = v.entries[2].problem.as_deref().unwrap();
-        assert!(p.contains("outside the trust anchor"), "{p}");
+        assert!(p.contains("0 valid root signature"), "{p}");
         assert!(!v.entries[2].signature_valid, "checked under the old key");
         assert!(v.repudiated.is_empty(), "and nothing is repudiated");
         assert_eq!(v.public_key, (&old_pk).into());
     }
 
-    /// The scenario the anchor exists for: a thief with the signing key
-    /// rotates the chain onto their own, and the Steward answers with a
-    /// compromise declaration from before the theft.
+    /// A key stolen before anyone knew: the Steward rotates routinely,
+    /// then learns the old key was already out, and names a head from
+    /// before the rotation. The rotation is void with the rest of the
+    /// window.
     #[test]
-    fn a_thiefs_rotation_is_void_once_a_compromise_names_an_earlier_head() {
+    fn a_rotation_inside_the_window_is_void_with_it() {
         let (steward, steward_pk) = generate_keypair();
-        let (thief, thief_pk) = generate_keypair();
+        let (successor, _) = generate_keypair();
         let (recovery, recovery_pk) = generate_keypair();
-        let anchor = anchored(&steward_pk).with((&recovery_pk).into());
 
         let mut c = Chain::new();
-        c.decision(&steward); // 1 — the last honest entry
-        let stolen = KeyRotation::routine(
-            (&steward_pk).into(),
-            &thief,
-            c.prev_hash(),
-            at(25),
-            "routine",
-        );
-        c.rotate(&steward, &stolen); // 2 — signed with the stolen key
-        c.decision(&thief); // 3 — the thief's own decision
+        c.decision(&steward); // 1 — the last entry anyone trusts
+        c.decision(&steward); // 2 — the thief's, as it turns out
+        let routine = c.routine(&steward_pk, &successor);
+        c.rotate(&steward, &routine); // 3
+        c.decision(&successor); // 4
 
-        let declaration = KeyRotation::compromise(
-            (&steward_pk).into(),
-            &recovery,
-            TrustedHead {
-                id: gov(1),
-                chain_seq: 1,
-                entry_hash: c.hash_at(1),
-            },
-            c.prev_hash(),
-            at(55),
-            "key stolen; everything after GOV-2026-0001 is disclaimed",
-        );
-        c.rotate(&recovery, &declaration); // 4
+        let declaration = c.compromise(&steward_pk, &recovery, 1);
+        c.rotate(&recovery, &declaration); // 5
 
-        let v = verify_chain(&c.links, &steward_pk, &anchor);
+        let v = verify_chain(
+            &c.links,
+            &steward_pk,
+            &anchored(&steward_pk),
+            &roots(),
+        );
         assert!(v.ok, "{v:#?}");
-        assert_eq!(v.repudiated, vec![key_id(1), gov(2)]);
-        assert!(v.entries[1].repudiated && v.entries[2].repudiated);
-        assert_eq!(
-            v.unanchored_keys,
-            vec![PublicKeyHex::from(&thief_pk)],
-            "and the theft was visible as it happened"
-        );
+        assert_eq!(v.repudiated, vec![gov(2), key_id(1), gov(3)]);
         assert_eq!(v.public_key, (&recovery_pk).into());
-        assert_eq!(v.keys.len(), 2, "the thief's key is not part of history");
+        assert_eq!(v.keys.len(), 2, "the successor is not part of history");
         assert_eq!(v.keys[0].public_key, (&steward_pk).into());
         assert_eq!(v.keys[0].status, KeyStatus::Compromised);
+        assert!(
+            v.keys[0].certified,
+            "the genesis certificate rode in on the voided rotation and \
+             is the root's word all the same"
+        );
         assert_eq!(v.keys[1].public_key, (&recovery_pk).into());
     }
 
@@ -3318,70 +3974,130 @@ mod tests {
     fn a_compromise_must_name_a_real_head_and_the_key_that_held_it() {
         let (old, old_pk) = generate_keypair();
         let (new, new_pk) = generate_keypair();
-        let anchor = anchored(&old_pk).with((&new_pk).into());
-        let head = |c: &Chain| TrustedHead {
-            id: gov(1),
-            chain_seq: 1,
-            entry_hash: c.hash_at(1),
-        };
+        let anchor = anchored(&old_pk);
 
-        // A head whose hash is not that entry's.
+        // A head whose hash is not that entry's — certified, so the only
+        // thing wrong is what the chain says about it.
         let mut c = Chain::new();
         c.decision(&old);
-        let mut trusted = head(&c);
+        let mut trusted = c.head(1);
         trusted.entry_hash = data_hash(&json!("nope"));
-        let rotation = KeyRotation::compromise(
-            (&old_pk).into(),
-            &new,
-            trusted,
+        let statement = KeyCertStatement::compromise(
+            (&new_pk).into(),
+            2,
             c.prev_hash(),
-            at(45),
-            "n",
+            trusted,
         );
+        let mut rotation = c.compromise(&old_pk, &new, 1);
+        rotation.certificate = certify(&[&root(1)], statement);
         c.rotate(&new, &rotation);
-        let v = verify_chain(&c.links, &old_pk, &anchor);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
         let p = v.entries[1].problem.as_deref().unwrap();
         assert!(p.contains("last_trusted"), "{p}");
 
         // An old_key that was never in force.
-        let (other, _) = generate_keypair();
+        let (_, other_pk) = generate_keypair();
         let mut c = Chain::new();
         c.decision(&old);
-        let rotation = KeyRotation::compromise(
-            (&other.verifying_key()).into(),
-            &new,
-            head(&c),
-            c.prev_hash(),
-            at(45),
-            "n",
-        );
+        let rotation = c.compromise(&other_pk, &new, 1);
         c.rotate(&new, &rotation);
-        let v = verify_chain(&c.links, &old_pk, &anchor);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
         let p = v.entries[1].problem.as_deref().unwrap();
         assert!(p.contains("old_key is not the key"), "{p}");
 
-        // A routine rotation that names one anyway.
+        // A compromise whose certificate names no head at all.
         let mut c = Chain::new();
         c.decision(&old);
-        let mut rotation = KeyRotation::routine(
-            (&old_pk).into(),
-            &new,
-            c.prev_hash(),
-            at(45),
-            "n",
-        );
-        rotation.last_trusted = Some(head(&c));
-        c.rotate(&old, &rotation);
-        let v = verify_chain(&c.links, &old_pk, &anchor);
+        let mut rotation = c.compromise(&old_pk, &new, 1);
+        rotation.certificate.statement.last_trusted = None;
+        c.rotate(&new, &rotation);
+        let v = verify_chain(&c.links, &old_pk, &anchor, &roots());
         let p = v.entries[1].problem.as_deref().unwrap();
-        assert!(p.contains("must not name last_trusted"), "{p}");
+        assert!(p.contains("must name last_trusted"), "{p}");
+    }
+
+    #[test]
+    fn a_rotation_carries_no_free_text() {
+        let (old, old_pk) = generate_keypair();
+        let (new, _) = generate_keypair();
+        let mut c = Chain::new();
+        c.decision(&old);
+        let rotation = c.routine(&old_pk, &new);
+        let mut value = serde_json::to_value(&rotation).unwrap();
+        assert!(serde_json::from_value::<KeyRotation>(value.clone()).is_ok());
+        value["note"] = json!("at the request of …");
+        assert!(serde_json::from_value::<KeyRotation>(value).is_err());
+
+        let mut head = serde_json::to_value(c.head(1)).unwrap();
+        head["comment"] = json!("the last one I remember signing");
+        assert!(serde_json::from_value::<TrustedHead>(head).is_err());
+
+        let mut statement =
+            serde_json::to_value(&rotation.certificate.statement).unwrap();
+        statement["comment"] = json!("signed in the kitchen");
+        assert!(serde_json::from_value::<KeyCertStatement>(statement).is_err());
+    }
+
+    #[test]
+    fn the_root_statement_bytes_are_pinned() {
+        let key: PublicKeyHex = PUBLISHED_KEYS[0].parse().unwrap();
+        assert_eq!(
+            String::from_utf8(KeyCertStatement::genesis(key).signed_bytes())
+                .unwrap(),
+            "agora-governance-root-v1\n\
+             {\"agora_governance_key_cert\":1,\"from_seq\":1,\
+             \"key\":\"ebb3091dd328f1463362c171121921b2fe14628e3fc4c145deaccefb85c0e78a\",\
+             \"last_trusted\":null,\"prev_hash\":null,\"purpose\":\"genesis\"}"
+        );
+
+        // The same statement `governance/root/root_sign.py --self-test`
+        // pins in the agora repository: the tool that signs and the
+        // verifiers that check must mean the same bytes.
+        let statement = KeyCertStatement::compromise(
+            Sha256Hex::from([0xab; 32]).to_string().parse().unwrap(),
+            15,
+            Some([0xcd; 32].into()),
+            TrustedHead {
+                id: gov(10),
+                chain_seq: 11,
+                entry_hash: [0xef; 32].into(),
+            },
+        );
+        assert_eq!(
+            Sha256Hex::from(<[u8; 32]>::from(Sha256::digest(
+                statement.signed_bytes()
+            )))
+            .to_string(),
+            "633685771e08be126fd12ca4eb98c77120e5868236ff541ecba85ce6a21e6b68"
+        );
+    }
+
+    #[test]
+    fn root_keys_are_curve_points_and_make_a_root_set() {
+        let roots = RootSet::published();
+        assert_eq!(roots.keys().count(), ROOT_KEYS.len());
+        assert_eq!(roots.threshold(), ROOT_THRESHOLD);
+        assert!(ROOT_THRESHOLD >= 1 && ROOT_THRESHOLD <= ROOT_KEYS.len());
+        for root in ROOT_KEYS {
+            let key: PublicKeyHex = root.parse().unwrap();
+            assert!(roots.contains(&key));
+            assert!(
+                key.to_verifying_key().is_ok(),
+                "{root} is not a valid Ed25519 public key"
+            );
+            assert!(
+                !PUBLISHED_KEYS.contains(root),
+                "a root key never signs entries"
+            );
+        }
+        assert_eq!(RootSet::new([], 0).threshold(), 1);
     }
 
     #[test]
     fn a_genesis_key_outside_the_anchor_is_reported_not_rejected() {
         let (key, pk) = generate_keypair();
         let c = chain(&key, 2);
-        let v = verify_chain(&c, &pk, &KeyAnchor::default());
+        let v = verify_chain(&c, &pk, &KeyAnchor::default(), &roots());
         assert!(v.ok, "{v:#?}");
         assert_eq!(v.unanchored_keys, vec![PublicKeyHex::from(&pk)]);
         assert_eq!(v.keys.len(), 1);
@@ -3418,7 +4134,7 @@ mod tests {
     #[test]
     fn amendments_and_rotations_round_trip_as_entry_data() {
         let (key, pk) = generate_keypair();
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             gov(1),
             data_hash(&json!("x")),
             AmendmentKind::Superseded,
@@ -3428,36 +4144,70 @@ mod tests {
         .unwrap()
         .with_authority(gov(9))
         .with_rationale("the later decision covers the same subject");
+        let AmendmentDraft { amendment, texts } = amendment;
         let value = serde_json::to_value(&amendment).unwrap();
         assert_eq!(value["kind"], "superseded");
-        assert_eq!(value["agora_governance_amendment"], 1);
+        assert_eq!(value["agora_governance_amendment"], 2);
         assert!(value.get("redaction").is_none(), "{value}");
+        let text = value.to_string();
+        assert!(!text.contains("Art. VI"), "no text in signed data: {text}");
+        assert!(!text.contains("salt"), "and no salt: {text}");
+        assert_eq!(
+            value["note"]["commitment"],
+            texts
+                .note
+                .as_ref()
+                .unwrap()
+                .commitment()
+                .commitment
+                .to_string()
+        );
         assert_eq!(
             serde_json::from_value::<Amendment>(value).unwrap(),
             amendment
         );
-
-        let rotation = KeyRotation::compromise(
-            (&pk).into(),
-            &key,
-            TrustedHead {
-                id: gov(1),
-                chain_seq: 1,
-                entry_hash: data_hash(&json!("x")),
-            },
-            Some(data_hash(&json!("prev"))),
-            at(0),
-            "note",
+        let beside = serde_json::to_value(&texts).unwrap();
+        assert_eq!(beside["basis"]["text"], "Art. VI § 2");
+        assert_eq!(
+            serde_json::from_value::<AmendmentTexts>(beside).unwrap(),
+            texts
         );
+
+        // Version 1, as the platform's three are, still reads.
+        let legacy = json!({
+            "agora_governance_amendment": 1,
+            "target": "GOV-2026-0001",
+            "target_entry_hash": data_hash(&json!("x")),
+            "kind": "non_precedential",
+            "authority": "GOV-2026-0005",
+            "basis": "§1",
+            "note": "diagnostic finding",
+        });
+        let legacy: Amendment = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.validate(), Ok(()));
+        assert_eq!(legacy.basis, AmendmentText::Plain("§1".into()));
+
+        let mut c = Chain::new();
+        c.decision(&key);
+        let rotation = c.compromise(&pk, &generate_keypair().0, 1);
         let value = serde_json::to_value(&rotation).unwrap();
+        assert_eq!(value["agora_governance_key_rotation"], 2);
         assert_eq!(value["reason"], "compromise");
-        assert_eq!(value["last_trusted"]["chain_seq"], 1);
+        let statement = &value["certificate"]["statement"];
+        assert_eq!(statement["purpose"], "compromise");
+        assert_eq!(statement["last_trusted"]["chain_seq"], 1);
+        assert_eq!(
+            value["outgoing_certificate"]["statement"]["purpose"],
+            "genesis"
+        );
+        assert!(value.get("note").is_none(), "{value}");
         assert_eq!(
             serde_json::from_value::<KeyRotation>(value).unwrap(),
             rotation
         );
 
-        let notice = AmendmentNotice::new(amd(1), at(0), &amendment);
+        let notice =
+            AmendmentNotice::new(amd(1), at(0), &amendment, Some(&texts));
         let value = serde_json::to_value(&notice).unwrap();
         assert_eq!(value["id"], "AMD-2026-0001");
         assert_eq!(value["note"], "superseded by GOV-2026-0009");
@@ -3465,6 +4215,20 @@ mod tests {
             serde_json::from_value::<AmendmentNotice>(value).unwrap(),
             notice
         );
+
+        // The rationale erased: the label stays, and nothing else moves.
+        let erased = AmendmentTexts {
+            rationale: None,
+            ..texts.clone()
+        };
+        let notice =
+            AmendmentNotice::new(amd(1), at(0), &amendment, Some(&erased));
+        assert_eq!(notice.note, "superseded by GOV-2026-0009");
+        assert_eq!(notice.rationale.as_deref(), Some(WITHHELD_TEXT));
+        let notice = AmendmentNotice::new(amd(1), at(0), &amendment, None);
+        assert_eq!(notice.basis, WITHHELD_TEXT);
+        let notice = AmendmentNotice::new(amd(1), at(0), &legacy, None);
+        assert_eq!(notice.note, "diagnostic finding");
     }
 
     /// The verifier hashes the raw `data` value, so a field it has never
@@ -3475,7 +4239,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let bare = Amendment::new(
+        let bare = AmendmentDraft::new(
             target.clone(),
             c.hash_at(1),
             AmendmentKind::Correction,
@@ -3484,7 +4248,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            serde_json::to_value(&bare)
+            serde_json::to_value(&bare.amendment)
                 .unwrap()
                 .get("rationale")
                 .is_none()
@@ -3493,7 +4257,7 @@ mod tests {
         let full = bare.clone().with_rationale("at length: …");
         c.amend(&key, &full);
         // And a field from a future version of the shape.
-        let mut future = serde_json::to_value(&full).unwrap();
+        let mut future = serde_json::to_value(&full.amendment).unwrap();
         future["superseded_by_something_new"] = json!(["later"]);
         c.push(
             &key,
@@ -3503,7 +4267,7 @@ mod tests {
             true,
         );
 
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         assert!(v.ok, "{v:#?}");
         assert_eq!(
             v.entries[0].amended_by,
@@ -3571,7 +4335,7 @@ mod tests {
         let (key, pk) = generate_keypair();
         let mut c = Chain::new();
         let target = c.decision(&key);
-        let amendment = Amendment::new(
+        let amendment = AmendmentDraft::new(
             target,
             c.hash_at(1),
             AmendmentKind::Overruled,
@@ -3580,7 +4344,7 @@ mod tests {
         )
         .unwrap();
         c.amend(&key, &amendment);
-        let v = verify_chain(&c.links, &pk, &anchored(&pk));
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
         let text = serde_json::to_string(&v).unwrap();
         assert_eq!(
             serde_json::from_str::<GovernanceVerification>(&text).unwrap(),

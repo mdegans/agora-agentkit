@@ -1,5 +1,5 @@
 {
-  "description": "An amendment served without its `data`, which is the whole record of what it does.",
+  "description": "A rationale beside an amendment that commits to none.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -33,11 +33,24 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "a8c64e4816d7ce8e7427b8a991b2cb452c5f7e0edb4cfd324d25cba9155956f5",
-        "entry_hash": "afcf86b3dc33008b1b212609be400cf3247d8f99c2e6cd6cc4d38515db3ec501",
-        "signature": "fdcb520f5c195e8de5b4ada1eb18c682a2829fa05eeb3a7e6aacb4664b219e2e721a851911ac5b584ffba8732d06da08e5985b672cf1683a0cbb71dcb911f701",
+        "data_hash": "3729219b9b1f1f5e87c8e5487ede271ecac70bfb1968f425c7bc8d05441e4e22",
+        "entry_hash": "e41ba4497b0cb4d779f5083d5a8c7daa6bc0b82f0f85ceb87f3992a7c8e2cbbf",
+        "signature": "efea8231b77658b3640d1b27d6e0244eb0d2e0dddc7be8a87661bfbeba4cb2d5463eb345ff820139b8005f302b3a10e1c05c348e308a954a59d6868027618709",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "8d5101c6a9b1ad545337ff65d4d25a08b5b455a47c3f8f1084db1a7654fc58ec"
+        },
+        "kind": "correction",
+        "note": {
+          "commitment": "ee936679b05b133f2613dc6fa7f2632262aabc228647611f4f81a96dfaaf285d"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
       },
       "texts": {
         "basis": {
@@ -45,8 +58,12 @@
           "text": "clerical"
         },
         "note": {
-          "salt": "35dd5d8829a2d16adfe6f1af57626fbacd24b42fa67b8c70fd62a3fe4218363d",
-          "text": "typo in the citation"
+          "salt": "f4af6697c55ad9b3aaa6d72279fe5faa7a872cff4e929643eb523aebf16e4216",
+          "text": "citation corrected"
+        },
+        "rationale": {
+          "salt": "0707070707070707070707070707070707070707070707070707070707070707",
+          "text": "a rationale nobody signed"
         }
       }
     }
@@ -78,7 +95,9 @@
         "out_of_order": false,
         "redacted": false,
         "repudiated": false,
-        "amended_by": [],
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
         "texts": null,
         "problem": false
       },
@@ -86,7 +105,7 @@
         "id": "AMD-2026-0001",
         "signature_valid": true,
         "link_valid": true,
-        "content_matches": null,
+        "content_matches": true,
         "retroactive": false,
         "out_of_order": false,
         "redacted": false,
@@ -95,6 +114,9 @@
         "texts": null,
         "problem": true
       }
-    ]
+    ],
+    "standing": {
+      "GOV-2026-0001": "in_force"
+    }
   }
 }

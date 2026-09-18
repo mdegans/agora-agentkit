@@ -1,10 +1,14 @@
 {
-  "description": "A scheduled rotation, signed by the old key, to a key the anchor vouches for.",
+  "description": "The chain's first rotation without the genesis key's certificate.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
-    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-    "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
   ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
   "links": [
     {
       "id": "GOV-2026-0001",
@@ -29,18 +33,33 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "ef1a289f925aede25c7b4ee3a6a3779e867a159aad12623bb11b8376fd015dbb",
-        "entry_hash": "4a240d9dd4935afaaf07740bab94f6ba960f90586f348829f5d22fed52b31ad1",
-        "signature": "5e96f3d0d3b56dd1c15eab2c858a8d2435835d59b1c6c21fd06119cecdd2a52ecff589f9c0d0b20b7046b16b9c38271e1f1b50cf8f404db37bb909d4af2c5409",
+        "data_hash": "d3add7e53ccc84f736ffab3c1e7be1796a7e91496f5ea6fffcf11fe2855bbfd5",
+        "entry_hash": "0527de1c68581637a0ffe8f4c84ff7d3ad042abba454ef792689ee8aeafbbfb3",
+        "signature": "20984a6333a32d0b22f81345f3543c7200f914d0e3f260c0a0afc1291068a71f14fefc04b218deabe736ac78f2b7c83f39b7dda21e19f6e00484bc4d6337a700",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_key_rotation": 1,
+        "agora_governance_key_rotation": 2,
+        "certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "10389db232cd6c6b2bc054454efd641e7ec975b967f5d482ba01dcd0b9971f9a87389aed565eaa3d3c25bc425c46375b4699f988ca579c4a130b9d6d1f796503"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 3,
+            "key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+            "last_trusted": null,
+            "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+            "purpose": "routine"
+          }
+        },
         "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
-        "note": "scheduled rotation",
         "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-        "proof": "e864d2f2ced1fb7c7c4eb70699236bcaf48c90bec24cc9897af8f0a5cce46f4014e2120881d7d8806787ffb331147666fa5976fba382f27518bb7315a0c96202",
+        "proof": "0ee69ec5c4ceebe4303d7d734362bc728866420f3f1a2b5158d56c5990a47c35457f89f732c848457b99ecea467027fe8c350ac9df0cf9004bf17ff14a499a06",
         "proof_signed_at": 1700000025,
         "reason": "routine"
       }
@@ -52,21 +71,32 @@
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 3,
-        "prev_hash": "4a240d9dd4935afaaf07740bab94f6ba960f90586f348829f5d22fed52b31ad1",
+        "prev_hash": "0527de1c68581637a0ffe8f4c84ff7d3ad042abba454ef792689ee8aeafbbfb3",
         "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
-        "entry_hash": "27f3d6f7183d81ab9249843c4e730e8148d4fe8bb129c338ded631bac73053a6",
-        "signature": "6865827d51c9dbcc0c6ff89bf4d4888f3b199452ef9576eb7a60ba3f85c48fbfa9c913221fc58a8257ff65718aa126c247c5026b079bfa4ec2106b620dec2c06",
+        "entry_hash": "1b21b9f44f301e2436e19f1f2c34c4e3fd1ef70493c7c7e3d3108d575ee25d09",
+        "signature": "802ebaae036fbb6db1bc7090b49893d12269f21612fd055bdd7c464c7914f92b4da939d7609fc2bf25dbf61057ed2fd25917a69f240e5b596a83ddf283161a00",
         "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       }
     }
   ],
   "expect": {
-    "ok": true,
+    "ok": false,
     "head": "GOV-2026-0002",
-    "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
     "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
     "entries": [
       {
         "id": "GOV-2026-0001",
@@ -78,6 +108,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -90,11 +121,12 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
-        "problem": false
+        "texts": null,
+        "problem": true
       },
       {
         "id": "GOV-2026-0002",
-        "signature_valid": true,
+        "signature_valid": false,
         "link_valid": true,
         "content_matches": null,
         "retroactive": false,
@@ -102,7 +134,8 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
-        "problem": false
+        "texts": null,
+        "problem": true
       }
     ]
   }

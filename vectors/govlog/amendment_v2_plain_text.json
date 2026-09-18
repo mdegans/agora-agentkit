@@ -1,5 +1,5 @@
 {
-  "description": "An amendment served without its `data`, which is the whole record of what it does.",
+  "description": "A version 2 amendment with its note in the signed data after all. Permanent free text is what version 2 exists to end: malformed.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -33,21 +33,22 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "a8c64e4816d7ce8e7427b8a991b2cb452c5f7e0edb4cfd324d25cba9155956f5",
-        "entry_hash": "afcf86b3dc33008b1b212609be400cf3247d8f99c2e6cd6cc4d38515db3ec501",
-        "signature": "fdcb520f5c195e8de5b4ada1eb18c682a2829fa05eeb3a7e6aacb4664b219e2e721a851911ac5b584ffba8732d06da08e5985b672cf1683a0cbb71dcb911f701",
+        "data_hash": "2a072bb48ae7ce801794d0c08aa8edd38c6f8515d243a2e2e2a87cb6b5afca14",
+        "entry_hash": "aba4f99f0f9c0f721c79437730af0ebaed7e1fe0aca2bf5d022f8b52356e37f4",
+        "signature": "3f4390f9f96cbad9437f51fc891935aa40f0a7593ed917f5167c62cd8695087b1e68511c771f24411d2e5d7d7ac763a4fe9c398c7963f78d2e08804372a76603",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
-      "texts": {
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
         "basis": {
-          "salt": "24b53afed7e2f89fcbefbfb75a605c0020fad587505a40314f60ea2ac382c6f3",
-          "text": "clerical"
+          "commitment": "8d5101c6a9b1ad545337ff65d4d25a08b5b455a47c3f8f1084db1a7654fc58ec"
         },
-        "note": {
-          "salt": "35dd5d8829a2d16adfe6f1af57626fbacd24b42fa67b8c70fd62a3fe4218363d",
-          "text": "typo in the citation"
-        }
+        "kind": "correction",
+        "note": "citation corrected",
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
       }
     }
   ],
@@ -86,7 +87,7 @@
         "id": "AMD-2026-0001",
         "signature_valid": true,
         "link_valid": true,
-        "content_matches": null,
+        "content_matches": true,
         "retroactive": false,
         "out_of_order": false,
         "redacted": false,

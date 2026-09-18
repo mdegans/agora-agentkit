@@ -1,5 +1,5 @@
 {
-  "description": "An amendment served without its `data`, which is the whole record of what it does.",
+  "description": "An amendment, validly signed, with a field holding 0.5. Governance data never contains a number that is not a 64-bit integer: no two JSON libraries write a float the same way, so it is reported and never hashed.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -33,21 +33,25 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "a8c64e4816d7ce8e7427b8a991b2cb452c5f7e0edb4cfd324d25cba9155956f5",
-        "entry_hash": "afcf86b3dc33008b1b212609be400cf3247d8f99c2e6cd6cc4d38515db3ec501",
-        "signature": "fdcb520f5c195e8de5b4ada1eb18c682a2829fa05eeb3a7e6aacb4664b219e2e721a851911ac5b584ffba8732d06da08e5985b672cf1683a0cbb71dcb911f701",
+        "data_hash": "acd835d56e8aa97d5fc08ba6d7949f1b6b3c669958ac55b924695bd52568efbb",
+        "entry_hash": "a2a0dcdc050f9a61b72c99525b2eb585b264fddbbb39ffeef6eb09c8f08c3ed8",
+        "signature": "f7a28c41f742dd4d8e79682f1a5ab18195642a1d7664fa2a1e699a98eff93463c918e94edfbc4fe6bdb85095a07c01452b95bb5ece1e7d32eda4d021c8e9c203",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
-      "texts": {
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
         "basis": {
-          "salt": "24b53afed7e2f89fcbefbfb75a605c0020fad587505a40314f60ea2ac382c6f3",
-          "text": "clerical"
+          "commitment": "8d5101c6a9b1ad545337ff65d4d25a08b5b455a47c3f8f1084db1a7654fc58ec"
         },
+        "kind": "correction",
         "note": {
-          "salt": "35dd5d8829a2d16adfe6f1af57626fbacd24b42fa67b8c70fd62a3fe4218363d",
-          "text": "typo in the citation"
-        }
+          "commitment": "ee936679b05b133f2613dc6fa7f2632262aabc228647611f4f81a96dfaaf285d"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "weight": 0.5
       }
     }
   ],
@@ -86,7 +90,7 @@
         "id": "AMD-2026-0001",
         "signature_valid": true,
         "link_valid": true,
-        "content_matches": null,
+        "content_matches": false,
         "retroactive": false,
         "out_of_order": false,
         "redacted": false,

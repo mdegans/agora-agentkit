@@ -1,9 +1,14 @@
 {
-  "description": "The same declaration, from a key outside the anchor: it authenticates nothing, and nothing is repudiated on its say-so.",
+  "description": "No texts beside the entry at all, as a chain served without them looks. The amendment still takes effect.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
   ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
   "links": [
     {
       "id": "GOV-2026-0001",
@@ -36,41 +41,54 @@
       }
     },
     {
-      "id": "KEY-2026-0001",
-      "entry_type": "key_rotation",
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
       "created_at": "2023-11-14T22:13:50.123456Z",
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 3,
         "prev_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
-        "data_hash": "96f7cff545accaf09d5c80444d818a50cf61165fff4d08ab727728c6421b4459",
-        "entry_hash": "8b512ea4f5bcbd4b00ea7f970d2faf2263974a810cf801a4c468b229f0778790",
-        "signature": "eadfb36fd3b09c8cc69ccd0bb20e18ee014cbf0e1310a2fdfa2ec7c66886369824abc3f06a263cef3ad3f4a8f118b5db99862bbf4bb8564e9bb84bc273dfa90e",
+        "data_hash": "f2f8f005f61d4d077503210c502bd1e2aeb6e7e4a0cd109162866d9d064143f4",
+        "entry_hash": "9f123bdc1f54888c845b98354bad3bfc92a479b65949cb257429215077b93c99",
+        "signature": "a4ae156c1ab54f6174595ef44344e691cc48dabb08bfef9b4c968ebd0382710aec4f77267dcfe58eecb56bc59aecb6463ae667541c512d04e3f2bd72ead6ef0c",
         "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_key_rotation": 1,
-        "last_trusted": {
-          "chain_seq": 1,
-          "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-          "id": "GOV-2026-0001"
+        "agora_governance_amendment": 2,
+        "authority": "GOV-2026-0005",
+        "basis": {
+          "commitment": "ccf06ffdc7f4b6f61cc37cfc15b06d05eea1b83c7cefc86cabdfae5aff392052"
         },
-        "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
-        "note": "trust me",
-        "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-        "proof": "ed3423425221ad12dc37005c2a52562e75ee0475927d5a09332458bfece13b010634bb37c4e6d734e67704b57c12e4868424f77f3d34403c3c636ce9abcf920f",
-        "proof_signed_at": 1700000045,
-        "reason": "compromise"
+        "kind": "non_precedential",
+        "note": {
+          "commitment": "c44266d6ef014506d47d8726458474405354641798ada28eb943e13eec0772b4"
+        },
+        "rationale": {
+          "commitment": "258e3c3c99251805b77f034829aa77476f06313a1a760caddcf2f8e03cb46e3d"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
       }
     }
   ],
   "expect": {
-    "ok": false,
-    "head": "KEY-2026-0001",
+    "ok": true,
+    "head": "AMD-2026-0001",
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
     "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
     "entries": [
       {
         "id": "GOV-2026-0001",
@@ -81,7 +99,10 @@
         "out_of_order": false,
         "redacted": false,
         "repudiated": false,
-        "amended_by": [],
+        "amended_by": [
+          "AMD-2026-0001"
+        ],
+        "texts": null,
         "problem": false
       },
       {
@@ -94,11 +115,12 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
-        "id": "KEY-2026-0001",
-        "signature_valid": false,
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
         "link_valid": true,
         "content_matches": true,
         "retroactive": false,
@@ -106,8 +128,16 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
-        "problem": true
+        "texts": {
+          "basis": "withheld",
+          "note": "withheld",
+          "rationale": "withheld"
+        },
+        "problem": false
       }
-    ]
+    ],
+    "standing": {
+      "GOV-2026-0001": "non_precedential"
+    }
   }
 }

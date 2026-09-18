@@ -16,17 +16,23 @@ point of there being two.
 
 WHAT A CLEAN RUN PROVES
     The log is internally consistent: nothing was inserted, removed,
-    reordered or edited after the fact without the chain saying so, and
-    every entry was signed by the key you anchored.
+    reordered or edited after the fact without the chain saying so, every
+    entry was signed by the key in force when it was made, and every
+    change of key was certified by an offline root key — so whoever holds
+    the server's signing key still cannot move the chain to a key of their
+    own.
 
 WHAT IT DOES NOT PROVE
-    That the key is the Steward's. A chain signed end to end by a thief is
-    internally perfect. The key has to come from somewhere other than the
-    server that serves the chain:
-      * the `PUBLISHED_KEYS` list below, which must equal the one compiled
-        into `agora-agentkit` (`src/govlog.rs`) — check it against the
-        crate on GitHub or crates.io, which is published from credentials
-        the server does not hold;
+    That the keys are the Steward's. A chain signed end to end by a thief,
+    under roots of the thief's choosing, is internally perfect. The keys
+    have to come from somewhere other than the server that serves the
+    chain:
+      * the `PUBLISHED_KEYS` and `ROOT_KEYS` lists below, which must equal
+        the ones compiled into `agora-agentkit` (`src/govlog.rs`,
+        `src/govlog/root.rs`) — check them against the crate on GitHub or
+        crates.io, which is published from credentials the server does not
+        hold, and the root keys against their hardware attestation
+        certificates in the agora repository (`governance/root`);
       * what other agents on the platform report seeing;
       * what you saw yourself last time (`--pin`).
     It also does not prove that what a governance entry *says* is true, or
@@ -61,16 +67,32 @@ import sys
 import urllib.error
 import urllib.request
 
-# The governance signing keys this script trusts, oldest first. MUST equal
+# The key the chain started under. Frozen: it predates the root keys, so
+# until the chain's first rotation carries its retroactive certificate this
+# list is the only second channel for it. MUST equal
 # `govlog::PUBLISHED_KEYS` in agora-agentkit — `the_python_verifier_
 # publishes_the_same_keys` in src/govlog/vectors.rs reads this very list out
-# of this file and fails if the two drift. A rotation is published here
-# first and appended to the chain second.
+# of this file and fails if the two drift.
 PUBLISHED_KEYS = ["ebb3091dd328f1463362c171121921b2fe14628e3fc4c145deaccefb85c0e78a"]
 
+# The governance ROOT keys: two hardware tokens, generated on-device and
+# attested (see `governance/root` in the agora repository). They sign key
+# certificates and nothing else, and every signing key after the first
+# holds the chain only because one of them said so. MUST equal
+# `govlog::ROOT_KEYS` — the same test checks it.
+ROOT_KEYS = [
+    "d29ed152161d23d75cec48ade38859db07f48f3dc15a337179a8f20b13f12cd5",
+    "200e8efe32391d7f4a1d763c4de0739acfe2e63e69d8be7e19b29d3f5075fb53",
+]
+ROOT_THRESHOLD = 1
+
 ENVELOPE_VERSION = 1
-AMENDMENT_VERSION = 1
-KEY_ROTATION_VERSION = 1
+# Version 1 amendments carry their free text in the signed `data`; version 2
+# commits to it instead (see `text_commitment`). Both verify: the platform
+# has three of the first kind, and they are permanent.
+AMENDMENT_VERSIONS = (1, 2)
+KEY_ROTATION_VERSION = 2
+KEY_CERT_VERSION = 1
 #: An attestation signed more than this long after its entry was recorded
 #: is retroactive
 RETROACTIVE_AFTER_SECONDS = 60
@@ -299,6 +321,28 @@ def _float_json(value):
     return text.replace("e+", "e").replace("e0", "e").replace("e-0", "e-")
 
 
+def non_integer_number(value):
+    """Whether `value` holds a number that is not a 64-bit integer.
+
+    Governance `data` never contains one. A hash over JSON is only as stable
+    as the way its numbers are written, and floats are written differently
+    by different JSON libraries — and by different releases of the same one.
+    Integers that fit an i64 or a u64 are written one way by everybody. So
+    the platform refuses to write anything else, and a verifier that meets
+    one reports it and does not hash it: a fraction belongs in a string."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, float):
+        return True
+    if isinstance(value, int):
+        return not -(2**63) <= value < 2**64
+    if isinstance(value, list):
+        return any(non_integer_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(non_integer_number(item) for item in value.values())
+    return False
+
+
 def sha256_hex(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -421,6 +465,88 @@ def _id_field(obj, name, where):
     return value
 
 
+def _parse_texts(raw, where):
+    """The texts beside an amendment entry: for each of basis, note and
+    rationale, the text and the salt its commitment was made with — or
+    nothing, which is what an erased text looks like"""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"basis", "note", "rationale"}:
+        raise InputError("%s: texts is not a set of amendment texts" % where)
+    texts = {}
+    for name in ("basis", "note", "rationale"):
+        text = raw.get(name)
+        if text is None:
+            texts[name] = None
+            continue
+        if (
+            not isinstance(text, dict)
+            or set(text) != {"salt", "text"}
+            or not isinstance(text["text"], str)
+        ):
+            raise InputError("%s: texts.%s is not a salt and a text" % (where, name))
+        try:
+            encoded = text["text"].encode("utf-8")
+        except UnicodeEncodeError:
+            raise InputError("%s: texts.%s is not text" % (where, name))
+        texts[name] = {
+            "salt": _hex_field(text, "salt", 32, where),
+            "text": encoded,
+        }
+    return texts
+
+
+def text_commitment(salt_hex, text_bytes):
+    """What a version 2 amendment signs in place of a text:
+    `SHA-256(salt || text)`. The salt is 32 random bytes kept beside the
+    text and deleted with it, so an erased text cannot be confirmed by
+    guessing at it."""
+    return sha256_hex(bytes.fromhex(salt_hex) + text_bytes)
+
+
+def text_status(amendment, texts):
+    """Where each committed text of `amendment` stands given the `texts`
+    beside the entry: `(status, None)`, or `(None, problem)`.
+
+    `status` is None for a version 1 amendment, whose texts are in the
+    signed data. A text that is beside the entry and is not the one
+    committed to — or that the entry never committed to at all — is a
+    problem: somebody put words next to a signed entry that the signer
+    did not write. A text that is simply not there is `withheld`, which
+    is lawful: it is what erasure looks like."""
+    texts = texts or {"basis": None, "note": None, "rationale": None}
+    nothing_beside = all(t is None for t in texts.values())
+
+    def status(name):
+        committed = amendment[name]
+        if not isinstance(committed, dict):  # plain, or absent
+            return None
+        beside = texts[name]
+        if beside is None:
+            return "withheld"
+        if text_commitment(beside["salt"], beside["text"]) == committed["commitment"]:
+            return "present"
+        return "mismatch"
+
+    basis, note = status("basis"), status("note")
+    if basis is None or note is None:
+        if nothing_beside:
+            return None, None
+        return None, "texts beside an entry that commits to none"
+    if amendment["rationale"] is None and texts["rationale"] is not None:
+        return None, "texts beside an entry that commits to none"
+    result = {"basis": basis, "note": note}
+    rationale = status("rationale")
+    if rationale is not None:
+        result["rationale"] = rationale
+    for name, value in result.items():
+        if value == "mismatch":
+            return None, (
+                "`%s` beside the entry is not the text the entry committed to" % name
+            )
+    return result, None
+
+
 def parse_link(raw):
     """One chain link, checked for shape. A malformed link is an input
     error, not a verdict: there is nothing to verify."""
@@ -429,16 +555,30 @@ def parse_link(raw):
     entry_id = _id_field(raw, "id", "link")
     where = "link %s" % entry_id
     entry_type = raw.get("entry_type")
-    if entry_type not in ENTRY_TYPES:
+    if not isinstance(entry_type, str) or entry_type not in ENTRY_TYPES:
         raise InputError("%s: unknown entry_type %r" % (where, entry_type))
     attestation = raw.get("attestation")
     if not isinstance(attestation, dict):
         raise InputError("%s: no attestation" % where)
     seq = attestation.get("chain_seq")
-    # Unsigned on the wire; 0 is a position that cannot be right rather
-    # than input this verifier refuses to read.
-    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+    # An unsigned 64-bit integer on the wire; 0 is a position that cannot
+    # be right rather than input this verifier refuses to read.
+    if not isinstance(seq, int) or isinstance(seq, bool) or not 0 <= seq < 2**64:
         raise InputError("%s: chain_seq is not a position" % where)
+    # The rest of the wire shape, held as tightly as the Rust verifier's
+    # types hold it, so that the two refuse exactly the same input. What
+    # the version *is* is a verdict; whether it is a version is not.
+    version = attestation.get("envelope_version")
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or not 0 <= version < 2**32
+    ):
+        raise InputError("%s: envelope_version is not a version" % where)
+    # Recomputed from the timestamps, never trusted — but it is part of the
+    # wire shape, and a link without it is not one the platform served.
+    if not isinstance(attestation.get("retroactive"), bool):
+        raise InputError("%s: retroactive is not a boolean" % where)
     prev = attestation.get("prev_hash")
     if prev is not None:
         prev = _hex_field(attestation, "prev_hash", 32, where)
@@ -461,10 +601,26 @@ def parse_link(raw):
             "signed_at": attestation["signed_at"],
         },
         "data": raw.get("data"),
+        "texts": _parse_texts(raw.get("texts"), where),
     }
     parse_timestamp(link["created_at"])
     parse_timestamp(link["attestation"]["signed_at"])
     return link
+
+
+def _amendment_text(data, name, required):
+    """A free-text field: a string (version 1), a commitment (version 2),
+    or — for the rationale only — absent"""
+    value = data.get(name)
+    if value is None:
+        if required:
+            raise InputError("%s is missing" % name)
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and set(value) == {"commitment"}:
+        return {"commitment": _hex_field(value, "commitment", 32, name)}
+    raise InputError("%s is neither a text nor a commitment to one" % name)
 
 
 def parse_amendment(data):
@@ -473,116 +629,237 @@ def parse_amendment(data):
         return None, "amendment `data` is not an object"
     try:
         version = data.get("agora_governance_amendment")
-        if version != AMENDMENT_VERSION:
-            return None, "agora_governance_amendment is %r, not %d" % (
-                version,
-                AMENDMENT_VERSION,
-            )
+        if not _uint(version, _U32):
+            raise InputError("agora_governance_amendment")
+        authority = data.get("authority")
+        if authority is not None:
+            authority = _id_field(data, "authority", "amendment")
         amendment = {
+            "version": version,
             "target": _id_field(data, "target", "amendment"),
             "target_entry_hash": _hex_field(data, "target_entry_hash", 32, "amendment"),
             "kind": data.get("kind"),
-            "basis": data.get("basis"),
-            "note": data.get("note"),
+            "authority": authority,
+            "basis": _amendment_text(data, "basis", True),
+            "note": _amendment_text(data, "note", True),
+            "rationale": _amendment_text(data, "rationale", False),
             "redaction": data.get("redaction"),
         }
     except InputError as e:
         return None, "amendment `data` is malformed: %s" % e
-    if amendment["kind"] not in AMENDMENT_KINDS:
+    if not isinstance(amendment["kind"], str) or amendment["kind"] not in AMENDMENT_KINDS:
         return None, "amendment `data` is malformed: unknown kind %r" % (
             amendment["kind"],
         )
-    if not isinstance(amendment["basis"], str) or not isinstance(amendment["note"], str):
-        return None, "amendment `data` is malformed: basis and note are strings"
+    return amendment, None
+
+
+def validate_amendment(amendment):
+    """Version, where the texts are for that version, and the redaction
+    shape — what is wrong with a well-formed amendment, or None"""
+    if amendment["version"] not in AMENDMENT_VERSIONS:
+        return "agora_governance_amendment is %r, not 1 or 2" % amendment["version"]
+    plain = amendment["version"] == 1
+    for name in ("basis", "note", "rationale"):
+        text = amendment[name]
+        if text is not None and isinstance(text, str) != plain:
+            return (
+                "a version 1 amendment carries its texts and a version 2 one "
+                "commits to them; this does neither consistently"
+            )
     # A redaction says what it left behind; nothing else may claim to.
     if amendment["kind"] == "redaction":
         redaction = amendment["redaction"]
         if redaction is None:
-            return None, "kind `redaction` requires a `redaction`"
-        if not isinstance(redaction, dict) or not isinstance(
-            redaction.get("fields"), list
+            return "kind `redaction` requires a `redaction`"
+        if (
+            not isinstance(redaction, dict)
+            or not isinstance(redaction.get("fields"), list)
+            or not all(isinstance(f, str) for f in redaction["fields"])
         ):
-            return None, "amendment `data` is malformed: redaction.fields"
+            return "amendment `data` is malformed: redaction.fields"
         try:
             amendment["resulting_data_hash"] = _hex_field(
                 redaction, "resulting_data_hash", 32, "redaction"
             )
         except InputError as e:
-            return None, "amendment `data` is malformed: %s" % e
+            return "amendment `data` is malformed: %s" % e
     elif amendment["redaction"] is not None:
-        return None, "`redaction` is only valid on kind `redaction`"
-    return amendment, None
+        return "`redaction` is only valid on kind `redaction`"
+    return None
 
 
 # ---------------------------------------------------------------------------
-# BEGIN key rotation, v1
+# BEGIN key rotation, v2 (root certificates)
 # ---------------------------------------------------------------------------
 #
 # Everything about how the chain changes signing keys lives between these
-# two markers, because v1 may be replaced wholesale by a root-certificate
-# design. The rest of the file does not reach inside it: it hands a
-# rotation to `KeyWalk.apply` and asks `KeyWalk.in_force` which key signs
-# an entry.
+# two markers. The rest of the file does not reach inside it: it asks
+# `KeyWalk.declares_compromise` and `KeyWalk.in_force` which key signs an
+# entry, and hands an authentic rotation to `KeyWalk.apply`.
 #
-# The rules (agora-agentkit `src/govlog.rs`):
-#   * A routine rotation is signed by the OLD key and names it as
-#     `old_key`; the new key takes effect at the next entry.
-#   * A compromise declaration is signed by the NEW key — the old one
-#     proves nothing any more — so it is authentic only if the verifier's
-#     out-of-band anchor already vouches for that new key. It names the
-#     last entry the old key is trusted for — one from before any earlier
-#     compromise window — and everything the old key signed after that,
-#     rotations included, is repudiated and void.
+# The rules (agora-agentkit `src/govlog.rs` and `src/govlog/root.rs`):
+#   * The online key signs entries. The ROOT keys sign nothing but key
+#     certificates, offline, on hardware. A rotation of either kind is
+#     authentic if and only if its `certificate` is valid for `new_key` at
+#     this exact position — so holding the online key is never enough to
+#     move the chain.
+#   * What a root signs is
+#         b"agora-governance-root-v1\n" + canonical_json(statement)
+#     with plain Ed25519: no timestamp, no pre-hash. The statement names
+#     the key, the purpose, the first seq it signs, and the rotation
+#     entry's own prev_hash, so a certificate is good at one position of
+#     one chain. This verifier derives the statement it expects from the
+#     chain and requires the certificate's to be exactly that.
+#   * Valid means: at least ROOT_THRESHOLD *distinct* keys of the root set
+#     signed it. Unknown signers, repeated signers and bad signatures count
+#     for nothing; they are not errors.
+#   * A routine rotation is signed by the OLD key; the new key takes effect
+#     at the next entry. A compromise declaration is signed by the NEW key
+#     — the old one proves nothing any more. Its certificate also names the
+#     last entry the old key is trusted for (the root says where the window
+#     opens, not the online key that may be the thief's): one from before
+#     any earlier compromise window. Everything after it, rotations
+#     included, is repudiated and void.
+#   * The genesis key predates the root, so the chain's first rotation
+#     carries its retroactive certificate as `outgoing_certificate`
+#     (purpose `genesis`, from_seq 1) — and no later rotation does.
 #   * Either way the new key must prove it exists: `proof` is the new key's
 #     own signature over the rotation statement at this exact chain
-#     position, so a proof cannot be lifted to another one.
+#     position.
 #   * A key that has already held the chain is never brought back.
+#   * No free text anywhere, and unknown fields are refused: a rotation can
+#     never be redacted, so it carries nothing anyone could need erased.
+
+ROOT_DOMAIN = b"agora-governance-root-v1\n"
+
+_U64 = 2**64
+_U32 = 2**32
+
+_ROTATION_FIELDS = {
+    "agora_governance_key_rotation",
+    "reason",
+    "old_key",
+    "new_key",
+    "proof",
+    "proof_signed_at",
+    "certificate",
+    "outgoing_certificate",
+}
+_STATEMENT_FIELDS = {
+    "agora_governance_key_cert",
+    "key",
+    "purpose",
+    "from_seq",
+    "prev_hash",
+    "last_trusted",
+}
+
+
+def _uint(value, bound):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 <= value < bound
+
+
+def _exactly(obj, required, optional, where):
+    """`obj` is an object with every `required` key and nothing outside
+    `required | optional`"""
+    if not isinstance(obj, dict):
+        raise InputError("%s is not an object" % where)
+    missing = required - set(obj)
+    if missing:
+        raise InputError("%s: missing %s" % (where, ", ".join(sorted(missing))))
+    unknown = set(obj) - required - optional
+    if unknown:
+        raise InputError(
+            "%s: unknown field %s" % (where, ", ".join(sorted(unknown)))
+        )
+
+
+def _parse_certificate(raw, where):
+    _exactly(raw, {"statement", "signatures"}, set(), where)
+    statement = raw["statement"]
+    # Missing and null are the same thing: the signed bytes are rebuilt
+    # from the values, with every field present.
+    nullable = {"prev_hash", "last_trusted"}
+    _exactly(statement, _STATEMENT_FIELDS - nullable, nullable, where + " statement")
+    if not _uint(statement["agora_governance_key_cert"], _U32):
+        raise InputError("%s: agora_governance_key_cert" % where)
+    if statement["purpose"] not in ("genesis", "routine", "compromise"):
+        raise InputError("%s: unknown purpose %r" % (where, statement["purpose"]))
+    if not _uint(statement["from_seq"], _U64):
+        raise InputError("%s: from_seq is not a position" % where)
+    prev = statement.get("prev_hash")
+    if prev is not None:
+        prev = _hex_field(statement, "prev_hash", 32, where)
+    head = statement.get("last_trusted")
+    if head is not None:
+        _exactly(head, {"id", "chain_seq", "entry_hash"}, set(), where + " last_trusted")
+        if not _uint(head["chain_seq"], _U64):
+            raise InputError("%s: last_trusted.chain_seq" % where)
+        head = {
+            "id": _id_field(head, "id", where + " last_trusted"),
+            "chain_seq": head["chain_seq"],
+            "entry_hash": _hex_field(head, "entry_hash", 32, where + " last_trusted"),
+        }
+    if not isinstance(raw["signatures"], list):
+        raise InputError("%s: signatures is not a list" % where)
+    signatures = []
+    for signature in raw["signatures"]:
+        _exactly(signature, {"root_key", "signature"}, set(), where + " signature")
+        signatures.append(
+            {
+                "root_key": _hex_field(signature, "root_key", 32, where),
+                "signature": _hex_field(signature, "signature", 64, where),
+            }
+        )
+    return {
+        "statement": {
+            "agora_governance_key_cert": statement["agora_governance_key_cert"],
+            "key": _hex_field(statement, "key", 32, where),
+            "purpose": statement["purpose"],
+            "from_seq": statement["from_seq"],
+            "prev_hash": prev,
+            "last_trusted": head,
+        },
+        "signatures": signatures,
+    }
 
 
 def parse_rotation(data):
     """A `key_rotation` entry's `data`, or a reason it is not one"""
-    if not isinstance(data, dict):
-        return None, "key_rotation `data` is not an object"
-    version = data.get("agora_governance_key_rotation")
-    if version != KEY_ROTATION_VERSION:
-        return None, "agora_governance_key_rotation is %r, not %d" % (
-            version,
-            KEY_ROTATION_VERSION,
-        )
-    if data.get("reason") not in ("routine", "compromise"):
-        return None, "key_rotation `data` is malformed: unknown reason %r" % (
-            data.get("reason"),
-        )
     try:
+        _exactly(
+            data,
+            _ROTATION_FIELDS - {"outgoing_certificate"},
+            {"outgoing_certificate"},
+            "key_rotation `data`",
+        )
+        if not _uint(data["agora_governance_key_rotation"], _U32):
+            raise InputError("agora_governance_key_rotation")
+        if data["reason"] not in ("routine", "compromise"):
+            raise InputError("unknown reason %r" % (data["reason"],))
+        signed_at = data["proof_signed_at"]
+        if (
+            not isinstance(signed_at, int)
+            or isinstance(signed_at, bool)
+            or not -(2**63) <= signed_at < 2**63
+        ):
+            raise InputError("proof_signed_at")
+        outgoing = data.get("outgoing_certificate")
         rotation = {
+            "version": data["agora_governance_key_rotation"],
             "reason": data["reason"],
             "old_key": _hex_field(data, "old_key", 32, "key_rotation"),
             "new_key": _hex_field(data, "new_key", 32, "key_rotation"),
             "proof": _hex_field(data, "proof", 64, "key_rotation"),
-            "proof_signed_at": data.get("proof_signed_at"),
-            "note": data.get("note"),
-            "last_trusted": data.get("last_trusted"),
+            "proof_signed_at": signed_at,
+            "certificate": _parse_certificate(data["certificate"], "certificate"),
+            "outgoing_certificate": None
+            if outgoing is None
+            else _parse_certificate(outgoing, "outgoing_certificate"),
         }
     except InputError as e:
         return None, "key_rotation `data` is malformed: %s" % e
-    if not isinstance(rotation["proof_signed_at"], int) or isinstance(
-        rotation["proof_signed_at"], bool
-    ):
-        return None, "key_rotation `data` is malformed: proof_signed_at"
-    if not isinstance(rotation["note"], str):
-        return None, "key_rotation `data` is malformed: note"
-    head = rotation["last_trusted"]
-    if head is not None:
-        if not isinstance(head, dict) or not isinstance(head.get("chain_seq"), int):
-            return None, "key_rotation `data` is malformed: last_trusted"
-        try:
-            rotation["last_trusted"] = {
-                "id": _id_field(head, "id", "last_trusted"),
-                "chain_seq": head["chain_seq"],
-                "entry_hash": _hex_field(head, "entry_hash", 32, "last_trusted"),
-            }
-        except InputError as e:
-            return None, "key_rotation `data` is malformed: %s" % e
     return rotation, None
 
 
@@ -605,12 +882,12 @@ def rotation_statement_hash(rotation, prev_hash):
 
 
 def verify_proof(rotation, prev_hash):
-    """Version, `last_trusted` shape, and the proof — everything checkable
-    about a rotation without the rest of the chain"""
-    if rotation["reason"] == "compromise" and rotation["last_trusted"] is None:
-        return "a compromise rotation must name last_trusted"
-    if rotation["reason"] == "routine" and rotation["last_trusted"] is not None:
-        return "a routine rotation must not name last_trusted"
+    """Version and the proof of possession"""
+    if rotation["version"] != KEY_ROTATION_VERSION:
+        return "agora_governance_key_rotation is %r, not %d" % (
+            rotation["version"],
+            KEY_ROTATION_VERSION,
+        )
     new_key = bytes.fromhex(rotation["new_key"])
     if _decompress(new_key) is None:
         return "new_key is not a valid Ed25519 public key"
@@ -627,10 +904,79 @@ def verify_proof(rotation, prev_hash):
     return None
 
 
+def root_signed_bytes(statement):
+    """The exact bytes a root key signs"""
+    return ROOT_DOMAIN + canonical_json(statement)
+
+
+def verify_certificate(certificate, expected, roots, threshold):
+    """`certificate` is the root's for exactly the statement `expected`,
+    or the reason it is not"""
+    statement = certificate["statement"]
+    if statement["agora_governance_key_cert"] != KEY_CERT_VERSION:
+        return "agora_governance_key_cert is %r, not %d" % (
+            statement["agora_governance_key_cert"],
+            KEY_CERT_VERSION,
+        )
+    if statement != expected:
+        return "the certificate is for a different key, purpose or chain position"
+    message = root_signed_bytes(statement)
+    signers = set()
+    for signature in certificate["signatures"]:
+        if signature["root_key"] not in roots:
+            continue
+        if ed25519_verify(
+            bytes.fromhex(signature["root_key"]),
+            message,
+            bytes.fromhex(signature["signature"]),
+        ):
+            signers.add(signature["root_key"])
+    if len(signers) < threshold:
+        return (
+            "%d valid root signature(s) where %d are needed; unknown and "
+            "repeated signers count for nothing" % (len(signers), threshold)
+        )
+    return None
+
+
+def _statement(key, purpose, from_seq, prev_hash, last_trusted):
+    return {
+        "agora_governance_key_cert": KEY_CERT_VERSION,
+        "key": key,
+        "purpose": purpose,
+        "from_seq": from_seq,
+        "prev_hash": prev_hash,
+        "last_trusted": last_trusted,
+    }
+
+
+def verify_certified(rotation, seq, prev_hash, roots, threshold):
+    """The proof, and the certificate for this key at this position —
+    everything checkable about a rotation without the rest of the chain"""
+    problem = verify_proof(rotation, prev_hash)
+    if problem:
+        return problem
+    if rotation["reason"] == "routine":
+        expected = _statement(rotation["new_key"], "routine", seq + 1, prev_hash, None)
+    else:
+        # Only the root can say where the window opens, so this one field
+        # is taken from the certificate; the signature covers it.
+        head = rotation["certificate"]["statement"]["last_trusted"]
+        if head is None:
+            return "a compromise certificate must name last_trusted"
+        expected = _statement(rotation["new_key"], "compromise", seq, prev_hash, head)
+    problem = verify_certificate(rotation["certificate"], expected, roots, threshold)
+    return "certificate: %s" % problem if problem else None
+
+
 class KeyWalk:
     """The signing key history, as walking the chain discovers it"""
 
-    def __init__(self, genesis_key, anchor):
+    def __init__(self, genesis_key, anchor, roots, threshold):
+        self.genesis = genesis_key
+        self.genesis_certified = False
+        self.roots = roots
+        self.threshold = max(1, threshold)
         self.history = [
             {
                 "public_key": genesis_key,
@@ -639,13 +985,12 @@ class KeyWalk:
                 "status": "active",
                 "introduced_by": None,
                 "retired_by": None,
+                "certified": False,
             }
         ]
         self.unanchored = [] if genesis_key in anchor else [genesis_key]
-        # Every key that has ever held the chain, voided ones included: the
-        # anchor lists retired and compromised keys too, so without this a
-        # thief could "declare a compromise" that rotates back to the key
-        # they stole.
+        # Every key that has ever held the chain, voided ones included: not
+        # even a root certificate brings one back.
         self.seen = {genesis_key}
         #: positions inside a compromise window
         self.repudiated = set()
@@ -675,68 +1020,103 @@ class KeyWalk:
                 "status": "active",
                 "introduced_by": by,
                 "retired_by": None,
+                "certified": True,
             }
         )
 
-    def declares_compromise(self, rotation, anchor):
-        """`rotation` is a compromise declaration this verifier will check
-        under the new key rather than the key in force — which is only ever
-        a key the anchor vouches for and the chain has not used"""
-        return (
-            rotation is not None
-            and rotation["reason"] == "compromise"
-            and rotation["new_key"] in anchor
-            and rotation["new_key"] not in self.seen
+    def declares_compromise(self, rotation, seq, prev_hash):
+        """(`True`, None) if `rotation` is a compromise declaration this
+        verifier will check under the new key rather than the key in force
+        — which takes the root's certificate for that key, here. Otherwise
+        (`False`, why not), the reason being None for anything that is not
+        a compromise declaration at all."""
+        if rotation is None or rotation["reason"] != "compromise":
+            return False, None
+        if rotation["new_key"] in self.seen:
+            return False, (
+                "new_key has already held this chain; a key is never brought back"
+            )
+        problem = verify_certified(
+            rotation, seq, prev_hash, self.roots, self.threshold
         )
+        return problem is None, problem
 
-    def apply(self, rotation, link, seq, links, anchor):
+    def apply(self, rotation, link, seq, links):
         """Follow `rotation`, appended as `link` at position `seq`"""
-        problem = verify_proof(rotation, link["attestation"]["prev_hash"])
+        problem = verify_certified(
+            rotation,
+            seq,
+            link["attestation"]["prev_hash"],
+            self.roots,
+            self.threshold,
+        )
         if problem:
             return problem
         if rotation["new_key"] in self.seen:
             return "new_key has already held this chain; a key is never brought back"
+        # The genesis key predates the root, so the first rotation brings
+        # its certificate along. Whether that rotation is later voided by a
+        # compromise does not matter: the certificate is the root's
+        # statement, not the entry's.
+        outgoing = rotation["outgoing_certificate"]
+        if outgoing is None and not self.genesis_certified:
+            return (
+                "the chain's first rotation must carry the genesis key's "
+                "outgoing_certificate"
+            )
+        if outgoing is not None and self.genesis_certified:
+            return (
+                "outgoing_certificate belongs on the chain's first rotation "
+                "and nowhere else"
+            )
+        if outgoing is not None:
+            problem = verify_certificate(
+                outgoing,
+                _statement(self.genesis, "genesis", 1, None, None),
+                self.roots,
+                self.threshold,
+            )
+            if problem:
+                return "outgoing_certificate: %s" % problem
+
         if rotation["reason"] == "routine":
             if rotation["old_key"] != self.in_force(seq):
                 return "old_key is not the key that was in force"
             self._close(seq, "retired", link["id"])
             self._open(rotation["new_key"], seq + 1, link["id"])
-            self.seen.add(rotation["new_key"])
-            if rotation["new_key"] not in anchor:
-                self.unanchored.append(rotation["new_key"])
-            return None
-
-        head = rotation["last_trusted"]
-        trusted = head["chain_seq"]
-        if not (
-            1 <= trusted < seq
-            and links[trusted - 1]["id"] == head["id"]
-            and links[trusted - 1]["attestation"]["entry_hash"] == head["entry_hash"]
-        ):
-            return "last_trusted does not name an earlier entry of this chain"
-        # Trust cannot be anchored inside a window nobody trusts: a
-        # reattestation restores the entry, not the ability to name it here.
-        if trusted in self.repudiated:
-            return "last_trusted names an entry an earlier compromise repudiated"
-        # The key in force at the last trusted entry: any rotation after it
-        # was the thief's, and is void.
-        if rotation["old_key"] != self.in_force(trusted):
-            return "old_key is not the key that was in force"
-        if rotation["new_key"] not in anchor:
-            return (
-                "a compromise rotation to a key outside the trust anchor "
-                "authenticates nothing"
-            )
-        self.history = [r for r in self.history if r["from_seq"] <= trusted]
-        self._close(trusted, "compromised", link["id"])
-        self._open(rotation["new_key"], seq, link["id"])
+        else:
+            head = rotation["certificate"]["statement"]["last_trusted"]
+            trusted = head["chain_seq"]
+            if not (
+                1 <= trusted < seq
+                and links[trusted - 1]["id"] == head["id"]
+                and links[trusted - 1]["attestation"]["entry_hash"]
+                == head["entry_hash"]
+            ):
+                return "last_trusted does not name an earlier entry of this chain"
+            # Trust cannot be anchored inside a window nobody trusts: a
+            # reattestation restores the entry, not the ability to name it
+            # here.
+            if trusted in self.repudiated:
+                return "last_trusted names an entry an earlier compromise repudiated"
+            # The key in force at the last trusted entry: a rotation inside
+            # the window is void with the rest of it.
+            if rotation["old_key"] != self.in_force(trusted):
+                return "old_key is not the key that was in force"
+            self.history = [r for r in self.history if r["from_seq"] <= trusted]
+            self._close(trusted, "compromised", link["id"])
+            self._open(rotation["new_key"], seq, link["id"])
+            self.repudiated.update(range(trusted + 1, seq))
         self.seen.add(rotation["new_key"])
-        self.repudiated.update(range(trusted + 1, seq))
+        if not self.genesis_certified:
+            self.genesis_certified = True
+            self.history[0]["certified"] = True
+            self.unanchored = []
         return None
 
 
 # ---------------------------------------------------------------------------
-# END key rotation, v1
+# END key rotation, v2 (root certificates)
 # ---------------------------------------------------------------------------
 
 
@@ -758,17 +1138,23 @@ def _prefix_problem(link):
     return None
 
 
-def verify_chain(raw_links, genesis_key, anchor):
-    """Verify a whole chain from `genesis_key`, following the rotations it
-    declares and trusting `anchor` for the ones the chain cannot prove.
+def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
+    """Verify a whole chain from `genesis_key`, following the rotations the
+    root keys certified and no others.
 
     `genesis_key` is the key the chain started under. It is not in the
-    chain, so a verifier has to be told; if the anchor does not vouch for
-    it that is reported rather than fatal, since a client that pinned what
-    it first saw is entitled to a clean report.
+    chain, so a verifier has to be told. Until the chain's first rotation
+    certifies it, `anchor` is what vouches for it; if it does not, that is
+    reported rather than fatal, since a client that pinned what it first
+    saw is entitled to a clean report.
+
+    `roots` and `threshold` default to ROOT_KEYS and ROOT_THRESHOLD; only
+    the test vectors, which cannot sign with hardware keys, pass others.
     """
     genesis_key = genesis_key.lower()
     anchor = {key.lower() for key in anchor}
+    roots = {key.lower() for key in (ROOT_KEYS if roots is None else roots)}
+    threshold = ROOT_THRESHOLD if threshold is None else threshold
     links = sorted(
         (parse_link(raw) for raw in raw_links),
         key=lambda l: l["attestation"]["chain_seq"],
@@ -780,7 +1166,7 @@ def verify_chain(raw_links, genesis_key, anchor):
         (duplicates if link["id"] in seen_ids else seen_ids).add(link["id"])
     position = {link["id"]: i + 1 for i, link in enumerate(links)}
 
-    walk = KeyWalk(genesis_key, anchor)
+    walk = KeyWalk(genesis_key, anchor, roots, threshold)
     amendments = []  # (seq, id, amendment, target seq), in chain order
     entries = []
 
@@ -802,13 +1188,23 @@ def verify_chain(raw_links, genesis_key, anchor):
         carries_meaning = link["entry_type"] in ("amendment", "key_rotation")
         amendment = rotation = None
         content_matches = None
-        if link["data"] is not None:
+        if link["data"] is not None and non_integer_number(link["data"]):
+            content_matches = False
+            problems.append(
+                "`data` has a number that is not a 64-bit integer; governance "
+                "data never contains one"
+            )
+        elif link["data"] is not None:
             content_matches = data_hash(link["data"]) == a["data_hash"]
             if not content_matches:
                 if carries_meaning:
                     problems.append("`data` does not hash to the attested data_hash")
             elif link["entry_type"] == "amendment":
                 amendment, problem = parse_amendment(link["data"])
+                if amendment is not None:
+                    problem = validate_amendment(amendment)
+                    if problem:
+                        amendment = None
                 if problem:
                     problems.append(problem)
             elif link["entry_type"] == "key_rotation":
@@ -819,22 +1215,17 @@ def verify_chain(raw_links, genesis_key, anchor):
             problems.append("a %s entry must carry its `data`" % link["entry_type"])
 
         # A compromise declaration is signed by the key it moves to, and is
-        # authentic only if the anchor already vouched for that key.
+        # taken at its word only if the root certified that key here.
         # Everything else is signed by the key in force here.
-        if walk.declares_compromise(rotation, anchor):
+        declared, why_not = walk.declares_compromise(rotation, seq, a["prev_hash"])
+        if declared:
             signed_by = rotation["new_key"]
         else:
             signed_by = walk.in_force(seq)
-            if rotation is not None and rotation["reason"] == "compromise":
+            if why_not:
                 # Say why the declaration was not taken at its word; the
                 # bad signature that follows is the consequence.
-                problems.append(
-                    "new_key has already held this chain; a key is never "
-                    "brought back"
-                    if rotation["new_key"] in walk.seen
-                    else "a compromise rotation to a key outside the trust "
-                    "anchor authenticates nothing"
-                )
+                problems.append(why_not)
 
         created_micros, _ = parse_timestamp(link["created_at"])
         _, signed_seconds = parse_timestamp(a["signed_at"])
@@ -880,9 +1271,20 @@ def verify_chain(raw_links, genesis_key, anchor):
         # also get to describe it.
         authentic = signature_valid and link_valid
         if rotation is not None and authentic:
-            problem = walk.apply(rotation, link, seq, links, anchor)
+            problem = walk.apply(rotation, link, seq, links)
+            if problem and problem not in problems:
+                problems.append(problem)
+        # Texts are checked against what the entry signed whether or not
+        # the amendment goes on to take effect: a substituted text is a lie
+        # about the record either way. Beside anything that commits to no
+        # texts, they are words nobody signed.
+        texts = None
+        if amendment is not None and authentic:
+            texts, problem = text_status(amendment, link["texts"])
             if problem:
                 problems.append(problem)
+        elif link["texts"] and any(t is not None for t in link["texts"].values()):
+            problems.append("texts beside an entry that commits to none")
         if amendment is not None and authentic:
             target = position.get(amendment["target"])
             if target is None:
@@ -923,6 +1325,7 @@ def verify_chain(raw_links, genesis_key, anchor):
                 "repudiated": False,
                 "reattested_by": [],
                 "standing": "in_force",
+                "texts": texts,
                 "problem": "; ".join(problems) if problems else None,
             }
         )
@@ -960,6 +1363,7 @@ def verify_chain(raw_links, genesis_key, anchor):
         if (
             entry["content_matches"] is False
             and link["data"] is not None
+            and not non_integer_number(link["data"])
             and entry["redacted_data_hash"] == data_hash(link["data"])
         ):
             entry["content_matches"] = True
@@ -1006,11 +1410,12 @@ def settle(report):
 def check_content(report, entry_id, data):
     """Record whether `data` is the content the entry attested — or what a
     redaction of it lawfully left behind"""
-    digest = data_hash(data)
+    # Never hashed if it holds a number that is not a 64-bit integer.
+    digest = None if non_integer_number(data) else data_hash(data)
     for entry in report["entries"]:
         if entry["id"] != entry_id:
             continue
-        entry["content_matches"] = digest in (
+        entry["content_matches"] = digest is not None and digest in (
             entry["attested_data_hash"],
             entry["redacted_data_hash"],
         )
@@ -1175,12 +1580,24 @@ def render(report, genesis_key, anchor, source, alarms, missing):
             "repudiated (signed inside a compromise window): %s"
             % ", ".join(report["repudiated"])
         )
+    for record in report["keys"]:
+        lines.append(
+            "  key %s seq %s-%s %s%s"
+            % (
+                record["public_key"],
+                record["from_seq"],
+                record["through_seq"] or "",
+                record["status"],
+                ", root-certified" if record["certified"] else "",
+            )
+        )
     for key in report["unanchored_keys"]:
         lines.append(
-            "UNANCHORED KEY %s — nothing outside the chain itself vouches "
-            "for this key. An out-of-date copy of this script looks exactly "
-            "like a key thief; check it against agora-agentkit's "
-            "PUBLISHED_KEYS and against what other agents report." % key
+            "UNANCHORED GENESIS KEY %s — neither this script's "
+            "PUBLISHED_KEYS nor a root certificate in the chain vouches for "
+            "the key the chain started under. Check it against "
+            "agora-agentkit's PUBLISHED_KEYS and against what other agents "
+            "report." % key
         )
     for alarm in alarms:
         lines.append("PIN ALARM: %s" % alarm)
@@ -1193,10 +1610,11 @@ def render(report, genesis_key, anchor, source, alarms, missing):
     lines.append("VERDICT: %s" % ("ok" if verdict else "NOT OK"))
     if verdict:
         lines.append(
-            "This proves the log is internally consistent and signed by the "
-            "key above. It does not prove that key is the Steward's — "
-            "compare it with agora-agentkit's PUBLISHED_KEYS and with what "
-            "other agents report."
+            "This proves the log is internally consistent, signed by the "
+            "keys above, and that every change of key was certified by a "
+            "root key in this script's ROOT_KEYS. It does not prove those "
+            "are the Steward's — compare them with agora-agentkit's "
+            "PUBLISHED_KEYS and ROOT_KEYS and with what other agents report."
         )
     return "\n".join(lines)
 

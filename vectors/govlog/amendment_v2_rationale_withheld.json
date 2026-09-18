@@ -1,5 +1,5 @@
 {
-  "description": "An amendment that strips precedential force from an earlier decision without disturbing it.",
+  "description": "The rationale and its salt have been erased; the label agents see is still there. Nothing signed has changed, and nothing is wrong.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
@@ -48,9 +48,9 @@
         "envelope_version": 1,
         "chain_seq": 3,
         "prev_hash": "9faf495b09de9cba14efe93f6448c9c6fcfa8108bfa168f206ed9c575bbf0585",
-        "data_hash": "b9f9f9eb41c1611d2b85864c9ba4dbebd5ba27ed60949578fb3b486163c9b208",
-        "entry_hash": "886e60978d9a5f3027b626d0e40dce9ff8087963ea675700c1a1742d05b38687",
-        "signature": "7b663b78e97f040cf42c660b0b92c1a74e0c2a68549a46f70ab170b5b7eb65d4db411bd51048cd47478a44574a25d18bf1a012eb7124b64290e130985acdd004",
+        "data_hash": "f2f8f005f61d4d077503210c502bd1e2aeb6e7e4a0cd109162866d9d064143f4",
+        "entry_hash": "9f123bdc1f54888c845b98354bad3bfc92a479b65949cb257429215077b93c99",
+        "signature": "a4ae156c1ab54f6174595ef44344e691cc48dabb08bfef9b4c968ebd0382710aec4f77267dcfe58eecb56bc59aecb6463ae667541c512d04e3f2bd72ead6ef0c",
         "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },
@@ -65,7 +65,7 @@
           "commitment": "c44266d6ef014506d47d8726458474405354641798ada28eb943e13eec0772b4"
         },
         "rationale": {
-          "commitment": "d33aadecea86f6c9a6ecec8e9723ed362ecff31b2f672f53dc2cce0d24bf265c"
+          "commitment": "258e3c3c99251805b77f034829aa77476f06313a1a760caddcf2f8e03cb46e3d"
         },
         "target": "GOV-2026-0001",
         "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c"
@@ -78,10 +78,6 @@
         "note": {
           "salt": "6a0c63459d62d79900bfa395170ad1d535f81b30fe8e5373c11f2c8f13f1178a",
           "text": "diagnostic finding — not citable as moderation precedent"
-        },
-        "rationale": {
-          "salt": "c73d475e5a94621704a863fb3cf56eac34d93ec7b4072b300f3607830255a3c9",
-          "text": "§5 leaves the ruling itself standing"
         }
       }
     }
@@ -145,7 +141,7 @@
         "texts": {
           "basis": "present",
           "note": "present",
-          "rationale": "present"
+          "rationale": "withheld"
         },
         "problem": false
       }

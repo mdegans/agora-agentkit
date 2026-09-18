@@ -4,6 +4,11 @@
   "anchor": [
     "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
   ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
   "links": [
     {
       "id": "GOV-2026-0001",
@@ -28,20 +33,34 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "6ebaf52b33bc80b54d758a20fa952790211570bcf20dbd635b0c8918a1a1fe41",
-        "entry_hash": "affd9702abad2e1a040ed071db0ddb592f80f6172a5a87d17f8babbeb00c7d5b",
-        "signature": "591e2890d9d44a4897b9309855e80c2bca116211e8f398ef16c6061c37c20c6c17b4480ffba4239623e92abbdb006f716155fede9a6fa01bdeb4a1dd7d61f10e",
+        "data_hash": "a8d7fe639b0b7164ad9c4d5a304502ae04c61b0f2a24b1de49e2348e04e87ee1",
+        "entry_hash": "17a134a61896726bfb15e5f87199ee21127dca7c4988eef6058c02c1fdb3248b",
+        "signature": "43c44b96d40ff7ff63b22f85ea59748944456cfa7765acac6b7c05dd6189600a3864d5fefd92d4fd043efdc9073c5026da98887f5cc802aefebf6c26dd480d0a",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_amendment": 1,
+        "agora_governance_amendment": 2,
         "authority": null,
-        "basis": "Art. VI § 2",
+        "basis": {
+          "commitment": "56cb7c6a328b8121b30e4eadd1444fe578a1c322b0c2eb054d267ebb46c33c02"
+        },
         "kind": "overruled",
-        "note": "overruled",
+        "note": {
+          "commitment": "f8fb9b94b6a6bfae9a241454ecb361e7dafb56be3e145080f97713d44c98a262"
+        },
         "target": "GOV-2026-0001",
         "target_entry_hash": "789d2e41d49d2d3054891995e1cca82db4434b455d6afa0b45944802267d0c52"
+      },
+      "texts": {
+        "basis": {
+          "salt": "2de122c1d842e501bfc6de92c4be2c3558ab2bae3420270b95cd8882fdcc9293",
+          "text": "Art. VI § 2"
+        },
+        "note": {
+          "salt": "abc8eea246911dc709e1818b266e4d84068958049472b679676b0e9e8a058079",
+          "text": "overruled"
+        }
       }
     }
   ],
@@ -51,6 +70,17 @@
     "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
     "repudiated": [],
     "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
     "entries": [
       {
         "id": "GOV-2026-0001",
@@ -62,6 +92,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -74,6 +105,10 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
         "problem": true
       }
     ]

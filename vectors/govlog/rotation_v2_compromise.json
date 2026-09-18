@@ -1,10 +1,14 @@
 {
-  "description": "A compromise declaration signed by an anchored new key: the window after the last trusted entry is repudiated, and a reattestation restores one entry of it.",
+  "description": "A compromise declaration signed by the certified new key: the window after the last trusted entry is repudiated, and a reattestation restores one entry of it.",
   "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
   "anchor": [
-    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-    "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
   ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
   "links": [
     {
       "id": "GOV-2026-0001",
@@ -59,23 +63,53 @@
         "envelope_version": 1,
         "chain_seq": 4,
         "prev_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a",
-        "data_hash": "22dc9cebb6e7dc53e206f6b7ae1a96b33d5c17b99ba555d1548f47c2468ee5e1",
-        "entry_hash": "4975502260268747e0175eb1756127d93518a10d6305e8de70c2d3c8dc8c19d0",
-        "signature": "797b9b2793995720f8610e1aa4471b112d553482b1ef0beded10a2b4a6b9bd1caa07d0e462939e11d54e55456c46a3580f099f10e87b39fc09bab4124bec4c06",
+        "data_hash": "a06bc0c1fb09e12f349940884eb6c8d90592f8b1b365025a0bd7323452c3a557",
+        "entry_hash": "c032daf8a3742e032be1c738b3d3acff6ac5df5bff486d81929cae302d9dad35",
+        "signature": "c40b81724d819991e783a60a8b4ed1a5463c73b1103ab40795aefa1ce91bb6845e50650866e6188b72860f64550a2d0a0c504f2d402551a6fccf32a06d7b3f0d",
         "signed_at": "2023-11-14T22:14:01Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_key_rotation": 1,
-        "last_trusted": {
-          "chain_seq": 1,
-          "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-          "id": "GOV-2026-0001"
+        "agora_governance_key_rotation": 2,
+        "certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "76b13814fec960c403f55485419961a95a4781f49f3e19c6968bcecebd391f066c2da7c6635ad66b548e1b6710458a14ee715259ba3f6bb1d3675f50248ba40c"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 4,
+            "key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+            "last_trusted": {
+              "chain_seq": 1,
+              "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+              "id": "GOV-2026-0001"
+            },
+            "prev_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a",
+            "purpose": "compromise"
+          }
         },
         "new_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
-        "note": "signing key exfiltrated",
         "old_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
-        "proof": "5830f85eb7ece77370c4847702ad27f2166bf4ac04d0e8c5212ca3cb149e9261399d8b819877d84b26f02c62569d2ca2db06ebf339103d304a66dc804b95000e",
+        "outgoing_certificate": {
+          "signatures": [
+            {
+              "root_key": "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5",
+              "signature": "fb67cc382d57c42b757d3607de6e7ebc167ff12dbf24101a328b0f5ebb7217c4c81934e8a4ce197b77c6499457213859c166d89820dcc800218b5e7b3f3dab07"
+            }
+          ],
+          "statement": {
+            "agora_governance_key_cert": 1,
+            "from_seq": 1,
+            "key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            "last_trusted": null,
+            "prev_hash": null,
+            "purpose": "genesis"
+          }
+        },
+        "proof": "b0e9f39b42efd748109218649cd85e58bfe0cc74de20df0dbc92fa4582df2c817b9c136e200e25e322d6c87d2065d7504de1d0bf5516d3049d0d4c2ace44fb00",
         "proof_signed_at": 1700000045,
         "reason": "compromise"
       }
@@ -87,21 +121,35 @@
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 5,
-        "prev_hash": "4975502260268747e0175eb1756127d93518a10d6305e8de70c2d3c8dc8c19d0",
-        "data_hash": "72f2e6b2c69e59b1c52fdcb440230e929de7263c035f82157264a26fbd7162b2",
-        "entry_hash": "746a389f3566f03d837b11e2984b320cc6a4b236593173670d77987bb0373788",
-        "signature": "ba845ea57b0fa3d0903a62eb5628102a5186b3ff521ccbdc5ebfa81102d8f0adc94835d855a85328eb0b8fe5ad2e11315ec3302e1f1fc79ab38f8f9b3c6a1a0e",
+        "prev_hash": "c032daf8a3742e032be1c738b3d3acff6ac5df5bff486d81929cae302d9dad35",
+        "data_hash": "bafa5af1d2c5c13657de72b8c2444fe540a6096f4b6d820c42199ec5c1fae598",
+        "entry_hash": "4ad128cdbe78310c50a958954e6b95d9713dfe887c0b80da83333ea32d681b03",
+        "signature": "c96c8ea684450e95447a7cfa6a357b71a492c0b20cef3da309718a1d8cc81341c1b12ed44b235345885f3184d795e1fcb222d60e973dd3d7feae49c8cd07e108",
         "signed_at": "2023-11-14T22:14:11Z",
         "retroactive": false
       },
       "data": {
-        "agora_governance_amendment": 1,
+        "agora_governance_amendment": 2,
         "authority": null,
-        "basis": "Art. VII",
+        "basis": {
+          "commitment": "d0370dab6691be0517efb5d491229f7b6ced095a4b9b344e7e4d40d76d2edb37"
+        },
         "kind": "reattested",
-        "note": "independently verified; the Steward vouches for it",
+        "note": {
+          "commitment": "8099bdc08afa1f88f0e9a2d1a2640b651b189da6fdefaabbc165085fd87ccb96"
+        },
         "target": "GOV-2026-0003",
         "target_entry_hash": "47b9772b873bde97c03ce75eb44a9608684b9f1864085b5c0cc87c820f86c67a"
+      },
+      "texts": {
+        "basis": {
+          "salt": "59dc5c54df502e69f30dd914d6e718513cde824f0f378fa15d70fae9f939142e",
+          "text": "Art. VII"
+        },
+        "note": {
+          "salt": "bb692d7358d687daec8c02d10fdfc1a80a699a722af09a62fcd10369866c26e6",
+          "text": "independently verified; the Steward vouches for it"
+        }
       }
     }
   ],
@@ -113,6 +161,26 @@
       "GOV-2026-0002"
     ],
     "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": 1,
+        "status": "compromised",
+        "introduced_by": null,
+        "retired_by": "KEY-2026-0001",
+        "certified": true
+      },
+      {
+        "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+        "from_seq": 4,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": "KEY-2026-0001",
+        "retired_by": null,
+        "certified": true
+      }
+    ],
     "entries": [
       {
         "id": "GOV-2026-0001",
@@ -124,6 +192,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -136,6 +205,7 @@
         "redacted": false,
         "repudiated": true,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -150,6 +220,7 @@
         "amended_by": [
           "AMD-2026-0001"
         ],
+        "texts": null,
         "problem": false
       },
       {
@@ -162,6 +233,7 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": null,
         "problem": false
       },
       {
@@ -174,6 +246,10 @@
         "redacted": false,
         "repudiated": false,
         "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
         "problem": false
       }
     ],
