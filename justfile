@@ -40,13 +40,14 @@ features:
         echo ok
     done
 
-# The published-key parity check: the key the platform serves must be the
-# newest element of `PUBLISHED_KEYS`. Networked, so it is not part of
-# `check` — CI runs it as its own job, where a 5G blip reads as a blip
-# rather than as a code failure.
+# The published-key parity check: the live chain must verify under the
+# genesis key and the ROOT keys compiled into this crate, and the key the
+# platform serves must be the one that walk ends on. Networked, so it is not
+# part of `check` — CI runs it as its own job, where a 5G blip reads as a
+# blip rather than as a code failure.
 #
-# A rotation is published in this order: add the new key to PUBLISHED_KEYS
-# and release agentkit FIRST, then append the rotation entry to the chain.
+# A rotation needs no release here any more: the root certifies the new key
+# in the chain itself, and this check follows it.
 check-published-keys:
     cargo test --features agora-client --lib \
         govlog::tests::the_published_key_is_the_one_the_platform_serves \

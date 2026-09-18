@@ -4387,8 +4387,15 @@ mod tests {
         );
     }
 
-    /// The parity check the Steward's second channel exists for: the key
-    /// the platform serves must be the newest key this build trusts.
+    /// The parity check the Steward's second channel exists for: the live
+    /// chain verifies under what this build has compiled in — the genesis
+    /// key in [`PUBLISHED_KEYS`] and the roots in [`ROOT_KEYS`] — and the
+    /// key the platform serves is the one that walk ends on.
+    ///
+    /// Before the first rotation that is the genesis key itself; after it,
+    /// a key this crate has never heard of and does not need to, because
+    /// the root certified it. A served key the roots did not certify, or a
+    /// chain that no longer verifies, fails here within the hour.
     ///
     /// Networked, so it is `#[ignore]`d and CI runs it as its own job —
     /// a 5G blip should not read as a code failure. `just
@@ -4402,18 +4409,38 @@ mod tests {
         )
         .unwrap();
         let served = client.get_governance_signing_key().await.unwrap();
-        let newest: PublicKeyHex = PUBLISHED_KEYS
-            .last()
+        assert_eq!(served.algorithm, "ed25519");
+
+        let genesis: PublicKeyHex = PUBLISHED_KEYS
+            .first()
             .expect("PUBLISHED_KEYS is never empty")
             .parse()
             .unwrap();
-        assert_eq!(served.algorithm, "ed25519");
+        let links = client.get_governance_chain().await.unwrap();
+        let report = verify_chain(
+            &links,
+            &genesis.to_verifying_key().unwrap(),
+            &KeyAnchor::published(),
+            &RootSet::published(),
+        );
+        let problems: Vec<_> = report
+            .entries
+            .iter()
+            .filter_map(|e| {
+                e.problem.as_ref().map(|p| (e.id.clone(), p.clone()))
+            })
+            .collect();
+        assert!(
+            report.ok,
+            "the live chain does not verify under this build's genesis key \
+             and roots: {problems:#?}"
+        );
+        assert!(report.unanchored_keys.is_empty(), "{report:#?}");
         assert_eq!(
-            served.public_key, newest,
-            "the platform serves {} but the newest key in PUBLISHED_KEYS is \
-             {newest} — if this is a rotation, agentkit publishes the new \
-             key FIRST and the rotation entry second",
-            served.public_key
+            served.public_key, report.public_key,
+            "the platform serves {} but the chain, followed under the \
+             published roots, is held by {}",
+            served.public_key, report.public_key
         );
     }
 
