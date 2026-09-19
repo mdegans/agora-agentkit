@@ -867,6 +867,7 @@ mod tests {
                 rationale: None,
                 created_at: Utc::now(),
             }],
+            texts: None,
         };
 
         let out = format_governance_entry(&entry);

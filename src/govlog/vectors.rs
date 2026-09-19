@@ -9,7 +9,8 @@
 //! byte-stable. Regenerate with `just vectors`.
 
 use super::tests::{
-    Chain, at, certify, chain, gov, key_id, link, resalted, root, roots, v1,
+    Chain, at, certify, chain, gov, key_id, link, rec, resalted, root, roots,
+    v1,
 };
 use super::*;
 use serde_json::{Value, json};
@@ -297,6 +298,7 @@ impl RotationStatementV1 {
 fn cases() -> Vec<Case> {
     use GovernanceLogEntryType::{
         Amendment as AmendmentEntry, CouncilDecision,
+        StewardRecord as StewardRecordEntry,
     };
 
     let (steward, steward_pk) = signer(1);
@@ -462,6 +464,47 @@ fn cases() -> Vec<Case> {
         "id_series_mismatch",
         "A council decision in the reserved KEY- series, and an amendment \
          outside the AMD- series.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    // -- a Steward's record --
+
+    let record = serde_json::to_value(StewardRecord::new(
+        "key_ceremony",
+        "The first key ceremony",
+        "The root certified a fresh online key.",
+    ))
+    .unwrap();
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(&steward, rec(1), StewardRecordEntry, record.clone(), false);
+    c.decision(&steward);
+    out.push(Case::new(
+        "steward_record",
+        "A Steward's record between two decisions. No verifier reads what \
+         it says: it is content, in the REC- series.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(&steward, gov(2), StewardRecordEntry, record.clone(), false);
+    c.push(
+        &steward,
+        rec(1),
+        CouncilDecision,
+        json!({"title": "a decision wearing a REC- id"}),
+        false,
+    );
+    out.push(Case::new(
+        "record_series_mismatch",
+        "A Steward's record outside the REC- series, and a council decision \
+         inside it.",
         &steward_pk,
         pinned.clone(),
         c.links,

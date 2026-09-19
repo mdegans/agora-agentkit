@@ -259,6 +259,11 @@ pub enum GovernanceLogEntryType {
     // A `KEY-` entry rotating the governance signing key; its `data` is a
     // `govlog::KeyRotation`.
     KeyRotation,
+    // A `REC-` entry: the Steward's record of an operational act — a key
+    // ceremony, a restore, the narrative of a compromise. It decides
+    // nothing and no verifier reads it; it is redactable because it names
+    // people. Its `data` is a `govlog::StewardRecord`. (0.29)
+    StewardRecord,
 }
 
 /// What an amendment does to the entry it names

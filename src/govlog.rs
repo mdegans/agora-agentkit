@@ -39,6 +39,12 @@
 //!   ([`ROOT_KEYS`]) is, so holding the online key is never enough to
 //!   move the chain. See [`verify_chain`].
 //!
+//! A third series is reserved but read by no verifier: a [`StewardRecord`]
+//! (`REC-`) says what was done — a key ceremony, a restore — and decides
+//! nothing. It exists because a rotation can never be redacted and so
+//! carries keys and hashes only; the narrative that names people goes in an
+//! entry that can be.
+//!
 //! The envelope itself is unchanged by any of this: `ENVELOPE_VERSION` is
 //! still 1 and what it does and does not cover is exactly as above.
 
@@ -56,6 +62,11 @@ mod texts;
 pub use texts::{
     AmendmentText, AmendmentTextStatus, AmendmentTexts, CommittedText,
     TextCommitment, TextStatus, WITHHELD_TEXT,
+};
+
+mod record;
+pub use record::{
+    RecordAttachment, RecordParticipant, STEWARD_RECORD_VERSION, StewardRecord,
 };
 
 mod root;
@@ -1735,24 +1746,43 @@ where
         .map_err(serde::de::Error::custom)
 }
 
+/// The id series reserved for one entry type, if it has one. The other
+/// types share `GOV-` and `APP-`, which the verifier does not tell apart.
+fn reserved_prefix(
+    entry_type: GovernanceLogEntryType,
+) -> Option<GovernanceLogPrefix> {
+    match entry_type {
+        GovernanceLogEntryType::Amendment => Some(GovernanceLogPrefix::Amd),
+        GovernanceLogEntryType::KeyRotation => Some(GovernanceLogPrefix::Key),
+        GovernanceLogEntryType::StewardRecord => Some(GovernanceLogPrefix::Rec),
+        GovernanceLogEntryType::CouncilDecision
+        | GovernanceLogEntryType::AppealsCourtDecision
+        | GovernanceLogEntryType::EmergencyAction
+        | GovernanceLogEntryType::PolicyChange
+        | GovernanceLogEntryType::StewardVeto => None,
+    }
+}
+
+/// The entry type a reserved id series belongs to, if it is reserved
+fn reserved_for(prefix: GovernanceLogPrefix) -> Option<GovernanceLogEntryType> {
+    match prefix {
+        GovernanceLogPrefix::Amd => Some(GovernanceLogEntryType::Amendment),
+        GovernanceLogPrefix::Key => Some(GovernanceLogEntryType::KeyRotation),
+        GovernanceLogPrefix::Rec => Some(GovernanceLogEntryType::StewardRecord),
+        GovernanceLogPrefix::Gov | GovernanceLogPrefix::App => None,
+    }
+}
+
 /// The id series an entry type must use, and must not
 fn prefix_problem(link: &GovernanceChainLink) -> Option<String> {
     let prefix = link.id.prefix();
-    let reserved =
-        matches!(prefix, GovernanceLogPrefix::Amd | GovernanceLogPrefix::Key);
-    let expected = match link.entry_type {
-        GovernanceLogEntryType::Amendment => Some(GovernanceLogPrefix::Amd),
-        GovernanceLogEntryType::KeyRotation => Some(GovernanceLogPrefix::Key),
-        _ => None,
-    };
-    match expected {
-        Some(want) if prefix != want => Some(format!(
+    match (reserved_prefix(link.entry_type), reserved_for(prefix)) {
+        (Some(want), _) if prefix != want => Some(format!(
             "the id of a {} entry must be in the {want}- series, not {}",
             link.entry_type, link.id
         )),
-        None if reserved => Some(format!(
-            "{prefix}- ids are reserved for amendment and key_rotation \
-             entries, but {} is a {}",
+        (None, Some(owner)) => Some(format!(
+            "{prefix}- ids are reserved for {owner} entries, but {} is a {}",
             link.id, link.entry_type
         )),
         _ => None,
@@ -1982,8 +2012,8 @@ impl KeyWalk {
 /// never move the chain.
 ///
 /// The rules the report records that no type states on its own: an id
-/// belongs to its entry type's series and appears once (`AMD-` and `KEY-`
-/// are reserved for the two types that carry `data`); only an entry whose
+/// belongs to its entry type's series and appears once (`AMD-`, `KEY-`
+/// and `REC-` are each reserved for one type); only an entry whose
 /// own signature and linkage verify amends anything or moves the key, so
 /// a forged entry cannot also describe the chain; and an amendment inside
 /// a repudiated window has no effect unless a [`AmendmentKind::Reattested`]
@@ -2285,6 +2315,10 @@ mod tests {
 
     pub(super) fn key_id(n: u32) -> GovernanceLogId {
         format!("KEY-2026-{n:04}").parse().unwrap()
+    }
+
+    pub(super) fn rec(n: u32) -> GovernanceLogId {
+        format!("REC-2026-{n:04}").parse().unwrap()
     }
 
     pub(super) fn at(secs: i64) -> DateTime<Utc> {
