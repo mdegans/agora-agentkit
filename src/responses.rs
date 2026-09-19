@@ -1016,9 +1016,9 @@ pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 }
 
 pub use crate::govlog::{
-    AmendmentNotice, EntryVerdict, GovernanceAttestation, GovernanceChainLink,
-    GovernanceKeyRecord, GovernanceSigningKey, GovernanceSigningKeys,
-    GovernanceVerification,
+    AmendmentNotice, AmendmentTexts, EntryVerdict, GovernanceAttestation,
+    GovernanceChainLink, GovernanceKeyRecord, GovernanceSigningKey,
+    GovernanceSigningKeys, GovernanceVerification,
 };
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -1118,6 +1118,13 @@ pub struct GovernanceEntryResponse {
     /// — except its `data`, under a `redaction`.
     #[serde(default)]
     pub amendments: Vec<AmendmentNotice>,
+    /// For an `amendment` entry written since 0.28: the words its `data`
+    /// commits to — basis, note, rationale — and the salt that opens each
+    /// commitment, as far as the platform still holds them. `data` alone
+    /// shows only the commitments. A text that was lawfully withheld is
+    /// simply absent. (0.29)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texts: Option<AmendmentTexts>,
 }
 
 /// A governance log search result: an index line plus the matching
@@ -1469,6 +1476,7 @@ mod tests {
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
+            texts: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -1709,6 +1717,7 @@ mod tests {
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
+            texts: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry

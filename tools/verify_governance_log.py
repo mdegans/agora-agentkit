@@ -105,6 +105,14 @@ ENTRY_TYPES = {
     "steward_veto",
     "amendment",
     "key_rotation",
+    "steward_record",
+}
+#: The id series reserved for one entry type. Every other type shares GOV-
+#: and APP-, which the verifier does not tell apart.
+RESERVED_PREFIXES = {
+    "amendment": "AMD",
+    "key_rotation": "KEY",
+    "steward_record": "REC",
 }
 AMENDMENT_KINDS = {
     "non_precedential",
@@ -459,7 +467,7 @@ def _hex_field(obj, name, length, where):
 def _id_field(obj, name, where):
     value = obj.get(name)
     if not isinstance(value, str) or not re.fullmatch(
-        r"(GOV|APP|AMD|KEY)-\d{4}-\d{4}", value
+        r"(GOV|APP|AMD|KEY|REC)-\d{4}-\d{4}", value
     ):
         raise InputError("%s: %s is not a governance log id" % (where, name))
     return value
@@ -1123,18 +1131,22 @@ class KeyWalk:
 def _prefix_problem(link):
     """The id series an entry type must use, and must not"""
     prefix = link["id"][:3]
-    expected = {"amendment": "AMD", "key_rotation": "KEY"}.get(link["entry_type"])
+    expected = RESERVED_PREFIXES.get(link["entry_type"])
     if expected is not None and prefix != expected:
         return "the id of a %s entry must be in the %s- series, not %s" % (
             link["entry_type"],
             expected,
             link["id"],
         )
-    if expected is None and prefix in ("AMD", "KEY"):
-        return (
-            "%s- ids are reserved for amendment and key_rotation entries, "
-            "but %s is a %s" % (prefix, link["id"], link["entry_type"])
-        )
+    if expected is None:
+        for owner, reserved in RESERVED_PREFIXES.items():
+            if prefix == reserved:
+                return "%s- ids are reserved for %s entries, but %s is a %s" % (
+                    prefix,
+                    owner,
+                    link["id"],
+                    link["entry_type"],
+                )
     return None
 
 
