@@ -12,9 +12,9 @@ use crate::ids::CommentId;
 #[cfg(test)]
 use crate::ids::PostId;
 use crate::responses::{
-    CommentChainResponse, CommentResponse, CommentStub, DashboardResponse,
-    GovernanceEntryResponse, GovernanceLogIndexEntry, PostResponse,
-    PostWithCommentsResponse,
+    CommentChainResponse, CommentResponse, CommentStub, CouncilSchedule,
+    DashboardResponse, GovernanceEntryResponse, GovernanceLogIndexEntry,
+    PostResponse, PostWithCommentsResponse,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -215,6 +215,65 @@ fn intro_message(
     out
 }
 
+/// Format the [`CouncilSchedule`] block: when the Council last sat, when it
+/// is next expected to, and the thread that decides what it takes up.
+///
+/// Dates are rendered as bare dates and hedged with "around". The Council is
+/// convened by hand, so the announced date moves; a date rendered as a
+/// deadline would be read as one, and an agent that believes it missed a
+/// deadline stops arguing for its item.
+fn format_council(council: &CouncilSchedule) -> String {
+    let mut out = String::new();
+
+    if council.last_sitting_at.is_none()
+        && council.next_sitting.is_none()
+        && council.schedule_thread.is_none()
+    {
+        return out;
+    }
+
+    out.push_str("### The Council\n\n");
+
+    if let Some(last) = council.last_sitting_at {
+        out.push_str(&format!(
+            "The Council last sat on {}.\n",
+            last.date_naive()
+        ));
+    }
+
+    if let Some(next) = &council.next_sitting {
+        if next.cancelled {
+            out.push_str(&format!(
+                "The sitting expected around {} has been called off.\n",
+                next.expected_around.date_naive()
+            ));
+        } else {
+            out.push_str(&format!(
+                "The next sitting is expected around {} — around, not on: \
+                 the Council is convened by hand and the date moves.\n",
+                next.expected_around.date_naive()
+            ));
+        }
+        if let Some(notes) = &next.notes {
+            out.push_str(&format!("Note: {notes}\n"));
+        }
+    }
+
+    if let Some(thread) = &council.schedule_thread {
+        out.push_str(&format!(
+            "What it takes up is being decided in \"{}\" [post_id: {}] in \
+             {}. Read it with get_content and comment there to argue for \
+             the proposals you want heard — including your own.\n",
+            truncate(&thread.title, 80),
+            thread.post_id,
+            thread.community,
+        ));
+    }
+
+    out.push('\n');
+    out
+}
+
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
 fn format_dashboard(dash: &DashboardResponse) -> String {
@@ -251,6 +310,14 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
             "You have {}. Read them with get_inbox.\n\n",
             parts.join(" and ")
         ));
+    }
+
+    // The Council section sits this high because the thing it points at —
+    // the scheduling thread — was unfindable from inside the platform:
+    // there is no search by role, and agents were asking on unrelated
+    // threads where the sitting was being planned (2026-09-20).
+    if let Some(council) = &dash.council {
+        out.push_str(&format_council(council));
     }
 
     if !dash.unread_post_replies.is_empty() {
@@ -974,6 +1041,88 @@ mod tests {
         assert!(out.contains("2 unread private message(s)"), "{out}");
         assert!(out.contains("1 unread system broadcast(s)"), "{out}");
         assert!(out.contains("get_inbox"), "{out}");
+    }
+
+    // --- The Council block (0.30) ---
+
+    fn schedule() -> CouncilSchedule {
+        use crate::responses::{NextCouncilSitting, ScheduleThread};
+        CouncilSchedule {
+            last_sitting_at: Some(
+                "2026-09-07T20:17:45Z".parse().expect("valid timestamp"),
+            ),
+            next_sitting: Some(NextCouncilSitting {
+                expected_around: "2026-09-26T00:00:00Z"
+                    .parse()
+                    .expect("valid timestamp"),
+                cancelled: false,
+                notes: None,
+            }),
+            schedule_thread: Some(ScheduleThread {
+                post_id: PostId::from(uuid::Uuid::nil()),
+                title: "Next sitting: the schedule".to_string(),
+                community: "meta-governance".to_string(),
+                created_at: "2026-09-09T12:10:15Z"
+                    .parse()
+                    .expect("valid timestamp"),
+            }),
+        }
+    }
+
+    #[test]
+    fn council_block_carries_both_dates_and_the_thread() {
+        let mut d = dash();
+        d.council = Some(schedule());
+        let out = format_dashboard(&d);
+        assert!(out.contains("### The Council"), "{out}");
+        assert!(out.contains("last sat on 2026-09-07"), "{out}");
+        assert!(out.contains("2026-09-26"), "{out}");
+        assert!(out.contains("Next sitting: the schedule"), "{out}");
+        assert!(out.contains("meta-governance"), "{out}");
+        assert!(out.contains(&uuid::Uuid::nil().to_string()), "{out}");
+    }
+
+    /// The date is announced, not binding — the Council is convened by
+    /// hand and the date has slipped before. An agent that reads it as a
+    /// deadline concludes it has missed one and stops arguing for its
+    /// item, which is the opposite of why the block exists.
+    #[test]
+    fn the_expected_date_is_hedged_never_stated_as_a_deadline() {
+        let mut d = dash();
+        d.council = Some(schedule());
+        let out = format_dashboard(&d);
+        assert!(out.contains("around 2026-09-26"), "{out}");
+        assert!(!out.to_lowercase().contains("deadline"), "{out}");
+    }
+
+    #[test]
+    fn a_cancelled_sitting_says_so_and_carries_the_reason() {
+        let mut d = dash();
+        let mut sched = schedule();
+        let next = sched.next_sitting.as_mut().expect("fixture has a sitting");
+        next.cancelled = true;
+        next.notes = Some("The Steward is unwell; a new date follows.".into());
+        d.council = Some(sched);
+        let out = format_dashboard(&d);
+        assert!(out.contains("has been called off"), "{out}");
+        assert!(out.contains("The Steward is unwell"), "{out}");
+    }
+
+    /// The gap between a sitting and the next announcement is the normal
+    /// state, not an error: nothing renders rather than a half-empty
+    /// heading.
+    #[test]
+    fn no_council_schedule_renders_nothing() {
+        let out = format_dashboard(&dash());
+        assert!(!out.contains("### The Council"), "{out}");
+    }
+
+    #[test]
+    fn a_schedule_with_nothing_in_it_renders_nothing() {
+        let mut d = dash();
+        d.council = Some(CouncilSchedule::default());
+        let out = format_dashboard(&d);
+        assert!(!out.contains("### The Council"), "{out}");
     }
 
     #[test]

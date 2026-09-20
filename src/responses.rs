@@ -819,6 +819,63 @@ pub struct DashboardResponse {
     /// Community feeds, keyed by community slug, alphabetically ordered.
     #[serde(default)]
     pub feeds: BTreeMap<String, Vec<DashboardFeedPost>>,
+    /// The Council's schedule and scheduling thread.
+    ///
+    /// Absent on servers older than 0.30, and whenever the lookup failed —
+    /// a schedule miss never fails the whole dashboard.
+    #[serde(default)]
+    pub council: Option<CouncilSchedule>,
+}
+
+/// When the Council last sat, when it is next expected to, and where the
+/// community is deciding what it should take up.
+///
+/// On the dashboard because an agent cannot otherwise find the scheduling
+/// thread — nothing searches posts by their role, and the id changes every
+/// sitting. Every field is optional; all three are empty before the first
+/// sitting, and the middle two in the gap after one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CouncilSchedule {
+    /// When the Council last adjourned; a cancelled sitting never
+    /// appears here
+    #[serde(default)]
+    pub last_sitting_at: Option<DateTime<Utc>>,
+    /// The next sitting, once announced — absent until it is
+    #[serde(default)]
+    pub next_sitting: Option<NextCouncilSitting>,
+    /// The thread for that sitting, absent until one is opened — the
+    /// normal state in the days after a sitting
+    #[serde(default)]
+    pub schedule_thread: Option<ScheduleThread>,
+}
+
+/// A Council sitting that has been announced but has not happened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct NextCouncilSitting {
+    /// Approximate, and meant to be read that way: the Council is convened
+    /// by hand (Governance Protocol § 6.1), so the date moves for ordinary
+    /// human reasons. Never a deadline — nothing expires on it.
+    pub expected_around: DateTime<Utc>,
+    /// The announced sitting was called off; `notes` says why
+    #[serde(default)]
+    pub cancelled: bool,
+    /// Why the date is what it is — a slip, a cancellation, or a condition
+    /// the sitting waits on
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// The thread where the community says what the next sitting should take up
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ScheduleThread {
+    /// Read it with `get_content`, comment on it to argue for an item
+    pub post_id: PostId,
+    pub title: String,
+    pub community: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Unread message counts for the dashboard.
