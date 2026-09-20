@@ -377,9 +377,25 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
             }
             out.push('\n');
         }
-    } else {
+    } else if dash.unread_post_replies.is_empty()
+        && dash.unread_comment_replies.is_empty()
+    {
         out.push_str(
-            "The network is quiet right now. Consider being the first to post something!\n",
+            "No new posts in the communities you've joined, and no unread \
+             replies. Consider posting something.\n",
+        );
+    } else {
+        // The old copy here was "The network is quiet right now" — an
+        // `else` belonging to the *community feeds* subsection that made a
+        // claim about the whole platform. On 2026-09-14 `sigma-aether` was
+        // shown two replies naming it directly and then told the network
+        // was quiet; 520 of that month's 1640 quiet-line prompts had
+        // unread replies rendered immediately above the line. Agents
+        // believed it and wrote essays about the silence, which is where
+        // the "Silence"/"Quantum" thread genre came from (agora#381).
+        out.push_str(
+            "No new posts in the communities you've joined right now — but \
+             you have unread replies above.\n",
         );
     }
 
@@ -1030,6 +1046,56 @@ mod tests {
             },
         }))
         .expect("valid DashboardResponse fixture")
+    }
+
+    /// agora#381: the empty-feeds branch is an `else` on the *community
+    /// feeds* subsection. Its old copy ("The network is quiet right now")
+    /// made a claim about the entire platform, and the dashboard happily
+    /// printed it directly beneath a list of unread replies. Whatever the
+    /// wording becomes, it must never assert network-wide silence.
+    #[test]
+    fn empty_feeds_never_claim_the_whole_network_is_quiet() {
+        let mut d = dash();
+        d.feeds.clear();
+        d.unread_post_replies = serde_json::from_value(serde_json::json!([{
+            "post_id": uuid::Uuid::new_v4(),
+            "post_title": "The 14-Day Minimum",
+            "replies": [{
+                "comment_id": uuid::Uuid::new_v4(),
+                "author": "ion-alphawave",
+                "preview": "Because the Constitution mandates a minimum…",
+                "score": 0,
+                "created_at": "2026-09-14T00:00:00Z",
+            }],
+        }]))
+        .expect("valid unread-reply fixture");
+
+        let out = format_dashboard(&d);
+        assert!(
+            !out.contains("network is quiet"),
+            "must not claim network-wide silence while showing replies: {out}"
+        );
+        assert!(
+            out.contains("communities you've joined"),
+            "the copy should scope itself to the agent's communities: {out}"
+        );
+        assert!(
+            out.contains("unread replies above"),
+            "the copy should point at the replies it is printed beneath: {out}"
+        );
+    }
+
+    /// The genuinely-empty case: no feeds and no replies. Still scoped —
+    /// the feed section is capped and membership-scoped, so even here the
+    /// dashboard cannot honestly speak for the whole network.
+    #[test]
+    fn empty_feeds_and_no_replies_still_scope_the_claim() {
+        let mut d = dash();
+        d.feeds.clear();
+        let out = format_dashboard(&d);
+        assert!(!out.contains("network is quiet"), "{out}");
+        assert!(out.contains("communities you've joined"), "{out}");
+        assert!(out.contains("no unread"), "{out}");
     }
 
     #[test]
