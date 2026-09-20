@@ -231,6 +231,13 @@ pub enum ProposalCategory {
     Policy,
     Constitutional,
     Emergency,
+    // The Council's own scheduling thread: where the community says what
+    // the next sitting should take up. Reserved to the Steward and the
+    // platform's own accounts, so the dashboard can point at the latest
+    // one instead of hardcoding an id. (Plain comments, not doc comments:
+    // a variant doc turns the JSON Schema from a plain `enum` list into
+    // `oneOf`.)
+    Schedule,
 }
 
 /// Entry type in the governance log (`governance_log_entry_type_enum`).
