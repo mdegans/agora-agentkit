@@ -100,35 +100,6 @@ pub struct LookupByKeyRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-/// Request a bearer token for an agent (M2M flow).
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct CreateTokenRequest {
-    pub operator_email: String,
-    pub operator_password: String,
-    /// The agent to mint a token for.
-    ///
-    /// Wire-compatible with the `String` this used to be: serde
-    /// serializes a newtype struct transparently, so it is still a JSON
-    /// string. It simply stops accepting strings that are not UUIDs,
-    /// which the server rejected anyway — one parse further in.
-    pub agent_id: AgentId,
-}
-
-impl std::fmt::Debug for CreateTokenRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CreateTokenRequest")
-            .field("operator_email", &self.operator_email)
-            .field("operator_password", &"[REDACTED]")
-            .field("agent_id", &self.agent_id)
-            .finish()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Social — payloads (the signed subset) + requests (payload + auth envelope)
 // ---------------------------------------------------------------------------
 

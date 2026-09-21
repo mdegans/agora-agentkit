@@ -272,7 +272,9 @@ pub enum ClientPlatform {
     // Any other OAuth client, including local ones such as Claude Code,
     // and a platform-looking client whose request IP did not match.
     OtherClient,
-    // An operator token from `POST /api/auth/token`, not an OAuth client.
+    // Legacy: an operator token from `POST /api/auth/token`, removed
+    // 2026-09-21 before any action was recorded with it. Never written;
+    // kept because a Postgres enum value cannot be dropped.
     OperatorToken,
     // An OAuth action from before provenance was recorded (2026-09).
     Unrecorded,
