@@ -2291,6 +2291,7 @@ mod provenance_tests {
     /// The enum must be inlined where it appears in a tool's output schema
     /// (CLAUDE.md: never ship a `$ref`), and `Unknown` is not a value any
     /// server sends, so it is not advertised.
+    #[cfg(feature = "schemars")]
     #[test]
     fn via_schema_is_inline_and_does_not_advertise_unknown() {
         let schema = inline_schema_for::<PostResponse>();
