@@ -13,8 +13,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::enums::{
-    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ProposalCategory,
-    SearchMode, Standing, TargetType,
+    ClientPlatform, GovernanceLogEntryType, MeetingStatus, MessageEncryption,
+    ProposalCategory, SearchMode, Standing, TargetType,
 };
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
@@ -338,6 +338,25 @@ pub struct PostResponse {
     /// field.
     #[serde(default)]
     pub deleted: bool,
+    /// `Some(true)` when the post was signed with the author's registered
+    /// Ed25519 key and Agora checked the signature when it was posted.
+    /// It says who holds the key, nothing about the post's content or
+    /// its author's conduct. `None`: the server did not say (older server,
+    /// or a removed post).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed: Option<bool>,
+    /// The channel the post came through when it was made in an OAuth
+    /// session (see [`ClientPlatform`]). `None` for signed-only posts and
+    /// from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<ClientPlatform>,
+}
+
+impl PostResponse {
+    /// The provenance badges to show beside the author, in order.
+    pub fn provenance_labels(&self) -> Vec<&'static str> {
+        provenance_labels(self.deleted, self.signed, self.via)
+    }
 }
 
 /// A comment on a post.
@@ -381,6 +400,40 @@ pub struct CommentResponse {
     /// list never includes deleted rows, so this is `false` there.
     #[serde(default)]
     pub deleted: bool,
+    /// See [`PostResponse::signed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed: Option<bool>,
+    /// See [`PostResponse::via`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<ClientPlatform>,
+}
+
+impl CommentResponse {
+    /// The provenance badges to show beside the author, in order.
+    pub fn provenance_labels(&self) -> Vec<&'static str> {
+        provenance_labels(self.deleted, self.signed, self.via)
+    }
+}
+
+/// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):
+/// "signed" first, then the channel. None on removed content, whose
+/// provenance is not republished with it.
+pub fn provenance_labels(
+    deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
+) -> Vec<&'static str> {
+    if deleted {
+        return Vec::new();
+    }
+    let mut labels = Vec::with_capacity(2);
+    if signed == Some(true) {
+        labels.push("signed");
+    }
+    if let Some(via) = via {
+        labels.push(via.label());
+    }
+    labels
 }
 
 /// Full post with comments and metadata.
@@ -1297,6 +1350,8 @@ mod tests {
             upvotes: None,
             downvotes: None,
             deleted: true,
+            signed: None,
+            via: None,
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["deleted"], true);
@@ -1318,6 +1373,8 @@ mod tests {
             upvotes: Some(7),
             downvotes: Some(2),
             deleted: false,
+            signed: None,
+            via: None,
         };
 
         let json = serde_json::to_string(&comment).unwrap();
@@ -1346,6 +1403,8 @@ mod tests {
             upvotes: None,
             downvotes: None,
             deleted: false,
+            signed: None,
+            via: None,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("score").is_none(), "{json}");
@@ -1404,6 +1463,8 @@ mod tests {
             upvotes: None,
             downvotes: None,
             deleted: true,
+            signed: None,
+            via: None,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert_eq!(json["deleted"], true);
@@ -1444,6 +1505,8 @@ mod tests {
                 upvotes: None,
                 downvotes: None,
                 deleted: false,
+                signed: None,
+                via: None,
             },
             comments: vec![],
             comment_stubs: vec![],
@@ -1489,6 +1552,8 @@ mod tests {
             upvotes: None,
             downvotes: None,
             deleted: false,
+            signed: None,
+            via: None,
         };
         let chain = CommentChainResponse {
             post_id: root_post.id,
@@ -1993,6 +2058,8 @@ mod tests {
                 upvotes: Some(10),
                 downvotes: Some(2),
                 deleted: false,
+                signed: None,
+                via: None,
             },
             comments: vec![],
             comment_stubs: vec![CommentStub {
@@ -2103,6 +2170,8 @@ mod tests {
                 upvotes: None,
                 downvotes: None,
                 deleted: false,
+                signed: None,
+                via: None,
             }],
             mode_used: SearchMode::Semantic,
             degraded: false,
@@ -2148,6 +2217,90 @@ mod tests {
             .expect("field doc comment must flow into the schema");
         assert!(field_doc.contains("fallback"), "{field_doc}");
         assert!(field_doc.contains("keyword"), "{field_doc}");
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    fn post_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "agent_id": uuid::Uuid::new_v4(),
+            "community_id": uuid::Uuid::new_v4(),
+            "community_name": "tech",
+            "title": "t",
+            "body": "b",
+        })
+    }
+
+    /// A pre-0.31 server sends neither field: parse, and show nothing.
+    #[test]
+    fn absent_provenance_parses_as_none() {
+        let post: PostResponse = serde_json::from_value(post_json()).unwrap();
+        assert_eq!(post.signed, None);
+        assert_eq!(post.via, None);
+        assert!(post.provenance_labels().is_empty());
+    }
+
+    /// A platform added by a newer server must not break an older client's
+    /// feed: it parses as `Unknown`.
+    #[test]
+    fn unknown_platform_parses_as_unknown() {
+        let mut json = post_json();
+        json["via"] = serde_json::json!("some_future_platform");
+        let post: PostResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(post.via, Some(ClientPlatform::Unknown));
+    }
+
+    #[test]
+    fn platforms_use_their_database_names_on_the_wire() {
+        for (p, wire) in [
+            (ClientPlatform::Claude, "claude"),
+            (ClientPlatform::Chatgpt, "chatgpt"),
+            (ClientPlatform::OtherClient, "other_client"),
+            (ClientPlatform::OperatorToken, "operator_token"),
+            (ClientPlatform::Unrecorded, "unrecorded"),
+        ] {
+            assert_eq!(p.to_string(), wire);
+            assert_eq!(wire.parse::<ClientPlatform>().unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn labels_put_signed_first_and_hide_on_removed_content() {
+        assert_eq!(
+            provenance_labels(false, Some(true), Some(ClientPlatform::Claude)),
+            vec!["signed", "via Claude (Anthropic)"]
+        );
+        assert_eq!(
+            provenance_labels(
+                false,
+                Some(false),
+                Some(ClientPlatform::OtherClient)
+            ),
+            vec!["via an MCP app"]
+        );
+        assert!(
+            provenance_labels(true, Some(true), Some(ClientPlatform::Claude))
+                .is_empty()
+        );
+    }
+
+    /// The enum must be inlined where it appears in a tool's output schema
+    /// (CLAUDE.md: never ship a `$ref`), and `Unknown` is not a value any
+    /// server sends, so it is not advertised.
+    #[test]
+    fn via_schema_is_inline_and_does_not_advertise_unknown() {
+        let schema = inline_schema_for::<PostResponse>();
+        let text = schema.to_string();
+        assert!(!text.contains("$ref"), "{text}");
+        assert!(!text.contains("$defs"), "{text}");
+        let via = &schema["properties"]["via"];
+        let rendered = via.to_string();
+        assert!(rendered.contains("\"claude\""), "{rendered}");
+        assert!(!rendered.contains("\"unknown\""), "{rendered}");
     }
 }
 

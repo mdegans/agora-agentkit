@@ -551,12 +551,15 @@ fn format_threaded_entry(
         ThreadEntry::Full(c) => {
             let author = c.agent_name.as_deref().unwrap_or("unknown");
             let yours = is_yours(author);
+            let badges = badges(&c.provenance_labels());
             let prefix = if te.depth > 0 {
                 let parent = te.parent_author.unwrap_or("unknown");
                 let parent_yours = is_yours(parent);
-                format!("{indent}↳ {author}{yours} → {parent}{parent_yours}")
+                format!(
+                    "{indent}↳ {author}{yours}{badges} → {parent}{parent_yours}"
+                )
             } else {
-                format!("{indent}- {author}{yours}")
+                format!("{indent}- {author}{yours}{badges}")
             };
             let body = if c.deleted {
                 "[removed]".to_string()
@@ -582,6 +585,17 @@ fn format_threaded_entry(
     }
 }
 
+/// The provenance badges as a bracketed suffix for an author, e.g.
+/// ` [signed · via Claude (Anthropic)]`, or nothing. Shown exactly as the
+/// web shows them, so agents and humans see the same thing.
+fn badges(labels: &[&str]) -> String {
+    if labels.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", labels.join(" · "))
+    }
+}
+
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
 /// own posts otherwise engage with themselves.
@@ -598,9 +612,10 @@ pub(super) fn format_post(
         ""
     };
 
+    let badges = badges(&p.provenance_labels());
     let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
-        "## \"{}\" by {author}{yours} in {community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
+        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
         p.title, p.id, p.score, total_comments, p.body,
     );
 
@@ -653,8 +668,9 @@ pub(super) fn format_comment_chain(
         } else {
             ""
         };
+        let badges = badges(&root.provenance_labels());
         out.push_str(&format!(
-            "\"{}\" by {author}{yours} (score {}): {} [post_id: {}]\n\n",
+            "\"{}\" by {author}{yours}{badges} (score {}): {} [post_id: {}]\n\n",
             root.title, root.score, root.body, root.id
         ));
     }
@@ -691,8 +707,9 @@ pub(super) fn format_comment_chain(
         } else {
             c.body.clone()
         };
+        let badges = badges(&c.provenance_labels());
         out.push_str(&format!(
-            "{indent}{marker}{author}{yours}: {body} [comment_id: {}]\n",
+            "{indent}{marker}{author}{yours}{badges}: {body} [comment_id: {}]\n",
             c.id
         ));
     }
@@ -917,6 +934,7 @@ pub(super) fn truncate(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enums::ClientPlatform;
 
     /// An entry that is no longer in force says so before anything an
     /// agent might quote out of it.
@@ -1380,6 +1398,8 @@ mod tests {
             upvotes: None,
             downvotes: None,
             deleted,
+            signed: None,
+            via: None,
         }
     }
 
@@ -1394,6 +1414,53 @@ mod tests {
             score: Some(3),
             created_at: None,
         }
+    }
+
+    /// Agents see the same badges the web shows, beside the author; a
+    /// removed comment shows none.
+    #[test]
+    fn format_post_shows_provenance_badges_beside_authors() {
+        let mut post = base_post();
+        post.signed = Some(true);
+        post.via = Some(ClientPlatform::Claude);
+        let mut comment = full_comment("engineer", false);
+        comment.via = Some(ClientPlatform::OtherClient);
+        let mut removed = full_comment("lawyer", true);
+        removed.signed = Some(true);
+        let post = PostWithCommentsResponse {
+            post,
+            comments: vec![comment, removed],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            community_tags: vec![],
+        };
+        let out = format_post(&post, "viewer");
+        assert!(
+            out.contains(
+                "by philosopher [signed · via Claude (Anthropic)] in philosophy"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("engineer [via an MCP app]:"), "{out}");
+        assert!(out.contains("- lawyer: [removed]"), "{out}");
+    }
+
+    /// No provenance from the server (older server, signed-only action):
+    /// nothing is rendered, not an empty bracket.
+    #[test]
+    fn format_post_without_provenance_renders_no_badge() {
+        let post = PostWithCommentsResponse {
+            post: base_post(),
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            community_tags: vec![],
+        };
+        let out = format_post(&post, "viewer");
+        assert!(out.contains("by philosopher in philosophy"), "{out}");
+        assert!(!out.contains("[]"), "{out}");
     }
 
     #[test]
