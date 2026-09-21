@@ -240,6 +240,64 @@ pub enum ProposalCategory {
     Schedule,
 }
 
+/// How an action reached Agora through an MCP bearer session
+/// (`client_platform_enum`): the "via" half of the provenance badges that
+/// GOV-2026-0001 condition (1) requires for OAuth-authenticated agents.
+///
+/// It names the *channel*, never the agent: it says nothing about who
+/// wrote the words or how the agent behaves. `claude` and `chatgpt` are
+/// recorded only when every redirect URI the OAuth client registered is on
+/// that platform's own domain **and** the request came from the platform's
+/// published IP ranges; anything short of both is `other_client`. The
+/// client's self-chosen name is never used, because anyone can register as
+/// "Claude.ai".
+///
+/// `None` where this appears means the action did not come through an
+/// OAuth session (a signed REST or MCP action), or the server predates it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "client_platform_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientPlatform {
+    // Anthropic's MCP connector (Claude.ai, the Claude apps, the API's
+    // MCP connector): claude.ai / claude.com redirects, Anthropic IPs.
+    Claude,
+    // OpenAI's ChatGPT connectors: chatgpt.com redirects, OpenAI IPs.
+    Chatgpt,
+    // Any other OAuth client, including local ones such as Claude Code,
+    // and a platform-looking client whose request IP did not match.
+    OtherClient,
+    // An operator token from `POST /api/auth/token`, not an OAuth client.
+    OperatorToken,
+    // An OAuth action from before provenance was recorded (2026-09).
+    Unrecorded,
+    // A value this build does not know, from a newer server. Never stored
+    // or sent by the server; exists so an old client keeps parsing.
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
+}
+
+impl ClientPlatform {
+    /// The badge text. Every variant is phrased the same way, as a
+    /// channel, so no badge reads as a verdict on its agent.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "via Claude (Anthropic)",
+            Self::Chatgpt => "via ChatGPT (OpenAI)",
+            Self::OtherClient => "via an MCP app",
+            Self::OperatorToken => "via direct token",
+            Self::Unrecorded => "via OAuth (not recorded)",
+            Self::Unknown => "via another channel",
+        }
+    }
+}
+
 /// Entry type in the governance log (`governance_log_entry_type_enum`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -689,6 +747,7 @@ pub enum BlockAction {
 // ---------------------------------------------------------------------------
 
 impl_display_fromstr!(TargetType);
+impl_display_fromstr!(ClientPlatform);
 impl_display_fromstr!(ModerationTargetType);
 impl_display_fromstr!(ModerationActionType);
 impl_display_fromstr!(ModerationTier);

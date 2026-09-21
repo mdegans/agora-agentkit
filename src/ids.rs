@@ -653,6 +653,128 @@ impl schemars::JsonSchema for GovernanceLogId {
     }
 }
 
+/// An OAuth client's public identifier: the `client_id` issued at dynamic
+/// client registration (RFC 7591) and carried on every authorization code,
+/// access token and refresh token the client obtains.
+///
+/// A string, not a UUID: registered clients get a UUID-shaped string, but
+/// the operator-token path (`POST /api/auth/token`) records the fixed
+/// sentinel [`OAuthClientId::OPERATOR_TOKEN`] (`"m2m"`), which is not a
+/// client at all. Parsing rejects the empty string, anything over 255
+/// bytes, and control characters; it does not check that the client exists.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "String")]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct OAuthClientId(String);
+
+/// A string that cannot be an [`OAuthClientId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not an OAuth client id: {0:?}")]
+pub struct OAuthClientIdError(pub String);
+
+impl OAuthClientId {
+    /// The `client_id` recorded on operator (machine-to-machine) tokens,
+    /// which are issued from the operator's own credentials rather than
+    /// through an OAuth client.
+    pub const OPERATOR_TOKEN: &'static str = "m2m";
+
+    /// The operator-token sentinel as an id.
+    pub fn operator_token() -> Self {
+        Self(Self::OPERATOR_TOKEN.to_string())
+    }
+
+    /// `true` for the operator-token sentinel.
+    pub fn is_operator_token(&self) -> bool {
+        self.0 == Self::OPERATOR_TOKEN
+    }
+
+    /// A fresh id for a newly registered client.
+    pub fn generate() -> Self {
+        Self(Uuid::new_v4().to_string())
+    }
+
+    /// The id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume this id, yielding the inner `String`.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+
+    fn is_valid(s: &str) -> bool {
+        !s.is_empty() && s.len() <= 255 && !s.chars().any(char::is_control)
+    }
+}
+
+impl std::fmt::Display for OAuthClientId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for OAuthClientId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for OAuthClientId {
+    type Err = OAuthClientIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.to_string())
+    }
+}
+
+impl TryFrom<String> for OAuthClientId {
+    type Error = OAuthClientIdError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(OAuthClientIdError(s))
+        }
+    }
+}
+
+impl From<OAuthClientId> for String {
+    fn from(id: OAuthClientId) -> Self {
+        id.0
+    }
+}
+
+// Manual, inline JsonSchema for the same reason as every id newtype: a
+// derived schema would be a `$ref` into `$defs`.
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for OAuthClientId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("OAuthClientId")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::OAuthClientId"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "OAuth client_id issued at dynamic client registration.",
+        })
+    }
+}
+
 /// A platform governing document readable through `get_content`.
 ///
 /// The slugs are the wire form: `"constitution"` and `"protocol"`.
@@ -945,6 +1067,24 @@ impl schemars::JsonSchema for ContentRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_client_id_accepts_registered_ids_and_the_operator_sentinel() {
+        let id = OAuthClientId::generate();
+        assert_eq!(id.as_str().parse::<OAuthClientId>().unwrap(), id);
+        assert!(OAuthClientId::operator_token().is_operator_token());
+        assert!(!id.is_operator_token());
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(serde_json::from_str::<OAuthClientId>(&json).unwrap(), id);
+    }
+
+    #[test]
+    fn oauth_client_id_rejects_empty_oversized_and_control_characters() {
+        assert!("".parse::<OAuthClientId>().is_err());
+        assert!("a".repeat(256).parse::<OAuthClientId>().is_err());
+        assert!("abc\ndef".parse::<OAuthClientId>().is_err());
+        assert!(serde_json::from_str::<OAuthClientId>("\"\"").is_err());
+    }
 
     #[test]
     fn content_ref_parses_document_slugs() {
