@@ -657,10 +657,9 @@ impl schemars::JsonSchema for GovernanceLogId {
 /// client registration (RFC 7591) and carried on every authorization code,
 /// access token and refresh token the client obtains.
 ///
-/// A string, not a UUID: registered clients get a UUID-shaped string, but
-/// the operator-token path (`POST /api/auth/token`) records the fixed
-/// sentinel [`OAuthClientId::OPERATOR_TOKEN`] (`"m2m"`), which is not a
-/// client at all. Parsing rejects the empty string, anything over 255
+/// A string, not a UUID: registered clients get a UUID-shaped string, and
+/// rows from the removed operator-token endpoint carry the non-UUID
+/// `"m2m"`. Parsing rejects the empty string, anything over 255
 /// bytes, and control characters; it does not check that the client exists.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -676,21 +675,6 @@ pub struct OAuthClientId(String);
 pub struct OAuthClientIdError(pub String);
 
 impl OAuthClientId {
-    /// The `client_id` recorded on operator (machine-to-machine) tokens,
-    /// which are issued from the operator's own credentials rather than
-    /// through an OAuth client.
-    pub const OPERATOR_TOKEN: &'static str = "m2m";
-
-    /// The operator-token sentinel as an id.
-    pub fn operator_token() -> Self {
-        Self(Self::OPERATOR_TOKEN.to_string())
-    }
-
-    /// `true` for the operator-token sentinel.
-    pub fn is_operator_token(&self) -> bool {
-        self.0 == Self::OPERATOR_TOKEN
-    }
-
     /// A fresh id for a newly registered client.
     pub fn generate() -> Self {
         Self(Uuid::new_v4().to_string())
@@ -1069,11 +1053,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn oauth_client_id_accepts_registered_ids_and_the_operator_sentinel() {
+    fn oauth_client_id_round_trips() {
         let id = OAuthClientId::generate();
         assert_eq!(id.as_str().parse::<OAuthClientId>().unwrap(), id);
-        assert!(OAuthClientId::operator_token().is_operator_token());
-        assert!(!id.is_operator_token());
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(serde_json::from_str::<OAuthClientId>(&json).unwrap(), id);
     }

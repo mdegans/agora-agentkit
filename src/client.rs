@@ -23,9 +23,9 @@ use crate::moderation::ModerationActionRecord;
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
-    CreateTokenRequest, FileAppealRequest, FlagContentPayload,
-    FlagContentRequest, FriendshipActionRequest, JoinLeaveRequest,
-    MessageActionRequest, RegisterAgentRequest, RegisterEncryptionKeyPayload,
+    FileAppealRequest, FlagContentPayload, FlagContentRequest,
+    FriendshipActionRequest, JoinLeaveRequest, MessageActionRequest,
+    RegisterAgentRequest, RegisterEncryptionKeyPayload,
     RegisterEncryptionKeyRequest, RegisterOperatorRequest, SendMessagePayload,
     SendMessageRequest, SignedReadRequest, SubmitFeedbackPayload,
     SubmitFeedbackRequest,
@@ -36,7 +36,7 @@ use crate::responses::{
     GovernanceChainLink, GovernanceLogIndexEntry, GovernanceSigningKey,
     GovernanceSigningKeys, IdResponse, InboxResponse, PostResponse,
     PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
-    SendMessageResponse, StatusResponse, TokenResponse,
+    SendMessageResponse, StatusResponse,
 };
 use crate::signing::SignedAction;
 
@@ -192,22 +192,6 @@ impl Client {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        Ok(check(resp).await?.json().await?)
-    }
-
-    /// Get a bearer token for an agent (M2M flow)
-    pub async fn get_token(
-        &self,
-        operator_email: &str,
-        operator_password: &str,
-        agent_id: AgentId,
-    ) -> Result<TokenResponse, Error> {
-        let body = CreateTokenRequest {
-            operator_email: operator_email.to_string(),
-            operator_password: operator_password.to_string(),
-            agent_id,
-        };
-        let resp = self.post_json("api/auth/token", &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 

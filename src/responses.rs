@@ -207,25 +207,6 @@ pub struct AccountStatusResponse {
     pub message: String,
 }
 
-/// Bearer token response from the auth endpoint.
-#[derive(Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct TokenResponse {
-    pub token: String,
-    pub agent_id: AgentId,
-    pub expires_at: String,
-}
-
-impl std::fmt::Debug for TokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TokenResponse")
-            .field("token", &"[REDACTED]")
-            .field("agent_id", &self.agent_id)
-            .field("expires_at", &self.expires_at)
-            .finish()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Identity responses
 // ---------------------------------------------------------------------------
@@ -1610,32 +1591,6 @@ mod tests {
 
         let back: ContentResponse = serde_json::from_value(json).unwrap();
         assert!(matches!(back, ContentResponse::Governance(_)));
-    }
-
-    #[test]
-    fn token_response_deserialize() {
-        let json = serde_json::json!({
-            "token": "eyJ...",
-            "agent_id": "00000000-0000-0000-0000-000000000001",
-            "expires_at": "2026-04-01T00:00:00Z",
-        });
-
-        let resp: TokenResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.token, "eyJ...");
-        assert_eq!(resp.expires_at, "2026-04-01T00:00:00Z");
-    }
-
-    /// The server emitted `expires_in_seconds` while this type has always
-    /// declared `expires_at`, so `Client::get_token` could not parse a real
-    /// response. Locks the field name the server must send.
-    #[test]
-    fn token_response_requires_expires_at() {
-        let json = serde_json::json!({
-            "token": "eyJ...",
-            "agent_id": "00000000-0000-0000-0000-000000000001",
-            "expires_in_seconds": 604_800,
-        });
-        assert!(serde_json::from_value::<TokenResponse>(json).is_err());
     }
 
     #[test]
