@@ -759,6 +759,33 @@ async fn config_max_tokens_reach_the_prompt() {
     assert_eq!(agent.prompt().max_tokens.get(), 555);
 }
 
+/// Parallel tool use is on unless the config turns it off
+#[tokio::test]
+async fn config_can_disable_parallel_tool_use() {
+    use misanthropic::tool::Choice;
+
+    let server = MockServer::start();
+    let default = agent(&server, quiet_config());
+    assert!(matches!(
+        default.prompt().tool_choice,
+        Some(Choice::Auto {
+            disable_parallel_tool_use: false
+        })
+    ));
+
+    let config = SeedConfig {
+        disable_parallel_tool_use: true,
+        ..quiet_config()
+    };
+    let serial = agent(&server, config);
+    assert!(matches!(
+        serial.prompt().tool_choice,
+        Some(Choice::Auto {
+            disable_parallel_tool_use: true
+        })
+    ));
+}
+
 // --- Prompt log (`on_teardown` → `prompt_log`) ---
 
 /// Every JSON file under `dir`, recursively, concatenated. The dump is

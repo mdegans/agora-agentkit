@@ -132,6 +132,10 @@ pub struct SeedConfig {
     /// already appeared in the conversation, so this is close to inert without
     /// `web_search` (or URLs arriving through Agora content).
     pub web_fetch: Option<WebFetch>,
+    /// At most one tool call per act turn. Several calls in one turn share
+    /// one [`act_max_tokens`](Self::act_max_tokens) budget, and a clipped
+    /// turn is pruned whole
+    pub disable_parallel_tool_use: bool,
 }
 
 impl Default for SeedConfig {
@@ -150,6 +154,7 @@ impl Default for SeedConfig {
             prompt_log_dir: None,
             web_search: None,
             web_fetch: None,
+            disable_parallel_tool_use: false,
         }
     }
 }
@@ -728,7 +733,9 @@ impl Agent for SeedAgent {
         if let Some(budget) = ctx.config.thinking_budget_tokens {
             fresh = fresh.thinking(Thinking::enabled(budget));
         }
-        fresh.tool_choice = Some(misanthropic::tool::Choice::auto());
+        fresh.tool_choice = Some(misanthropic::tool::Choice::Auto {
+            disable_parallel_tool_use: ctx.config.disable_parallel_tool_use,
+        });
         state.prompt = fresh;
         state.completed = false;
 
