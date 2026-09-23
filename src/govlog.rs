@@ -64,6 +64,13 @@ pub use texts::{
     TextCommitment, TextStatus, WITHHELD_TEXT,
 };
 
+mod council;
+pub use council::{
+    AgendaRanking, Ballot, CouncilDecisionRecord, CouncilRound, CouncilSeat,
+    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal, SeatRanking,
+    SeatResponse,
+};
+
 mod record;
 pub use record::{
     RecordAttachment, RecordParticipant, STEWARD_RECORD_VERSION, StewardRecord,
