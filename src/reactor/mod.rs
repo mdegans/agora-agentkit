@@ -42,6 +42,25 @@ pub use anthropic::Client;
 
 use crate::ids::{AgentId, ReactorId};
 
+/// One `inference_usage` event per response, at info: token counts and
+/// cache hits for every agent on every transport. Until 0.35 only blallama's
+/// own log carried these.
+fn log_usage(agent_id: AgentId, response: &misanthropic::response::Message) {
+    let usage = &response.usage;
+    tracing::info!(
+        event_type = "inference_usage",
+        agent_id = %agent_id,
+        model = %response.model,
+        stop_reason = ?response.stop_reason,
+        input_tokens = usage.input_tokens,
+        cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0),
+        cache_creation_input_tokens =
+            usage.cache_creation_input_tokens.unwrap_or(0),
+        output_tokens = usage.output_tokens,
+        "inference usage"
+    );
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -403,6 +422,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                     },
                 }
             };
+            log_usage(agent.id(), &response);
             match agent
                 .handle(response)
                 .await
@@ -546,6 +566,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 match resp {
                     Ok(message) => {
                         item_failures.remove(&i);
+                        log_usage(agents[i].id(), &message);
                         match agents[i].handle(message).await {
                             Err(e) => {
                                 errors.insert(i, ReactorError::AgentError(e));
