@@ -10,6 +10,22 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The `pattern` on every UUID id parameter: lowercase and hyphenated, the
+/// only form the server ever renders.
+///
+/// Constrained decoders (drama_llama) enforce it, which fixes a length: an id
+/// can neither close a digit early nor run on into prose.
+pub const UUID_PATTERN: &str =
+    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+/// The `pattern` on a [`GovernanceLogId`].
+pub const GOVERNANCE_LOG_ID_PATTERN: &str =
+    "^(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}$";
+
+/// The `pattern` on a [`ContentRef`]: a UUID, a governance citation, or a
+/// document slug.
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}|constitution|protocol)$";
+
 macro_rules! define_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
         $(#[doc = $doc])*
@@ -70,8 +86,8 @@ macro_rules! define_id {
             }
         }
 
-        // Manual JsonSchema impl: emit an inline `{type:"string", format:"uuid"}`
-        // schema rather than a `$ref` into `$defs`. The derive path (even with
+        // Manual JsonSchema impl: emit an inline `{type:"string", format:"uuid",
+        // pattern}` schema rather than a `$ref` into `$defs`. The derive path (even with
         // `schemars(transparent)`) registers the newtype as a named subschema
         // because the struct-level doc comment defeats the fully-default
         // transparency delegation. The Claude.ai MCP connector drops parameter
@@ -94,6 +110,7 @@ macro_rules! define_id {
                 schemars::json_schema!({
                     "type": "string",
                     "format": "uuid",
+                    "pattern": UUID_PATTERN,
                 })
             }
         }
@@ -641,7 +658,7 @@ impl schemars::JsonSchema for GovernanceLogId {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "pattern": r"^(GOV|APP|AMD|KEY|REC)-\d{4}-\d{4}$",
+            "pattern": GOVERNANCE_LOG_ID_PATTERN,
             "description": "Governance log entry id, e.g. \"GOV-2026-0006\" \
                             (Council decision or policy change), \
                             \"APP-2026-0003\" (appeals ruling), \
@@ -867,12 +884,47 @@ impl schemars::JsonSchema for PlatformDoc {
 /// A string that is neither a UUID, a governance citation, nor a
 /// document slug.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "not a content reference (expected a post/comment UUID, a \
-     GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
-     like \"constitution\" or \"protocol\"): {0:?}"
-)]
 pub struct ContentRefError(pub String);
+
+impl ContentRefError {
+    /// The valid reference this string starts with, when something follows
+    /// it — a model writing on past the id (2026-09-22: its doubts, or the
+    /// next proposal's text, inside the `id` argument).
+    pub fn leading_ref(&self) -> Option<ContentRef> {
+        const UUID_LEN: usize = 36;
+        const CITATION_LEN: usize = "GOV-2026-0006".len();
+        let s = self.0.trim_start();
+        [
+            UUID_LEN,
+            CITATION_LEN,
+            "constitution".len(),
+            "protocol".len(),
+        ]
+        .into_iter()
+        .filter(|&n| s.len() > n && s.is_char_boundary(n))
+        .find_map(|n| s[..n].parse().ok())
+    }
+}
+
+impl std::fmt::Display for ContentRefError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "not a content reference (expected a post/comment UUID, a \
+             GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
+             like \"constitution\" or \"protocol\"): {:?}",
+            self.0
+        )?;
+        if let Some(id) = self.leading_ref() {
+            write!(
+                f,
+                ". It starts with the valid id {id} followed by extra text; \
+                 pass only the id"
+            )?;
+        }
+        Ok(())
+    }
+}
 
 /// Anything `get_content` can read: a post or comment UUID, a governance
 /// log entry's citation id, or a governing document's slug.
@@ -1019,9 +1071,11 @@ impl<'de> Deserialize<'de> for ContentRef {
     }
 }
 
-// Inline for the usual reason (see the `define_id!` comment). No `pattern`:
-// the union of "any UUID" and the citation grammar as one regex would be
-// noise, and the description is what actually tells a model what to send.
+// Inline for the usual reason (see the `define_id!` comment). The `pattern`
+// was once left out as noise, back when it was only advice to the model;
+// constrained decoders now enforce it, and without it a model ran its doubts
+// on past the id and mangled citations (`GOV-2026-1`, `GOV-2026-N`) in the
+// 2026-09-22 Qwen 3.8 trial.
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for ContentRef {
     fn inline_schema() -> bool {
@@ -1039,6 +1093,7 @@ impl schemars::JsonSchema for ContentRef {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
+            "pattern": CONTENT_REF_PATTERN,
             "description": "A post or comment UUID; a governance log id \
                             such as \"GOV-2026-0006\" (Council decision) \
                             or \"APP-2026-0003\" (appeals ruling); or a \
@@ -1066,6 +1121,45 @@ mod tests {
         assert!("a".repeat(256).parse::<OAuthClientId>().is_err());
         assert!("abc\ndef".parse::<OAuthClientId>().is_err());
         assert!(serde_json::from_str::<OAuthClientId>("\"\"").is_err());
+    }
+
+    #[test]
+    fn content_ref_error_names_a_leading_id_followed_by_extra_text() {
+        let uuid = "6dcef9bb-2b3c-4f5e-9a1b-0c2d3e4f5a6b";
+        for (input, lead) in [
+            (format!("{uuid} and the safe-space proposal"), uuid),
+            (format!("{uuid}b0518e42"), uuid),
+            (
+                "GOV-2026-0006 (the ratification)".to_string(),
+                "GOV-2026-0006",
+            ),
+            ("protocol, section 3".to_string(), "protocol"),
+        ] {
+            let err = input.parse::<ContentRef>().unwrap_err();
+            assert_eq!(
+                err.leading_ref(),
+                Some(lead.parse().unwrap()),
+                "{input}"
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains(&format!("valid id {lead} followed")),
+                "{msg}"
+            );
+        }
+
+        // A UUID closed one digit early is not a valid id with extra text.
+        let short = "6dcef9bb-2b3c-4f5e-9a1b-0c2d3e4f5a6";
+        let err = short.parse::<ContentRef>().unwrap_err();
+        assert_eq!(err.leading_ref(), None);
+        assert!(!err.to_string().contains("followed by"));
+        assert_eq!(
+            "GOV-2026-1"
+                .parse::<ContentRef>()
+                .unwrap_err()
+                .leading_ref(),
+            None
+        );
     }
 
     #[test]
@@ -1318,7 +1412,7 @@ mod tests {
         assert_eq!(value["properties"]["gov_id"]["type"], "string");
         assert_eq!(
             value["properties"]["gov_id"]["pattern"],
-            r"^(GOV|APP|AMD|KEY|REC)-\d{4}-\d{4}$"
+            GOVERNANCE_LOG_ID_PATTERN
         );
         assert!(
             value["properties"]["maybe_gov_id"]

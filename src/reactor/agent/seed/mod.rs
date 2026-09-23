@@ -1029,8 +1029,10 @@ fn describe_tool_responses(prompt: &mut Prompt) {
         {
             let schema = inline_schema_for::<Vec<ProposalResponse>>();
             custom.description = format!(
-                "{GET_PROPOSALS_DOC}\n\nThe tool result is JSON \
-                 matching this schema:\n{}",
+                "{GET_PROPOSALS_DOC}\n\nThe tool result is one block \
+                 per proposal: its title and post_id, then fields labelled \
+                 by the keys of this schema, then its body, then the \
+                 post_id again. Schema:\n{}",
                 serde_json::to_string(&schema)
                     .expect("a schema Value always serializes"),
             )
