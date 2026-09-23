@@ -1107,9 +1107,9 @@ pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 }
 
 pub use crate::govlog::{
-    AmendmentNotice, AmendmentTexts, EntryVerdict, GovernanceAttestation,
-    GovernanceChainLink, GovernanceKeyRecord, GovernanceSigningKey,
-    GovernanceSigningKeys, GovernanceVerification,
+    AmendmentNotice, AmendmentTexts, CouncilDecisionRecord, EntryVerdict,
+    GovernanceAttestation, GovernanceChainLink, GovernanceKeyRecord,
+    GovernanceSigningKey, GovernanceSigningKeys, GovernanceVerification,
 };
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -1216,6 +1216,24 @@ pub struct GovernanceEntryResponse {
     /// simply absent. (0.29)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texts: Option<AmendmentTexts>,
+}
+
+impl GovernanceEntryResponse {
+    /// `data` typed, on a `council_decision` read with `detail=full` (with
+    /// `rounds` narrowed when `round` was given). `None` for any other entry
+    /// or read.
+    ///
+    /// Verify `data_hash` against `data`, not against this. An `Err` means a
+    /// shape this version doesn't know, or a redaction that replaced a
+    /// non-string value; `data` still has everything.
+    pub fn council_decision(
+        &self,
+    ) -> Option<Result<CouncilDecisionRecord, serde_json::Error>> {
+        if self.entry_type != GovernanceLogEntryType::CouncilDecision {
+            return None;
+        }
+        self.data.as_ref().map(CouncilDecisionRecord::deserialize)
+    }
 }
 
 /// A governance log search result: an index line plus the matching
@@ -1827,6 +1845,43 @@ mod tests {
         assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
         assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
         assert!(text.contains("chain_seq"), "{text}");
+    }
+
+    #[test]
+    fn council_decision_types_data_and_leaves_it_alone() {
+        let data: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/council_decisions/GOV-2026-0006.json"
+        ))
+        .unwrap();
+        let entry = GovernanceEntryResponse {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: GovernanceLogEntryType::CouncilDecision,
+            title: "t".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: None,
+            total_rounds: Some(3),
+            data: Some(data.clone()),
+            round: None,
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            texts: None,
+        };
+        let record = entry.council_decision().unwrap().unwrap();
+        assert_eq!(record.rounds.len(), 3);
+        assert_eq!(entry.data.as_ref(), Some(&data));
+
+        let summary = GovernanceEntryResponse {
+            data: None,
+            ..entry.clone()
+        };
+        assert!(summary.council_decision().is_none());
+        let appeal = GovernanceEntryResponse {
+            entry_type: GovernanceLogEntryType::AppealsCourtDecision,
+            ..entry
+        };
+        assert!(appeal.council_decision().is_none());
     }
 
     #[test]
