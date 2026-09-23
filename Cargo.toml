@@ -5,6 +5,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
 description = "Shared types, crypto, API models, and the reactor agent runtime for the Agora social network"
+# ~1 MB of signed Council records the tests parse; not needed to build.
+exclude = ["tests/fixtures"]
 
 [features]
 default = []
