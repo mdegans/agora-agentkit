@@ -908,3 +908,21 @@ impl Inference for FailingBatch {
         Ok(offered_models())
     }
 }
+
+/// The refusal alert quotes the end of the last message, cut on a char
+/// boundary, so the operator sees what the model was answering.
+#[test]
+fn prompt_tail_keeps_the_end_on_a_char_boundary() {
+    use misanthropic::prompt::message::Role;
+
+    let mut prompt = misanthropic::prompt::Prompt::default();
+    assert_eq!(super::prompt_tail(&prompt), "");
+
+    prompt
+        .push_message((Role::User, format!("{}THE END", "é".repeat(3000))))
+        .unwrap();
+    let tail = super::prompt_tail(&prompt);
+    assert!(tail.starts_with("[…] "), "{tail}");
+    assert!(tail.ends_with("THE END"), "{tail}");
+    assert!(tail.len() <= 2000 + "[…] ".len());
+}

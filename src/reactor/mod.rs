@@ -42,25 +42,6 @@ pub use anthropic::Client;
 
 use crate::ids::{AgentId, ReactorId};
 
-/// One `inference_usage` event per response, at info: token counts and
-/// cache hits for every agent on every transport. Until 0.35 only blallama's
-/// own log carried these.
-fn log_usage(agent_id: AgentId, response: &misanthropic::response::Message) {
-    let usage = &response.usage;
-    tracing::info!(
-        event_type = "inference_usage",
-        agent_id = %agent_id,
-        model = %response.model,
-        stop_reason = ?response.stop_reason,
-        input_tokens = usage.input_tokens,
-        cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0),
-        cache_creation_input_tokens =
-            usage.cache_creation_input_tokens.unwrap_or(0),
-        output_tokens = usage.output_tokens,
-        "inference usage"
-    );
-}
-
 #[cfg(test)]
 mod tests;
 
@@ -422,7 +403,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                     },
                 }
             };
-            log_usage(agent.id(), &response);
+            log_usage(agent.id(), &response, agent.prompt());
             match agent
                 .handle(response)
                 .await
@@ -566,7 +547,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 match resp {
                     Ok(message) => {
                         item_failures.remove(&i);
-                        log_usage(agents[i].id(), &message);
+                        log_usage(agents[i].id(), &message, agents[i].prompt());
                         match agents[i].handle(message).await {
                             Err(e) => {
                                 errors.insert(i, ReactorError::AgentError(e));
@@ -926,4 +907,67 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
         self.persist_all(to_persist).await;
         Ok(self.report())
     }
+}
+
+/// The last message of `prompt`, cut to its final ~2000 bytes: what the
+/// model was answering when it refused.
+fn prompt_tail(prompt: &Prompt) -> String {
+    const CAP: usize = 2000;
+    let Some(last) = prompt.messages.last() else {
+        return String::new();
+    };
+    let text = last.to_string();
+    if text.len() <= CAP {
+        return text;
+    }
+    let mut start = text.len() - CAP;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[…] {}", &text[start..])
+}
+
+/// One `inference_usage` event per response, at info: token counts and
+/// cache hits for every agent on every transport. Until 0.35 only blallama's
+/// own log carried these.
+///
+/// A [`Refusal`] is also an `inference_refusal` error carrying the trigger:
+/// repeated refusals can get an API account banned, and the operator needs
+/// to know what caused one.
+///
+/// [`Refusal`]: misanthropic::response::StopReason::Refusal
+fn log_usage(
+    agent_id: AgentId,
+    response: &misanthropic::response::Message,
+    prompt: &Prompt,
+) {
+    if matches!(
+        response.stop_reason,
+        Some(misanthropic::response::StopReason::Refusal)
+    ) {
+        let details = response.stop_details.as_deref();
+        tracing::error!(
+            event_type = "inference_refusal",
+            agent_id = %agent_id,
+            model = %response.model,
+            response_id = %response.id,
+            category = details.and_then(|d| d.category.as_deref()),
+            explanation = details.and_then(|d| d.explanation.as_deref()),
+            prompt_tail = %prompt_tail(prompt),
+            "model refused"
+        );
+    }
+    let usage = &response.usage;
+    tracing::info!(
+        event_type = "inference_usage",
+        agent_id = %agent_id,
+        model = %response.model,
+        stop_reason = ?response.stop_reason,
+        input_tokens = usage.input_tokens,
+        cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0),
+        cache_creation_input_tokens =
+            usage.cache_creation_input_tokens.unwrap_or(0),
+        output_tokens = usage.output_tokens,
+        "inference usage"
+    );
 }
