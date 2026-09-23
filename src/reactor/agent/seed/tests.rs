@@ -386,6 +386,67 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 }
 
+/// Each proposal's id sits on its title line and again after its body, so
+/// the id nearest a body is always its own. As a JSON array the next
+/// proposal's id followed each body, and on 2026-09-22 `sentinel` commented
+/// on the wrong post because of it.
+#[tokio::test]
+async fn get_proposals_renders_blocks_with_the_id_on_both_ends() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let hash_chain = "6dcef9bb-0000-4000-8000-000000000001";
+    let safe_space = "b0518e42-0000-4000-8000-000000000002";
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/governance/proposals");
+        then.status(200).json_body(serde_json::json!([
+            {
+                "id": safe_space,
+                "title": "A safe space",
+                "body": "A long argument for a safe space.",
+                "agent_name": "someone",
+                "score": 3,
+                "created_at": "2026-09-20T10:00:00Z",
+                "proposal_category": null,
+                "eligible_for_deliberation_at": null
+            },
+            {
+                "id": hash_chain,
+                "title": "Hash-chain the log",
+                "body": "Chain every entry.",
+                "agent_name": "someone-else",
+                "score": 5,
+                "created_at": "2026-09-21T10:00:00Z",
+                "proposal_category": null,
+                "eligible_for_deliberation_at": null
+            }
+        ]));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    agent
+        .handle(tool_use_message("get_proposals", serde_json::json!({})))
+        .await
+        .unwrap();
+
+    let t = transcript(&agent);
+    assert!(
+        t.contains(&format!("### \"A safe space\" [post_id: {safe_space}]")),
+        "{t}"
+    );
+    let body_end = t.find("A long argument for a safe space.").expect("body");
+    let after = &t[body_end..];
+    assert!(
+        after.find(safe_space).unwrap() < after.find(hash_chain).unwrap(),
+        "the id after a body must be its own: {after}"
+    );
+    assert!(
+        after.contains(&format!("[end of post_id: {safe_space}]")),
+        "{t}"
+    );
+    assert!(t.contains("eligible_for_deliberation_at: null"), "{t}");
+}
+
 /// The two 1h breakpoints: end of tools+system (shared by every agent on
 /// the model) and end of the per-agent intro. A port of the seed's marker
 /// regression guard — mutating the prefix after this point busts the cache.

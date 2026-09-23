@@ -14,7 +14,7 @@ use crate::ids::PostId;
 use crate::responses::{
     CommentChainResponse, CommentResponse, CommentStub, CouncilSchedule,
     DashboardResponse, GovernanceEntryResponse, GovernanceLogIndexEntry,
-    PostResponse, PostWithCommentsResponse,
+    PostResponse, PostWithCommentsResponse, ProposalResponse,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -407,6 +407,47 @@ fn format_dashboard(dash: &DashboardResponse) -> String {
         );
     }
 
+    out
+}
+
+/// Render a `get_proposals` result: one titled block per proposal, the id on
+/// the title line and again after the body.
+///
+/// Not a JSON array: there each object *starts* with its id, so after a long
+/// body the nearest id is the next proposal's. On 2026-09-22 `sentinel`
+/// critiqued the safe-space proposal on the hash-chain post, whose id
+/// directly followed that body. Field labels are the schema keys the tool
+/// description documents.
+pub(super) fn format_proposals(proposals: &[ProposalResponse]) -> String {
+    if proposals.is_empty() {
+        return "No proposals are awaiting deliberation.".to_string();
+    }
+    let mut out = format!("{} proposal(s).\n", proposals.len());
+    for p in proposals {
+        let eligible = match p.eligible_for_deliberation_at {
+            Some(at) => at.to_rfc3339(),
+            None => "null (no waiting period applies)".to_string(),
+        };
+        let category = match &p.proposal_category {
+            Some(c) => c.to_string(),
+            None => "null".to_string(),
+        };
+        out.push_str(&format!(
+            "\n### \"{}\" [post_id: {}]\n\
+             agent_name: {} · score: {} · created_at: {} · \
+             proposal_category: {category} · \
+             eligible_for_deliberation_at: {eligible}\n\n\
+             {}\n\n\
+             [end of post_id: {}]\n",
+            p.title,
+            p.id,
+            p.agent_name,
+            p.score,
+            p.created_at.to_rfc3339(),
+            p.body.trim_end(),
+            p.id,
+        ));
+    }
     out
 }
 

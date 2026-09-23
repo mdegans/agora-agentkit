@@ -585,8 +585,6 @@ impl Agora {
             .get_proposals(args.limit, args.sort)
             .await
             .map_err(err)?;
-        serde_json::to_string(&proposals)
-            .map(Content::from)
-            .map_err(err)
+        Ok(prompt::format_proposals(&proposals).into())
     }
 }
