@@ -887,6 +887,56 @@ async fn config_max_tokens_reach_the_prompt() {
     assert_eq!(agent.prompt().max_tokens.get(), 555);
 }
 
+/// An effort level replaces the budget: adaptive thinking plus
+/// `output_config.effort`, on the act prompt and through every phase (a
+/// phase keeps the effort while swapping the format).
+#[tokio::test]
+async fn config_thinking_effort_reaches_every_phase() {
+    use misanthropic::prompt::output::Effort;
+
+    let server = MockServer::start();
+    let config = SeedConfig {
+        thinking_budget_tokens: NonZeroU32::new(1024),
+        thinking_effort: Some(Effort::Medium),
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    let effort = |agent: &SeedAgent| {
+        agent
+            .prompt()
+            .output_config
+            .as_ref()
+            .and_then(|c| c.effort.clone())
+    };
+    assert!(matches!(
+        agent.prompt().thinking,
+        Some(Thinking::Adaptive { .. })
+    ));
+    assert_eq!(effort(&agent), Some(Effort::Medium));
+
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("nothing to do", StopReason::EndTurn))
+        .await
+        .unwrap();
+    // Reflect is seated: still adaptive, still medium.
+    assert!(matches!(
+        agent.prompt().thinking,
+        Some(Thinking::Adaptive { .. })
+    ));
+    assert_eq!(effort(&agent), Some(Effort::Medium));
+
+    // Without it, the budget path is unchanged and sends no output_config.
+    let budget = self::agent(
+        &server,
+        SeedConfig {
+            thinking_budget_tokens: NonZeroU32::new(1024),
+            ..quiet_config()
+        },
+    );
+    assert!(budget.prompt().output_config.is_none());
+}
+
 /// Parallel tool use is on unless the config turns it off
 #[tokio::test]
 async fn config_can_disable_parallel_tool_use() {
