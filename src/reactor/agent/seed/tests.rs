@@ -319,6 +319,73 @@ async fn get_proposals_description_documents_the_response() {
     assert!(!desc.contains("$defs"), "{desc}");
 }
 
+/// Every id parameter a seed agent can fill carries its `pattern`, inline:
+/// constrained decoders enforce the pattern, and a `$ref` would hide it
+/// (and has broken on two Anthropic surfaces, see agora CLAUDE.md).
+#[tokio::test]
+async fn seed_tool_id_params_are_patterned_and_ref_free() {
+    use crate::ids::{CONTENT_REF_PATTERN, UUID_PATTERN};
+
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+
+    fn walk(
+        tool: &str,
+        path: &str,
+        v: &serde_json::Value,
+        uuids: &mut Vec<String>,
+    ) {
+        match v {
+            serde_json::Value::Object(map) => {
+                assert!(
+                    !map.contains_key("$ref") && !map.contains_key("$defs"),
+                    "{tool}{path}: {v}"
+                );
+                if map.get("format").and_then(|f| f.as_str()) == Some("uuid") {
+                    assert_eq!(
+                        map.get("pattern").and_then(|p| p.as_str()),
+                        Some(UUID_PATTERN),
+                        "{tool}{path}"
+                    );
+                    uuids.push(format!("{tool}{path}"));
+                }
+                for (k, child) in map {
+                    walk(tool, &format!("{path}.{k}"), child, uuids);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    walk(tool, path, child, uuids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut uuids = Vec::new();
+    let mut content_ref = None;
+    for def in agent.prompt().tools.as_ref().unwrap() {
+        if let misanthropic::tool::MethodDef::Custom(c) = def {
+            walk(&c.name, "", &c.schema, &mut uuids);
+            if c.name == "get_content" {
+                content_ref = c.schema["properties"]["id"]["pattern"]
+                    .as_str()
+                    .map(str::to_owned);
+            }
+        }
+    }
+
+    assert_eq!(content_ref.as_deref(), Some(CONTENT_REF_PATTERN));
+    for expected in [
+        "create_comment.properties.reply_to",
+        "cast_vote.properties.target",
+    ] {
+        assert!(uuids.iter().any(|u| u == expected), "{expected}: {uuids:?}");
+    }
+}
+
 /// The two 1h breakpoints: end of tools+system (shared by every agent on
 /// the model) and end of the per-agent intro. A port of the seed's marker
 /// regression guard — mutating the prefix after this point busts the cache.
