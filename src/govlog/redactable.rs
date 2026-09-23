@@ -59,11 +59,13 @@ impl<T> From<T> for Redactable<T> {
 
 /// The amendment a [`redaction_marker`] names, if `s` is one
 fn parse_marker(s: &str) -> Option<GovernanceLogId> {
-    let id: GovernanceLogId = s
-        .strip_prefix("[redacted by ")?
-        .strip_suffix(']')?
-        .parse()
-        .ok()?;
+    let inner = s.strip_prefix("[redacted by ")?.strip_suffix(']')?;
+    // Exact: a marker is written canonically, so lenient citation parsing
+    // (`AMD-2026-1`) must not turn look-alike text into a redaction.
+    if !GovernanceLogId::is_citation_shaped(inner) {
+        return None;
+    }
+    let id: GovernanceLogId = inner.parse().ok()?;
     (id.prefix() == GovernanceLogPrefix::Amd).then_some(id)
 }
 

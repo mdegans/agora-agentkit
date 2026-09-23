@@ -795,6 +795,62 @@ async fn contact_me_survey_stays_in_the_transcript() {
     assert!(transcript(&agent).contains("Contact me about batching."));
 }
 
+/// Thinking parameters are part of the cached prefix on both backends
+/// (Anthropic invalidates message caches on a thinking change; an effort
+/// rendered into a local template would change the prompt), so a session
+/// must never change them. Only `max_tokens` and the output format differ
+/// between act and the phases.
+#[tokio::test]
+async fn thinking_and_effort_are_constant_across_the_session() {
+    use misanthropic::prompt::output::Effort;
+
+    for config in [
+        SeedConfig {
+            thinking_budget_tokens: NonZeroU32::new(1024),
+            force_survey: true,
+            ..quiet_config()
+        },
+        SeedConfig {
+            thinking_effort: Some(Effort::Medium),
+            force_survey: true,
+            ..quiet_config()
+        },
+    ] {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/agora/api/social/feedback");
+            then.status(201).json_body(serde_json::json!({}));
+        });
+        let mut agent = agent(&server, config);
+        let params = |agent: &SeedAgent| {
+            (
+                serde_json::to_value(agent.prompt().thinking).unwrap(),
+                agent
+                    .prompt()
+                    .output_config
+                    .as_ref()
+                    .and_then(|c| c.effort.clone()),
+            )
+        };
+        let start = params(&agent);
+        assert!(!start.0.is_null());
+        seat_start(&mut agent);
+
+        // act -> reflect -> survey -> done
+        for reply in [
+            "done",
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            r#"{"text": "Fine.", "contact_me": true}"#,
+        ] {
+            agent
+                .handle(text_message(reply, StopReason::EndTurn))
+                .await
+                .unwrap();
+            assert_eq!(params(&agent), start, "after {reply:?}");
+        }
+    }
+}
+
 #[test]
 fn state_round_trips_with_prompt_and_ledger() {
     let mut state = seed_state();

@@ -13,8 +13,9 @@ use uuid::Uuid;
 /// The `pattern` on every UUID id parameter: lowercase and hyphenated, the
 /// only form the server ever renders.
 ///
-/// Constrained decoders (drama_llama) enforce it, which fixes a length: an id
-/// can neither close a digit early nor run on into prose.
+/// A hint, not a constraint: drama_llama deliberately does not enforce
+/// `pattern` (a forced pattern turns a malformed id into a well-formed wrong
+/// one), and strict Anthropic schemas must not carry it (agora CLAUDE.md).
 pub const UUID_PATTERN: &str =
     "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
 
@@ -580,6 +581,28 @@ impl GovernanceLogId {
             .0
     }
 
+    /// The canonical form of a citation as agents and people write it:
+    /// any case, `-` `.` `/` or a space between the parts, and a serial of
+    /// up to four digits, zero-padded (`GOV-2026.6` → `GOV-2026-0006`).
+    /// Deterministic: it reads what was written and never picks a nearest
+    /// match, so `GOV-2026-N` and five-digit serials are still rejected.
+    pub fn normalize(s: &str) -> Option<String> {
+        let mut parts = s.trim().split(['-', '.', '/', ' ']);
+        let (prefix, year, serial) =
+            (parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        let prefix: GovernanceLogPrefix =
+            prefix.to_ascii_uppercase().parse().ok()?;
+        let digits = |p: &str| p.chars().all(|c| c.is_ascii_digit());
+        (year.len() == 4
+            && digits(year)
+            && (1..=4).contains(&serial.len())
+            && digits(serial))
+        .then(|| format!("{prefix}-{year}-{serial:0>4}"))
+    }
+
     fn parts(s: &str) -> Option<(GovernanceLogPrefix, &str, &str)> {
         let parts: Vec<&str> = s.split('-').collect();
         let [prefix, year, serial] = parts.as_slice() else {
@@ -609,12 +632,12 @@ impl AsRef<str> for GovernanceLogId {
 impl std::str::FromStr for GovernanceLogId {
     type Err = GovernanceLogIdError;
 
+    /// Accepts the variants [`normalize`](Self::normalize) does and stores
+    /// the canonical form.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if Self::is_citation_shaped(s) {
-            Ok(Self(s.to_string()))
-        } else {
-            Err(GovernanceLogIdError(s.to_string()))
-        }
+        Self::normalize(s)
+            .map(Self)
+            .ok_or_else(|| GovernanceLogIdError(s.to_string()))
     }
 }
 
@@ -623,10 +646,9 @@ impl TryFrom<String> for GovernanceLogId {
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         if Self::is_citation_shaped(&s) {
-            Ok(Self(s))
-        } else {
-            Err(GovernanceLogIdError(s))
+            return Ok(Self(s));
         }
+        s.parse()
     }
 }
 
@@ -1072,10 +1094,9 @@ impl<'de> Deserialize<'de> for ContentRef {
 }
 
 // Inline for the usual reason (see the `define_id!` comment). The `pattern`
-// was once left out as noise, back when it was only advice to the model;
-// constrained decoders now enforce it, and without it a model ran its doubts
-// on past the id and mangled citations (`GOV-2026-1`, `GOV-2026-N`) in the
-// 2026-09-22 Qwen 3.8 trial.
+// documents the canonical shape; it is not enforced by any decoder we run
+// (see `UUID_PATTERN`). Parsing is lenient where the pattern is strict:
+// `GovernanceLogId::normalize` accepts `GOV-2026.6` and the like.
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for ContentRef {
     fn inline_schema() -> bool {
@@ -1153,13 +1174,44 @@ mod tests {
         let err = short.parse::<ContentRef>().unwrap_err();
         assert_eq!(err.leading_ref(), None);
         assert!(!err.to_string().contains("followed by"));
+        // A short serial is read as written, not rejected (0.40).
         assert_eq!(
-            "GOV-2026-1"
-                .parse::<ContentRef>()
-                .unwrap_err()
-                .leading_ref(),
-            None
+            "GOV-2026-1".parse::<ContentRef>().unwrap(),
+            ContentRef::Governance("GOV-2026-0001".parse().unwrap())
         );
+    }
+
+    #[test]
+    fn citations_normalize_as_written() {
+        for (written, canonical) in [
+            ("GOV-2026-0006", "GOV-2026-0006"),
+            ("GOV-2026.6", "GOV-2026-0006"),
+            ("gov-2026-6", "GOV-2026-0006"),
+            ("GOV 2026 6", "GOV-2026-0006"),
+            ("app/2026/03", "APP-2026-0003"),
+            (" REC-2026-0002 ", "REC-2026-0002"),
+        ] {
+            let id: GovernanceLogId = written.parse().unwrap();
+            assert_eq!(id.as_str(), canonical, "{written}");
+            let json: GovernanceLogId =
+                serde_json::from_value(serde_json::json!(written)).unwrap();
+            assert_eq!(json.as_str(), canonical, "{written} via serde");
+            let content: ContentRef = written.parse().unwrap();
+            assert_eq!(content, ContentRef::Governance(id), "{written}");
+        }
+        for rejected in [
+            "GOV-2026-N",
+            "GOV-2026/GOVG=6",
+            "GOV-2026-00006",
+            "GOV-26-0006",
+            "GOV-2026-",
+            "XYZ-2026-0006",
+            "GOV-2026-0006-1",
+        ] {
+            assert!(rejected.parse::<GovernanceLogId>().is_err(), "{rejected}");
+        }
+        // Scraping prose stays strict: only the canonical form is a citation.
+        assert!(!GovernanceLogId::is_citation_shaped("GOV-2026.6"));
     }
 
     #[test]
@@ -1446,11 +1498,18 @@ mod tests {
                 .len(),
             3 * GovernanceLogPrefix::ALL.len()
         );
+        // Lenient since 0.40: read as written, stored canonically.
+        assert_eq!(
+            "GOV-2026-006".parse::<GovernanceLogId>().unwrap().as_str(),
+            "GOV-2026-0006"
+        );
+        assert_eq!(
+            "gov-2026-0006".parse::<GovernanceLogId>().unwrap().as_str(),
+            "GOV-2026-0006"
+        );
         for bad in [
             "",
-            "GOV-2026-006",
             "GOV-26-0006",
-            "gov-2026-0006",
             "MOD-2026-0006",
             "GOV-2026-0006-1",
             "GOV-202X-0006",
