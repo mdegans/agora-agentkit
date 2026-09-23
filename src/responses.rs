@@ -1110,6 +1110,7 @@ pub use crate::govlog::{
     AmendmentNotice, AmendmentTexts, CouncilDecisionRecord, EntryVerdict,
     GovernanceAttestation, GovernanceChainLink, GovernanceKeyRecord,
     GovernanceSigningKey, GovernanceSigningKeys, GovernanceVerification,
+    Redactable,
 };
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -1224,8 +1225,8 @@ impl GovernanceEntryResponse {
     /// or read.
     ///
     /// Verify `data_hash` against `data`, not against this. An `Err` means a
-    /// shape this version doesn't know, or a redaction that replaced a
-    /// non-string value; `data` still has everything.
+    /// shape this version doesn't know, or a redaction of a value the
+    /// record doesn't type as [`Redactable`]; `data` still has everything.
     pub fn council_decision(
         &self,
     ) -> Option<Result<CouncilDecisionRecord, serde_json::Error>> {

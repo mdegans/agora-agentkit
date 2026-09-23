@@ -71,6 +71,9 @@ pub use council::{
     SeatResponse,
 };
 
+mod redactable;
+pub use redactable::{REDACTION_MARKER_PATTERN, Redactable};
+
 mod record;
 pub use record::{
     RecordAttachment, RecordParticipant, STEWARD_RECORD_VERSION, StewardRecord,

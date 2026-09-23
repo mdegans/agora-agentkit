@@ -6,12 +6,14 @@
 //!
 //! Records have grown fields over time; each later field is optional here
 //! and says when it appeared, so every entry ever signed still parses.
+//! Free text is [`Redactable`]; a redaction of anything else (a vote, a
+//! whole round) does not parse.
 //!
 //! [`GovernanceEntryResponse::council_decision`]: crate::responses::GovernanceEntryResponse::council_decision
 
 use serde::{Deserialize, Serialize};
 
-use super::Blind;
+use super::{Blind, Redactable};
 use crate::enums::{DecisionOutcome, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 
@@ -28,7 +30,7 @@ pub struct CouncilDecisionRecord {
     pub meeting_id: CouncilMeetingId,
     pub category: DecisionCategory,
     /// The agenda item's title
-    pub title: String,
+    pub title: Redactable<String>,
     /// Every round of deliberation, in order. The last is the
     /// `final_vote` round unless the item was tabled earlier.
     pub rounds: Vec<CouncilRound>,
@@ -40,14 +42,14 @@ pub struct CouncilDecisionRecord {
     /// For display only. `"<yes>-<no>"` with `concur` counted as yes
     /// (`"5-0"`, `"0-4"`); `"Deferred"` for a tabled item, optionally
     /// followed by `": <why>"`; a sentence on a `Schedule` item.
-    pub vote_tally: String,
+    pub vote_tally: Redactable<String>,
     /// Flagged by the Steward as significant for readers and for
     /// precedent weight. Changes nothing procedurally.
     pub landmark: bool,
     /// The Steward's rationale for a `veto` (Constitution Art. IV § 5).
     /// Written since 2026-09-22; no veto had been cast before then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub veto_rationale: Option<String>,
+    pub veto_rationale: Option<Redactable<String>>,
     /// On a `Schedule` item, the seats' aggregated ranking of the docket
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agenda_ranking: Option<AgendaRanking>,
@@ -102,7 +104,7 @@ pub struct CouncilRound {
     pub responses: Vec<SeatResponse>,
     /// The Steward's notes to the seats for this round, or the reason an
     /// item was tabled
-    pub steward_contribution: Option<String>,
+    pub steward_contribution: Option<Redactable<String>>,
 }
 
 /// One seat's turn in a round
@@ -113,16 +115,17 @@ pub struct SeatResponse {
     pub role: CouncilSeat,
     /// The seat's statement for the record. On a turn the API refused,
     /// `"No response: the API returned a refusal (…)."`
-    pub position: String,
+    pub position: Redactable<String>,
     /// The seat's vote as of this round; only the `final_vote` round's
     /// counts. Absent only when the API returned a refusal for the turn:
     /// a refusal is recorded as a fact, never as a vote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vote: Option<CouncilVote>,
     /// The seat's reasoning. Empty on a refused turn.
-    pub rationale: String,
-    /// Questions the seat put to the others or the Steward
-    pub questions: Vec<String>,
+    pub rationale: Redactable<String>,
+    /// Questions the seat put to the others or the Steward. A redaction
+    /// can take one question or the whole list.
+    pub questions: Redactable<Vec<Redactable<String>>>,
     /// Whether the seat said it was ready for the final vote
     pub ready_to_vote: bool,
     /// On a `Schedule` item's final round, the seat's ballot
@@ -131,7 +134,7 @@ pub struct SeatResponse {
     /// The model's raw reply text. Only in entries signed before
     /// 2026-09-18; from GOV-2026-0003 on it duplicates `rationale`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub raw_text: Option<String>,
+    pub raw_text: Option<Redactable<String>>,
 }
 
 /// A voting Council seat. The fifth vote is the Steward's.
@@ -408,6 +411,64 @@ mod tests {
         }
         let refused = round_trips("refusal", &synthetic("refusal"));
         assert_eq!(refused.rounds[0].responses[0].vote, None);
+    }
+
+    /// GOV-2026-0001 through the real [`redact_data`](super::super::redact_data)
+    #[test]
+    fn a_redacted_record_parses_with_the_redactions_in_place() {
+        let (name, data) = fixtures().swap_remove(0);
+        assert_eq!(name, "GOV-2026-0001.json");
+        let amd: GovernanceLogId = "AMD-2026-0009".parse().unwrap();
+        let fields = [
+            "/title",
+            "/vote_tally",
+            "/rounds/0/responses/0/position",
+            "/rounds/0/responses/0/rationale",
+            "/rounds/0/responses/0/raw_text",
+            "/rounds/0/responses/1/questions",
+            "/rounds/0/responses/2/questions/1",
+            "/rounds/1/steward_contribution",
+        ]
+        .map(String::from);
+        let redacted =
+            super::super::redact_data(&data, &fields, &amd, Blind::random())
+                .unwrap();
+        let record = round_trips(&name, &redacted);
+
+        let gone = Redactable::Redacted(amd.clone());
+        assert_eq!(record.title, gone);
+        assert_eq!(record.vote_tally, gone);
+        let [first, second, third, ..] = &record.rounds[0].responses[..] else {
+            panic!("round 1 has four responses");
+        };
+        assert_eq!(first.position, gone);
+        assert_eq!(first.rationale, gone);
+        assert_eq!(first.raw_text, Some(gone.clone()));
+        assert!(!first.questions.is_redacted());
+        assert_eq!(second.questions.redacted_by(), Some(&amd));
+        let questions = third.questions.value().unwrap();
+        assert!(!questions[0].is_redacted());
+        assert_eq!(questions[1], gone);
+        assert_eq!(record.rounds[1].steward_contribution, Some(gone));
+        assert!(record.blind.is_some());
+    }
+
+    /// Structural fields stay plain: redacting one is a shape this
+    /// version doesn't describe, and says so rather than guessing
+    #[test]
+    fn a_redacted_vote_is_an_error() {
+        let (_, data) = fixtures().swap_remove(0);
+        let amd: GovernanceLogId = "AMD-2026-0009".parse().unwrap();
+        let redacted = super::super::redact_data(
+            &data,
+            &["/final_votes/artist".into()],
+            &amd,
+            Blind::random(),
+        )
+        .unwrap();
+        assert!(
+            serde_json::from_value::<CouncilDecisionRecord>(redacted).is_err()
+        );
     }
 
     #[cfg(feature = "schemars")]
