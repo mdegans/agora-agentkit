@@ -45,6 +45,7 @@ use misanthropic::model::ModelInfo;
 use misanthropic::prompt::{
     Prompt,
     message::{Block, Role},
+    output::{Effort, OutputConfig},
     thinking::Thinking,
 };
 use misanthropic::response::{self, StopReason};
@@ -113,6 +114,17 @@ pub struct SeedConfig {
     /// file, not process-wide across cohorts. Should be less than
     /// [`act_max_tokens`](Self::act_max_tokens).
     pub thinking_budget_tokens: Option<NonZeroU32>,
+    /// Thinking by effort level instead of a token budget: `Some(e)` sends
+    /// `thinking: {type: adaptive}` with `output_config.effort = e` on the
+    /// act prompt, and takes precedence over
+    /// [`thinking_budget_tokens`](Self::thinking_budget_tokens).
+    ///
+    /// For backends that honour effort (blallama/Qwen): left to the model's
+    /// default (`xhigh` on Qwen 3.8), thinking overran a 4096-token budget
+    /// by 2× on 2026-09-22, since a budget there is only a hint. Haiku 4.5
+    /// takes budgets, not effort, so its config keeps
+    /// `thinking_budget_tokens`.
+    pub thinking_effort: Option<Effort>,
     /// Where [`on_teardown`](Agent::on_teardown) writes the finished session
     /// transcript, content-addressed — see [`prompt_log`]. `None` disables
     /// the dump entirely.
@@ -151,6 +163,7 @@ impl Default for SeedConfig {
             phase_max_tokens: 4096,
             evolve_max_tokens: 4096,
             thinking_budget_tokens: None,
+            thinking_effort: None,
             prompt_log_dir: None,
             web_search: None,
             web_fetch: None,
@@ -406,8 +419,10 @@ impl SeedAgent {
     }
 
     /// Seat a phase instruction as (or merged into) the trailing user turn
-    /// and set the phase's token budget. Clears any `output_config` from the
-    /// previous phase; callers re-add one where it's cache-safe.
+    /// and set the phase's token budget. Clears the previous phase's
+    /// `output_config` format (callers re-add one where it's cache-safe) but
+    /// keeps its effort: thinking stays adaptive across phases, and without
+    /// the effort a phase would think at the model's default.
     fn seat_phase(
         &mut self,
         text: &str,
@@ -415,7 +430,11 @@ impl SeedAgent {
     ) -> Result<Control, SeedError> {
         let prompt = &mut self.state.prompt;
         prompt.max_tokens = NonZeroU32::new(max_tokens).expect("nonzero");
-        prompt.output_config = None;
+        prompt.output_config = prompt
+            .output_config
+            .take()
+            .and_then(|config| config.effort)
+            .map(OutputConfig::effort);
         match prompt.messages.last_mut() {
             Some(last) if last.role == Role::User => {
                 last.extend([Block::from(text.to_string())]);
@@ -730,7 +749,9 @@ impl Agent for SeedAgent {
             .max_tokens(
                 NonZeroU32::new(ctx.config.act_max_tokens).expect("nonzero"),
             );
-        if let Some(budget) = ctx.config.thinking_budget_tokens {
+        if let Some(effort) = ctx.config.thinking_effort.clone() {
+            fresh = fresh.thinking(Thinking::adaptive()).effort(effort);
+        } else if let Some(budget) = ctx.config.thinking_budget_tokens {
             fresh = fresh.thinking(Thinking::enabled(budget));
         }
         fresh.tool_choice = Some(misanthropic::tool::Choice::Auto {
