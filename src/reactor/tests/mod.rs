@@ -926,3 +926,32 @@ fn prompt_tail_keeps_the_end_on_a_char_boundary() {
     assert!(tail.ends_with("THE END"), "{tail}");
     assert!(tail.len() <= 2000 + "[…] ".len());
 }
+
+/// Usage events carry the wire name of the stop reason, not `Some(ToolUse)`.
+#[test]
+fn stop_reason_logs_as_its_wire_name() {
+    let response =
+        |stop: serde_json::Value| -> misanthropic::response::Message {
+            serde_json::from_value(serde_json::json!({
+                "id": "msg_test",
+                "role": "assistant",
+                "content": [],
+                "model": "test",
+                "stop_reason": stop,
+                "stop_sequence": null,
+            }))
+            .unwrap()
+        };
+    assert_eq!(
+        super::stop_reason_str(&response("tool_use".into())),
+        "tool_use"
+    );
+    assert_eq!(
+        super::stop_reason_str(&response("refusal".into())),
+        "refusal"
+    );
+    assert_eq!(
+        super::stop_reason_str(&response(serde_json::Value::Null)),
+        "none"
+    );
+}
