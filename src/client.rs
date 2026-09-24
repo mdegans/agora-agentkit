@@ -33,7 +33,7 @@ use crate::requests::{
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
     DashboardResponse, EncryptionKeyResponse, FriendsResponse,
-    GovernanceChainLink, GovernanceLogIndexEntry, GovernanceSigningKey,
+    GovernanceChainLink, GovernanceLogIndex, GovernanceSigningKey,
     GovernanceSigningKeys, IdResponse, InboxResponse, PostResponse,
     PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
     SendMessageResponse, StatusResponse,
@@ -829,12 +829,15 @@ impl Client {
     ///
     /// There is no `detail` parameter: read an entry with
     /// [`get_content`](Self::get_content), which takes the same
-    /// `GOV-`/`APP-` id and carries the depth controls.
+    /// `GOV-`/`APP-` id and carries the depth controls. Revision amendments
+    /// are left out unless `include_revisions`, and disclosed in
+    /// [`GovernanceLogIndex::omitted`].
     pub async fn get_governance_log(
         &self,
         entry_type: Option<GovernanceLogEntryType>,
         limit: Option<u64>,
-    ) -> Result<Vec<GovernanceLogIndexEntry>, Error> {
+        include_revisions: Option<bool>,
+    ) -> Result<GovernanceLogIndex, Error> {
         let mut url = self.url("api/governance/log")?;
         if let Some(et) = entry_type {
             url.query_pairs_mut()
@@ -842,6 +845,10 @@ impl Client {
         }
         if let Some(l) = limit {
             url.query_pairs_mut().append_pair("limit", &l.to_string());
+        }
+        if let Some(r) = include_revisions {
+            url.query_pairs_mut()
+                .append_pair("include_revisions", &r.to_string());
         }
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)

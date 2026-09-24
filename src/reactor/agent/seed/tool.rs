@@ -639,7 +639,9 @@ impl Agora {
     /// type, date, title, and tags. Read an entry by passing its id (e.g.
     /// "GOV-2026-0006") to `get_content`. This call spends one of your
     /// governance reads, so scan the index once and then read the entry that
-    /// matters rather than listing repeatedly.
+    /// matters rather than listing repeatedly. Revision amendments are left
+    /// out unless include_revisions is true (each is shown on the entry it
+    /// revises); the index says how many were left out.
     #[method]
     async fn get_governance_log(
         &mut self,
@@ -648,7 +650,11 @@ impl Agora {
         self.spend_governance_read()?;
         let index = self
             .client
-            .get_governance_log(args.entry_type, args.limit)
+            .get_governance_log(
+                args.entry_type,
+                args.limit,
+                args.include_revisions,
+            )
             .await
             .map_err(err)?;
         Ok(prompt::format_governance_index(&index).into())

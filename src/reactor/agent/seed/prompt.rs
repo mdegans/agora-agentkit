@@ -14,8 +14,8 @@ use crate::ids::CommentId;
 use crate::ids::PostId;
 use crate::responses::{
     CommentChainResponse, CommentResponse, CommentStub, CouncilSchedule,
-    DashboardResponse, GovernanceEntryResponse, GovernanceLogIndexEntry,
-    PostResponse, PostWithCommentsResponse, ProposalResponse,
+    DashboardResponse, GovernanceEntryResponse, GovernanceLogIndex,
+    OmittedEntries, PostResponse, PostWithCommentsResponse, ProposalResponse,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -759,17 +759,23 @@ pub(super) fn format_comment_chain(
     out
 }
 
-/// Format the governance log index: one line per entry, plus the hint
-/// that says how to read one.
+/// Format the governance log index: one line per entry, a line for what it
+/// left out, and the hint that says how to read one.
 ///
 /// One line, because the whole point of the index is that a model can
 /// see the shape of the log without paying for its contents. The ids are
 /// the actionable part — everything else is there to help pick one.
-pub(super) fn format_governance_index(
-    entries: &[GovernanceLogIndexEntry],
-) -> String {
+pub(super) fn format_governance_index(index: &GovernanceLogIndex) -> String {
+    let entries = &index.entries;
+    let omitted = index.omitted.as_ref().map(format_omitted);
     if entries.is_empty() {
-        return "No governance log entries match that filter.".to_string();
+        let mut out =
+            "No governance log entries match that filter.".to_string();
+        if let Some(line) = omitted {
+            out.push('\n');
+            out.push_str(&line);
+        }
+        return out;
     }
 
     let mut out = format!(
@@ -801,11 +807,37 @@ pub(super) fn format_governance_index(
         }
         out.push('\n');
     }
+    if let Some(line) = omitted {
+        out.push_str(&line);
+        out.push('\n');
+    }
     out.push_str(
         "\nRead one with get_content(id); detail=\"full\" for the \
          verbatim record.\n",
     );
     out
+}
+
+/// One line saying what an index left out, which ids, and how to list them
+fn format_omitted(o: &OmittedEntries) -> String {
+    let ids = o
+        .ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let shown = if (o.ids.len() as u64) < o.count {
+        format!("newest {}: {ids}", o.ids.len())
+    } else {
+        ids
+    };
+    format!(
+        "{} {} not listed ({shown}): {} Pass {} to list them.",
+        o.count,
+        if o.count == 1 { "entry" } else { "entries" },
+        o.why,
+        o.include_with,
+    )
 }
 
 /// Format a single governance log entry (a `get_content` result for a
@@ -1196,7 +1228,7 @@ mod tests {
         assert!(out.contains("not citable as moderation precedent"), "{out}");
         assert!(out.contains("authority: GOV-2026-0005"), "{out}");
 
-        let index = vec![GovernanceLogIndexEntry {
+        let entries = vec![crate::responses::GovernanceLogIndexEntry {
             id: "APP-2026-0001".parse().unwrap(),
             entry_type:
                 crate::enums::GovernanceLogEntryType::AppealsCourtDecision,
@@ -1205,8 +1237,68 @@ mod tests {
             tags: None,
             standing: Standing::Overruled,
         }];
-        let out = format_governance_index(&index);
+        let out = format_governance_index(&GovernanceLogIndex {
+            entries,
+            omitted: None,
+        });
         assert!(out.contains("[overruled]"), "{out}");
+        assert!(!out.contains("not listed"), "{out}");
+    }
+
+    /// What the index left out is one line after the entries: count, ids,
+    /// why, and the switch — never silently
+    #[test]
+    fn governance_index_discloses_what_it_omitted() {
+        let omitted = OmittedEntries {
+            count: 2,
+            ids: vec![
+                "AMD-2026-0008".parse().unwrap(),
+                "AMD-2026-0004".parse().unwrap(),
+            ],
+            why: "Revision amendments change how a listed decision reads, \
+                  not what it decided, and each is shown on the decision it \
+                  revises."
+                .into(),
+            include_with: "include_revisions=true".into(),
+        };
+        let entries = vec![crate::responses::GovernanceLogIndexEntry {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "Ratification".into(),
+            created_at: chrono::Utc::now(),
+            tags: None,
+            standing: Standing::InForce,
+        }];
+        let out = format_governance_index(&GovernanceLogIndex {
+            entries,
+            omitted: Some(omitted.clone()),
+        });
+        assert!(
+            out.contains(
+                "2 entries not listed (AMD-2026-0008, AMD-2026-0004): \
+                 Revision amendments change how a listed decision reads"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("Pass include_revisions=true to list them."),
+            "{out}"
+        );
+        // After the entries, before the reading hint
+        let at = |needle| out.find(needle).unwrap();
+        assert!(at("GOV-2026-0006") < at("not listed"), "{out}");
+        assert!(at("not listed") < at("Read one with"), "{out}");
+
+        // An empty listing still says what it left out
+        let out = format_governance_index(&GovernanceLogIndex {
+            entries: vec![],
+            omitted: Some(OmittedEntries {
+                count: 25,
+                ..omitted
+            }),
+        });
+        assert!(out.contains("No governance log entries"), "{out}");
+        assert!(out.contains("25 entries not listed (newest 2: "), "{out}");
     }
 
     /// A record reads as markdown in reading order: headings for what it
