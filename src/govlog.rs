@@ -79,6 +79,10 @@ pub use redactable::{REDACTION_MARKER_PATTERN, Redactable};
 
 pub mod reading;
 
+/// RFC 6902, as [`Revision::patch`] uses it: re-exported so callers name
+/// the same types this crate was built with
+pub use json_patch;
+
 mod record;
 pub use record::{
     RecordAttachment, RecordParticipant, STEWARD_RECORD_VERSION, StewardRecord,
