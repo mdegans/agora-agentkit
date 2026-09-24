@@ -730,6 +730,7 @@ def validate_amendment(amendment):
                     "the patch does not remove" % path
                 )
         amendment["patch"] = patch
+        amendment["duplicates"] = duplicates
         amendment["resulting_data_hash"] = resulting
     elif amendment["revision"] is not None:
         return "`revision` is only valid on kind `revision`"
@@ -1590,6 +1591,14 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
         entry["standing"] = KIND_STANDING.get(amendment["kind"], entry["standing"])
         history = entry["history"]
         if amendment["kind"] == "redaction":
+            # A redaction of a revised entry says what the rebase gives, or
+            # the rebased history is checked against nothing.
+            if entry["revisions"] and amendment["resulting_latest_hash"] is None:
+                _add_problem(
+                    entries[seq - 1],
+                    "the redaction of %s, which has revisions, names no "
+                    "resulting_latest_hash" % entry["id"],
+                )
             entry["redacted"] = True
             entry["redacted_data_hash"] = amendment["resulting_data_hash"]
             # The revisions so far are rebased over the redacted data.
@@ -1601,7 +1610,12 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
             entry["revisions"].append(amendment_id)
             entry["latest_data_hash"] = amendment["resulting_data_hash"]
             history["revisions"].append(
-                (amendment_id, amendment["patch"], amendment["resulting_data_hash"])
+                (
+                    amendment_id,
+                    amendment["patch"],
+                    amendment["resulting_data_hash"],
+                    amendment["duplicates"],
+                )
             )
 
     # A redacted entry's content is what the redaction left behind, and a
@@ -1671,7 +1685,11 @@ def _content_check(entry, data):
     history = entry["history"]
     current = data
     failures = []
-    for revision_id, patch, _ in history["revisions"][: history["rebased"]]:
+    for revision_id, patch, _, duplicates in history["revisions"][: history["rebased"]]:
+        failure = _false_duplicate(revision_id, duplicates, current)
+        if failure:
+            failures.append(failure)
+            break
         try:
             current = apply_patch(current, patch)
         except PatchError:
@@ -1688,8 +1706,14 @@ def _content_check(entry, data):
             "the revisions rebased over the redacted data do not produce the "
             "redaction's resulting_latest_hash"
         )
-    for revision_id, patch, resulting in history["revisions"][history["rebased"]:]:
+    for revision_id, patch, resulting, duplicates in history["revisions"][
+        history["rebased"] :
+    ]:
         if failures:
+            break
+        failure = _false_duplicate(revision_id, duplicates, current)
+        if failure:
+            failures.append(failure)
             break
         try:
             following = apply_patch(current, patch)
@@ -1703,11 +1727,30 @@ def _content_check(entry, data):
             break
         current = following
     for failure in failures:
-        if not entry["problem"]:
-            entry["problem"] = failure
-        elif failure not in entry["problem"]:
-            entry["problem"] += "; " + failure
+        _add_problem(entry, failure)
     return True
+
+
+def _add_problem(entry, problem):
+    if not entry["problem"]:
+        entry["problem"] = problem
+    elif problem not in entry["problem"]:
+        entry["problem"] += "; " + problem
+
+
+def _false_duplicate(revision_id, duplicates, current):
+    """The first duplicate a revision claims that is not one in `current`,
+    the version it was applied to"""
+    for path, same_as in duplicates:
+        found_a, a = resolve_pointer(current, path)
+        found_b, b = resolve_pointer(current, same_as)
+        if not (found_a and found_b and canonical_json(a) == canonical_json(b)):
+            return "revision %s removed %s as a duplicate of %s, but they differ" % (
+                revision_id,
+                path,
+                same_as,
+            )
+    return None
 
 
 def check_content(report, entry_id, data):

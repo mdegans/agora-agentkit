@@ -1066,6 +1066,82 @@ fn cases() -> Vec<Case> {
 
     let mut c = Chain::new();
     let target = c.entry(&steward, data.clone());
+    let (revision, _) = revise(&c, &target, &data, dedup(&data));
+    c.amend(&steward, &revision);
+    let (redaction, _) = redact(&c, &target, "/subject/handle", &data, &[]);
+    c.amend(&steward, &redaction);
+    out.push(Case::new(
+        "redaction_missing_latest_hash",
+        "A redaction of an entry that has a revision, naming no \
+         resulting_latest_hash: the rebased history would be checked \
+         against nothing, so the redaction is a problem.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (mut lying, _) = revise(
+        &c,
+        &target,
+        &data,
+        serde_json::from_value::<json_patch::Patch>(json!([
+            {"op": "remove", "path": "/responses/1/raw_text"}
+        ]))
+        .unwrap()
+        .into(),
+    );
+    lying.amendment.revision.as_mut().unwrap().duplicates = vec![(
+        "/responses/1/raw_text".into(),
+        "/responses/1/rationale".into(),
+    )];
+    c.amend(&steward, &lying);
+    out.push(
+        Case::new(
+            "revision_false_duplicate",
+            "A revision that removed a value as a duplicate of one it \
+             differs from. Its hash is honest; its duplicates claim is not, \
+             and the removed text is not recoverable from what remains.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, data.clone()),
+    );
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (first, _) = revise(&c, &target, &data, dedup(&data));
+    c.amend(&steward, &first);
+    let first_revision = first.amendment.revision.clone().unwrap();
+    let (redaction, redacted) = redact(
+        &c,
+        &target,
+        "/responses/0/rationale",
+        &data,
+        &[&first_revision],
+    );
+    c.amend(&steward, &redaction);
+    let rebased = latest(&redacted, [&first_revision]).unwrap();
+    let (second, _) = revise(&c, &target, &rebased, moved.clone().into());
+    c.amend(&steward, &second);
+    out.push(
+        Case::new(
+            "redaction_of_duplicated_source",
+            "A redaction of the value a revision's removed duplicate was \
+             identical to: the stored duplicate is redacted with it, so the \
+             two are the same marker and the duplicates claim still holds. \
+             A later revision applies to the rebased version.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, redacted),
+    );
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
     let (redaction, redacted) =
         redact(&c, &target, "/subject/handle", &data, &[]);
     c.amend(&steward, &redaction);

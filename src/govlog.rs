@@ -2015,6 +2015,10 @@ impl EntryVerdict {
             if i == history.rebased {
                 break;
             }
+            if let Some(failure) = false_duplicate(id, revision, &current) {
+                failures.push(failure);
+                break;
+            }
             match apply_patch(&current, &revision.patch) {
                 Ok(next) => current = next,
                 Err(_) => {
@@ -2039,6 +2043,10 @@ impl EntryVerdict {
             if !failures.is_empty() {
                 break;
             }
+            if let Some(failure) = false_duplicate(id, revision, &current) {
+                failures.push(failure);
+                break;
+            }
             match apply_patch(&current, &revision.patch) {
                 Ok(next)
                     if data_hash(&next) == revision.resulting_data_hash =>
@@ -2054,14 +2062,40 @@ impl EntryVerdict {
             }
         }
         for failure in failures {
-            self.problem = Some(match self.problem.take() {
-                Some(p) if p.contains(&failure) => p,
-                Some(p) => format!("{p}; {failure}"),
-                None => failure,
-            });
+            add_problem(&mut self.problem, failure);
         }
         true
     }
+}
+
+/// Append `problem` to `problems`, once
+fn add_problem(problems: &mut Option<String>, problem: String) {
+    *problems = Some(match problems.take() {
+        Some(p) if p.contains(&problem) => p,
+        Some(p) => format!("{p}; {problem}"),
+        None => problem,
+    });
+}
+
+/// The first of `revision`'s duplicates that is not one in `current`, the
+/// version it was applied to: what makes "nothing was lost" checkable
+fn false_duplicate(
+    id: &GovernanceLogId,
+    revision: &Revision,
+    current: &serde_json::Value,
+) -> Option<String> {
+    revision.duplicates.iter().find_map(|(path, same_as)| {
+        let same = match (current.pointer(path), current.pointer(same_as)) {
+            (Some(a), Some(b)) => canonical_json(a) == canonical_json(b),
+            _ => false,
+        };
+        (!same).then(|| {
+            format!(
+                "revision {id} removed {path} as a duplicate of {same_as}, \
+                 but they differ"
+            )
+        })
+    })
 }
 
 /// A verification of the whole chain
@@ -2813,7 +2847,12 @@ pub fn verify_chain(
         }
         let entry = &mut entries[*target as usize - 1];
         entry.amended_by.push(id.clone());
+        let mut unrebased = false;
         if let Some(redaction) = &amendment.redaction {
+            // A redaction of a revised entry says what the rebase gives,
+            // or the rebased history is checked against nothing.
+            unrebased = !entry.revisions.is_empty()
+                && redaction.resulting_latest_hash.is_none();
             entry.redacted = true;
             entry.redacted_data_hash = Some(redaction.resulting_data_hash);
             // The revisions so far are rebased over the redacted data.
@@ -2826,6 +2865,16 @@ pub fn verify_chain(
             entry.revisions.push(id.clone());
             entry.latest_data_hash = Some(revision.resulting_data_hash);
             entry.history.revisions.push((id.clone(), revision.clone()));
+        }
+        if unrebased {
+            let target = entry.id.clone();
+            add_problem(
+                &mut entries[*seq as usize - 1].problem,
+                format!(
+                    "the redaction of {target}, which has revisions, names no \
+                     resulting_latest_hash"
+                ),
+            );
         }
     }
 
@@ -4034,6 +4083,68 @@ mod tests {
         c2.amend(&key, &lying);
         let mut v = verify_chain(&c2.links, &pk, &anchored(&pk), &roots());
         assert!(v.check_content(&c2.links[0], &honest));
+        assert!(!v.settle().ok);
+    }
+
+    /// A redaction of a revised entry that does not say what the rebase
+    /// gives leaves the rebased history checked against nothing
+    #[test]
+    fn a_redaction_of_a_revised_entry_must_name_the_latest_hash() {
+        let (key, pk) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let (revision, _) = revise(&c, &target, &data, dedup(&data));
+        c.amend(&key, &revision);
+        // What a caller passing no revisions produces.
+        let (redaction, _) =
+            redact(&c, &target, &["/subject/handle"], &data, &[]).unwrap();
+        c.amend(&key, &redaction);
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(!v.ok);
+        assert!(
+            v.entries[2]
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("names no resulting_latest_hash")),
+            "{v:#?}"
+        );
+    }
+
+    /// A revision's duplicates are checked against the version it applied
+    /// to: one that removed a value unlike its `same_as` lost something
+    #[test]
+    fn a_false_duplicate_fails() {
+        let (key, pk) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let artist = "/rounds/0/responses/1";
+        let (raw, rationale) =
+            (format!("{artist}/raw_text"), format!("{artist}/rationale"));
+        // Hand-built: the builder refuses it.
+        let (mut lying, _) = revise(
+            &c,
+            &target,
+            &data,
+            patch(json!([{"op": "remove", "path": raw}])),
+        );
+        let revised = apply_patch(&data, &revision_of(&lying).patch).unwrap();
+        let r = lying.amendment.revision.as_mut().unwrap();
+        r.duplicates = vec![(raw, rationale)];
+        r.resulting_data_hash = data_hash(&revised);
+        c.amend(&key, &lying);
+
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(v.ok, "unread, the claim is unchecked: {v:#?}");
+        assert!(v.check_content(&c.links[0], &data));
+        assert!(
+            v.entries[0]
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("but they differ")),
+            "{v:#?}"
+        );
         assert!(!v.settle().ok);
     }
 
