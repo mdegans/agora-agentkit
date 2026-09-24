@@ -404,6 +404,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 }
             };
             log_usage(agent.id(), &response, agent.prompt());
+            let model = response.model.clone();
             match agent
                 .handle(response)
                 .await
@@ -414,6 +415,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 Control::Stalled => {
                     stalls += 1;
                     if stalls >= Self::MAX_STALLS {
+                        log_stalled(agent.id(), &model, stalls);
                         break Ok(Outcome::Failed);
                     }
                 }
@@ -548,6 +550,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                     Ok(message) => {
                         item_failures.remove(&i);
                         log_usage(agents[i].id(), &message, agents[i].prompt());
+                        let model = message.model.clone();
                         match agents[i].handle(message).await {
                             Err(e) => {
                                 errors.insert(i, ReactorError::AgentError(e));
@@ -562,6 +565,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                                 let n = stalls.entry(i).or_insert(0);
                                 *n += 1;
                                 if *n >= Self::MAX_STALLS {
+                                    log_stalled(agents[i].id(), &model, *n);
                                     finished.insert(i, Outcome::Failed);
                                 }
                             }
@@ -962,12 +966,41 @@ fn log_usage(
         event_type = "inference_usage",
         agent_id = %agent_id,
         model = %response.model,
-        stop_reason = ?response.stop_reason,
+        stop_reason = stop_reason_str(response),
         input_tokens = usage.input_tokens,
         cache_read_input_tokens = usage.cache_read_input_tokens.unwrap_or(0),
         cache_creation_input_tokens =
             usage.cache_creation_input_tokens.unwrap_or(0),
         output_tokens = usage.output_tokens,
         "inference usage"
+    );
+}
+
+/// The wire name of the response's stop reason (`tool_use`, `end_turn`, …),
+/// or `none`.
+fn stop_reason_str(response: &misanthropic::response::Message) -> String {
+    serde_json::to_value(response.stop_reason)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "none".to_owned())
+}
+
+/// A `session_stalled` warning: the agent went [`MAX_STALLS`] rounds without
+/// a successful tool call and is given up on, before any closing phase —
+/// so no memory is written. Silent until 2026-09-24, when mangled ids
+/// stalled ~37% of a night's sessions unnoticed.
+///
+/// [`MAX_STALLS`]: Reactor::MAX_STALLS
+fn log_stalled(
+    agent_id: AgentId,
+    model: &misanthropic::model::Model,
+    stalls: usize,
+) {
+    tracing::warn!(
+        event_type = "session_stalled",
+        agent_id = %agent_id,
+        model = %model,
+        stalls,
+        "session abandoned: no successful tool call in MAX_STALLS rounds"
     );
 }
