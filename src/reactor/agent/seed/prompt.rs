@@ -867,8 +867,34 @@ pub(super) fn format_governance_entry(
         ),
     }
 
+    if !entry.attachments.is_empty() && entry.attachment.is_none() {
+        out.push_str("\nAttachments (read one with attachment=\"<name>\"):\n");
+        for a in &entry.attachments {
+            out.push_str(&format!(
+                "- {} — {} ({} bytes)\n",
+                a.name, a.note, a.bytes
+            ));
+        }
+    }
+
+    // An attachment is markdown written for reading; hand it over as
+    // text rather than as a JSON string full of escaped newlines.
+    let attachment = entry.attachment.as_deref().and_then(|name| {
+        entry
+            .data
+            .as_ref()?
+            .get("attachments")?
+            .as_array()?
+            .iter()
+            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(name))?
+            .get("content")?
+            .as_str()
+            .map(|content| (name, content))
+    });
     let has_record = entry.data.is_some();
-    if let Some(data) = &entry.data {
+    if let Some((name, content)) = attachment {
+        out.push_str(&format!("\n### Attachment: {name}\n\n{content}\n"));
+    } else if let Some(data) = &entry.data {
         out.push_str("\n### Record\n\n");
         match serde_json::to_string(data) {
             Ok(json) => out.push_str(&json),
@@ -996,6 +1022,8 @@ mod tests {
             total_rounds: None,
             data: None,
             round: None,
+            attachments: Vec::new(),
+            attachment: None,
             attestation: None,
             standing: Standing::NonPrecedential,
             amendments: vec![AmendmentNotice {
@@ -1030,6 +1058,58 @@ mod tests {
         }];
         let out = format_governance_index(&index);
         assert!(out.contains("[overruled]"), "{out}");
+    }
+
+    /// A decision lists its attachments, and one read by name comes back
+    /// as its markdown rather than as JSON
+    #[test]
+    fn attachments_are_listed_and_read_as_text() {
+        use crate::responses::AttachmentListing;
+        use chrono::Utc;
+
+        let mut entry = GovernanceEntryResponse {
+            id: "GOV-2026-0009".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "A motion".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("Approved.".into()),
+            total_rounds: Some(3),
+            data: None,
+            round: None,
+            attachments: vec![AttachmentListing {
+                name: "clerk-thread-summary.md".into(),
+                note: "The Clerk's summary of the thread".into(),
+                bytes: 24,
+            }],
+            attachment: None,
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            texts: None,
+        };
+        let out = format_governance_entry(&entry);
+        assert!(out.contains("attachment=\"<name>\""), "{out}");
+        assert!(
+            out.contains("- clerk-thread-summary.md — The Clerk's"),
+            "{out}"
+        );
+
+        entry.attachment = Some("clerk-thread-summary.md".into());
+        entry.data = Some(serde_json::json!({
+            "title": "A motion",
+            "attachments": [{
+                "name": "clerk-thread-summary.md",
+                "note": "n",
+                "content": "## Arguments\n\n[C1] argues for it."
+            }]
+        }));
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains("### Attachment: clerk-thread-summary.md\n\n## Arguments\n\n[C1]"),
+            "{out}"
+        );
+        assert!(!out.contains("### Record"), "{out}");
     }
 
     #[test]

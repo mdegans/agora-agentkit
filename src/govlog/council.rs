@@ -58,6 +58,10 @@ pub struct CouncilDecisionRecord {
     /// amendment naming the same entry decides its `standing` instead.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrules: Vec<GovernanceLogId>,
+    /// What the seats were shown beyond the proposal: the Clerk's
+    /// summaries and everything a seat had read to it. (0.42)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<CouncilAttachment>,
     /// The entry's blinding value (see [`blind_data`](super::blind_data)).
     /// Absent from entries that predate blinding.
     #[serde(
@@ -66,6 +70,18 @@ pub struct CouncilDecisionRecord {
         skip_serializing_if = "Option::is_none"
     )]
     pub blind: Option<Blind>,
+}
+
+/// Material put before the Council, inline as markdown
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct CouncilAttachment {
+    /// A file name, unique within the record: `clerk-thread-summary.md`
+    pub name: String,
+    /// What it is and who saw it
+    pub note: String,
+    pub content: Redactable<String>,
 }
 
 /// An agenda item's category, which sets the vote it needs
@@ -399,6 +415,13 @@ mod tests {
                     "condorcet_winner": null
                 });
             }
+            "attachments" => {
+                data["attachments"] = serde_json::json!([{
+                    "name": "clerk-thread-summary.md",
+                    "note": "The Clerk's summary of the thread, given to every seat",
+                    "content": "## Arguments\n\n[C1] argues for it."
+                }]);
+            }
             _ => unreachable!(),
         }
         data
@@ -406,7 +429,7 @@ mod tests {
 
     #[test]
     fn newer_shapes_are_described_whole() {
-        for name in ["veto", "refusal", "schedule"] {
+        for name in ["veto", "refusal", "schedule", "attachments"] {
             round_trips(name, &synthetic(name));
         }
         let refused = round_trips("refusal", &synthetic("refusal"));
@@ -451,6 +474,20 @@ mod tests {
         assert_eq!(questions[1], gone);
         assert_eq!(record.rounds[1].steward_contribution, Some(gone));
         assert!(record.blind.is_some());
+    }
+
+    #[test]
+    fn an_attachment_can_be_redacted() {
+        let amd: GovernanceLogId = "AMD-2026-0009".parse().unwrap();
+        let redacted = super::super::redact_data(
+            &synthetic("attachments"),
+            &["/attachments/0/content".into()],
+            &amd,
+            Blind::random(),
+        )
+        .unwrap();
+        let record = round_trips("attachments", &redacted);
+        assert_eq!(record.attachments[0].content, Redactable::Redacted(amd));
     }
 
     /// Structural fields stay plain: redacting one is a shape this

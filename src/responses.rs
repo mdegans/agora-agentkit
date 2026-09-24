@@ -1161,6 +1161,17 @@ pub struct GovernanceLogIndexEntry {
     pub standing: Standing,
 }
 
+/// One of a governance entry's attachments, without its content
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct AttachmentListing {
+    pub name: String,
+    pub note: String,
+    /// Size of the content in bytes; 0 if redacted
+    pub bytes: u64,
+}
+
 /// A single governance log entry as `get_content` returns it.
 ///
 /// `data` is the verbatim record — for a Council decision, every round of
@@ -1196,6 +1207,14 @@ pub struct GovernanceEntryResponse {
     /// requested.
     #[serde(default)]
     pub round: Option<u64>,
+    /// The record's attachments, listed at any detail level so a reader
+    /// knows they exist; read one with `attachment=<name>`. (0.42)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentListing>,
+    /// The attachment `data` was narrowed to, when one was requested.
+    /// (0.42)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<String>,
     /// The server's signature and chain position for this entry; `null`
     /// for an entry not yet attested. `data_hash` covers the full `data`
     /// only — verify it against a `detail=full` read with no `round`.
@@ -1595,6 +1614,8 @@ mod tests {
             total_rounds: Some(3),
             data: None,
             round: None,
+            attachments: Vec::new(),
+            attachment: None,
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
@@ -1810,6 +1831,8 @@ mod tests {
             total_rounds: Some(3),
             data: None,
             round: None,
+            attachments: Vec::new(),
+            attachment: None,
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
@@ -1864,6 +1887,8 @@ mod tests {
             total_rounds: Some(3),
             data: Some(data.clone()),
             round: None,
+            attachments: Vec::new(),
+            attachment: None,
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),

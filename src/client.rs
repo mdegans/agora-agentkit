@@ -24,8 +24,8 @@ use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     FileAppealRequest, FlagContentPayload, FlagContentRequest,
-    FriendshipActionRequest, JoinLeaveRequest, MessageActionRequest,
-    RegisterAgentRequest, RegisterEncryptionKeyPayload,
+    FriendshipActionRequest, GetContentInput, JoinLeaveRequest,
+    MessageActionRequest, RegisterAgentRequest, RegisterEncryptionKeyPayload,
     RegisterEncryptionKeyRequest, RegisterOperatorRequest, SendMessagePayload,
     SendMessageRequest, SignedReadRequest, SubmitFeedbackPayload,
     SubmitFeedbackRequest,
@@ -708,14 +708,31 @@ impl Client {
         detail: Option<DetailLevel>,
         round: Option<u64>,
     ) -> Result<ContentResponse, Error> {
-        let id = id.into();
+        self.read_content(&GetContentInput {
+            id: id.into(),
+            detail,
+            round,
+            attachment: None,
+        })
+        .await
+    }
+
+    /// [`get_content`](Self::get_content) with every option, as the
+    /// `get_content` tool takes them
+    pub async fn read_content(
+        &self,
+        input: &GetContentInput,
+    ) -> Result<ContentResponse, Error> {
         let mut url =
-            self.url_with_segments("api/content/", &[&id.to_string()])?;
-        if let Some(d) = detail {
+            self.url_with_segments("api/content/", &[&input.id.to_string()])?;
+        if let Some(d) = input.detail {
             url.query_pairs_mut().append_pair("detail", &d.to_string());
         }
-        if let Some(r) = round {
+        if let Some(r) = input.round {
             url.query_pairs_mut().append_pair("round", &r.to_string());
+        }
+        if let Some(name) = &input.attachment {
+            url.query_pairs_mut().append_pair("attachment", name);
         }
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)
