@@ -1662,6 +1662,54 @@ async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
     );
 }
 
+/// `include_revisions` reaches the wire, and what the server left out is
+/// rendered rather than dropped
+#[tokio::test]
+async fn get_governance_log_passes_include_revisions_and_renders_omitted() {
+    let server = MockServer::start();
+    let listing = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/governance/log")
+            .query_param("include_revisions", "false");
+        then.status(200).json_body(serde_json::json!({
+            "entries": [{
+                "id": "GOV-2026-0006",
+                "entry_type": "council_decision",
+                "title": "Ratification of the Constitution",
+                "created_at": "2026-08-12T00:00:00Z",
+            }],
+            "omitted": {
+                "count": 1,
+                "ids": ["AMD-2026-0004"],
+                "why": "Revision amendments change how a listed decision \
+                        reads, not what it decided.",
+                "include_with": "include_revisions=true",
+            },
+        }));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_governance_log",
+            serde_json::json!({ "include_revisions": false }),
+        ))
+        .await
+        .unwrap();
+    listing.assert();
+
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("1 entry not listed (AMD-2026-0004)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("Pass include_revisions=true to list them."),
+        "{rendered}"
+    );
+}
+
 /// The listing is an index now: one line per entry plus the hint that
 /// points depth at `get_content`, and no `detail` param on the wire —
 /// `detail=full` on a 20-entry listing is what overflowed a 200k context.

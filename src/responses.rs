@@ -1161,6 +1161,62 @@ pub struct GovernanceLogIndexEntry {
     pub standing: Standing,
 }
 
+/// The governance log index: the listed entries, and what the listing left
+/// out
+#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GovernanceLogIndex {
+    pub entries: Vec<GovernanceLogIndexEntry>,
+    /// Matching entries the listing left out, and how to list them; absent
+    /// when nothing was left out
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted: Option<OmittedEntries>,
+}
+
+/// A server before 0.44 answered the index with a bare array
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum GovernanceLogIndexWire {
+    Index {
+        entries: Vec<GovernanceLogIndexEntry>,
+        #[serde(default)]
+        omitted: Option<OmittedEntries>,
+    },
+    Bare(Vec<GovernanceLogIndexEntry>),
+}
+
+impl<'de> Deserialize<'de> for GovernanceLogIndex {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        Ok(match GovernanceLogIndexWire::deserialize(deserializer)? {
+            GovernanceLogIndexWire::Index { entries, omitted } => {
+                Self { entries, omitted }
+            }
+            GovernanceLogIndexWire::Bare(entries) => Self {
+                entries,
+                omitted: None,
+            },
+        })
+    }
+}
+
+/// Entries a listing left out by default, disclosed so none is left out
+/// silently
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OmittedEntries {
+    /// How many matching entries the listing left out
+    pub count: u64,
+    /// Their ids, newest first, at most 20
+    pub ids: Vec<GovernanceLogId>,
+    /// Why, in a sentence a reader can act on
+    pub why: String,
+    /// The switch that lists them, e.g. `include_revisions=true`
+    pub include_with: String,
+}
+
 /// One of a governance entry's attachments, without its content
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1881,6 +1937,58 @@ mod tests {
         assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
         assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
         assert!(text.contains("chain_seq"), "{text}");
+    }
+
+    /// The index and its omission notice are tool output schemas too
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn governance_log_index_schema_is_ref_free() {
+        let text =
+            serde_json::to_string(&inline_schema_for::<GovernanceLogIndex>())
+                .unwrap();
+        assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
+        assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
+        assert!(text.contains("include_with"), "{text}");
+    }
+
+    /// A server before 0.44 answers with a bare array; both shapes parse
+    #[test]
+    fn governance_log_index_reads_both_wire_shapes() {
+        let entry = serde_json::json!({
+            "id": "GOV-2026-0006",
+            "entry_type": "council_decision",
+            "title": "Ratification",
+            "created_at": "2026-08-12T00:00:00Z",
+        });
+
+        let bare: GovernanceLogIndex =
+            serde_json::from_value(serde_json::json!([entry.clone()])).unwrap();
+        assert_eq!(bare.entries.len(), 1);
+        assert!(bare.omitted.is_none());
+
+        let object: GovernanceLogIndex =
+            serde_json::from_value(serde_json::json!({
+                "entries": [entry],
+                "omitted": {
+                    "count": 1,
+                    "ids": ["AMD-2026-0004"],
+                    "why": "Why.",
+                    "include_with": "include_revisions=true",
+                },
+            }))
+            .unwrap();
+        assert_eq!(object.entries.len(), 1);
+        let omitted = object.omitted.clone().unwrap();
+        assert_eq!(omitted.count, 1);
+        assert_eq!(omitted.ids[0].to_string(), "AMD-2026-0004");
+
+        // Round trip, and `omitted` is absent rather than null when unset
+        let again: GovernanceLogIndex =
+            serde_json::from_value(serde_json::to_value(&object).unwrap())
+                .unwrap();
+        assert_eq!(again.omitted, object.omitted);
+        let unset = serde_json::to_value(&bare).unwrap();
+        assert!(unset.get("omitted").is_none(), "{unset}");
     }
 
     #[test]

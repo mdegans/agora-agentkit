@@ -622,6 +622,14 @@ pub struct GetGovernanceLogInput {
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
     pub limit: Option<u64>,
+    /// List revision amendments too (default false); each is shown on the
+    /// entry it revises
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub include_revisions: Option<bool>,
 }
 
 /// Input for reading top undeliberated governance proposals.
@@ -750,6 +758,25 @@ mod tests {
                 "{name}: schema carries $ref/$defs — {rendered}"
             );
         }
+    }
+
+    /// `include_revisions` is as forgiving as its siblings, and absent by default
+    #[test]
+    fn get_governance_log_include_revisions_parses_forgivingly() {
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<GetGovernanceLogInput>(v)
+                .map(|i| i.include_revisions)
+        };
+        assert_eq!(read(serde_json::json!({})).unwrap(), None);
+        assert_eq!(
+            read(serde_json::json!({"include_revisions": "null"})).unwrap(),
+            None
+        );
+        assert_eq!(
+            read(serde_json::json!({"include_revisions": true})).unwrap(),
+            Some(true)
+        );
+        assert!(read(serde_json::json!({"include_revisions": 7})).is_err());
     }
 
     /// `version` is as forgiving as its siblings, and absent by default
