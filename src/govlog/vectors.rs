@@ -80,6 +80,14 @@ struct ExpectEntry {
     retroactive: bool,
     out_of_order: bool,
     redacted: bool,
+    /// The three below are absent when empty, so the vectors that predate
+    /// them are unchanged
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    revisions: Vec<GovernanceLogId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_data_hash: Option<Sha256Hex>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded_revisions: Vec<GovernanceLogId>,
     repudiated: bool,
     amended_by: Vec<GovernanceLogId>,
     /// Where a version 2 amendment's texts stand; `null` for anything else
@@ -145,6 +153,9 @@ fn observe(
                 retroactive: e.retroactive,
                 out_of_order: e.out_of_order,
                 redacted: e.redacted,
+                revisions: e.revisions.clone(),
+                latest_data_hash: e.latest_data_hash,
+                superseded_revisions: e.superseded_revisions.clone(),
                 repudiated: e.repudiated,
                 amended_by: e.amended_by.clone(),
                 texts: e.texts,
@@ -839,6 +850,7 @@ fn cases() -> Vec<Case> {
         &data,
         // Fixed, like every key in this file: vectors are reproducible.
         Blind::from([0x5a; 32]),
+        &[],
     )
     .unwrap();
     c.amend(&steward, &amendment);
@@ -865,6 +877,210 @@ fn cases() -> Vec<Case> {
             c.links,
         )
         .content(target, tampered),
+    );
+
+    // -- revision --
+
+    let data = json!({
+        "title": "A motion",
+        "responses": [
+            {"role": "lawyer", "rationale": "Because.", "raw_text": "Because."},
+            {"role": "artist", "rationale": "Why not.", "raw_text": "Why not?"},
+        ],
+        "subject": {"handle": "someone"},
+        BLIND_KEY: Blind::from([0x5b; 32]),
+    });
+    let dedup = |data: &Value| {
+        Revision::remove_duplicates(
+            data,
+            &[("/responses/0/raw_text", "/responses/0/rationale")],
+        )
+        .unwrap()
+    };
+    let moved: json_patch::Patch = serde_json::from_value(json!([
+        {"op": "move", "from": "/title", "path": "/motion"}
+    ]))
+    .unwrap();
+    let revise =
+        |c: &Chain, target: &GovernanceLogId, latest: &Value, edit: Edit| {
+            AmendmentDraft::revision(
+                target.clone(),
+                CouncilDecision,
+                c.hash_at(1),
+                "Steward's record",
+                "raw_text identical to the rationale removed",
+                latest,
+                edit,
+            )
+            .unwrap()
+        };
+    let redact = |c: &Chain,
+                  target: &GovernanceLogId,
+                  field: &str,
+                  data: &Value,
+                  revisions: &[&Revision]| {
+        AmendmentDraft::redaction(
+            &c.next_amd(),
+            target.clone(),
+            c.hash_at(1),
+            "GDPR Art. 17(1)(a)",
+            "removed on request",
+            vec![field.to_string()],
+            data,
+            Blind::from([0x5c; 32]),
+            revisions,
+        )
+        .unwrap()
+    };
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (first, v1) = revise(&c, &target, &data, dedup(&data));
+    c.amend(&steward, &first);
+    let (second, v2) = revise(&c, &target, &v1, moved.clone().into());
+    c.amend(&steward, &second);
+    out.push(
+        Case::new(
+            "revision_accepted",
+            "Two revisions: one removes a key whose value is byte-identical \
+             to another's, one moves a key. The stored data is untouched and \
+             hashes to the attested data_hash; applying each RFC 6902 patch \
+             in chain order produces each resulting_data_hash.",
+            &steward_pk,
+            pinned.clone(),
+            c.links.clone(),
+        )
+        .content(target.clone(), data.clone()),
+    );
+    out.push(
+        Case::new(
+            "revision_latest_served",
+            "The same chain, content read as the latest version: it hashes \
+             to the last revision's resulting_data_hash.",
+            &steward_pk,
+            pinned.clone(),
+            c.links.clone(),
+        )
+        .content(target.clone(), v2),
+    );
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (mut lying, _) = revise(&c, &target, &data, dedup(&data));
+    lying
+        .amendment
+        .revision
+        .as_mut()
+        .unwrap()
+        .resulting_data_hash = data_hash(&json!({"title": "Something else"}));
+    c.amend(&steward, &lying);
+    out.push(
+        Case::new(
+            "revision_wrong_hash",
+            "A revision whose patch does not produce the resulting_data_hash \
+             it claims.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, data.clone()),
+    );
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (mut broken, _) = revise(&c, &target, &data, dedup(&data));
+    let broken_revision = broken.amendment.revision.as_mut().unwrap();
+    broken_revision.patch =
+        serde_json::from_value(json!([{"op": "remove", "path": "/nowhere"}]))
+            .unwrap();
+    broken_revision.duplicates.clear();
+    c.amend(&steward, &broken);
+    out.push(
+        Case::new(
+            "revision_does_not_apply",
+            "A well-formed revision whose patch does not apply to the \
+             stored data.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, data.clone()),
+    );
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (mut empty, _) = revise(&c, &target, &data, moved.clone().into());
+    empty.amendment.revision.as_mut().unwrap().patch =
+        json_patch::Patch(vec![]);
+    c.amend(&steward, &empty);
+    out.push(Case::new(
+        "revision_empty_patch",
+        "A revision with an empty patch: malformed.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (revision, _) = revise(&c, &target, &data, dedup(&data));
+    c.amend(&steward, &revision);
+    let rev = revision.amendment.revision.clone().unwrap();
+    let (redaction, redacted) =
+        redact(&c, &target, "/responses/0/rationale", &data, &[&rev]);
+    c.amend(&steward, &redaction);
+    out.push(
+        Case::new(
+            "revision_then_redaction",
+            "A revision removes a duplicate; a redaction then erases the \
+             value it duplicated, and the stored copy with it. The revision \
+             is rebased over the redacted data: its own resulting hash is \
+             superseded, and the redaction's resulting_latest_hash holds.",
+            &steward_pk,
+            pinned.clone(),
+            c.links.clone(),
+        )
+        .content(target.clone(), redacted.clone()),
+    );
+    let mut lie = redaction.clone();
+    lie.amendment
+        .redaction
+        .as_mut()
+        .unwrap()
+        .resulting_latest_hash = Some(data_hash(&json!({})));
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    c.amend(&steward, &revision);
+    c.amend(&steward, &lie);
+    out.push(
+        Case::new(
+            "redaction_wrong_latest_hash",
+            "The same redaction, claiming a resulting_latest_hash the \
+             rebased revisions do not produce.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, redacted),
+    );
+
+    let mut c = Chain::new();
+    let target = c.entry(&steward, data.clone());
+    let (redaction, redacted) =
+        redact(&c, &target, "/subject/handle", &data, &[]);
+    c.amend(&steward, &redaction);
+    let (revision, _) = revise(&c, &target, &redacted, dedup(&redacted));
+    c.amend(&steward, &revision);
+    out.push(
+        Case::new(
+            "redaction_then_revision",
+            "A redaction, then a revision of what it left: the patch is \
+             checked against the redacted data.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, redacted),
     );
 
     // -- forgery --

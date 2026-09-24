@@ -31,7 +31,10 @@
 //!   redaction replaces values in the target's `data` in place; the
 //!   original `entry_hash` stays on the row so later links still verify,
 //!   and the amendment's `resulting_data_hash` is what the redacted data
-//!   must now hash to. [`EntryVerdict::content_matches`] is the check.
+//!   must now hash to. [`EntryVerdict::content_matches`] is the check. A
+//!   [`Revision`] overwrites nothing: it is a signed RFC 6902 patch, and
+//!   the entry's [`latest`] version is its stored `data` with every
+//!   revision applied in chain order.
 //! - [`KeyRotation`] (`KEY-`) moves the chain to a new signing key. A
 //!   routine rotation is signed by the old key and a compromise
 //!   declaration by the new one, but neither signature is what makes the
@@ -73,6 +76,8 @@ pub use council::{
 
 mod redactable;
 pub use redactable::{REDACTION_MARKER_PATTERN, Redactable};
+
+pub mod reading;
 
 mod record;
 pub use record::{
@@ -605,6 +610,12 @@ pub enum AmendmentError {
     MissingRedaction,
     #[error("`redaction` is only valid on kind `redaction`")]
     UnexpectedRedaction,
+    #[error("kind `revision` requires a `revision`")]
+    MissingRevision,
+    #[error("`revision` is only valid on kind `revision`")]
+    UnexpectedRevision,
+    #[error("the `revision` is malformed: {0}")]
+    RevisionShape(ReviseError),
     #[error("amendment target {0} is not an entry of this chain")]
     UnknownTarget(GovernanceLogId),
     #[error("amendment target {0} is not an earlier entry")]
@@ -644,6 +655,9 @@ pub struct Amendment {
     /// Present iff `kind` is [`AmendmentKind::Redaction`]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redaction: Option<Redaction>,
+    /// Present iff `kind` is [`AmendmentKind::Revision`] (0.43)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<Revision>,
 }
 
 /// What a [`AmendmentKind::Redaction`] removed, and what is left
@@ -657,6 +671,190 @@ pub struct Redaction {
     /// What the target's `data` hashes to after redaction, so the redacted
     /// content is itself verifiable and cannot be altered again silently
     pub resulting_data_hash: Sha256Hex,
+    /// What the target's [`latest`] version hashes to after redaction: its
+    /// [`Revision`]s rebased over the redacted data. `None` when it has
+    /// none. (0.43)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resulting_latest_hash: Option<Sha256Hex>,
+}
+
+/// A commit on a governance entry: an RFC 6902 patch from its previous
+/// version to the next.
+///
+/// Nothing is overwritten. The entry keeps the `data` it was signed with,
+/// and its [`latest`] version is derived by applying every revision's
+/// patch in chain order, as git derives a checkout from its commits. See
+/// [`AmendmentDraft::revision`].
+///
+/// A value a patch adds (`add`, `replace`, `test`) lives in the amendment,
+/// which redaction cannot reach yet; removals, moves and copies carry no
+/// content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Revision {
+    /// From the previous version to this one
+    pub patch: json_patch::Patch,
+    /// For each `remove` of a duplicate, the removed path and the path it
+    /// duplicated: what a later redaction of the one must also erase from
+    /// the stored original. Not `test` ops, which would carry the values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub duplicates: Vec<(String, String)>,
+    /// What the entry's `data` hashes to after `patch`
+    pub resulting_data_hash: Sha256Hex,
+}
+
+/// What a [`Revision`] changes, before it is applied: a patch, and the
+/// duplicates it removes, if that is what it does
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Edit {
+    pub patch: json_patch::Patch,
+    /// See [`Revision::duplicates`]
+    pub duplicates: Vec<(String, String)>,
+}
+
+impl From<json_patch::Patch> for Edit {
+    fn from(patch: json_patch::Patch) -> Self {
+        Self {
+            patch,
+            duplicates: Vec::new(),
+        }
+    }
+}
+
+/// Written by hand: `json_patch` derives nothing inline, and a `$ref` in
+/// a schema is not an option (see the agora CLAUDE.md)
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Revision {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Revision".into()
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        let hash = generator.subschema_for::<Sha256Hex>();
+        schemars::json_schema!({
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "description": "RFC 6902 JSON Patch from the previous version to this one",
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "op": {
+                                "type": "string",
+                                "enum": ["add", "remove", "replace", "move", "copy", "test"]
+                            },
+                            "path": {"type": "string"},
+                            "from": {"type": "string"},
+                            "value": true
+                        },
+                        "required": ["op", "path"]
+                    }
+                },
+                "duplicates": {
+                    "description": "(removed path, the path it duplicated) for each duplicate removed",
+                    "type": "array",
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 2,
+                        "maxItems": 2
+                    }
+                },
+                "resulting_data_hash": hash
+            },
+            "required": ["patch", "resulting_data_hash"]
+        })
+    }
+}
+
+impl Revision {
+    /// Everything wrong with it that is checkable without `data`: an empty
+    /// patch, or a duplicate the patch does not remove
+    pub fn validate(&self) -> Result<(), ReviseError> {
+        if self.patch.is_empty() {
+            return Err(ReviseError::EmptyPatch);
+        }
+        for (path, _) in &self.duplicates {
+            let removed = self.patch.iter().any(|op| {
+                matches!(op, json_patch::PatchOperation::Remove(r) if r.path.as_str() == path)
+            });
+            if !removed {
+                return Err(ReviseError::NotRemoved(path.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// An [`Edit`] removing each `(path, same_as)` pair's `path`, whose
+    /// value is byte-identical (as [`canonical_json`]) to `same_as`'s,
+    /// which it leaves in place
+    pub fn remove_duplicates(
+        data: &serde_json::Value,
+        pairs: &[(&str, &str)],
+    ) -> Result<Edit, ReviseError> {
+        let mut ops = Vec::with_capacity(pairs.len());
+        for (path, _) in pairs {
+            let path = json_patch::jsonptr::PointerBuf::parse(*path)
+                .map_err(|e| ReviseError::Patch(e.to_string()))?;
+            ops.push(json_patch::PatchOperation::Remove(
+                json_patch::RemoveOperation { path },
+            ));
+        }
+        let edit = Edit {
+            patch: json_patch::Patch(ops),
+            duplicates: pairs
+                .iter()
+                .map(|(p, s)| (p.to_string(), s.to_string()))
+                .collect(),
+        };
+        check_duplicates(data, &edit)?;
+        Ok(edit)
+    }
+}
+
+/// Each of `edit`'s duplicates is removed by its patch, was byte-identical
+/// to its `same_as`, and its `same_as` survives the patch unchanged
+fn check_duplicates(
+    data: &serde_json::Value,
+    edit: &Edit,
+) -> Result<(), ReviseError> {
+    for (path, same_as) in &edit.duplicates {
+        let resolve = |pointer: &str| {
+            data.pointer(pointer)
+                .ok_or_else(|| ReviseError::Unresolved(pointer.to_string()))
+        };
+        let (removed, kept) = (resolve(path)?, resolve(same_as)?);
+        if canonical_json(removed) != canonical_json(kept) {
+            return Err(ReviseError::NotIdentical {
+                path: path.clone(),
+                same_as: same_as.clone(),
+            });
+        }
+    }
+    let revised = apply_patch(data, &edit.patch)?;
+    for (path, same_as) in &edit.duplicates {
+        let kept = data.pointer(same_as);
+        let removes = |op: &json_patch::PatchOperation| matches!(op, json_patch::PatchOperation::Remove(r) if r.path.as_str() == path);
+        if !edit.patch.iter().any(removes) {
+            return Err(ReviseError::NotRemoved(path.clone()));
+        }
+        let survives = revised.pointer(same_as).is_some_and(|v| {
+            kept.is_some_and(|k| canonical_json(v) == canonical_json(k))
+        });
+        if !survives {
+            return Err(ReviseError::SourceRemoved {
+                path: path.clone(),
+                same_as: same_as.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// An [`Amendment`] and the texts it commits to: what a writer appends,
@@ -670,9 +868,9 @@ pub struct AmendmentDraft {
 impl AmendmentDraft {
     /// An amendment of `kind` against `target`.
     ///
-    /// Redactions go through [`redaction`](Self::redaction) instead, which
-    /// is the only way to get a [`Redaction`] whose `resulting_data_hash`
-    /// is the hash of data that actually exists. A `&str` or `String`
+    /// Redactions and revisions go through [`redaction`](Self::redaction)
+    /// and [`revision`](Self::revision) instead, the only ways to get
+    /// a `resulting_data_hash` of data that actually exists. A `&str` or `String`
     /// text gets a [random](TextSalt::random) salt.
     pub fn new(
         target: GovernanceLogId,
@@ -681,8 +879,14 @@ impl AmendmentDraft {
         basis: impl Into<CommittedText>,
         note: impl Into<CommittedText>,
     ) -> Result<Self, AmendmentError> {
-        if kind == AmendmentKind::Redaction {
-            return Err(AmendmentError::MissingRedaction);
+        match kind {
+            AmendmentKind::Redaction => {
+                return Err(AmendmentError::MissingRedaction);
+            }
+            AmendmentKind::Revision => {
+                return Err(AmendmentError::MissingRevision);
+            }
+            _ => {}
         }
         let (basis, note) = (basis.into(), note.into());
         Ok(Self {
@@ -696,6 +900,7 @@ impl AmendmentDraft {
                 note: AmendmentText::Committed(note.commitment()),
                 rationale: None,
                 redaction: None,
+                revision: None,
             },
             texts: AmendmentTexts {
                 basis: Some(basis),
@@ -714,6 +919,14 @@ impl AmendmentDraft {
     /// target's row must hold for [`verify_chain`] to accept it. `blind`
     /// is the target's new [`Blind`]: [random](Blind::random), so a
     /// rehearsal's `resulting_data_hash` is not the real one's.
+    ///
+    /// `revisions` are the target's, in chain order. They are rebased over
+    /// the redacted data, which must still take every patch, and a value
+    /// they removed as a duplicate of a redacted one is redacted from the
+    /// stored original too: `fields` is extended with it, or the erased
+    /// text would still be readable as first signed.
+    // TODO(docs/design-govlog-revisions.md): redact inside a revision's
+    // patch values, before any revision adds content.
     #[allow(clippy::too_many_arguments)]
     pub fn redaction(
         amendment_id: &GovernanceLogId,
@@ -721,11 +934,29 @@ impl AmendmentDraft {
         target_entry_hash: Sha256Hex,
         basis: impl Into<CommittedText>,
         note: impl Into<CommittedText>,
-        fields: Vec<String>,
+        mut fields: Vec<String>,
         data: &serde_json::Value,
         blind: Blind,
+        revisions: &[&Revision],
     ) -> Result<(Self, serde_json::Value), RedactError> {
+        for extra in duplicates_of(&fields, revisions) {
+            let covered = fields.iter().any(|f| {
+                extra.strip_prefix(f.as_str()).is_some_and(|rest| {
+                    rest.is_empty() || rest.starts_with('/')
+                })
+            });
+            if !covered && data.pointer(&extra).is_some() {
+                fields.push(extra);
+            }
+        }
         let redacted = redact_data(data, &fields, amendment_id, blind)?;
+        let resulting_latest_hash = match revisions {
+            [] => None,
+            _ => Some(data_hash(
+                &latest(&redacted, revisions.iter().copied())
+                    .map_err(|e| RedactError::Rebase(e.to_string()))?,
+            )),
+        };
         let (basis, note) = (basis.into(), note.into());
         Ok((
             Self {
@@ -741,7 +972,9 @@ impl AmendmentDraft {
                     redaction: Some(Redaction {
                         fields,
                         resulting_data_hash: data_hash(&redacted),
+                        resulting_latest_hash,
                     }),
+                    revision: None,
                 },
                 texts: AmendmentTexts {
                     basis: Some(basis),
@@ -750,6 +983,100 @@ impl AmendmentDraft {
                 },
             },
             redacted,
+        ))
+    }
+
+    /// A revision of the target by `edit` (a patch, or
+    /// [`Revision::remove_duplicates`]), applied to its `latest` version
+    /// (see [`latest`]); returns the next version it commits to.
+    ///
+    /// Nothing is written to the target. A patch that adds content (`add`
+    /// or `replace`) to a target without a [`Blind`] adds one too, so the
+    /// public `resulting_data_hash` cannot confirm a guess at text a later
+    /// redaction removes; `copy` and `move` add nothing that was not
+    /// already covered by the entry's own hash. A patch may not touch an
+    /// existing blind.
+    pub fn revision(
+        target: GovernanceLogId,
+        target_type: GovernanceLogEntryType,
+        target_entry_hash: Sha256Hex,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
+        latest: &serde_json::Value,
+        edit: impl Into<Edit>,
+    ) -> Result<(Self, serde_json::Value), ReviseError> {
+        let Edit {
+            mut patch,
+            duplicates,
+        } = edit.into();
+        if !is_revisable(target_type) {
+            return Err(ReviseError::NotRevisable(target_type));
+        }
+        if patch.is_empty() {
+            return Err(ReviseError::EmptyPatch);
+        }
+        let blind_pointer = format!("/{BLIND_KEY}");
+        for op in patch.iter() {
+            let from = match op {
+                json_patch::PatchOperation::Move(m) => Some(m.from.as_str()),
+                json_patch::PatchOperation::Copy(c) => Some(c.from.as_str()),
+                _ => None,
+            };
+            for pointer in
+                [Some(op.path().as_str()), from].into_iter().flatten()
+            {
+                if overlaps(pointer, &blind_pointer) {
+                    return Err(ReviseError::BlindPointer(pointer.to_string()));
+                }
+            }
+        }
+        let adds = patch.iter().any(|op| {
+            matches!(
+                op,
+                json_patch::PatchOperation::Add(_)
+                    | json_patch::PatchOperation::Replace(_)
+            )
+        });
+        if adds && latest.is_object() && latest.get(BLIND_KEY).is_none() {
+            patch.0.push(json_patch::PatchOperation::Add(
+                json_patch::AddOperation {
+                    path: json_patch::jsonptr::PointerBuf::from_tokens([
+                        BLIND_KEY,
+                    ]),
+                    value: Blind::random().to_hex().into(),
+                },
+            ));
+        }
+        let edit = Edit { patch, duplicates };
+        check_duplicates(latest, &edit)?;
+        let Edit { patch, duplicates } = edit;
+        let revised = apply_patch(latest, &patch)?;
+        let (basis, note) = (basis.into(), note.into());
+        Ok((
+            Self {
+                amendment: Amendment {
+                    agora_governance_amendment: AMENDMENT_VERSION,
+                    target,
+                    target_entry_hash,
+                    kind: AmendmentKind::Revision,
+                    authority: None,
+                    basis: AmendmentText::Committed(basis.commitment()),
+                    note: AmendmentText::Committed(note.commitment()),
+                    rationale: None,
+                    redaction: None,
+                    revision: Some(Revision {
+                        patch,
+                        duplicates,
+                        resulting_data_hash: data_hash(&revised),
+                    }),
+                },
+                texts: AmendmentTexts {
+                    basis: Some(basis),
+                    note: Some(note),
+                    rationale: None,
+                },
+            },
+            revised,
         ))
     }
 
@@ -774,7 +1101,7 @@ impl AmendmentDraft {
 
 impl Amendment {
     /// Version, the shape of the texts for that version, and the
-    /// redaction-shape invariant — everything checkable without the rest
+    /// redaction- and revision-shape invariants — everything checkable without the rest
     /// of the chain
     pub fn validate(&self) -> Result<(), AmendmentError> {
         let plain = match self.agora_governance_amendment {
@@ -789,11 +1116,21 @@ impl Amendment {
         }
         match (self.kind, &self.redaction) {
             (AmendmentKind::Redaction, None) => {
-                Err(AmendmentError::MissingRedaction)
+                return Err(AmendmentError::MissingRedaction);
             }
             (k, Some(_)) if k != AmendmentKind::Redaction => {
-                Err(AmendmentError::UnexpectedRedaction)
+                return Err(AmendmentError::UnexpectedRedaction);
             }
+            _ => {}
+        }
+        match (self.kind, &self.revision) {
+            (AmendmentKind::Revision, None) => {
+                Err(AmendmentError::MissingRevision)
+            }
+            (AmendmentKind::Revision, Some(r)) => {
+                r.validate().map_err(AmendmentError::RevisionShape)
+            }
+            (_, Some(_)) => Err(AmendmentError::UnexpectedRevision),
             _ => Ok(()),
         }
     }
@@ -852,7 +1189,8 @@ pub fn kind_standing(kind: AmendmentKind) -> Option<Standing> {
         AmendmentKind::Reinstated => Some(Standing::InForce),
         AmendmentKind::Correction
         | AmendmentKind::Redaction
-        | AmendmentKind::Reattested => None,
+        | AmendmentKind::Reattested
+        | AmendmentKind::Revision => None,
     }
 }
 
@@ -940,6 +1278,8 @@ pub enum RedactError {
     NoFields,
     #[error("{0:?} is the entry's blind; every redaction replaces it already")]
     BlindPointer(String),
+    #[error("a revision no longer applies to the redacted data: {0}")]
+    Rebase(String),
     #[error(
         "{0:?} is a number that is not a 64-bit integer; governance data \
          never contains one"
@@ -1000,6 +1340,113 @@ pub fn redact_data(
         object.insert(BLIND_KEY.to_string(), blind.to_hex().into());
     }
     Ok(out)
+}
+
+/// Whether entries of this type can be revised. Those that cannot be
+/// [redacted](is_redactable) cannot, nor can a [`StewardRecord`]: it is
+/// the disclosure of what was done to the others.
+pub fn is_revisable(entry_type: GovernanceLogEntryType) -> bool {
+    is_redactable(entry_type)
+        && entry_type != GovernanceLogEntryType::StewardRecord
+}
+
+/// A [`Revision`] cannot be made or applied as asked
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReviseError {
+    #[error("a revision's patch has at least one op")]
+    EmptyPatch,
+    #[error("the patch does not apply: {0}")]
+    Patch(String),
+    #[error("{0:?} is the entry's blind, which a revision never touches")]
+    BlindPointer(String),
+    #[error("pointer {0:?} does not resolve")]
+    Unresolved(String),
+    #[error("{path:?} is not byte-identical to {same_as:?}")]
+    NotIdentical { path: String, same_as: String },
+    #[error("{same_as:?}, which {path:?} duplicates, has to survive the patch")]
+    SourceRemoved { path: String, same_as: String },
+    #[error("{0:?} is listed as a duplicate the patch does not remove")]
+    NotRemoved(String),
+    #[error("{0} entries are never revised")]
+    NotRevisable(GovernanceLogEntryType),
+    #[error(
+        "{0:?} is a number that is not a 64-bit integer; governance data \
+         never contains one"
+    )]
+    NonIntegerNumber(String),
+}
+
+/// `a` and `b` name the same value, or one lies inside the other
+fn overlaps(a: &str, b: &str) -> bool {
+    let within = |inner: &str, outer: &str| {
+        inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    within(a, b) || within(b, a)
+}
+
+/// `data` with `patch` applied, as the `json-patch` crate applies RFC 6902
+pub fn apply_patch(
+    data: &serde_json::Value,
+    patch: &json_patch::Patch,
+) -> Result<serde_json::Value, ReviseError> {
+    let mut out = data.clone();
+    json_patch::patch(&mut out, patch)
+        .map_err(|e| ReviseError::Patch(e.to_string()))?;
+    if let Some(pointer) = non_integer_number(&out) {
+        return Err(ReviseError::NonIntegerNumber(pointer));
+    }
+    Ok(out)
+}
+
+/// An entry's latest version: its stored `data` with each revision's
+/// patch applied in chain order. A redaction rebases them (see
+/// [`AmendmentDraft::redaction`]), so an error means the history is
+/// broken, not that a patch is out of date.
+pub fn latest<'a>(
+    data: &serde_json::Value,
+    revisions: impl IntoIterator<Item = &'a Revision>,
+) -> Result<serde_json::Value, ReviseError> {
+    let mut current = data.clone();
+    for revision in revisions {
+        current = apply_patch(&current, &revision.patch)?;
+    }
+    Ok(current)
+}
+
+/// The paths `revisions` removed as duplicates of a value in `fields` (or
+/// of one inside it, or holding it): what a redaction of `fields` must
+/// also erase from the stored original
+fn duplicates_of(fields: &[String], revisions: &[&Revision]) -> Vec<String> {
+    let mut extra = Vec::new();
+    for (removed, same_as) in revisions.iter().flat_map(|r| &r.duplicates) {
+        for field in fields {
+            if let Some(rest) = field.strip_prefix(same_as.as_str())
+                && (rest.is_empty() || rest.starts_with('/'))
+            {
+                // Part of the source: the same part of the copy.
+                extra.push(format!("{removed}{rest}"));
+            } else if overlaps(field, same_as) {
+                // The whole source: the whole copy.
+                extra.push(removed.clone());
+            }
+        }
+    }
+    extra
+}
+
+/// The revisions of one entry, for
+/// [`check_content`](GovernanceVerification::check_content)
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RevisionHistory {
+    /// In chain order
+    pub revisions: Vec<(GovernanceLogId, Revision)>,
+    /// How many of them came before the entry's last redaction, which
+    /// rebased them: their own hashes describe unredacted history
+    pub rebased: usize,
+    /// What the last redaction says the rebased ones fold to
+    pub rebased_hash: Option<Sha256Hex>,
 }
 
 /// What a reader needs next to an amended entry
@@ -1475,11 +1922,12 @@ pub struct EntryVerdict {
     /// `entry_hash` recomputes from the envelope fields, `prev_hash` is the
     /// previous entry's `entry_hash`, and `chain_seq` is contiguous
     pub link_valid: bool,
-    /// The entry's current `data` hashes to the attested `data_hash` — or,
+    /// The entry's stored `data` hashes to the attested `data_hash` — or,
     /// when a redaction names the entry, to the redaction's
-    /// `resulting_data_hash`. `null` when the verifier did not read `data`.
-    /// `false` with a clean chain means the content was changed after
-    /// attestation and no amendment says so.
+    /// `resulting_data_hash` — or `data` is the entry's
+    /// [latest](Self::latest_data_hash) version. `null` when the
+    /// verifier did not read `data`. `false` with a clean chain means the
+    /// content was changed after attestation and no amendment says so.
     #[serde(default)]
     pub content_matches: Option<bool>,
     /// See [`GovernanceAttestation::retroactive`]
@@ -1501,6 +1949,25 @@ pub struct EntryVerdict {
     /// What the entry's `data` must hash to now, when it has been redacted
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redacted_data_hash: Option<Sha256Hex>,
+    /// Revision amendments naming this entry, in chain order: its latest
+    /// version is its stored `data` with each one's patch applied (0.43)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<GovernanceLogId>,
+    /// What the entry's [`latest`] version hashes to: the last revision's
+    /// `resulting_data_hash`, or a later redaction's
+    /// `resulting_latest_hash` (0.43)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_data_hash: Option<Sha256Hex>,
+    /// Revisions whose own `resulting_data_hash` a later redaction
+    /// superseded: they describe the unredacted history, and the
+    /// redaction's `resulting_latest_hash` is checked instead. Reported,
+    /// not a failure. (0.43)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superseded_revisions: Vec<GovernanceLogId>,
+    /// What [`check_content`](GovernanceVerification::check_content)
+    /// folds. Not on the wire: the amendments carry it.
+    #[serde(skip)]
+    pub history: RevisionHistory,
     /// Signed inside a compromise window and not reattested: the key
     /// holder of record disclaims it
     #[serde(default)]
@@ -1517,6 +1984,84 @@ pub struct EntryVerdict {
     /// What failed, when something did
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+}
+
+impl EntryVerdict {
+    /// Whether `data` is the stored content or the latest version. For the
+    /// stored content, every revision is folded over it and checked; one
+    /// that does not apply or produce its hash is a `problem`.
+    fn content_check(
+        &mut self,
+        attested: Sha256Hex,
+        data: &serde_json::Value,
+    ) -> bool {
+        // Never hashed: see `non_integer_number`.
+        if non_integer_number(data).is_some() {
+            return false;
+        }
+        let hash = data_hash(data);
+        if hash == attested && self.redacted {
+            // A copy from before the redaction: authentic, and nothing
+            // later was built on it.
+            return true;
+        }
+        if hash != attested && Some(hash) != self.redacted_data_hash {
+            return Some(hash) == self.latest_data_hash;
+        }
+        let history = &self.history;
+        let mut current = data.clone();
+        let mut failures = Vec::new();
+        for (i, (id, revision)) in history.revisions.iter().enumerate() {
+            if i == history.rebased {
+                break;
+            }
+            match apply_patch(&current, &revision.patch) {
+                Ok(next) => current = next,
+                Err(_) => {
+                    failures.push(format!(
+                        "revision {id} does not apply to the redacted data"
+                    ));
+                    break;
+                }
+            }
+        }
+        if failures.is_empty()
+            && let Some(expected) = history.rebased_hash
+            && data_hash(&current) != expected
+        {
+            failures.push(
+                "the revisions rebased over the redacted data do not \
+                 produce the redaction's resulting_latest_hash"
+                    .to_string(),
+            );
+        }
+        for (id, revision) in history.revisions.iter().skip(history.rebased) {
+            if !failures.is_empty() {
+                break;
+            }
+            match apply_patch(&current, &revision.patch) {
+                Ok(next)
+                    if data_hash(&next) == revision.resulting_data_hash =>
+                {
+                    current = next;
+                }
+                Ok(_) => failures.push(format!(
+                    "revision {id} does not produce its resulting_data_hash"
+                )),
+                Err(_) => {
+                    failures.push(format!("revision {id} does not apply"))
+                }
+            }
+        }
+        for failure in failures {
+            self.problem = Some(match self.problem.take() {
+                Some(p) if p.contains(&failure) => p,
+                Some(p) => format!("{p}; {failure}"),
+                None => failure,
+            });
+        }
+        true
+    }
 }
 
 /// A verification of the whole chain
@@ -1564,7 +2109,8 @@ impl GovernanceVerification {
     }
 
     /// Record whether `data` is the content `link` attested — or what a
-    /// redaction of it left behind.
+    /// redaction of it left behind, or its latest version. Folding its
+    /// revisions over the stored content checks them too.
     ///
     /// The chain endpoint carries `data` only for amendments and
     /// rotations, so this is how a caller that read an entry in full folds
@@ -1581,12 +2127,7 @@ impl GovernanceVerification {
         else {
             return false;
         };
-        // Never hashed: see `non_integer_number`.
-        let hash = non_integer_number(data).is_none().then(|| data_hash(data));
-        let ok = hash.is_some_and(|hash| {
-            hash == link.attestation.data_hash
-                || entry.redacted_data_hash == Some(hash)
-        });
+        let ok = entry.content_check(link.attestation.data_hash, data);
         entry.content_matches = Some(ok);
         ok
     }
@@ -2231,6 +2772,10 @@ pub fn verify_chain(
             signed_by: Some(key_hex),
             redacted: false,
             redacted_data_hash: None,
+            revisions: Vec::new(),
+            latest_data_hash: None,
+            superseded_revisions: Vec::new(),
+            history: RevisionHistory::default(),
             repudiated: false,
             reattested_by: Vec::new(),
             texts,
@@ -2271,18 +2816,29 @@ pub fn verify_chain(
         if let Some(redaction) = &amendment.redaction {
             entry.redacted = true;
             entry.redacted_data_hash = Some(redaction.resulting_data_hash);
+            // The revisions so far are rebased over the redacted data.
+            entry.history.rebased = entry.history.revisions.len();
+            entry.history.rebased_hash = redaction.resulting_latest_hash;
+            entry.latest_data_hash = redaction.resulting_latest_hash;
+            entry.superseded_revisions = entry.revisions.clone();
+        }
+        if let Some(revision) = &amendment.revision {
+            entry.revisions.push(id.clone());
+            entry.latest_data_hash = Some(revision.resulting_data_hash);
+            entry.history.revisions.push((id.clone(), revision.clone()));
         }
     }
 
-    // A redacted entry's content is what the redaction left behind.
+    // A redacted entry's content is what the redaction left behind, and a
+    // revised one's revisions are checked against it.
     for (i, link) in links.iter().enumerate() {
-        if entries[i].content_matches == Some(false)
-            && let (Some(data), Some(hash)) =
-                (&link.data, entries[i].redacted_data_hash)
-            && non_integer_number(data).is_none()
-            && data_hash(data) == hash
+        let entry = &mut entries[i];
+        if let Some(data) = &link.data
+            && entry.content_matches.is_some()
+            && (entry.redacted || !entry.history.revisions.is_empty())
         {
-            entries[i].content_matches = Some(true);
+            entry.content_matches =
+                Some(entry.content_check(link.attestation.data_hash, data));
         }
     }
 
@@ -3123,6 +3679,7 @@ mod tests {
             a.redaction = Some(Redaction {
                 fields: vec!["/x".into()],
                 resulting_data_hash: data_hash(&json!({})),
+                resulting_latest_hash: None,
             })
         });
         assert!(p.contains("only valid on kind"), "{p}");
@@ -3199,6 +3756,7 @@ mod tests {
             vec!["/subject/handle".into(), "/subject/detail".into()],
             &data,
             Blind::from([7; 32]),
+            &[],
         )
         .unwrap();
         assert_eq!(c.amend(&key, &amendment), amendment_id);
@@ -3227,6 +3785,510 @@ mod tests {
         assert!(!v.check_content(&c.links[0], &tampered));
         assert_eq!(v.entries[0].content_matches, Some(false));
         assert!(!v.settle().ok);
+    }
+
+    /// A Council record with a seat whose `raw_text` repeats its
+    /// `rationale`, and one whose does not
+    fn seats() -> serde_json::Value {
+        json!({
+            "title": "A motion",
+            "rounds": [{
+                "number": 1,
+                "responses": [
+                    {"role": "lawyer", "rationale": "Because.", "raw_text": "Because.", "vote": "yes"},
+                    {"role": "artist", "rationale": "Why not.", "raw_text": "Why not?", "vote": "no"},
+                ],
+            }],
+            "subject": {"handle": "someone"},
+            BLIND_KEY: Blind::from([3; 32]),
+        })
+    }
+
+    const LAWYER: &str = "/rounds/0/responses/0";
+
+    /// An RFC 6902 patch from its JSON
+    fn patch(ops: serde_json::Value) -> json_patch::Patch {
+        serde_json::from_value(ops).unwrap()
+    }
+
+    /// The lawyer's `raw_text` removed as a duplicate of the rationale
+    fn dedup(data: &serde_json::Value) -> Edit {
+        let (raw, rationale) =
+            (format!("{LAWYER}/raw_text"), format!("{LAWYER}/rationale"));
+        Revision::remove_duplicates(data, &[(&raw, &rationale)]).unwrap()
+    }
+
+    fn revise(
+        c: &Chain,
+        target: &GovernanceLogId,
+        latest: &serde_json::Value,
+        patch: impl Into<Edit>,
+    ) -> (AmendmentDraft, serde_json::Value) {
+        AmendmentDraft::revision(
+            target.clone(),
+            GovernanceLogEntryType::CouncilDecision,
+            c.hash_at(1),
+            "Steward's record REC-2026-0001",
+            "raw_text identical to the rationale removed",
+            latest,
+            patch,
+        )
+        .unwrap()
+    }
+
+    fn revision_of(draft: &AmendmentDraft) -> &Revision {
+        draft.amendment.revision.as_ref().unwrap()
+    }
+
+    #[test]
+    fn a_revision_overwrites_nothing_and_folds_to_the_latest() {
+        let (key, pk) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let (first, v1) = revise(&c, &target, &data, dedup(&data));
+        c.amend(&key, &first);
+        let (second, v2) = revise(
+            &c,
+            &target,
+            &v1,
+            patch(json!([{"op": "move", "from": "/title", "path": "/motion"}])),
+        );
+        c.amend(&key, &second);
+
+        let seat = &v1["rounds"][0]["responses"];
+        assert!(seat[0].get("raw_text").is_none(), "removed, no marker");
+        assert_eq!(seat[1]["raw_text"], json!("Why not?"), "the other stays");
+        assert_eq!(v2["motion"], json!("A motion"));
+        assert_eq!(v2[BLIND_KEY], data[BLIND_KEY], "blind kept");
+        assert_eq!(
+            latest(&data, [revision_of(&first), revision_of(&second)]).unwrap(),
+            v2
+        );
+
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(v.ok, "{v:#?}");
+        let entry = &v.entries[0];
+        assert_eq!(entry.revisions, [amd(1), amd(2)]);
+        assert_eq!(entry.latest_data_hash, Some(data_hash(&v2)));
+        assert!(!entry.redacted && entry.redacted_data_hash.is_none());
+
+        // The stored data is what was signed, and the latest checks too.
+        assert!(v.check_content(&c.links[0], &data));
+        assert!(v.check_content(&c.links[0], &v2));
+        assert!(!v.check_content(&c.links[0], &v1), "not the latest");
+        v.check_content(&c.links[0], &data);
+        assert!(v.clone().settle().ok);
+
+        // The restoration history is not on the wire, and a report from
+        // before 0.43 still parses.
+        let wire = serde_json::to_value(&v).unwrap();
+        assert!(wire["entries"][0].get("history").is_none());
+        let mut old = wire.clone();
+        for field in ["revisions", "latest_data_hash", "superseded_revisions"] {
+            old["entries"][0].as_object_mut().unwrap().remove(field);
+        }
+        let old: GovernanceVerification = serde_json::from_value(old).unwrap();
+        assert!(old.entries[0].revisions.is_empty());
+    }
+
+    /// A revision claiming a hash its patch does not produce
+    #[test]
+    fn a_revision_that_does_not_produce_its_hash_fails() {
+        let (key, pk) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let (mut draft, _) = revise(&c, &target, &data, dedup(&data));
+        draft
+            .amendment
+            .revision
+            .as_mut()
+            .unwrap()
+            .resulting_data_hash = data_hash(&json!({"something": "else"}));
+        c.amend(&key, &draft);
+
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(v.ok, "the chain itself is sound: {v:#?}");
+        assert!(v.check_content(&c.links[0], &data), "the stored data is");
+        assert!(
+            v.entries[0]
+                .problem
+                .as_deref()
+                .is_some_and(|p| p.contains("does not produce")),
+            "{:?}",
+            v.entries[0].problem
+        );
+        assert!(!v.settle().ok);
+
+        // The same, when the link carries its data.
+        c.links[0].data = Some(data);
+        let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(!v.ok);
+    }
+
+    fn redact(
+        c: &Chain,
+        target: &GovernanceLogId,
+        fields: &[&str],
+        data: &serde_json::Value,
+        revisions: &[&Revision],
+    ) -> Result<(AmendmentDraft, serde_json::Value), RedactError> {
+        AmendmentDraft::redaction(
+            &c.next_amd(),
+            target.clone(),
+            c.hash_at(1),
+            "GDPR Art. 17(1)(a)",
+            "removed on request",
+            fields.iter().map(|f| f.to_string()).collect(),
+            data,
+            Blind::from([9; 32]),
+            revisions,
+        )
+    }
+
+    /// A redaction after a revision rebases it over the redacted data, and
+    /// erases the duplicate the revision removed along with its source
+    #[test]
+    fn a_revision_then_a_redaction() {
+        let (key, pk) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let (revision, _) = revise(&c, &target, &data, dedup(&data));
+        c.amend(&key, &revision);
+        let rationale = format!("{LAWYER}/rationale");
+        let (redaction, redacted) = redact(
+            &c,
+            &target,
+            &[&rationale],
+            &data,
+            &[revision_of(&revision)],
+        )
+        .unwrap();
+        c.amend(&key, &redaction);
+
+        // The copy the revision removed is erased from the original too.
+        let fields = &redaction.amendment.redaction.as_ref().unwrap().fields;
+        assert_eq!(fields, &[rationale, format!("{LAWYER}/raw_text")]);
+        let seat = &redacted["rounds"][0]["responses"][0];
+        assert_eq!(seat["raw_text"], seat["rationale"]);
+        assert!(seat["raw_text"].as_str().unwrap().starts_with("[redacted"));
+
+        let rebased = latest(&redacted, [revision_of(&revision)]).unwrap();
+        assert!(
+            rebased["rounds"][0]["responses"][0]
+                .get("raw_text")
+                .is_none()
+        );
+        assert_eq!(
+            redaction
+                .amendment
+                .redaction
+                .as_ref()
+                .unwrap()
+                .resulting_latest_hash,
+            Some(data_hash(&rebased))
+        );
+
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(v.ok, "{v:#?}");
+        let entry = &v.entries[0];
+        assert_eq!(entry.latest_data_hash, Some(data_hash(&rebased)));
+        assert_eq!(entry.superseded_revisions, [amd(1)]);
+        assert!(v.check_content(&c.links[0], &redacted));
+        assert!(v.check_content(&c.links[0], &rebased));
+        assert!(
+            v.check_content(&c.links[0], &data),
+            "for whoever kept a copy"
+        );
+        v.check_content(&c.links[0], &redacted);
+        assert!(v.clone().settle().ok, "{v:#?}");
+
+        // A redaction that lies about the rebase is caught.
+        let mut c2 = Chain::new();
+        let target = c2.entry(&key, data.clone());
+        c2.amend(&key, &revision);
+        let (mut lying, _) = redact(
+            &c2,
+            &target,
+            &["/subject/handle"],
+            &data,
+            &[revision_of(&revision)],
+        )
+        .unwrap();
+        let (_, honest) = redact(
+            &c2,
+            &target,
+            &["/subject/handle"],
+            &data,
+            &[revision_of(&revision)],
+        )
+        .unwrap();
+        lying
+            .amendment
+            .redaction
+            .as_mut()
+            .unwrap()
+            .resulting_latest_hash = Some(data_hash(&json!({})));
+        c2.amend(&key, &lying);
+        let mut v = verify_chain(&c2.links, &pk, &anchored(&pk), &roots());
+        assert!(v.check_content(&c2.links[0], &honest));
+        assert!(!v.settle().ok);
+    }
+
+    /// A redaction the revisions could not be rebased over is refused
+    #[test]
+    fn a_redaction_that_breaks_a_revision_is_refused() {
+        let (key, _) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let (moved, _) = revise(
+            &c,
+            &target,
+            &data,
+            patch(
+                json!([{"op": "move", "from": "/subject/handle", "path": "/handle"}]),
+            ),
+        );
+        c.amend(&key, &moved);
+        let err =
+            redact(&c, &target, &["/subject"], &data, &[revision_of(&moved)])
+                .unwrap_err();
+        assert!(matches!(err, RedactError::Rebase(_)), "{err}");
+        // Redacting the moved value itself rebases fine.
+        assert!(
+            redact(
+                &c,
+                &target,
+                &["/subject/handle"],
+                &data,
+                &[revision_of(&moved)]
+            )
+            .is_ok()
+        );
+    }
+
+    /// Part of a source, or a whole one inside a redacted value, is
+    /// followed to the same part of the copy
+    #[test]
+    fn a_redaction_follows_every_duplicate_of_what_it_erases() {
+        let revision = Revision {
+            patch: patch(json!([{"op": "remove", "path": "/copy"}])),
+            duplicates: vec![("/copy".into(), "/source/inner".into())],
+            resulting_data_hash: data_hash(&json!(null)),
+        };
+        let extra = |fields: &[&str]| {
+            let fields: Vec<String> =
+                fields.iter().map(|f| f.to_string()).collect();
+            duplicates_of(&fields, &[&revision])
+        };
+        assert_eq!(extra(&["/source/inner"]), ["/copy"]);
+        assert_eq!(extra(&["/source/inner/name"]), ["/copy/name"]);
+        assert_eq!(extra(&["/source"]), ["/copy"]);
+        assert!(extra(&["/source/other"]).is_empty());
+        assert!(extra(&["/source/inn"]).is_empty());
+    }
+
+    /// A revision after a redaction applies to what the redaction left,
+    /// and is checked against it
+    #[test]
+    fn a_redaction_then_a_revision() {
+        let (key, pk) = generate_keypair();
+        let data = seats();
+        let mut c = Chain::new();
+        let target = c.entry(&key, data.clone());
+        let (redaction, redacted) =
+            redact(&c, &target, &["/subject/handle"], &data, &[]).unwrap();
+        assert_eq!(
+            redaction
+                .amendment
+                .redaction
+                .as_ref()
+                .unwrap()
+                .resulting_latest_hash,
+            None,
+            "nothing to rebase"
+        );
+        c.amend(&key, &redaction);
+        let (revision, revised) =
+            revise(&c, &target, &redacted, dedup(&redacted));
+        c.amend(&key, &revision);
+
+        let mut v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(v.ok, "{v:#?}");
+        assert_eq!(v.entries[0].latest_data_hash, Some(data_hash(&revised)));
+        assert!(v.entries[0].superseded_revisions.is_empty());
+        assert!(v.check_content(&c.links[0], &redacted));
+        assert!(v.check_content(&c.links[0], &revised));
+        assert!(v.settle().ok);
+    }
+
+    #[test]
+    fn a_revision_refuses_what_it_should() {
+        let data = seats();
+        let raw = &format!("{LAWYER}/raw_text");
+        let rationale = &format!("{LAWYER}/rationale");
+        let artist = "/rounds/0/responses/1";
+        let dedup =
+            |pairs: &[(&str, &str)]| Revision::remove_duplicates(&data, pairs);
+
+        assert_eq!(
+            dedup(&[(
+                &format!("{artist}/raw_text"),
+                &format!("{artist}/rationale")
+            )]),
+            Err(ReviseError::NotIdentical {
+                path: format!("{artist}/raw_text"),
+                same_as: format!("{artist}/rationale"),
+            })
+        );
+        assert_eq!(
+            dedup(&[(raw, rationale), (rationale, raw)]),
+            Err(ReviseError::SourceRemoved {
+                path: raw.clone(),
+                same_as: rationale.clone(),
+            }),
+            "a same_as the patch removes"
+        );
+        assert_eq!(
+            dedup(&[("/nope", rationale)]),
+            Err(ReviseError::Unresolved("/nope".into()))
+        );
+
+        let make = |target_type, p: Edit| {
+            AmendmentDraft::revision(
+                gov(1),
+                target_type,
+                data_hash(&json!(null)),
+                "b",
+                "n",
+                &data,
+                p,
+            )
+            .map(|(_, v)| v)
+        };
+        let council = GovernanceLogEntryType::CouncilDecision;
+        assert_eq!(
+            make(council, patch(json!([])).into()),
+            Err(ReviseError::EmptyPatch)
+        );
+        assert!(matches!(
+            make(
+                council,
+                patch(json!([{"op": "remove", "path": "/nope"}])).into()
+            ),
+            Err(ReviseError::Patch(_))
+        ));
+        assert_eq!(
+            make(
+                council,
+                patch(json!([{"op": "remove", "path": "/_blind"}])).into()
+            ),
+            Err(ReviseError::BlindPointer("/_blind".into()))
+        );
+        assert_eq!(
+            make(
+                council,
+                patch(json!([{"op": "copy", "from": "/_blind", "path": "/b"}]))
+                    .into()
+            ),
+            Err(ReviseError::BlindPointer("/_blind".into()))
+        );
+        for entry_type in [
+            GovernanceLogEntryType::Amendment,
+            GovernanceLogEntryType::KeyRotation,
+            GovernanceLogEntryType::StewardRecord,
+        ] {
+            assert!(!is_revisable(entry_type));
+            assert_eq!(
+                make(entry_type, dedup(&[(raw, rationale)]).unwrap()),
+                Err(ReviseError::NotRevisable(entry_type))
+            );
+        }
+        assert!(is_revisable(council));
+    }
+
+    /// Added content blinds an unblinded target; nothing else does
+    #[test]
+    fn a_revision_that_adds_content_blinds_the_target() {
+        let unblinded =
+            json!({"title": "Old", "rationale": "r", "raw_text": "r"});
+        let revise = |data: &serde_json::Value, p: serde_json::Value| {
+            AmendmentDraft::revision(
+                gov(1),
+                GovernanceLogEntryType::CouncilDecision,
+                data_hash(&json!(null)),
+                "b",
+                "n",
+                data,
+                patch(p),
+            )
+            .unwrap()
+        };
+        let add = json!([{"op": "add", "path": "/attachments", "value": []}]);
+        let (draft, revised) = revise(&unblinded, add.clone());
+        assert!(revised.get(BLIND_KEY).is_some());
+        assert_eq!(revision_of(&draft).patch.len(), 2, "in the same patch");
+        assert_eq!(
+            latest(&unblinded, [revision_of(&draft)]).unwrap(),
+            revised,
+            "so the fold reproduces it"
+        );
+
+        let (_, revised) =
+            revise(&unblinded, json!([{"op": "remove", "path": "/raw_text"}]));
+        assert!(revised.get(BLIND_KEY).is_none(), "a removal adds nothing");
+
+        let (draft, revised) = revise(&seats(), add);
+        assert_eq!(revised[BLIND_KEY], seats()[BLIND_KEY], "never rotated");
+        assert_eq!(revision_of(&draft).patch.len(), 1);
+    }
+
+    #[test]
+    fn revision_shape_violations_fail_verification() {
+        let (key, pk) = generate_keypair();
+        let amend_with = |mutate: &dyn Fn(&mut Amendment)| -> String {
+            let mut c = Chain::new();
+            let target = c.entry(&key, seats());
+            let (mut draft, _) = revise(&c, &target, &seats(), dedup(&seats()));
+            mutate(&mut draft.amendment);
+            c.amend_v1(&key, &draft.amendment);
+            let v = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+            assert!(!v.ok, "{v:#?}");
+            v.entries[1].problem.clone().unwrap_or_default()
+        };
+        assert_eq!(
+            AmendmentDraft::new(
+                gov(1),
+                data_hash(&json!(null)),
+                AmendmentKind::Revision,
+                "b",
+                "n"
+            ),
+            Err(AmendmentError::MissingRevision)
+        );
+        let p = amend_with(&|a| a.revision = None);
+        assert!(p.contains("requires a `revision`"), "{p}");
+        let p = amend_with(&|a| a.kind = AmendmentKind::Correction);
+        assert!(p.contains("only valid on kind `revision`"), "{p}");
+        let p = amend_with(&|a| a.revision.as_mut().unwrap().patch.0.clear());
+        assert!(p.contains("at least one op"), "{p}");
+    }
+
+    /// Hand-written, so pinned: `wire_schemas_are_ref_free` covers `$ref`
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_revision_schema_describes_a_patch() {
+        let schema = crate::responses::inline_schema_for::<Amendment>();
+        let revision = &schema["properties"]["revision"]["properties"];
+        assert_eq!(revision["patch"]["type"], json!("array"), "{schema}");
+        assert_eq!(
+            revision["patch"]["items"]["properties"]["op"]["enum"],
+            json!(["add", "remove", "replace", "move", "copy", "test"])
+        );
+        assert_eq!(revision["resulting_data_hash"]["type"], json!("string"));
     }
 
     #[test]
@@ -4515,6 +5577,7 @@ mod tests {
             ),
             ("Amendment", inline_schema_for::<Amendment>()),
             ("Redaction", inline_schema_for::<Redaction>()),
+            ("Revision", inline_schema_for::<Revision>()),
             ("AmendmentNotice", inline_schema_for::<AmendmentNotice>()),
             ("KeyRotation", inline_schema_for::<KeyRotation>()),
             ("TrustedHead", inline_schema_for::<TrustedHead>()),

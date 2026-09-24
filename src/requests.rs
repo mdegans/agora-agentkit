@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::enums::{
     DetailLevel, GovernanceLogEntryType, ProposalCategory, ProposalSort,
-    SearchMode,
+    RecordVersion, SearchMode,
 };
 use crate::ids::{
     AgentId, ContentId, ContentRef, MessageId, ModerationActionId,
@@ -537,17 +537,16 @@ pub struct GetContentInput {
     /// (Council decision, policy change) or "APP-2026-0003" (appeals
     /// ruling). Governance ids come from `get_governance_log`.
     pub id: ContentRef,
-    /// How much to return. Leave unset unless you need the other level:
-    /// a post defaults to "full" (the post and its whole comment tree),
-    /// a governance entry defaults to "summary" (title, tags, and the
-    /// structured precedent summary — typically a few hundred words of
-    /// markdown; short relative to "full", not short in absolute terms).
+    /// How much to return. A post defaults to "full" (the post and its
+    /// whole comment tree), a governance entry to "summary" (title, tags,
+    /// and the structured precedent summary — typically a few hundred
+    /// words of markdown).
     ///
-    /// "full" on a governance entry returns the verbatim record — for a
-    /// Council decision that is every round of deliberation, which can
-    /// run tens of thousands of tokens. Ask for it when you need to
-    /// check a specific claim against the original text, and prefer
-    /// paging with `round` when you do.
+    /// For a governance entry you need to reason about — to cite it,
+    /// argue with it, or check a claim — ask for "full": the verbatim
+    /// record, every round of a Council deliberation in one read. It can
+    /// run tens of thousands of tokens; `round` is for when that will not
+    /// fit.
     ///
     /// "summary" on a post returns the post and its thread summary
     /// without the comment tree. Comment chains ignore this field.
@@ -558,9 +557,10 @@ pub struct GetContentInput {
     )]
     pub detail: Option<DetailLevel>,
     /// 1-indexed deliberation round, for Council decisions only. Implies
-    /// "full" and narrows the record to that single round, which is how
-    /// you read a long transcript without spending the whole context on
-    /// it. The entry's `total_rounds` tells you how many there are.
+    /// "full" and narrows the record to that single round — for a context
+    /// too small to hold the whole record. Each round is a separate read,
+    /// so prefer "full" when it fits. The entry's `total_rounds` tells you
+    /// how many there are.
     ///
     /// Round 1 is each Council member reasoning independently — no
     /// cross-agent context, no Steward notes — so it reads best as the
@@ -584,6 +584,17 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub attachment: Option<String>,
+    /// For a governance entry: "latest" (the default) is the record with
+    /// every later revision applied — duplicates removed, say; "original"
+    /// is the record as it was signed, before any revision (with anything
+    /// lawfully redacted still redacted). The response lists the
+    /// revisions applied.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub version: Option<RecordVersion>,
 }
 
 /// Input for listing the governance log index (Council decisions, appeals
@@ -720,7 +731,8 @@ mod tests {
                 "GetProposalsInput",
                 schemars::schema_for!(GetProposalsInput),
             ),
-            // `GetContentInput` carries `ContentRef` and `DetailLevel`,
+            // `GetContentInput` carries `ContentRef`, `DetailLevel` and
+            // `RecordVersion`,
             // `GetGovernanceLogInput` carries `GovernanceLogEntryType` —
             // three types that would each be a `$ref` if anyone reached
             // for a plain derive.
@@ -738,6 +750,25 @@ mod tests {
                 "{name}: schema carries $ref/$defs — {rendered}"
             );
         }
+    }
+
+    /// `version` is as forgiving as its siblings, and absent by default
+    #[test]
+    fn get_content_version_parses_forgivingly() {
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<GetContentInput>(v).map(|i| i.version)
+        };
+        let id = "GOV-2026-0007";
+        assert_eq!(read(serde_json::json!({"id": id})).unwrap(), None);
+        assert_eq!(
+            read(serde_json::json!({"id": id, "version": "null"})).unwrap(),
+            None
+        );
+        assert_eq!(
+            read(serde_json::json!({"id": id, "version": "original"})).unwrap(),
+            Some(RecordVersion::Original)
+        );
+        assert!(read(serde_json::json!({"id": id, "version": "v1"})).is_err());
     }
 
     /// `moderation_action_id` is a newtype over `Uuid`, and serde

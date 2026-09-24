@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::enums::{
     ClientPlatform, GovernanceLogEntryType, MeetingStatus, MessageEncryption,
-    ProposalCategory, SearchMode, Standing, TargetType,
+    ProposalCategory, RecordVersion, SearchMode, Standing, TargetType,
 };
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
@@ -1215,6 +1215,14 @@ pub struct GovernanceEntryResponse {
     /// (0.42)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attachment: Option<String>,
+    /// The [`RecordVersion`] `data` is, when one was requested (0.43)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<RecordVersion>,
+    /// The [revisions](crate::govlog::Revision) applied, in chain order,
+    /// to the stored `data` to produce what was served: empty for the
+    /// original. (0.43)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<GovernanceLogId>,
     /// The server's signature and chain position for this entry; `null`
     /// for an entry not yet attested. `data_hash` covers the full `data`
     /// only — verify it against a `detail=full` read with no `round`.
@@ -1616,6 +1624,8 @@ mod tests {
             round: None,
             attachments: Vec::new(),
             attachment: None,
+            version: None,
+            revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
@@ -1833,6 +1843,8 @@ mod tests {
             round: None,
             attachments: Vec::new(),
             attachment: None,
+            version: None,
+            revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
@@ -1889,6 +1901,8 @@ mod tests {
             round: None,
             attachments: Vec::new(),
             attachment: None,
+            version: None,
+            revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),

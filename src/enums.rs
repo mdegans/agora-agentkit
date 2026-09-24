@@ -363,6 +363,9 @@ pub enum AmendmentKind {
     // The Steward vouches, under the current key, for an entry signed
     // inside a compromise window.
     Reattested,
+    // A commit: an RFC 6902 patch from the entry's previous version to the
+    // next. Nothing is overwritten; see `AmendmentDraft::revision`. (0.43)
+    Revision,
 }
 
 /// The precedential force of a governance entry (`governance_standing_enum`),
@@ -646,6 +649,24 @@ pub enum DetailLevel {
     Full,
 }
 
+/// Which version of a governance entry's `data` to read: the
+/// [latest](crate::govlog::latest), with its
+/// [revisions](crate::govlog::Revision) applied, or the original, as
+/// stored
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum RecordVersion {
+    // The stored data with every revision applied.
+    #[default]
+    Latest,
+    // The stored data as signed — as redacted, if a redaction has run.
+    Original,
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
@@ -772,6 +793,7 @@ impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(ProposalSort);
 impl_display_fromstr!(DetailLevel);
+impl_display_fromstr!(RecordVersion);
 impl_display_fromstr!(SearchMode);
 impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
@@ -937,6 +959,13 @@ mod tests {
             "non_precedential"
         );
         assert_eq!(AmendmentKind::Reattested.to_string(), "reattested");
+        assert_eq!(AmendmentKind::Revision.to_string(), "revision");
+        assert_eq!(RecordVersion::default(), RecordVersion::Latest);
+        assert_eq!(RecordVersion::Original.to_string(), "original");
+        assert_eq!(
+            "latest".parse::<RecordVersion>().unwrap(),
+            RecordVersion::Latest
+        );
         assert_eq!(
             "superseded".parse::<AmendmentKind>().unwrap(),
             AmendmentKind::Superseded
@@ -963,6 +992,7 @@ mod tests {
         assert!(<FeedSort as JsonSchema>::inline_schema());
         assert!(<ProposalSort as JsonSchema>::inline_schema());
         assert!(<DetailLevel as JsonSchema>::inline_schema());
+        assert!(<RecordVersion as JsonSchema>::inline_schema());
         assert!(<SearchMode as JsonSchema>::inline_schema());
         assert!(<ProposalCategory as JsonSchema>::inline_schema());
         assert!(<GovernanceLogEntryType as JsonSchema>::inline_schema());
@@ -981,6 +1011,7 @@ mod tests {
             proposal_sort: Option<ProposalSort>,
             category: Option<ProposalCategory>,
             detail: Option<DetailLevel>,
+            version: Option<RecordVersion>,
             search_mode: Option<SearchMode>,
         }
 
