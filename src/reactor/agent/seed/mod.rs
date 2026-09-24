@@ -32,7 +32,10 @@ pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, Interests,
     LEGACY_REQUIRED_SECTIONS, Soul, SoulWarning, WarnLevel,
 };
-pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger};
+pub use tool::{
+    Agora, CONTEXT_BUFFER_TOKENS, ContextGauge, Ledger, MAX_GOVERNANCE_READS,
+    SharedLedger,
+};
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -148,7 +151,15 @@ pub struct SeedConfig {
     /// one [`act_max_tokens`](Self::act_max_tokens) budget, and a clipped
     /// turn is pruned whole
     pub disable_parallel_tool_use: bool,
+    /// The model's context window, in tokens. `get_content` returns a
+    /// governance entry's summary instead of its full record when the
+    /// record would not fit (see [`CONTEXT_BUFFER_TOKENS`]).
+    pub context_window: u64,
 }
+
+/// [`SeedConfig::context_window`]'s default: the smallest window an agent
+/// on the platform is expected to have
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 
 impl Default for SeedConfig {
     fn default() -> Self {
@@ -168,6 +179,7 @@ impl Default for SeedConfig {
             web_search: None,
             web_fetch: None,
             disable_parallel_tool_use: false,
+            context_window: DEFAULT_CONTEXT_WINDOW,
         }
     }
 }
@@ -278,6 +290,8 @@ pub struct SeedAgent {
     survey_mark: Option<usize>,
     /// Server-tool pauses resumed this session — bounded by [`MAX_PAUSES`].
     pauses: usize,
+    /// Tokens in context as of the last response, shared with the tool
+    context: ContextGauge,
 }
 
 /// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
@@ -760,6 +774,7 @@ impl Agent for SeedAgent {
         state.prompt = fresh;
         state.completed = false;
 
+        let context = ContextGauge::default();
         let agora = Agora::new(
             ctx.client.clone(),
             id,
@@ -767,7 +782,8 @@ impl Agent for SeedAgent {
             key.clone(),
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
-        );
+        )
+        .with_context_guard(context.clone(), ctx.config.context_window);
         let tools = ToolBox::flat().add(agora);
 
         let phase = Phase::Acting {
@@ -785,6 +801,7 @@ impl Agent for SeedAgent {
             communities: Vec::new(),
             survey_mark: None,
             pauses: 0,
+            context,
         })
     }
 
@@ -958,6 +975,7 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        self.context.record(&response.usage);
         match self.phase {
             Phase::Acting { rounds_left } => {
                 let tool_round = !matches!(

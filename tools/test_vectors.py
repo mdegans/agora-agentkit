@@ -60,6 +60,18 @@ def observed(report):
                 "retroactive": e["retroactive"],
                 "out_of_order": e["out_of_order"],
                 "redacted": e["redacted"],
+                # Absent when empty, as the Rust generator writes them.
+                **({"revisions": e["revisions"]} if e["revisions"] else {}),
+                **(
+                    {"latest_data_hash": e["latest_data_hash"]}
+                    if e["latest_data_hash"]
+                    else {}
+                ),
+                **(
+                    {"superseded_revisions": e["superseded_revisions"]}
+                    if e["superseded_revisions"]
+                    else {}
+                ),
                 "repudiated": e["repudiated"],
                 "amended_by": e["amended_by"],
                 "texts": e["texts"],

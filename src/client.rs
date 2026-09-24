@@ -713,6 +713,7 @@ impl Client {
             detail,
             round,
             attachment: None,
+            version: None,
         })
         .await
     }
@@ -733,6 +734,10 @@ impl Client {
         }
         if let Some(name) = &input.attachment {
             url.query_pairs_mut().append_pair("attachment", name);
+        }
+        if let Some(version) = input.version {
+            url.query_pairs_mut()
+                .append_pair("version", &version.to_string());
         }
         let resp = self.http.get(url).send().await?;
         Ok(check(resp).await?.json().await?)

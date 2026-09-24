@@ -8,7 +8,7 @@ Agora's governance log is a hash chain: every entry commits to its own
 fields and to the hash of the entry before it, and the platform's Ed25519
 signing key signs each link. This script recomputes all of that from
 scratch — canonical JSON, SHA-256 envelopes, chain linkage, amendments,
-redactions, key rotations — and checks every signature with an Ed25519
+redactions, revisions (RFC 6902 patches), key rotations — and checks every signature with an Ed25519
 implementation written here, in pure Python, from RFC 8032. It shares no
 code with the Rust verifier in `agora-agentkit`; the two are held to the
 same answers by the shared vectors in `vectors/govlog`, which is the whole
@@ -59,6 +59,7 @@ Exit status is 0 if and only if the verdict is ok.
 """
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -122,6 +123,7 @@ AMENDMENT_KINDS = {
     "correction",
     "redaction",
     "reattested",
+    "revision",
 }
 #: What an amendment kind does to its target's standing, when it does
 #: anything. The last amendment that changes standing wins.
@@ -652,6 +654,7 @@ def parse_amendment(data):
             "note": _amendment_text(data, "note", True),
             "rationale": _amendment_text(data, "rationale", False),
             "redaction": data.get("redaction"),
+            "revision": data.get("revision"),
         }
     except InputError as e:
         return None, "amendment `data` is malformed: %s" % e
@@ -690,11 +693,225 @@ def validate_amendment(amendment):
             amendment["resulting_data_hash"] = _hex_field(
                 redaction, "resulting_data_hash", 32, "redaction"
             )
+            amendment["resulting_latest_hash"] = (
+                None
+                if redaction.get("resulting_latest_hash") is None
+                else _hex_field(redaction, "resulting_latest_hash", 32, "redaction")
+            )
         except InputError as e:
             return "amendment `data` is malformed: %s" % e
     elif amendment["redaction"] is not None:
         return "`redaction` is only valid on kind `redaction`"
+    # A revision is an RFC 6902 patch from the previous version to the next.
+    if amendment["kind"] == "revision":
+        revision = amendment["revision"]
+        if revision is None:
+            return "kind `revision` requires a `revision`"
+        try:
+            if not isinstance(revision, dict):
+                raise InputError("revision is not an object")
+            patch = parse_patch(revision.get("patch"))
+            duplicates = revision.get("duplicates", [])
+            if not isinstance(duplicates, list) or not all(
+                isinstance(d, list) and len(d) == 2 and all(isinstance(p, str) for p in d)
+                for d in duplicates
+            ):
+                raise InputError("revision.duplicates")
+            resulting = _hex_field(revision, "resulting_data_hash", 32, "revision")
+        except InputError as e:
+            return "amendment `data` is malformed: %s" % e
+        if not patch:
+            return "the `revision` is malformed: a revision's patch has at least one op"
+        removed = {op["path"] for op in patch if op["op"] == "remove"}
+        for path, _ in duplicates:
+            if path not in removed:
+                return (
+                    "the `revision` is malformed: %r is listed as a duplicate "
+                    "the patch does not remove" % path
+                )
+        amendment["patch"] = patch
+        amendment["duplicates"] = duplicates
+        amendment["resulting_data_hash"] = resulting
+    elif amendment["revision"] is not None:
+        return "`revision` is only valid on kind `revision`"
     return None
+
+
+# ---------------------------------------------------------------------------
+# RFC 6902 JSON Patch, as the `json-patch` crate applies it
+# ---------------------------------------------------------------------------
+#
+# A revision overwrites nothing: an entry's latest version is its stored
+# data with every revision's patch applied in chain order. Pointers resolve
+# as serde_json resolves them; the last token of a path that adds or
+# removes is read as jsonptr reads it.
+
+#: The fields each op must carry, beside `op`
+PATCH_OPS = {
+    "add": ("path", "value"),
+    "remove": ("path",),
+    "replace": ("path", "value"),
+    "move": ("from", "path"),
+    "copy": ("from", "path"),
+    "test": ("path", "value"),
+}
+
+
+class PatchError(Exception):
+    """A patch that does not apply"""
+
+
+def _valid_pointer(pointer):
+    """An RFC 6901 pointer as jsonptr accepts one"""
+    if not isinstance(pointer, str):
+        return False
+    if pointer == "":
+        return True
+    return pointer.startswith("/") and re.fullmatch(r"(?:[^~]|~[01])*", pointer) is not None
+
+
+def parse_patch(raw):
+    """A patch's ops, each checked as serde reads it"""
+    if not isinstance(raw, list):
+        raise InputError("revision.patch is not a list")
+    ops = []
+    for op in raw:
+        if not isinstance(op, dict) or op.get("op") not in PATCH_OPS:
+            raise InputError("revision.patch has an unknown op")
+        parsed = {"op": op["op"]}
+        for name in PATCH_OPS[op["op"]]:
+            if name not in op:
+                raise InputError("revision.patch: %s missing" % name)
+            if name != "value" and not _valid_pointer(op[name]):
+                raise InputError("revision.patch: %s is not a pointer" % name)
+            parsed[name] = op[name]
+        ops.append(parsed)
+    return ops
+
+
+def _array_index(token, length, inclusive):
+    """jsonptr's `Index`: `-` is the next slot, no leading zeros"""
+    if token == "-":
+        if inclusive:
+            return length
+        raise PatchError("index out of bounds")
+    if not token or not (token.isascii() and token.isdigit()):
+        raise PatchError("not an array index")
+    if token.startswith("0") and token != "0":
+        raise PatchError("leading zeros")
+    index = int(token)
+    if index > length or (index == length and not inclusive):
+        raise PatchError("index out of bounds")
+    return index
+
+
+def _decode(token):
+    return token.replace("~1", "/").replace("~0", "~")
+
+
+def resolve_pointer(doc, pointer):
+    """`(True, value)` at `pointer`, or `(False, None)`, as serde_json's
+    `Value::pointer` resolves one"""
+    if pointer == "":
+        return True, doc
+    if not pointer.startswith("/"):
+        return False, None
+    for token in pointer.split("/")[1:]:
+        token = _decode(token)
+        if isinstance(doc, dict):
+            if token not in doc:
+                return False, None
+            doc = doc[token]
+        elif isinstance(doc, list):
+            if (
+                not token
+                or not (token.isascii() and token.isdigit())
+                or (token.startswith("0") and len(token) != 1)
+                or int(token) >= len(doc)
+            ):
+                return False, None
+            doc = doc[int(token)]
+        else:
+            return False, None
+    return True, doc
+
+
+def _parent(doc, pointer):
+    """The container holding `pointer`'s last token, and that token"""
+    front, _, back = pointer.rpartition("/")
+    found, parent = resolve_pointer(doc, front)
+    if not found or not isinstance(parent, (dict, list)):
+        raise PatchError("path is invalid")
+    return parent, back
+
+
+def _add(doc, path, value):
+    if path == "":
+        return value
+    parent, token = _parent(doc, path)
+    if isinstance(parent, dict):
+        parent[_decode(token)] = value
+    else:
+        parent.insert(_array_index(token, len(parent), True), value)
+    return doc
+
+
+def _remove(doc, path):
+    if path == "":
+        raise PatchError("path is invalid")
+    parent, token = _parent(doc, path)
+    if isinstance(parent, dict):
+        key = _decode(token)
+        if key not in parent:
+            raise PatchError("path is invalid")
+        return parent.pop(key)
+    return parent.pop(_array_index(token, len(parent), False))
+
+
+def _starts_with(path, prefix):
+    return path.startswith(prefix) and (
+        len(path) == len(prefix) or path[len(prefix)] == "/"
+    )
+
+
+def apply_patch(doc, patch):
+    """`doc` with `patch` applied, or PatchError; `doc` is not changed"""
+    doc = copy.deepcopy(doc)
+    for op in patch:
+        kind = op["op"]
+        if kind == "add":
+            doc = _add(doc, op["path"], copy.deepcopy(op["value"]))
+        elif kind == "remove":
+            _remove(doc, op["path"])
+        elif kind == "replace":
+            if op["path"] == "":
+                doc = copy.deepcopy(op["value"])
+                continue
+            found, _ = resolve_pointer(doc, op["path"])
+            if not found:
+                raise PatchError("path is invalid")
+            parent, token = _parent(doc, op["path"])
+            if isinstance(parent, dict):
+                parent[_decode(token)] = copy.deepcopy(op["value"])
+            else:
+                parent[int(token)] = copy.deepcopy(op["value"])
+        elif kind == "move":
+            if _starts_with(op["path"], op["from"]) and op["path"] != op["from"]:
+                raise PatchError("cannot move the value inside itself")
+            value = _remove(doc, op["from"])
+            doc = _add(doc, op["path"], value)
+        elif kind == "copy":
+            found, value = resolve_pointer(doc, op["from"])
+            if not found:
+                raise PatchError("from path is invalid")
+            doc = _add(doc, op["path"], copy.deepcopy(value))
+        else:  # test
+            found, value = resolve_pointer(doc, op["path"])
+            if not found or canonical_json(value) != canonical_json(op["value"]):
+                raise PatchError("value did not match")
+    if non_integer_number(doc):
+        raise PatchError("a number that is not a 64-bit integer")
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -1334,6 +1551,13 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
                 "signed_by": signed_by,
                 "redacted": False,
                 "redacted_data_hash": None,
+                "revisions": [],
+                "latest_data_hash": None,
+                "superseded_revisions": [],
+                # What check_content folds: (id, patch, resulting hash) in
+                # chain order, how many came before the last redaction, and
+                # what that redaction says they fold to.
+                "history": {"revisions": [], "rebased": 0, "rebased_hash": None},
                 "repudiated": False,
                 "reattested_by": [],
                 "standing": "in_force",
@@ -1365,20 +1589,45 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
         entry = entries[target - 1]
         entry["amended_by"].append(amendment_id)
         entry["standing"] = KIND_STANDING.get(amendment["kind"], entry["standing"])
+        history = entry["history"]
         if amendment["kind"] == "redaction":
+            # A redaction of a revised entry says what the rebase gives, or
+            # the rebased history is checked against nothing.
+            if entry["revisions"] and amendment["resulting_latest_hash"] is None:
+                _add_problem(
+                    entries[seq - 1],
+                    "the redaction of %s, which has revisions, names no "
+                    "resulting_latest_hash" % entry["id"],
+                )
             entry["redacted"] = True
             entry["redacted_data_hash"] = amendment["resulting_data_hash"]
+            # The revisions so far are rebased over the redacted data.
+            history["rebased"] = len(history["revisions"])
+            history["rebased_hash"] = amendment["resulting_latest_hash"]
+            entry["latest_data_hash"] = amendment["resulting_latest_hash"]
+            entry["superseded_revisions"] = list(entry["revisions"])
+        elif amendment["kind"] == "revision":
+            entry["revisions"].append(amendment_id)
+            entry["latest_data_hash"] = amendment["resulting_data_hash"]
+            history["revisions"].append(
+                (
+                    amendment_id,
+                    amendment["patch"],
+                    amendment["resulting_data_hash"],
+                    amendment["duplicates"],
+                )
+            )
 
-    # A redacted entry's content is what the redaction left behind.
+    # A redacted entry's content is what the redaction left behind, and a
+    # revised one's revisions are checked against it.
     for index, link in enumerate(links):
         entry = entries[index]
         if (
-            entry["content_matches"] is False
-            and link["data"] is not None
-            and not non_integer_number(link["data"])
-            and entry["redacted_data_hash"] == data_hash(link["data"])
+            link["data"] is not None
+            and entry["content_matches"] is not None
+            and (entry["redacted"] or entry["revisions"])
         ):
-            entry["content_matches"] = True
+            entry["content_matches"] = _content_check(entry, link["data"])
 
     repudiated = []
     for index, entry in enumerate(entries):
@@ -1419,18 +1668,98 @@ def settle(report):
     return report
 
 
-def check_content(report, entry_id, data):
-    """Record whether `data` is the content the entry attested — or what a
-    redaction of it lawfully left behind"""
+def _content_check(entry, data):
+    """Whether `data` is the stored content or the latest version. For the
+    stored content, every revision is folded over it and checked; one that
+    does not apply or produce its hash is a problem."""
     # Never hashed if it holds a number that is not a 64-bit integer.
-    digest = None if non_integer_number(data) else data_hash(data)
+    if non_integer_number(data):
+        return False
+    digest = data_hash(data)
+    if digest == entry["attested_data_hash"] and entry["redacted"]:
+        # A copy from before the redaction: authentic, and nothing later
+        # was built on it.
+        return True
+    if digest not in (entry["attested_data_hash"], entry["redacted_data_hash"]):
+        return entry["latest_data_hash"] is not None and digest == entry["latest_data_hash"]
+    history = entry["history"]
+    current = data
+    failures = []
+    for revision_id, patch, _, duplicates in history["revisions"][: history["rebased"]]:
+        failure = _false_duplicate(revision_id, duplicates, current)
+        if failure:
+            failures.append(failure)
+            break
+        try:
+            current = apply_patch(current, patch)
+        except PatchError:
+            failures.append(
+                "revision %s does not apply to the redacted data" % revision_id
+            )
+            break
+    if (
+        not failures
+        and history["rebased_hash"] is not None
+        and data_hash(current) != history["rebased_hash"]
+    ):
+        failures.append(
+            "the revisions rebased over the redacted data do not produce the "
+            "redaction's resulting_latest_hash"
+        )
+    for revision_id, patch, resulting, duplicates in history["revisions"][
+        history["rebased"] :
+    ]:
+        if failures:
+            break
+        failure = _false_duplicate(revision_id, duplicates, current)
+        if failure:
+            failures.append(failure)
+            break
+        try:
+            following = apply_patch(current, patch)
+        except PatchError:
+            failures.append("revision %s does not apply" % revision_id)
+            break
+        if data_hash(following) != resulting:
+            failures.append(
+                "revision %s does not produce its resulting_data_hash" % revision_id
+            )
+            break
+        current = following
+    for failure in failures:
+        _add_problem(entry, failure)
+    return True
+
+
+def _add_problem(entry, problem):
+    if not entry["problem"]:
+        entry["problem"] = problem
+    elif problem not in entry["problem"]:
+        entry["problem"] += "; " + problem
+
+
+def _false_duplicate(revision_id, duplicates, current):
+    """The first duplicate a revision claims that is not one in `current`,
+    the version it was applied to"""
+    for path, same_as in duplicates:
+        found_a, a = resolve_pointer(current, path)
+        found_b, b = resolve_pointer(current, same_as)
+        if not (found_a and found_b and canonical_json(a) == canonical_json(b)):
+            return "revision %s removed %s as a duplicate of %s, but they differ" % (
+                revision_id,
+                path,
+                same_as,
+            )
+    return None
+
+
+def check_content(report, entry_id, data):
+    """Record whether `data` is the content the entry attested — what a
+    redaction of it lawfully left behind, or its latest version"""
     for entry in report["entries"]:
         if entry["id"] != entry_id:
             continue
-        entry["content_matches"] = digest is not None and digest in (
-            entry["attested_data_hash"],
-            entry["redacted_data_hash"],
-        )
+        entry["content_matches"] = _content_check(entry, data)
         return entry["content_matches"]
     return False
 
@@ -1571,6 +1900,7 @@ def render(report, genesis_key, anchor, source, alarms, missing):
         "out of order": sum(1 for e in entries if e["out_of_order"]),
         "amended": sum(1 for e in entries if e["amended_by"]),
         "redacted": sum(1 for e in entries if e["redacted"]),
+        "revised": sum(1 for e in entries if e["revisions"]),
         "content checked": sum(
             1 for e in entries if e["content_matches"] is not None
         ),
