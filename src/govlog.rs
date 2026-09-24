@@ -66,9 +66,9 @@ pub use texts::{
 
 mod council;
 pub use council::{
-    AgendaRanking, Ballot, CouncilDecisionRecord, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal, SeatRanking,
-    SeatResponse,
+    AgendaRanking, Ballot, CouncilAttachment, CouncilDecisionRecord,
+    CouncilRound, CouncilSeat, CouncilVote, DecisionCategory, FinalVotes,
+    PlacedProposal, SeatRanking, SeatResponse,
 };
 
 mod redactable;

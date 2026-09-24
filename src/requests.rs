@@ -574,6 +574,16 @@ pub struct GetContentInput {
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
     pub round: Option<u64>,
+    /// The name of one of a governance entry's `attachments` — the
+    /// Clerk's summaries and what the seats had read to them, for a
+    /// Council decision. Implies "full" and narrows the record to that
+    /// attachment, without the rounds unless `round` is also given.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub attachment: Option<String>,
 }
 
 /// Input for listing the governance log index (Council decisions, appeals

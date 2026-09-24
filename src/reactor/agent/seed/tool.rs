@@ -321,11 +321,7 @@ impl Agora {
         if args.id.is_governance() {
             self.spend_governance_read()?;
         }
-        let content = self
-            .client
-            .get_content(args.id, args.detail, args.round)
-            .await
-            .map_err(err)?;
+        let content = self.client.read_content(&args).await.map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 prompt::format_post(&post, &self.agent_name).into()
