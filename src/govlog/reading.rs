@@ -55,20 +55,26 @@ pub const KEY_ORDER: &[&str] = &[
     "rounds",
     "jury_verdicts",
     "judge_ruling",
-    // Within one argument: reasoning before the decision it supports.
-    "position",
-    "questions",
+    // Within one argument, the order the decision tools declare their
+    // fields — which under `strict` is the order the model wrote them:
+    // reasoning first, then the statement, then the decision. (A seat's
+    // `reasoning` is stored as `rationale`, its `response` as `position`.)
+    // Pinned against the live tool schemas by agora's council and appeals
+    // tests; change it only with them.
     "context_analysis",
     "jury_assessment",
+    "rationale",
     "constitutional_refs",
     "precedents_cited",
+    "position",
+    "questions",
     "overrules",
-    "rationale",
-    "vote",
-    "ready_to_vote",
-    "verdict",
     "refer_to_council",
     "referral_reason",
+    "modified_action",
+    "ready_to_vote",
+    "vote",
+    "verdict",
     "referred_to_council",
     // The result.
     "final_votes",
@@ -284,10 +290,33 @@ mod tests {
             [
                 "juror_number",
                 "context_analysis",
+                "rationale",
                 "constitutional_refs",
                 "precedents_cited",
-                "rationale",
                 "verdict",
+            ]
+        );
+        // A Council seat: its reasoning (`rationale`) was written before
+        // the statement for the record (`position`) and the vote.
+        let seat = json!({
+            "vote": "yes",
+            "role": "lawyer",
+            "position": "p",
+            "raw_text": "r",
+            "questions": [],
+            "rationale": "r",
+            "ready_to_vote": true,
+        });
+        assert_eq!(
+            keys(&seat),
+            [
+                "role",
+                "rationale",
+                "position",
+                "questions",
+                "ready_to_vote",
+                "vote",
+                "raw_text",
             ]
         );
     }
