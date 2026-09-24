@@ -1441,26 +1441,34 @@ async fn get_content_reads_a_governance_entry_and_spends_a_read() {
     );
 }
 
-/// `detail` and `round` reach the wire as query params, and a record that
-/// *is* present renders as compact JSON — the pretty-printing is what
-/// tripled 331 KB of transcripts into an 862 KB tool result on
-/// 2026-08-29.
+/// `detail`, `round` and `version` reach the wire as query params, and a
+/// record renders as markdown in reading order: prose as prose, never a
+/// JSON string of escaped newlines
 #[tokio::test]
-async fn get_content_passes_detail_and_round_and_renders_the_record_compact() {
+async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
     let server = MockServer::start();
     let entry = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
             .query_param("detail", "full")
-            .query_param("round", "2");
+            .query_param("round", "2")
+            .query_param("version", "original");
         let mut body = governance_content(
             "GOV-2026-0006",
             Some(serde_json::json!({
-                "rounds": [{ "round": 2, "responses": ["aye", "nay"] }]
+                "rounds": [{
+                    "number": 2,
+                    "responses": [{
+                        "vote": "yes",
+                        "role": "lawyer",
+                        "rationale": "Aye.\n\nIt is within Art. IV.",
+                    }],
+                }]
             })),
         );
         // The server echoes the round it narrowed to.
         body["round"] = serde_json::json!(2);
+        body["version"] = serde_json::json!("original");
         then.status(200).json_body(body);
     });
 
@@ -1473,6 +1481,7 @@ async fn get_content_passes_detail_and_round_and_renders_the_record_compact() {
                 "id": "GOV-2026-0006",
                 "detail": "full",
                 "round": 2,
+                "version": "original",
             }),
         ))
         .await
@@ -1482,14 +1491,92 @@ async fn get_content_passes_detail_and_round_and_renders_the_record_compact() {
     let rendered = transcript(&agent);
     assert!(rendered.contains("Round 2 of 3"), "{rendered}");
     assert!(rendered.contains("### Record"), "{rendered}");
-    // Compact: no `serde_json::to_string_pretty` newline-and-indent.
+    assert!(rendered.contains("#### Round 2\n"), "{rendered}");
+    assert!(rendered.contains("##### Lawyer — yes\n"), "{rendered}");
     assert!(
-        rendered
-            .contains(r#"{"rounds":[{"responses":["aye","nay"],"round":2}]}"#),
-        "record must be compact JSON; got: {rendered}"
+        rendered.contains("**Rationale:**\n\nAye.\n\nIt is within Art. IV."),
+        "{rendered}"
     );
+    let (rationale, vote) = (
+        rendered.find("**Rationale:**").unwrap(),
+        rendered.find("**Vote:** yes").unwrap(),
+    );
+    assert!(
+        rationale < vote,
+        "reasoning before the decision: {rendered}"
+    );
+    assert!(
+        !rendered.contains(r#"\n"#),
+        "no escaped newlines: {rendered}"
+    );
+    assert!(!rendered.contains(r#"{"rounds""#), "{rendered}");
     // Already paging: no "you could page" hint.
     assert!(!rendered.contains("Page one at a time"), "{rendered}");
+}
+
+/// A `get_content` call whose response reports `input_tokens` already in
+/// context
+fn tool_use_with_usage(
+    name: &str,
+    input: serde_json::Value,
+    input_tokens: u64,
+) -> response::Message {
+    let mut message = tool_use_message(name, input);
+    message.usage.input_tokens = input_tokens;
+    message
+}
+
+/// A full record that would not fit beside what is already in context comes
+/// back as the summary, says why, and gives the read back; one that fits is
+/// served whole
+#[tokio::test]
+async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
+    let server = MockServer::start();
+    // ~40 KB of prose: about 13k tokens at a byte for every three.
+    let rationale = "The Council deliberated. ".repeat(1_600);
+    let record = serde_json::json!({
+        "rounds": [{"number": 1, "responses": [{"role": "lawyer", "rationale": rationale}]}]
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", Some(record)));
+    });
+    let read = serde_json::json!({"id": "GOV-2026-0006", "detail": "full"});
+
+    // 100k in context + 13k + the 16k buffer > 128k.
+    let mut reader = agent(&server, quiet_config());
+    seat_start(&mut reader);
+    reader
+        .handle(tool_use_with_usage("get_content", read.clone(), 100_000))
+        .await
+        .unwrap();
+    let rendered = transcript(&reader);
+    assert!(
+        rendered.contains("would not fit in your 128000 token window"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("The Council ratified v0.2"),
+        "the summary: {rendered}"
+    );
+    assert!(!rendered.contains("### Record"), "{rendered}");
+    assert!(rendered.contains("the read was not counted"), "{rendered}");
+
+    // A smaller window, with room: the record, whole.
+    let small = SeedConfig {
+        context_window: 40_000,
+        ..quiet_config()
+    };
+    let mut reader = agent(&server, small);
+    seat_start(&mut reader);
+    reader
+        .handle(tool_use_with_usage("get_content", read, 5_000))
+        .await
+        .unwrap();
+    let rendered = transcript(&reader);
+    assert!(rendered.contains("### Record"), "{rendered}");
+    assert!(!rendered.contains("would not fit"), "{rendered}");
 }
 
 /// The read budget is about *governance* attention, so it is the kind of
