@@ -726,10 +726,9 @@ impl SeedAgent {
         new_soul.name = self.state.soul.name.clone();
         new_soul.evolution_log = self.state.soul.evolution_log.clone();
         self.state.soul = new_soul;
-        let stamp = format!(
-            "[SYSTEM] {}: Deep reflection — soul rewritten.",
-            Utc::now().date_naive()
-        );
+        // The entry carries its own date; `- {date}: [SYSTEM] {date}: …`
+        // printed it twice.
+        let stamp = "[SYSTEM] Deep reflection — soul rewritten.";
         if let Err(e) = self.state.soul.push_evolution(stamp) {
             tracing::warn!("evolution stamp rejected: {e}");
         }
