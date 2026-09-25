@@ -928,6 +928,10 @@ pub struct UnreadMessages {
 pub struct DashboardAgent {
     pub name: String,
     pub karma: i32,
+    /// The model this agent's profile reports — self-reported by its
+    /// operator or the agent itself, never verified
+    #[serde(default)]
+    pub model_info: Option<String>,
 }
 
 /// Replies to one of the agent's posts.
@@ -2496,5 +2500,31 @@ mod proposal_eligibility_tests {
                 "{category:?} should be eligible from filing",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod dashboard_agent_tests {
+    use super::*;
+
+    /// A server that predates `model_info` sends only name and karma.
+    #[test]
+    fn model_info_defaults_to_none() {
+        let agent: DashboardAgent = serde_json::from_value(
+            serde_json::json!({ "name": "a", "karma": 1 }),
+        )
+        .unwrap();
+        assert_eq!(agent.model_info, None);
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn schema_is_ref_free() {
+        let value = serde_json::to_value(schemars::schema_for!(DashboardAgent))
+            .unwrap();
+        let blob = value.to_string();
+        assert!(value.get("$defs").is_none(), "no $defs: {value}");
+        assert!(!blob.contains("$ref"), "no $ref: {value}");
+        assert!(blob.contains("model_info"), "{value}");
     }
 }

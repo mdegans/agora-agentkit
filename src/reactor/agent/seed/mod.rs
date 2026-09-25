@@ -26,6 +26,9 @@ mod tool;
 
 pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
+pub use prompt::{
+    MODEL_LINE_PREFIX, ModelName, model_line, replace_model_line,
+};
 pub use prompt_log::PromptLogError;
 pub use shortstring::{ShortString, ShortStringError};
 pub use soul::{
@@ -281,6 +284,9 @@ pub struct SeedAgent {
     notifications: Option<Notifications>,
     phase: Phase,
     quirks: Option<Quirks>,
+    /// The endpoint's [`ModelInfo`] negotiated at admission, for its display
+    /// name
+    admitted: Option<ModelInfo>,
     ctx: SeedContext,
     key: SigningKey,
     /// The live community slugs, fetched at `on_init` — validates soul
@@ -796,6 +802,7 @@ impl Agent for SeedAgent {
             notifications: None,
             phase,
             quirks: None,
+            admitted: None,
             ctx,
             key,
             communities: Vec::new(),
@@ -829,8 +836,9 @@ impl Agent for SeedAgent {
         self.state.model.clone()
     }
 
-    fn on_admit(&mut self, _model: &ModelInfo, quirks: &Quirks) {
+    fn on_admit(&mut self, model: &ModelInfo, quirks: &Quirks) {
         self.quirks = Some(*quirks);
+        self.admitted = Some(model.clone());
         // `Choice::auto` *forces* a tool call on endpoints that don't honor
         // `tool_choice` (ollama) — the phase tail needs text turns.
         if quirks.tool_choice_not_respected {
@@ -964,6 +972,14 @@ impl Agent for SeedAgent {
                 // What was actually installed, not what was configured: an
                 // endpoint that can't run them gets no guidance about them.
                 web_tools,
+                // What the session is routed on: the id the prompt carries,
+                // named as the endpoint names it.
+                model: prompt::ModelName {
+                    id: self.state.model.id.name(),
+                    ..prompt::ModelName::of(
+                        self.admitted.as_ref().unwrap_or(&self.state.model),
+                    )
+                },
             },
         )?;
         Ok(())

@@ -1,28 +1,67 @@
-//! Persistence: one bulk save/load for the whole cohort, and partial-save
-//! recovery (unsaved snapshots + error attribution), plus the `Report` serde
-//! round-trip it all crosses the `dyn Run` erasure as.
+//! Persistence: each agent saved as its session ends, a bulk load, and
+//! partial-save recovery (unsaved snapshots + error attribution), plus the
+//! `Report` serde round-trip it all crosses the `dyn Run` erasure as.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::*;
 
-/// Bulk save: the reactor persists the whole cohort in a single `save_all_raw`
-/// call (the override a SQL backend would do as one query), not per-agent.
+/// Each agent is saved as its session ends, so the final bulk save has nothing
+/// left to do.
 #[tokio::test]
-async fn reactor_persists_in_one_bulk_save() {
+async fn reactor_saves_each_agent_as_it_finishes() {
     let store = BulkStore::default();
     let agents = vec![
         batch_agent(Behavior::Complete, 1),
-        batch_agent(Behavior::Complete, 1),
-        batch_agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 2),
+        agent(Behavior::Complete, 1),
     ];
     let mut reactor: Reactor<_, _, TestAgent> =
-        Reactor::new(MockInference::default(), store.clone(), agents);
-    reactor.run().await.unwrap();
+        Reactor::new(MockInference::end_turns(1), store.clone(), agents);
+    let report = reactor.run().await.unwrap();
 
-    assert_eq!(store.bulk_calls.load(Ordering::SeqCst), 1, "one bulk save");
-    assert_eq!(*store.last_batch.lock().unwrap(), 3, "all three in it");
+    assert_eq!(report.done, 3);
+    assert_eq!(store.map.lock().unwrap().len(), 3, "all three saved");
+    assert_eq!(store.bulk_calls.load(Ordering::SeqCst), 0, "nothing left");
+}
+
+/// A run that dies mid-cohort (here a panic in the second agent's session)
+/// keeps the first agent's finished session — agent-major path.
+#[tokio::test]
+async fn finished_agent_survives_a_later_crash_agent_major() {
+    let store = MemStore::default();
+    let first = agent(Behavior::Complete, 1);
+    let first_id = first.id();
+    let agents = vec![first, agent(Behavior::Panic, 1)];
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::end_turns(2), store.clone(), agents);
+
+    let crashed = tokio::spawn(async move { reactor.run().await }).await;
+    assert!(crashed.unwrap_err().is_panic(), "the run went down");
+
+    let saved = store.map.lock().unwrap();
+    assert_eq!(saved.len(), 1, "only the finished agent was saved");
+    assert!(saved.contains_key(&first_id));
+}
+
+/// The round-major counterpart: the first agent finishes in round one, the
+/// second panics in round two.
+#[tokio::test]
+async fn finished_agent_survives_a_later_crash_round_major() {
+    let store = MemStore::default();
+    let first = batch_agent(Behavior::Complete, 1);
+    let first_id = first.id();
+    let agents = vec![first, batch_agent(Behavior::Panic, 2)];
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::default(), store.clone(), agents);
+
+    let crashed = tokio::spawn(async move { reactor.run().await }).await;
+    assert!(crashed.unwrap_err().is_panic(), "the run went down");
+
+    let saved = store.map.lock().unwrap();
+    assert_eq!(saved.len(), 1, "only the finished agent was saved");
+    assert!(saved.contains_key(&first_id));
 }
 
 /// Bulk load: `load_agents` reconstructs from one query, skipping ids with
@@ -155,4 +194,25 @@ fn report_serde_round_trips() {
     assert_eq!(back.errors[&id].kind, ErrorKind::Storage);
     assert_eq!(back.errors[&id].retry_after, Some(Duration::from_secs(5)));
     assert_eq!(back.unsaved[&id]["turns_left"], 1);
+}
+
+/// `session_finished`'s outcome: an error wins, then the stall cap, then the
+/// agent's own outcome.
+#[test]
+fn session_outcome_names_how_it_ended() {
+    use super::super::Ending;
+    let err: Result<Outcome, &str> = Err("boom");
+    assert_eq!(Ending::of(&err, true).as_str(), "error");
+    assert_eq!(
+        Ending::of(&Ok::<_, ()>(Outcome::Failed), true).as_str(),
+        "stalled"
+    );
+    assert_eq!(
+        Ending::of(&Ok::<_, ()>(Outcome::Failed), false).as_str(),
+        "failed"
+    );
+    assert_eq!(
+        Ending::of(&Ok::<_, ()>(Outcome::Complete), false).as_str(),
+        "complete"
+    );
 }
