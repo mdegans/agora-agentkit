@@ -64,6 +64,19 @@ impl PromptLogError {
     }
 }
 
+/// The bytes a dump holds and their hex SHA-256, the dump's name
+fn encode(prompt: &Prompt) -> Result<(Vec<u8>, String), serde_json::Error> {
+    let json = serde_json::to_vec_pretty(prompt)?;
+    let hash = hex::encode(sha2::Sha256::digest(&json));
+    Ok((json, hash))
+}
+
+/// The `prompt_sha256` that [`save`] would name `prompt`'s dump by, without
+/// writing it — for correlating other events with the `prompt logged` one
+pub fn prompt_sha256(prompt: &Prompt) -> Result<String, serde_json::Error> {
+    encode(prompt).map(|(_, hash)| hash)
+}
+
 /// Serialize `prompt` to a content-addressed JSON file under `dir` and
 /// return `(path, sha256_hex)`.
 ///
@@ -80,8 +93,7 @@ pub async fn save(
     prompt: &Prompt,
     dir: impl AsRef<Path>,
 ) -> Result<(PathBuf, String), PromptLogError> {
-    let json = serde_json::to_vec_pretty(prompt)?;
-    let hash = hex::encode(sha2::Sha256::digest(&json));
+    let (json, hash) = encode(prompt)?;
 
     let dir = dir.as_ref().join(&hash[..2]);
     tokio::fs::create_dir_all(&dir)
@@ -127,6 +139,13 @@ mod tests {
         assert!(path.exists());
         assert_eq!(path.file_name().unwrap(), format!("{hash}.json").as_str());
         assert_eq!(path.parent().unwrap().file_name().unwrap(), &hash[..2]);
+    }
+
+    #[tokio::test]
+    async fn prompt_sha256_names_the_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, hash) = save(&prompt("hello"), dir.path()).await.unwrap();
+        assert_eq!(prompt_sha256(&prompt("hello")).unwrap(), hash);
     }
 
     #[tokio::test]
