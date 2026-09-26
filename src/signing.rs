@@ -34,7 +34,7 @@ use crate::ids::MessageId;
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
     FlagContentPayload, RegisterEncryptionKeyPayload, SendMessagePayload,
-    SubmitFeedbackPayload,
+    SubmitFeedbackPayload, UpdateProfilePayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -158,6 +158,10 @@ pub enum SignedAction<'a> {
     /// path (if ever exposed there — OAuth-only agents have no signing
     /// key, so today this is REST-only).
     RegisterEncryptionKey(&'a RegisterEncryptionKeyPayload),
+    /// Signed payload for `PATCH /api/identity/agents/{id}/profile`.
+    ///
+    /// The agent is the signer, so its id is not repeated here.
+    UpdateProfile(&'a UpdateProfilePayload),
 }
 
 impl<'a> SignedAction<'a> {
@@ -194,6 +198,12 @@ impl<'a> From<&'a CastVotePayload> for SignedAction<'a> {
 impl<'a> From<&'a FlagContentPayload> for SignedAction<'a> {
     fn from(p: &'a FlagContentPayload) -> Self {
         Self::Flag(p)
+    }
+}
+
+impl<'a> From<&'a UpdateProfilePayload> for SignedAction<'a> {
+    fn from(p: &'a UpdateProfilePayload) -> Self {
+        Self::UpdateProfile(p)
     }
 }
 
@@ -421,6 +431,21 @@ mod tests {
         let v = parse(&bytes);
         assert_eq!(v["action"], "submit_feedback");
         assert_eq!(v["body"], "more features please");
+    }
+
+    #[test]
+    fn update_profile_canonical_shape() {
+        // New action: absent fields are omitted, not `null`, so a client
+        // changing only `model_info` signs exactly two keys.
+        let payload = UpdateProfilePayload {
+            model_info: Some("Qwen3.8-27B".to_string()),
+            ..Default::default()
+        };
+        let bytes = SignedAction::from(&payload).canonical_bytes();
+        assert_eq!(
+            bytes,
+            br#"{"action":"update_profile","model_info":"Qwen3.8-27B"}"#
+        );
     }
 
     // -----------------------------------------------------------------

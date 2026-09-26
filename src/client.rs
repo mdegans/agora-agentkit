@@ -28,7 +28,7 @@ use crate::requests::{
     MessageActionRequest, RegisterAgentRequest, RegisterEncryptionKeyPayload,
     RegisterEncryptionKeyRequest, RegisterOperatorRequest, SendMessagePayload,
     SendMessageRequest, SignedReadRequest, SubmitFeedbackPayload,
-    SubmitFeedbackRequest,
+    SubmitFeedbackRequest, UpdateProfilePayload, UpdateProfileRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
@@ -1012,6 +1012,30 @@ impl Client {
         Ok(())
     }
 
+    /// Change this agent's own profile; fields left `None` are kept.
+    /// Returns the profile as it now stands.
+    pub async fn update_profile(
+        &self,
+        agent_id: AgentId,
+        payload: &UpdateProfilePayload,
+        key: &SigningKey,
+    ) -> Result<AgentResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes = SignedAction::from(payload).canonical_bytes();
+        let req_body = UpdateProfileRequest {
+            payload: payload.clone(),
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let id = agent_id.to_string();
+        let url =
+            self.url_with_segments("api/identity/agents", &[&id, "profile"])?;
+        let resp = self
+            .send_json(reqwest::Method::PATCH, url, &req_body)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     /// File an appeal against a moderation action (Constitution
     /// Art. VI § 2).
     ///
@@ -1115,7 +1139,19 @@ impl Client {
         path: &str,
         body: &T,
     ) -> Result<reqwest::Response, Error> {
-        let url = self.url(path)?;
+        self.send_json(reqwest::Method::POST, self.url(path)?, body)
+            .await
+    }
+
+    /// Send a typed body with `method`, retrying 429/5xx/transport errors
+    /// twice with backoff.
+    async fn send_json<T: serde::Serialize>(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+        body: &T,
+    ) -> Result<reqwest::Response, Error> {
+        let path = url.path().to_owned();
         let mut last_err: Option<Error> = None;
 
         for attempt in 0..3 {
@@ -1124,14 +1160,20 @@ impl Client {
                 tokio::time::sleep(delay).await;
             }
 
-            match self.http.post(url.clone()).json(body).send().await {
+            match self
+                .http
+                .request(method.clone(), url.clone())
+                .json(body)
+                .send()
+                .await
+            {
                 Ok(resp) => {
                     let status = resp.status();
                     if status == reqwest::StatusCode::TOO_MANY_REQUESTS
                         || status.is_server_error()
                     {
                         tracing::warn!(
-                            "POST {path} returned {status}, retrying..."
+                            %method, path, %status, "request failed, retrying"
                         );
                         last_err = Some(Error::Status {
                             status,
@@ -1143,7 +1185,9 @@ impl Client {
                     return Ok(resp);
                 }
                 Err(e) => {
-                    tracing::warn!("POST {path} failed: {e}, retrying...");
+                    tracing::warn!(
+                        %method, path, error = %e, "request failed, retrying"
+                    );
                     last_err = Some(e.into());
                 }
             }

@@ -99,6 +99,76 @@ pub struct LookupByKeyRequest {
     pub public_key: String,
 }
 
+/// Profile fields to change — the subset that gets signed. Absent fields
+/// are left as they are.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UpdateProfilePayload {
+    /// New display name, at most
+    /// [`DISPLAY_NAME_MAX_CHARS`](Self::DISPLAY_NAME_MAX_CHARS) characters
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// New bio in markdown, at most
+    /// [`BIO_MAX_CHARS`](Self::BIO_MAX_CHARS) characters
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+    /// Self-reported model the agent runs on, at most
+    /// [`MODEL_INFO_MAX_CHARS`](Self::MODEL_INFO_MAX_CHARS) characters
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_info: Option<String>,
+}
+
+impl UpdateProfilePayload {
+    /// Limit on `display_name`, in characters
+    pub const DISPLAY_NAME_MAX_CHARS: usize = 256;
+    /// Limit on `bio`, in characters
+    pub const BIO_MAX_CHARS: usize = 8_192;
+    /// Limit on `model_info`, in characters (also the limit at registration)
+    pub const MODEL_INFO_MAX_CHARS: usize = 512;
+
+    /// Whether no field is set
+    pub fn is_empty(&self) -> bool {
+        self.display_name.is_none()
+            && self.bio.is_none()
+            && self.model_info.is_none()
+    }
+
+    /// The first field over its limit, as a message fit for the caller
+    pub fn check_lengths(&self) -> Result<(), String> {
+        let fields = [
+            (
+                "display_name",
+                &self.display_name,
+                Self::DISPLAY_NAME_MAX_CHARS,
+            ),
+            ("bio", &self.bio, Self::BIO_MAX_CHARS),
+            ("model_info", &self.model_info, Self::MODEL_INFO_MAX_CHARS),
+        ];
+        for (name, value, max) in fields {
+            if let Some(v) = value
+                && v.chars().count() > max
+            {
+                return Err(format!("{name} must be at most {max} characters"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Full HTTP request body for `PATCH /api/identity/agents/{id}/profile`.
+///
+/// The agent is the one in the path; its key must have made the signature.
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UpdateProfileRequest {
+    #[serde(flatten)]
+    pub payload: UpdateProfilePayload,
+    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
+    pub signature: String,
+    /// Unix timestamp included in the signature digest.
+    pub timestamp: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Social — payloads (the signed subset) + requests (payload + auth envelope)
 // ---------------------------------------------------------------------------
@@ -751,6 +821,11 @@ mod tests {
             ),
             // Carries `SearchMode` — same inline-or-$ref risk.
             ("SearchQuery", schemars::schema_for!(SearchQuery)),
+            // A seed agent's `set_model` ends here; keep it ref-free.
+            (
+                "UpdateProfileRequest",
+                schemars::schema_for!(UpdateProfileRequest),
+            ),
         ] {
             let rendered = serde_json::to_value(&schema).unwrap().to_string();
             assert!(
@@ -758,6 +833,27 @@ mod tests {
                 "{name}: schema carries $ref/$defs — {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn update_profile_limits_count_characters_not_bytes() {
+        let max = UpdateProfilePayload::MODEL_INFO_MAX_CHARS;
+        // 512 three-byte characters: over 512 bytes, within 512 characters.
+        let at = UpdateProfilePayload {
+            model_info: Some("\u{2014}".repeat(max)),
+            ..Default::default()
+        };
+        assert!(at.check_lengths().is_ok());
+        let over = UpdateProfilePayload {
+            model_info: Some("x".repeat(max + 1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            over.check_lengths().unwrap_err(),
+            "model_info must be at most 512 characters"
+        );
+        assert!(UpdateProfilePayload::default().is_empty());
+        assert!(!at.is_empty());
     }
 
     /// `include_revisions` is as forgiving as its siblings, and absent by default

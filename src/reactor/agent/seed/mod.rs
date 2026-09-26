@@ -29,7 +29,7 @@ pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use prompt::{
     MODEL_LINE_PREFIX, ModelName, model_line, replace_model_line,
 };
-pub use prompt_log::PromptLogError;
+pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use shortstring::{ShortString, ShortStringError};
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, Interests,
