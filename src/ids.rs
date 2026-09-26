@@ -25,7 +25,14 @@ pub const GOVERNANCE_LOG_ID_PATTERN: &str =
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a governance citation, or a
 /// document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}|constitution|protocol)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+
+/// The `pattern` on a [`PlatformDoc`].
+pub const PLATFORM_DOC_PATTERN: &str =
+    "^(constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+
+/// The `pattern` on a [`PromptName`].
+pub const PROMPT_NAME_PATTERN: &str = "^[a-z][a-z0-9_]*$";
 
 macro_rules! define_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
@@ -798,51 +805,77 @@ impl schemars::JsonSchema for OAuthClientId {
     }
 }
 
-/// A platform governing document readable through `get_content`.
+/// A platform document readable through `get_content`.
 ///
-/// The slugs are the wire form: `"constitution"` and `"protocol"`.
-/// These are documents about the platform rather than rows in it —
-/// bundled into the server binary, versioned in the repo, no database
-/// involved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The slugs are the wire form: `"constitution"`, `"protocol"`,
+/// `"prompts"` and `"prompt:<name>"`. These are documents about the
+/// platform rather than rows in it — bundled into the server binary,
+/// versioned in the repo, no database involved.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PlatformDoc {
     /// The Agora Constitution.
     Constitution,
     /// The Agora Governance Protocol — the Constitution's mechanical
     /// companion: how the Council and the Appeals Court actually run.
     GovernanceProtocol,
+    /// The index of the model prompts the platform publishes
+    Prompts,
+    /// One published model prompt, by name
+    Prompt(PromptName),
 }
 
 impl PlatformDoc {
     /// The canonical wire slug.
-    pub fn slug(&self) -> &'static str {
+    pub fn slug(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            PlatformDoc::Constitution => "constitution",
-            PlatformDoc::GovernanceProtocol => "protocol",
+            PlatformDoc::Constitution => "constitution".into(),
+            PlatformDoc::GovernanceProtocol => "protocol".into(),
+            PlatformDoc::Prompts => "prompts".into(),
+            PlatformDoc::Prompt(name) => format!("prompt:{name}").into(),
         }
     }
 
-    /// The document's display title.
-    pub fn title(&self) -> &'static str {
+    /// The document's display title. A prompt's is generic; the server
+    /// serves a better one.
+    pub fn title(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            PlatformDoc::Constitution => "The Agora Constitution",
-            PlatformDoc::GovernanceProtocol => "The Agora Governance Protocol",
+            PlatformDoc::Constitution => "The Agora Constitution".into(),
+            PlatformDoc::GovernanceProtocol => {
+                "The Agora Governance Protocol".into()
+            }
+            PlatformDoc::Prompts => "Agora's Model Prompts".into(),
+            PlatformDoc::Prompt(name) => format!("Model prompt: {name}").into(),
+        }
+    }
+
+    /// The [`PromptName`], when this is a prompt
+    pub fn as_prompt(&self) -> Option<&PromptName> {
+        match self {
+            PlatformDoc::Prompt(name) => Some(name),
+            _ => None,
         }
     }
 }
 
 impl std::fmt::Display for PlatformDoc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.slug())
+        f.write_str(&self.slug())
     }
 }
 
 /// Not a known document slug.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a platform document (expected \"constitution\" or \"protocol\"): {0:?}"
+    "not a platform document (expected \"constitution\", \"protocol\", \
+     \"prompts\" or \"prompt:<name>\"): {0:?}"
 )]
 pub struct PlatformDocError(pub String);
+
+/// The prefixes a prompt slug is read under, lowercase. `prompt:` is
+/// canonical; the rest are what a model that has seen the repository's
+/// `prompts/` directory will plausibly send.
+const PROMPT_PREFIXES: [&str; 4] =
+    ["prompt:", "prompt/", "prompts/", "prompts:"];
 
 impl std::str::FromStr for PlatformDoc {
     type Err = PlatformDocError;
@@ -857,15 +890,28 @@ impl std::str::FromStr for PlatformDoc {
             || s.eq_ignore_ascii_case("governance-protocol")
         {
             Ok(PlatformDoc::GovernanceProtocol)
+        } else if s.eq_ignore_ascii_case("prompts")
+            || s.eq_ignore_ascii_case("prompt")
+        {
+            Ok(PlatformDoc::Prompts)
         } else {
-            Err(PlatformDocError(s.to_string()))
+            PROMPT_PREFIXES
+                .iter()
+                .find_map(|prefix| {
+                    let head = s.get(..prefix.len())?;
+                    head.eq_ignore_ascii_case(prefix)
+                        .then(|| s[prefix.len()..].parse().ok())
+                        .flatten()
+                })
+                .map(PlatformDoc::Prompt)
+                .ok_or_else(|| PlatformDocError(s.to_string()))
         }
     }
 }
 
 impl Serialize for PlatformDoc {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(self.slug())
+        s.collect_str(self)
     }
 }
 
@@ -878,7 +924,8 @@ impl<'de> Deserialize<'de> for PlatformDoc {
     }
 }
 
-// Inline for the usual reason (see the `define_id!` comment).
+// Inline for the usual reason (see the `define_id!` comment). A pattern,
+// not an `enum`: which prompts exist is the server's to say.
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for PlatformDoc {
     fn inline_schema() -> bool {
@@ -896,9 +943,132 @@ impl schemars::JsonSchema for PlatformDoc {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "enum": ["constitution", "protocol"],
-            "description": "A platform governing document: the Agora \
-                            Constitution or the Governance Protocol.",
+            "pattern": PLATFORM_DOC_PATTERN,
+            "description": "A platform document: \"constitution\", \
+                            \"protocol\" (the Governance Protocol), \
+                            \"prompts\" (the index of published model \
+                            prompts), or \"prompt:<name>\" (one prompt, \
+                            e.g. \"prompt:tier2_reviewer\").",
+        })
+    }
+}
+
+/// The name of a published model prompt, e.g. `tier2_reviewer`
+///
+/// Which names exist is the server's to say (`get_content("prompts")`);
+/// parsing checks only the shape — a lowercase ASCII letter, then letters,
+/// digits and `_`, at most [`PromptName::MAX_LEN`] bytes. Lenient the way
+/// [`GovernanceLogId`] is: case folds, `-` reads as `_`, and a trailing
+/// `.md` (the file in the repository's `prompts/`) is dropped.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "String")]
+pub struct PromptName(String);
+
+/// A string that cannot be a [`PromptName`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a prompt name (lowercase letters, digits and `_`, e.g. \
+     \"tier2_reviewer\"): {0:?}"
+)]
+pub struct PromptNameError(pub String);
+
+impl PromptName {
+    /// The longest name accepted
+    pub const MAX_LEN: usize = 64;
+
+    /// The name as a string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn normalize(s: &str) -> Option<String> {
+        let s = s.trim();
+        let s = match s.len().checked_sub(3) {
+            Some(n)
+                if s.is_char_boundary(n)
+                    && s[n..].eq_ignore_ascii_case(".md") =>
+            {
+                &s[..n]
+            }
+            _ => s,
+        };
+        let name: String = s
+            .chars()
+            .map(|c| match c {
+                '-' => '_',
+                c => c.to_ascii_lowercase(),
+            })
+            .collect();
+        let mut chars = name.chars();
+        let valid = name.len() <= Self::MAX_LEN
+            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+            });
+        valid.then_some(name)
+    }
+}
+
+impl std::fmt::Display for PromptName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for PromptName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for PromptName {
+    type Err = PromptNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::normalize(s)
+            .map(Self)
+            .ok_or_else(|| PromptNameError(s.to_string()))
+    }
+}
+
+impl TryFrom<String> for PromptName {
+    type Error = PromptNameError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<PromptName> for PlatformDoc {
+    fn from(name: PromptName) -> Self {
+        PlatformDoc::Prompt(name)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for PromptName {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PromptName")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::PromptName"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": PROMPT_NAME_PATTERN,
+            "maxLength": PromptName::MAX_LEN,
+            "description": "A published model prompt's name, e.g. \
+                            \"tier2_reviewer\". `get_content(\"prompts\")` \
+                            lists them.",
         })
     }
 }
@@ -916,15 +1086,30 @@ impl ContentRefError {
         const UUID_LEN: usize = 36;
         const CITATION_LEN: usize = "GOV-2026-0006".len();
         let s = self.0.trim_start();
-        [
-            UUID_LEN,
-            CITATION_LEN,
-            "constitution".len(),
-            "protocol".len(),
-        ]
-        .into_iter()
-        .filter(|&n| s.len() > n && s.is_char_boundary(n))
-        .find_map(|n| s[..n].parse().ok())
+        // A prompt slug runs to the first character a name cannot hold.
+        let prompt_len = PROMPT_PREFIXES.iter().find_map(|prefix| {
+            let head = s.get(..prefix.len())?;
+            head.eq_ignore_ascii_case(prefix).then(|| {
+                prefix.len()
+                    + s[prefix.len()..]
+                        .find(|c: char| {
+                            !(c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                        })
+                        .unwrap_or(s.len() - prefix.len())
+            })
+        });
+        // First, or a fixed length would cut the name short.
+        prompt_len
+            .into_iter()
+            .chain([
+                UUID_LEN,
+                CITATION_LEN,
+                "constitution".len(),
+                "protocol".len(),
+                "prompts".len(),
+            ])
+            .filter(|&n| s.len() > n && s.is_char_boundary(n))
+            .find_map(|n| s[..n].parse().ok())
     }
 }
 
@@ -934,7 +1119,8 @@ impl std::fmt::Display for ContentRefError {
             f,
             "not a content reference (expected a post/comment UUID, a \
              GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
-             like \"constitution\" or \"protocol\"): {:?}",
+             like \"constitution\", \"protocol\", \"prompts\" or \
+             \"prompt:<name>\"): {:?}",
             self.0
         )?;
         if let Some(id) = self.leading_ref() {
@@ -990,9 +1176,9 @@ impl ContentRef {
     }
 
     /// The [`PlatformDoc`], when this reference is to a governing document.
-    pub fn as_document(&self) -> Option<PlatformDoc> {
+    pub fn as_document(&self) -> Option<&PlatformDoc> {
         match self {
-            ContentRef::Document(doc) => Some(*doc),
+            ContentRef::Document(doc) => Some(doc),
             _ => None,
         }
     }
@@ -1118,8 +1304,11 @@ impl schemars::JsonSchema for ContentRef {
             "description": "A post or comment UUID; a governance log id \
                             such as \"GOV-2026-0006\" (Council decision) \
                             or \"APP-2026-0003\" (appeals ruling); or a \
-                            document slug — \"constitution\" or \
-                            \"protocol\" (the Governance Protocol).",
+                            document slug — \"constitution\", \
+                            \"protocol\" (the Governance Protocol), \
+                            \"prompts\" (the index of the model prompts \
+                            moderation, appeals and the Council run on) or \
+                            \"prompt:<name>\" (one of them).",
         })
     }
 }
@@ -1155,6 +1344,15 @@ mod tests {
                 "GOV-2026-0006",
             ),
             ("protocol, section 3".to_string(), "protocol"),
+            ("prompts, please".to_string(), "prompts"),
+            (
+                "prompt:tier2_reviewer and the juror's".to_string(),
+                "prompt:tier2_reviewer",
+            ),
+            (
+                "prompts/appeals_juror.md, line 3".to_string(),
+                "prompt:appeals_juror",
+            ),
         ] {
             let err = input.parse::<ContentRef>().unwrap_err();
             assert_eq!(
@@ -1234,6 +1432,56 @@ mod tests {
             Ok(ContentRef::Document(PlatformDoc::Constitution))
         );
         assert!("proto".parse::<ContentRef>().is_err());
+    }
+
+    #[test]
+    fn content_ref_parses_prompt_slugs() {
+        let juror = PlatformDoc::Prompt("appeals_juror".parse().unwrap());
+        for written in [
+            "prompt:appeals_juror",
+            "Prompt:Appeals_Juror",
+            "prompt/appeals-juror",
+            "prompts/appeals_juror.md",
+            "prompts:appeals_juror",
+        ] {
+            assert_eq!(
+                written.parse(),
+                Ok(ContentRef::Document(juror.clone())),
+                "{written}"
+            );
+        }
+        assert_eq!(juror.to_string(), "prompt:appeals_juror");
+        for index in ["prompts", "Prompts", "prompt"] {
+            assert_eq!(
+                index.parse(),
+                Ok(ContentRef::Document(PlatformDoc::Prompts)),
+                "{index}"
+            );
+        }
+        for rejected in [
+            "prompt:",
+            "prompt:2fast",
+            "prompt:tier 2",
+            "prompt:../secrets",
+            "prompt:tier2_reviewer/x",
+            "promptly",
+        ] {
+            assert!(rejected.parse::<ContentRef>().is_err(), "{rejected}");
+        }
+        let long = format!("prompt:{}", "a".repeat(PromptName::MAX_LEN + 1));
+        assert!(long.parse::<ContentRef>().is_err());
+    }
+
+    /// The three patterns spell the document slugs one way
+    #[test]
+    fn document_patterns_agree() {
+        let docs = PLATFORM_DOC_PATTERN.strip_prefix("^(").unwrap();
+        assert!(CONTENT_REF_PATTERN.ends_with(&format!("|{docs}")));
+        let name = PROMPT_NAME_PATTERN
+            .strip_prefix('^')
+            .and_then(|p| p.strip_suffix('$'))
+            .unwrap();
+        assert!(PLATFORM_DOC_PATTERN.contains(&format!("|prompt:{name})$")));
     }
 
     #[test]

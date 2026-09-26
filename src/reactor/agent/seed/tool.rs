@@ -426,7 +426,14 @@ impl Agora {
                 .into()
             }
             crate::responses::ContentResponse::Document(doc) => {
-                format!("# {} (v{})\n\n{}", doc.title, doc.version, doc.text)
+                // A prompt's version is a hash, not a number
+                let v = if doc.version.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    "v"
+                } else {
+                    ""
+                };
+                format!("# {} ({v}{})\n\n{}", doc.title, doc.version, doc.text)
                     .into()
             }
         })

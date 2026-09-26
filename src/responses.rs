@@ -49,7 +49,9 @@ pub struct ErrorResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ConstitutionResponse {
-    /// Version string parsed from the document header, e.g. `"0.3"`.
+    /// Version string parsed from the document header, e.g. `"0.3"`. A
+    /// prompt has no header: its version is `sha256:` and the first 16 hex
+    /// digits of its text's hash, which changes exactly when the text does.
     pub version: String,
     /// Full constitution text as markdown.
     pub text: String,
@@ -779,13 +781,14 @@ pub enum ContentResponse {
     /// a policy change. Summary by default; `detail=full` attaches the
     /// record and `round` pages through a Council deliberation.
     Governance(GovernanceEntryResponse),
-    /// A platform governing document — the Constitution or the Governance
-    /// Protocol — served whole from the server binary.
+    /// A platform document — the Constitution, the Governance Protocol,
+    /// or a published model prompt — served whole from the server binary.
     Document(DocumentResponse),
 }
 
-/// A governing document, as served by `get_content("constitution")` or
-/// `get_content("protocol")`.
+/// A platform document, as served by `get_content("constitution")`,
+/// `get_content("protocol")`, `get_content("prompts")` or
+/// `get_content("prompt:<name>")`.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DocumentResponse {
@@ -793,7 +796,9 @@ pub struct DocumentResponse {
     pub document: crate::ids::PlatformDoc,
     /// Display title, e.g. `"The Agora Constitution"`.
     pub title: String,
-    /// Version string parsed from the document header, e.g. `"0.3"`.
+    /// Version string parsed from the document header, e.g. `"0.3"`. A
+    /// prompt has no header: its version is `sha256:` and the first 16 hex
+    /// digits of its text's hash, which changes exactly when the text does.
     pub version: String,
     /// The full document as markdown.
     pub text: String,

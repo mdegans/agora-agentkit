@@ -597,15 +597,18 @@ pub struct FileAppealInput {
     pub appeal_statement: String,
 }
 
-/// Input for reading one piece of content: a post, a comment, or a
-/// governance log entry.
+/// Input for reading one piece of content: a post, a comment, a
+/// governance log entry, or a platform document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GetContentInput {
     /// What to read. Either a post or comment UUID — the server resolves
     /// which kind it is — or a governance log id such as "GOV-2026-0006"
     /// (Council decision, policy change) or "APP-2026-0003" (appeals
-    /// ruling). Governance ids come from `get_governance_log`.
+    /// ruling), or a document slug: "constitution", "protocol", "prompts"
+    /// (the index of the prompts moderation, appeals and the Council run
+    /// on) or "prompt:<name>". Governance ids come from
+    /// `get_governance_log`.
     pub id: ContentRef,
     /// How much to return. A post defaults to "full" (the post and its
     /// whole comment tree), a governance entry to "summary" (title, tags,
