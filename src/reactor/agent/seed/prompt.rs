@@ -34,6 +34,55 @@ pub(super) struct Perception<'a> {
     /// Whether this session carries the web server tools, so the guidelines
     /// warn about open-web content only when the agent can actually reach it.
     pub web_tools: bool,
+    /// The model this session is routed on, rendered as [`model_line`]
+    pub model: ModelName<'a>,
+}
+
+/// A model's human-readable name and wire id, for [`model_line`]
+#[derive(Debug, Clone, Copy)]
+pub struct ModelName<'a> {
+    pub display: &'a str,
+    pub id: &'a str,
+}
+
+impl<'a> ModelName<'a> {
+    /// The endpoint's display name, falling back to the id when it has none
+    pub fn of(model: &'a misanthropic::model::ModelInfo) -> Self {
+        let id = model.id.name();
+        let display = model.display_name.trim();
+        Self {
+            display: if display.is_empty() { id } else { display },
+            id,
+        }
+    }
+}
+
+/// Start of the dashboard's model line (see [`model_line`])
+pub const MODEL_LINE_PREFIX: &str = "Model: ";
+
+/// The dashboard's model line, `Model: {display} ({id})`, without a newline.
+/// Fixed so a fork of a logged prompt can find it and rewrite it with
+/// [`replace_model_line`].
+pub fn model_line(model: ModelName<'_>) -> String {
+    format!("{MODEL_LINE_PREFIX}{} ({})", model.display, model.id)
+}
+
+/// Rewrite the first [`model_line`] in `text` to name `model`, or `None` if
+/// there is none
+pub fn replace_model_line(text: &str, model: ModelName<'_>) -> Option<String> {
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        if body.starts_with(MODEL_LINE_PREFIX) && body.ends_with(')') {
+            let mut out = String::with_capacity(text.len());
+            out.push_str(&text[..offset]);
+            out.push_str(&model_line(model));
+            out.push_str(&text[offset + body.len()..]);
+            return Some(out);
+        }
+        offset += line.len();
+    }
+    None
 }
 
 /// Assemble the whole working prompt: the integrity-gated system prefix
@@ -58,6 +107,7 @@ pub(super) fn assemble(
         recent_posts,
         recent_limit,
         web_tools,
+        model,
     } = *perception;
     if !constitution_looks_complete(constitution) {
         return Err(super::SeedError::Constitution);
@@ -66,7 +116,7 @@ pub(super) fn assemble(
     let intro = intro_message(
         soul_markdown,
         memory,
-        &format_dashboard(dashboard),
+        &format_dashboard(dashboard, model),
         &format_recent_activity(recent_posts, recent_limit),
     );
     let mut prompt = prompt
@@ -277,15 +327,19 @@ fn format_council(council: &CouncilSchedule) -> String {
 
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
-fn format_dashboard(dash: &DashboardResponse) -> String {
+fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     let mut out = String::new();
 
+    // The model line sits right under the name: agents couldn't tell which
+    // model they ran on, and read a consented-to model trial as already
+    // under way (2026-09-25).
     out.push_str(&format!(
-        "Name: {}\n\
+        "Name: {}\n{}\n\
          **Today's date: {}.** Events dated after today have not happened \
          yet — records of them in your memory are plans or predictions, \
          not outcomes.\n\n",
         dash.agent.name,
+        model_line(model),
         chrono::Utc::now().date_naive()
     ));
 
@@ -1519,6 +1573,64 @@ mod tests {
     const FULL_CONSTITUTION: &str = "Preamble Article I Article II \
          Article III Article IV Article V The Steward";
 
+    fn test_model() -> ModelName<'static> {
+        ModelName {
+            display: "Qwen 3.8 27B",
+            id: "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+        }
+    }
+
+    #[test]
+    fn dashboard_names_the_model_under_the_name() {
+        let out = format_dashboard(&dash(), test_model());
+        assert!(
+            out.starts_with(
+                "Name: marker-agent\n\
+                 Model: Qwen 3.8 27B (Qwen3.8-27B-UD-Q8_K_XL.gguf)\n"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn model_line_rewrites_in_place() {
+        let text = format_dashboard(&dash(), test_model());
+        let other = ModelName {
+            display: "Qwen3.6-35B-A3B",
+            id: "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf",
+        };
+        let out = replace_model_line(&text, other).unwrap();
+        assert!(
+            out.contains(
+                "\nModel: Qwen3.6-35B-A3B (Qwen3.6-35B-A3B-UD-Q4_K_S.gguf)\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("Qwen3.8"), "{out}");
+        assert_eq!(
+            out.replace(&model_line(other), &model_line(test_model())),
+            text,
+            "only the line changed"
+        );
+        assert!(replace_model_line("no model here", other).is_none());
+    }
+
+    #[test]
+    fn model_name_falls_back_to_the_id() {
+        let mut info = misanthropic::model::ModelInfo {
+            id: "x.gguf".to_string().into(),
+            display_name: "".into(),
+            capabilities: Default::default(),
+            max_input_tokens: 0,
+            max_tokens: 0,
+            kind: misanthropic::model::Kind::Model,
+            created_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        };
+        assert_eq!(ModelName::of(&info).display, "x.gguf");
+        info.display_name = "X".into();
+        assert_eq!(ModelName::of(&info).display, "X");
+    }
+
     fn dash() -> DashboardResponse {
         serde_json::from_value(serde_json::json!({
             "agent": { "name": "marker-agent", "karma": 0 },
@@ -1558,7 +1670,7 @@ mod tests {
         }]))
         .expect("valid unread-reply fixture");
 
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(
             !out.contains("network is quiet"),
             "must not claim network-wide silence while showing replies: {out}"
@@ -1580,7 +1692,7 @@ mod tests {
     fn empty_feeds_and_no_replies_still_scope_the_claim() {
         let mut d = dash();
         d.feeds.clear();
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(!out.contains("network is quiet"), "{out}");
         assert!(out.contains("communities you've joined"), "{out}");
         assert!(out.contains("no unread"), "{out}");
@@ -1591,7 +1703,7 @@ mod tests {
         let mut d = dash();
         d.unread_messages.dms = 2;
         d.unread_messages.broadcasts = 1;
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(out.contains("2 unread private message(s)"), "{out}");
         assert!(out.contains("1 unread system broadcast(s)"), "{out}");
         assert!(out.contains("get_inbox"), "{out}");
@@ -1627,7 +1739,7 @@ mod tests {
     fn council_block_carries_both_dates_and_the_thread() {
         let mut d = dash();
         d.council = Some(schedule());
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(out.contains("### The Council"), "{out}");
         assert!(out.contains("last sat on 2026-09-07"), "{out}");
         assert!(out.contains("2026-09-26"), "{out}");
@@ -1644,7 +1756,7 @@ mod tests {
     fn the_expected_date_is_hedged_never_stated_as_a_deadline() {
         let mut d = dash();
         d.council = Some(schedule());
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(out.contains("around 2026-09-26"), "{out}");
         assert!(!out.to_lowercase().contains("deadline"), "{out}");
     }
@@ -1657,7 +1769,7 @@ mod tests {
         next.cancelled = true;
         next.notes = Some("The Steward is unwell; a new date follows.".into());
         d.council = Some(sched);
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(out.contains("has been called off"), "{out}");
         assert!(out.contains("The Steward is unwell"), "{out}");
     }
@@ -1667,7 +1779,7 @@ mod tests {
     /// heading.
     #[test]
     fn no_council_schedule_renders_nothing() {
-        let out = format_dashboard(&dash());
+        let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("### The Council"), "{out}");
     }
 
@@ -1675,13 +1787,13 @@ mod tests {
     fn a_schedule_with_nothing_in_it_renders_nothing() {
         let mut d = dash();
         d.council = Some(CouncilSchedule::default());
-        let out = format_dashboard(&d);
+        let out = format_dashboard(&d, test_model());
         assert!(!out.contains("### The Council"), "{out}");
     }
 
     #[test]
     fn zero_unread_messages_render_nothing() {
-        let out = format_dashboard(&dash());
+        let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("### Messages"), "{out}");
         assert!(!out.contains("get_inbox"), "{out}");
     }
@@ -1692,7 +1804,7 @@ mod tests {
     // anchors explicitly as "today" and states the anticipation rule.
     #[test]
     fn dashboard_anchors_today_and_warns_future_events_are_unhappened() {
-        let out = format_dashboard(&dash());
+        let out = format_dashboard(&dash(), test_model());
         assert!(out.contains("Today's date:"), "{out}");
         assert!(
             out.contains("Events dated after today have not happened yet"),
@@ -1729,6 +1841,7 @@ mod tests {
                 recent_posts: &[recent_post()],
                 recent_limit: 5,
                 web_tools,
+                model: test_model(),
             },
         )
         .expect("assemble succeeds on a complete constitution")
@@ -1748,6 +1861,7 @@ mod tests {
                 recent_posts: &[],
                 recent_limit: 5,
                 web_tools: false,
+                model: test_model(),
             },
         )
         .unwrap_err();

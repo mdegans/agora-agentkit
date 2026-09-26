@@ -73,7 +73,7 @@ impl From<EndpointVariant> for Quirks {
     }
 }
 
-/// An ollama/blallama `GET /api/tags` body — the subset [`models`]
+/// An ollama `GET /api/tags` body — the subset [`models`]
 /// synthesizes from.
 ///
 /// [`models`]: Inference::models
@@ -338,11 +338,15 @@ impl Inference for Client {
 
     async fn models(&self) -> Result<misanthropic::model::Models, Self::Error> {
         match self.variant {
-            EndpointVariant::Anthropic => self.client.models().await,
-            // ollama/blallama don't serve /v1/models; discover via /api/tags.
+            // blallama serves `/v1/models` with real capabilities and token
+            // ceilings. The key it gets is `DUMMY_KEY` (see `with_variant`).
+            EndpointVariant::Anthropic | EndpointVariant::Blallama => {
+                self.client.models().await
+            }
+            // ollama doesn't serve /v1/models; discover via /api/tags.
             // Deliberately through the bare `inner` and not a keyed helper
             // like `get_raw`: no API key may reach a local endpoint.
-            EndpointVariant::Ollama | EndpointVariant::Blallama => {
+            EndpointVariant::Ollama => {
                 let url = self.client.messages_url.join("/api/tags").map_err(
                     |_| misanthropic::client::Error::UnexpectedResponse {
                         message: "cannot derive /api/tags from messages_url",
@@ -731,6 +735,66 @@ mod tests {
             "the batch item ran no server tool: {:?}",
             response.inner.content
         );
+    }
+
+    /// blallama discovers through `/v1/models` (a body captured from the live
+    /// endpoint, 2026-09-25), with the dummy key, and its real ceilings still
+    /// admit the id-only [`ModelInfo`] a stored agent requests.
+    #[tokio::test]
+    async fn blallama_discovers_via_v1_models() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path("/v1/models")
+                .header("x-api-key", DUMMY_KEY);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(include_str!(
+                    "../../tests/fixtures/blallama_v1_models.json"
+                ));
+        });
+        let transport = Client::new(
+            misanthropic::Client::new("x".repeat(108))
+                .unwrap()
+                .base_url(server.base_url())
+                .unwrap(),
+        )
+        .with_variant(EndpointVariant::Blallama);
+
+        let models = transport.models().await.unwrap();
+        mock.assert();
+
+        let qwen = models
+            .iter()
+            .find(|m| m.id.name() == "Qwen3.8-27B-UD-Q8_K_XL.gguf")
+            .expect("offered");
+        assert_eq!(qwen.display_name, "Qwen3.8-27B");
+        assert_eq!(qwen.max_input_tokens, 131072);
+        assert!(qwen.capabilities.structured_outputs.supported);
+
+        // What a stored agent's state carries: the id, zero ceilings, no
+        // capabilities.
+        let stored: ModelInfo = serde_json::from_value(serde_json::json!({
+            "capabilities": {},
+            "created_at": "1970-01-01T00:00:00Z",
+            "display_name": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+            "id": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+            "max_input_tokens": 0,
+            "max_tokens": 0,
+            "type": "model"
+        }))
+        .unwrap();
+        assert!(models.iter().any(|m| m.satisfies(&stored)));
+        for offered in models.iter() {
+            let mut requested = offered.clone();
+            requested.display_name = requested.id.name().to_owned().into();
+            requested.capabilities = Default::default();
+            requested.max_input_tokens = 0;
+            requested.max_tokens = 0;
+            assert!(offered.satisfies(&requested), "{}", offered.id.name());
+        }
     }
 
     /// `/api/tags` synthesis: custom ids, batch unsupported, ceilings

@@ -1,6 +1,6 @@
 //! A [`Reactor`] runs [`Agent`]s to completion by scheduling agentic tasks and
-//! submitting prompts to [`Inference`] engines. Post-[`Run`] agents [`Persist`]
-//! in a [`Storage`] implementation (disk, sql, etc).
+//! submitting prompts to [`Inference`] engines. Each agent persists in a
+//! [`Storage`] implementation (disk, sql, etc) as its session ends.
 //!
 //! All traits, [`Agent`], [`Inference`] and [`Storage`] all have an associated
 //! [`Error`] type requiring [`RetryAfter`] be implemented so 429, 529 and more
@@ -182,8 +182,62 @@ impl<I: Inference, S: Storage, A: Agent> RetryAfter for ReactorError<I, S, A> {
     }
 }
 
-/// An [`Agent`] ready to [`persist_all`](Reactor::persist_all) to [`Storage`]
-type Persist<I, S, A> = (A, Result<Outcome, ReactorError<I, S, A>>);
+/// An [`Agent`] whose session ended, for [`persist_all`](Reactor::persist_all)
+struct Persist<I: Inference, S: Storage, A: Agent> {
+    agent: A,
+    result: Result<Outcome, ReactorError<I, S, A>>,
+    /// Already committed by [`settle`](Reactor::settle); `persist_all` skips it
+    saved: bool,
+}
+
+/// [`Storage`] shared by the two run-paths, so each agent saves as it finishes
+type SharedStorage<'a, S> = futures::lock::Mutex<&'a mut S>;
+
+/// How a session ended, for the `session_finished` event
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Complete,
+    Failed,
+    /// Gave up after [`Reactor::MAX_STALLS`] rounds (an [`Outcome::Failed`])
+    Stalled,
+    Error,
+}
+
+impl Ending {
+    fn of<E>(result: &Result<Outcome, E>, stalled: bool) -> Self {
+        match result {
+            Err(_) => Ending::Error,
+            Ok(_) if stalled => Ending::Stalled,
+            Ok(Outcome::Complete) => Ending::Complete,
+            Ok(Outcome::Failed) => Ending::Failed,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Ending::Complete => "complete",
+            Ending::Failed => "failed",
+            Ending::Stalled => "stalled",
+            Ending::Error => "error",
+        }
+    }
+}
+
+/// When a session started, for the `session_finished` event
+#[derive(Debug, Clone, Copy)]
+struct Started {
+    at: chrono::DateTime<chrono::Utc>,
+    instant: std::time::Instant,
+}
+
+impl Started {
+    fn now() -> Self {
+        Self {
+            at: chrono::Utc::now(),
+            instant: std::time::Instant::now(),
+        }
+    }
+}
 
 /// How many consecutive batch-item failures (canceled / expired / errored
 /// results, which never reach the agent's `handle` and so never charge its own
@@ -356,22 +410,99 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// engine. [`on_teardown`](Agent::on_teardown) runs however the drive
     /// ends — a stateful tool may hold real resources — and its error never
     /// clobbers the drive's own.
+    ///
+    /// Returns whether the drive ended on the stall cap, alongside the result.
     async fn drive_one(
         inference: &I,
         agent: &mut A,
-    ) -> Result<Outcome, ReactorError<I, S, A>> {
+    ) -> (Result<Outcome, ReactorError<I, S, A>>, bool) {
         let driven = Self::drive_inner(inference, agent).await;
+        let stalled = matches!(driven, Ok(None));
+        let driven = driven.map(|o| o.unwrap_or(Outcome::Failed));
         let teardown =
             agent.on_teardown().await.map_err(ReactorError::AgentError);
-        driven.and_then(|outcome| teardown.map(|()| outcome))
+        (
+            driven.and_then(|outcome| teardown.map(|()| outcome)),
+            stalled,
+        )
+    }
+
+    /// Save one finished agent's state right away, so a crash later in a long
+    /// run loses nothing already done, and emit its `session_finished` event.
+    /// Returns whether the save committed; if not,
+    /// [`persist_all`](Self::persist_all) tries again and reports.
+    async fn settle(
+        storage: &SharedStorage<'_, S>,
+        // `&mut` only because `&A` isn't `Send` across the save's await.
+        agent: &mut A,
+        result: &Result<Outcome, ReactorError<I, S, A>>,
+        stalled: bool,
+        started: Started,
+    ) -> bool {
+        let id = agent.id();
+        let saved = match serde_json::to_value(agent.state()) {
+            Ok(value) => match storage.lock().await.save_raw(id, value).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %id,
+                        error = %e,
+                        "session save failed; retrying at end of run"
+                    );
+                    false
+                }
+            },
+            // `persist_all` serializes again and records the error.
+            Err(_) => false,
+        };
+        let ending = Ending::of(result, stalled);
+        let model = agent.prompt().model.to_string();
+        let started_at = started.at.to_rfc3339();
+        let duration_secs = started.instant.elapsed().as_secs_f64();
+        // Anything short of complete is an ERROR the moment it happens,
+        // with its cause, rather than only a line in the end-of-run report
+        // (agora-agents#171: 19 sessions of a sweep died that way unseen).
+        let error = match (ending, result) {
+            (Ending::Complete, _) => None,
+            (_, Err(e)) => Some(e.to_string()),
+            (Ending::Stalled, _) => Some(format!(
+                "no successful tool call in {} rounds",
+                Self::MAX_STALLS
+            )),
+            _ => Some("the agent ended its session as failed".to_owned()),
+        };
+        match error {
+            None => tracing::info!(
+                event_type = "session_finished",
+                agent_id = %id,
+                model,
+                outcome = ending.as_str(),
+                started_at,
+                duration_secs,
+                saved,
+                "session finished"
+            ),
+            Some(error) => tracing::error!(
+                event_type = "session_finished",
+                agent_id = %id,
+                model,
+                outcome = ending.as_str(),
+                started_at,
+                duration_secs,
+                saved,
+                error,
+                "session finished without completing"
+            ),
+        }
+        saved
     }
 
     /// The init + drive loop of [`drive_one`](Self::drive_one), split out so
-    /// teardown can run no matter how it ends.
+    /// teardown can run no matter how it ends. `None` is the stall cap.
     async fn drive_inner(
         inference: &I,
         agent: &mut A,
-    ) -> Result<Outcome, ReactorError<I, S, A>> {
+    ) -> Result<Option<Outcome>, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
         let mut stalls = 0usize;
         loop {
@@ -410,13 +541,13 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 .await
                 .map_err(ReactorError::AgentError)?
             {
-                Control::Done(outcome) => break Ok(outcome),
+                Control::Done(outcome) => break Ok(Some(outcome)),
                 Control::Continue => stalls = 0,
                 Control::Stalled => {
                     stalls += 1;
                     if stalls >= Self::MAX_STALLS {
                         log_stalled(agent.id(), &model, stalls);
-                        break Ok(Outcome::Failed);
+                        break Ok(None);
                     }
                 }
             }
@@ -425,16 +556,27 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
 
     /// Agent-major path: drive each agent to completion, up to
     /// [`max_concurrency`](Inference::max_concurrency) in flight. One agent's
-    /// failure never aborts the cohort (persistence happens after).
+    /// failure never aborts the cohort; each agent is saved as it finishes.
     async fn run_agent_major(
         inference: &I,
+        storage: &SharedStorage<'_, S>,
         agents: Vec<A>,
     ) -> Vec<Persist<I, S, A>> {
         let limit = inference.max_concurrency().get();
         futures::stream::iter(agents)
             .map(|mut agent| async move {
-                let result = Self::drive_one(inference, &mut agent).await;
-                (agent, result)
+                let started = Started::now();
+                let (result, stalled) =
+                    Self::drive_one(inference, &mut agent).await;
+                let saved = Self::settle(
+                    storage, &mut agent, &result, stalled, started,
+                )
+                .await;
+                Persist {
+                    agent,
+                    result,
+                    saved,
+                }
             })
             .buffer_unordered(limit)
             .collect()
@@ -444,15 +586,22 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// Round-major path: drive the whole cohort in lockstep, collecting each live
     /// agent's next prompt into one [`infer_batch`](Inference::infer_batch) per
     /// round and scattering the responses back. Only inference is batched;
-    /// per-agent lifecycle runs sequentially.
+    /// per-agent lifecycle runs sequentially. Each agent is torn down and saved
+    /// in the round it leaves the cohort.
     async fn run_round_major(
         inference: &I,
+        storage: &SharedStorage<'_, S>,
         mut agents: Vec<A>,
     ) -> Vec<Persist<I, S, A>> {
+        let started = Started::now();
         // All keyed by the agent's index in `agents` (which stays full-length).
         let mut errors: HashMap<usize, ReactorError<I, S, A>> = HashMap::new();
         // Agents that reached an outcome (Done, or stall-capped to Failed).
         let mut finished: HashMap<usize, Outcome> = HashMap::new();
+        // Of those, the stall-capped ones.
+        let mut stall_capped: BTreeSet<usize> = BTreeSet::new();
+        // Agents torn down and saved (or save attempted), with the save result.
+        let mut settled: HashMap<usize, bool> = HashMap::new();
         // Consecutive `Stalled` rounds, and consecutive per-item failures.
         let mut stalls: HashMap<usize, usize> = HashMap::new();
         let mut item_failures: HashMap<usize, usize> = HashMap::new();
@@ -497,6 +646,17 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         // The live cohort for a round, reused across rounds.
         let mut live: Vec<usize> = Vec::new();
         loop {
+            Self::settle_round_major(
+                storage,
+                &mut agents,
+                &mut errors,
+                &finished,
+                &stall_capped,
+                &mut settled,
+                started,
+            )
+            .await;
+
             live.clear();
             live.extend((0..agents.len()).filter(|i| {
                 !errors.contains_key(i) && !finished.contains_key(i)
@@ -567,6 +727,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                                 if *n >= Self::MAX_STALLS {
                                     log_stalled(agents[i].id(), &model, *n);
                                     finished.insert(i, Outcome::Failed);
+                                    stall_capped.insert(i);
                                 }
                             }
                         }
@@ -587,40 +748,85 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             }
         }
 
-        // Tear down every agent (best-effort) without clobbering a prior error.
-        for (i, agent) in agents.iter_mut().enumerate() {
-            if let Err(e) = agent.on_teardown().await {
-                errors.entry(i).or_insert(ReactorError::AgentError(e));
-            }
-        }
+        // Whoever the loop left (a dead transport breaks out mid-round).
+        Self::settle_round_major(
+            storage,
+            &mut agents,
+            &mut errors,
+            &finished,
+            &stall_capped,
+            &mut settled,
+            started,
+        )
+        .await;
 
         // Flatten to `Persist`: errored → Err; finished → Ok(outcome).
-        // `persist_all` buckets and serializes from here.
+        // `persist_all` buckets, and saves whatever didn't commit, from here.
         agents
             .into_iter()
             .enumerate()
-            .map(|(i, agent)| {
-                let result = match errors.remove(&i) {
+            .map(|(i, agent)| Persist {
+                result: match errors.remove(&i) {
                     Some(e) => Err(e),
                     None => Ok(finished.remove(&i).unwrap_or(Outcome::Failed)),
-                };
-                (agent, result)
+                },
+                saved: settled.get(&i).copied().unwrap_or(false),
+                agent,
             })
             .collect()
     }
 
-    /// Bulk save agents then calculate, done, failed, etc. for a [`Report`]. Of
-    /// particular interest are the [`unsaved`](Self::unsaved).
-    // TODO: We do this all at once, which is effecient but also means if there
-    // is a power failure or whatever we lose everything. Instead we could
-    // accept a Stream and map what's here now as an inner function onto chunks
-    // of ~30. We simply remove the `collect` from the callsite in this case.
+    /// Tear down (best-effort, without clobbering a prior error) and
+    /// [`settle`](Self::settle) every round-major agent that has left the
+    /// cohort since the last call.
+    async fn settle_round_major(
+        storage: &SharedStorage<'_, S>,
+        agents: &mut [A],
+        errors: &mut HashMap<usize, ReactorError<I, S, A>>,
+        finished: &HashMap<usize, Outcome>,
+        stall_capped: &BTreeSet<usize>,
+        settled: &mut HashMap<usize, bool>,
+        started: Started,
+    ) {
+        for (i, agent) in agents.iter_mut().enumerate() {
+            if settled.contains_key(&i)
+                || !(errors.contains_key(&i) || finished.contains_key(&i))
+            {
+                continue;
+            }
+            if let Err(e) = agent.on_teardown().await {
+                errors.entry(i).or_insert(ReactorError::AgentError(e));
+            }
+            let result = match errors.get(&i) {
+                // Only the variant matters to `settle`; the error stays put.
+                Some(e) => Err(ReactorError::Shared(ErrorReport::from(e))),
+                None => Ok(finished[&i]),
+            };
+            let saved = Self::settle(
+                storage,
+                agent,
+                &result,
+                stall_capped.contains(&i),
+                started,
+            )
+            .await;
+            settled.insert(i, saved);
+        }
+    }
+
+    /// Bulk save whatever [`settle`](Self::settle) didn't, then calculate done,
+    /// failed, etc. for a [`Report`]. Of particular interest are the
+    /// [`unsaved`](Self::unsaved).
     async fn persist_all(&mut self, agent_results: Vec<Persist<I, S, A>>) {
         // Serialize each snapshot once. A serialize failure is itself a storage
         // error — that agent can be neither persisted nor recovered.
-        let mut values: Vec<(AgentId, serde_json::Value)> =
-            Vec::with_capacity(agent_results.len());
-        for (agent, _) in &agent_results {
+        let mut values: Vec<(AgentId, serde_json::Value)> = Vec::new();
+        let mut saved: BTreeSet<AgentId> = agent_results
+            .iter()
+            .filter(|p| p.saved)
+            .map(|p| p.agent.id())
+            .collect();
+        for Persist { agent, .. } in agent_results.iter().filter(|p| !p.saved) {
             let id = agent.id();
             match serde_json::to_value(agent.state()) {
                 Ok(v) => values.push((id, v)),
@@ -637,13 +843,18 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
 
         // Persist, learning exactly which ids committed. The clone feeds the
         // save; the original is drained below into `unsaved`.
-        let (saved, mut save_err) =
+        let mut save_err = None;
+        if !values.is_empty() {
             // `save_all_raw`, not `save_all`: per-agent serialize failures are
             // handled above (`save_all` aborts the whole batch — see its FIXME).
             match self.storage.save_all_raw(values.clone().into_iter()).await {
-                Ok(()) => (attempted.clone(), None),
-                Err(SaveError { saved, inner }) => (saved, Some(inner)),
-            };
+                Ok(()) => saved.extend(attempted.iter().copied()),
+                Err(SaveError { saved: some, inner }) => {
+                    saved.extend(some);
+                    save_err = Some(inner);
+                }
+            }
+        }
 
         // Keep the only in-memory copy of every attempted-but-uncommitted snapshot.
         for (id, value) in values {
@@ -652,7 +863,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             }
         }
 
-        for (agent, result) in agent_results {
+        for Persist { agent, result, .. } in agent_results {
             let id = agent.id();
             let done =
                 matches!(result, Ok(Outcome::Complete)) && saved.contains(&id);
@@ -898,16 +1109,19 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
             }
         }
 
-        // Run both paths concurrently; each only borrows `&self.inference`. One
-        // agent's failure never aborts the cohort — persistence happens after.
+        // Run both paths concurrently, sharing the inference and the storage.
+        // One agent's failure never aborts the cohort, and each agent is saved
+        // as soon as its session ends.
         let inference = &self.inference;
+        let storage = futures::lock::Mutex::new(&mut self.storage);
         let (mut to_persist, seq_persist) = futures::join!(
-            Self::run_round_major(inference, batch),
-            Self::run_agent_major(inference, sequential),
+            Self::run_round_major(inference, &storage, batch),
+            Self::run_agent_major(inference, &storage, sequential),
         );
+        drop(storage);
         to_persist.extend(seq_persist);
 
-        // Persist all snapshots in one bulk save, then bucket.
+        // Save whatever didn't commit as it finished, then bucket.
         self.persist_all(to_persist).await;
         Ok(self.report())
     }

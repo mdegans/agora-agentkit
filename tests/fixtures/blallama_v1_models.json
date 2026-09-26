@@ -1,0 +1,416 @@
+{
+    "data": [
+        {
+            "id": "Mistral-Small-4-119B-2603-UD-Q4_K_XL.gguf",
+            "display_name": "Mistral-Small-4-119B-2603",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-07-28T09:23:08.128497031Z"
+        },
+        {
+            "id": "Qwen3.5-35B-A3B-Base-Q8_0.gguf",
+            "display_name": "Qwen 35b A3B Base",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": false,
+                    "types": {}
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-08-04T12:20:37.162031396Z"
+        },
+        {
+            "id": "Qwen3.5-35B-A3B-Q8_0.gguf",
+            "display_name": "Qwen3.5-35B-A3B",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-04-22T17:38:14.177995772Z"
+        },
+        {
+            "id": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+            "display_name": "Qwen3.6-35B-A3B",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-07-13T08:55:06.676725536Z"
+        },
+        {
+            "id": "Qwen3.6-35B-A3B-UD-Q4_K_S.gguf",
+            "display_name": "Qwen3.6-35B-A3B",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-05-14T11:40:15.448236168Z"
+        },
+        {
+            "id": "Qwen3.8-27B-UD-Q8_K_XL.gguf",
+            "display_name": "Qwen3.8-27B",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": true
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-09-18T10:48:22.480175841Z"
+        },
+        {
+            "id": "cogito-32b.gguf",
+            "display_name": "Cogito v1 Preview Qwen 32B",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": false,
+                    "types": {}
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-04-09T10:45:02.344627756Z"
+        },
+        {
+            "id": "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf",
+            "display_name": "Gemma-4 31B IT (smart Q4_0, QAT-lossless)",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": true
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-07-13T08:57:42.066452700Z"
+        },
+        {
+            "id": "gpt-oss-120b-MXFP4.gguf",
+            "display_name": "Gpt Oss 120b",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": false
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-07-27T16:13:56.799689144Z"
+        },
+        {
+            "id": "model.gguf",
+            "display_name": "Qwen3.6-35B-A3B",
+            "capabilities": {
+                "batch": {
+                    "supported": false
+                },
+                "citations": {
+                    "supported": false
+                },
+                "code_execution": {
+                    "supported": false
+                },
+                "context_management": {
+                    "supported": false
+                },
+                "effort": {
+                    "supported": false
+                },
+                "image_input": {
+                    "supported": true
+                },
+                "pdf_input": {
+                    "supported": false
+                },
+                "structured_outputs": {
+                    "supported": true
+                },
+                "thinking": {
+                    "supported": true,
+                    "types": {
+                        "enabled": {
+                            "supported": true
+                        }
+                    }
+                }
+            },
+            "max_input_tokens": 131072,
+            "max_tokens": 131072,
+            "type": "model",
+            "created_at": "2026-07-13T08:55:06.676725536Z"
+        }
+    ]
+}

@@ -16,7 +16,7 @@
 //! - [`truncation`] — the `MaxTokens` path of the default `handle`: budget
 //!   bump, ceiling clamp, and stall.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -94,6 +94,9 @@ enum Behavior {
     ErrHandle,
     /// `on_quiesce` always stalls — the reactor should cap and fail it.
     Stall,
+    /// Like `Complete`, but panics where it would finish, taking the whole
+    /// run down with it.
+    Panic,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -215,8 +218,11 @@ impl Agent for TestAgent {
                 self.push_user("retry")?;
                 Ok(Control::Stalled)
             }
-            Behavior::Complete => {
+            Behavior::Complete | Behavior::Panic => {
                 if self.state.turns_left <= 1 {
+                    if self.state.behavior == Behavior::Panic {
+                        panic!("agent panicked mid-session");
+                    }
                     Ok(Control::Done(Outcome::Complete))
                 } else {
                     self.state.turns_left -= 1;
@@ -679,18 +685,21 @@ impl Inference for ModelRecorder {
 #[derive(Default, Clone)]
 struct PartialStore {
     map: Arc<Mutex<HashMap<AgentId, serde_json::Value>>>,
-    commit: usize,
+    /// Saves left before the store fails, across all calls.
+    budget: Arc<AtomicUsize>,
 }
 
 impl PartialStore {
     fn commit(commit: usize) -> Self {
         Self {
-            commit,
+            budget: Arc::new(AtomicUsize::new(commit)),
             ..Default::default()
         }
     }
 }
 
+/// Only `save_raw` is overridden: the default `save_all_raw` loops it and
+/// reports the prefix that committed.
 #[async_trait::async_trait]
 impl Storage for PartialStore {
     type Error = TestError;
@@ -700,6 +709,15 @@ impl Storage for PartialStore {
         id: AgentId,
         value: serde_json::Value,
     ) -> Result<(), TestError> {
+        if self
+            .budget
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                n.checked_sub(1)
+            })
+            .is_err()
+        {
+            return Err(TestError::Msg("out of space".into()));
+        }
         self.map.lock().unwrap().insert(id, value);
         Ok(())
     }
@@ -712,28 +730,6 @@ impl Storage for PartialStore {
             Some(value) => Ok(serde_json::from_value(value.clone())?),
             None => Err(AgentNotFound(id).into()),
         }
-    }
-
-    async fn save_all_raw<It>(
-        &mut self,
-        items: It,
-    ) -> Result<(), SaveError<TestError>>
-    where
-        It: ExactSizeIterator<Item = (AgentId, serde_json::Value)> + Send,
-    {
-        let mut saved = BTreeSet::new();
-        let mut map = self.map.lock().unwrap();
-        for (i, (id, value)) in items.enumerate() {
-            if i >= self.commit {
-                return Err(SaveError {
-                    saved,
-                    inner: TestError::Msg("out of space".into()),
-                });
-            }
-            map.insert(id, value);
-            saved.insert(id);
-        }
-        Ok(())
     }
 }
 
