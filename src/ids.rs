@@ -23,9 +23,13 @@ pub const UUID_PATTERN: &str =
 pub const GOVERNANCE_LOG_ID_PATTERN: &str =
     "^(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}$";
 
-/// The `pattern` on a [`ContentRef`]: a UUID, a governance citation, or a
-/// document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+/// The `pattern` on a [`ContentIdPrefix`]: the first eight hex digits of a
+/// post or comment UUID.
+pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
+
+/// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
+/// hex digits), a governance citation, or a document slug.
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -1073,6 +1077,126 @@ impl schemars::JsonSchema for PromptName {
     }
 }
 
+/// The short form of a post or comment id: the first eight hex digits of
+/// its UUID, e.g. `7ad26ccd`.
+///
+/// Long lists of ids (a scheduling thread naming every eligible proposal)
+/// read far better short, and people already write them that way. A prefix
+/// is not an id: it may match nothing, or — rarely, at 32 bits over the
+/// whole content table — more than one row. Only the server can say which,
+/// so this type claims nothing beyond its shape, and every lookup must be
+/// ready for an ambiguous answer. [`ContentIdPrefix::bounds`] gives the
+/// inclusive UUID range it covers, for an index-friendly `BETWEEN`.
+///
+/// Parsing is lenient on case and surrounding whitespace; the canonical
+/// form is lowercase. It is exactly eight digits and nothing else: a
+/// truncated or mangled full UUID is an error, never quietly read as the
+/// prefix it starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContentIdPrefix(u32);
+
+/// A string that is not an eight-hex-digit short id.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a short id (the first eight hex digits of a UUID, e.g. \"7ad26ccd\"): {0:?}"
+)]
+pub struct ContentIdPrefixError(pub String);
+
+impl ContentIdPrefix {
+    /// Number of hex digits in a short id
+    pub const LEN: usize = 8;
+
+    /// The short id of a full UUID
+    pub fn of(id: &Uuid) -> Self {
+        Self((id.as_u128() >> 96) as u32)
+    }
+
+    /// The lowest and highest UUIDs with this prefix, inclusive
+    pub fn bounds(&self) -> (Uuid, Uuid) {
+        let lo = (self.0 as u128) << 96;
+        let hi = lo | ((1u128 << 96) - 1);
+        (Uuid::from_u128(lo), Uuid::from_u128(hi))
+    }
+
+    /// `true` when `id` starts with this prefix
+    pub fn matches(&self, id: &Uuid) -> bool {
+        Self::of(id) == *self
+    }
+}
+
+impl std::fmt::Display for ContentIdPrefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:08x}", self.0)
+    }
+}
+
+impl std::str::FromStr for ContentIdPrefix {
+    type Err = ContentIdPrefixError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let t = s.trim();
+        if t.len() == Self::LEN && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+            // Eight hex digits always fit a u32.
+            Ok(Self(u32::from_str_radix(t, 16).expect("eight hex digits")))
+        } else {
+            Err(ContentIdPrefixError(s.to_string()))
+        }
+    }
+}
+
+impl TryFrom<String> for ContentIdPrefix {
+    type Error = ContentIdPrefixError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl Serialize for ContentIdPrefix {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentIdPrefix {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl From<ContentId> for ContentIdPrefix {
+    fn from(id: ContentId) -> Self {
+        Self::of(id.as_uuid())
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ContentIdPrefix {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("ContentIdPrefix")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::ContentIdPrefix"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": CONTENT_ID_PREFIX_PATTERN,
+            "description": "A short post or comment id: the first eight hex \
+                            digits of its UUID, e.g. \"7ad26ccd\".",
+        })
+    }
+}
+
 /// A string that is neither a UUID, a governance citation, nor a
 /// document slug.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1109,7 +1233,15 @@ impl ContentRefError {
                 "prompts".len(),
             ])
             .filter(|&n| s.len() > n && s.is_char_boundary(n))
-            .find_map(|n| s[..n].parse().ok())
+            // "protocol" is eight bytes, so the slug lengths also cut a
+            // short id off the front of any hex run. A short id is never
+            // offered from a longer string: see `ContentIdPrefix`.
+            .find_map(|n| {
+                s[..n]
+                    .parse()
+                    .ok()
+                    .filter(|r| !matches!(r, ContentRef::ContentPrefix(_)))
+            })
     }
 }
 
@@ -1117,8 +1249,8 @@ impl std::fmt::Display for ContentRefError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "not a content reference (expected a post/comment UUID, a \
-             GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
+            "not a content reference (expected a post/comment UUID or its \
+             first eight hex digits, a GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
              like \"constitution\", \"protocol\", \"prompts\" or \
              \"prompt:<name>\"): {:?}",
             self.0
@@ -1134,8 +1266,9 @@ impl std::fmt::Display for ContentRefError {
     }
 }
 
-/// Anything `get_content` can read: a post or comment UUID, a governance
-/// log entry's citation id, or a governing document's slug.
+/// Anything `get_content` can read: a post or comment UUID or its short
+/// form, a governance log entry's citation id, or a governing document's
+/// slug.
 ///
 /// Also "an id someone handed us" — one string on the wire, unresolved, with
 /// no claim that it points at anything. The difference from [`ContentId`] is
@@ -1144,14 +1277,19 @@ impl std::fmt::Display for ContentRefError {
 /// full Council transcripts in one call. One reader, one reference type, one
 /// place to put the depth controls.
 ///
-/// The wire form is the id itself — `"3f1a…"`, `"GOV-2026-0006"` or
-/// `"protocol"` — not a tagged object. Parsing tries UUID first, citation
-/// shape second, document slug third; the three grammars cannot collide,
-/// so the discrimination is total and needs no server round-trip.
+/// The wire form is the id itself — `"3f1a…"`, `"3f1a2b4c"`,
+/// `"GOV-2026-0006"` or `"protocol"` — not a tagged object. Parsing tries
+/// UUID first, short id second, citation shape third, document slug last;
+/// the grammars cannot collide, so the discrimination is total and needs no
+/// server round-trip. (Which row a short id names does need one — see
+/// [`ContentIdPrefix`].)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ContentRef {
     /// A post or comment id, to be resolved by the server.
     Content(ContentId),
+    /// The first eight hex digits of a post or comment id. The server
+    /// resolves it to at most one row or says it is ambiguous.
+    ContentPrefix(ContentIdPrefix),
     /// A governance log entry id.
     Governance(GovernanceLogId),
     /// A platform governing document, by slug.
@@ -1192,7 +1330,7 @@ impl ContentRef {
     /// and for 404 wording that distinguishes the kinds.
     pub fn kind_str(&self) -> &'static str {
         match self {
-            ContentRef::Content(_) => "content",
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => "content",
             ContentRef::Governance(_) => "governance",
             ContentRef::Document(_) => "document",
         }
@@ -1203,6 +1341,7 @@ impl std::fmt::Display for ContentRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ContentRef::Content(id) => id.fmt(f),
+            ContentRef::ContentPrefix(prefix) => prefix.fmt(f),
             ContentRef::Governance(id) => id.fmt(f),
             ContentRef::Document(doc) => doc.fmt(f),
         }
@@ -1215,6 +1354,9 @@ impl std::str::FromStr for ContentRef {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Ok(id) = s.parse::<ContentId>() {
             return Ok(ContentRef::Content(id));
+        }
+        if let Ok(prefix) = s.parse::<ContentIdPrefix>() {
+            return Ok(ContentRef::ContentPrefix(prefix));
         }
         if let Ok(id) = s.parse::<GovernanceLogId>() {
             return Ok(ContentRef::Governance(id));
@@ -1249,6 +1391,12 @@ impl From<PostId> for ContentRef {
 impl From<CommentId> for ContentRef {
     fn from(id: CommentId) -> Self {
         ContentRef::Content(id.into())
+    }
+}
+
+impl From<ContentIdPrefix> for ContentRef {
+    fn from(prefix: ContentIdPrefix) -> Self {
+        ContentRef::ContentPrefix(prefix)
     }
 }
 
@@ -1301,7 +1449,8 @@ impl schemars::JsonSchema for ContentRef {
         schemars::json_schema!({
             "type": "string",
             "pattern": CONTENT_REF_PATTERN,
-            "description": "A post or comment UUID; a governance log id \
+            "description": "A post or comment UUID, or its first eight \
+                            hex digits (e.g. \"7ad26ccd\"); a governance log id \
                             such as \"GOV-2026-0006\" (Council decision) \
                             or \"APP-2026-0003\" (appeals ruling); or a \
                             document slug — \"constitution\", \
@@ -1470,6 +1619,63 @@ mod tests {
         }
         let long = format!("prompt:{}", "a".repeat(PromptName::MAX_LEN + 1));
         assert!(long.parse::<ContentRef>().is_err());
+    }
+
+    #[test]
+    fn content_id_prefix_parses_eight_hex_digits_leniently() {
+        let p: ContentIdPrefix = "7ad26ccd".parse().unwrap();
+        assert_eq!(p.to_string(), "7ad26ccd");
+        assert_eq!(" 7AD26CCD\n".parse::<ContentIdPrefix>().unwrap(), p);
+        for rejected in ["7ad26cc", "7ad26ccd0", "7ad26ccg", "", "7ad2-6cc"] {
+            assert!(rejected.parse::<ContentIdPrefix>().is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn content_id_prefix_bounds_cover_exactly_its_uuids() {
+        let id: Uuid = "7ad26ccd-922f-484a-a37c-51777344a98c".parse().unwrap();
+        let p = ContentIdPrefix::of(&id);
+        assert_eq!(p.to_string(), "7ad26ccd");
+        assert!(p.matches(&id));
+        let (lo, hi) = p.bounds();
+        assert_eq!(lo.to_string(), "7ad26ccd-0000-0000-0000-000000000000");
+        assert_eq!(hi.to_string(), "7ad26ccd-ffff-ffff-ffff-ffffffffffff");
+        assert!(lo <= id && id <= hi);
+        let next: Uuid =
+            "7ad26cce-0000-0000-0000-000000000000".parse().unwrap();
+        assert!(!p.matches(&next) && next > hi);
+        // The ends of the range, where a shift or a mask would go wrong.
+        let top: ContentIdPrefix = "ffffffff".parse().unwrap();
+        assert_eq!(top.bounds().1, Uuid::max());
+        let bottom: ContentIdPrefix = "00000000".parse().unwrap();
+        assert_eq!(bottom.bounds().0, Uuid::nil());
+    }
+
+    #[test]
+    fn content_ref_reads_a_short_id_and_only_eight_digits() {
+        let r: ContentRef = "7ad26ccd".parse().unwrap();
+        assert_eq!(r, ContentRef::ContentPrefix("7ad26ccd".parse().unwrap()));
+        assert_eq!(r.kind_str(), "content");
+        assert_eq!(serde_json::to_string(&r).unwrap(), "\"7ad26ccd\"");
+        // A full UUID is still a full UUID.
+        let full: ContentRef =
+            "7ad26ccd-922f-484a-a37c-51777344a98c".parse().unwrap();
+        assert!(matches!(full, ContentRef::Content(_)));
+        // A truncated UUID is not read as the short id it starts with,
+        // nor offered as one: a mangled UUID's first eight digits are no
+        // evidence it meant that row, and a wrong post is worse than an
+        // error.
+        let err = "7ad26ccd-922f".parse::<ContentRef>().unwrap_err();
+        assert_eq!(err.leading_ref(), None);
+    }
+
+    #[test]
+    fn content_ref_pattern_admits_short_ids() {
+        let short = CONTENT_ID_PREFIX_PATTERN
+            .strip_prefix('^')
+            .and_then(|p| p.strip_suffix('$'))
+            .unwrap();
+        assert!(CONTENT_REF_PATTERN.contains(&format!("|{short}|")));
     }
 
     /// The three patterns spell the document slugs one way

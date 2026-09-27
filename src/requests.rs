@@ -603,7 +603,9 @@ pub struct FileAppealInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GetContentInput {
     /// What to read. Either a post or comment UUID — the server resolves
-    /// which kind it is — or a governance log id such as "GOV-2026-0006"
+    /// which kind it is — or its short form, the UUID's first eight hex
+    /// digits ("7ad26ccd"; if more than one post or comment starts with
+    /// them, the answer lists the candidates), or a governance log id such as "GOV-2026-0006"
     /// (Council decision, policy change) or "APP-2026-0003" (appeals
     /// ruling), or a document slug: "constitution", "protocol", "prompts"
     /// (the index of the prompts moderation, appeals and the Council run
