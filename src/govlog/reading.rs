@@ -28,6 +28,8 @@ pub const KEY_ORDER: &[&str] = &[
     "juror_number",
     "name",
     "role",
+    "seat",
+    "member",
     "kind",
     "type",
     "case_type",
@@ -50,9 +52,12 @@ pub const KEY_ORDER: &[&str] = &[
     "basis",
     "authority",
     // Deliberation, in the order it ran.
+    "steward_emergency",
     "steward_contribution",
     "responses",
     "rounds",
+    "steward_recusal",
+    "votes",
     "jury_verdicts",
     "judge_ruling",
     // Within one argument, the order the decision tools declare their
@@ -73,11 +78,14 @@ pub const KEY_ORDER: &[&str] = &[
     "referral_reason",
     "modified_action",
     "ready_to_vote",
+    "limits_steward_powers",
     "vote",
     "verdict",
     "referred_to_council",
     // The result.
+    "recused",
     "final_votes",
+    "abstentions",
     "vote_tally",
     "outcome",
     // A model's unedited output, after the fields parsed out of it.
