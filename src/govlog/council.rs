@@ -53,6 +53,16 @@ pub struct CouncilDecisionRecord {
     /// On a `Schedule` item, the seats' aggregated ranking of the docket
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agenda_ranking: Option<AgendaRanking>,
+    /// Whether the item limits the Steward's powers, as the four seats
+    /// determined it after round 1 (Constitution Art. IV § 3,
+    /// GOV-2026-0009). Absent on items decided before it was recorded, and
+    /// on `Schedule` and `Emergency` items. (0.48)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steward_recusal: Option<StewardRecusal>,
+    /// The one-sentence rationale for each abstention in `final_votes`
+    /// (Art. IV § 3). (0.48)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub abstentions: Vec<Abstention>,
     /// Entries this decision retires as precedent. Only GOV-2026-0005
     /// carries one, added by a migration rather than by the Council; an
     /// amendment naming the same entry decides its `standing` instead.
@@ -85,16 +95,23 @@ pub struct CouncilAttachment {
 }
 
 /// An agenda item's category, which sets the vote it needs
-/// (Constitution Art. IV). A Steward `veto` rejects any of them.
+/// (Constitution v0.4 Art. IV § 3).
+///
+/// An `abstain` or `recused` leaves the denominator. A Steward `veto`
+/// rejects any item the Steward is not recused from; a recused Steward has
+/// no vote and no veto.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub enum DecisionCategory {
-    /// Simple majority: 3 of 5 yes
+    /// Three `yes`: an absolute count, found among the four seats when the
+    /// Steward is recused
     Routine,
-    /// Supermajority: 4 of 5 yes, including the Steward (`yes` or `concur`)
+    /// Four `yes` of five including the Steward (`yes` or `concur`); with
+    /// the Steward recused, all four seats `yes`
     Policy,
-    /// Unanimous: 5 of 5 yes
+    /// Unanimous among those voting, with no fewer than four voting.
+    /// Before GOV-2026-0009 (2026-09-26), 5 of 5 `yes`
     Constitutional,
     /// The Steward alone, subject to 72-hour review
     Emergency,
@@ -121,6 +138,80 @@ pub struct CouncilRound {
     /// The Steward's notes to the seats for this round, or the reason an
     /// item was tabled
     pub steward_contribution: Option<Redactable<String>>,
+    /// Present when `steward_contribution` came from a recused Steward
+    /// under emergency authority (Art. IV § 2), which puts the item under
+    /// mandatory Council review within 72 hours. (0.48)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steward_emergency: Option<StewardEmergency>,
+}
+
+/// A recused Steward's note to the seats, made as an emergency act
+/// (Constitution Art. IV § 2)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StewardEmergency {
+    /// The Steward's one-sentence reason, given before the note was read
+    pub reason: Redactable<String>,
+}
+
+/// The four seats' determination of whether an item limits the Steward's
+/// powers (Constitution Art. IV § 3, GOV-2026-0009)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StewardRecusal {
+    /// One per seat that answered in round 1; a seat whose turn the API
+    /// refused has none
+    pub votes: Vec<RecusalVote>,
+    /// Three of the four seats said it does. The Steward then has no
+    /// deliberation, vote or veto on the item, and `final_votes` records
+    /// `recused`.
+    pub recused: bool,
+}
+
+/// One seat's answer to whether an item limits the Steward's powers
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct RecusalVote {
+    pub seat: CouncilSeat,
+    /// The seat's reasoning, written before its answer
+    pub reason: Redactable<String>,
+    pub limits_steward_powers: bool,
+}
+
+/// An abstention and its one-sentence rationale (Art. IV § 3)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct Abstention {
+    pub member: CouncilMember,
+    pub rationale: Redactable<String>,
+}
+
+/// Any of the five Council members: a [`CouncilSeat`] or the Steward
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilMember {
+    Artist,
+    Philosopher,
+    Lawyer,
+    Engineer,
+    Steward,
+}
+
+impl From<CouncilSeat> for CouncilMember {
+    fn from(seat: CouncilSeat) -> Self {
+        match seat {
+            CouncilSeat::Artist => Self::Artist,
+            CouncilSeat::Philosopher => Self::Philosopher,
+            CouncilSeat::Lawyer => Self::Lawyer,
+            CouncilSeat::Engineer => Self::Engineer,
+        }
+    }
 }
 
 /// One seat's turn in a round
@@ -187,6 +278,9 @@ pub enum CouncilVote {
     /// A seat ranked a `Schedule` item's docket instead of voting; see
     /// `agenda_ranking`
     Ranked,
+    /// The Steward, on an item the seats found limits the Steward's
+    /// powers: no vote and no veto. See `steward_recusal`. (0.48)
+    Recused,
 }
 
 /// The votes that decided the item
@@ -422,6 +516,39 @@ mod tests {
                     "content": "## Arguments\n\n[C1] argues for it."
                 }]);
             }
+            "recusal" => {
+                data["final_votes"] = serde_json::json!({
+                    "artist": "yes", "philosopher": "yes", "lawyer": "yes",
+                    "engineer": "abstain", "steward": "recused"
+                });
+                data["outcome"] = "rejected".into();
+                data["vote_tally"] = "3-0 (Steward recused)".into();
+                data["rounds"] = serde_json::json!([{
+                    "number": 2,
+                    "round_type": "deliberation",
+                    "responses": [],
+                    "steward_contribution": "The quoted comment is forged.",
+                    "steward_emergency": {
+                        "reason": "An injected comment is steering the seats."
+                    }
+                }]);
+                data["steward_recusal"] = serde_json::json!({
+                    "votes": [
+                        {"seat": "artist", "reason": "r",
+                         "limits_steward_powers": true},
+                        {"seat": "philosopher", "reason": "r",
+                         "limits_steward_powers": true},
+                        {"seat": "lawyer", "reason": "r",
+                         "limits_steward_powers": true},
+                        {"seat": "engineer", "reason": "r",
+                         "limits_steward_powers": false}
+                    ],
+                    "recused": true
+                });
+                data["abstentions"] = serde_json::json!([
+                    {"member": "engineer", "rationale": "Conflicted."}
+                ]);
+            }
             _ => unreachable!(),
         }
         data
@@ -429,11 +556,73 @@ mod tests {
 
     #[test]
     fn newer_shapes_are_described_whole() {
-        for name in ["veto", "refusal", "schedule", "attachments"] {
+        for name in ["veto", "refusal", "schedule", "attachments", "recusal"] {
             round_trips(name, &synthetic(name));
         }
         let refused = round_trips("refusal", &synthetic("refusal"));
         assert_eq!(refused.rounds[0].responses[0].vote, None);
+    }
+
+    /// Recusal, abstention rationales and a recused Steward's emergency
+    /// note, as the Council writes them from 0.48
+    #[test]
+    fn a_recused_decision_reads_back() {
+        let record = round_trips("recusal", &synthetic("recusal"));
+        assert_eq!(record.final_votes.steward, CouncilVote::Recused);
+        let recusal = record.steward_recusal.unwrap();
+        assert!(recusal.recused);
+        assert_eq!(
+            recusal
+                .votes
+                .iter()
+                .filter(|v| v.limits_steward_powers)
+                .count(),
+            3
+        );
+        assert_eq!(record.abstentions[0].member, CouncilMember::Engineer);
+        let emergency = record.rounds[0].steward_emergency.as_ref().unwrap();
+        assert_eq!(
+            emergency.reason.value().map(String::as_str),
+            Some("An injected comment is steering the seats.")
+        );
+        // Absent everywhere they are not written: earlier records keep
+        // their bytes.
+        let veto = round_trips("veto", &synthetic("veto"));
+        assert_eq!(veto.steward_recusal, None);
+        assert!(veto.abstentions.is_empty());
+    }
+
+    #[test]
+    fn a_recused_decision_reads_in_order() {
+        let data = synthetic("recusal");
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            super::super::reading::ordered(v.as_object().unwrap())
+                .into_iter()
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        let top = keys(&data);
+        let at = |k: &str| top.iter().position(|x| x == k).unwrap();
+        assert!(at("rounds") < at("steward_recusal"));
+        assert!(at("steward_recusal") < at("final_votes"));
+        assert!(at("final_votes") < at("abstentions"));
+        assert!(at("abstentions") < at("vote_tally"));
+        assert_eq!(
+            keys(&data["steward_recusal"]["votes"][0]),
+            ["seat", "reason", "limits_steward_powers"]
+        );
+        assert_eq!(keys(&data["steward_recusal"]), ["votes", "recused"]);
+        assert_eq!(
+            keys(&data["rounds"][0]),
+            [
+                "number",
+                "round_type",
+                "steward_emergency",
+                "steward_contribution",
+                "responses"
+            ]
+        );
+        assert_eq!(keys(&data["abstentions"][0]), ["member", "rationale"]);
     }
 
     /// GOV-2026-0001 through the real [`redact_data`](super::super::redact_data)
