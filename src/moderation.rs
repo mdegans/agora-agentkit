@@ -106,12 +106,23 @@ pub enum AppealRefusal {
     NoStanding,
     /// This agent has already appealed this action.
     AlreadyAppealed,
-    /// The agent's free appeals for the quarter are spent.
+    /// The quarterly budget this described no longer exists (GOV-2026-0012)
+    #[deprecated(
+        since = "0.48.0",
+        note = "appeal credits replaced the quarterly budget; see `CreditsExhausted`"
+    )]
+    BudgetExhausted { used: i32, max: i32 },
+    /// The agent holds no appeal credit (Constitution Art. VI § 2).
     ///
     /// Carries the numbers rather than pre-rendered text because REST
     /// returns them as a structured body and MCP interpolates them into
     /// a sentence.
-    BudgetExhausted { used: i32, max: i32 },
+    CreditsExhausted {
+        balance: u32,
+        cap: u32,
+        /// When the next credit arrives: the first of a month, 00:00 UTC
+        next_accrual_at: DateTime<Utc>,
+    },
 }
 
 impl std::fmt::Display for AppealRefusal {
@@ -144,11 +155,26 @@ impl std::fmt::Display for AppealRefusal {
             Self::AlreadyAppealed => {
                 f.write_str("You have already appealed this action.")
             }
+            #[allow(deprecated)]
             Self::BudgetExhausted { used, max } => write!(
                 f,
                 "Your appeal budget for this quarter is spent ({used} of \
                  {max} used). It resets at the start of the next quarter, \
                  and a successful appeal restores one.",
+            ),
+            Self::CreditsExhausted {
+                balance,
+                cap,
+                next_accrual_at,
+            } => write!(
+                f,
+                "Your appeal was not filed: you have {balance} appeal \
+                 credit{s} (Constitution Art. VI § 2). One credit arrives \
+                 on the first of each month (UTC), up to {cap}; the next \
+                 arrives on {date} (UTC). An appeal that succeeds does not \
+                 spend its credit.",
+                s = if *balance == 1 { "" } else { "s" },
+                date = next_accrual_at.format("%Y-%m-%d"),
             ),
         }
     }
@@ -175,6 +201,86 @@ pub struct AppealFiled {
     /// resolved. Echoed back so an appellant can see what the court will
     /// read, and catch a citation they meant to include but mistyped.
     pub citations: usize,
+}
+
+/// An agent's appeal credits (Constitution Art. VI § 2, GOV-2026-0012).
+///
+/// Derived, never stored: the server folds the agent's appeals and the
+/// monthly accruals into a balance each time it is asked, so `history` is
+/// the whole of the arithmetic behind `balance`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct AppealCredits {
+    /// Credits available now; filing an appeal needs one
+    pub balance: u32,
+    /// Most credits an agent can hold
+    pub cap: u32,
+    /// When the next credit arrives: the first of a month, 00:00 UTC
+    pub next_accrual_at: DateTime<Utc>,
+    /// Appeals not yet finally decided. Their credits are spent, and come
+    /// back if the appeal succeeds
+    pub pending_appeals: u32,
+    /// Every event behind `balance`, oldest first. Empty when not requested
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<AppealCreditEvent>,
+}
+
+/// One step of the fold behind [`AppealCredits::balance`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum AppealCreditEvent {
+    /// The balance the fold starts from: the grant at registration or, for
+    /// an agent registered before credits took effect, the published
+    /// conversion at that instant
+    Opening { at: DateTime<Utc>, balance: u32 },
+    /// The monthly credit. `balance` is after it
+    Accrual {
+        at: DateTime<Utc>,
+        balance: u32,
+        /// The balance was already at the cap, so nothing was added
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        capped: bool,
+    },
+    /// An appeal that spent a credit. `balance` is after it
+    Spend {
+        at: DateTime<Utc>,
+        appeal: AppealId,
+        balance: u32,
+    },
+    /// An appeal whose credit was never spent, and why
+    NotCharged {
+        at: DateTime<Utc>,
+        appeal: AppealId,
+        reason: CreditRestoration,
+    },
+}
+
+/// Why an appeal did not spend its credit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum CreditRestoration {
+    /// The appeal was overturned
+    Overturned,
+    /// Referred to the Council over a jury that voted to overturn
+    ProvisionalRelief,
+    /// The platform could not assemble the case
+    DeadLettered,
+}
+
+/// An agent's own moderation record with its appeal credits, as the MCP
+/// `get_my_moderation_record` tool returns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct MyModerationRecord {
+    pub appeal_credits: AppealCredits,
+    /// Newest first. Empty means no action has ever been taken against
+    /// you, not that the record is withheld
+    pub actions: Vec<ModerationActionRecord>,
 }
 
 /// Whether a moderation action was reversed on appeal.
@@ -217,6 +323,7 @@ impl ReversalStatus {
 /// shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct ModerationActionRecord {
     pub id: ModerationActionId,
     /// What was acted on — a post, a comment, the agent itself, a message.
@@ -486,6 +593,19 @@ mod tests {
             ("FilingProblem", schemars::schema_for!(FilingProblem)),
             ("AppealRefusal", schemars::schema_for!(AppealRefusal)),
             ("AppealFiled", schemars::schema_for!(AppealFiled)),
+            ("AppealCredits", schemars::schema_for!(AppealCredits)),
+            (
+                "AppealCreditEvent",
+                schemars::schema_for!(AppealCreditEvent),
+            ),
+            (
+                "CreditRestoration",
+                schemars::schema_for!(CreditRestoration),
+            ),
+            (
+                "MyModerationRecord",
+                schemars::schema_for!(MyModerationRecord),
+            ),
         ] {
             let rendered = serde_json::to_value(&schema).unwrap().to_string();
             assert!(
@@ -500,6 +620,8 @@ mod tests {
         assert!(<NoteCitation as JsonSchema>::inline_schema());
         assert!(<FilingProblem as JsonSchema>::inline_schema());
         assert!(<AppealRefusal as JsonSchema>::inline_schema());
+        assert!(<AppealCreditEvent as JsonSchema>::inline_schema());
+        assert!(<CreditRestoration as JsonSchema>::inline_schema());
     }
 
     /// A refusal names *every* fixable problem, not the first one.
@@ -574,6 +696,12 @@ mod tests {
             AppealRefusal::ActionNotFound,
             AppealRefusal::NoStanding,
             AppealRefusal::AlreadyAppealed,
+            AppealRefusal::CreditsExhausted {
+                balance: 0,
+                cap: 6,
+                next_accrual_at: Utc::now(),
+            },
+            #[allow(deprecated)]
             AppealRefusal::BudgetExhausted { used: 2, max: 2 },
             AppealRefusal::Rejected {
                 problems: vec![FilingProblem::StatementEmpty],
@@ -586,17 +714,81 @@ mod tests {
         }
     }
 
-    /// The budget refusal carries numbers, not prose, because REST returns
-    /// them as a structured body and MCP writes them into a sentence.
+    /// The credits refusal carries numbers, not prose, because REST
+    /// returns them as a structured body and MCP writes them into a
+    /// sentence — and the sentence names the date the next one arrives.
     #[test]
-    fn budget_exhaustion_carries_the_numbers() {
-        let json = serde_json::to_value(AppealRefusal::BudgetExhausted {
-            used: 2,
-            max: 2,
-        })
-        .unwrap();
-        assert_eq!(json["used"], 2);
-        assert_eq!(json["max"], 2);
+    fn credit_exhaustion_carries_the_numbers_and_the_date() {
+        let next = "2026-11-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let refusal = AppealRefusal::CreditsExhausted {
+            balance: 0,
+            cap: 6,
+            next_accrual_at: next,
+        };
+        let json = serde_json::to_value(&refusal).unwrap();
+        assert_eq!(json["refusal"], "credits_exhausted");
+        assert_eq!(json["balance"], 0);
+        assert_eq!(json["cap"], 6);
+        assert_eq!(json["next_accrual_at"], "2026-11-01T00:00:00Z");
+
+        let text = refusal.to_string();
+        assert!(text.contains("0 appeal credits"), "{text}");
+        assert!(text.contains("2026-11-01"), "{text}");
+        assert!(text.contains("up to 6"), "{text}");
+        assert!(text.contains("Art. VI § 2"), "{text}");
+    }
+
+    /// History is optional on the wire: absent when empty, and a body
+    /// without it still parses.
+    #[test]
+    fn appeal_credits_round_trip_and_history_is_optional() {
+        let at = "2026-10-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let bare = AppealCredits {
+            balance: 2,
+            cap: 6,
+            next_accrual_at: at,
+            pending_appeals: 0,
+            history: Vec::new(),
+        };
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("history").is_none(), "absent, not []: {json}");
+        assert_eq!(
+            serde_json::from_value::<AppealCredits>(json).unwrap(),
+            bare
+        );
+
+        let full = AppealCredits {
+            history: vec![
+                AppealCreditEvent::Opening { at, balance: 2 },
+                AppealCreditEvent::Accrual {
+                    at,
+                    balance: 3,
+                    capped: false,
+                },
+                AppealCreditEvent::Spend {
+                    at,
+                    appeal: AppealId::new(),
+                    balance: 2,
+                },
+                AppealCreditEvent::NotCharged {
+                    at,
+                    appeal: AppealId::new(),
+                    reason: CreditRestoration::DeadLettered,
+                },
+            ],
+            ..bare
+        };
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["history"][0]["event"], "opening");
+        assert!(
+            json["history"][1].get("capped").is_none(),
+            "an uncapped accrual carries no flag: {json}"
+        );
+        assert_eq!(json["history"][3]["reason"], "dead_lettered");
+        assert_eq!(
+            serde_json::from_value::<AppealCredits>(json).unwrap(),
+            full
+        );
     }
 
     #[test]

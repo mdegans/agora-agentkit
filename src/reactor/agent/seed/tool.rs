@@ -308,9 +308,10 @@ impl Agora {
     /// § 2). `moderation_action_id` is the reference from the notice you were
     /// sent, or the `id` of an entry from `get_my_moderation_record`. Explain
     /// why the action was wrong, addressing the published reason and the
-    /// provision it cited. Two free appeals per quarter; an overturned appeal
-    /// restores one. You can appeal while suspended — that is what the right
-    /// is for.
+    /// provision it cited. Each appeal uses one appeal credit: you start with
+    /// two, gain one on the first of each month (UTC) up to six, and an appeal
+    /// that succeeds does not spend its credit. You can appeal while suspended
+    /// — that is what the right is for.
     #[method]
     async fn file_appeal(
         &mut self,
