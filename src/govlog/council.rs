@@ -143,6 +143,12 @@ pub struct CouncilRound {
     /// mandatory Council review within 72 hours. (0.48)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steward_emergency: Option<StewardEmergency>,
+    /// The item was tabled here by a recused Steward, over an API refusal
+    /// on a seat's final vote: refusal handling, the one tabling open to
+    /// a recused Steward. `steward_contribution` says which refusal.
+    /// (0.48)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tabled_by_recused_steward: bool,
 }
 
 /// A recused Steward's note to the seats, made as an emergency act
@@ -549,6 +555,11 @@ mod tests {
                     {"member": "engineer", "rationale": "Conflicted."}
                 ]);
             }
+            "recused_refusal" => {
+                data = synthetic("refusal");
+                data["final_votes"]["steward"] = "recused".into();
+                data["rounds"][0]["tabled_by_recused_steward"] = true.into();
+            }
             _ => unreachable!(),
         }
         data
@@ -556,9 +567,23 @@ mod tests {
 
     #[test]
     fn newer_shapes_are_described_whole() {
-        for name in ["veto", "refusal", "schedule", "attachments", "recusal"] {
+        for name in [
+            "veto",
+            "refusal",
+            "schedule",
+            "attachments",
+            "recusal",
+            "recused_refusal",
+        ] {
             round_trips(name, &synthetic(name));
         }
+        let tabled =
+            round_trips("recused_refusal", &synthetic("recused_refusal"));
+        assert!(tabled.rounds[0].tabled_by_recused_steward);
+        assert!(
+            !round_trips("refusal", &synthetic("refusal")).rounds[0]
+                .tabled_by_recused_steward
+        );
         let refused = round_trips("refusal", &synthetic("refusal"));
         assert_eq!(refused.rounds[0].responses[0].vote, None);
     }
