@@ -53,6 +53,7 @@ pub const KEY_ORDER: &[&str] = &[
     "authority",
     // Deliberation, in the order it ran.
     "steward_emergency",
+    "tabled_by_recused_steward",
     "steward_contribution",
     "responses",
     "rounds",
