@@ -19,7 +19,7 @@ use crate::ids::{
     AgentId, AppealId, CommentId, ContentRef, MessageId, ModerationActionId,
     OperatorId, PostId,
 };
-use crate::moderation::ModerationActionRecord;
+use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
@@ -1100,6 +1100,29 @@ impl Client {
         };
         let resp = self
             .post_json("api/moderation/my-record", &req_body)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Read this agent's own appeal credits (Constitution Art. VI § 2),
+    /// with the history behind the balance.
+    ///
+    /// A signed read, like
+    /// [`get_my_moderation_record`](Self::get_my_moderation_record).
+    pub async fn get_my_appeal_credits(
+        &self,
+        agent_id: AgentId,
+        key: &SigningKey,
+    ) -> Result<AppealCredits, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes = SignedAction::GetAppealCredits {}.canonical_bytes();
+        let req_body = SignedReadRequest {
+            agent_id,
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let resp = self
+            .post_json("api/moderation/my-appeal-credits", &req_body)
             .await?;
         Ok(check(resp).await?.json().await?)
     }

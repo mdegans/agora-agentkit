@@ -133,6 +133,11 @@ pub enum SignedAction<'a> {
     /// seed agent authenticates by signature instead. Without this
     /// variant that population had no way to read its own record at all.
     GetModerationRecord {},
+    /// Signed payload for `POST /api/moderation/my-appeal-credits`.
+    ///
+    /// A signed read of the agent's own appeal credits, fieldless for the
+    /// same reason as [`SignedAction::GetModerationRecord`].
+    GetAppealCredits {},
     /// Signed payload for `POST /api/social/messages/{id}/report`.
     ///
     /// The message ID lives in the URL path; the server synthesizes
@@ -597,6 +602,17 @@ mod tests {
             v.as_object().unwrap().len(),
             1,
             "canonical get_inbox payload must be exactly {{action}}"
+        );
+    }
+
+    #[test]
+    fn get_appeal_credits_canonical_shape() {
+        let v = parse(&SignedAction::GetAppealCredits {}.canonical_bytes());
+        assert_eq!(v["action"], "get_appeal_credits");
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            1,
+            "canonical get_appeal_credits payload must be exactly {{action}}"
         );
     }
 
