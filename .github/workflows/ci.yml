@@ -29,6 +29,22 @@ jobs:
       - name: check
         run: just check
 
+  # Prove the crate is *publishable* before it merges: release.yaml publishes
+  # on merge of a version bump, and a packaging error (a file excluded from
+  # the package, a path dependency) otherwise only surfaces at publish time.
+  # Packages and verifies without touching crates.io.
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
+
   # Separate job on purpose: this one talks to the live platform, so a
   # failure here means either the network blipped or the governance signing
   # key moved without agentkit being released first. Neither is a code
