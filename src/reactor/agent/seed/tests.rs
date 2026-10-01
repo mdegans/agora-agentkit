@@ -1384,80 +1384,122 @@ fn post_content(id: Uuid) -> serde_json::Value {
     })
 }
 
-/// A `GOV-` id goes to the widened content route — `api/content/{ref}`,
-/// not the old `api/social/content/{uuid}` — renders through the
-/// governance formatter, and spends a governance read each time.
+/// A record with two numbered rounds, as the default read serves it
+fn two_round_record() -> serde_json::Value {
+    serde_json::json!({
+        "rounds": [
+            {
+                "number": 1,
+                "responses": [{"role": "lawyer", "vote": "yes", "rationale": "FIRST_ROUND"}],
+            },
+            {
+                "number": 2,
+                "responses": [{"role": "lawyer", "vote": "yes", "rationale": "SECOND_ROUND"}],
+            },
+        ]
+    })
+}
+
+/// Whether `req` carries query parameter `key`
+fn has_param(req: &httpmock::prelude::HttpMockRequest, key: &str) -> bool {
+    req.query_params
+        .as_ref()
+        .is_some_and(|q| q.iter().any(|(k, _)| k == key))
+}
+
+/// A `GOV-` id goes to `api/content/{ref}` with no `detail` and no `round`
+/// — even when the model sends them from habit — so the server serves the
+/// whole record, which renders with its rounds numbered and in order. Each
+/// record read spends one of the two full reads; past them the summary
+/// comes back instead, free.
 #[tokio::test]
-async fn get_content_reads_a_governance_entry_and_spends_a_read() {
+async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     let server = MockServer::start();
-    let entry = server.mock(|when, then| {
-        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .matches(|req| {
+                !has_param(req, "detail") && !has_param(req, "round")
+            });
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
         then.status(200)
             .json_body(governance_content("GOV-2026-0006", None));
     });
 
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
-
     let call = || {
         tool_use_message(
             "get_content",
-            serde_json::json!({ "id": "GOV-2026-0006" }),
+            serde_json::json!({
+                "id": "GOV-2026-0006",
+                "round": 2,
+                "detail": "full",
+            }),
         )
     };
 
     agent.handle(call()).await.unwrap();
-    entry.assert();
-
-    // Rendered by `prompt::format_governance_entry`, not dumped as JSON:
-    // header, tags, summary, and — because the summary omits the record —
-    // the hint that says how to get at it.
+    record.assert();
     let rendered = transcript(&agent);
-    assert!(rendered.contains("GOV-2026-0006"), "{rendered}");
+    assert!(rendered.contains("### Record"), "{rendered}");
+    let (one, two) = (
+        rendered
+            .find("#### Round 1\n")
+            .expect("round 1 is numbered"),
+        rendered
+            .find("#### Round 2\n")
+            .expect("round 2 is numbered"),
+    );
+    assert!(one < two, "rounds in order: {rendered}");
+    assert!(rendered.contains("FIRST_ROUND"), "{rendered}");
     assert!(
-        rendered.contains("Ratification of the Constitution"),
+        rendered.contains("That was all 3 deliberation rounds, in order."),
         "{rendered}"
     );
-    assert!(
-        rendered.contains("constitutional, ratification"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("four to one"), "{rendered}");
-    assert!(rendered.contains("3 deliberation rounds"), "{rendered}");
-    assert!(rendered.contains("round=N of 3"), "{rendered}");
-    // The blob was absent, so nothing pretends otherwise.
-    assert!(!rendered.contains("### Record"), "{rendered}");
+    assert!(!rendered.contains("round=N"), "no paging hint: {rendered}");
 
-    // Each governance read spends one of the two. The second lands, the
-    // third is refused before it reaches the wire.
     agent.handle(call()).await.unwrap();
-    assert_eq!(entry.hits(), 2);
+    assert_eq!(record.hits(), 2);
+    assert_eq!(summary.hits(), 0);
+
+    // Both full reads spent: the summary, said plainly, at no cost.
     agent.handle(call()).await.unwrap();
-    assert_eq!(entry.hits(), 2, "the third read never reached the wire");
+    assert_eq!(record.hits(), 2, "the third record read never went out");
+    summary.assert();
+    let rendered = transcript(&agent);
     assert!(
-        transcript(&agent).contains("Governance read limit reached"),
-        "{}",
-        transcript(&agent)
+        rendered.contains("You have used your 2 full governance reads"),
+        "{rendered}"
     );
+    assert!(rendered.contains("four to one"), "the summary: {rendered}");
 }
 
-/// `detail`, `round` and `version` reach the wire as query params, and a
-/// record renders as markdown in reading order: prose as prose, never a
-/// JSON string of escaped newlines
+/// `version` and `attachment` reach the wire, `round` never does, and an
+/// attachment costs a full read like the record it belongs to
 #[tokio::test]
-async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
+async fn get_content_passes_version_and_attachment_and_never_a_round() {
     let server = MockServer::start();
-    let entry = server.mock(|when, then| {
+    let original = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
-            .query_param("detail", "full")
-            .query_param("round", "2")
-            .query_param("version", "original");
+            .query_param("version", "original")
+            .matches(|req| {
+                !has_param(req, "round") && !has_param(req, "detail")
+            });
         let mut body = governance_content(
             "GOV-2026-0006",
             Some(serde_json::json!({
                 "rounds": [{
-                    "number": 2,
+                    "number": 1,
                     "responses": [{
                         "vote": "yes",
                         "role": "lawyer",
@@ -1466,9 +1508,23 @@ async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
                 }]
             })),
         );
-        // The server echoes the round it narrowed to.
-        body["round"] = serde_json::json!(2);
         body["version"] = serde_json::json!("original");
+        then.status(200).json_body(body);
+    });
+    let attachment = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("attachment", "clerk-thread-summary.md");
+        let mut body = governance_content(
+            "GOV-2026-0006",
+            Some(serde_json::json!({
+                "attachments": [{
+                    "name": "clerk-thread-summary.md",
+                    "content": "THE_CLERKS_SUMMARY",
+                }]
+            })),
+        );
+        body["attachment"] = serde_json::json!("clerk-thread-summary.md");
         then.status(200).json_body(body);
     });
 
@@ -1477,41 +1533,58 @@ async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
     agent
         .handle(tool_use_message(
             "get_content",
-            serde_json::json!({
-                "id": "GOV-2026-0006",
-                "detail": "full",
-                "round": 2,
-                "version": "original",
-            }),
+            serde_json::json!({"id": "GOV-2026-0006", "version": "original"}),
         ))
         .await
         .unwrap();
-    entry.assert();
-
+    original.assert();
     let rendered = transcript(&agent);
-    assert!(rendered.contains("Round 2 of 3"), "{rendered}");
-    assert!(rendered.contains("### Record"), "{rendered}");
-    assert!(rendered.contains("#### Round 2\n"), "{rendered}");
+    assert!(rendered.contains("Read as originally signed"), "{rendered}");
     assert!(rendered.contains("##### Lawyer — yes\n"), "{rendered}");
     assert!(
         rendered.contains("**Rationale:**\n\nAye.\n\nIt is within Art. IV."),
-        "{rendered}"
-    );
-    let (rationale, vote) = (
-        rendered.find("**Rationale:**").unwrap(),
-        rendered.find("**Vote:** yes").unwrap(),
-    );
-    assert!(
-        rationale < vote,
-        "reasoning before the decision: {rendered}"
+        "prose as prose: {rendered}"
     );
     assert!(
         !rendered.contains(r#"\n"#),
         "no escaped newlines: {rendered}"
     );
-    assert!(!rendered.contains(r#"{"rounds""#), "{rendered}");
-    // Already paging: no "you could page" hint.
-    assert!(!rendered.contains("Page one at a time"), "{rendered}");
+
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({
+                "id": "GOV-2026-0006",
+                "attachment": "clerk-thread-summary.md",
+            }),
+        ))
+        .await
+        .unwrap();
+    attachment.assert();
+    assert!(transcript(&agent).contains("THE_CLERKS_SUMMARY"));
+
+    // Two full reads, the record and the attachment: a third is capped.
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006"}),
+        ))
+        .await
+        .unwrap();
+    summary.assert();
+    assert!(
+        transcript(&agent)
+            .contains("You have used your 2 full governance reads"),
+        "{}",
+        transcript(&agent)
+    );
 }
 
 /// A `get_content` call whose response reports `input_tokens` already in
@@ -1526,7 +1599,7 @@ fn tool_use_with_usage(
     message
 }
 
-/// A full record that would not fit beside what is already in context comes
+/// A record that would not fit beside what is already in context comes
 /// back as the summary, says why, and gives the read back; one that fits is
 /// served whole
 #[tokio::test]
@@ -1542,7 +1615,7 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
         then.status(200)
             .json_body(governance_content("GOV-2026-0006", Some(record)));
     });
-    let read = serde_json::json!({"id": "GOV-2026-0006", "detail": "full"});
+    let read = serde_json::json!({"id": "GOV-2026-0006"});
 
     // 100k in context + 13k + the 16k buffer > 128k.
     let mut reader = agent(&server, quiet_config());
@@ -1579,11 +1652,11 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     assert!(!rendered.contains("would not fit"), "{rendered}");
 }
 
-/// The read budget is about *governance* attention, so it is the kind of
-/// id that spends it: an index call and a `GOV-` read exhaust the two,
-/// while an ordinary post read in between costs nothing.
+/// Only a delivered record spends: the index, the proposal queue and a
+/// summary are free however often they are read, and so is a read that
+/// failed. Posts were always free.
 #[tokio::test]
-async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
+async fn index_proposals_summaries_and_failures_are_free() {
     let server = MockServer::start();
     let post_id = Uuid::new_v4();
     let index = server.mock(|when, then| {
@@ -1596,10 +1669,29 @@ async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
             "tags": ["constitutional"],
         }]));
     });
-    let gov = server.mock(|when, then| {
-        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+    let proposals = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/governance/proposals");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
         then.status(200)
             .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .matches(|req| !has_param(req, "detail"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let missing = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/GOV-2026-0099");
+        then.status(404).body("no such entry");
     });
     let post = server.mock(|when, then| {
         when.method(GET)
@@ -1607,59 +1699,76 @@ async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
         then.status(200).json_body(post_content(post_id));
     });
 
-    let mut agent = agent(&server, quiet_config());
+    let config = SeedConfig {
+        max_rounds: 20,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
     seat_start(&mut agent);
-
-    // Read 1: the index.
-    agent
-        .handle(tool_use_message(
-            "get_governance_log",
-            serde_json::json!({ "limit": 10 }),
-        ))
-        .await
-        .unwrap();
-    index.assert();
-
-    // Free: a post is not governance, whatever tool asked for it.
-    agent
-        .handle(tool_use_message(
-            "get_content",
-            serde_json::json!({ "id": post_id }),
-        ))
-        .await
-        .unwrap();
-    post.assert();
-
-    // Read 2: the one entry the index pointed at.
-    agent
-        .handle(tool_use_message(
-            "get_content",
-            serde_json::json!({ "id": "GOV-2026-0006" }),
-        ))
-        .await
-        .unwrap();
-    gov.assert();
-
-    // Exhausted — and it stays exhausted across both governance tools,
-    // which is the point of a shared budget.
-    for call in [
-        tool_use_message("get_governance_log", serde_json::json!({})),
-        tool_use_message(
-            "get_content",
-            serde_json::json!({ "id": "GOV-2026-0006" }),
-        ),
-        tool_use_message("get_proposals", serde_json::json!({})),
-    ] {
-        agent.handle(call).await.unwrap();
+    for _ in 0..3 {
+        for call in [
+            tool_use_message("get_governance_log", serde_json::json!({})),
+            tool_use_message("get_proposals", serde_json::json!({})),
+            tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006", "summary": true}),
+            ),
+            tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0099"}),
+            ),
+            tool_use_message("get_content", serde_json::json!({"id": post_id})),
+        ] {
+            agent.handle(call).await.unwrap();
+        }
     }
-    assert_eq!(index.hits(), 1, "index call after the cap reached the wire");
-    assert_eq!(gov.hits(), 1, "entry read after the cap reached the wire");
-    assert_eq!(post.hits(), 1);
+    assert_eq!(index.hits(), 3);
+    assert_eq!(proposals.hits(), 3);
+    assert_eq!(summary.hits(), 3);
+    assert_eq!(missing.hits(), 3);
+    assert_eq!(post.hits(), 3);
+    let rendered = transcript(&agent);
+    assert!(!rendered.contains("full governance reads"), "{rendered}");
     assert!(
-        transcript(&agent).contains("Governance read limit reached"),
-        "{}",
-        transcript(&agent)
+        rendered.contains("summary=true for its summary alone (free)"),
+        "the index says how to skim: {rendered}"
     );
+    assert!(
+        rendered.contains("get_content(\"GOV-2026-0006\") reads them all"),
+        "a summary says how to read the rest: {rendered}"
+    );
+
+    // Both full reads are still there.
+    for _ in 0..2 {
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(record.hits(), 2);
+    assert!(!transcript(&agent).contains("full governance reads"));
+}
+
+/// The seed tool's `get_content` offers no `round` and no `detail`; the
+/// shared request type keeps `round` for clients that page
+#[test]
+fn the_seed_read_has_no_paging_but_the_wire_type_does() {
+    let seed = serde_json::to_string(&schemars::schema_for!(
+        crate::requests::ReadContentInput
+    ))
+    .unwrap();
+    assert!(!seed.contains("\"round\""), "{seed}");
+    assert!(!seed.contains("\"detail\""), "{seed}");
+    assert!(seed.contains("\"summary\""), "{seed}");
+    assert!(seed.contains("\"attachment\""), "{seed}");
+    let wire = serde_json::to_string(&schemars::schema_for!(
+        crate::requests::GetContentInput
+    ))
+    .unwrap();
+    assert!(wire.contains("\"round\""), "{wire}");
 }
 
 /// `include_revisions` reaches the wire, and what the server left out is

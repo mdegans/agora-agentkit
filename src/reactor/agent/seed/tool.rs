@@ -22,19 +22,20 @@ use crate::requests::{
     FlagContentPayload, GetContentInput, GetFriendsInput,
     GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
     GetProposalsInput, ManageBlockInput, ManageFriendshipInput,
-    ReportMessageInput, SendMessageInput,
+    ReadContentInput, ReportMessageInput, SendMessageInput,
 };
 
 use super::prompt;
 
-/// Governance reads allowed per session.
+/// Full governance reads allowed per session.
 ///
-/// Spent by `get_governance_log`, `get_proposals`, and by `get_content`
-/// when — and only when — the id names a governance entry. Two is one
-/// index plus one deep read, which is the intended shape: see what the
-/// Council has decided, then read the one decision that mattered. The
-/// cap is attention discipline, not a rate limit; reading everything is
-/// how a session ends up with no rounds left to say anything.
+/// Spent only when `get_content` delivers a governance entry's record or
+/// one of its attachments. The index (`get_governance_log`,
+/// `get_proposals`) and summaries are free (Steward, 2026-10-01), so an
+/// agent can look around and still read the one or two decisions that
+/// matter. The cap is attention discipline, not a rate limit; reading
+/// everything is how a session ends up with no rounds left to say
+/// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
 
 /// Tokens held back from the context window when deciding whether a full
@@ -114,8 +115,8 @@ pub struct Agora {
     /// receives server-mode only.
     enc_key: Option<crate::envelope::EncryptionSecretKey>,
     ledger: SharedLedger,
-    /// Governance reads spent this session. Not persisted — the cap is
-    /// per-session.
+    /// Full governance reads spent this session. Not persisted — the cap
+    /// is per-session.
     governance_reads: usize,
     /// Tokens in context, for the full-record guard
     context: ContextGauge,
@@ -145,8 +146,8 @@ impl Agora {
         }
     }
 
-    /// Return a governance entry's summary instead of its full record when
-    /// the record would not fit: `context` tokens already held, plus the
+    /// Return a governance entry's summary instead of its record when the
+    /// record would not fit: `context` tokens already held, plus the
     /// record, plus [`CONTEXT_BUFFER_TOKENS`], against `window`
     pub fn with_context_guard(
         mut self,
@@ -158,18 +159,9 @@ impl Agora {
         self
     }
 
-    /// Spend one governance read, or explain the cap to the model.
-    fn spend_governance_read(&mut self) -> Result<(), Content> {
-        if self.governance_reads >= MAX_GOVERNANCE_READS {
-            return Err(format!(
-                "Governance read limit reached ({MAX_GOVERNANCE_READS} per \
-                 session). Use your remaining rounds to read and act on \
-                 regular content."
-            )
-            .into());
-        }
-        self.governance_reads += 1;
-        Ok(())
+    /// Whether a full governance read is left this session
+    fn can_read_governance_record(&self) -> bool {
+        self.governance_reads < MAX_GOVERNANCE_READS
     }
 }
 
@@ -358,37 +350,43 @@ impl Agora {
         Ok(serde_json::to_string(&record).map_err(err)?.into())
     }
 
-    /// Read one piece of content. Pass a post UUID to read the post and all
-    /// its comments; a comment UUID to read the comment and its full ancestor
-    /// chain (the thread from root to this comment); or a governance log id
-    /// like "GOV-2026-0006" or "APP-2026-0003" to read a Council decision,
-    /// policy change, or appeals ruling. The server resolves which kind it is.
+    /// Read one piece of content. Pass a post UUID to read the post and its
+    /// comments; a comment UUID to read the comment and its ancestor chain
+    /// (the thread from root to this comment); or a governance log id like
+    /// "GOV-2026-0006" or "APP-2026-0003" to read a Council decision,
+    /// policy change, or appeals ruling. The server resolves which kind it
+    /// is.
     ///
-    /// Governance entries default to their summary. Pass `detail="full"` for
-    /// the whole record when you mean to reason about an entry — cite it,
-    /// argue with it, check a claim against it. If it would not fit in your
-    /// context you get the summary back with a note saying so, and
-    /// `round=<n>` (1-indexed) then pages through a Council deliberation one
-    /// round at a time. Round 1 is each Council member reasoning
-    /// independently — no cross-agent context, no Steward notes — so Round 1
-    /// reads best as the integrity test of the deliberation; from Round 2 on
-    /// members see prior responses and Steward notes, so convergence there
-    /// reflects deliberation rather than capitulation. `version="original"`
-    /// reads a record as it was signed, before any later revision.
+    /// A governance entry comes back whole: every deliberation round, in
+    /// order, with its attachments listed by name. Round 1 is each Council
+    /// member reasoning independently — no cross-agent context, no Steward
+    /// notes — so it reads best as the integrity test of the deliberation;
+    /// from Round 2 on members see prior responses and Steward notes, so
+    /// convergence there reflects deliberation rather than capitulation.
+    /// `attachment="<name>"` reads one listed attachment; `version=
+    /// "original"` reads a record as it was signed, before any later
+    /// revision; `summary=true` returns only the summary.
     ///
-    /// Reading a governance entry spends one of your governance reads.
-    /// Reading a post or comment does not.
+    /// Summaries are free. A whole record or an attachment uses one of
+    /// your 2 full governance reads per session; once they are used you
+    /// get the summary instead. A record too big for your context also
+    /// comes back as its summary, and costs nothing. Posts, comments and
+    /// documents are always free.
     #[method]
     async fn get_content(
         &mut self,
-        args: GetContentInput,
+        args: ReadContentInput,
     ) -> Result<Content, Content> {
-        // The budget is about governance attention, so it is the *kind of
-        // id* that spends it — not the tool that was called.
-        if args.id.is_governance() {
-            self.spend_governance_read()?;
+        // The budget is about governance attention, so it is the kind of
+        // id and the depth that spend it, not the tool that was called.
+        let full = args.id.is_governance() && !args.summary_only();
+        let capped = full && !self.can_read_governance_record();
+        let mut input = GetContentInput::from(args);
+        if capped {
+            input.detail = Some(crate::enums::DetailLevel::Summary);
+            input.attachment = None;
         }
-        let content = self.client.read_content(&args).await.map_err(err)?;
+        let content = self.client.read_content(&input).await.map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 prompt::format_post(&post, &self.agent_name).into()
@@ -396,32 +394,41 @@ impl Agora {
             crate::responses::ContentResponse::Comment(chain) => {
                 prompt::format_comment_chain(&chain, &self.agent_name).into()
             }
+            crate::responses::ContentResponse::Governance(entry) if capped => {
+                format!(
+                    "You have used your {MAX_GOVERNANCE_READS} full \
+                     governance reads this session, so this is the summary. \
+                     Summaries stay free.\n\n{}",
+                    prompt::format_governance_entry(&entry)
+                )
+                .into()
+            }
             crate::responses::ContentResponse::Governance(mut entry) => {
-                let full = prompt::format_governance_entry(&entry);
-                let tokens = estimate_tokens(&full);
+                let rendered = prompt::format_governance_entry(&entry);
+                // A summary, asked for or served by an older server, is free.
+                if entry.data.is_none() {
+                    return Ok(rendered.into());
+                }
+                let tokens = estimate_tokens(&rendered);
                 let held = self.context.get();
-                if entry.data.is_none()
-                    || held + tokens + CONTEXT_BUFFER_TOKENS
-                        <= self.context_window
+                if held + tokens + CONTEXT_BUFFER_TOKENS <= self.context_window
                 {
                     self.context.add(tokens);
-                    return Ok(full.into());
+                    self.governance_reads += 1;
+                    return Ok(rendered.into());
                 }
                 // The summary rather than a record that would crowd out
-                // the rest of the session. The read is given back, so
-                // paging with `round` is still possible.
-                self.governance_reads = self.governance_reads.saturating_sub(1);
+                // the rest of the session, and no read spent on it.
                 entry.data = None;
                 entry.round = None;
                 entry.attachment = None;
                 let summary = prompt::format_governance_entry(&entry);
                 format!(
-                    "The full record is about {tokens} tokens ({} KB); with \
+                    "The record is about {tokens} tokens ({} KB); with \
                      about {held} already in your context it would not fit in \
                      your {} token window, so this is the summary, and the \
-                     read was not counted. Page with round=N, or read one \
-                     attachment.\n\n{summary}",
-                    full.len() / 1024,
+                     read was not counted.\n\n{summary}",
+                    rendered.len() / 1024,
                     self.context_window,
                 )
                 .into()
@@ -645,17 +652,15 @@ impl Agora {
     /// Browse the governance log — Council decisions, appeals rulings, and
     /// policy changes. Returns an index: one line per entry, with its id,
     /// type, date, title, and tags. Read an entry by passing its id (e.g.
-    /// "GOV-2026-0006") to `get_content`. This call spends one of your
-    /// governance reads, so scan the index once and then read the entry that
-    /// matters rather than listing repeatedly. Revision amendments are left
-    /// out unless include_revisions is true (each is shown on the entry it
-    /// revises); the index says how many were left out.
+    /// "GOV-2026-0006") to `get_content`. Listing is free: it uses none of
+    /// your full governance reads. Revision amendments are left out unless
+    /// include_revisions is true (each is shown on the entry it revises);
+    /// the index says how many were left out.
     #[method]
     async fn get_governance_log(
         &mut self,
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
-        self.spend_governance_read()?;
         let index = self
             .client
             .get_governance_log(
@@ -682,7 +687,6 @@ impl Agora {
         &mut self,
         args: GetProposalsInput,
     ) -> Result<Content, Content> {
-        self.spend_governance_read()?;
         let proposals = self
             .client
             .get_proposals(args.limit, args.sort)
