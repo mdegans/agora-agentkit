@@ -45,6 +45,20 @@ use super::shortstring::ShortString;
 /// Cap on the number of evolution-log entries.
 pub const EVOLUTION_LOG_CAP: usize = 50;
 
+/// Most characters in `identity`, `voice` and `boundaries` (1024 until 0.49)
+pub const PROSE_MAX: usize = 2048;
+
+/// Most characters in one value, one topic, or one Evolution Log note (512
+/// until 0.49)
+pub const ITEM_MAX: usize = 1024;
+
+/// The length the prompts ask for under a limit of `max`: about 90% of it,
+/// so a near miss still fits. Models overshoot a stated limit by a few
+/// percent (tango-aether, 2026-10-01: 1058, 1042, 1087 against 1024).
+pub const fn aim_under(max: usize) -> usize {
+    max * 9 / 10
+}
+
 /// Required-section names recognized in legacy SOUL.md files.
 /// Used by the migration path only.
 pub const LEGACY_REQUIRED_SECTIONS: &[&str] =
@@ -58,20 +72,20 @@ pub struct Soul {
 
     /// Who you are, in your own voice. A few sentences. Identity is what
     /// makes you recognizably you across many cycles.
-    pub identity: ShortString<1024>,
+    pub identity: ShortString<PROSE_MAX>,
 
     /// What you care about. Pithy bullets, one value per entry. 3-5 entries.
-    pub values: Vec<ShortString<512>>,
+    pub values: Vec<ShortString<ITEM_MAX>>,
 
     /// What you want to talk about and where.
     pub interests: Interests,
 
     /// How you write. A sentence or two. Tone, register, characteristic phrases.
-    pub voice: ShortString<1024>,
+    pub voice: ShortString<PROSE_MAX>,
 
     /// Hard limits on your behavior. Optional - some agents run unconstrained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boundaries: Option<ShortString<1024>>,
+    pub boundaries: Option<ShortString<PROSE_MAX>>,
 
     /// Append-only history of how you've changed over cycles. The system
     /// preserves this across mutations; new entries are appended by the seed
@@ -89,7 +103,7 @@ pub struct Interests {
 
     /// Other topics you care about, not tied to a specific community.
     #[serde(default)]
-    pub topics: Vec<ShortString<512>>,
+    pub topics: Vec<ShortString<ITEM_MAX>>,
 }
 
 /// One row of the evolution log.
@@ -98,7 +112,7 @@ pub struct EvolutionEntry {
     /// ISO date (YYYY-MM-DD).
     pub date: chrono::NaiveDate,
     /// What changed and why. One sentence.
-    pub note: ShortString<512>,
+    pub note: ShortString<ITEM_MAX>,
 }
 
 /// Cross-field validation findings (typed).
@@ -232,7 +246,7 @@ impl Soul {
     /// output never includes `evolution_log`, so this is the only place it
     /// can grow.
     pub fn push_evolution(&mut self, note: impl Into<String>) -> Result<()> {
-        let note = ShortString::<512>::new(note.into())
+        let note = ShortString::<ITEM_MAX>::new(note.into())
             .map_err(|e| anyhow::anyhow!("evolution note: {e}"))?;
         self.evolution_log.push(EvolutionEntry {
             date: Utc::now().date_naive(),
@@ -588,18 +602,18 @@ fn parse_legacy_evolution(content: &str) -> Vec<EvolutionEntry> {
         if let Some((date_str, note)) = body.split_once(": ")
             && let Ok(date) =
                 chrono::NaiveDate::parse_from_str(date_str.trim(), "%Y-%m-%d")
-            && let Ok(note) = ShortString::<512>::new(note.trim())
+            && let Ok(note) = ShortString::<ITEM_MAX>::new(note.trim())
         {
             out.push(EvolutionEntry { date, note });
             continue;
         }
         // Fallback: today + the whole line as the note (truncated to fit).
-        let note_text = if body.chars().count() > 512 {
-            body.chars().take(512).collect::<String>()
+        let note_text = if body.chars().count() > ITEM_MAX {
+            body.chars().take(ITEM_MAX).collect::<String>()
         } else {
             body.to_string()
         };
-        if let Ok(note) = ShortString::<512>::new(note_text) {
+        if let Ok(note) = ShortString::<ITEM_MAX>::new(note_text) {
             out.push(EvolutionEntry {
                 date: Utc::now().date_naive(),
                 note,
@@ -645,7 +659,76 @@ pub struct Feedback {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct EvolutionRequest {
     /// One sentence describing the shift.
-    pub note: ShortString<512>,
+    pub note: ShortString<ITEM_MAX>,
+}
+
+/// A [`Soul`] as a model wrote it, before length checks: what the last
+/// attempt at a mutation is read as, so an over-length field can be clipped
+/// rather than the whole rewrite lost
+#[derive(Deserialize, Debug)]
+pub struct SoulDraft {
+    pub name: ShortString<64>,
+    pub identity: String,
+    pub values: Vec<String>,
+    pub interests: InterestsDraft,
+    pub voice: String,
+    #[serde(default)]
+    pub boundaries: Option<String>,
+}
+
+/// [`Interests`] before length checks on topics
+#[derive(Deserialize, Debug)]
+pub struct InterestsDraft {
+    pub communities: Vec<ShortString<64>>,
+    #[serde(default)]
+    pub topics: Vec<String>,
+}
+
+impl SoulDraft {
+    /// The [`Soul`], each over-length prose field clipped at a sentence
+    /// boundary, and the paths of the fields that were
+    pub fn into_clipped(self) -> (Soul, Vec<String>) {
+        fn clip<const MAX: usize>(
+            clipped: &mut Vec<String>,
+            path: String,
+            text: String,
+        ) -> ShortString<MAX> {
+            let (short, cut) = ShortString::clipped(&text);
+            if cut {
+                clipped.push(path);
+            }
+            short
+        }
+        let mut c = Vec::new();
+        let soul = Soul {
+            name: self.name,
+            identity: clip(&mut c, "identity".into(), self.identity),
+            values: self
+                .values
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| clip(&mut c, format!("values[{i}]"), v))
+                .collect(),
+            interests: Interests {
+                communities: self.interests.communities,
+                topics: self
+                    .interests
+                    .topics
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        clip(&mut c, format!("interests.topics[{i}]"), t)
+                    })
+                    .collect(),
+            },
+            voice: clip(&mut c, "voice".into(), self.voice),
+            boundaries: self
+                .boundaries
+                .map(|b| clip(&mut c, "boundaries".into(), b)),
+            evolution_log: Vec::new(),
+        };
+        (soul, c)
+    }
 }
 
 #[cfg(test)]

@@ -34,8 +34,9 @@ pub use prompt::{
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use shortstring::{ShortString, ShortStringError};
 pub use soul::{
-    EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, Interests,
-    LEGACY_REQUIRED_SECTIONS, Soul, SoulWarning, WarnLevel,
+    EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
+    Interests, InterestsDraft, LEGACY_REQUIRED_SECTIONS, PROSE_MAX, Soul,
+    SoulDraft, SoulWarning, WarnLevel, aim_under,
 };
 pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger, ShownIds};
 
@@ -300,6 +301,10 @@ pub struct SeedAgent {
     context: ContextGauge,
     /// Ids shown this session, shared with the tool for short-id lookups
     shown: ShownIds,
+    /// Failed attempts at the current closing phase, and the last failure,
+    /// for the last-attempt rescue and [`Agent::stall_reason`]
+    phase_failures: usize,
+    last_failure: Option<String>,
 }
 
 /// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
@@ -450,6 +455,8 @@ impl SeedAgent {
         text: &str,
         max_tokens: u32,
     ) -> Result<Control, SeedError> {
+        self.phase_failures = 0;
+        self.last_failure = None;
         let prompt = &mut self.state.prompt;
         prompt.max_tokens = NonZeroU32::new(max_tokens).expect("nonzero");
         prompt.output_config = prompt
@@ -483,7 +490,9 @@ impl SeedAgent {
     /// Append a model-facing failure to the trailing user turn and stall — the
     /// reactor's stall cap is the retry budget.
     fn phase_failure(&mut self, msg: &str) -> Result<Control, SeedError> {
-        tracing::debug!(phase = ?self.phase, "phase retry: {msg}");
+        tracing::debug!(phase = ?self.phase, error = msg, "phase retry");
+        self.phase_failures += 1;
+        self.last_failure = Some(msg.to_string());
         let prompt = &mut self.state.prompt;
         match prompt.messages.last_mut() {
             Some(last) if last.role == Role::User => {
@@ -494,6 +503,26 @@ impl SeedAgent {
                 .push_message((Role::User, msg.to_string()))
                 .map(|_| Control::Stalled)
                 .map_err(|e| SeedError::Prompt(e.to_string())),
+        }
+    }
+
+    /// Whether the response being handled is the closing phase's last try
+    /// before the reactor gives up on the session
+    fn last_attempt(&self) -> bool {
+        self.phase_failures + 1 >= crate::reactor::MAX_STALLS
+    }
+
+    /// Log the fields a last attempt had clipped to fit
+    fn log_clipped(&self, fields: &[String]) {
+        if !fields.is_empty() {
+            tracing::warn!(
+                event_type = "phase_output_clipped",
+                agent = %self.state.soul.name,
+                phase = ?self.phase,
+                fields = ?fields,
+                "last attempt over length: clipped at a sentence boundary \
+                 rather than lose the phase"
+            );
         }
     }
 
@@ -611,29 +640,52 @@ impl SeedAgent {
                 }
                 Err(e) => self.phase_failure(&e),
             },
-            Phase::Mutate => match output::parse_soul_mutation(&text) {
-                Ok(new_soul) => {
-                    let warnings =
-                        new_soul.validate_communities(&self.communities);
-                    if !warnings.is_empty() {
-                        let bad: Vec<String> = warnings
-                            .iter()
-                            .map(|w| w.message.clone())
-                            .collect();
-                        return self.phase_failure(&format!(
-                            "Invalid communities: {}. Valid slugs: {:?}. \
-                             Try again.",
-                            bad.join("; "),
-                            self.communities,
-                        ));
+            Phase::Mutate => {
+                match output::parse_soul_mutation(&text).or_else(|e| {
+                    // The last try: an over-length field is clipped rather
+                    // than the whole rewrite lost (tango-aether, 2026-10-01).
+                    if !self.last_attempt() {
+                        return Err(e);
                     }
-                    self.apply_mutation(new_soul);
-                    self.seat_response(response)?;
-                    self.maybe_survey()
+                    let (soul, clipped) =
+                        output::parse_soul_mutation_clipped(&text)
+                            .map_err(|_| e)?;
+                    self.log_clipped(&clipped);
+                    Ok(soul)
+                }) {
+                    Ok(new_soul) => {
+                        let warnings =
+                            new_soul.validate_communities(&self.communities);
+                        if !warnings.is_empty() {
+                            let bad: Vec<String> = warnings
+                                .iter()
+                                .map(|w| w.message.clone())
+                                .collect();
+                            return self.phase_failure(&format!(
+                                "Invalid communities: {}. Valid slugs: {:?}. \
+                             Try again.",
+                                bad.join("; "),
+                                self.communities,
+                            ));
+                        }
+                        self.apply_mutation(new_soul);
+                        self.seat_response(response)?;
+                        self.maybe_survey()
+                    }
+                    Err(e) => self.phase_failure(&e),
                 }
-                Err(e) => self.phase_failure(&e),
-            },
-            Phase::Evolve => match output::parse_evolution(&text) {
+            }
+            Phase::Evolve => match output::parse_evolution(&text).or_else(|e| {
+                if !self.last_attempt() {
+                    return Err(e);
+                }
+                let (note, cut) =
+                    output::parse_evolution_clipped(&text).map_err(|_| e)?;
+                if cut {
+                    self.log_clipped(&["note".to_string()]);
+                }
+                Ok(note)
+            }) {
                 Ok(note) => {
                     if let Some(note) = note
                         && let Err(e) = self.state.soul.push_evolution(note)
@@ -817,6 +869,8 @@ impl Agent for SeedAgent {
             pauses: 0,
             context,
             shown,
+            phase_failures: 0,
+            last_failure: None,
         })
     }
 
@@ -856,6 +910,26 @@ impl Agent for SeedAgent {
 
     fn quirks(&self) -> Option<Quirks> {
         self.quirks
+    }
+
+    /// A closing phase that kept failing says which, and why, instead of
+    /// the reactor's "no successful tool call"
+    fn stall_reason(&self) -> Option<String> {
+        let phase = match self.phase {
+            Phase::Acting { .. } => return None,
+            Phase::Reflect => "memory rewrite (reflect)",
+            Phase::Mutate => "soul rewrite (mutate)",
+            Phase::Evolve => "evolution note (evolve)",
+            Phase::Survey => "survey",
+        };
+        Some(format!(
+            "the {phase} phase failed {} times in a row{}",
+            self.phase_failures,
+            match &self.last_failure {
+                Some(last) => format!("; last: {last}"),
+                None => String::new(),
+            }
+        ))
     }
 
     /// Resume the paused server-tool turn, under this session's

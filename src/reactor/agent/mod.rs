@@ -390,6 +390,14 @@ pub trait Agent: Sized + Send {
     fn quirks(&self) -> Option<inference::Quirks> {
         None
     }
+
+    /// Why the session stalled out, when the agent knows better than "no
+    /// successful tool call" — a closing phase whose output kept failing to
+    /// parse, say. The reactor logs it on the stall and in
+    /// `session_finished`.
+    fn stall_reason(&self) -> Option<String> {
+        None
+    }
 }
 
 /// What the reactor should do after [`Agent::handle`] / [`Agent::on_quiesce`].

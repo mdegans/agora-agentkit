@@ -2286,3 +2286,123 @@ async fn an_ambiguous_or_malformed_short_id_explains_itself() {
     );
     assert!(!rendered.contains("group"), "{rendered}");
 }
+
+// --- SOUL limits and the closing-phase rescue (0.49) ---
+
+/// A soul rewrite whose identity runs `identity_chars` long, in sentences
+fn soul_rewrite(identity_chars: usize) -> String {
+    let sentence = "I keep arguing for clearer rules. ";
+    let identity: String = sentence
+        .repeat(identity_chars / sentence.len() + 1)
+        .chars()
+        .take(identity_chars)
+        .collect();
+    format!(
+        r#"{{"name": "test-agent", "identity": "{identity}", "values": ["Clarity"], "interests": {{"communities": ["tech"], "topics": []}}, "voice": "terse"}}"#
+    )
+}
+
+/// An agent at the soul-rewrite phase, as `after_reflect` leaves it
+fn mutating_agent(server: &MockServer) -> SeedAgent {
+    let mut agent = agent(server, quiet_config());
+    agent.communities = vec!["tech".to_string()];
+    seat_start(&mut agent);
+    agent.phase = Phase::Mutate;
+    let instruction = output::build_soul_mutation_prompt(&agent.state.soul);
+    agent.seat_phase(&instruction, 4096).unwrap();
+    agent
+}
+
+/// Two over-length tries stall as before; the third is clipped at a
+/// sentence boundary instead of losing the rewrite (tango-aether,
+/// 2026-10-01)
+#[tokio::test]
+async fn the_last_soul_rewrite_attempt_is_clipped_not_lost() {
+    let server = MockServer::start();
+    let mut agent = mutating_agent(&server);
+    let over = soul_rewrite(soul::PROSE_MAX + 60);
+    for _ in 0..2 {
+        let control = agent
+            .handle(text_message(&over, StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    assert!(transcript(&agent).contains("exceeds 2048 chars"));
+    let control = agent
+        .handle(text_message(&over, StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    let identity = agent.state.soul.identity.as_str();
+    assert!(identity.chars().count() <= soul::PROSE_MAX);
+    assert!(identity.ends_with("rules."), "a sentence end: {identity}");
+    assert_eq!(
+        agent
+            .state
+            .soul
+            .evolution_log
+            .last()
+            .map(|e| e.note.as_str()),
+        Some("[SYSTEM] Deep reflection — soul rewritten.")
+    );
+}
+
+/// A closing phase that keeps failing for another reason still fails, and
+/// the reactor is told which phase and why rather than "no successful tool
+/// call"
+#[tokio::test]
+async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
+    let server = MockServer::start();
+    let mut mutating = mutating_agent(&server);
+    assert_eq!(
+        mutating.stall_reason(),
+        Some(
+            "the soul rewrite (mutate) phase failed 0 times in a row"
+                .to_string()
+        )
+    );
+    for _ in 0..crate::reactor::MAX_STALLS {
+        let control = mutating
+            .handle(text_message("not json", StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    let reason = mutating.stall_reason().unwrap();
+    assert!(
+        reason.starts_with(
+            "the soul rewrite (mutate) phase failed 3 times in a row; last: \
+             Invalid JSON"
+        ),
+        "{reason}"
+    );
+
+    // An acting stall keeps the reactor's own wording.
+    let acting = agent(&server, quiet_config());
+    assert_eq!(acting.stall_reason(), None);
+}
+
+/// The limits only got looser: a soul at the old caps still reads, the new
+/// caps hold, and an old ledger reads without the new field
+#[test]
+fn existing_souls_and_ledgers_still_deserialize() {
+    let old = soul_rewrite(1024);
+    let soul: Soul = serde_json::from_str(&old).unwrap();
+    let back: Soul =
+        serde_json::from_str(&serde_json::to_string(&soul).unwrap()).unwrap();
+    assert_eq!(back.identity.as_str(), soul.identity.as_str());
+    assert!(
+        serde_json::from_str::<Soul>(&soul_rewrite(soul::PROSE_MAX)).is_ok()
+    );
+    assert!(
+        serde_json::from_str::<Soul>(&soul_rewrite(soul::PROSE_MAX + 1))
+            .is_err()
+    );
+
+    let ledger: Ledger = serde_json::from_str(
+        r#"{"created_posts": [], "commented_posts": [], "created_comments": []}"#,
+    )
+    .unwrap();
+    assert!(ledger.post_comments.is_empty());
+}

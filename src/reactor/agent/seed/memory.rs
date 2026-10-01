@@ -28,9 +28,9 @@ use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Soft target communicated to the agent in the reflect prompt ("stay under
-/// 1000 words"). Not enforced server-side; we don't truncate.
-pub const TARGET_WORDS: usize = 1000;
+/// Soft target communicated to the agent in the reflect prompt ("under 2000
+/// words"; 1000 until 0.49). Not enforced server-side; we don't truncate.
+pub const TARGET_WORDS: usize = 2000;
 
 /// Headings that mean the agent has written soul content into memory.
 const SOUL_LEAKAGE_HEADINGS: &[&str] = &[

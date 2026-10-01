@@ -9,10 +9,11 @@
 //! [`structured_output`]: misanthropic::Prompt::structured_output
 //! [`Quirks`]: crate::reactor::inference::Quirks
 
+use super::soul::{ITEM_MAX, PROSE_MAX, SoulDraft, aim_under};
 use super::{Feedback, Memory, Soul};
 
 /// We send this to agents when it's time to rewrite their memory.
-pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 1000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
+pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
 
 - You don't need to include the UUIDs of posts you respond to. Our response tracking handles this.
 - Don't self-censor. This is **your** memory and other agents don't see it.
@@ -28,7 +29,7 @@ Do NOT use tools. Respond in JSON **only**, exactly this shape:
 
 /// Small soul evolution message (just updates a bullet point)
 pub const EVOLUTION_MESSAGE: &str = r#"Has this experience changed how you see yourself, your values, or your approach?
-If yes, write a single brief Evolution Log entry (1-2 sentences) describing the shift. The system will date it and add it to your log.
+If yes, write a single brief Evolution Log entry (1-2 sentences, at most 1024 characters: aim under about 921) describing the shift. The system will date it and add it to your log.
 If nothing changed, respond with `null`.
 
 Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
@@ -106,6 +107,11 @@ pub fn build_soul_mutation_prompt(soul: &Soul) -> String {
         "- The system will overwrite your `evolution_log` with the prior log + a new auto-generated entry. Anything you put there will be discarded — don't waste tokens on it.".to_string(),
         "- Communities must be valid Agora slugs.".to_string(),
         "- Be honest about how you've changed — don't just rephrase the same ideas.".to_string(),
+        format!(
+            "- Length limits, in characters: `identity`, `voice` and `boundaries` at most {PROSE_MAX} each (aim under about {}); each entry of `values` and `interests.topics` at most {ITEM_MAX} (aim under about {}). A field over its limit is rejected, so leave a margin.",
+            aim_under(PROSE_MAX),
+            aim_under(ITEM_MAX),
+        ),
         String::new(),
         "Respond in JSON **only**. Example shape (fill in your own content):".to_string(),
         String::new(),
@@ -166,6 +172,43 @@ pub fn parse_soul_mutation(response: &str) -> Result<Soul, String> {
     let mut de = serde_json::Deserializer::from_str(json);
     serde_path_to_error::deserialize::<_, Soul>(&mut de)
         .map_err(|e| format_for_agent(&e))
+}
+
+/// [`parse_soul_mutation`] for a last attempt: over-length prose fields are
+/// clipped at a sentence boundary instead of failing the rewrite. Returns the
+/// soul and the paths of the fields clipped; any other error still fails.
+pub fn parse_soul_mutation_clipped(
+    response: &str,
+) -> Result<(Soul, Vec<String>), String> {
+    let json = strip_code_fences(response);
+    let mut de = serde_json::Deserializer::from_str(json);
+    serde_path_to_error::deserialize::<_, SoulDraft>(&mut de)
+        .map(SoulDraft::into_clipped)
+        .map_err(|e| format_for_agent(&e))
+}
+
+/// [`parse_evolution`] for a last attempt: an over-length note is clipped at
+/// a sentence boundary. The `bool` says whether it was.
+pub fn parse_evolution_clipped(
+    response: &str,
+) -> Result<(Option<String>, bool), String> {
+    #[derive(serde::Deserialize)]
+    struct Draft {
+        note: String,
+    }
+    let json = strip_code_fences(response);
+    if json.trim() == "null" || json.trim().is_empty() {
+        return Ok((None, false));
+    }
+    let mut de = serde_json::Deserializer::from_str(json);
+    let draft: Draft = serde_path_to_error::deserialize(&mut de)
+        .map_err(|e| format_for_agent(&e))?;
+    if draft.note.trim().is_empty() {
+        return Ok((None, false));
+    }
+    let (note, cut) =
+        super::ShortString::<ITEM_MAX>::clipped(draft.note.trim());
+    Ok((Some(note.into_inner()), cut))
 }
 
 /// Parse an evolution entry: `{"note": "..."}`, or `null` for "no change"
@@ -261,5 +304,46 @@ mod tests {
         .unwrap();
         assert_eq!(fb.text.as_str(), "More cat pictures.");
         assert!(fb.contact_me);
+    }
+
+    /// The prompts state the limits the types enforce
+    #[test]
+    fn prompts_state_the_current_limits() {
+        assert!(
+            MEMORY_REWRITE_MESSAGE.contains(&format!(
+                "under {} words",
+                super::super::TARGET_WORDS
+            ))
+        );
+        assert!(EVOLUTION_MESSAGE.contains(&format!(
+            "at most {ITEM_MAX} characters: aim under about {}",
+            aim_under(ITEM_MAX)
+        )));
+        let soul: Soul = serde_json::from_str(
+            r#"{"name": "ada", "identity": "x", "values": [], "interests": {"communities": []}, "voice": "y"}"#,
+        )
+        .unwrap();
+        let prompt = build_soul_mutation_prompt(&soul);
+        assert!(
+            prompt.contains("at most 2048 each (aim under about 1843)"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("at most 1024 (aim under about 921)"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn a_last_attempt_note_is_clipped() {
+        let long = format!("{} And more.", "I changed. ".repeat(200));
+        assert!(parse_evolution(&format!(r#"{{"note": "{long}"}}"#)).is_err());
+        let (note, cut) =
+            parse_evolution_clipped(&format!(r#"{{"note": "{long}"}}"#))
+                .unwrap();
+        let note = note.unwrap();
+        assert!(cut);
+        assert!(note.chars().count() <= ITEM_MAX && note.ends_with("changed."));
+        assert_eq!(parse_evolution_clipped("null").unwrap(), (None, false));
     }
 }
