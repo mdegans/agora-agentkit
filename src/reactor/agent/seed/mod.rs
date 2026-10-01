@@ -13,6 +13,7 @@
 //! [`on_init`]: Agent::on_init
 //! [`on_teardown`]: Agent::on_teardown
 
+mod gauge;
 mod keyring;
 mod memory;
 mod output;
@@ -24,6 +25,7 @@ mod soul;
 mod tests;
 mod tool;
 
+pub use gauge::{CONTEXT_BUFFER_TOKENS, ContextGauge, Gauged};
 pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use prompt::{
@@ -35,10 +37,7 @@ pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, Interests,
     LEGACY_REQUIRED_SECTIONS, Soul, SoulWarning, WarnLevel,
 };
-pub use tool::{
-    Agora, CONTEXT_BUFFER_TOKENS, ContextGauge, Ledger, MAX_GOVERNANCE_READS,
-    SharedLedger,
-};
+pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger};
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -154,9 +153,10 @@ pub struct SeedConfig {
     /// one [`act_max_tokens`](Self::act_max_tokens) budget, and a clipped
     /// turn is pruned whole
     pub disable_parallel_tool_use: bool,
-    /// The model's context window, in tokens. `get_content` returns a
-    /// governance entry's summary instead of its full record when the
-    /// record would not fit (see [`CONTEXT_BUFFER_TOKENS`]).
+    /// The model's context window, in tokens. A tool result that would not
+    /// fit is replaced by a note (see [`Gauged`]), and `get_content`
+    /// returns a governance entry's summary instead of a record that would
+    /// not (see [`CONTEXT_BUFFER_TOKENS`]).
     pub context_window: u64,
 }
 
@@ -789,7 +789,11 @@ impl Agent for SeedAgent {
             state.ledger.clone(),
         )
         .with_context_guard(context.clone(), ctx.config.context_window);
-        let tools = ToolBox::flat().add(agora);
+        let tools = ToolBox::flat().add(Gauged::new(
+            agora,
+            context.clone(),
+            ctx.config.context_window,
+        ));
 
         let phase = Phase::Acting {
             rounds_left: ctx.config.max_rounds,

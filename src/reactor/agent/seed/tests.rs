@@ -1891,3 +1891,41 @@ async fn get_governance_log_renders_an_index_and_sends_no_detail_param() {
     // An index carries no record: nothing here should look like a blob.
     assert!(!rendered.contains("\"rounds\""), "{rendered}");
 }
+
+/// Every tool result goes through the gauge, not just governance records:
+/// a post too big for what is left of the window is a note, and the
+/// prompt never holds the body
+#[tokio::test]
+async fn an_oversized_post_read_is_left_out_with_a_note() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let mut body = post_content(post_id);
+    // ~60 KB: about 20k tokens at a byte for every three.
+    body["post"]["body"] = serde_json::json!("OVERSIZED ".repeat(6_000));
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{post_id}"));
+        then.status(200).json_body(body);
+    });
+    let small = SeedConfig {
+        context_window: 40_000,
+        ..quiet_config()
+    };
+    let mut reader = agent(&server, small);
+    seat_start(&mut reader);
+    reader
+        .handle(tool_use_with_usage(
+            "get_content",
+            serde_json::json!({"id": post_id}),
+            10_000,
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&reader);
+    assert!(
+        rendered.contains("would not fit in your 40000 token window"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("summary=true"), "{rendered}");
+    assert!(!rendered.contains("OVERSIZED"), "{rendered}");
+}

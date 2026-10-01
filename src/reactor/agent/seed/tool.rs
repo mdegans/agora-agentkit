@@ -7,7 +7,6 @@
 //! persistence, this tool owns the writes; lock guards never cross an `.await`.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use misanthropic::prompt::message::Content;
@@ -25,6 +24,7 @@ use crate::requests::{
     ReadContentInput, ReportMessageInput, SendMessageInput,
 };
 
+use super::gauge::{ContextGauge, estimate_tokens};
 use super::prompt;
 
 /// Full governance reads allowed per session.
@@ -37,50 +37,6 @@ use super::prompt;
 /// everything is how a session ends up with no rounds left to say
 /// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
-
-/// Tokens held back from the context window when deciding whether a full
-/// governance record fits: room for the rest of the round and the phases
-/// after it
-pub const CONTEXT_BUFFER_TOKENS: u64 = 16_000;
-
-/// Tokens in an agent's context as of its last response, shared between the
-/// [`SeedAgent`](super::SeedAgent), which reads each response's usage, and
-/// the [`Agora`] tool, which decides whether a full record fits
-#[derive(Debug, Clone, Default)]
-pub struct ContextGauge(Arc<AtomicU64>);
-
-impl ContextGauge {
-    pub fn get(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    pub fn set(&self, tokens: u64) {
-        self.0.store(tokens, Ordering::Relaxed);
-    }
-
-    /// Count a tool result about to join the context, so a second read in
-    /// the same turn sees the first
-    pub fn add(&self, tokens: u64) {
-        self.0.fetch_add(tokens, Ordering::Relaxed);
-    }
-
-    /// Everything a response says is now in context: its whole input and
-    /// its output
-    pub fn record(&self, usage: &misanthropic::response::Usage) {
-        let input = usage.input_tokens
-            + usage.cache_read_input_tokens.unwrap_or(0)
-            + usage.cache_creation_input_tokens.unwrap_or(0);
-        self.set(input + usage.output_tokens);
-    }
-}
-
-/// A rough token count for `text`: a byte for every three.
-// TODO: count with the endpoint (`BatchBackend::count_tokens` /
-// misanthropic `Client::count_tokens`), which needs the inference backend
-// plumbed into the `Agora` tool.
-fn estimate_tokens(text: &str) -> u64 {
-    text.len() as u64 / 3
-}
 
 /// What this agent has created and seen — the dedup policy's working set
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -149,6 +105,8 @@ impl Agora {
     /// Return a governance entry's summary instead of its record when the
     /// record would not fit: `context` tokens already held, plus the
     /// record, plus [`CONTEXT_BUFFER_TOKENS`], against `window`
+    ///
+    /// [`CONTEXT_BUFFER_TOKENS`]: super::CONTEXT_BUFFER_TOKENS
     pub fn with_context_guard(
         mut self,
         context: ContextGauge,
@@ -409,11 +367,10 @@ impl Agora {
                 if entry.data.is_none() {
                     return Ok(rendered.into());
                 }
+                // Counted by `Gauged` on the way out, like every result.
                 let tokens = estimate_tokens(&rendered);
                 let held = self.context.get();
-                if held + tokens + CONTEXT_BUFFER_TOKENS <= self.context_window
-                {
-                    self.context.add(tokens);
+                if self.context.fits(tokens, self.context_window) {
                     self.governance_reads += 1;
                     return Ok(rendered.into());
                 }
@@ -693,28 +650,5 @@ impl Agora {
             .await
             .map_err(err)?;
         Ok(prompt::format_proposals(&proposals).into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Cached input is still in context: a cache hit is not a small prompt
-    #[test]
-    fn the_gauge_counts_cached_input_and_output() {
-        let gauge = ContextGauge::default();
-        let usage: misanthropic::response::Usage =
-            serde_json::from_value(serde_json::json!({
-                "input_tokens": 10,
-                "cache_read_input_tokens": 90_000,
-                "cache_creation_input_tokens": 1_000,
-                "output_tokens": 500,
-            }))
-            .unwrap();
-        gauge.record(&usage);
-        assert_eq!(gauge.get(), 91_510);
-        gauge.add(10);
-        assert_eq!(gauge.clone().get(), 91_520, "shared, not copied");
     }
 }
