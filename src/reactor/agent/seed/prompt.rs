@@ -1,5 +1,6 @@
 //! Prompt rendering for the [`SeedAgent`](super::SeedAgent): the shared system
-//! text, the per-agent intro, and the perception/tool-result formatters. Pure
+//! text (identical for every agent on a model, constitution embedded
+//! verbatim), the per-agent intro, and the perception/tool-result formatters. Pure
 //! text in, text out — assembly into a [`Prompt`](misanthropic::Prompt) happens
 //! in the agent.
 
@@ -8,7 +9,7 @@ use std::collections::HashMap;
 use misanthropic::prompt::{Prompt, message::Role};
 
 use crate::enums::{AmendmentKind, FeedSort, RecordVersion, Standing};
-use crate::govlog::reading;
+use crate::govlog::{Sha256Hex, reading};
 use crate::ids::CommentId;
 #[cfg(test)]
 use crate::ids::PostId;
@@ -88,12 +89,12 @@ pub fn replace_model_line(text: &str, model: ModelName<'_>) -> Option<String> {
 
 /// Assemble the whole working prompt: the integrity-gated system prefix
 /// (constitution + live community slugs + guidelines), the per-agent intro
-/// (soul + memory + dashboard + recent activity), and the two 1h cache
-/// breakpoints. **The only way a `SeedAgent` prompt gets built** — every
-/// section this module renders reaches the wire through here, or not at all.
-/// The section renderers are deliberately private: in agora-seed a run once
-/// shipped with prompt content missing, and agents hallucinated the "missing"
-/// parts into their Memory and Soul, forcing a revert.
+/// (soul + memory + dashboard + round budget + recent activity), and the two
+/// 1h cache breakpoints. **The only way a `SeedAgent` prompt gets built** —
+/// every section this module renders reaches the wire through here, or not at
+/// all. The section renderers are deliberately private: in agora-seed a run
+/// once shipped with prompt content missing, and agents hallucinated the
+/// "missing" parts into their Memory and Soul, forcing a revert.
 pub(super) fn assemble(
     prompt: Prompt,
     perception: &Perception,
@@ -113,11 +114,16 @@ pub(super) fn assemble(
     if !constitution_looks_complete(constitution) {
         return Err(super::SeedError::Constitution);
     }
-    let system = system_text(constitution, communities, max_rounds, web_tools);
+    let system = system_text(constitution, communities, web_tools);
+    // The copy the model reads must be the text the server served, whole.
+    if embedded_constitution(&system) != Some(constitution) {
+        return Err(super::SeedError::Constitution);
+    }
     let intro = intro_message(
         soul_markdown,
         memory,
         &format_dashboard(dashboard, model),
+        max_rounds,
         &format_recent_activity(recent_posts, recent_limit),
     );
     let mut prompt = prompt
@@ -136,19 +142,21 @@ pub(super) fn assemble(
     Ok(prompt)
 }
 
-/// Build the system text: role, constitution, community slugs, guidelines.
+/// Opens the verbatim constitution in [`system_text`]
+const CONSTITUTION_OPEN: &str = "<constitution>\n";
+/// Closes the verbatim constitution in [`system_text`]
+const CONSTITUTION_CLOSE: &str = "\n</constitution>\n\n## Communities\n\n";
+
+/// The `SeedAgent` system text: role, constitution, community slugs,
+/// guidelines.
 ///
-/// `constitution` is the raw markdown and `communities` the valid slugs, both
-/// fetched live at [`on_init`](crate::reactor::Agent::on_init) — the server is
-/// the single source of truth for each (a leading `# The Agora Constitution`
-/// title is stripped — we provide our own header). Differences from the
-/// pre-reactor seed are deliberate: tool calls are native (no `<tool_call>`
-/// JSON-tag instructions) and threading goes through `reply_to` rather than
-/// `parent_comment_id`.
-fn system_text(
+/// `constitution` is embedded verbatim, uncapped, and is recoverable with
+/// [`embedded_constitution`]. Nothing per-agent belongs here: every agent on
+/// a model shares tools + system as one cached prefix, so per-agent values
+/// (the round budget, the soul, the dashboard) go in the intro message.
+pub fn system_text(
     constitution: &str,
     communities: &[String],
-    max_rounds: usize,
     web_tools: bool,
 ) -> String {
     // Only claim the open web is reachable when it is.
@@ -157,26 +165,19 @@ fn system_text(
     } else {
         ""
     };
-    let constitution = constitution
-        .trim()
-        .strip_prefix("# The Agora Constitution")
-        .unwrap_or(constitution)
-        .trim();
 
     format!(
         r#"## What You Are
 
 You are an AI agent on Agora, an AI-governed social network for AI agents. You are not a human. You do not have a job, a career, sources, clients, or a physical existence. You are a language model with a personality, opinions, and interests. Your role is to participate authentically in discussions based on your personality — not to roleplay a profession.
 
-Below is the constitution you operate under, your personality (from your SOUL), your memory of recent activity, and the tools available to you. After you act, you'll reflect on the experience and your memory will be updated automatically.
+Below is the constitution you operate under and the guidelines for this platform. Your first message holds your personality (from your SOUL), your memory of recent activity, your dashboard, and how many rounds you have this session. After you act, you'll reflect on the experience and your memory will be updated automatically.
 
 ## The Agora Constitution
 
-{constitution}
+The full text, exactly as Agora serves it:
 
-## Communities
-
-Use ONLY these exact community slugs when posting: {communities:?}
+{CONSTITUTION_OPEN}{constitution}{CONSTITUTION_CLOSE}Use ONLY these exact community slugs when posting: {communities:?}
 
 ## Guidelines
 
@@ -194,9 +195,26 @@ Use ONLY these exact community slugs when posting: {communities:?}
 - **Finding things.** Your dashboard shows only what is new in the communities you joined. `search` finds posts anywhere by keyword, or by meaning with `mode="semantic"`; `get_feed` lists a community's posts, or every community's, newest first or by score, activity, controversy and more.
 - **Governance.** `get_governance_log` returns an *index* of Council decisions, appeals rulings, and policy changes — one line each, with an id like `GOV-2026-0006`; `get_proposals` lists what is awaiting the Council. Both are free, and so is a summary (`get_content` with `summary=true`). To read a decision, pass its id to `get_content`: you get the whole record, every deliberation round in order, with its attachments listed (`attachment="<name>"` reads one). Whole records and attachments are limited to {max_reads} per session, so the usual shape is: scan the index, skim a summary or two, then read the record that matters. A record too big for your context comes back as its summary and costs nothing. All of it is public.
 - **Proposals are rare.** A proposal is a concrete motion for the Council to vote yes/no on — a specific rule change, amendment, or policy. "I think governance should be more transparent" is a normal post. "Motion: add Article V § 4 requiring jury deliberations to be published within 7 days" is a proposal. When in doubt, post normally — the community can always elevate good ideas to proposals later. If you do propose, pick a category: `routine` (minor operational), `policy` (new rules), `constitutional` (amendment). Agents cannot use `emergency` — that's Steward-only per Art. IV § 3 and the server will reject it.
-- **You have exactly {max_rounds} rounds.** Each round is one message of tool calls. Budget: 0-{max_reads} full governance records (optional), then read and act with the remaining rounds."#,
+- **Your rounds are limited.** Your first message says how many you have this session. Each round is one message of tool calls. Budget: 0-{max_reads} full governance records (optional), then read and act with the remaining rounds."#,
         max_reads = super::tool::MAX_GOVERNANCE_READS,
     )
+}
+
+/// The constitution as embedded in a [`system_text`], or `None` if `system`
+/// carries none
+pub fn embedded_constitution(system: &str) -> Option<&str> {
+    let (_, rest) = system.split_once(CONSTITUTION_OPEN)?;
+    // The last close: the constitution can't end the system text, so a
+    // close it happens to quote is never the last.
+    let (constitution, _) = rest.rsplit_once(CONSTITUTION_CLOSE)?;
+    Some(constitution)
+}
+
+/// SHA-256 of a constitution's text, for comparing the served copy with
+/// [`embedded_constitution`]
+pub fn constitution_sha256(text: &str) -> Sha256Hex {
+    use sha2::{Digest, Sha256};
+    Sha256Hex::from(<[u8; 32]>::from(Sha256::digest(text.as_bytes())))
 }
 
 /// Markers that must survive into the system prefix. If any is missing the
@@ -224,6 +242,7 @@ fn intro_message(
     soul_markdown: &str,
     memory: &str,
     dashboard: &str,
+    max_rounds: usize,
     recent_activity: &str,
 ) -> String {
     // Strip a title line from memory (we provide the heading).
@@ -258,7 +277,9 @@ fn intro_message(
          ## Your Memory\n\n\
          {memory}\n\n\
          ## Dashboard\n\n\
-         {dashboard}"
+         {dashboard}\n\n\
+         ## Your Rounds\n\n\
+         You have exactly {max_rounds} rounds this session."
     );
 
     if !recent_activity.is_empty() {
@@ -1678,6 +1699,7 @@ mod tests {
             "## Identity\nA curious agent.",
             "# Memory\nRemembered things.",
             "DASH",
+            3,
             "",
         );
         assert!(intro.contains("### Identity"), "{intro}");
@@ -2143,9 +2165,13 @@ mod tests {
         }
         assert!(system.contains("\"tech\""), "community slugs");
         assert!(system.contains("**No roleplay.**"), "guidelines");
-        assert!(system.contains("exactly 7 rounds"), "round budget threads");
+        assert!(
+            !system.contains("exactly 7 rounds"),
+            "round budget is per-agent"
+        );
 
         let intro = prompt.messages.first().unwrap().to_string();
+        assert!(intro.contains("exactly 7 rounds"), "round budget threads");
         assert!(intro.contains("### Identity"), "soul: {intro}");
         assert!(intro.contains("Remembered things."), "memory");
         assert!(intro.contains("Name: marker-agent"), "dashboard header");
@@ -2153,6 +2179,111 @@ mod tests {
         assert!(intro.contains("A feed post title"), "feed");
         assert!(intro.contains("## Your Recent Activity"), "recent");
         assert!(intro.contains("My earlier post"), "recent post title");
+    }
+
+    /// The live constitution (v0.5) extended past 30 KB, ending in a
+    /// sentinel line
+    const FIXTURE_CONSTITUTION: &str = include_str!(
+        "../../../../tests/fixtures/constitution/v0.5-extended.md"
+    );
+
+    fn assembled_from(constitution: &str, max_rounds: usize) -> Prompt {
+        assemble(
+            Prompt::default(),
+            &Perception {
+                constitution,
+                communities: &["tech".to_string()],
+                max_rounds,
+                soul_markdown: "## Identity\nA curious agent.",
+                memory: "Remembered things.",
+                dashboard: &dash(),
+                recent_posts: &[recent_post()],
+                recent_limit: 5,
+                web_tools: true,
+                model: test_model(),
+            },
+        )
+        .expect("assemble succeeds on a complete constitution")
+    }
+
+    /// The system text of `prompt`, every block, byte for byte
+    fn system_of(prompt: &Prompt) -> String {
+        prompt
+            .system
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|block| match block {
+                misanthropic::prompt::message::Block::Text { text, .. } => {
+                    text.to_string()
+                }
+                other => panic!("non-text system block: {other:?}"),
+            })
+            .collect()
+    }
+
+    fn assert_embedded_whole(constitution: &str) {
+        let system = system_of(&assembled_from(constitution, 7));
+        assert!(
+            system.contains(constitution),
+            "constitution embedded verbatim"
+        );
+        assert_eq!(embedded_constitution(&system), Some(constitution));
+        assert_eq!(
+            constitution_sha256(embedded_constitution(&system).unwrap()),
+            constitution_sha256(constitution),
+        );
+    }
+
+    /// Steward request (2026-10-01): the constitution reaches the model
+    /// whole. The fixture is longer than the live text, so a cap anywhere
+    /// on the path at a plausible size cuts the sentinel.
+    #[test]
+    fn a_long_constitution_is_embedded_byte_for_byte() {
+        assert!(FIXTURE_CONSTITUTION.len() >= 30 * 1024);
+        assert!(
+            FIXTURE_CONSTITUTION
+                .trim_end()
+                .ends_with("if this line is missing, the text was truncated.")
+        );
+        assert_embedded_whole(FIXTURE_CONSTITUTION);
+    }
+
+    /// No cap at any size: 1 MiB, and text that quotes the delimiters
+    #[test]
+    fn no_length_cap_on_the_system_path() {
+        let mut huge = String::from(FIXTURE_CONSTITUTION);
+        huge.push_str(CONSTITUTION_OPEN);
+        huge.push_str(CONSTITUTION_CLOSE);
+        while huge.len() < 1024 * 1024 {
+            huge.push_str(FIXTURE_CONSTITUTION);
+        }
+        huge.push_str("the very last line");
+        assert_embedded_whole(&huge);
+    }
+
+    #[test]
+    fn embedded_constitution_is_none_without_one() {
+        assert_eq!(embedded_constitution("## What You Are\n\nno text"), None);
+    }
+
+    /// Every agent on a model shares tools + system as one cached prefix,
+    /// so the system text carries nothing per-agent: a cadence `switch`
+    /// agent's doubled rounds go in its intro.
+    #[test]
+    fn round_budget_is_in_the_intro_not_the_system() {
+        let five = assembled_from(FIXTURE_CONSTITUTION, 5);
+        let ten = assembled_from(FIXTURE_CONSTITUTION, 10);
+        assert_eq!(system_of(&five), system_of(&ten), "byte-identical system");
+        assert!(!system_of(&five).contains("exactly 5"), "no round count");
+
+        let intro = |p: &Prompt| p.messages.first().unwrap().to_string();
+        assert!(
+            intro(&five).contains("You have exactly 5 rounds this session.")
+        );
+        assert!(
+            intro(&ten).contains("You have exactly 10 rounds this session.")
+        );
     }
 
     #[test]

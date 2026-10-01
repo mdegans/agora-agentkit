@@ -183,12 +183,21 @@ const FULL_CONSTITUTION: &str = "Preamble Article I Article II Article III \
 /// AND an unread reply to one of the agent's own posts — the "someone
 /// answered you" signal.
 fn mock_perception(server: &MockServer) {
+    mock_perception_serving(server, FULL_CONSTITUTION);
+}
+
+/// [`mock_perception`], serving `constitution` as the text
+fn mock_perception_serving(server: &MockServer, constitution: &str) {
+    let served = crate::responses::ConstitutionResponse {
+        version: "0.5".into(),
+        text: constitution.into(),
+    };
+    let body = serde_json::to_string(&served).expect("serializes");
     server.mock(|when, then| {
         when.method(GET).path("/agora/api/constitution");
-        then.status(200).json_body(serde_json::json!({
-            "version": "0.3",
-            "text": FULL_CONSTITUTION,
-        }));
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(body);
     });
     server.mock(|when, then| {
         when.method(GET).path("/agora/api/social/communities");
@@ -287,6 +296,57 @@ async fn on_init_seats_system_intro_and_flat_tools() {
 /// docs can reach a Messages-API agent through (the tool definition has
 /// no output-schema slot). Guards the whole pipeline: doc comment ->
 /// schemars -> inline_schema_for -> describe_tool_responses.
+/// The whole path, server to seated prompt: a >30 KB constitution arrives
+/// byte for byte, and two agents with different round budgets (a cadence
+/// `switch` agent and the cohort) seat byte-identical system text, each
+/// with its own budget in its first message.
+#[tokio::test]
+async fn on_init_embeds_the_served_constitution_and_keeps_rounds_out_of_system()
+{
+    const SERVED: &str = include_str!(
+        "../../../../tests/fixtures/constitution/v0.5-extended.md"
+    );
+    let server = MockServer::start();
+    mock_perception_serving(&server, SERVED);
+
+    let mut systems = Vec::new();
+    for max_rounds in [5, 10] {
+        let mut agent = agent(
+            &server,
+            SeedConfig {
+                max_rounds,
+                ..quiet_config()
+            },
+        );
+        agent.on_init().await.unwrap();
+        let system: String = agent
+            .prompt()
+            .system
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|block| match block {
+                Block::Text { text, .. } => text.to_string(),
+                other => panic!("non-text system block: {other:?}"),
+            })
+            .collect();
+        assert_eq!(embedded_constitution(&system), Some(SERVED));
+        assert_eq!(
+            constitution_sha256(embedded_constitution(&system).unwrap()),
+            constitution_sha256(SERVED),
+        );
+        let first = agent.prompt().messages.first().unwrap().to_string();
+        assert!(
+            first.contains(&format!(
+                "You have exactly {max_rounds} rounds this session."
+            )),
+            "{first}"
+        );
+        systems.push(system);
+    }
+    assert_eq!(systems[0], systems[1], "system text is the same for both");
+}
+
 #[tokio::test]
 async fn get_proposals_description_documents_the_response() {
     let server = MockServer::start();

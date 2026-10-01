@@ -704,6 +704,8 @@ impl PartialStore {
 impl Storage for PartialStore {
     type Error = TestError;
 
+    // `fetch_update` is `try_update` from Rust 1.99, which 1.98 lacks
+    #[allow(deprecated)]
     async fn save_raw(
         &mut self,
         id: AgentId,
@@ -755,6 +757,8 @@ impl FlakyModels {
 impl Inference for FlakyModels {
     type Error = TestError;
 
+    // `fetch_update` is `try_update` from Rust 1.99, which 1.98 lacks
+    #[allow(deprecated)]
     async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
     where
         P: Serialize + Send,
@@ -762,6 +766,8 @@ impl Inference for FlakyModels {
         Ok(message(StopReason::EndTurn))
     }
 
+    // `fetch_update` is `try_update` from Rust 1.99, which 1.98 lacks
+    #[allow(deprecated)]
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
         let failing = self
             .failures_left
@@ -803,6 +809,8 @@ impl FlakyInfer {
 impl Inference for FlakyInfer {
     type Error = TestError;
 
+    // `fetch_update` is `try_update` from Rust 1.99, which 1.98 lacks
+    #[allow(deprecated)]
     async fn infer<P>(&self, _prompt: P) -> Result<response::Message, TestError>
     where
         P: Serialize + Send,

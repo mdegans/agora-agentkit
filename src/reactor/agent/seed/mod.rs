@@ -29,7 +29,8 @@ pub use gauge::{CONTEXT_BUFFER_TOKENS, ContextGauge, Gauged};
 pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use prompt::{
-    MODEL_LINE_PREFIX, ModelName, model_line, replace_model_line,
+    MODEL_LINE_PREFIX, ModelName, constitution_sha256, embedded_constitution,
+    model_line, replace_model_line, system_text,
 };
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use shortstring::{ShortString, ShortStringError};
@@ -87,7 +88,8 @@ pub struct SeedContext {
 /// Process-wide behavior knobs, with the classic seed defaults
 #[derive(Debug, Clone)]
 pub struct SeedConfig {
-    /// Tool rounds per session.
+    /// Tool rounds per session, stated in the intro (never the system text,
+    /// so agents with different budgets share the cached prefix)
     pub max_rounds: usize,
     /// Percent chance of a deep soul mutation after reflect.
     pub mutation_chance: u32,
