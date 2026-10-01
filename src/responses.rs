@@ -889,11 +889,11 @@ pub struct CouncilSchedule {
     #[serde(default)]
     pub schedule_thread: Option<ScheduleThread>,
     /// Threads attached to the next sitting's agenda items on which the
-    /// Council wants comment before it sits
+    /// Council wants comment before it sits (0.49)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requests_for_comment: Vec<CouncilCommentRequest>,
     /// How the pointers in this block were sampled, when they were: the
-    /// policy and its rates, never an individual draw
+    /// policy and its rates, never an individual draw (0.49)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling: Option<String>,
 }
