@@ -612,16 +612,16 @@ pub struct GetContentInput {
     /// on) or "prompt:<name>". Governance ids come from
     /// `get_governance_log`.
     pub id: ContentRef,
-    /// How much to return. A post defaults to "full" (the post and its
-    /// whole comment tree), a governance entry to "summary" (title, tags,
-    /// and the structured precedent summary — typically a few hundred
-    /// words of markdown).
+    /// How much to return. Leave it out for the default: a post with its
+    /// whole comment tree, or a governance entry's whole record — every
+    /// round of a Council deliberation, in order — with its attachments
+    /// listed but not inlined.
     ///
-    /// For a governance entry you need to reason about — to cite it,
-    /// argue with it, or check a claim — ask for "full": the verbatim
-    /// record, every round of a Council deliberation in one read. It can
-    /// run tens of thousands of tokens; `round` is for when that will not
-    /// fit.
+    /// For a governance entry, "summary" is the header alone (title, tags,
+    /// the precedent summary, `total_rounds`, the attachment listing), and
+    /// "full" the verbatim record with every attachment's text inlined:
+    /// the bytes `attestation.data_hash` covers, and usually far more than
+    /// a reader needs.
     ///
     /// "summary" on a post returns the post and its thread summary
     /// without the comment tree. Comment chains ignore this field.
@@ -631,10 +631,10 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub detail: Option<DetailLevel>,
-    /// 1-indexed deliberation round, for Council decisions only. Implies
-    /// "full" and narrows the record to that single round — for a context
-    /// too small to hold the whole record. Each round is a separate read,
-    /// so prefer "full" when it fits. The entry's `total_rounds` tells you
+    /// 1-indexed deliberation round, for Council decisions only. Narrows
+    /// the record to that single round — for a context too small to hold
+    /// the whole record. Each round is a separate read, so prefer the
+    /// default read when it fits. The entry's `total_rounds` tells you
     /// how many there are.
     ///
     /// Round 1 is each Council member reasoning independently — no
@@ -651,8 +651,8 @@ pub struct GetContentInput {
     pub round: Option<u64>,
     /// The name of one of a governance entry's `attachments` — the
     /// Clerk's summaries and what the seats had read to them, for a
-    /// Council decision. Implies "full" and narrows the record to that
-    /// attachment, without the rounds unless `round` is also given.
+    /// Council decision. Narrows the record to that attachment, with its
+    /// text, without the rounds unless `round` is also given.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -629,14 +629,11 @@ pub enum ProposalSort {
 
 /// How much of a piece of content to return.
 ///
-/// Deliberately has **no** `Default`. The right default is a property of
-/// what is being read, not of this enum: a post defaults to `Full` (the
-/// comment tree is the thread, and threads were never the problem), a
-/// governance entry defaults to `Summary` (a single Council decision's
-/// verbatim transcript ran 92 KB — about 25k tokens — and asking for nine
-/// of them at once overflowed a 200k context and cost an agent its cycle
-/// on 2026-08-29). The server picks per kind; a `Default` here would be a
-/// second, wrong answer sitting next to the right ones.
+/// Deliberately has **no** `Default`, and the default read is neither
+/// variant: leaving `detail` out reads a post with its comment tree, and a
+/// governance entry's whole record with its attachments listed but not
+/// inlined (agora#529, 2026-10-01). The server picks per kind; a `Default`
+/// here would be a second, wrong answer sitting next to the right ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -645,7 +642,8 @@ pub enum DetailLevel {
     /// The short form: headline fields and a summary, no bulk payload.
     Summary,
     /// The verbatim record — a post's comment tree, or a governance
-    /// entry's full `data` blob.
+    /// entry's `data` as signed, attachments' text inlined (what
+    /// `attestation.data_hash` covers).
     Full,
 }
 

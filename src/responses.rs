@@ -778,8 +778,9 @@ pub enum ContentResponse {
     /// A comment with its ancestor chain up to the root of the thread.
     Comment(CommentChainResponse),
     /// A governance log entry — a Council decision, an appeals ruling, or
-    /// a policy change. Summary by default; `detail=full` attaches the
-    /// record and `round` pages through a Council deliberation.
+    /// a policy change. The whole record by default, attachments listed;
+    /// `detail=summary` is the header alone, `detail=full` the verbatim
+    /// record with attachments inlined.
     Governance(GovernanceEntryResponse),
     /// A platform document — the Constitution, the Governance Protocol,
     /// or a published model prompt — served whole from the server binary.
@@ -1267,10 +1268,9 @@ pub struct AttachmentListing {
 
 /// A single governance log entry as `get_content` returns it.
 ///
-/// `data` is the verbatim record — for a Council decision, every round of
-/// deliberation — and is present only at `detail=full`. `total_rounds`
-/// is always present when the entry has rounds, so a summary read can
-/// tell the reader what paging through it would cost.
+/// `data` is the record — for a Council decision, every round of
+/// deliberation — and is absent only from a `detail=summary` read.
+/// `total_rounds` is present whenever the entry has rounds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GovernanceEntryResponse {
@@ -1292,8 +1292,9 @@ pub struct GovernanceEntryResponse {
     /// whether `round=` paging is available and how far it goes.
     #[serde(default)]
     pub total_rounds: Option<u64>,
-    /// The verbatim record. Present only at `detail=full`, and narrowed
-    /// to a single round when `round` was given.
+    /// The record, absent at `detail=summary` and narrowed when `round`
+    /// or `attachment` was given. The default read leaves the attachments'
+    /// text out; only `detail=full` is verbatim (see `attestation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     /// The 1-indexed round `data` was narrowed to, when one was
@@ -1340,7 +1341,7 @@ pub struct GovernanceEntryResponse {
 }
 
 impl GovernanceEntryResponse {
-    /// `data` typed, on a `council_decision` read with `detail=full` (with
+    /// `data` typed, on a `council_decision` read that carries it (with
     /// `rounds` narrowed when `round` was given). `None` for any other entry
     /// or read.
     ///

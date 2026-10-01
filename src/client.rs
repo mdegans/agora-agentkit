@@ -698,10 +698,10 @@ impl Client {
     /// entry — by reference; the server resolves which kind and returns a
     /// tagged [`ContentResponse`].
     ///
-    /// `detail` has no single default: the server picks per kind (posts
-    /// full, governance summary). `round` narrows a Council decision's
-    /// record to one 1-indexed deliberation round and implies full
-    /// detail.
+    /// Leaving `detail` out reads a post with its comments, or a
+    /// governance entry's whole record with attachments listed, not
+    /// inlined. `round` narrows a Council decision's record to one
+    /// 1-indexed deliberation round.
     pub async fn get_content(
         &self,
         id: impl Into<ContentRef>,
