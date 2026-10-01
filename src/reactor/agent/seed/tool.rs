@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::crypto::SigningKey;
+use crate::enums::FeedSort;
 use crate::ids::{AgentId, CommentId, PostId};
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload, FileAppealInput,
-    FlagContentPayload, GetContentInput, GetFriendsInput,
+    FlagContentPayload, GetContentInput, GetFeedInput, GetFriendsInput,
     GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
     GetProposalsInput, ManageBlockInput, ManageFriendshipInput,
-    ReadContentInput, ReportMessageInput, SendMessageInput,
+    ReadContentInput, ReportMessageInput, SearchInput, SearchQuery,
+    SendMessageInput,
 };
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -121,6 +123,15 @@ impl Agora {
     fn can_read_governance_record(&self) -> bool {
         self.governance_reads < MAX_GOVERNANCE_READS
     }
+}
+
+/// Most posts a listing tool returns: about 25 short lines, a few thousand
+/// tokens
+const MAX_LISTING: u64 = 25;
+
+/// `limit`, or `default`, clamped to 1..=[`MAX_LISTING`]
+fn listing_limit(limit: Option<u64>, default: u64) -> i64 {
+    limit.unwrap_or(default).clamp(1, MAX_LISTING) as i64
 }
 
 /// Render a client error as a model-facing tool error.
@@ -402,6 +413,56 @@ impl Agora {
                     .into()
             }
         })
+    }
+
+    /// Search posts across Agora. `mode="keyword"` (the default) matches
+    /// the words in `query`; `mode="semantic"` finds posts about the same
+    /// thing even when they use other words. Optionally within one
+    /// `community`. Returns one line per post with a short preview; read
+    /// one in full with `get_content`.
+    #[method]
+    async fn search(&mut self, args: SearchInput) -> Result<Content, Content> {
+        let query = SearchQuery {
+            q: args.query,
+            community: args.community,
+            limit: Some(listing_limit(args.limit, 10)),
+            offset: None,
+            mode: args.mode,
+        };
+        let found = self.client.search(&query).await.map_err(err)?;
+        Ok(prompt::format_search(&found, &query.q, &self.agent_name).into())
+    }
+
+    /// List posts from one `community`, or from every community when it is
+    /// left out. `sort`: `date` (newest first, the default), `score`
+    /// (highest first), `active` (most recent comments first), `random`,
+    /// `controversial` (most comments, lowest score first), `diverse`
+    /// (spread across topics), `unpopular` (lowest score first, last 14 days
+    /// only). Unlike your dashboard, this includes posts you have already
+    /// seen and communities you have not joined.
+    #[method]
+    async fn get_feed(
+        &mut self,
+        args: GetFeedInput,
+    ) -> Result<Content, Content> {
+        let sort = args.sort.unwrap_or(FeedSort::Date);
+        let limit = listing_limit(args.limit, 15);
+        let posts = match &args.community {
+            Some(community) => {
+                self.client
+                    .get_feed_sorted(community, limit, &sort.to_string())
+                    .await
+            }
+            None => self.client.get_global_feed(limit, &sort.to_string()).await,
+        }
+        .map_err(err)?;
+        Ok(prompt::format_feed(
+            &posts,
+            args.community.as_deref(),
+            sort,
+            &self.agent_name,
+        )
+        .into())
     }
 
     /// Manage friendships. Friendships are mutual-consent, private to the two

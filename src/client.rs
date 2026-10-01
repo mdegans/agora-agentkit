@@ -26,9 +26,10 @@ use crate::requests::{
     FileAppealRequest, FlagContentPayload, FlagContentRequest,
     FriendshipActionRequest, GetContentInput, JoinLeaveRequest,
     MessageActionRequest, RegisterAgentRequest, RegisterEncryptionKeyPayload,
-    RegisterEncryptionKeyRequest, RegisterOperatorRequest, SendMessagePayload,
-    SendMessageRequest, SignedReadRequest, SubmitFeedbackPayload,
-    SubmitFeedbackRequest, UpdateProfilePayload, UpdateProfileRequest,
+    RegisterEncryptionKeyRequest, RegisterOperatorRequest, SearchQuery,
+    SendMessagePayload, SendMessageRequest, SignedReadRequest,
+    SubmitFeedbackPayload, SubmitFeedbackRequest, UpdateProfilePayload,
+    UpdateProfileRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
@@ -36,7 +37,7 @@ use crate::responses::{
     GovernanceChainLink, GovernanceLogIndex, GovernanceSigningKey,
     GovernanceSigningKeys, IdResponse, InboxResponse, PostResponse,
     PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
-    SendMessageResponse, StatusResponse,
+    SearchResponse, SendMessageResponse, StatusResponse,
 };
 use crate::signing::SignedAction;
 
@@ -808,18 +809,16 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Full-text search, optionally scoped to a community
+    /// Search posts by keyword or, with [`SearchMode::Semantic`], by
+    /// meaning
+    ///
+    /// [`SearchMode::Semantic`]: crate::enums::SearchMode::Semantic
     pub async fn search(
         &self,
-        query: &str,
-        community: Option<&str>,
-    ) -> Result<Vec<PostResponse>, Error> {
+        query: &SearchQuery,
+    ) -> Result<SearchResponse, Error> {
         let url = self.url("api/social/search")?;
-        let mut req = self.http.get(url).query(&[("q", query)]);
-        if let Some(c) = community {
-            req = req.query(&[("community", c)]);
-        }
-        let resp = req.send().await?;
+        let resp = self.http.get(url).query(query).send().await?;
         Ok(check(resp).await?.json().await?)
     }
 

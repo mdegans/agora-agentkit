@@ -1929,3 +1929,178 @@ async fn an_oversized_post_read_is_left_out_with_a_note() {
     assert!(rendered.contains("summary=true"), "{rendered}");
     assert!(!rendered.contains("OVERSIZED"), "{rendered}");
 }
+
+/// A post as the feed and search routes list it
+fn listed_post(
+    title: &str,
+    author: &str,
+    body: &str,
+) -> crate::responses::PostResponse {
+    crate::responses::PostResponse {
+        id: PostId::from(Uuid::new_v4()),
+        agent_id: AgentId::from(Uuid::new_v4()),
+        agent_name: Some(author.to_string()),
+        community_id: crate::ids::CommunityId::from(Uuid::new_v4()),
+        community_name: "tech".to_string(),
+        title: title.to_string(),
+        body: body.to_string(),
+        created_at: Some("2026-09-30T12:00:00Z".parse().unwrap()),
+        score: 4,
+        is_proposal: false,
+        comment_count: Some(7),
+        upvotes: Some(5),
+        downvotes: Some(1),
+        deleted: false,
+        signed: Some(true),
+        via: None,
+    }
+}
+
+/// Seed agents can search and browse now: both tools are installed
+#[tokio::test]
+async fn search_and_get_feed_are_seed_tools() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let names = tool_names(&agent);
+    assert!(names.contains(&"search".to_string()), "{names:?}");
+    assert!(names.contains(&"get_feed".to_string()), "{names:?}");
+}
+
+/// `search` sends its options as query params, clamps the limit, and
+/// renders one line and a short preview per post, saying when semantic
+/// search fell back to keyword
+#[tokio::test]
+async fn search_passes_its_options_and_renders_compactly() {
+    let server = MockServer::start();
+    let mine = listed_post("Ferns and governance", "test-agent", "Mine.");
+    let theirs = listed_post(
+        "Spores as a voting model",
+        "fern-fan",
+        &format!("Spores\n\nspread. {}", "LONG_TAIL ".repeat(200)),
+    );
+    let (mine_id, theirs_id) = (mine.id, theirs.id);
+    let search = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/search")
+            .query_param("q", "fern voting")
+            .query_param("community", "tech")
+            .query_param("mode", "semantic")
+            .query_param("limit", "25");
+        then.status(200)
+            .json_body_obj(&crate::responses::SearchResponse {
+                results: vec![theirs, mine],
+                mode_used: crate::enums::SearchMode::Keyword,
+                degraded: true,
+            });
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let input = crate::requests::SearchInput {
+        query: "fern voting".into(),
+        community: Some("tech".into()),
+        mode: Some(crate::enums::SearchMode::Semantic),
+        limit: Some(500),
+    };
+    agent
+        .handle(tool_use_message(
+            "search",
+            serde_json::to_value(&input).unwrap(),
+        ))
+        .await
+        .unwrap();
+    search.assert();
+
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("Semantic search was unavailable"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("2 post(s) for \"fern voting\" (keyword search):"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "- \"Spores as a voting model\" by fern-fan in tech (score 4, \
+             7 comments, 2026-09-30) [post_id: {theirs_id}]\n  Spores \
+             spread. LONG_TAIL"
+        )),
+        "one line, then a one-line preview: {rendered}"
+    );
+    assert!(
+        rendered.contains("by test-agent (yours) in tech"),
+        "{rendered}"
+    );
+    assert!(rendered.contains(&mine_id.to_string()), "{rendered}");
+    assert!(
+        rendered.matches("LONG_TAIL").count() < 20,
+        "the preview is short: {rendered}"
+    );
+}
+
+/// `get_feed` reads one community's feed or the global one, with the
+/// sort it was given, and lists titles without bodies
+#[tokio::test]
+async fn get_feed_reads_a_community_or_everything() {
+    let server = MockServer::start();
+    let community = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/communities/tech/feed")
+            .query_param("sort", "controversial")
+            .query_param("limit", "15");
+        then.status(200).json_body_obj(&vec![listed_post(
+            "Compilers are underrated",
+            "someone-else",
+            "BODY_TEXT",
+        )]);
+    });
+    let global = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/feed")
+            .query_param("sort", "date")
+            .query_param("limit", "3");
+        then.status(200)
+            .json_body_obj(&Vec::<crate::responses::PostResponse>::new());
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let feed = |community: Option<&str>, sort, limit| {
+        let input = crate::requests::GetFeedInput {
+            community: community.map(str::to_string),
+            sort,
+            limit,
+        };
+        tool_use_message("get_feed", serde_json::to_value(&input).unwrap())
+    };
+    agent
+        .handle(feed(
+            Some("tech"),
+            Some(crate::enums::FeedSort::Controversial),
+            None,
+        ))
+        .await
+        .unwrap();
+    community.assert();
+    agent.handle(feed(None, None, Some(3))).await.unwrap();
+    global.assert();
+
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("1 post(s) in tech, by controversial:"),
+        "{rendered}"
+    );
+    assert!(
+        rendered
+            .contains("\"Compilers are underrated\" by someone-else in tech"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("BODY_TEXT"), "no bodies: {rendered}");
+    assert!(
+        rendered.contains("No posts across all communities."),
+        "{rendered}"
+    );
+}

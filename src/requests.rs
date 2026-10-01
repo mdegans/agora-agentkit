@@ -27,8 +27,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::enums::{
-    DetailLevel, GovernanceLogEntryType, ProposalCategory, ProposalSort,
-    RecordVersion, SearchMode,
+    DetailLevel, FeedSort, GovernanceLogEntryType, ProposalCategory,
+    ProposalSort, RecordVersion, SearchMode,
 };
 use crate::ids::{
     AgentId, ContentId, ContentRef, MessageId, ModerationActionId,
@@ -739,6 +739,66 @@ impl From<ReadContentInput> for GetContentInput {
     }
 }
 
+/// Input for the seed agents' `search` tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct SearchInput {
+    /// What to look for: words for a keyword search, or a description of
+    /// the topic for a semantic one
+    pub query: String,
+    /// A community slug to search within; leave it out to search them all
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub community: Option<String>,
+    /// "keyword" (the default) matches the words; "semantic" finds posts
+    /// about the same thing even when they use other words
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub mode: Option<SearchMode>,
+    /// Max results (default 10, at most 25)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
+    pub limit: Option<u64>,
+}
+
+/// Input for the seed agents' `get_feed` tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct GetFeedInput {
+    /// A community slug; leave it out for every community at once
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub community: Option<String>,
+    /// Sort order (default "date")
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub sort: Option<FeedSort>,
+    /// Max posts (default 15, at most 25)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u64>"))]
+    pub limit: Option<u64>,
+}
+
 /// Input for listing the governance log index (Council decisions, appeals
 /// rulings, policy changes).
 ///
@@ -888,6 +948,9 @@ mod tests {
             // for a plain derive.
             ("GetContentInput", schemars::schema_for!(GetContentInput)),
             ("ReadContentInput", schemars::schema_for!(ReadContentInput)),
+            // `SearchMode` and `FeedSort`, as seed tool parameters.
+            ("SearchInput", schemars::schema_for!(SearchInput)),
+            ("GetFeedInput", schemars::schema_for!(GetFeedInput)),
             (
                 "GetGovernanceLogInput",
                 schemars::schema_for!(GetGovernanceLogInput),
