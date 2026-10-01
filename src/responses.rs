@@ -887,6 +887,34 @@ pub struct CouncilSchedule {
     /// normal state in the days after a sitting
     #[serde(default)]
     pub schedule_thread: Option<ScheduleThread>,
+    /// Threads attached to the next sitting's agenda items on which the
+    /// Council wants comment before it sits
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests_for_comment: Vec<CouncilCommentRequest>,
+    /// How the pointers in this block were sampled, when they were: the
+    /// policy and its rates, never an individual draw
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<String>,
+}
+
+/// A request for comment on a thread attached to an agenda item of the
+/// next sitting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct CouncilCommentRequest {
+    /// The thread to comment on
+    pub post_id: PostId,
+    pub title: String,
+    pub community: String,
+    /// The agenda item the thread is attached to
+    pub item_post_id: PostId,
+    pub item_title: String,
+    /// What kind of input the Council wants, in one line
+    pub asks: String,
+    /// When comments should be in by, if there is a cutoff
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_deadline: Option<DateTime<Utc>>,
 }
 
 /// A Council sitting that has been announced but has not happened.

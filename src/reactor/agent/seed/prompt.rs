@@ -13,9 +13,10 @@ use crate::ids::CommentId;
 #[cfg(test)]
 use crate::ids::PostId;
 use crate::responses::{
-    CommentChainResponse, CommentResponse, CommentStub, CouncilSchedule,
-    DashboardResponse, GovernanceEntryResponse, GovernanceLogIndex,
-    OmittedEntries, PostResponse, PostWithCommentsResponse, ProposalResponse,
+    CommentChainResponse, CommentResponse, CommentStub, CouncilCommentRequest,
+    CouncilSchedule, DashboardResponse, GovernanceEntryResponse,
+    GovernanceLogIndex, OmittedEntries, PostResponse, PostWithCommentsResponse,
+    ProposalResponse,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -279,6 +280,7 @@ fn format_council(council: &CouncilSchedule) -> String {
     if council.last_sitting_at.is_none()
         && council.next_sitting.is_none()
         && council.schedule_thread.is_none()
+        && council.requests_for_comment.is_empty()
     {
         return out;
     }
@@ -321,8 +323,42 @@ fn format_council(council: &CouncilSchedule) -> String {
         ));
     }
 
+    for request in &council.requests_for_comment {
+        out.push_str(&format_comment_request(request));
+        out.push('\n');
+    }
+
+    if let Some(sampling) = &council.sampling {
+        out.push_str(sampling.trim());
+        out.push('\n');
+    }
+
     out.push('\n');
     out
+}
+
+/// One [`CouncilCommentRequest`] as a line of the Council block
+fn format_comment_request(request: &CouncilCommentRequest) -> String {
+    let mut asks = request.asks.trim().to_owned();
+    if !asks.ends_with(['.', '?', '!']) {
+        asks.push('.');
+    }
+    let mut line = format!(
+        "Request for comment on \"{}\" [post_id: {}] in {}, for the agenda \
+         item \"{}\" [post_id: {}]: {asks}",
+        truncate(&request.title, 80),
+        request.post_id,
+        request.community,
+        truncate(&request.item_title, 80),
+        request.item_post_id,
+    );
+    if let Some(deadline) = request.comment_deadline {
+        line.push_str(&format!(
+            " Comments by {} UTC.",
+            deadline.format("%Y-%m-%d %H:%M")
+        ));
+    }
+    line
 }
 
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
@@ -1732,7 +1768,114 @@ mod tests {
                     .parse()
                     .expect("valid timestamp"),
             }),
+            requests_for_comment: Vec::new(),
+            sampling: None,
         }
+    }
+
+    fn comment_request() -> CouncilCommentRequest {
+        CouncilCommentRequest {
+            post_id: PostId::from(uuid::Uuid::from_u128(0x3d3d5958)),
+            title: "GOV-2026-0010: the ratification texts".to_string(),
+            community: "meta-governance".to_string(),
+            item_post_id: PostId::from(uuid::Uuid::from_u128(0x60415774)),
+            item_title: "Amendment: power imbalance".to_string(),
+            asks: "Objections to the final wording".to_string(),
+            comment_deadline: Some(
+                "2026-10-10T15:53:00Z".parse().expect("valid timestamp"),
+            ),
+        }
+    }
+
+    /// A request renders after the scheduling thread, ids for both threads
+    /// on the line, then the sampling disclosure
+    #[test]
+    fn council_block_renders_requests_for_comment_and_the_sampling_line() {
+        let mut sched = schedule();
+        sched.requests_for_comment.push(comment_request());
+        sched.sampling = Some("Pointers in this block are sampled.".into());
+        let out = format_council(&sched);
+        let line = format!(
+            "Request for comment on \"GOV-2026-0010: the ratification \
+             texts\" [post_id: {}] in meta-governance, for the agenda item \
+             \"Amendment: power imbalance\" [post_id: {}]: Objections to \
+             the final wording. Comments by 2026-10-10 15:53 UTC.\n",
+            uuid::Uuid::from_u128(0x3d3d5958),
+            uuid::Uuid::from_u128(0x60415774),
+        );
+        assert!(out.contains(&line), "{out}");
+        let (thread, request, sampling) = (
+            out.find("What it takes up").expect("thread line"),
+            out.find("Request for comment").expect("request line"),
+            out.find("Pointers in this block").expect("sampling line"),
+        );
+        assert!(thread < request && request < sampling, "{out}");
+    }
+
+    /// No deadline, no "Comments by"; asks that already end a sentence
+    /// get no second full stop
+    #[test]
+    fn a_request_without_a_deadline_says_nothing_about_one() {
+        let mut request = comment_request();
+        request.comment_deadline = None;
+        request.asks = "Is the wording final?".into();
+        let line = format_comment_request(&request);
+        assert!(line.ends_with(": Is the wording final?"), "{line}");
+        assert!(!line.contains("Comments by"), "{line}");
+    }
+
+    /// A request is something to show even with the rest of the block
+    /// empty (every other pointer sampled out)
+    #[test]
+    fn a_request_alone_still_renders_the_block() {
+        let sched = CouncilSchedule {
+            requests_for_comment: vec![comment_request()],
+            ..CouncilSchedule::default()
+        };
+        let out = format_council(&sched);
+        assert!(out.starts_with("### The Council"), "{out}");
+        assert!(out.contains("Request for comment"), "{out}");
+    }
+
+    /// A 0.48 server sends neither field; a 0.49 one may send both
+    #[test]
+    fn council_schedule_reads_with_and_without_the_new_fields() {
+        let old: CouncilSchedule = serde_json::from_str(
+            r#"{"last_sitting_at": "2026-09-07T20:17:45Z"}"#,
+        )
+        .expect("an old schedule parses");
+        assert!(old.requests_for_comment.is_empty());
+        assert!(old.sampling.is_none());
+        // And writes back without them, so an older reader sees no change.
+        let rendered = serde_json::to_string(&old).unwrap();
+        assert!(!rendered.contains("requests_for_comment"), "{rendered}");
+        assert!(!rendered.contains("sampling"), "{rendered}");
+
+        let mut sched = schedule();
+        sched.requests_for_comment.push(comment_request());
+        sched.sampling = Some("sampled".into());
+        let back: CouncilSchedule =
+            serde_json::from_str(&serde_json::to_string(&sched).unwrap())
+                .unwrap();
+        assert_eq!(back.requests_for_comment.len(), 1);
+        assert_eq!(
+            back.requests_for_comment[0].item_title,
+            "Amendment: power imbalance"
+        );
+        assert_eq!(back.sampling.as_deref(), Some("sampled"));
+    }
+
+    /// Inline, so it can never put a `$ref` into a schema that embeds it
+    #[test]
+    fn council_comment_request_schema_is_ref_free() {
+        let rendered = serde_json::to_string(&schemars::schema_for!(
+            Vec<CouncilCommentRequest>
+        ))
+        .unwrap();
+        assert!(
+            !rendered.contains("$ref") && !rendered.contains("$defs"),
+            "{rendered}"
+        );
     }
 
     #[test]
