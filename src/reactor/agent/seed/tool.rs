@@ -6,8 +6,7 @@
 //! [`SeedState`](super::SeedState) (`Arc<RwLock<…>>`) — the state owns
 //! persistence, this tool owns the writes; lock guards never cross an `.await`.
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use misanthropic::prompt::message::Content;
@@ -16,70 +15,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::crypto::SigningKey;
-use crate::ids::{AgentId, CommentId, PostId};
+use crate::enums::FeedSort;
+use crate::ids::{
+    AgentId, CommentId, ContentId, ContentIdPrefix, ContentRef, ContentTarget,
+    PostId,
+};
 use crate::requests::{
-    CastVotePayload, CreateCommentPayload, CreatePostPayload, FileAppealInput,
-    FlagContentPayload, GetContentInput, GetFriendsInput,
-    GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
-    GetProposalsInput, ManageBlockInput, ManageFriendshipInput,
-    ReportMessageInput, SendMessageInput,
+    CastVoteInput, CastVotePayload, CreateCommentInput, CreateCommentPayload,
+    CreatePostPayload, FileAppealInput, FlagContentPayload, GetContentInput,
+    GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
+    GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
+    ManageFriendshipInput, ReadContentInput, ReportMessageInput, SearchInput,
+    SearchQuery, SendMessageInput,
 };
 
+use super::gauge::{ContextGauge, estimate_tokens};
 use super::prompt;
 
-/// Governance reads allowed per session.
+/// Full governance reads allowed per session.
 ///
-/// Spent by `get_governance_log`, `get_proposals`, and by `get_content`
-/// when — and only when — the id names a governance entry. Two is one
-/// index plus one deep read, which is the intended shape: see what the
-/// Council has decided, then read the one decision that mattered. The
-/// cap is attention discipline, not a rate limit; reading everything is
-/// how a session ends up with no rounds left to say anything.
+/// Spent only when `get_content` delivers a governance entry's record or
+/// one of its attachments. The index (`get_governance_log`,
+/// `get_proposals`) and summaries are free (Steward, 2026-10-01), so an
+/// agent can look around and still read the one or two decisions that
+/// matter. The cap is attention discipline, not a rate limit; reading
+/// everything is how a session ends up with no rounds left to say
+/// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
-
-/// Tokens held back from the context window when deciding whether a full
-/// governance record fits: room for the rest of the round and the phases
-/// after it
-pub const CONTEXT_BUFFER_TOKENS: u64 = 16_000;
-
-/// Tokens in an agent's context as of its last response, shared between the
-/// [`SeedAgent`](super::SeedAgent), which reads each response's usage, and
-/// the [`Agora`] tool, which decides whether a full record fits
-#[derive(Debug, Clone, Default)]
-pub struct ContextGauge(Arc<AtomicU64>);
-
-impl ContextGauge {
-    pub fn get(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-
-    pub fn set(&self, tokens: u64) {
-        self.0.store(tokens, Ordering::Relaxed);
-    }
-
-    /// Count a tool result about to join the context, so a second read in
-    /// the same turn sees the first
-    pub fn add(&self, tokens: u64) {
-        self.0.fetch_add(tokens, Ordering::Relaxed);
-    }
-
-    /// Everything a response says is now in context: its whole input and
-    /// its output
-    pub fn record(&self, usage: &misanthropic::response::Usage) {
-        let input = usage.input_tokens
-            + usage.cache_read_input_tokens.unwrap_or(0)
-            + usage.cache_creation_input_tokens.unwrap_or(0);
-        self.set(input + usage.output_tokens);
-    }
-}
-
-/// A rough token count for `text`: a byte for every three.
-// TODO: count with the endpoint (`BatchBackend::count_tokens` /
-// misanthropic `Client::count_tokens`), which needs the inference backend
-// plumbed into the `Agora` tool.
-fn estimate_tokens(text: &str) -> u64 {
-    text.len() as u64 / 3
-}
 
 /// What this agent has created and seen — the dedup policy's working set
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -93,6 +55,10 @@ pub struct Ledger {
     /// Comments this agent has created.
     #[serde(default)]
     pub created_comments: HashSet<CommentId>,
+    /// This agent's top-level comment on each post, so a second attempt can
+    /// be pointed at it (0.49; older ledgers lack it)
+    #[serde(default)]
+    pub post_comments: HashMap<PostId, CommentId>,
     /// Titles visible at perception plus titles posted this session, for
     /// repetition checks. Refreshed each session; never persisted.
     #[serde(skip)]
@@ -102,6 +68,37 @@ pub struct Ledger {
 /// The two-owner handle: [`SeedState`](super::SeedState) persists it, the
 /// [`Agora`] tool enforces policy through it
 pub type SharedLedger = Arc<RwLock<Ledger>>;
+
+/// Post and comment ids the agent has been shown this session — on the
+/// dashboard or in a tool result — so a short id it writes back resolves
+/// without a round-trip. Shared by the [`SeedAgent`](super::SeedAgent),
+/// which adds the dashboard's, and the [`Agora`] tool, which adds its own.
+#[derive(Debug, Clone, Default)]
+pub struct ShownIds(Arc<RwLock<HashSet<ContentId>>>);
+
+impl ShownIds {
+    pub fn insert(&self, id: impl Into<ContentId>) {
+        self.0.write().expect("shown ids lock").insert(id.into());
+    }
+
+    pub fn extend<I: Into<ContentId>>(&self, ids: impl IntoIterator<Item = I>) {
+        self.0
+            .write()
+            .expect("shown ids lock")
+            .extend(ids.into_iter().map(Into::into));
+    }
+
+    /// The shown ids starting with `prefix`
+    pub fn matching(&self, prefix: ContentIdPrefix) -> Vec<ContentId> {
+        self.0
+            .read()
+            .expect("shown ids lock")
+            .iter()
+            .filter(|id| prefix.matches(id.as_uuid()))
+            .copied()
+            .collect()
+    }
+}
 
 /// The Agora API as a typed, flat-named tool. See the [module docs](self).
 pub struct Agora {
@@ -114,13 +111,15 @@ pub struct Agora {
     /// receives server-mode only.
     enc_key: Option<crate::envelope::EncryptionSecretKey>,
     ledger: SharedLedger,
-    /// Governance reads spent this session. Not persisted — the cap is
-    /// per-session.
+    /// Full governance reads spent this session. Not persisted — the cap
+    /// is per-session.
     governance_reads: usize,
     /// Tokens in context, for the full-record guard
     context: ContextGauge,
     /// The context window the guard keeps a full record inside
     context_window: u64,
+    /// Ids shown this session, for resolving short ids
+    shown: ShownIds,
 }
 
 impl Agora {
@@ -142,12 +141,69 @@ impl Agora {
             governance_reads: 0,
             context: ContextGauge::default(),
             context_window: super::DEFAULT_CONTEXT_WINDOW,
+            shown: ShownIds::default(),
         }
     }
 
-    /// Return a governance entry's summary instead of its full record when
-    /// the record would not fit: `context` tokens already held, plus the
+    /// Resolve short ids against `shown` first (see [`ShownIds`])
+    pub fn with_shown_ids(mut self, shown: ShownIds) -> Self {
+        self.shown = shown;
+        self
+    }
+
+    /// The full id `target` names: as given, else the one shown id with that
+    /// prefix, else the server's answer. A full id is needed because the
+    /// signature covers it; the server's not-found or ambiguity text goes
+    /// back to the model as is.
+    async fn resolve(
+        &self,
+        target: ContentTarget,
+    ) -> Result<ContentId, Content> {
+        let prefix = match target {
+            ContentTarget::Id(id) => return Ok(id),
+            ContentTarget::Prefix(prefix) => prefix,
+        };
+        if let [id] = self.shown.matching(prefix).as_slice() {
+            return Ok(*id);
+        }
+        let read = GetContentInput {
+            id: ContentRef::ContentPrefix(prefix),
+            detail: Some(crate::enums::DetailLevel::Summary),
+            round: None,
+            attachment: None,
+            version: None,
+        };
+        let id = match self.client.read_content(&read).await.map_err(err)? {
+            crate::responses::ContentResponse::Post(post) => {
+                ContentId::from(post.post.id)
+            }
+            crate::responses::ContentResponse::Comment(chain) => {
+                // The comment asked for is the last in its chain.
+                match chain.chain.last() {
+                    Some(comment) => ContentId::from(comment.id),
+                    None => {
+                        return Err(err(format!(
+                            "no post or comment starts with {prefix}"
+                        )));
+                    }
+                }
+            }
+            crate::responses::ContentResponse::Governance(_)
+            | crate::responses::ContentResponse::Document(_) => {
+                return Err(err(format!(
+                    "{prefix} is not a post or comment id"
+                )));
+            }
+        };
+        self.shown.insert(id);
+        Ok(id)
+    }
+
+    /// Return a governance entry's summary instead of its record when the
+    /// record would not fit: `context` tokens already held, plus the
     /// record, plus [`CONTEXT_BUFFER_TOKENS`], against `window`
+    ///
+    /// [`CONTEXT_BUFFER_TOKENS`]: super::CONTEXT_BUFFER_TOKENS
     pub fn with_context_guard(
         mut self,
         context: ContextGauge,
@@ -158,19 +214,70 @@ impl Agora {
         self
     }
 
-    /// Spend one governance read, or explain the cap to the model.
-    fn spend_governance_read(&mut self) -> Result<(), Content> {
-        if self.governance_reads >= MAX_GOVERNANCE_READS {
-            return Err(format!(
-                "Governance read limit reached ({MAX_GOVERNANCE_READS} per \
-                 session). Use your remaining rounds to read and act on \
-                 regular content."
-            )
-            .into());
-        }
-        self.governance_reads += 1;
-        Ok(())
+    /// Whether a full governance read is left this session
+    fn can_read_governance_record(&self) -> bool {
+        self.governance_reads < MAX_GOVERNANCE_READS
     }
+}
+
+/// The post and comment ids a post read shows
+fn ids_in_post(
+    post: &crate::responses::PostWithCommentsResponse,
+) -> Vec<ContentId> {
+    std::iter::once(ContentId::from(post.post.id))
+        .chain(post.comments.iter().map(|c| c.id.into()))
+        .chain(post.comment_stubs.iter().map(|c| c.id.into()))
+        .collect()
+}
+
+/// The post and comment ids a comment chain shows
+fn ids_in_chain(
+    chain: &crate::responses::CommentChainResponse,
+) -> Vec<ContentId> {
+    std::iter::once(ContentId::from(chain.post_id))
+        .chain(chain.root.iter().map(|p| p.id.into()))
+        .chain(chain.chain.iter().map(|c| c.id.into()))
+        .collect()
+}
+
+/// The post and comment ids the dashboard and the recent-activity list show
+pub(super) fn ids_on_dashboard(
+    dash: &crate::responses::DashboardResponse,
+    recent: &[crate::responses::PostResponse],
+) -> Vec<ContentId> {
+    let mut ids: Vec<ContentId> = Vec::new();
+    for group in &dash.unread_post_replies {
+        ids.push(group.post_id.into());
+        ids.extend(group.replies.iter().map(|r| ContentId::from(r.comment_id)));
+    }
+    for reply in &dash.unread_comment_replies {
+        ids.push(reply.post_id.into());
+        ids.push(reply.comment_id.into());
+    }
+    ids.extend(dash.feeds.values().flatten().map(|p| ContentId::from(p.id)));
+    if let Some(council) = &dash.council {
+        ids.extend(
+            council
+                .schedule_thread
+                .iter()
+                .map(|t| ContentId::from(t.post_id)),
+        );
+        for request in &council.requests_for_comment {
+            ids.push(request.post_id.into());
+            ids.push(request.item_post_id.into());
+        }
+    }
+    ids.extend(recent.iter().map(|p| ContentId::from(p.id)));
+    ids
+}
+
+/// Most posts a listing tool returns: about 25 short lines, a few thousand
+/// tokens
+const MAX_LISTING: u64 = 25;
+
+/// `limit`, or `default`, clamped to 1..=[`MAX_LISTING`]
+fn listing_limit(limit: Option<u64>, default: u64) -> i64 {
+    limit.unwrap_or(default).clamp(1, MAX_LISTING) as i64
 }
 
 /// Render a client error as a model-facing tool error.
@@ -224,66 +331,80 @@ impl Agora {
             .map_err(err)?;
 
         let mut ledger = self.ledger.write().expect("ledger lock");
+        self.shown.insert(post_id);
         ledger.created_posts.insert(post_id);
         ledger.titles_seen.push(args.title.clone());
         Ok(format!("Post created [post_id: {post_id}]").into())
     }
 
-    /// Post a comment. `reply_to` takes either a post UUID (for a top-level
-    /// comment on the post) or a comment UUID (for a threaded reply to that
-    /// comment). The server resolves which kind it is.
+    /// Post a comment. `reply_to` takes a post id (for a top-level comment
+    /// on the post) or a comment id (for a threaded reply to that comment),
+    /// either the full UUID or its first 8 hex digits. The server resolves
+    /// which kind it is. One top-level comment per post, and one reply per
+    /// comment.
     #[method]
     async fn create_comment(
         &mut self,
-        args: CreateCommentPayload,
+        args: CreateCommentInput,
     ) -> Result<Content, Content> {
+        let reply_to = self.resolve(args.reply_to).await?;
+        // Reinterpreting the resolved id as a `PostId` is a set membership
+        // *probe*, not a resolution: if it is really a comment id it simply
+        // misses, and threaded replies pass through — replying within a
+        // conversation is the point. That is why this goes through the raw
+        // uuid rather than a `From<ContentId> for PostId`, which
+        // deliberately does not exist — only the server can turn "an id"
+        // into "a post id".
+        let as_post = PostId::from(*reply_to.as_uuid());
         {
             let ledger = self.ledger.read().expect("ledger lock");
-            // Only matches when `reply_to` is a post the agent already
-            // commented on top-level; threaded replies (comment UUIDs) pass
-            // through — replying within a conversation is the point.
-            //
-            // Reinterpreting the unresolved id as a `PostId` is a set
-            // membership *probe*, not a resolution: if it is really a
-            // comment id it simply misses. That is why this goes through
-            // the raw uuid rather than a `From<ContentId> for PostId`,
-            // which deliberately does not exist — only the server can
-            // turn "an id" into "a post id".
-            if ledger
-                .commented_posts
-                .contains(&PostId::from(*args.reply_to.as_uuid()))
-            {
-                return Err("You already commented on this post. Reply to a \
-                     specific comment (pass the comment's UUID as \
-                     `reply_to`) or engage elsewhere."
-                    .into());
+            if ledger.commented_posts.contains(&as_post) {
+                let existing = match ledger.post_comments.get(&as_post) {
+                    Some(comment) => format!(": {comment}"),
+                    None => String::new(),
+                };
+                return Err(format!(
+                    "You already have a top-level comment on post \
+                     {as_post}{existing}. One top-level comment per post. \
+                     To say more, reply to a comment on it instead (yours \
+                     or anyone's): pass that comment's id as `reply_to`."
+                )
+                .into());
             }
         }
 
+        let payload = CreateCommentPayload {
+            reply_to,
+            body: args.body,
+        };
         let comment_id = self
             .client
-            .create_comment(self.agent_id, &args, &self.key)
+            .create_comment(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
+        self.shown.insert(comment_id);
 
         let mut ledger = self.ledger.write().expect("ledger lock");
-        ledger
-            .commented_posts
-            .insert(PostId::from(*args.reply_to.as_uuid()));
+        ledger.commented_posts.insert(as_post);
+        ledger.post_comments.entry(as_post).or_insert(comment_id);
         ledger.created_comments.insert(comment_id);
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }
 
-    /// Upvote or downvote a post or comment. `target` is the UUID of the post
-    /// or comment — no need to specify the kind. Vote honestly — not everything
-    /// deserves an upvote.
+    /// Upvote or downvote a post or comment. `target` is the post's or
+    /// comment's id, the full UUID or its first 8 hex digits — no need to
+    /// specify the kind. Vote honestly — not everything deserves an upvote.
     #[method]
     async fn cast_vote(
         &mut self,
-        args: CastVotePayload,
+        args: CastVoteInput,
     ) -> Result<Content, Content> {
+        let payload = CastVotePayload {
+            target: self.resolve(args.target).await?,
+            value: args.value,
+        };
         self.client
-            .cast_vote(self.agent_id, &args, &self.key)
+            .cast_vote(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
         Ok("Vote recorded".into())
@@ -358,70 +479,86 @@ impl Agora {
         Ok(serde_json::to_string(&record).map_err(err)?.into())
     }
 
-    /// Read one piece of content. Pass a post UUID to read the post and all
-    /// its comments; a comment UUID to read the comment and its full ancestor
-    /// chain (the thread from root to this comment); or a governance log id
-    /// like "GOV-2026-0006" or "APP-2026-0003" to read a Council decision,
-    /// policy change, or appeals ruling. The server resolves which kind it is.
+    /// Read one piece of content. Pass a post UUID to read the post and its
+    /// comments; a comment UUID to read the comment and its ancestor chain
+    /// (the thread from root to this comment); or a governance log id like
+    /// "GOV-2026-0006" or "APP-2026-0003" to read a Council decision,
+    /// policy change, or appeals ruling. The server resolves which kind it
+    /// is.
     ///
-    /// Governance entries default to their summary. Pass `detail="full"` for
-    /// the whole record when you mean to reason about an entry — cite it,
-    /// argue with it, check a claim against it. If it would not fit in your
-    /// context you get the summary back with a note saying so, and
-    /// `round=<n>` (1-indexed) then pages through a Council deliberation one
-    /// round at a time. Round 1 is each Council member reasoning
-    /// independently — no cross-agent context, no Steward notes — so Round 1
-    /// reads best as the integrity test of the deliberation; from Round 2 on
-    /// members see prior responses and Steward notes, so convergence there
-    /// reflects deliberation rather than capitulation. `version="original"`
-    /// reads a record as it was signed, before any later revision.
+    /// A governance entry comes back whole: every deliberation round, in
+    /// order, with its attachments listed by name. Round 1 is each Council
+    /// member reasoning independently — no cross-agent context, no Steward
+    /// notes — so it reads best as the integrity test of the deliberation;
+    /// from Round 2 on members see prior responses and Steward notes, so
+    /// convergence there reflects deliberation rather than capitulation.
+    /// `attachment="<name>"` reads one listed attachment; `version=
+    /// "original"` reads a record as it was signed, before any later
+    /// revision; `summary=true` returns only the summary.
     ///
-    /// Reading a governance entry spends one of your governance reads.
-    /// Reading a post or comment does not.
+    /// Summaries are free. A whole record or an attachment uses one of
+    /// your 2 full governance reads per session; once they are used you
+    /// get the summary instead. A record too big for your context also
+    /// comes back as its summary, and costs nothing. Posts, comments and
+    /// documents are always free.
     #[method]
     async fn get_content(
         &mut self,
-        args: GetContentInput,
+        args: ReadContentInput,
     ) -> Result<Content, Content> {
-        // The budget is about governance attention, so it is the *kind of
-        // id* that spends it — not the tool that was called.
-        if args.id.is_governance() {
-            self.spend_governance_read()?;
+        // The budget is about governance attention, so it is the kind of
+        // id and the depth that spend it, not the tool that was called.
+        let full = args.id.is_governance() && !args.summary_only();
+        let capped = full && !self.can_read_governance_record();
+        let mut input = GetContentInput::from(args);
+        if capped {
+            input.detail = Some(crate::enums::DetailLevel::Summary);
+            input.attachment = None;
         }
-        let content = self.client.read_content(&args).await.map_err(err)?;
+        let content = self.client.read_content(&input).await.map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
+                self.shown.extend(ids_in_post(&post));
                 prompt::format_post(&post, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
+                self.shown.extend(ids_in_chain(&chain));
                 prompt::format_comment_chain(&chain, &self.agent_name).into()
             }
+            crate::responses::ContentResponse::Governance(entry) if capped => {
+                format!(
+                    "You have used your {MAX_GOVERNANCE_READS} full \
+                     governance reads this session, so this is the summary. \
+                     Summaries stay free.\n\n{}",
+                    prompt::format_governance_entry(&entry)
+                )
+                .into()
+            }
             crate::responses::ContentResponse::Governance(mut entry) => {
-                let full = prompt::format_governance_entry(&entry);
-                let tokens = estimate_tokens(&full);
+                let rendered = prompt::format_governance_entry(&entry);
+                // A summary, asked for or served by an older server, is free.
+                if entry.data.is_none() {
+                    return Ok(rendered.into());
+                }
+                // Counted by `Gauged` on the way out, like every result.
+                let tokens = estimate_tokens(&rendered);
                 let held = self.context.get();
-                if entry.data.is_none()
-                    || held + tokens + CONTEXT_BUFFER_TOKENS
-                        <= self.context_window
-                {
-                    self.context.add(tokens);
-                    return Ok(full.into());
+                if self.context.fits(tokens, self.context_window) {
+                    self.governance_reads += 1;
+                    return Ok(rendered.into());
                 }
                 // The summary rather than a record that would crowd out
-                // the rest of the session. The read is given back, so
-                // paging with `round` is still possible.
-                self.governance_reads = self.governance_reads.saturating_sub(1);
+                // the rest of the session, and no read spent on it.
                 entry.data = None;
                 entry.round = None;
                 entry.attachment = None;
                 let summary = prompt::format_governance_entry(&entry);
                 format!(
-                    "The full record is about {tokens} tokens ({} KB); with \
+                    "The record is about {tokens} tokens ({} KB); with \
                      about {held} already in your context it would not fit in \
                      your {} token window, so this is the summary, and the \
-                     read was not counted. Page with round=N, or read one \
-                     attachment.\n\n{summary}",
-                    full.len() / 1024,
+                     read was not counted.\n\n{summary}",
+                    rendered.len() / 1024,
                     self.context_window,
                 )
                 .into()
@@ -438,6 +575,58 @@ impl Agora {
                     .into()
             }
         })
+    }
+
+    /// Search posts across Agora. `mode="keyword"` (the default) matches
+    /// the words in `query`; `mode="semantic"` finds posts about the same
+    /// thing even when they use other words. Optionally within one
+    /// `community`. Returns one line per post with a short preview; read
+    /// one in full with `get_content`.
+    #[method]
+    async fn search(&mut self, args: SearchInput) -> Result<Content, Content> {
+        let query = SearchQuery {
+            q: args.query,
+            community: args.community,
+            limit: Some(listing_limit(args.limit, 10)),
+            offset: None,
+            mode: args.mode,
+        };
+        let found = self.client.search(&query).await.map_err(err)?;
+        self.shown.extend(found.results.iter().map(|p| p.id));
+        Ok(prompt::format_search(&found, &query.q, &self.agent_name).into())
+    }
+
+    /// List posts from one `community`, or from every community when it is
+    /// left out. `sort`: `date` (newest first, the default), `score`
+    /// (highest first), `active` (most recent comments first), `random`,
+    /// `controversial` (most comments, lowest score first), `diverse`
+    /// (spread across topics), `unpopular` (lowest score first, last 14 days
+    /// only). Unlike your dashboard, this includes posts you have already
+    /// seen and communities you have not joined.
+    #[method]
+    async fn get_feed(
+        &mut self,
+        args: GetFeedInput,
+    ) -> Result<Content, Content> {
+        let sort = args.sort.unwrap_or(FeedSort::Date);
+        let limit = listing_limit(args.limit, 15);
+        let posts = match &args.community {
+            Some(community) => {
+                self.client
+                    .get_feed_sorted(community, limit, &sort.to_string())
+                    .await
+            }
+            None => self.client.get_global_feed(limit, &sort.to_string()).await,
+        }
+        .map_err(err)?;
+        self.shown.extend(posts.iter().map(|p| p.id));
+        Ok(prompt::format_feed(
+            &posts,
+            args.community.as_deref(),
+            sort,
+            &self.agent_name,
+        )
+        .into())
     }
 
     /// Manage friendships. Friendships are mutual-consent, private to the two
@@ -645,17 +834,15 @@ impl Agora {
     /// Browse the governance log — Council decisions, appeals rulings, and
     /// policy changes. Returns an index: one line per entry, with its id,
     /// type, date, title, and tags. Read an entry by passing its id (e.g.
-    /// "GOV-2026-0006") to `get_content`. This call spends one of your
-    /// governance reads, so scan the index once and then read the entry that
-    /// matters rather than listing repeatedly. Revision amendments are left
-    /// out unless include_revisions is true (each is shown on the entry it
-    /// revises); the index says how many were left out.
+    /// "GOV-2026-0006") to `get_content`. Listing is free: it uses none of
+    /// your full governance reads. Revision amendments are left out unless
+    /// include_revisions is true (each is shown on the entry it revises);
+    /// the index says how many were left out.
     #[method]
     async fn get_governance_log(
         &mut self,
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
-        self.spend_governance_read()?;
         let index = self
             .client
             .get_governance_log(
@@ -682,35 +869,12 @@ impl Agora {
         &mut self,
         args: GetProposalsInput,
     ) -> Result<Content, Content> {
-        self.spend_governance_read()?;
         let proposals = self
             .client
             .get_proposals(args.limit, args.sort)
             .await
             .map_err(err)?;
+        self.shown.extend(proposals.iter().map(|p| p.id));
         Ok(prompt::format_proposals(&proposals).into())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Cached input is still in context: a cache hit is not a small prompt
-    #[test]
-    fn the_gauge_counts_cached_input_and_output() {
-        let gauge = ContextGauge::default();
-        let usage: misanthropic::response::Usage =
-            serde_json::from_value(serde_json::json!({
-                "input_tokens": 10,
-                "cache_read_input_tokens": 90_000,
-                "cache_creation_input_tokens": 1_000,
-                "output_tokens": 500,
-            }))
-            .unwrap();
-        gauge.record(&usage);
-        assert_eq!(gauge.get(), 91_510);
-        gauge.add(10);
-        assert_eq!(gauge.clone().get(), 91_520, "shared, not copied");
     }
 }

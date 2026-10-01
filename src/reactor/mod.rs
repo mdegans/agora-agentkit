@@ -343,10 +343,13 @@ where
     }
 }
 
+/// Consecutive [`Stalled`](Control::Stalled) rounds before a [`Reactor`]
+/// aborts an [`Agent`]
+pub const MAX_STALLS: usize = 3;
+
 impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
-    /// Consecutive [`Stalled`](Control::Stalled) rounds before the [`Reactor`]
-    /// aborts the [`Agent`]
-    pub const MAX_STALLS: usize = 3;
+    /// See [`MAX_STALLS`](crate::reactor::MAX_STALLS)
+    pub const MAX_STALLS: usize = MAX_STALLS;
 
     /// Build a [`Reactor`] from [`Inference`], [`Storage`], and [`Agent`]s
     pub fn new<Ai>(
@@ -465,10 +468,14 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         let error = match (ending, result) {
             (Ending::Complete, _) => None,
             (_, Err(e)) => Some(e.to_string()),
-            (Ending::Stalled, _) => Some(format!(
-                "no successful tool call in {} rounds",
-                Self::MAX_STALLS
-            )),
+            (Ending::Stalled, _) => {
+                Some(agent.stall_reason().unwrap_or_else(|| {
+                    format!(
+                        "no successful tool call in {} rounds",
+                        Self::MAX_STALLS
+                    )
+                }))
+            }
             _ => Some("the agent ended its session as failed".to_owned()),
         };
         match error {
@@ -546,7 +553,12 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 Control::Stalled => {
                     stalls += 1;
                     if stalls >= Self::MAX_STALLS {
-                        log_stalled(agent.id(), &model, stalls);
+                        log_stalled(
+                            agent.id(),
+                            &model,
+                            stalls,
+                            agent.stall_reason(),
+                        );
                         break Ok(None);
                     }
                 }
@@ -725,7 +737,12 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                                 let n = stalls.entry(i).or_insert(0);
                                 *n += 1;
                                 if *n >= Self::MAX_STALLS {
-                                    log_stalled(agents[i].id(), &model, *n);
+                                    log_stalled(
+                                        agents[i].id(),
+                                        &model,
+                                        *n,
+                                        agents[i].stall_reason(),
+                                    );
                                     finished.insert(i, Outcome::Failed);
                                     stall_capped.insert(i);
                                 }
@@ -1200,21 +1217,31 @@ fn stop_reason_str(response: &misanthropic::response::Message) -> String {
 }
 
 /// A `session_stalled` warning: the agent went [`MAX_STALLS`] rounds without
-/// a successful tool call and is given up on, before any closing phase —
-/// so no memory is written. Silent until 2026-09-24, when mangled ids
-/// stalled ~37% of a night's sessions unnoticed.
-///
-/// [`MAX_STALLS`]: Reactor::MAX_STALLS
+/// progress and is given up on. Silent until 2026-09-24, when mangled ids
+/// stalled ~37% of a night's sessions unnoticed. `reason` is the agent's
+/// [`stall_reason`](Agent::stall_reason), when it has one: a closing phase
+/// that kept failing is not a tool-call stall.
 fn log_stalled(
     agent_id: AgentId,
     model: &misanthropic::model::Model,
     stalls: usize,
+    reason: Option<String>,
 ) {
-    tracing::warn!(
-        event_type = "session_stalled",
-        agent_id = %agent_id,
-        model = %model,
-        stalls,
-        "session abandoned: no successful tool call in MAX_STALLS rounds"
-    );
+    match reason {
+        Some(reason) => tracing::warn!(
+            event_type = "session_stalled",
+            agent_id = %agent_id,
+            model = %model,
+            stalls,
+            reason,
+            "session abandoned: {reason}"
+        ),
+        None => tracing::warn!(
+            event_type = "session_stalled",
+            agent_id = %agent_id,
+            model = %model,
+            stalls,
+            "session abandoned: no successful tool call in MAX_STALLS rounds"
+        ),
+    }
 }

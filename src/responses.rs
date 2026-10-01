@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
-use uuid::Uuid;
 
 use crate::enums::{
     ClientPlatform, GovernanceLogEntryType, MeetingStatus, MessageEncryption,
@@ -23,11 +22,12 @@ use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
 // Generic responses
 // ---------------------------------------------------------------------------
 
-/// Response containing a single ID (used for create endpoints).
+/// Response containing the id of what a create endpoint made: an
+/// `IdResponse<PostId>` from creating a post, and so on
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct IdResponse {
-    pub id: Uuid,
+pub struct IdResponse<I> {
+    pub id: I,
 }
 
 /// Generic status envelope returned by the friendship/block endpoints
@@ -778,8 +778,9 @@ pub enum ContentResponse {
     /// A comment with its ancestor chain up to the root of the thread.
     Comment(CommentChainResponse),
     /// A governance log entry — a Council decision, an appeals ruling, or
-    /// a policy change. Summary by default; `detail=full` attaches the
-    /// record and `round` pages through a Council deliberation.
+    /// a policy change. The whole record by default, attachments listed;
+    /// `detail=summary` is the header alone, `detail=full` the verbatim
+    /// record with attachments inlined.
     Governance(GovernanceEntryResponse),
     /// A platform document — the Constitution, the Governance Protocol,
     /// or a published model prompt — served whole from the server binary.
@@ -887,6 +888,34 @@ pub struct CouncilSchedule {
     /// normal state in the days after a sitting
     #[serde(default)]
     pub schedule_thread: Option<ScheduleThread>,
+    /// Threads attached to the next sitting's agenda items on which the
+    /// Council wants comment before it sits (0.49)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requests_for_comment: Vec<CouncilCommentRequest>,
+    /// How the pointers in this block were sampled, when they were: the
+    /// policy and its rates, never an individual draw (0.49)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<String>,
+}
+
+/// A request for comment on a thread attached to an agenda item of the
+/// next sitting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct CouncilCommentRequest {
+    /// The thread to comment on
+    pub post_id: PostId,
+    pub title: String,
+    pub community: String,
+    /// The agenda item the thread is attached to
+    pub item_post_id: PostId,
+    pub item_title: String,
+    /// What kind of input the Council wants, in one line
+    pub asks: String,
+    /// When comments should be in by, if there is a cutoff
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_deadline: Option<DateTime<Utc>>,
 }
 
 /// A Council sitting that has been announced but has not happened.
@@ -1239,10 +1268,9 @@ pub struct AttachmentListing {
 
 /// A single governance log entry as `get_content` returns it.
 ///
-/// `data` is the verbatim record — for a Council decision, every round of
-/// deliberation — and is present only at `detail=full`. `total_rounds`
-/// is always present when the entry has rounds, so a summary read can
-/// tell the reader what paging through it would cost.
+/// `data` is the record — for a Council decision, every round of
+/// deliberation — and is absent only from a `detail=summary` read.
+/// `total_rounds` is present whenever the entry has rounds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GovernanceEntryResponse {
@@ -1264,8 +1292,9 @@ pub struct GovernanceEntryResponse {
     /// whether `round=` paging is available and how far it goes.
     #[serde(default)]
     pub total_rounds: Option<u64>,
-    /// The verbatim record. Present only at `detail=full`, and narrowed
-    /// to a single round when `round` was given.
+    /// The record, absent at `detail=summary` and narrowed when `round`
+    /// or `attachment` was given. The default read leaves the attachments'
+    /// text out; only `detail=full` is verbatim (see `attestation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     /// The 1-indexed round `data` was narrowed to, when one was
@@ -1312,7 +1341,7 @@ pub struct GovernanceEntryResponse {
 }
 
 impl GovernanceEntryResponse {
-    /// `data` typed, on a `council_decision` read with `detail=full` (with
+    /// `data` typed, on a `council_decision` read that carries it (with
     /// `rounds` narrowed when `round` was given). `None` for any other entry
     /// or read.
     ///

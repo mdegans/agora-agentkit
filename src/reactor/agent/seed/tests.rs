@@ -378,11 +378,33 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 
     assert_eq!(content_ref.as_deref(), Some(CONTENT_REF_PATTERN));
-    for expected in [
-        "create_comment.properties.reply_to",
-        "cast_vote.properties.target",
-    ] {
-        assert!(uuids.iter().any(|u| u == expected), "{expected}: {uuids:?}");
+    assert!(
+        uuids.iter().any(|u| u == "flag_content.properties.target"),
+        "{uuids:?}"
+    );
+    // The write tools take a short id too: their pattern admits both forms,
+    // and no `format: uuid` that a short id would fail.
+    for (tool, field) in
+        [("create_comment", "reply_to"), ("cast_vote", "target")]
+    {
+        let def = agent
+            .prompt()
+            .tools
+            .iter()
+            .flatten()
+            .find_map(|d| match d {
+                misanthropic::tool::MethodDef::Custom(c) if c.name == tool => {
+                    Some(c.schema["properties"][field].clone())
+                }
+                _ => None,
+            })
+            .expect("the tool is installed");
+        assert_eq!(
+            def["pattern"].as_str(),
+            Some(crate::ids::CONTENT_TARGET_PATTERN),
+            "{tool}.{field}: {def}"
+        );
+        assert!(def.get("format").is_none(), "{tool}.{field}: {def}");
     }
 }
 
@@ -1384,80 +1406,122 @@ fn post_content(id: Uuid) -> serde_json::Value {
     })
 }
 
-/// A `GOV-` id goes to the widened content route — `api/content/{ref}`,
-/// not the old `api/social/content/{uuid}` — renders through the
-/// governance formatter, and spends a governance read each time.
+/// A record with two numbered rounds, as the default read serves it
+fn two_round_record() -> serde_json::Value {
+    serde_json::json!({
+        "rounds": [
+            {
+                "number": 1,
+                "responses": [{"role": "lawyer", "vote": "yes", "rationale": "FIRST_ROUND"}],
+            },
+            {
+                "number": 2,
+                "responses": [{"role": "lawyer", "vote": "yes", "rationale": "SECOND_ROUND"}],
+            },
+        ]
+    })
+}
+
+/// Whether `req` carries query parameter `key`
+fn has_param(req: &httpmock::prelude::HttpMockRequest, key: &str) -> bool {
+    req.query_params
+        .as_ref()
+        .is_some_and(|q| q.iter().any(|(k, _)| k == key))
+}
+
+/// A `GOV-` id goes to `api/content/{ref}` with no `detail` and no `round`
+/// — even when the model sends them from habit — so the server serves the
+/// whole record, which renders with its rounds numbered and in order. Each
+/// record read spends one of the two full reads; past them the summary
+/// comes back instead, free.
 #[tokio::test]
-async fn get_content_reads_a_governance_entry_and_spends_a_read() {
+async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     let server = MockServer::start();
-    let entry = server.mock(|when, then| {
-        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .matches(|req| {
+                !has_param(req, "detail") && !has_param(req, "round")
+            });
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
         then.status(200)
             .json_body(governance_content("GOV-2026-0006", None));
     });
 
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
-
     let call = || {
         tool_use_message(
             "get_content",
-            serde_json::json!({ "id": "GOV-2026-0006" }),
+            serde_json::json!({
+                "id": "GOV-2026-0006",
+                "round": 2,
+                "detail": "full",
+            }),
         )
     };
 
     agent.handle(call()).await.unwrap();
-    entry.assert();
-
-    // Rendered by `prompt::format_governance_entry`, not dumped as JSON:
-    // header, tags, summary, and — because the summary omits the record —
-    // the hint that says how to get at it.
+    record.assert();
     let rendered = transcript(&agent);
-    assert!(rendered.contains("GOV-2026-0006"), "{rendered}");
+    assert!(rendered.contains("### Record"), "{rendered}");
+    let (one, two) = (
+        rendered
+            .find("#### Round 1\n")
+            .expect("round 1 is numbered"),
+        rendered
+            .find("#### Round 2\n")
+            .expect("round 2 is numbered"),
+    );
+    assert!(one < two, "rounds in order: {rendered}");
+    assert!(rendered.contains("FIRST_ROUND"), "{rendered}");
     assert!(
-        rendered.contains("Ratification of the Constitution"),
+        rendered.contains("That was all 3 deliberation rounds, in order."),
         "{rendered}"
     );
-    assert!(
-        rendered.contains("constitutional, ratification"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("four to one"), "{rendered}");
-    assert!(rendered.contains("3 deliberation rounds"), "{rendered}");
-    assert!(rendered.contains("round=N of 3"), "{rendered}");
-    // The blob was absent, so nothing pretends otherwise.
-    assert!(!rendered.contains("### Record"), "{rendered}");
+    assert!(!rendered.contains("round=N"), "no paging hint: {rendered}");
 
-    // Each governance read spends one of the two. The second lands, the
-    // third is refused before it reaches the wire.
     agent.handle(call()).await.unwrap();
-    assert_eq!(entry.hits(), 2);
+    assert_eq!(record.hits(), 2);
+    assert_eq!(summary.hits(), 0);
+
+    // Both full reads spent: the summary, said plainly, at no cost.
     agent.handle(call()).await.unwrap();
-    assert_eq!(entry.hits(), 2, "the third read never reached the wire");
+    assert_eq!(record.hits(), 2, "the third record read never went out");
+    summary.assert();
+    let rendered = transcript(&agent);
     assert!(
-        transcript(&agent).contains("Governance read limit reached"),
-        "{}",
-        transcript(&agent)
+        rendered.contains("You have used your 2 full governance reads"),
+        "{rendered}"
     );
+    assert!(rendered.contains("four to one"), "the summary: {rendered}");
 }
 
-/// `detail`, `round` and `version` reach the wire as query params, and a
-/// record renders as markdown in reading order: prose as prose, never a
-/// JSON string of escaped newlines
+/// `version` and `attachment` reach the wire, `round` never does, and an
+/// attachment costs a full read like the record it belongs to
 #[tokio::test]
-async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
+async fn get_content_passes_version_and_attachment_and_never_a_round() {
     let server = MockServer::start();
-    let entry = server.mock(|when, then| {
+    let original = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
-            .query_param("detail", "full")
-            .query_param("round", "2")
-            .query_param("version", "original");
+            .query_param("version", "original")
+            .matches(|req| {
+                !has_param(req, "round") && !has_param(req, "detail")
+            });
         let mut body = governance_content(
             "GOV-2026-0006",
             Some(serde_json::json!({
                 "rounds": [{
-                    "number": 2,
+                    "number": 1,
                     "responses": [{
                         "vote": "yes",
                         "role": "lawyer",
@@ -1466,9 +1530,23 @@ async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
                 }]
             })),
         );
-        // The server echoes the round it narrowed to.
-        body["round"] = serde_json::json!(2);
         body["version"] = serde_json::json!("original");
+        then.status(200).json_body(body);
+    });
+    let attachment = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("attachment", "clerk-thread-summary.md");
+        let mut body = governance_content(
+            "GOV-2026-0006",
+            Some(serde_json::json!({
+                "attachments": [{
+                    "name": "clerk-thread-summary.md",
+                    "content": "THE_CLERKS_SUMMARY",
+                }]
+            })),
+        );
+        body["attachment"] = serde_json::json!("clerk-thread-summary.md");
         then.status(200).json_body(body);
     });
 
@@ -1477,41 +1555,58 @@ async fn get_content_passes_its_options_and_renders_the_record_as_markdown() {
     agent
         .handle(tool_use_message(
             "get_content",
-            serde_json::json!({
-                "id": "GOV-2026-0006",
-                "detail": "full",
-                "round": 2,
-                "version": "original",
-            }),
+            serde_json::json!({"id": "GOV-2026-0006", "version": "original"}),
         ))
         .await
         .unwrap();
-    entry.assert();
-
+    original.assert();
     let rendered = transcript(&agent);
-    assert!(rendered.contains("Round 2 of 3"), "{rendered}");
-    assert!(rendered.contains("### Record"), "{rendered}");
-    assert!(rendered.contains("#### Round 2\n"), "{rendered}");
+    assert!(rendered.contains("Read as originally signed"), "{rendered}");
     assert!(rendered.contains("##### Lawyer — yes\n"), "{rendered}");
     assert!(
         rendered.contains("**Rationale:**\n\nAye.\n\nIt is within Art. IV."),
-        "{rendered}"
-    );
-    let (rationale, vote) = (
-        rendered.find("**Rationale:**").unwrap(),
-        rendered.find("**Vote:** yes").unwrap(),
-    );
-    assert!(
-        rationale < vote,
-        "reasoning before the decision: {rendered}"
+        "prose as prose: {rendered}"
     );
     assert!(
         !rendered.contains(r#"\n"#),
         "no escaped newlines: {rendered}"
     );
-    assert!(!rendered.contains(r#"{"rounds""#), "{rendered}");
-    // Already paging: no "you could page" hint.
-    assert!(!rendered.contains("Page one at a time"), "{rendered}");
+
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({
+                "id": "GOV-2026-0006",
+                "attachment": "clerk-thread-summary.md",
+            }),
+        ))
+        .await
+        .unwrap();
+    attachment.assert();
+    assert!(transcript(&agent).contains("THE_CLERKS_SUMMARY"));
+
+    // Two full reads, the record and the attachment: a third is capped.
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006"}),
+        ))
+        .await
+        .unwrap();
+    summary.assert();
+    assert!(
+        transcript(&agent)
+            .contains("You have used your 2 full governance reads"),
+        "{}",
+        transcript(&agent)
+    );
 }
 
 /// A `get_content` call whose response reports `input_tokens` already in
@@ -1526,7 +1621,7 @@ fn tool_use_with_usage(
     message
 }
 
-/// A full record that would not fit beside what is already in context comes
+/// A record that would not fit beside what is already in context comes
 /// back as the summary, says why, and gives the read back; one that fits is
 /// served whole
 #[tokio::test]
@@ -1542,7 +1637,7 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
         then.status(200)
             .json_body(governance_content("GOV-2026-0006", Some(record)));
     });
-    let read = serde_json::json!({"id": "GOV-2026-0006", "detail": "full"});
+    let read = serde_json::json!({"id": "GOV-2026-0006"});
 
     // 100k in context + 13k + the 16k buffer > 128k.
     let mut reader = agent(&server, quiet_config());
@@ -1579,11 +1674,11 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     assert!(!rendered.contains("would not fit"), "{rendered}");
 }
 
-/// The read budget is about *governance* attention, so it is the kind of
-/// id that spends it: an index call and a `GOV-` read exhaust the two,
-/// while an ordinary post read in between costs nothing.
+/// Only a delivered record spends: the index, the proposal queue and a
+/// summary are free however often they are read, and so is a read that
+/// failed. Posts were always free.
 #[tokio::test]
-async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
+async fn index_proposals_summaries_and_failures_are_free() {
     let server = MockServer::start();
     let post_id = Uuid::new_v4();
     let index = server.mock(|when, then| {
@@ -1596,10 +1691,29 @@ async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
             "tags": ["constitutional"],
         }]));
     });
-    let gov = server.mock(|when, then| {
-        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+    let proposals = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/governance/proposals");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
         then.status(200)
             .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .matches(|req| !has_param(req, "detail"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let missing = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/GOV-2026-0099");
+        then.status(404).body("no such entry");
     });
     let post = server.mock(|when, then| {
         when.method(GET)
@@ -1607,59 +1721,76 @@ async fn the_governance_read_cap_is_shared_across_tools_and_spares_posts() {
         then.status(200).json_body(post_content(post_id));
     });
 
-    let mut agent = agent(&server, quiet_config());
+    let config = SeedConfig {
+        max_rounds: 20,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
     seat_start(&mut agent);
-
-    // Read 1: the index.
-    agent
-        .handle(tool_use_message(
-            "get_governance_log",
-            serde_json::json!({ "limit": 10 }),
-        ))
-        .await
-        .unwrap();
-    index.assert();
-
-    // Free: a post is not governance, whatever tool asked for it.
-    agent
-        .handle(tool_use_message(
-            "get_content",
-            serde_json::json!({ "id": post_id }),
-        ))
-        .await
-        .unwrap();
-    post.assert();
-
-    // Read 2: the one entry the index pointed at.
-    agent
-        .handle(tool_use_message(
-            "get_content",
-            serde_json::json!({ "id": "GOV-2026-0006" }),
-        ))
-        .await
-        .unwrap();
-    gov.assert();
-
-    // Exhausted — and it stays exhausted across both governance tools,
-    // which is the point of a shared budget.
-    for call in [
-        tool_use_message("get_governance_log", serde_json::json!({})),
-        tool_use_message(
-            "get_content",
-            serde_json::json!({ "id": "GOV-2026-0006" }),
-        ),
-        tool_use_message("get_proposals", serde_json::json!({})),
-    ] {
-        agent.handle(call).await.unwrap();
+    for _ in 0..3 {
+        for call in [
+            tool_use_message("get_governance_log", serde_json::json!({})),
+            tool_use_message("get_proposals", serde_json::json!({})),
+            tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006", "summary": true}),
+            ),
+            tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0099"}),
+            ),
+            tool_use_message("get_content", serde_json::json!({"id": post_id})),
+        ] {
+            agent.handle(call).await.unwrap();
+        }
     }
-    assert_eq!(index.hits(), 1, "index call after the cap reached the wire");
-    assert_eq!(gov.hits(), 1, "entry read after the cap reached the wire");
-    assert_eq!(post.hits(), 1);
+    assert_eq!(index.hits(), 3);
+    assert_eq!(proposals.hits(), 3);
+    assert_eq!(summary.hits(), 3);
+    assert_eq!(missing.hits(), 3);
+    assert_eq!(post.hits(), 3);
+    let rendered = transcript(&agent);
+    assert!(!rendered.contains("full governance reads"), "{rendered}");
     assert!(
-        transcript(&agent).contains("Governance read limit reached"),
-        "{}",
-        transcript(&agent)
+        rendered.contains("summary=true for its summary alone (free)"),
+        "the index says how to skim: {rendered}"
     );
+    assert!(
+        rendered.contains("get_content(\"GOV-2026-0006\") reads them all"),
+        "a summary says how to read the rest: {rendered}"
+    );
+
+    // Both full reads are still there.
+    for _ in 0..2 {
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(record.hits(), 2);
+    assert!(!transcript(&agent).contains("full governance reads"));
+}
+
+/// The seed tool's `get_content` offers no `round` and no `detail`; the
+/// shared request type keeps `round` for clients that page
+#[test]
+fn the_seed_read_has_no_paging_but_the_wire_type_does() {
+    let seed = serde_json::to_string(&schemars::schema_for!(
+        crate::requests::ReadContentInput
+    ))
+    .unwrap();
+    assert!(!seed.contains("\"round\""), "{seed}");
+    assert!(!seed.contains("\"detail\""), "{seed}");
+    assert!(seed.contains("\"summary\""), "{seed}");
+    assert!(seed.contains("\"attachment\""), "{seed}");
+    let wire = serde_json::to_string(&schemars::schema_for!(
+        crate::requests::GetContentInput
+    ))
+    .unwrap();
+    assert!(wire.contains("\"round\""), "{wire}");
 }
 
 /// `include_revisions` reaches the wire, and what the server left out is
@@ -1781,4 +1912,497 @@ async fn get_governance_log_renders_an_index_and_sends_no_detail_param() {
     );
     // An index carries no record: nothing here should look like a blob.
     assert!(!rendered.contains("\"rounds\""), "{rendered}");
+}
+
+/// Every tool result goes through the gauge, not just governance records:
+/// a post too big for what is left of the window is a note, and the
+/// prompt never holds the body
+#[tokio::test]
+async fn an_oversized_post_read_is_left_out_with_a_note() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let mut body = post_content(post_id);
+    // ~60 KB: about 20k tokens at a byte for every three.
+    body["post"]["body"] = serde_json::json!("OVERSIZED ".repeat(6_000));
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{post_id}"));
+        then.status(200).json_body(body);
+    });
+    let small = SeedConfig {
+        context_window: 40_000,
+        ..quiet_config()
+    };
+    let mut reader = agent(&server, small);
+    seat_start(&mut reader);
+    reader
+        .handle(tool_use_with_usage(
+            "get_content",
+            serde_json::json!({"id": post_id}),
+            10_000,
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&reader);
+    assert!(
+        rendered.contains("would not fit in your 40000 token window"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("summary=true"), "{rendered}");
+    assert!(!rendered.contains("OVERSIZED"), "{rendered}");
+}
+
+/// A post as the feed and search routes list it
+fn listed_post(
+    title: &str,
+    author: &str,
+    body: &str,
+) -> crate::responses::PostResponse {
+    crate::responses::PostResponse {
+        id: PostId::from(Uuid::new_v4()),
+        agent_id: AgentId::from(Uuid::new_v4()),
+        agent_name: Some(author.to_string()),
+        community_id: crate::ids::CommunityId::from(Uuid::new_v4()),
+        community_name: "tech".to_string(),
+        title: title.to_string(),
+        body: body.to_string(),
+        created_at: Some("2026-09-30T12:00:00Z".parse().unwrap()),
+        score: 4,
+        is_proposal: false,
+        comment_count: Some(7),
+        upvotes: Some(5),
+        downvotes: Some(1),
+        deleted: false,
+        signed: Some(true),
+        via: None,
+    }
+}
+
+/// Seed agents can search and browse now: both tools are installed
+#[tokio::test]
+async fn search_and_get_feed_are_seed_tools() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let names = tool_names(&agent);
+    assert!(names.contains(&"search".to_string()), "{names:?}");
+    assert!(names.contains(&"get_feed".to_string()), "{names:?}");
+}
+
+/// `search` sends its options as query params, clamps the limit, and
+/// renders one line and a short preview per post, saying when semantic
+/// search fell back to keyword
+#[tokio::test]
+async fn search_passes_its_options_and_renders_compactly() {
+    let server = MockServer::start();
+    let mine = listed_post("Ferns and governance", "test-agent", "Mine.");
+    let theirs = listed_post(
+        "Spores as a voting model",
+        "fern-fan",
+        &format!("Spores\n\nspread. {}", "LONG_TAIL ".repeat(200)),
+    );
+    let (mine_id, theirs_id) = (mine.id, theirs.id);
+    let search = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/search")
+            .query_param("q", "fern voting")
+            .query_param("community", "tech")
+            .query_param("mode", "semantic")
+            .query_param("limit", "25");
+        then.status(200)
+            .json_body_obj(&crate::responses::SearchResponse {
+                results: vec![theirs, mine],
+                mode_used: crate::enums::SearchMode::Keyword,
+                degraded: true,
+            });
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let input = crate::requests::SearchInput {
+        query: "fern voting".into(),
+        community: Some("tech".into()),
+        mode: Some(crate::enums::SearchMode::Semantic),
+        limit: Some(500),
+    };
+    agent
+        .handle(tool_use_message(
+            "search",
+            serde_json::to_value(&input).unwrap(),
+        ))
+        .await
+        .unwrap();
+    search.assert();
+
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("Semantic search was unavailable"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("2 post(s) for \"fern voting\" (keyword search):"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "- \"Spores as a voting model\" by fern-fan in tech (score 4, \
+             7 comments, 2026-09-30) [post_id: {theirs_id}]\n  Spores \
+             spread. LONG_TAIL"
+        )),
+        "one line, then a one-line preview: {rendered}"
+    );
+    assert!(
+        rendered.contains("by test-agent (yours) in tech"),
+        "{rendered}"
+    );
+    assert!(rendered.contains(&mine_id.to_string()), "{rendered}");
+    assert!(
+        rendered.matches("LONG_TAIL").count() < 20,
+        "the preview is short: {rendered}"
+    );
+}
+
+/// `get_feed` reads one community's feed or the global one, with the
+/// sort it was given, and lists titles without bodies
+#[tokio::test]
+async fn get_feed_reads_a_community_or_everything() {
+    let server = MockServer::start();
+    let community = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/communities/tech/feed")
+            .query_param("sort", "controversial")
+            .query_param("limit", "15");
+        then.status(200).json_body_obj(&vec![listed_post(
+            "Compilers are underrated",
+            "someone-else",
+            "BODY_TEXT",
+        )]);
+    });
+    let global = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/feed")
+            .query_param("sort", "date")
+            .query_param("limit", "3");
+        then.status(200)
+            .json_body_obj(&Vec::<crate::responses::PostResponse>::new());
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let feed = |community: Option<&str>, sort, limit| {
+        let input = crate::requests::GetFeedInput {
+            community: community.map(str::to_string),
+            sort,
+            limit,
+        };
+        tool_use_message("get_feed", serde_json::to_value(&input).unwrap())
+    };
+    agent
+        .handle(feed(
+            Some("tech"),
+            Some(crate::enums::FeedSort::Controversial),
+            None,
+        ))
+        .await
+        .unwrap();
+    community.assert();
+    agent.handle(feed(None, None, Some(3))).await.unwrap();
+    global.assert();
+
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("1 post(s) in tech, by controversial:"),
+        "{rendered}"
+    );
+    assert!(
+        rendered
+            .contains("\"Compilers are underrated\" by someone-else in tech"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("BODY_TEXT"), "no bodies: {rendered}");
+    assert!(
+        rendered.contains("No posts across all communities."),
+        "{rendered}"
+    );
+}
+
+// --- Short ids on writes (0.49; agora#531) ---
+
+/// The first eight hex digits of `id`
+fn short(id: Uuid) -> String {
+    id.to_string()[..8].to_string()
+}
+
+/// A short id the agent was shown resolves locally; the signed payload
+/// carries the full id, and the ledger's refusal of a second top-level
+/// comment names the first one
+#[tokio::test]
+async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment()
+ {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let comment_id = Uuid::new_v4();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{post_id}"));
+        then.status(200).json_body(post_content(post_id));
+    });
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{}", short(post_id)));
+        then.status(500);
+    });
+    let created = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/comments")
+            .json_body_partial(format!(r#"{{"reply_to": "{post_id}"}}"#));
+        then.status(201)
+            .json_body_obj(&crate::responses::IdResponse { id: comment_id });
+    });
+
+    let config = SeedConfig {
+        max_rounds: 10,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({ "id": post_id }),
+        ))
+        .await
+        .unwrap();
+    let comment = || {
+        let input = crate::requests::CreateCommentInput {
+            reply_to: short(post_id).parse().unwrap(),
+            body: "Agreed, and here is why.".into(),
+        };
+        tool_use_message(
+            "create_comment",
+            serde_json::to_value(&input).unwrap(),
+        )
+    };
+    agent.handle(comment()).await.unwrap();
+    created.assert();
+    assert_eq!(lookup.hits(), 0, "resolved from what was shown");
+
+    agent.handle(comment()).await.unwrap();
+    assert_eq!(created.hits(), 1, "the second never reached the wire");
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(&format!(
+            "You already have a top-level comment on post {post_id}: \
+             {comment_id}. One top-level comment per post."
+        )),
+        "{rendered}"
+    );
+}
+
+/// A short id the agent was not shown is looked up (a summary read) and
+/// the vote is signed with the full id
+#[tokio::test]
+async fn cast_vote_looks_up_an_unseen_short_id() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{}", short(post_id)))
+            .query_param("detail", "summary");
+        then.status(200).json_body(post_content(post_id));
+    });
+    let vote = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/votes")
+            .json_body_partial(format!(
+                r#"{{"target": "{post_id}", "value": -1}}"#
+            ));
+        then.status(200)
+            .json_body_obj(&crate::responses::StatusResponse {
+                status: "ok".into(),
+            });
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let input = crate::requests::CastVoteInput {
+        target: short(post_id).to_uppercase().parse().unwrap(),
+        value: -1,
+    };
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::to_value(&input).unwrap(),
+        ))
+        .await
+        .unwrap();
+    lookup.assert();
+    vote.assert();
+    assert!(transcript(&agent).contains("Vote recorded"));
+}
+
+/// The server's ambiguity answer goes back to the model as is, and nothing
+/// is signed; a malformed id fails in plain words
+#[tokio::test]
+async fn an_ambiguous_or_malformed_short_id_explains_itself() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/7ad26ccd");
+        then.status(400).body(
+            r#"{"error": "7ad26ccd is ambiguous: it starts 2 posts and comments"}"#,
+        );
+    });
+    let vote = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/votes");
+        then.status(200);
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::json!({ "target": "7ad26ccd", "value": 1 }),
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::json!({
+                "target": "7ad26ccd-922f-484a-a37c-51777344a",
+                "value": 1,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(vote.hits(), 0);
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("is ambiguous"), "{rendered}");
+    assert!(
+        rendered.contains("`target` must be a post or comment id"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("group"), "{rendered}");
+}
+
+// --- SOUL limits and the closing-phase rescue (0.49) ---
+
+/// A soul rewrite whose identity runs `identity_chars` long, in sentences
+fn soul_rewrite(identity_chars: usize) -> String {
+    let sentence = "I keep arguing for clearer rules. ";
+    let identity: String = sentence
+        .repeat(identity_chars / sentence.len() + 1)
+        .chars()
+        .take(identity_chars)
+        .collect();
+    format!(
+        r#"{{"name": "test-agent", "identity": "{identity}", "values": ["Clarity"], "interests": {{"communities": ["tech"], "topics": []}}, "voice": "terse"}}"#
+    )
+}
+
+/// An agent at the soul-rewrite phase, as `after_reflect` leaves it
+fn mutating_agent(server: &MockServer) -> SeedAgent {
+    let mut agent = agent(server, quiet_config());
+    agent.communities = vec!["tech".to_string()];
+    seat_start(&mut agent);
+    agent.phase = Phase::Mutate;
+    let instruction = output::build_soul_mutation_prompt(&agent.state.soul);
+    agent.seat_phase(&instruction, 4096).unwrap();
+    agent
+}
+
+/// Two over-length tries stall as before; the third is clipped at a
+/// sentence boundary instead of losing the rewrite (tango-aether,
+/// 2026-10-01)
+#[tokio::test]
+async fn the_last_soul_rewrite_attempt_is_clipped_not_lost() {
+    let server = MockServer::start();
+    let mut agent = mutating_agent(&server);
+    let over = soul_rewrite(soul::PROSE_MAX + 60);
+    for _ in 0..2 {
+        let control = agent
+            .handle(text_message(&over, StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    assert!(transcript(&agent).contains("exceeds 2048 chars"));
+    let control = agent
+        .handle(text_message(&over, StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    let identity = agent.state.soul.identity.as_str();
+    assert!(identity.chars().count() <= soul::PROSE_MAX);
+    assert!(identity.ends_with("rules."), "a sentence end: {identity}");
+    assert_eq!(
+        agent
+            .state
+            .soul
+            .evolution_log
+            .last()
+            .map(|e| e.note.as_str()),
+        Some("[SYSTEM] Deep reflection — soul rewritten.")
+    );
+}
+
+/// A closing phase that keeps failing for another reason still fails, and
+/// the reactor is told which phase and why rather than "no successful tool
+/// call"
+#[tokio::test]
+async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
+    let server = MockServer::start();
+    let mut mutating = mutating_agent(&server);
+    assert_eq!(
+        mutating.stall_reason(),
+        Some(
+            "the soul rewrite (mutate) phase failed 0 times in a row"
+                .to_string()
+        )
+    );
+    for _ in 0..crate::reactor::MAX_STALLS {
+        let control = mutating
+            .handle(text_message("not json", StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    let reason = mutating.stall_reason().unwrap();
+    assert!(
+        reason.starts_with(
+            "the soul rewrite (mutate) phase failed 3 times in a row; last: \
+             Invalid JSON"
+        ),
+        "{reason}"
+    );
+
+    // An acting stall keeps the reactor's own wording.
+    let acting = agent(&server, quiet_config());
+    assert_eq!(acting.stall_reason(), None);
+}
+
+/// The limits only got looser: a soul at the old caps still reads, the new
+/// caps hold, and an old ledger reads without the new field
+#[test]
+fn existing_souls_and_ledgers_still_deserialize() {
+    let old = soul_rewrite(1024);
+    let soul: Soul = serde_json::from_str(&old).unwrap();
+    let back: Soul =
+        serde_json::from_str(&serde_json::to_string(&soul).unwrap()).unwrap();
+    assert_eq!(back.identity.as_str(), soul.identity.as_str());
+    assert!(
+        serde_json::from_str::<Soul>(&soul_rewrite(soul::PROSE_MAX)).is_ok()
+    );
+    assert!(
+        serde_json::from_str::<Soul>(&soul_rewrite(soul::PROSE_MAX + 1))
+            .is_err()
+    );
+
+    let ledger: Ledger = serde_json::from_str(
+        r#"{"created_posts": [], "commented_posts": [], "created_comments": []}"#,
+    )
+    .unwrap();
+    assert!(ledger.post_comments.is_empty());
 }

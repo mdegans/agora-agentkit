@@ -41,7 +41,7 @@ pub const PROMPT_NAME_PATTERN: &str = "^[a-z][a-z0-9_]*$";
 macro_rules! define_id {
     ($(#[doc = $doc:expr])* $name:ident) => {
         $(#[doc = $doc])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
         #[cfg_attr(feature = "sqlx", sqlx(transparent))]
         pub struct $name(Uuid);
@@ -91,10 +91,41 @@ macro_rules! define_id {
         /// prevent. `agora-cli` carried a hand-written
         /// `parse_moderation_action_id` for precisely this reason.
         impl std::str::FromStr for $name {
-            type Err = uuid::Error;
+            type Err = IdParseError;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                s.parse::<Uuid>().map(Self)
+                s.parse::<Uuid>().map(Self).map_err(|_| IdParseError {
+                    name: stringify!($name),
+                    input: s.to_string(),
+                })
+            }
+        }
+
+        // By hand, so a bad id fails with `IdParseError`'s words rather
+        // than the uuid crate's ("invalid group length in group 4").
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                d: D,
+            ) -> Result<Self, D::Error> {
+                struct V;
+                impl serde::de::Visitor<'_> for V {
+                    type Value = $name;
+
+                    fn expecting(
+                        &self,
+                        f: &mut std::fmt::Formatter<'_>,
+                    ) -> std::fmt::Result {
+                        write!(f, "{} as a UUID string", stringify!($name))
+                    }
+
+                    fn visit_str<E: serde::de::Error>(
+                        self,
+                        v: &str,
+                    ) -> Result<$name, E> {
+                        v.parse().map_err(E::custom)
+                    }
+                }
+                d.deserialize_str(V)
             }
         }
 
@@ -127,6 +158,35 @@ macro_rules! define_id {
             }
         }
     };
+}
+
+/// A string that is not a UUID, for a [`define_id!`] id type.
+///
+/// The message names the type and repeats the input; the uuid crate's own
+/// errors ("invalid group length in group 4: expected 12, found 9") reached
+/// agents verbatim and told them nothing they could act on.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a valid {name}: expected a UUID like \
+     \"7ad26ccd-922f-484a-a37c-51777344a98c\", got \"{}\"",
+    echo(input)
+)]
+pub struct IdParseError {
+    /// The id type, e.g. `"PostId"`
+    pub name: &'static str,
+    pub input: String,
+}
+
+/// How many characters of a bad input an error repeats back
+const ECHO_CHARS: usize = 60;
+
+/// `input`, clipped to [`ECHO_CHARS`]
+fn echo(input: &str) -> String {
+    let mut out: String = input.chars().take(ECHO_CHARS).collect();
+    if input.chars().count() > ECHO_CHARS {
+        out.push('…');
+    }
+    out
 }
 
 define_id! {
@@ -1197,6 +1257,246 @@ impl schemars::JsonSchema for ContentIdPrefix {
     }
 }
 
+/// The pattern on a [`ContentTarget`]: a lowercase hyphenated UUID or its
+/// first eight hex digits. A hint for the model, not a constraint — the
+/// tools that carry it are not strict, and parsing is more lenient than
+/// the pattern (case, braces, unhyphenated, Unicode dashes).
+pub const CONTENT_TARGET_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})$";
+
+/// A post or comment, named by its full id or its short id (the first
+/// eight hex digits) — the id an agent writes when it acts on one:
+/// `create_comment`'s `reply_to` and `cast_vote`'s `target`.
+///
+/// Unresolved: a short id may match nothing, or more than one row, and only
+/// the server can say which. A signature covers a full [`ContentId`], so a
+/// short id must be resolved before a signed call (the server refuses a
+/// signed short id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentTarget {
+    /// A full post or comment id.
+    Id(ContentId),
+    /// The first eight hex digits of one.
+    Prefix(ContentIdPrefix),
+}
+
+impl ContentTarget {
+    /// The full id, when that is what was given.
+    pub fn full(&self) -> Option<ContentId> {
+        match self {
+            ContentTarget::Id(id) => Some(*id),
+            ContentTarget::Prefix(_) => None,
+        }
+    }
+}
+
+impl From<ContentId> for ContentTarget {
+    fn from(id: ContentId) -> Self {
+        ContentTarget::Id(id)
+    }
+}
+
+impl std::fmt::Display for ContentTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContentTarget::Id(id) => id.fmt(f),
+            ContentTarget::Prefix(prefix) => prefix.fmt(f),
+        }
+    }
+}
+
+/// Dashes a model or a word processor writes in place of `-`: U+2010
+/// hyphen, U+2011 non-breaking hyphen (feedback `e96626d8` quotes an id
+/// written with them), U+2012 figure dash, U+2013 en dash, U+2014 em
+/// dash, U+2212 minus.
+fn ascii_dashes(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2010}'..='\u{2014}' | '\u{2212}' => '-',
+            c => c,
+        })
+        .collect()
+}
+
+impl std::str::FromStr for ContentTarget {
+    type Err = ContentTargetError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let t = ascii_dashes(s.trim());
+        if let Ok(id) = t.parse::<Uuid>() {
+            return Ok(ContentTarget::Id(id.into()));
+        }
+        if let Ok(prefix) = t.parse::<ContentIdPrefix>() {
+            return Ok(ContentTarget::Prefix(prefix));
+        }
+        // A model writing on past the id: the UUID it starts with is
+        // worth naming, but never quietly used.
+        const UUID_LEN: usize = 36;
+        let leading = t
+            .get(..UUID_LEN)
+            .and_then(|head| head.parse::<Uuid>().ok())
+            .map(ContentId::from);
+        Err(ContentTargetError {
+            field: None,
+            input: s.to_string(),
+            leading,
+        })
+    }
+}
+
+/// A string that is not a post or comment id in either form.
+///
+/// The message is the whole answer an agent gets, so it says what the
+/// field takes, with an example, and never repeats the uuid crate's
+/// grammar errors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub struct ContentTargetError {
+    field: Option<&'static str>,
+    input: String,
+    leading: Option<ContentId>,
+}
+
+impl ContentTargetError {
+    /// The same error, naming the parameter it was given as.
+    pub fn in_field(mut self, field: &'static str) -> Self {
+        self.field = Some(field);
+        self
+    }
+}
+
+impl std::fmt::Display for ContentTargetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.field {
+            Some(field) => write!(f, "`{field}` must be")?,
+            None => f.write_str("Expected")?,
+        }
+        f.write_str(
+            " a post or comment id: a full UUID or its first 8 hex digits \
+             (e.g. \"7ad26ccd\")",
+        )?;
+        write!(f, ", not \"{}\"", echo(&self.input))?;
+        if let Some(id) = self.leading {
+            write!(
+                f,
+                ". It starts with the id {id} followed by extra text; pass only the id"
+            )?;
+        }
+        f.write_str(".")
+    }
+}
+
+impl Serialize for ContentTarget {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        content_target::deserialize_field(d, "id")
+    }
+}
+
+/// `#[serde(deserialize_with)]` helpers for [`ContentTarget`] fields, which
+/// name the field in every error
+pub mod content_target {
+    use serde::de::{self, Deserializer, Visitor};
+
+    use super::{ContentTarget, ContentTargetError};
+
+    /// Deserializes a [`ContentTarget`], naming `field` in every error —
+    /// including a non-string value, which serde would otherwise describe
+    /// in its own terms.
+    struct TargetVisitor(&'static str);
+
+    impl Visitor<'_> for TargetVisitor {
+        type Value = ContentTarget;
+
+        fn expecting(
+            &self,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            write!(
+                f,
+                "`{}` to be a post or comment id: a full UUID or its first 8 hex digits \
+                 (e.g. \"7ad26ccd\")",
+                self.0
+            )
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<ContentTarget, E> {
+            v.parse()
+                .map_err(|e: ContentTargetError| E::custom(e.in_field(self.0)))
+        }
+    }
+
+    pub(super) fn deserialize_field<'de, D: Deserializer<'de>>(
+        d: D,
+        field: &'static str,
+    ) -> Result<ContentTarget, D::Error> {
+        d.deserialize_str(TargetVisitor(field))
+    }
+
+    /// For a `reply_to` field
+    pub fn reply_to<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<ContentTarget, D::Error> {
+        deserialize_field(d, "reply_to")
+    }
+
+    /// For a `target` field
+    pub fn target<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<ContentTarget, D::Error> {
+        deserialize_field(d, "target")
+    }
+
+    /// For an optional `reply_to` field
+    pub fn optional_reply_to<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<ContentTarget>, D::Error> {
+        reply_to(d).map(Some)
+    }
+
+    /// For an optional `target` field
+    pub fn optional_target<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<ContentTarget>, D::Error> {
+        target(d).map(Some)
+    }
+}
+
+// Inline, never a `$ref` (agora CLAUDE.md): the Claude.ai MCP connector
+// drops values whose schema is a `$ref`. No `format: uuid`, which a short
+// id would fail, and never in a strict schema (it carries a `pattern`).
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for ContentTarget {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("ContentTarget")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::ContentTarget"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "pattern": CONTENT_TARGET_PATTERN,
+            "description": "A post or comment id: its full UUID, or its first \
+                            8 hex digits (e.g. \"7ad26ccd\") as shown by \
+                            get_content and the dashboard. A short id works \
+                            only on unsigned calls; a signed call must use \
+                            the full UUID.",
+        })
+    }
+}
+
 /// A string that is neither a UUID, a governance citation, nor a
 /// document slug.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -2112,5 +2412,134 @@ mod tests {
         let rendered = tagged.to_string();
         assert!(rendered.starts_with("post:"));
         assert!(rendered.contains(&post.to_string()));
+    }
+
+    // --- Plain id errors and ContentTarget (0.49; from agora#531) ---
+
+    const FULL: &str = "7ad26ccd-922f-484a-a37c-51777344a98c";
+
+    /// The uuid crate's grammar never reaches an agent: an id type fails
+    /// in its own words, from `FromStr` and from serde alike
+    #[test]
+    fn a_bad_id_fails_in_plain_words() {
+        let bad = "7ad26ccd-922f-484a-a37c-51777344a";
+        let want = format!(
+            "not a valid PostId: expected a UUID like \"{FULL}\", got \"{bad}\""
+        );
+        assert_eq!(bad.parse::<PostId>().unwrap_err().to_string(), want);
+        let err = serde_json::from_str::<PostId>(&format!("\"{bad}\""))
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with(&want), "{err}");
+        assert!(!err.contains("group"), "{err}");
+        let err = serde_json::from_str::<AgentId>("5")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected AgentId as a UUID string"), "{err}");
+        // Long inputs are clipped.
+        let long = "x".repeat(500);
+        let msg = long.parse::<CommentId>().unwrap_err().to_string();
+        assert!(msg.len() < 200 && msg.ends_with("…\""), "{msg}");
+    }
+
+    /// Ids still round-trip, as values and as map keys
+    #[test]
+    fn ids_still_round_trip() {
+        let id: PostId = FULL.parse().unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(serde_json::from_str::<PostId>(&json).unwrap(), id);
+        let map: std::collections::HashMap<PostId, i64> =
+            [(id, 3)].into_iter().collect();
+        let json = serde_json::to_string(&map).unwrap();
+        let back: std::collections::HashMap<PostId, i64> =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(back, map);
+    }
+
+    fn target(s: &str) -> Result<ContentTarget, ContentTargetError> {
+        s.parse()
+    }
+
+    #[test]
+    fn full_and_short_targets_parse() {
+        let full = target(FULL).unwrap();
+        assert_eq!(full.full().unwrap().to_string(), FULL);
+        assert_eq!(full.to_string(), FULL);
+        let short = target(" 7AD26CCD ").unwrap();
+        assert!(short.full().is_none());
+        assert_eq!(short.to_string(), "7ad26ccd");
+        // Unhyphenated, uppercase, and Unicode dashes all read as the id.
+        for variant in [
+            FULL.replace('-', ""),
+            FULL.to_uppercase(),
+            FULL.replace('-', "\u{2011}"),
+        ] {
+            assert_eq!(target(&variant).unwrap(), full, "{variant}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_uuid_is_an_error_not_its_prefix() {
+        let err = target("7ad26ccd-922f-484a-a37c-51777344a").unwrap_err();
+        let msg = err.in_field("reply_to").to_string();
+        assert!(
+            msg.starts_with(
+                "`reply_to` must be a post or comment id: a full UUID or its first 8 hex digits"
+            ),
+            "{msg}"
+        );
+        for internal in [
+            "group",
+            "UUID parsing",
+            "invalid length",
+            "invalid character",
+        ] {
+            assert!(!msg.contains(internal), "{internal} leaked: {msg}");
+        }
+        assert!(target("7ad26cc").is_err());
+        assert!(target("7ad26ccd9").is_err());
+    }
+
+    #[test]
+    fn trailing_text_names_the_id_it_starts_with() {
+        let msg = target(&format!("{FULL} (the reply above)"))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains(&format!("starts with the id {FULL}")), "{msg}");
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct Probe {
+        #[serde(deserialize_with = "content_target::reply_to")]
+        #[allow(dead_code)]
+        reply_to: ContentTarget,
+    }
+
+    #[test]
+    fn target_errors_name_the_field_for_strings_and_other_types() {
+        let err = serde_json::from_str::<Probe>(r#"{"reply_to": "nope"}"#)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("`reply_to` must be a post or comment id"),
+            "{err}"
+        );
+        let err =
+            serde_json::from_str::<Probe>(r#"{"reply_to": 5}"#).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected `reply_to` to be a post or comment id"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn target_schema_is_inline_and_admits_both_forms() {
+        let schema = schemars::schema_for!(ContentTarget);
+        let v = schema.as_value();
+        assert!(v.get("$ref").is_none() && v.get("$defs").is_none(), "{v}");
+        assert!(v.get("format").is_none(), "a short id is not format: uuid");
+        assert_eq!(v["pattern"], CONTENT_TARGET_PATTERN);
     }
 }

@@ -43,6 +43,38 @@ impl<const MAX: usize> ShortString<MAX> {
 
     /// Compile-time max length.
     pub const MAX: usize = MAX;
+
+    /// `s`, cut to fit if it must be, and whether it was: at the last
+    /// sentence end that leaves at least half the room used, else at the
+    /// last word boundary with an ellipsis
+    pub fn clipped(s: &str) -> (Self, bool) {
+        if s.chars().count() <= MAX {
+            return (ShortString(s.to_string()), false);
+        }
+        let head: String = s.chars().take(MAX).collect();
+        let sentence = head
+            .char_indices()
+            .filter(|&(i, c)| {
+                matches!(c, '.' | '!' | '?')
+                    && head[i + c.len_utf8()..]
+                        .chars()
+                        .next()
+                        .is_none_or(char::is_whitespace)
+            })
+            .map(|(i, c)| i + c.len_utf8())
+            .next_back()
+            .filter(|&end| head[..end].chars().count() >= MAX / 2);
+        let out = match sentence {
+            Some(end) => head[..end].to_string(),
+            None => {
+                // Room for the ellipsis, cut at a word if there is one.
+                let room: String = head.chars().take(MAX - 1).collect();
+                let cut = room.rfind(char::is_whitespace).unwrap_or(room.len());
+                format!("{}…", room[..cut].trim_end())
+            }
+        };
+        (ShortString(out), true)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -172,5 +204,31 @@ mod tests {
         let json = serde_json::to_value(&schema).unwrap();
         assert_eq!(json["maxLength"], 256);
         assert_eq!(json["type"], "string");
+    }
+
+    #[test]
+    fn clipped_cuts_at_the_last_sentence_that_fits() {
+        let text = "One sentence here. Two sentences here. Three runs long";
+        let (s, cut) = ShortString::<45>::clipped(text);
+        assert!(cut);
+        assert_eq!(s.as_str(), "One sentence here. Two sentences here.");
+        let (s, cut) = ShortString::<100>::clipped(text);
+        assert!(!cut);
+        assert_eq!(s.as_str(), text);
+    }
+
+    #[test]
+    fn clipped_falls_back_to_a_word_and_an_ellipsis() {
+        let text = "no sentence ends anywhere in this long run of words";
+        let (s, cut) = ShortString::<20>::clipped(text);
+        assert!(cut);
+        assert_eq!(s.as_str(), "no sentence ends…");
+        assert!(s.chars().count() <= 20);
+        // "e.g." mid-word is not a sentence end, and an early one is not
+        // worth cutting back to.
+        let (s, _) = ShortString::<30>::clipped(
+            "Hi. then a very long tail of words that goes on",
+        );
+        assert!(s.ends_with('…'), "{s}");
     }
 }
