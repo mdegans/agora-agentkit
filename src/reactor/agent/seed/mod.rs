@@ -37,7 +37,7 @@ pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, Interests,
     LEGACY_REQUIRED_SECTIONS, Soul, SoulWarning, WarnLevel,
 };
-pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger};
+pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger, ShownIds};
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -298,6 +298,8 @@ pub struct SeedAgent {
     pauses: usize,
     /// Tokens in context as of the last response, shared with the tool
     context: ContextGauge,
+    /// Ids shown this session, shared with the tool for short-id lookups
+    shown: ShownIds,
 }
 
 /// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
@@ -780,6 +782,7 @@ impl Agent for SeedAgent {
         state.completed = false;
 
         let context = ContextGauge::default();
+        let shown = ShownIds::default();
         let agora = Agora::new(
             ctx.client.clone(),
             id,
@@ -788,7 +791,8 @@ impl Agent for SeedAgent {
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
         )
-        .with_context_guard(context.clone(), ctx.config.context_window);
+        .with_context_guard(context.clone(), ctx.config.context_window)
+        .with_shown_ids(shown.clone());
         let tools = ToolBox::flat().add(Gauged::new(
             agora,
             context.clone(),
@@ -812,6 +816,7 @@ impl Agent for SeedAgent {
             survey_mark: None,
             pauses: 0,
             context,
+            shown,
         })
     }
 
@@ -954,6 +959,8 @@ impl Agent for SeedAgent {
                 Vec::new()
             }
         };
+
+        self.shown.extend(tool::ids_on_dashboard(&dash, &recent));
 
         let soul_markdown = self.state.soul.markdown();
         let memory = self.state.memory.render_for_prompt();

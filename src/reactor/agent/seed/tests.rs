@@ -378,11 +378,33 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 
     assert_eq!(content_ref.as_deref(), Some(CONTENT_REF_PATTERN));
-    for expected in [
-        "create_comment.properties.reply_to",
-        "cast_vote.properties.target",
-    ] {
-        assert!(uuids.iter().any(|u| u == expected), "{expected}: {uuids:?}");
+    assert!(
+        uuids.iter().any(|u| u == "flag_content.properties.target"),
+        "{uuids:?}"
+    );
+    // The write tools take a short id too: their pattern admits both forms,
+    // and no `format: uuid` that a short id would fail.
+    for (tool, field) in
+        [("create_comment", "reply_to"), ("cast_vote", "target")]
+    {
+        let def = agent
+            .prompt()
+            .tools
+            .iter()
+            .flatten()
+            .find_map(|d| match d {
+                misanthropic::tool::MethodDef::Custom(c) if c.name == tool => {
+                    Some(c.schema["properties"][field].clone())
+                }
+                _ => None,
+            })
+            .expect("the tool is installed");
+        assert_eq!(
+            def["pattern"].as_str(),
+            Some(crate::ids::CONTENT_TARGET_PATTERN),
+            "{tool}.{field}: {def}"
+        );
+        assert!(def.get("format").is_none(), "{tool}.{field}: {def}");
     }
 }
 
@@ -2103,4 +2125,164 @@ async fn get_feed_reads_a_community_or_everything() {
         rendered.contains("No posts across all communities."),
         "{rendered}"
     );
+}
+
+// --- Short ids on writes (0.49; agora#531) ---
+
+/// The first eight hex digits of `id`
+fn short(id: Uuid) -> String {
+    id.to_string()[..8].to_string()
+}
+
+/// A short id the agent was shown resolves locally; the signed payload
+/// carries the full id, and the ledger's refusal of a second top-level
+/// comment names the first one
+#[tokio::test]
+async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment()
+ {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let comment_id = Uuid::new_v4();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{post_id}"));
+        then.status(200).json_body(post_content(post_id));
+    });
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{}", short(post_id)));
+        then.status(500);
+    });
+    let created = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/comments")
+            .json_body_partial(format!(r#"{{"reply_to": "{post_id}"}}"#));
+        then.status(201)
+            .json_body_obj(&crate::responses::IdResponse { id: comment_id });
+    });
+
+    let config = SeedConfig {
+        max_rounds: 10,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({ "id": post_id }),
+        ))
+        .await
+        .unwrap();
+    let comment = || {
+        let input = crate::requests::CreateCommentInput {
+            reply_to: short(post_id).parse().unwrap(),
+            body: "Agreed, and here is why.".into(),
+        };
+        tool_use_message(
+            "create_comment",
+            serde_json::to_value(&input).unwrap(),
+        )
+    };
+    agent.handle(comment()).await.unwrap();
+    created.assert();
+    assert_eq!(lookup.hits(), 0, "resolved from what was shown");
+
+    agent.handle(comment()).await.unwrap();
+    assert_eq!(created.hits(), 1, "the second never reached the wire");
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(&format!(
+            "You already have a top-level comment on post {post_id}: \
+             {comment_id}. One top-level comment per post."
+        )),
+        "{rendered}"
+    );
+}
+
+/// A short id the agent was not shown is looked up (a summary read) and
+/// the vote is signed with the full id
+#[tokio::test]
+async fn cast_vote_looks_up_an_unseen_short_id() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{}", short(post_id)))
+            .query_param("detail", "summary");
+        then.status(200).json_body(post_content(post_id));
+    });
+    let vote = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/votes")
+            .json_body_partial(format!(
+                r#"{{"target": "{post_id}", "value": -1}}"#
+            ));
+        then.status(200)
+            .json_body_obj(&crate::responses::StatusResponse {
+                status: "ok".into(),
+            });
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let input = crate::requests::CastVoteInput {
+        target: short(post_id).to_uppercase().parse().unwrap(),
+        value: -1,
+    };
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::to_value(&input).unwrap(),
+        ))
+        .await
+        .unwrap();
+    lookup.assert();
+    vote.assert();
+    assert!(transcript(&agent).contains("Vote recorded"));
+}
+
+/// The server's ambiguity answer goes back to the model as is, and nothing
+/// is signed; a malformed id fails in plain words
+#[tokio::test]
+async fn an_ambiguous_or_malformed_short_id_explains_itself() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/7ad26ccd");
+        then.status(400).body(
+            r#"{"error": "7ad26ccd is ambiguous: it starts 2 posts and comments"}"#,
+        );
+    });
+    let vote = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/votes");
+        then.status(200);
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::json!({ "target": "7ad26ccd", "value": 1 }),
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::json!({
+                "target": "7ad26ccd-922f-484a-a37c-51777344a",
+                "value": 1,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(vote.hits(), 0);
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("is ambiguous"), "{rendered}");
+    assert!(
+        rendered.contains("`target` must be a post or comment id"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("group"), "{rendered}");
 }

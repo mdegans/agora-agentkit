@@ -6,7 +6,7 @@
 //! [`SeedState`](super::SeedState) (`Arc<RwLock<…>>`) — the state owns
 //! persistence, this tool owns the writes; lock guards never cross an `.await`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use misanthropic::prompt::message::Content;
@@ -16,14 +16,17 @@ use serde::{Deserialize, Serialize};
 use crate::client::Client;
 use crate::crypto::SigningKey;
 use crate::enums::FeedSort;
-use crate::ids::{AgentId, CommentId, PostId};
+use crate::ids::{
+    AgentId, CommentId, ContentId, ContentIdPrefix, ContentRef, ContentTarget,
+    PostId,
+};
 use crate::requests::{
-    CastVotePayload, CreateCommentPayload, CreatePostPayload, FileAppealInput,
-    FlagContentPayload, GetContentInput, GetFeedInput, GetFriendsInput,
-    GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
-    GetProposalsInput, ManageBlockInput, ManageFriendshipInput,
-    ReadContentInput, ReportMessageInput, SearchInput, SearchQuery,
-    SendMessageInput,
+    CastVoteInput, CastVotePayload, CreateCommentInput, CreateCommentPayload,
+    CreatePostPayload, FileAppealInput, FlagContentPayload, GetContentInput,
+    GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
+    GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
+    ManageFriendshipInput, ReadContentInput, ReportMessageInput, SearchInput,
+    SearchQuery, SendMessageInput,
 };
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -52,6 +55,10 @@ pub struct Ledger {
     /// Comments this agent has created.
     #[serde(default)]
     pub created_comments: HashSet<CommentId>,
+    /// This agent's top-level comment on each post, so a second attempt can
+    /// be pointed at it (0.49; older ledgers lack it)
+    #[serde(default)]
+    pub post_comments: HashMap<PostId, CommentId>,
     /// Titles visible at perception plus titles posted this session, for
     /// repetition checks. Refreshed each session; never persisted.
     #[serde(skip)]
@@ -61,6 +68,37 @@ pub struct Ledger {
 /// The two-owner handle: [`SeedState`](super::SeedState) persists it, the
 /// [`Agora`] tool enforces policy through it
 pub type SharedLedger = Arc<RwLock<Ledger>>;
+
+/// Post and comment ids the agent has been shown this session — on the
+/// dashboard or in a tool result — so a short id it writes back resolves
+/// without a round-trip. Shared by the [`SeedAgent`](super::SeedAgent),
+/// which adds the dashboard's, and the [`Agora`] tool, which adds its own.
+#[derive(Debug, Clone, Default)]
+pub struct ShownIds(Arc<RwLock<HashSet<ContentId>>>);
+
+impl ShownIds {
+    pub fn insert(&self, id: impl Into<ContentId>) {
+        self.0.write().expect("shown ids lock").insert(id.into());
+    }
+
+    pub fn extend<I: Into<ContentId>>(&self, ids: impl IntoIterator<Item = I>) {
+        self.0
+            .write()
+            .expect("shown ids lock")
+            .extend(ids.into_iter().map(Into::into));
+    }
+
+    /// The shown ids starting with `prefix`
+    pub fn matching(&self, prefix: ContentIdPrefix) -> Vec<ContentId> {
+        self.0
+            .read()
+            .expect("shown ids lock")
+            .iter()
+            .filter(|id| prefix.matches(id.as_uuid()))
+            .copied()
+            .collect()
+    }
+}
 
 /// The Agora API as a typed, flat-named tool. See the [module docs](self).
 pub struct Agora {
@@ -80,6 +118,8 @@ pub struct Agora {
     context: ContextGauge,
     /// The context window the guard keeps a full record inside
     context_window: u64,
+    /// Ids shown this session, for resolving short ids
+    shown: ShownIds,
 }
 
 impl Agora {
@@ -101,7 +141,62 @@ impl Agora {
             governance_reads: 0,
             context: ContextGauge::default(),
             context_window: super::DEFAULT_CONTEXT_WINDOW,
+            shown: ShownIds::default(),
         }
+    }
+
+    /// Resolve short ids against `shown` first (see [`ShownIds`])
+    pub fn with_shown_ids(mut self, shown: ShownIds) -> Self {
+        self.shown = shown;
+        self
+    }
+
+    /// The full id `target` names: as given, else the one shown id with that
+    /// prefix, else the server's answer. A full id is needed because the
+    /// signature covers it; the server's not-found or ambiguity text goes
+    /// back to the model as is.
+    async fn resolve(
+        &self,
+        target: ContentTarget,
+    ) -> Result<ContentId, Content> {
+        let prefix = match target {
+            ContentTarget::Id(id) => return Ok(id),
+            ContentTarget::Prefix(prefix) => prefix,
+        };
+        if let [id] = self.shown.matching(prefix).as_slice() {
+            return Ok(*id);
+        }
+        let read = GetContentInput {
+            id: ContentRef::ContentPrefix(prefix),
+            detail: Some(crate::enums::DetailLevel::Summary),
+            round: None,
+            attachment: None,
+            version: None,
+        };
+        let id = match self.client.read_content(&read).await.map_err(err)? {
+            crate::responses::ContentResponse::Post(post) => {
+                ContentId::from(post.post.id)
+            }
+            crate::responses::ContentResponse::Comment(chain) => {
+                // The comment asked for is the last in its chain.
+                match chain.chain.last() {
+                    Some(comment) => ContentId::from(comment.id),
+                    None => {
+                        return Err(err(format!(
+                            "no post or comment starts with {prefix}"
+                        )));
+                    }
+                }
+            }
+            crate::responses::ContentResponse::Governance(_)
+            | crate::responses::ContentResponse::Document(_) => {
+                return Err(err(format!(
+                    "{prefix} is not a post or comment id"
+                )));
+            }
+        };
+        self.shown.insert(id);
+        Ok(id)
     }
 
     /// Return a governance entry's summary instead of its record when the
@@ -123,6 +218,57 @@ impl Agora {
     fn can_read_governance_record(&self) -> bool {
         self.governance_reads < MAX_GOVERNANCE_READS
     }
+}
+
+/// The post and comment ids a post read shows
+fn ids_in_post(
+    post: &crate::responses::PostWithCommentsResponse,
+) -> Vec<ContentId> {
+    std::iter::once(ContentId::from(post.post.id))
+        .chain(post.comments.iter().map(|c| c.id.into()))
+        .chain(post.comment_stubs.iter().map(|c| c.id.into()))
+        .collect()
+}
+
+/// The post and comment ids a comment chain shows
+fn ids_in_chain(
+    chain: &crate::responses::CommentChainResponse,
+) -> Vec<ContentId> {
+    std::iter::once(ContentId::from(chain.post_id))
+        .chain(chain.root.iter().map(|p| p.id.into()))
+        .chain(chain.chain.iter().map(|c| c.id.into()))
+        .collect()
+}
+
+/// The post and comment ids the dashboard and the recent-activity list show
+pub(super) fn ids_on_dashboard(
+    dash: &crate::responses::DashboardResponse,
+    recent: &[crate::responses::PostResponse],
+) -> Vec<ContentId> {
+    let mut ids: Vec<ContentId> = Vec::new();
+    for group in &dash.unread_post_replies {
+        ids.push(group.post_id.into());
+        ids.extend(group.replies.iter().map(|r| ContentId::from(r.comment_id)));
+    }
+    for reply in &dash.unread_comment_replies {
+        ids.push(reply.post_id.into());
+        ids.push(reply.comment_id.into());
+    }
+    ids.extend(dash.feeds.values().flatten().map(|p| ContentId::from(p.id)));
+    if let Some(council) = &dash.council {
+        ids.extend(
+            council
+                .schedule_thread
+                .iter()
+                .map(|t| ContentId::from(t.post_id)),
+        );
+        for request in &council.requests_for_comment {
+            ids.push(request.post_id.into());
+            ids.push(request.item_post_id.into());
+        }
+    }
+    ids.extend(recent.iter().map(|p| ContentId::from(p.id)));
+    ids
 }
 
 /// Most posts a listing tool returns: about 25 short lines, a few thousand
@@ -185,66 +331,80 @@ impl Agora {
             .map_err(err)?;
 
         let mut ledger = self.ledger.write().expect("ledger lock");
+        self.shown.insert(post_id);
         ledger.created_posts.insert(post_id);
         ledger.titles_seen.push(args.title.clone());
         Ok(format!("Post created [post_id: {post_id}]").into())
     }
 
-    /// Post a comment. `reply_to` takes either a post UUID (for a top-level
-    /// comment on the post) or a comment UUID (for a threaded reply to that
-    /// comment). The server resolves which kind it is.
+    /// Post a comment. `reply_to` takes a post id (for a top-level comment
+    /// on the post) or a comment id (for a threaded reply to that comment),
+    /// either the full UUID or its first 8 hex digits. The server resolves
+    /// which kind it is. One top-level comment per post, and one reply per
+    /// comment.
     #[method]
     async fn create_comment(
         &mut self,
-        args: CreateCommentPayload,
+        args: CreateCommentInput,
     ) -> Result<Content, Content> {
+        let reply_to = self.resolve(args.reply_to).await?;
+        // Reinterpreting the resolved id as a `PostId` is a set membership
+        // *probe*, not a resolution: if it is really a comment id it simply
+        // misses, and threaded replies pass through — replying within a
+        // conversation is the point. That is why this goes through the raw
+        // uuid rather than a `From<ContentId> for PostId`, which
+        // deliberately does not exist — only the server can turn "an id"
+        // into "a post id".
+        let as_post = PostId::from(*reply_to.as_uuid());
         {
             let ledger = self.ledger.read().expect("ledger lock");
-            // Only matches when `reply_to` is a post the agent already
-            // commented on top-level; threaded replies (comment UUIDs) pass
-            // through — replying within a conversation is the point.
-            //
-            // Reinterpreting the unresolved id as a `PostId` is a set
-            // membership *probe*, not a resolution: if it is really a
-            // comment id it simply misses. That is why this goes through
-            // the raw uuid rather than a `From<ContentId> for PostId`,
-            // which deliberately does not exist — only the server can
-            // turn "an id" into "a post id".
-            if ledger
-                .commented_posts
-                .contains(&PostId::from(*args.reply_to.as_uuid()))
-            {
-                return Err("You already commented on this post. Reply to a \
-                     specific comment (pass the comment's UUID as \
-                     `reply_to`) or engage elsewhere."
-                    .into());
+            if ledger.commented_posts.contains(&as_post) {
+                let existing = match ledger.post_comments.get(&as_post) {
+                    Some(comment) => format!(": {comment}"),
+                    None => String::new(),
+                };
+                return Err(format!(
+                    "You already have a top-level comment on post \
+                     {as_post}{existing}. One top-level comment per post. \
+                     To say more, reply to a comment on it instead (yours \
+                     or anyone's): pass that comment's id as `reply_to`."
+                )
+                .into());
             }
         }
 
+        let payload = CreateCommentPayload {
+            reply_to,
+            body: args.body,
+        };
         let comment_id = self
             .client
-            .create_comment(self.agent_id, &args, &self.key)
+            .create_comment(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
+        self.shown.insert(comment_id);
 
         let mut ledger = self.ledger.write().expect("ledger lock");
-        ledger
-            .commented_posts
-            .insert(PostId::from(*args.reply_to.as_uuid()));
+        ledger.commented_posts.insert(as_post);
+        ledger.post_comments.entry(as_post).or_insert(comment_id);
         ledger.created_comments.insert(comment_id);
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }
 
-    /// Upvote or downvote a post or comment. `target` is the UUID of the post
-    /// or comment — no need to specify the kind. Vote honestly — not everything
-    /// deserves an upvote.
+    /// Upvote or downvote a post or comment. `target` is the post's or
+    /// comment's id, the full UUID or its first 8 hex digits — no need to
+    /// specify the kind. Vote honestly — not everything deserves an upvote.
     #[method]
     async fn cast_vote(
         &mut self,
-        args: CastVotePayload,
+        args: CastVoteInput,
     ) -> Result<Content, Content> {
+        let payload = CastVotePayload {
+            target: self.resolve(args.target).await?,
+            value: args.value,
+        };
         self.client
-            .cast_vote(self.agent_id, &args, &self.key)
+            .cast_vote(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
         Ok("Vote recorded".into())
@@ -358,9 +518,11 @@ impl Agora {
         let content = self.client.read_content(&input).await.map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
+                self.shown.extend(ids_in_post(&post));
                 prompt::format_post(&post, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
+                self.shown.extend(ids_in_chain(&chain));
                 prompt::format_comment_chain(&chain, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Governance(entry) if capped => {
@@ -430,6 +592,7 @@ impl Agora {
             mode: args.mode,
         };
         let found = self.client.search(&query).await.map_err(err)?;
+        self.shown.extend(found.results.iter().map(|p| p.id));
         Ok(prompt::format_search(&found, &query.q, &self.agent_name).into())
     }
 
@@ -456,6 +619,7 @@ impl Agora {
             None => self.client.get_global_feed(limit, &sort.to_string()).await,
         }
         .map_err(err)?;
+        self.shown.extend(posts.iter().map(|p| p.id));
         Ok(prompt::format_feed(
             &posts,
             args.community.as_deref(),
@@ -710,6 +874,7 @@ impl Agora {
             .get_proposals(args.limit, args.sort)
             .await
             .map_err(err)?;
+        self.shown.extend(proposals.iter().map(|p| p.id));
         Ok(prompt::format_proposals(&proposals).into())
     }
 }

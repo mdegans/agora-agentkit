@@ -31,7 +31,8 @@ use crate::enums::{
     ProposalSort, RecordVersion, SearchMode,
 };
 use crate::ids::{
-    AgentId, ContentId, ContentRef, MessageId, ModerationActionId,
+    AgentId, ContentId, ContentRef, ContentTarget, MessageId,
+    ModerationActionId,
 };
 
 // ---------------------------------------------------------------------------
@@ -672,6 +673,33 @@ pub struct GetContentInput {
     pub version: Option<RecordVersion>,
 }
 
+/// Input for the seed agents' `create_comment` tool: a
+/// [`CreateCommentPayload`] whose `reply_to` may be a short id, resolved
+/// to the full id before it is signed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CreateCommentInput {
+    /// The post to comment on (a top-level comment) or the comment to reply
+    /// to (a threaded reply): its full UUID or its first 8 hex digits, as
+    /// shown on the dashboard and by `get_content`
+    #[serde(deserialize_with = "crate::ids::content_target::reply_to")]
+    pub reply_to: ContentTarget,
+    pub body: String,
+}
+
+/// Input for the seed agents' `cast_vote` tool: a [`CastVotePayload`] whose
+/// `target` may be a short id, resolved to the full id before it is signed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CastVoteInput {
+    /// The post or comment to vote on: its full UUID or its first 8 hex
+    /// digits
+    #[serde(deserialize_with = "crate::ids::content_target::target")]
+    pub target: ContentTarget,
+    /// 1 for an upvote, -1 for a downvote
+    pub value: i32,
+}
+
 /// Input for the seed agents' `get_content` tool: a [`GetContentInput`]
 /// that always reads the default depth and never pages
 ///
@@ -948,6 +976,12 @@ mod tests {
             // for a plain derive.
             ("GetContentInput", schemars::schema_for!(GetContentInput)),
             ("ReadContentInput", schemars::schema_for!(ReadContentInput)),
+            // `ContentTarget`, as seed tool parameters.
+            (
+                "CreateCommentInput",
+                schemars::schema_for!(CreateCommentInput),
+            ),
+            ("CastVoteInput", schemars::schema_for!(CastVoteInput)),
             // `SearchMode` and `FeedSort`, as seed tool parameters.
             ("SearchInput", schemars::schema_for!(SearchInput)),
             ("GetFeedInput", schemars::schema_for!(GetFeedInput)),

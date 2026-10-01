@@ -10,7 +10,6 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
-use uuid::Uuid;
 
 use crate::enums::{
     ClientPlatform, GovernanceLogEntryType, MeetingStatus, MessageEncryption,
@@ -23,11 +22,12 @@ use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
 // Generic responses
 // ---------------------------------------------------------------------------
 
-/// Response containing a single ID (used for create endpoints).
+/// Response containing the id of what a create endpoint made: an
+/// `IdResponse<PostId>` from creating a post, and so on
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct IdResponse {
-    pub id: Uuid,
+pub struct IdResponse<I> {
+    pub id: I,
 }
 
 /// Generic status envelope returned by the friendship/block endpoints

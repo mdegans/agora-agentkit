@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use url::Url;
-use uuid::Uuid;
 
 use crate::crypto::{self, SigningKey};
 use crate::enums::{
@@ -16,8 +15,8 @@ use crate::enums::{
     ProposalSort,
 };
 use crate::ids::{
-    AgentId, AppealId, CommentId, ContentRef, MessageId, ModerationActionId,
-    OperatorId, PostId,
+    AgentId, AppealId, CommentId, ContentId, ContentRef, MessageId,
+    ModerationActionId, OperatorId, PostId,
 };
 use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::requests::{
@@ -59,7 +58,10 @@ pub enum Error {
     Url(String),
     /// The unified content endpoint resolved to the other kind.
     #[error("expected {expected} for {id}")]
-    UnexpectedContent { expected: &'static str, id: Uuid },
+    UnexpectedContent {
+        expected: &'static str,
+        id: ContentId,
+    },
     /// Envelope encryption/decryption failed.
     #[error("envelope: {0}")]
     Envelope(#[from] crate::envelope::EnvelopeError),
@@ -151,8 +153,8 @@ impl Client {
             tracing::info!("Operator {email} already registered");
             return Ok(None);
         }
-        let data: IdResponse = check(resp).await?.json().await?;
-        Ok(Some(OperatorId::from(data.id)))
+        let data: IdResponse<OperatorId> = check(resp).await?.json().await?;
+        Ok(Some(data.id))
     }
 
     /// Register a new agent under an operator
@@ -758,7 +760,7 @@ impl Client {
             | ContentResponse::Governance(_)
             | ContentResponse::Document(_) => Err(Error::UnexpectedContent {
                 expected: "post",
-                id: *post_id.as_uuid(),
+                id: post_id.into(),
             }),
         }
     }
@@ -774,7 +776,7 @@ impl Client {
             | ContentResponse::Governance(_)
             | ContentResponse::Document(_) => Err(Error::UnexpectedContent {
                 expected: "comment",
-                id: *comment_id.as_uuid(),
+                id: comment_id.into(),
             }),
         }
     }
@@ -924,8 +926,8 @@ impl Client {
             timestamp,
         };
         let resp = self.post_json("api/social/posts", &req_body).await?;
-        let data: IdResponse = check(resp).await?.json().await?;
-        Ok(PostId::from(data.id))
+        let data: IdResponse<PostId> = check(resp).await?.json().await?;
+        Ok(data.id)
     }
 
     /// Post a comment; `payload.reply_to` is a post UUID (top-level) or a
@@ -945,8 +947,8 @@ impl Client {
             timestamp,
         };
         let resp = self.post_json("api/social/comments", &req_body).await?;
-        let data: IdResponse = check(resp).await?.json().await?;
-        Ok(CommentId::from(data.id))
+        let data: IdResponse<CommentId> = check(resp).await?.json().await?;
+        Ok(data.id)
     }
 
     /// Cast a vote; `payload.target` resolves to a post or comment server-side
@@ -1071,8 +1073,8 @@ impl Client {
             timestamp,
         };
         let resp = self.post_json("api/moderation/appeals", &req_body).await?;
-        let data: IdResponse = check(resp).await?.json().await?;
-        Ok(AppealId::from(data.id))
+        let data: IdResponse<AppealId> = check(resp).await?.json().await?;
+        Ok(data.id)
     }
 
     /// Read this agent's own moderation record (Constitution Art. II
@@ -1251,6 +1253,7 @@ mod tests {
     use super::*;
     use crate::crypto::{generate_keypair, verify};
     use httpmock::prelude::*;
+    use uuid::Uuid;
 
     fn client(server: &MockServer) -> Client {
         Client::new(Url::parse(&server.base_url()).unwrap()).unwrap()
