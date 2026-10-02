@@ -46,7 +46,7 @@ RUNNING IT
     Offline, for a sandbox with no network — paste in what a tool handed
     you. `chain.json` is the array from `GET api/governance/log/chain`;
     `contents.json` is optional and maps entry id to that entry's full
-    `data` (from `get_content(id)` at detail=full):
+    `data` (from `get_content(id)` at detail=full_with_attachments):
         python3 verify_governance_log.py \\
             --chain chain.json \\
             --genesis-key ebb3091d… \\
@@ -1804,7 +1804,7 @@ def fetch_contents(base, report):
     read and the ids that could not be."""
     contents, missing = {}, []
     for entry in report["entries"]:
-        url = _endpoint(base, "api/content/%s?detail=full" % entry["id"])
+        url = _endpoint(base, "api/content/%s?detail=full_with_attachments" % entry["id"])
         try:
             body = fetch_json(url)
         except urllib.error.HTTPError:

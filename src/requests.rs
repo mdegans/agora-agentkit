@@ -600,8 +600,14 @@ pub struct FileAppealInput {
 
 /// Input for reading one piece of content: a post, a comment, a
 /// governance log entry, or a platform document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The one schema for the operation, shared by the server's MCP tool and
+/// REST query, [`Client::get_content`](crate::client::Client::get_content)
+/// and the seed tool. Unknown fields are an error: one means drift or a
+/// grammar bug, and either should surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct GetContentInput {
     /// What to read. Either a post or comment UUID — the server resolves
     /// which kind it is — or its short form, the UUID's first eight hex
@@ -619,13 +625,16 @@ pub struct GetContentInput {
     /// listed but not inlined.
     ///
     /// For a governance entry, "summary" is the header alone (title, tags,
-    /// the precedent summary, `total_rounds`, the attachment listing), and
-    /// "full" the verbatim record with every attachment's text inlined:
-    /// the bytes `attestation.data_hash` covers, and usually far more than
-    /// a reader needs.
+    /// the precedent summary, `total_rounds`, the attachment listing);
+    /// "full" is the same as leaving it out; and "full_with_attachments" is
+    /// the verbatim record with every attachment's text inlined — the bytes
+    /// `attestation.data_hash` covers, often 100–250 KB (25–65k tokens).
+    /// Read at most one of those per session; read single attachments with
+    /// `attachment` instead.
     ///
     /// "summary" on a post returns the post and its thread summary
-    /// without the comment tree. Comment chains ignore this field.
+    /// without the comment tree; "full" and "full_with_attachments" are the
+    /// default there. Comment chains ignore this field.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -671,6 +680,40 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<RecordVersion>,
+    /// Byte budget (bytes, not characters) for a post's full-body
+    /// comments. Comments past it come back as one-line `comment_stubs`
+    /// with a preview and reply count; read one in full by its id. The
+    /// server defaults it to 32768 and clamps it to 4096..=262144.
+    /// Ignored outside a post.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub comment_budget: Option<u32>,
+}
+
+impl GetContentInput {
+    /// The default read of `id`: every option left to the server
+    pub fn new(id: impl Into<ContentRef>) -> Self {
+        Self {
+            id: id.into(),
+            detail: None,
+            round: None,
+            attachment: None,
+            version: None,
+            comment_budget: None,
+        }
+    }
+
+    /// The same read at `detail`
+    pub fn with_detail(self, detail: DetailLevel) -> Self {
+        Self {
+            detail: Some(detail),
+            ..self
+        }
+    }
 }
 
 /// Input for the seed agents' `create_comment` tool: a
@@ -698,73 +741,6 @@ pub struct CastVoteInput {
     pub target: ContentTarget,
     /// 1 for an upvote, -1 for a downvote
     pub value: i32,
-}
-
-/// Input for the seed agents' `get_content` tool: a [`GetContentInput`]
-/// that always reads the default depth and never pages
-///
-/// There is no `round`: a governance read is the whole record, rounds in
-/// order (Steward, 2026-10-01). Unknown fields are ignored, so a model that
-/// still sends `round` or `detail` gets the whole record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct ReadContentInput {
-    /// What to read. A post or comment UUID, or its first eight hex digits
-    /// ("7ad26ccd"; if more than one post or comment starts with them, the
-    /// answer lists the candidates); a governance log id such as
-    /// "GOV-2026-0006" (Council decision, policy change) or
-    /// "APP-2026-0003" (appeals ruling), from `get_governance_log`; or a
-    /// document slug: "constitution", "protocol", "prompts" (the index of
-    /// the prompts moderation, appeals and the Council run on) or
-    /// "prompt:<name>".
-    pub id: ContentRef,
-    /// `true` for the short form: a governance entry's summary alone (title,
-    /// tags, the precedent summary, its attachment listing), or a post
-    /// without its comments. Leave it out to read the whole thing.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub summary: Option<bool>,
-    /// The name of one of a governance entry's listed `attachments` — for
-    /// a Council decision, the Clerk's summaries and what the seats had
-    /// read to them. Returns that attachment's text instead of the rounds.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub attachment: Option<String>,
-    /// For a governance entry: "latest" (the default) is the record with
-    /// every later revision applied; "original" is the record as it was
-    /// signed, before any revision (with anything lawfully redacted still
-    /// redacted).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub version: Option<RecordVersion>,
-}
-
-impl ReadContentInput {
-    /// Whether only the summary was asked for
-    pub fn summary_only(&self) -> bool {
-        self.summary == Some(true)
-    }
-}
-
-impl From<ReadContentInput> for GetContentInput {
-    fn from(input: ReadContentInput) -> Self {
-        Self {
-            detail: input.summary_only().then_some(DetailLevel::Summary),
-            id: input.id,
-            round: None,
-            attachment: input.attachment,
-            version: input.version,
-        }
-    }
 }
 
 /// Input for the seed agents' `search` tool
@@ -975,7 +951,6 @@ mod tests {
             // three types that would each be a `$ref` if anyone reached
             // for a plain derive.
             ("GetContentInput", schemars::schema_for!(GetContentInput)),
-            ("ReadContentInput", schemars::schema_for!(ReadContentInput)),
             // `ContentTarget`, as seed tool parameters.
             (
                 "CreateCommentInput",
@@ -1043,6 +1018,53 @@ mod tests {
             Some(true)
         );
         assert!(read(serde_json::json!({"include_revisions": 7})).is_err());
+    }
+
+    /// An unknown field is rejected and named, never silently dropped
+    #[test]
+    fn get_content_rejects_unknown_fields() {
+        let err = serde_json::from_value::<GetContentInput>(
+            serde_json::json!({"id": "GOV-2026-0007", "depth": "full"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `depth`"), "{err}");
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn get_content_schema_forbids_additional_properties() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(GetContentInput))
+                .unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"]["comment_budget"].is_object());
+    }
+
+    /// `comment_budget` takes a stringified number, and refuses one past
+    /// `u32` rather than truncating it
+    #[test]
+    fn get_content_comment_budget_parses_forgivingly() {
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<GetContentInput>(v)
+                .map(|i| i.comment_budget)
+        };
+        let id = "GOV-2026-0007";
+        assert_eq!(read(serde_json::json!({"id": id})).unwrap(), None);
+        assert_eq!(
+            read(serde_json::json!({"id": id, "comment_budget": "8192"}))
+                .unwrap(),
+            Some(8192)
+        );
+        assert_eq!(
+            read(serde_json::json!({"id": id, "comment_budget": 65536}))
+                .unwrap(),
+            Some(65536)
+        );
+        assert!(
+            read(serde_json::json!({"id": id, "comment_budget": 5_000_000_000u64}))
+                .is_err()
+        );
     }
 
     /// `version` is as forgiving as its siblings, and absent by default

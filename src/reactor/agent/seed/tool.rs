@@ -25,8 +25,8 @@ use crate::requests::{
     CreatePostPayload, FileAppealInput, FlagContentPayload, GetContentInput,
     GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
     GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
-    ManageFriendshipInput, ReadContentInput, ReportMessageInput, SearchInput,
-    SearchQuery, SendMessageInput,
+    ManageFriendshipInput, ReportMessageInput, SearchInput, SearchQuery,
+    SendMessageInput,
 };
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -114,6 +114,8 @@ pub struct Agora {
     /// Full governance reads spent this session. Not persisted — the cap
     /// is per-session.
     governance_reads: usize,
+    /// Whether this session's one `full_with_attachments` read is spent
+    verbatim_read: bool,
     /// Tokens in context, for the full-record guard
     context: ContextGauge,
     /// The context window the guard keeps a full record inside
@@ -139,6 +141,7 @@ impl Agora {
             enc_key,
             ledger,
             governance_reads: 0,
+            verbatim_read: false,
             context: ContextGauge::default(),
             context_window: super::DEFAULT_CONTEXT_WINDOW,
             shown: ShownIds::default(),
@@ -166,14 +169,9 @@ impl Agora {
         if let [id] = self.shown.matching(prefix).as_slice() {
             return Ok(*id);
         }
-        let read = GetContentInput {
-            id: ContentRef::ContentPrefix(prefix),
-            detail: Some(crate::enums::DetailLevel::Summary),
-            round: None,
-            attachment: None,
-            version: None,
-        };
-        let id = match self.client.read_content(&read).await.map_err(err)? {
+        let read = GetContentInput::new(ContentRef::ContentPrefix(prefix))
+            .with_detail(crate::enums::DetailLevel::Summary);
+        let id = match self.client.get_content(&read).await.map_err(err)? {
             crate::responses::ContentResponse::Post(post) => {
                 ContentId::from(post.post.id)
             }
@@ -492,30 +490,44 @@ impl Agora {
     /// notes — so it reads best as the integrity test of the deliberation;
     /// from Round 2 on members see prior responses and Steward notes, so
     /// convergence there reflects deliberation rather than capitulation.
-    /// `attachment="<name>"` reads one listed attachment; `version=
-    /// "original"` reads a record as it was signed, before any later
-    /// revision; `summary=true` returns only the summary.
+    /// `attachment="<name>"` reads one listed attachment; `round=<n>` reads
+    /// one round; `version="original"` reads a record as it was signed,
+    /// before any later revision; `detail="summary"` returns only the
+    /// summary. `detail="full"` is the same as leaving it out, and
+    /// `detail="full_with_attachments"` inlines every attachment — often
+    /// 100–250 KB — and is allowed once per session.
     ///
-    /// Summaries are free. A whole record or an attachment uses one of
-    /// your 2 full governance reads per session; once they are used you
-    /// get the summary instead. A record too big for your context also
+    /// Summaries are free. A whole record, a round or an attachment uses
+    /// one of your 2 full governance reads per session; once they are used
+    /// you get the summary instead. A record too big for your context also
     /// comes back as its summary, and costs nothing. Posts, comments and
     /// documents are always free.
     #[method]
     async fn get_content(
         &mut self,
-        args: ReadContentInput,
+        mut input: GetContentInput,
     ) -> Result<Content, Content> {
+        use crate::enums::DetailLevel;
         // The budget is about governance attention, so it is the kind of
         // id and the depth that spend it, not the tool that was called.
-        let full = args.id.is_governance() && !args.summary_only();
+        let full = input.id.is_governance()
+            && input.detail != Some(DetailLevel::Summary);
         let capped = full && !self.can_read_governance_record();
-        let mut input = GetContentInput::from(args);
+        // One verbatim read per session; a second gets the record without
+        // the attachment bodies, and says so.
+        let verbatim = full
+            && !capped
+            && input.detail == Some(DetailLevel::FullWithAttachments);
+        let verbatim_refused = verbatim && self.verbatim_read;
+        if verbatim_refused {
+            input.detail = None;
+        }
         if capped {
-            input.detail = Some(crate::enums::DetailLevel::Summary);
+            input.detail = Some(DetailLevel::Summary);
+            input.round = None;
             input.attachment = None;
         }
-        let content = self.client.read_content(&input).await.map_err(err)?;
+        let content = self.client.get_content(&input).await.map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
@@ -545,6 +557,16 @@ impl Agora {
                 let held = self.context.get();
                 if self.context.fits(tokens, self.context_window) {
                     self.governance_reads += 1;
+                    if verbatim_refused {
+                        return Ok(format!(
+                            "You have used this session's one \
+                             full_with_attachments read, so this is the record \
+                             with its attachments listed; read one with \
+                             attachment=\"<name>\".\n\n{rendered}"
+                        )
+                        .into());
+                    }
+                    self.verbatim_read |= verbatim;
                     return Ok(rendered.into());
                 }
                 // The summary rather than a record that would crowd out
