@@ -478,6 +478,39 @@ impl SeedAgent {
         }
     }
 
+    /// Seat a tool-calling turn the round budget has no room for, and
+    /// answer each call with a "not run" error result in one user turn, so
+    /// the transcript stays well-formed and the next instruction lands in
+    /// that new message.
+    fn seat_unrun_calls(
+        &mut self,
+        response: response::Message,
+    ) -> Result<(), SeedError> {
+        let results: Vec<Block> = response
+            .inner
+            .content
+            .iter()
+            .filter_map(|block| block.tool_use())
+            .map(|call| {
+                Block::from(
+                    misanthropic::tool::Result::new(
+                        call.id.clone(),
+                        "Not run: this session's rounds are used up.",
+                    )
+                    .error(),
+                )
+            })
+            .collect();
+        let prompt = &mut self.state.prompt;
+        prompt
+            .push_message(response.inner)
+            .map_err(|e| SeedError::Prompt(e.to_string()))?;
+        prompt
+            .push_message((Role::User, results))
+            .map(|_| ())
+            .map_err(|e| SeedError::Prompt(e.to_string()))
+    }
+
     /// Constrain the next response to `T`'s schema — only where changing
     /// `output_config` doesn't invalidate the prefix cache (blallama); on
     /// canonical Anthropic the instruction + parser carry the contract and
@@ -1090,9 +1123,17 @@ impl Agent for SeedAgent {
                     .any(|block| block.tool_use().is_some());
                 if tool_round {
                     if rounds_left == 0 {
-                        // Budget spent: the un-dispatched calls can't be seated
-                        // (their `tool_use` would go unanswered), so the
-                        // response is dropped and the tail begins.
+                        // Budget spent. The turn is seated and each call
+                        // answered "not run" rather than the turn being
+                        // dropped: dropping it put the reflect instruction
+                        // *inside* the previous tool-result message, which
+                        // grows a message the cache already holds and costs
+                        // the whole tail on prefix caches anchored at
+                        // message ends (blallama hybrid models: windmill,
+                        // 31.2k, 2026-10-02). Seated, the previous prompt and
+                        // this turn stay a prefix, and the instruction
+                        // starts in a fresh user message.
+                        self.seat_unrun_calls(response)?;
                         return self.begin_reflect();
                     }
                     self.phase = Phase::Acting {

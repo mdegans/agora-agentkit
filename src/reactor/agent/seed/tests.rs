@@ -676,6 +676,7 @@ async fn round_budget_forces_reflect_without_dispatch() {
     };
     let mut agent = agent(&server, config);
     seat_start(&mut agent);
+    let before = serde_json::to_value(&agent.prompt().messages).unwrap();
 
     let control = agent
         .handle(tool_use_message(
@@ -691,6 +692,29 @@ async fn round_budget_forces_reflect_without_dispatch() {
     assert_eq!(control, Control::Continue);
     assert!(transcript(&agent).contains("update your `## Memory`"));
     assert!(agent.state.ledger.read().unwrap().created_posts.is_empty());
+
+    // Cache shape: the earlier messages are untouched, the over-budget turn
+    // is kept, its call is answered "not run", and the reflect instruction
+    // starts in that new user message — never appended to a message the
+    // previous request already ended with.
+    let after = serde_json::to_value(&agent.prompt().messages).unwrap();
+    let (before, after) =
+        (before.as_array().unwrap(), after.as_array().unwrap());
+    assert_eq!(&after[..before.len()], &before[..], "prefix unchanged");
+    assert_eq!(after.len(), before.len() + 2, "{after:#?}");
+    let turn = &after[before.len()];
+    assert_eq!(turn["role"], "assistant");
+    assert!(turn.to_string().contains("tool_use"), "{turn}");
+    let tail = after[before.len() + 1].to_string();
+    assert!(
+        tail.contains("tool_result") && tail.contains("Not run"),
+        "{tail}"
+    );
+    assert!(tail.contains("update your `## Memory`"), "{tail}");
+    assert!(
+        tail.find("Not run").unwrap() < tail.find("update your").unwrap(),
+        "results first, then the instruction"
+    );
 }
 
 #[tokio::test]
