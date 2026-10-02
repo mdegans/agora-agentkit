@@ -3,12 +3,17 @@
 //! One [`Run`](crate::reactor::Run) session is one seed *cycle*: perceive
 //! (dashboard seated at [`on_init`]), think/act (the default tool loop,
 //! round-capped), then a phase tail — reflect (memory rewrite), a rare deep
-//! soul mutation or evolution-log entry, and an occasional anonymous survey.
-//! The working [`Prompt`] rides [`SeedState`], so the persisted state at rest
-//! *is* the last session's transcript (survey turns redacted unless the agent
-//! asked for contact). That copy is overwritten every cycle; the durable
-//! archive is [`prompt_log`], written at [`on_teardown`] when
-//! [`SeedConfig::prompt_log_dir`] is set.
+//! soul mutation or evolution-log entry, and an occasional anonymous survey,
+//! always the session's last request (a wrapping agent asks its own questions
+//! before it: see [`Epilogue`]). The working [`Prompt`] rides [`SeedState`],
+//! so the persisted state at rest *is* the last session's transcript (survey
+//! turns redacted at [`on_teardown`] unless the agent asked for contact). That
+//! copy is overwritten every cycle; the durable archive is [`prompt_log`],
+//! written at [`on_teardown`] when [`SeedConfig::prompt_log_dir`] is set.
+//!
+//! **Append-only.** Every request extends the one before it: a failed reply
+//! is seated with the retry note after it ([`seat_unused_reply`]), never
+//! dropped, and nothing already sent is rewritten or removed until teardown.
 //!
 //! [`on_init`]: Agent::on_init
 //! [`on_teardown`]: Agent::on_teardown
@@ -51,7 +56,7 @@ use chrono::{DateTime, Utc};
 use misanthropic::model::ModelInfo;
 use misanthropic::prompt::{
     Prompt,
-    message::{Block, Role},
+    message::Block,
     output::{Effort, OutputConfig},
     thinking::Thinking,
 };
@@ -68,8 +73,8 @@ use crate::crypto::SigningKey;
 use crate::docs::{FEED_SORT_VALUES_DOC, SEARCH_DOC};
 use crate::ids::{AgentId, PostId};
 use crate::reactor::{
-    Agent, Control, Outcome, RetryAfter, State, default_handle,
-    inference::Quirks,
+    Agent, Control, Epilogue, Outcome, RetryAfter, State, default_handle,
+    inference::Quirks, seat_unused_reply, seat_user,
 };
 use crate::requests::SubmitFeedbackPayload;
 use crate::responses::{
@@ -250,11 +255,52 @@ impl State for SeedState {}
 /// the phase tail, each one structured-output turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
-    Acting { rounds_left: usize },
+    Acting {
+        rounds_left: usize,
+    },
     Reflect,
     Mutate,
     Evolve,
+    /// The tail is done but for the survey, held for [`Epilogue`]
+    Held,
     Survey,
+}
+
+/// The end of the transcript as the survey found it. The survey question
+/// joins a trailing user turn when there is one (a wrapper's tool results,
+/// say), so the mark is a block as well as a message.
+#[derive(Debug, Clone, Copy)]
+struct SurveyMark {
+    messages: usize,
+    /// Blocks of the last message, when that message is a user turn the
+    /// question was added to
+    blocks: Option<usize>,
+}
+
+impl SurveyMark {
+    fn at(prompt: &Prompt) -> Self {
+        let blocks = prompt
+            .messages
+            .last()
+            .filter(|last| {
+                last.role == misanthropic::prompt::message::Role::User
+            })
+            .map(|last| last.content.len());
+        Self {
+            messages: prompt.messages.len(),
+            blocks,
+        }
+    }
+
+    /// Cut the survey, and everything after it, out of `prompt`
+    fn redact(self, prompt: &mut Prompt) {
+        prompt.messages.truncate(self.messages);
+        if let (Some(blocks), Some(last)) =
+            (self.blocks, prompt.messages.last_mut())
+        {
+            last.content.truncate(blocks);
+        }
+    }
 }
 
 /// Something went wrong inside the [`SeedAgent`]
@@ -297,8 +343,12 @@ pub struct SeedAgent {
     /// The live community slugs, fetched at `on_init` — validates soul
     /// mutations.
     communities: Vec<String>,
-    /// `messages.len()` before the survey turns, for redaction.
-    survey_mark: Option<usize>,
+    /// Where the survey begins, for redaction at teardown
+    survey_mark: Option<SurveyMark>,
+    /// The agent answered the survey asking to be contacted: keep it
+    contact_me: bool,
+    /// The survey waits for [`Epilogue::begin_epilogue`]
+    hold_survey: bool,
     /// Server-tool pauses resumed this session — bounded by [`MAX_PAUSES`].
     pauses: usize,
     /// Tokens in context as of the last response, shared with the tool
@@ -321,6 +371,14 @@ pub struct SeedAgent {
 /// stall cap can't see it, because resuming is progress. Matches the runaway
 /// guard misanthropic's own server-tool loop uses.
 const MAX_PAUSES: usize = 5;
+
+/// The error result a tool call gets in a closing-phase turn
+const NOT_RUN_NOW: &str =
+    "Not run: no tools can be used in this turn. Nothing was done.";
+
+/// The error result a tool call gets in a turn clipped at `max_tokens`
+const NOT_RUN_CLIPPED: &str =
+    "Not run: this turn was cut off at the length limit. Nothing was done.";
 
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
@@ -449,8 +507,8 @@ impl SeedAgent {
         Ok(Control::Continue)
     }
 
-    /// Seat a phase instruction as (or merged into) the trailing user turn
-    /// and set the phase's token budget. Clears the previous phase's
+    /// Seat a phase instruction with [`seat_user`] and set the phase's token
+    /// budget. Clears the previous phase's
     /// `output_config` format (callers re-add one where it's cache-safe) but
     /// keeps its effort: thinking stays adaptive across phases, and without
     /// the effort a phase would think at the model's default.
@@ -468,49 +526,23 @@ impl SeedAgent {
             .take()
             .and_then(|config| config.effort)
             .map(OutputConfig::effort);
-        match prompt.messages.last_mut() {
-            Some(last) if last.role == Role::User => {
-                last.extend([Block::from(text.to_string())]);
-                Ok(Control::Continue)
-            }
-            _ => prompt
-                .push_message((Role::User, text.to_string()))
-                .map(|_| Control::Continue)
-                .map_err(|e| SeedError::Prompt(e.to_string())),
-        }
+        seat_user(prompt, text.to_string())
+            .map(|()| Control::Continue)
+            .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
-    /// Seat a tool-calling turn the round budget has no room for, and
-    /// answer each call with a "not run" error result in one user turn, so
-    /// the transcript stays well-formed and the next instruction lands in
-    /// that new message.
+    /// Seat a tool-calling turn the round budget has no room for, each call
+    /// answered "not run", so the next instruction lands in that new message
     fn seat_unrun_calls(
         &mut self,
         response: response::Message,
     ) -> Result<(), SeedError> {
-        let results: Vec<Block> = response
-            .inner
-            .content
-            .iter()
-            .filter_map(|block| block.tool_use())
-            .map(|call| {
-                Block::from(
-                    misanthropic::tool::Result::new(
-                        call.id.clone(),
-                        "Not run: this session's rounds are used up.",
-                    )
-                    .error(),
-                )
-            })
-            .collect();
-        let prompt = &mut self.state.prompt;
-        prompt
-            .push_message(response.inner)
-            .map_err(|e| SeedError::Prompt(e.to_string()))?;
-        prompt
-            .push_message((Role::User, results))
-            .map(|_| ())
-            .map_err(|e| SeedError::Prompt(e.to_string()))
+        seat_unused_reply(
+            &mut self.state.prompt,
+            &response,
+            "Not run: this session's rounds are used up.",
+        )
+        .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
     /// Constrain the next response to `T`'s schema — only where changing
@@ -524,23 +556,25 @@ impl SeedAgent {
         }
     }
 
-    /// Append a model-facing failure to the trailing user turn and stall — the
-    /// reactor's stall cap is the retry budget.
-    fn phase_failure(&mut self, msg: &str) -> Result<Control, SeedError> {
+    /// Seat the unusable `reply` and a model-facing failure after it, and
+    /// stall — the reactor's stall cap is the retry budget.
+    fn phase_failure(
+        &mut self,
+        reply: &response::Message,
+        msg: &str,
+    ) -> Result<Control, SeedError> {
         tracing::debug!(phase = ?self.phase, error = msg, "phase retry");
         self.phase_failures += 1;
         self.last_failure = Some(msg.to_string());
+        let not_run = match reply.stop_reason {
+            Some(StopReason::MaxTokens) => NOT_RUN_CLIPPED,
+            _ => NOT_RUN_NOW,
+        };
         let prompt = &mut self.state.prompt;
-        match prompt.messages.last_mut() {
-            Some(last) if last.role == Role::User => {
-                last.extend([Block::from(msg.to_string())]);
-                Ok(Control::Stalled)
-            }
-            _ => prompt
-                .push_message((Role::User, msg.to_string()))
-                .map(|_| Control::Stalled)
-                .map_err(|e| SeedError::Prompt(e.to_string())),
-        }
+        seat_unused_reply(prompt, reply, not_run)
+            .and_then(|()| seat_user(prompt, msg.to_string()))
+            .map(|()| Control::Stalled)
+            .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
     /// Whether the response being handled is the closing phase's last try
@@ -601,14 +635,23 @@ impl SeedAgent {
         self.maybe_survey()
     }
 
-    /// Roll for the survey, marking the redaction point; otherwise done.
+    /// The survey, or — held for [`Epilogue`] — `Done` until it is begun
     fn maybe_survey(&mut self) -> Result<Control, SeedError> {
+        if self.hold_survey {
+            self.phase = Phase::Held;
+            return Ok(Control::Done(Outcome::Complete));
+        }
+        self.roll_survey()
+    }
+
+    /// Roll for the survey, marking the redaction point; otherwise done.
+    fn roll_survey(&mut self) -> Result<Control, SeedError> {
         let roll = self.ctx.config.force_survey
             || rand::thread_rng().gen_range(0..100)
                 < self.ctx.config.survey_chance;
         if roll {
             self.phase = Phase::Survey;
-            self.survey_mark = Some(self.state.prompt.messages.len());
+            self.survey_mark = Some(SurveyMark::at(&self.state.prompt));
             // No `output_config`: `null` (no feedback) must stay expressible.
             let budget = self.ctx.config.phase_max_tokens;
             return self.seat_phase(output::SURVEY_MESSAGE, budget);
@@ -644,6 +687,7 @@ impl SeedAgent {
             .any(|block| block.tool_use().is_some())
         {
             return self.phase_failure(
+                &response,
                 "Do NOT use tools right now. Respond in JSON only, per the \
                  instructions above.",
             );
@@ -662,6 +706,9 @@ impl SeedAgent {
 
         match self.phase {
             Phase::Acting { .. } => unreachable!("routed by handle"),
+            Phase::Held => Err(SeedError::Prompt(
+                "a response while the survey is held".to_string(),
+            )),
             Phase::Reflect => match output::parse_memory_rewrite(&text) {
                 Ok(rewrite) => {
                     match self.state.memory.update(rewrite.content) {
@@ -670,12 +717,13 @@ impl SeedAgent {
                             self.seat_response(response)?;
                             self.after_reflect()
                         }
-                        Err(e) => self.phase_failure(&format!(
-                            "Memory rejected: {e}. Try again."
-                        )),
+                        Err(e) => self.phase_failure(
+                            &response,
+                            &format!("Memory rejected: {e}. Try again."),
+                        ),
                     }
                 }
-                Err(e) => self.phase_failure(&e),
+                Err(e) => self.phase_failure(&response, &e),
             },
             Phase::Mutate => {
                 match output::parse_soul_mutation(&text).or_else(|e| {
@@ -698,18 +746,21 @@ impl SeedAgent {
                                 .iter()
                                 .map(|w| w.message.clone())
                                 .collect();
-                            return self.phase_failure(&format!(
-                                "Invalid communities: {}. Valid slugs: {:?}. \
-                             Try again.",
-                                bad.join("; "),
-                                self.communities,
-                            ));
+                            return self.phase_failure(
+                                &response,
+                                &format!(
+                                    "Invalid communities: {}. Valid slugs: \
+                                     {:?}. Try again.",
+                                    bad.join("; "),
+                                    self.communities,
+                                ),
+                            );
                         }
                         self.apply_mutation(new_soul);
                         self.seat_response(response)?;
                         self.maybe_survey()
                     }
-                    Err(e) => self.phase_failure(&e),
+                    Err(e) => self.phase_failure(&response, &e),
                 }
             }
             Phase::Evolve => match output::parse_evolution(&text).or_else(|e| {
@@ -727,24 +778,28 @@ impl SeedAgent {
                     if let Some(note) = note
                         && let Err(e) = self.state.soul.push_evolution(note)
                     {
-                        return self.phase_failure(&format!(
-                            "Evolution note rejected: {e}. Try again."
-                        ));
+                        return self.phase_failure(
+                            &response,
+                            &format!(
+                                "Evolution note rejected: {e}. Try again."
+                            ),
+                        );
                     }
                     self.seat_response(response)?;
                     self.maybe_survey()
                 }
-                Err(e) => self.phase_failure(&e),
+                Err(e) => self.phase_failure(&response, &e),
             },
             Phase::Survey => match output::parse_feedback(&text) {
                 Ok(feedback) => {
-                    let contact = feedback
+                    // Seated either way, so the transcript only ever grows
+                    // while the session runs; an anonymous exchange is taken
+                    // out at teardown, after the last request.
+                    self.contact_me = feedback
                         .as_ref()
                         .map(|f| f.contact_me)
                         .unwrap_or(false);
-                    if contact {
-                        self.seat_response(response)?;
-                    }
+                    self.seat_response(response)?;
                     if let Some(feedback) = feedback {
                         let payload = SubmitFeedbackPayload {
                             body: feedback.text.to_string(),
@@ -760,14 +815,9 @@ impl SeedAgent {
                             tracing::warn!("feedback submission failed: {e}");
                         }
                     }
-                    if !contact && let Some(mark) = self.survey_mark {
-                        // The promise in the survey prompt: anonymous exchanges
-                        // never persist in the transcript.
-                        self.state.prompt.messages.truncate(mark);
-                    }
                     Ok(self.finish())
                 }
-                Err(e) => self.phase_failure(&e),
+                Err(e) => self.phase_failure(&response, &e),
             },
         }
     }
@@ -778,9 +828,9 @@ impl SeedAgent {
     /// the persisted state, so a failure here loses the archive copy, not
     /// the data.
     ///
-    /// The survey redaction has already happened in the live prompt by this
-    /// point — see the [`prompt_log`] module docs before adding any
-    /// filtering here.
+    /// The survey redaction ([`redact_survey`](Self::redact_survey)) has
+    /// already happened in the live prompt by this point — see the
+    /// [`prompt_log`] module docs before adding any filtering here.
     ///
     /// Takes its inputs as arguments rather than `&self` on purpose:
     /// [`ToolBox`] is not `Sync`, so a `&SeedAgent` held across the write
@@ -808,6 +858,19 @@ impl SeedAgent {
                 error = %e,
                 "prompt log failed"
             ),
+        }
+    }
+
+    /// The promise in the survey prompt: an anonymous exchange never persists
+    /// in the transcript. Runs at teardown, after the last request, so no
+    /// request ever re-sends a transcript with a hole in it; the survey is
+    /// last, so everything from its mark on is the survey, failed attempts
+    /// included.
+    fn redact_survey(&mut self) {
+        if let Some(mark) = self.survey_mark.take()
+            && !self.contact_me
+        {
+            mark.redact(&mut self.state.prompt);
         }
     }
 
@@ -903,6 +966,8 @@ impl Agent for SeedAgent {
             key,
             communities: Vec::new(),
             survey_mark: None,
+            contact_me: false,
+            hold_survey: false,
             pauses: 0,
             context,
             shown,
@@ -953,7 +1018,7 @@ impl Agent for SeedAgent {
     /// the reactor's "no successful tool call"
     fn stall_reason(&self) -> Option<String> {
         let phase = match self.phase {
-            Phase::Acting { .. } => return None,
+            Phase::Acting { .. } | Phase::Held => return None,
             Phase::Reflect => "memory rewrite (reflect)",
             Phase::Mutate => "soul rewrite (mutate)",
             Phase::Evolve => "evolution note (evolve)",
@@ -979,15 +1044,15 @@ impl Agent for SeedAgent {
         self.resume_pause(response)
     }
 
-    /// A clipped response is never seated, so no pop is needed: warn the
-    /// model the attempt was pruned and stall-retry at the same budget (the
-    /// trait default's doubling is unbounded on local endpoints, which
-    /// declare no ceiling). The reactor's stall cap bounds attempts.
+    /// Seat the clipped response (its calls answered "not run"), warn the
+    /// model, and stall-retry at the same budget (the trait default's
+    /// doubling is unbounded on local endpoints, which declare no ceiling).
+    /// The reactor's stall cap bounds attempts.
     async fn on_truncate(
         &mut self,
-        _response: &response::Message,
+        response: &response::Message,
     ) -> Result<Control, SeedError> {
-        self.phase_failure(output::TRUNCATION_WARNING)
+        self.phase_failure(response, output::TRUNCATION_WARNING)
     }
 
     /// Perceive: install tools, subscribe to their pushes, then hand everything
@@ -1171,7 +1236,8 @@ impl Agent for SeedAgent {
         self.begin_reflect()
     }
 
-    /// Tear tools down, then archive the session transcript.
+    /// Redact an anonymous survey, tear tools down, then archive the session
+    /// transcript.
     ///
     /// The dump goes last so it captures whatever the tools appended on
     /// their way out, and it runs here rather than after the save because
@@ -1179,6 +1245,7 @@ impl Agent for SeedAgent {
     /// including one whose state fails to persist, which is exactly when
     /// having the transcript on disk matters most.
     async fn on_teardown(&mut self) -> Result<(), SeedError> {
+        self.redact_survey();
         {
             let (tools, prompt) = self.parts();
             tools.on_teardown(prompt).await?;
@@ -1194,6 +1261,26 @@ impl Agent for SeedAgent {
             .await;
         }
         Ok(())
+    }
+}
+
+/// The survey is the epilogue: held, the session is `Done` after reflect and
+/// any mutation or evolution, and the survey (if rolled) waits for
+/// `begin_epilogue`
+impl Epilogue for SeedAgent {
+    fn hold_epilogue(&mut self) {
+        self.hold_survey = true;
+    }
+
+    fn begin_epilogue(&mut self) -> Result<Control, SeedError> {
+        if self.phase != Phase::Held {
+            return Err(SeedError::Prompt(format!(
+                "the survey was begun in the {:?} phase, not after the tail",
+                self.phase
+            )));
+        }
+        self.hold_survey = false;
+        self.roll_survey()
     }
 }
 

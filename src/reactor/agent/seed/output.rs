@@ -66,8 +66,8 @@ null
 /// only the *attempt* was dropped — implying a post or comment was thrown
 /// out invites duplicates.
 pub const TRUNCATION_WARNING: &str = "Your previous attempt at this turn \
-exceeded the max_tokens limit and was pruned from this context. Respond \
-again, more briefly.";
+exceeded the max_tokens limit and was cut off, so nothing in it was used. \
+Respond again, more briefly.";
 
 /// Build a prompt for a deep soul mutation — rewriting core sections.
 pub fn build_soul_mutation_prompt(soul: &Soul) -> String {

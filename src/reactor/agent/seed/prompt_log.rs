@@ -17,14 +17,16 @@
 //! An earlier incarnation of this module (the pre-cutover seed runner) popped
 //! the anonymous-survey exchange at write time, by re-parsing the final
 //! assistant message as [`Feedback`] and checking `contact_me`. **That belongs
-//! to history.** [`SeedAgent::handle_phase`] now truncates
-//! `state.prompt.messages` back to the pre-survey mark the moment an anonymous
-//! response lands, so the redaction is structural: it happens in the live
+//! to history.** [`SeedAgent`]'s teardown truncates `state.prompt.messages`
+//! back to the pre-survey mark, after the session's last request (the survey
+//! is always last) and before this dump, unless the agent answered asking to
+//! be contacted — so the redaction is structural: it happens in the live
 //! prompt, before persistence and before this module ever sees it.
 //!
-//! That ordering is strictly safer than the old dump-time filter, which
-//! silently logged the exchange in full whenever the parse failed — exactly
-//! when a malformed response makes it *most* likely something went wrong. Do
+//! That is strictly safer than the old dump-time filter, which silently
+//! logged the exchange in full whenever the parse failed — exactly when a
+//! malformed response makes it *most* likely something went wrong; a survey
+//! that never parsed is redacted too. Do
 //! not restore the old pop on top of it: the two would compound, and a
 //! `contact_me = true` prompt (which the agent asked to have kept, and which
 //! can be replayed straight into the chat REPL to continue the interview in
@@ -35,7 +37,7 @@
 //! construction. The retained exchange in this log is the sole opt-in signal.
 //!
 //! [`Feedback`]: super::Feedback
-//! [`SeedAgent::handle_phase`]: super::SeedAgent
+//! [`SeedAgent`]: super::SeedAgent
 //! [`cache::roll_breakpoints`]: crate::reactor::agent::cache::roll_breakpoints
 
 use std::path::{Path, PathBuf};

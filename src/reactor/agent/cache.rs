@@ -150,6 +150,64 @@ fn index_is_cached(prompt: &Prompt, index: Index) -> bool {
     }
 }
 
+/// Where request `next` stops extending request `prev`, if it does: a change
+/// to the tools, system, thinking or `tool_choice`, or to any message `prev`
+/// sent — a new block on its last message included, which moves the end a
+/// prefix cache anchored at message ends checkpointed. `cache_control` is
+/// not compared (the rolling breakpoints move by design), nor `max_tokens`
+/// or `output_config`, which a session sets per phase.
+///
+/// A session that only appends gives `None` for every consecutive pair of
+/// its requests.
+pub fn divergence(prev: &Prompt, next: &Prompt) -> Option<String> {
+    fn wire(value: &impl serde::Serialize) -> serde_json::Value {
+        fn strip(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    map.remove("cache_control");
+                    map.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(strip)
+                }
+                _ => {}
+            }
+        }
+        let mut value =
+            serde_json::to_value(value).expect("a prompt always serializes");
+        strip(&mut value);
+        value
+    }
+    let heads = [
+        ("tools", wire(&prev.tools), wire(&next.tools)),
+        ("system", wire(&prev.system), wire(&next.system)),
+        ("thinking", wire(&prev.thinking), wire(&next.thinking)),
+        (
+            "tool_choice",
+            wire(&prev.tool_choice),
+            wire(&next.tool_choice),
+        ),
+    ];
+    for (field, a, b) in heads {
+        if a != b {
+            return Some(format!("`{field}` changed: {a} -> {b}"));
+        }
+    }
+    for (i, a) in prev.messages.iter().enumerate() {
+        let Some(b) = next.messages.get(i) else {
+            return Some(format!(
+                "message {i} of {} dropped",
+                prev.messages.len()
+            ));
+        };
+        let (a, b) = (wire(a), wire(b));
+        if a != b {
+            return Some(format!("message {i} changed: {a} -> {b}"));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +414,29 @@ mod tests {
             second.usage.cache_creation_input_tokens, second.usage.input_tokens
         );
         assert!(read > 0, "round 2 read nothing: {:?}", second.usage);
+    }
+
+    /// A new message extends; a moved marker is not a change; a block added
+    /// to the last message sent, or a changed system, diverges
+    #[test]
+    fn divergence_sees_only_what_a_prefix_cache_does() {
+        let prev = session(1);
+        let mut next = prev.clone();
+        next.push_message((Role::Assistant, "asst 1")).unwrap();
+        next.push_message((Role::User, "results 1")).unwrap();
+        roll_breakpoints(&Quirks::default(), &mut next);
+        assert_eq!(divergence(&prev, &next), None);
+
+        let mut grown = prev.clone();
+        grown.messages.last_mut().unwrap().extend(["a note"]);
+        let why = divergence(&prev, &grown).unwrap();
+        assert!(why.starts_with("message 2 changed"), "{why}");
+
+        let mut dropped = prev.clone();
+        dropped.messages.pop();
+        assert!(divergence(&prev, &dropped).unwrap().contains("dropped"));
+
+        let other = prev.clone().system("other system");
+        assert!(divergence(&prev, &other).unwrap().starts_with("`system`"));
     }
 }

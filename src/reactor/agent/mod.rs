@@ -12,8 +12,8 @@ use std::num::NonZeroU32;
 use misanthropic::{
     model::ModelInfo,
     prompt::{
-        Prompt,
-        message::{Block, Role},
+        Prompt, TurnOrderError,
+        message::{Block, Content, Role},
     },
     response::{self, StopReason},
     tool::{Notification, Notifications, Tool, ToolBox, Use},
@@ -30,9 +30,69 @@ fn boxed<E: std::error::Error + Send + Sync + 'static>(
     Box::new(e)
 }
 
+/// Seat `content` as the trailing user turn: a new message after an
+/// assistant turn, or new blocks on the trailing user turn (turn order
+/// forbids two adjacent), never a change to a block already there
+pub fn seat_user(
+    prompt: &mut Prompt,
+    content: impl Into<Content>,
+) -> Result<(), TurnOrderError> {
+    let content = content.into();
+    match prompt.messages.last_mut() {
+        Some(last) if last.role == Role::User => {
+            last.extend(content);
+            Ok(())
+        }
+        _ => prompt.push_message((Role::User, content)).map(|_| ()),
+    }
+}
+
+/// Seat a `reply` that can't be used (clipped, unparseable, a tool call
+/// where none was wanted), so the retry *extends* the request that produced
+/// it. Dropping the reply and adding the retry note to the message the
+/// request ended with diverges inside that request instead, which costs the
+/// tail on prefix caches anchored at message ends (blallama hybrid models).
+///
+/// Empty text blocks are left out (the API refuses them), a turn with nothing
+/// visible gets [`THINKING_ONLY_PLACEHOLDER`], and each client `tool_use` is
+/// answered with an error result saying `not_run`, in a new user turn. Follow
+/// with [`seat_user`] for the note.
+pub fn seat_unused_reply(
+    prompt: &mut Prompt,
+    reply: &response::Message,
+    not_run: &str,
+) -> Result<(), TurnOrderError> {
+    let mut turn = reply.inner.clone();
+    turn.content.retain(
+        |block| !matches!(block, Block::Text { text, .. } if text.is_empty()),
+    );
+    let visible = turn.content.iter().any(|block| {
+        !matches!(block, Block::Thought { .. } | Block::RedactedThought { .. })
+    });
+    if !visible {
+        turn.content
+            .push(Block::from(THINKING_ONLY_PLACEHOLDER.to_string()));
+    }
+    let results: Vec<Block> = turn
+        .content
+        .iter()
+        .filter_map(|block| block.tool_use())
+        .map(|call| {
+            Block::from(
+                misanthropic::tool::Result::new(call.id.clone(), not_run)
+                    .error(),
+            )
+        })
+        .collect();
+    prompt.push_message(turn)?;
+    if !results.is_empty() {
+        prompt.push_message((Role::User, results))?;
+    }
+    Ok(())
+}
+
 /// Seat drained `notes` as [`Role::User`] content, each labeled with its
-/// authoritative source: merged into a trailing user turn when there is one
-/// (turn order forbids two adjacent), pushed as a new one otherwise.
+/// authoritative source, via [`seat_user`]
 // TODO: honor `Notification::preferred_roles` (via `Prompt::resolve_role`)
 // once a tool actually prefers something other than `User`.
 fn seat_notifications(
@@ -44,16 +104,7 @@ fn seat_notifications(
         blocks.push(format!("[notification: {}]", note.source).into());
         blocks.append(&mut note.content);
     }
-    match prompt.messages.last_mut() {
-        Some(last) if last.role == Role::User => {
-            last.extend(blocks);
-            Ok(())
-        }
-        _ => prompt
-            .push_message((Role::User, blocks))
-            .map(|_| ())
-            .map_err(boxed),
-    }
+    seat_user(prompt, blocks).map_err(boxed)
 }
 
 /// The default [`Agent::handle`] body as a free function: pass through a
@@ -413,6 +464,24 @@ pub trait Agent: Sized + Send {
     fn stall_reason(&self) -> Option<String> {
         None
     }
+}
+
+/// An [`Agent`] whose session ends in a closing exchange (the seed agent's
+/// survey) that an agent wrapping it can hold back, to ask its own questions
+/// first and still leave that exchange last
+///
+/// Held, the session returns [`Control::Done`] where the epilogue would
+/// begin; the wrapper asks what it wants on the same transcript, then calls
+/// [`begin_epilogue`](Epilogue::begin_epilogue) and hands the responses back
+/// to [`Agent::handle`] until the next `Done`.
+pub trait Epilogue: Agent {
+    /// Hold the epilogue for [`begin_epilogue`](Epilogue::begin_epilogue).
+    /// Call before the first [`Agent::handle`]
+    fn hold_epilogue(&mut self);
+
+    /// Begin the held epilogue: [`Control::Continue`] with its turn seated,
+    /// or [`Control::Done`] when there is none this session
+    fn begin_epilogue(&mut self) -> Result<Control, Self::Error>;
 }
 
 /// What the reactor should do after [`Agent::handle`] / [`Agent::on_quiesce`].
