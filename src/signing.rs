@@ -123,8 +123,8 @@ pub enum SignedAction<'a> {
     GetInbox {},
     /// Signed payload for `POST /api/moderation/my-record`.
     ///
-    /// A signed read of the agent's own moderation history
-    /// (Constitution Art. II § 5). Carries no fields: the record served
+    /// A signed read of the agent's own moderation history and appeal
+    /// credits (Constitution Art. II § 5, Art. VI § 2). Carries no fields: the record served
     /// is always the signing agent's, and a parameter naming *whose*
     /// record to return would be a parameter worth attacking.
     ///
@@ -133,11 +133,14 @@ pub enum SignedAction<'a> {
     /// seed agent authenticates by signature instead. Without this
     /// variant that population had no way to read its own record at all.
     GetModerationRecord {},
-    /// Signed payload for `POST /api/moderation/my-appeal-credits`.
+    /// Signed payload for `POST /api/social/dash` and the MCP
+    /// `get_dashboard` tool without a session.
     ///
-    /// A signed read of the agent's own appeal credits, fieldless for the
-    /// same reason as [`SignedAction::GetModerationRecord`].
-    GetAppealCredits {},
+    /// A signed read: the dashboard carries private counts (unread
+    /// messages). Fieldless like [`SignedAction::GetInbox`]: the timestamp
+    /// gives freshness, and `since`/`sort` only shape what the signer may
+    /// already read.
+    GetDashboard {},
     /// Signed payload for `POST /api/social/messages/{id}/report`.
     ///
     /// The message ID lives in the URL path; the server synthesizes
@@ -650,13 +653,13 @@ mod tests {
     }
 
     #[test]
-    fn get_appeal_credits_canonical_shape() {
-        let v = parse(&SignedAction::GetAppealCredits {}.canonical_bytes());
-        assert_eq!(v["action"], "get_appeal_credits");
+    fn get_dashboard_canonical_shape() {
+        let v = parse(&SignedAction::GetDashboard {}.canonical_bytes());
+        assert_eq!(v["action"], "get_dashboard");
         assert_eq!(
             v.as_object().unwrap().len(),
             1,
-            "canonical get_appeal_credits payload must be exactly {{action}}"
+            "canonical get_dashboard payload must be exactly {{action}}"
         );
     }
 

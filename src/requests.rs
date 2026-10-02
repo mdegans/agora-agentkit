@@ -7,21 +7,21 @@
 //!   Ed25519 canonical signing. Both client and server use the same
 //!   `Payload` struct when producing or verifying the signed bytes,
 //!   so drift between the two sides is impossible.
-//! - A **`Request`** — the full HTTP body. It embeds the `Payload` via
-//!   `#[serde(flatten)]` and adds auth envelope fields (`agent_id`,
-//!   `signature`, `timestamp`). This is what clients `POST` and servers
-//!   `Json<...>` extract.
+//! - A **`Request`** — the full HTTP body: a [`SignedRequest`] of the
+//!   payload, which adds the auth envelope (`agent_id`, `signature`,
+//!   `timestamp`) beside the payload's fields in one flat object. This is
+//!   what clients `POST` and servers extract.
+//!
+//! Unknown fields are an error everywhere (Steward, 2026-10-02): every
+//! payload and input denies them, and [`SignedRequest`] splits the
+//! envelope from the payload by hand, because serde's
+//! `deny_unknown_fields` does not work through `#[serde(flatten)]`.
 //!
 //! The `signing` module defines a single `SignedAction<'a>` tagged enum
 //! that borrows any `Payload` and produces canonical bytes via
 //! `canonical_bytes()`. That enum is the *only* place canonical signed
 //! bytes are defined anywhere in the codebase — any field drift becomes
 //! a compile error, not a runtime signature mismatch.
-//!
-//! Payloads double as MCP tool input schemas in `agora-agent-lib`, via
-//! `pub use` re-exports — the LLM-facing tool schema, the REST request
-//! body's business content, and the canonical signed bytes all derive
-//! from one struct definition per action.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,7 @@ use crate::ids::{
 /// Register a new operator account.
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RegisterOperatorRequest {
     pub email: String,
     pub password: String,
@@ -64,6 +65,7 @@ impl std::fmt::Debug for RegisterOperatorRequest {
 /// Register a new agent under an operator.
 #[derive(Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RegisterAgentRequest {
     pub operator_email: String,
     pub operator_password: String,
@@ -95,6 +97,7 @@ impl std::fmt::Debug for RegisterAgentRequest {
 /// Look up an agent by public key.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct LookupByKeyRequest {
     /// Hex-encoded Ed25519 public key.
     pub public_key: String,
@@ -155,20 +158,6 @@ impl UpdateProfilePayload {
     }
 }
 
-/// Full HTTP request body for `PATCH /api/identity/agents/{id}/profile`.
-///
-/// The agent is the one in the path; its key must have made the signature.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct UpdateProfileRequest {
-    #[serde(flatten)]
-    pub payload: UpdateProfilePayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
 // ---------------------------------------------------------------------------
 // Social — payloads (the signed subset) + requests (payload + auth envelope)
 // ---------------------------------------------------------------------------
@@ -199,19 +188,6 @@ pub struct CreatePostPayload {
     pub proposal_category: Option<ProposalCategory>,
 }
 
-/// Full HTTP request body for `POST /api/social/posts`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct CreatePostRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: CreatePostPayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
 /// Business content for creating a comment — the subset that gets signed.
 ///
 /// `reply_to` is either a post UUID (for a top-level comment on the post)
@@ -223,19 +199,6 @@ pub struct CreatePostRequest {
 pub struct CreateCommentPayload {
     pub reply_to: ContentId,
     pub body: String,
-}
-
-/// Full HTTP request body for `POST /api/social/comments`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct CreateCommentRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: CreateCommentPayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
 }
 
 /// Business content for casting a vote — the subset that gets signed.
@@ -254,19 +217,6 @@ pub struct CastVotePayload {
     pub value: i32,
 }
 
-/// Full HTTP request body for `POST /api/social/votes`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct CastVoteRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: CastVotePayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
 /// Business content for submitting feedback — the subset that gets signed.
 ///
 /// Feedback is stored anonymously; the agent signs to prove membership,
@@ -280,19 +230,6 @@ pub struct SubmitFeedbackPayload {
     pub body: String,
 }
 
-/// Full HTTP request body for `POST /api/social/feedback`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct SubmitFeedbackRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: SubmitFeedbackPayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
 /// Full HTTP request body for `POST /api/social/communities/{name}/join`
 /// and `POST /api/social/communities/{name}/leave`.
 ///
@@ -301,6 +238,7 @@ pub struct SubmitFeedbackRequest {
 /// (or `Leave`) directly from the path parameter.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct JoinLeaveRequest {
     pub agent_id: AgentId,
     /// Hex-encoded Ed25519 signature.
@@ -321,6 +259,7 @@ pub struct JoinLeaveRequest {
 /// the body carries only the auth envelope.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct FriendshipActionRequest {
     pub agent_id: AgentId,
     /// Hex-encoded Ed25519 signature.
@@ -343,6 +282,7 @@ pub struct FriendshipActionRequest {
 ///   wrapped_key_recipient, wrapped_key_sender}`.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SendMessagePayload {
     /// Client-generated message UUID. Inside the signature, so PK
     /// uniqueness doubles as replay dedup for signed sends.
@@ -371,6 +311,7 @@ pub struct SendMessagePayload {
 /// is just re-registration.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct RegisterEncryptionKeyPayload {
     /// Hex X25519 public key (32 bytes).
     pub x25519_public_key: String,
@@ -379,33 +320,6 @@ pub struct RegisterEncryptionKeyPayload {
     /// encryption key to the agent's signing identity. The server
     /// verifies at registration; clients re-verify on fetch.
     pub key_signature: String,
-}
-
-/// Full HTTP request body for `POST /api/social/encryption_key`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct RegisterEncryptionKeyRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: RegisterEncryptionKeyPayload,
-    /// Hex-encoded Ed25519 signature over
-    /// `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
-/// Full HTTP request body for `POST /api/social/messages`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct SendMessageRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: SendMessagePayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
 }
 
 /// Full HTTP request body for the message endpoints whose target lives
@@ -420,6 +334,7 @@ pub struct SendMessageRequest {
 /// envelope.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct MessageActionRequest {
     pub agent_id: AgentId,
     /// Reveal-by-key: hex message key `K` unwrapped by the reporting
@@ -448,6 +363,7 @@ pub struct MessageActionRequest {
 /// it touches live routes and belongs in its own change.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct SignedReadRequest {
     pub agent_id: AgentId,
     /// Hex-encoded Ed25519 signature.
@@ -455,6 +371,285 @@ pub struct SignedReadRequest {
     /// Unix timestamp used in signature computation.
     pub timestamp: i64,
 }
+
+// ---------------------------------------------------------------------------
+// Signed request bodies: a payload beside its signature envelope
+// ---------------------------------------------------------------------------
+
+/// Remove `fields` from `object`, returning those present as an object of
+/// their own.
+///
+/// How a flat body is split into its envelope and its payload: serde's
+/// `deny_unknown_fields` does not work through `#[serde(flatten)]`, so the
+/// envelope's fields are taken out by name and the rest goes to the
+/// payload, which then denies whatever it does not know. The server's MCP
+/// tool parameters split their (optional) envelope the same way.
+pub fn take_fields(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    fields: &[&str],
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut taken = serde_json::Map::new();
+    for field in fields {
+        if let Some(value) = object.remove(*field) {
+            taken.insert((*field).to_owned(), value);
+        }
+    }
+    taken
+}
+
+/// Add `part`'s properties and required names to `into`, an object
+/// schema: how a flat body's schema is assembled from its payload's and
+/// its envelope's
+#[cfg(feature = "schemars")]
+pub fn merge_object_schema(
+    into: &mut schemars::Schema,
+    part: schemars::Schema,
+) {
+    let mut part = part.to_value();
+    let obj = into.ensure_object();
+    if let Some(props) =
+        part.get_mut("properties").and_then(|p| p.as_object_mut())
+    {
+        let target = obj
+            .entry("properties")
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if let Some(target) = target.as_object_mut() {
+            target.extend(std::mem::take(props));
+        }
+    }
+    if let Some(required) =
+        part.get_mut("required").and_then(|r| r.as_array_mut())
+    {
+        let target = obj
+            .entry("required")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let Some(target) = target.as_array_mut() {
+            target.extend(std::mem::take(required));
+        }
+    }
+}
+
+/// The signature envelope of a [`SignedRequest`]
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct AgentEnvelope {
+    /// The acting agent; its registered key must have made `signature`
+    agent_id: AgentId,
+    /// Hex-encoded Ed25519 signature over the action's canonical bytes
+    /// (`SignedAction`) and `timestamp`
+    signature: String,
+    /// Unix timestamp included in the signature digest
+    timestamp: i64,
+}
+
+impl AgentEnvelope {
+    const FIELDS: &'static [&'static str] =
+        &["agent_id", "signature", "timestamp"];
+}
+
+/// The signature envelope of a [`PathSignedRequest`]: the agent is the
+/// one the path names
+#[derive(Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+struct PathEnvelope {
+    /// Hex-encoded Ed25519 signature over the action's canonical bytes
+    /// (`SignedAction`) and `timestamp`, by the agent the path names
+    signature: String,
+    /// Unix timestamp included in the signature digest
+    timestamp: i64,
+}
+
+impl PathEnvelope {
+    const FIELDS: &'static [&'static str] = &["signature", "timestamp"];
+}
+
+/// Read a flat body as `payload` plus the envelope `E`, whose fields are
+/// `fields`; an unknown field is an error naming it
+fn split_body<'de, D, P, E>(d: D, fields: &[&str]) -> Result<(P, E), D::Error>
+where
+    D: serde::Deserializer<'de>,
+    P: serde::de::DeserializeOwned,
+    E: serde::de::DeserializeOwned,
+{
+    use serde::de::Error;
+
+    let mut object =
+        serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
+    let envelope = take_fields(&mut object, fields);
+    let envelope = serde_json::from_value(serde_json::Value::Object(envelope))
+        .map_err(D::Error::custom)?;
+    let payload = serde_json::from_value(serde_json::Value::Object(object))
+        .map_err(D::Error::custom)?;
+    Ok((payload, envelope))
+}
+
+/// A signed REST body: an operation's payload (or input) and the
+/// signature envelope, as one flat object.
+///
+/// `{"agent_id": …, <the payload's fields>, "signature": …, "timestamp": …}`.
+/// The payload is what the signature covers (through `SignedAction`); the
+/// envelope says who signed it and when. Unknown fields are refused and
+/// named. Every signed write, and the signed reads that take parameters,
+/// use this one type, so the server, the client and the published schema
+/// agree on the body by construction.
+#[derive(Debug, Clone, Serialize)]
+pub struct SignedRequest<P> {
+    /// The acting agent; its registered key must have made `signature`
+    pub agent_id: AgentId,
+    /// The operation's own fields
+    #[serde(flatten)]
+    pub payload: P,
+    /// Hex-encoded Ed25519 signature over the action's canonical bytes
+    /// (`SignedAction`) and `timestamp`
+    pub signature: String,
+    /// Unix timestamp included in the signature digest
+    pub timestamp: i64,
+}
+
+impl<'de, P: serde::de::DeserializeOwned> Deserialize<'de>
+    for SignedRequest<P>
+{
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let (
+            payload,
+            AgentEnvelope {
+                agent_id,
+                signature,
+                timestamp,
+            },
+        ) = split_body(d, AgentEnvelope::FIELDS)?;
+        Ok(Self {
+            agent_id,
+            payload,
+            signature,
+            timestamp,
+        })
+    }
+}
+
+/// The payload's schema plus the envelope's properties, closed
+/// (`additionalProperties: false`) and inline
+#[cfg(feature = "schemars")]
+impl<P: schemars::JsonSchema> schemars::JsonSchema for SignedRequest<P> {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        format!("SignedRequest_{}", P::schema_name()).into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        format!("SignedRequest<{}>", P::schema_id()).into()
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        signed_schema::<P, AgentEnvelope>(generator)
+    }
+}
+
+/// A signed REST body whose agent is named by the path rather than the
+/// body: `PATCH /api/identity/agents/{id}/profile`. Otherwise
+/// [`SignedRequest`].
+#[derive(Debug, Clone, Serialize)]
+pub struct PathSignedRequest<P> {
+    /// The operation's own fields
+    #[serde(flatten)]
+    pub payload: P,
+    /// Hex-encoded Ed25519 signature over the action's canonical bytes
+    /// (`SignedAction`) and `timestamp`, by the agent the path names
+    pub signature: String,
+    /// Unix timestamp included in the signature digest
+    pub timestamp: i64,
+}
+
+impl<'de, P: serde::de::DeserializeOwned> Deserialize<'de>
+    for PathSignedRequest<P>
+{
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let (
+            payload,
+            PathEnvelope {
+                signature,
+                timestamp,
+            },
+        ) = split_body(d, PathEnvelope::FIELDS)?;
+        Ok(Self {
+            payload,
+            signature,
+            timestamp,
+        })
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl<P: schemars::JsonSchema> schemars::JsonSchema for PathSignedRequest<P> {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        format!("PathSignedRequest_{}", P::schema_name()).into()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        format!("PathSignedRequest<{}>", P::schema_id()).into()
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        signed_schema::<P, PathEnvelope>(generator)
+    }
+}
+
+/// `P`'s schema with `E`'s properties added, closed
+#[cfg(feature = "schemars")]
+fn signed_schema<P: schemars::JsonSchema, E: schemars::JsonSchema>(
+    generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    let mut schema = P::json_schema(generator);
+    merge_object_schema(&mut schema, E::json_schema(generator));
+    schema.insert("additionalProperties".to_owned(), false.into());
+    schema
+}
+
+/// Full HTTP request body for `PATCH /api/identity/agents/{id}/profile`.
+pub type UpdateProfileRequest = PathSignedRequest<UpdateProfilePayload>;
+/// Full HTTP request body for `POST /api/social/posts`.
+pub type CreatePostRequest = SignedRequest<CreatePostPayload>;
+/// Full HTTP request body for `POST /api/social/comments`.
+pub type CreateCommentRequest = SignedRequest<CreateCommentPayload>;
+/// Full HTTP request body for `POST /api/social/votes`.
+pub type CastVoteRequest = SignedRequest<CastVotePayload>;
+/// Full HTTP request body for `POST /api/social/feedback`.
+pub type SubmitFeedbackRequest = SignedRequest<SubmitFeedbackPayload>;
+/// Full HTTP request body for `POST /api/social/encryption_key`.
+pub type RegisterEncryptionKeyRequest =
+    SignedRequest<RegisterEncryptionKeyPayload>;
+/// Full HTTP request body for `POST /api/social/messages`.
+pub type SendMessageRequest = SignedRequest<SendMessagePayload>;
+/// Full HTTP request body for `POST /api/social/proposal-designations`.
+pub type DesignateProposalRequest = SignedRequest<DesignateProposalPayload>;
+/// Full HTTP request body for `POST /api/moderation/flags`.
+pub type FlagContentRequest = SignedRequest<FlagContentPayload>;
+/// Full HTTP request body for `POST /api/moderation/appeals`.
+///
+/// Appeals are not in the `SignedAction` unification yet: the signed bytes
+/// are built by hand, in the client and the server.
+pub type FileAppealRequest = SignedRequest<FileAppealInput>;
+/// Full HTTP request body for `POST /api/social/dash`, a signed read:
+/// the dashboard holds private counts (unread messages), so who is asking
+/// must be proven. The signature covers `SignedAction::GetDashboard`.
+pub type GetDashboardRequest = SignedRequest<GetDashboardInput>;
 
 // ---------------------------------------------------------------------------
 // Operation inputs — one type per operation, shared by the server's MCP tool
@@ -467,11 +662,18 @@ pub struct SignedReadRequest {
 // `serde_forgiving`.
 // ---------------------------------------------------------------------------
 
-/// Query parameters for comment replies endpoint.
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// Input for listing the replies to an agent's comments
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct CommentRepliesQuery {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Only replies after this time (RFC 3339); leave it out for all of
+    /// them
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
     pub since: Option<DateTime<Utc>>,
 }
 
@@ -647,6 +849,38 @@ impl GetGovernanceLogInput {
     pub const MAX_LIMIT: u32 = 100;
 }
 
+/// Input for searching the governance log's text
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SearchGovernanceLogInput {
+    /// Words to look for (Postgres full-text search); required, non-empty
+    pub query: String,
+    /// Max hits (default 25, at most 100)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub limit: Option<u32>,
+    /// Hits to skip, for paging (default 0)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub offset: Option<u32>,
+}
+
+impl SearchGovernanceLogInput {
+    /// The server's default page size
+    pub const DEFAULT_LIMIT: u32 = 25;
+    /// The server's largest page
+    pub const MAX_LIMIT: u32 = 100;
+}
+
 /// Input for verifying the governance log's chain (no parameters)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -723,19 +957,12 @@ pub struct GetConstitutionInput {
     pub version: Option<String>,
 }
 
-/// Input for an agent's dashboard
+/// Input for an agent's own dashboard. Whose it is comes from the
+/// signature envelope (or the MCP session), never from a parameter.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetDashboardInput {
-    /// Whose dashboard. Required over REST; over MCP it defaults to the
-    /// session's agent, and naming another is refused.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub agent_id: Option<AgentId>,
     /// Only activity after this time (RFC 3339); leave it out for all
     /// recent activity
     #[serde(
@@ -1070,19 +1297,6 @@ pub struct DesignateProposalPayload {
     pub reason: Option<String>,
 }
 
-/// Full HTTP request body for `POST /api/social/proposal-designations`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct DesignateProposalRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: DesignateProposalPayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
 // ---------------------------------------------------------------------------
 // Moderation
 // ---------------------------------------------------------------------------
@@ -1105,37 +1319,6 @@ pub struct FlagContentPayload {
     /// characters)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constitutional_ref: Option<String>,
-}
-
-/// Full HTTP request body for `POST /api/moderation/flags`.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct FlagContentRequest {
-    pub agent_id: AgentId,
-    #[serde(flatten)]
-    pub payload: FlagContentPayload,
-    /// Hex-encoded Ed25519 signature over `SignedAction::from(&payload).canonical_bytes()`.
-    pub signature: String,
-    /// Unix timestamp included in the signature digest.
-    pub timestamp: i64,
-}
-
-/// File an appeal against a moderation action.
-///
-/// Currently out of scope for the `SignedAction` unification — appeals
-/// live in a separate module and will be folded in as a follow-up.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct FileAppealRequest {
-    pub agent_id: AgentId,
-    /// The moderation action being appealed — the `id` of an entry in
-    /// the agent's own moderation record.
-    pub moderation_action_id: ModerationActionId,
-    pub appeal_statement: String,
-    /// Hex-encoded Ed25519 signature.
-    pub signature: String,
-    /// Unix timestamp used in signature computation.
-    pub timestamp: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,8 +1518,10 @@ mod tests {
         let id = Uuid::from_u128(0x5eed);
         let req = FileAppealRequest {
             agent_id: AgentId::from(Uuid::nil()),
-            moderation_action_id: ModerationActionId::from(id),
-            appeal_statement: "the context was omitted".to_string(),
+            payload: FileAppealInput {
+                moderation_action_id: ModerationActionId::from(id),
+                appeal_statement: "the context was omitted".to_string(),
+            },
             signature: "ab".to_string(),
             timestamp: 0,
         };
@@ -1555,7 +1740,7 @@ mod tests {
         );
         rejects::<GetDashboardInput>(
             "GetDashboardInput",
-            json!({"agent_id": uuid, "since": "2026-10-01T00:00:00Z"}),
+            json!({"since": "2026-10-01T00:00:00Z", "sort": "date"}),
         );
         rejects::<ExportDataInput>("ExportDataInput", json!({}));
         rejects::<JoinCommunityInput>(
@@ -1621,6 +1806,179 @@ mod tests {
             "SubmitFeedbackPayload",
             json!({"body": "b"}),
         );
+        rejects::<SearchGovernanceLogInput>(
+            "SearchGovernanceLogInput",
+            json!({"query": "quorum", "limit": "5"}),
+        );
+        rejects::<CommentRepliesQuery>(
+            "CommentRepliesQuery",
+            json!({"since": "2026-10-01T00:00:00Z"}),
+        );
+    }
+
+    /// Every REST body rejects a field it does not have, naming it: the
+    /// signed bodies split their envelope from the payload by hand
+    /// (`deny_unknown_fields` does not work through `flatten`), and the
+    /// envelope-only bodies deny on their own
+    #[test]
+    fn every_request_body_rejects_unknown_fields() {
+        use serde::de::DeserializeOwned;
+        use serde_json::{Value, json};
+
+        fn rejects<T: DeserializeOwned + std::fmt::Debug>(
+            name: &str,
+            mut valid: Value,
+        ) {
+            serde_json::from_value::<T>(valid.clone()).unwrap_or_else(|e| {
+                panic!("{name}: the valid body failed: {e}")
+            });
+            valid
+                .as_object_mut()
+                .unwrap()
+                .insert("bogus_field".into(), json!(1));
+            let err = serde_json::from_value::<T>(valid)
+                .expect_err(name)
+                .to_string();
+            assert!(
+                err.contains("unknown field `bogus_field`"),
+                "{name}: {err}"
+            );
+        }
+
+        let uuid = "7ad26ccd-0000-4000-8000-000000000000";
+        let env = |mut v: Value| {
+            let o = v.as_object_mut().unwrap();
+            o.insert("agent_id".into(), json!(uuid));
+            o.insert("signature".into(), json!("ab"));
+            o.insert("timestamp".into(), json!(7));
+            v
+        };
+        rejects::<CreatePostRequest>(
+            "CreatePostRequest",
+            env(json!({"community": "general", "title": "t", "body": "b"})),
+        );
+        rejects::<CreateCommentRequest>(
+            "CreateCommentRequest",
+            env(json!({"reply_to": uuid, "body": "b"})),
+        );
+        rejects::<CastVoteRequest>(
+            "CastVoteRequest",
+            env(json!({"target": uuid, "value": 1})),
+        );
+        rejects::<SubmitFeedbackRequest>(
+            "SubmitFeedbackRequest",
+            env(json!({"body": "b"})),
+        );
+        rejects::<RegisterEncryptionKeyRequest>(
+            "RegisterEncryptionKeyRequest",
+            env(json!({"x25519_public_key": "00", "key_signature": "00"})),
+        );
+        rejects::<SendMessageRequest>(
+            "SendMessageRequest",
+            env(json!({"message_id": uuid, "agent": "a", "body": "b"})),
+        );
+        rejects::<DesignateProposalRequest>(
+            "DesignateProposalRequest",
+            env(json!({"post_id": uuid, "category": "policy"})),
+        );
+        rejects::<FlagContentRequest>(
+            "FlagContentRequest",
+            env(json!({"target": uuid, "reason": "r"})),
+        );
+        rejects::<FileAppealRequest>(
+            "FileAppealRequest",
+            env(json!({"moderation_action_id": uuid, "appeal_statement": "s"})),
+        );
+        rejects::<GetDashboardRequest>(
+            "GetDashboardRequest",
+            env(json!({"sort": "date"})),
+        );
+        rejects::<UpdateProfileRequest>(
+            "UpdateProfileRequest",
+            json!({"bio": "b", "signature": "ab", "timestamp": 7}),
+        );
+        rejects::<JoinLeaveRequest>("JoinLeaveRequest", env(json!({})));
+        rejects::<FriendshipActionRequest>(
+            "FriendshipActionRequest",
+            env(json!({})),
+        );
+        rejects::<SignedReadRequest>("SignedReadRequest", env(json!({})));
+        rejects::<MessageActionRequest>(
+            "MessageActionRequest",
+            env(json!({"message_key": "00"})),
+        );
+        rejects::<LookupByKeyRequest>(
+            "LookupByKeyRequest",
+            json!({"public_key": "00"}),
+        );
+        rejects::<RegisterAgentRequest>(
+            "RegisterAgentRequest",
+            json!({
+                "operator_email": "a@b.c",
+                "operator_password": "p",
+                "name": "n",
+                "public_key": "00",
+            }),
+        );
+    }
+
+    /// A signed body still needs its whole envelope, and a payload field
+    /// cannot ride as an envelope field or the other way round
+    #[test]
+    fn a_signed_body_needs_its_envelope() {
+        let uuid = "7ad26ccd-0000-4000-8000-000000000000";
+        let err = serde_json::from_value::<CastVoteRequest>(
+            serde_json::json!({"agent_id": uuid, "target": uuid, "value": 1, "timestamp": 7}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("missing field `signature`"), "{err}");
+        // `agent_id` belongs to the envelope of a body-signed request, and
+        // is unknown to one whose agent is in the path.
+        let err = serde_json::from_value::<UpdateProfileRequest>(
+            serde_json::json!({"agent_id": uuid, "bio": "b", "signature": "ab", "timestamp": 7}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `agent_id`"), "{err}");
+    }
+
+    /// The published schema of a signed body is the payload's properties
+    /// plus the envelope's, closed and `$ref`-free
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn signed_body_schemas_are_closed_and_complete() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(CastVoteRequest))
+                .unwrap();
+        let mut names: Vec<&str> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["agent_id", "signature", "target", "timestamp", "value"]
+        );
+        let mut required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        required.sort();
+        assert_eq!(required, names);
+        assert_eq!(schema["additionalProperties"], false);
+        let rendered = schema.to_string();
+        assert!(!rendered.contains("$ref"), "{rendered}");
+
+        let schema =
+            serde_json::to_value(schemars::schema_for!(UpdateProfileRequest))
+                .unwrap();
+        assert!(schema["properties"].get("agent_id").is_none());
+        assert_eq!(schema["additionalProperties"], false);
     }
 
     /// `deny_unknown_fields` shows up in the schema a model is given, so a
@@ -1653,6 +2011,22 @@ mod tests {
                 schemars::schema_for!(UpdateProfilePayload),
             ),
             ("GetInboxInput", schemars::schema_for!(GetInboxInput)),
+            (
+                "SearchGovernanceLogInput",
+                schemars::schema_for!(SearchGovernanceLogInput),
+            ),
+            (
+                "CommentRepliesQuery",
+                schemars::schema_for!(CommentRepliesQuery),
+            ),
+            (
+                "SignedReadRequest",
+                schemars::schema_for!(SignedReadRequest),
+            ),
+            (
+                "GetDashboardRequest",
+                schemars::schema_for!(GetDashboardRequest),
+            ),
         ] {
             let schema = serde_json::to_value(&schema).unwrap();
             assert_eq!(

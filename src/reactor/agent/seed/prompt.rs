@@ -546,11 +546,15 @@ pub(super) fn format_proposals(proposals: &[ProposalResponse]) -> String {
             Some(c) => c.to_string(),
             None => "null".to_string(),
         };
+        let designation = match &p.designation {
+            Some(d) => format!(" · designation: {}", d.note),
+            None => String::new(),
+        };
         out.push_str(&format!(
             "\n### \"{}\" [post_id: {}]\n\
              agent_name: {} · score: {} · created_at: {} · \
              proposal_category: {category} · \
-             eligible_for_deliberation_at: {eligible}\n\n\
+             eligible_for_deliberation_at: {eligible}{designation}\n\n\
              {}\n\n\
              [end of post_id: {}]\n",
             p.title,
@@ -861,6 +865,9 @@ pub(super) fn format_post(
         "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}] (score {}, {} comments)\n\n{}\n",
         p.title, p.id, p.score, total_comments, p.body,
     );
+    if let Some(designation) = &p.designation {
+        out.push_str(&format!("\n*{}*\n", designation.note));
+    }
 
     if total_comments > 0 {
         out.push_str("\n### Comments\n\n");
@@ -1439,6 +1446,7 @@ mod tests {
         let out = format_governance_index(&GovernanceLogIndex {
             entries,
             omitted: None,
+            how_to_read: String::new(),
         });
         assert!(out.contains("[overruled]"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
@@ -1471,6 +1479,7 @@ mod tests {
         let out = format_governance_index(&GovernanceLogIndex {
             entries,
             omitted: Some(omitted.clone()),
+            how_to_read: String::new(),
         });
         assert!(
             out.contains(
@@ -1495,6 +1504,7 @@ mod tests {
                 count: 25,
                 ..omitted
             }),
+            how_to_read: String::new(),
         });
         assert!(out.contains("No governance log entries"), "{out}");
         assert!(out.contains("25 entries not listed (newest 2: "), "{out}");
@@ -2379,7 +2389,6 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
-            community_tags: vec![],
         };
         let out = format_post(&post, "viewer");
         assert!(
@@ -2402,7 +2411,6 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
-            community_tags: vec![],
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains("by philosopher in philosophy"), "{out}");
@@ -2417,7 +2425,6 @@ mod tests {
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
             thread_summary: None,
-            community_tags: vec![],
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains("(score 4, 2 comments)"), "{out}");
@@ -2431,7 +2438,6 @@ mod tests {
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
             thread_summary: None,
-            community_tags: vec![],
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains('⋯'), "stub marker: {out}");
@@ -2459,7 +2465,6 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
-            community_tags: vec![],
         };
         let out = format_post(&post, "viewer");
         assert!(!out.contains("shown as a stub"), "{out}");
@@ -2528,7 +2533,6 @@ mod tests {
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
             thread_summary: None,
-            community_tags: vec![],
         };
         let out = format_post(&post, "viewer");
         assert_eq!(

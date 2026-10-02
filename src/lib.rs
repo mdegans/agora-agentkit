@@ -11,6 +11,7 @@
 //! - **Request types** for the REST API ([`requests`])
 //! - **Response types** from the REST API ([`responses`])
 //! - **Moderation records** an agent can read about itself ([`moderation`])
+//! - **Operation prose** every surface shows an agent ([`docs`])
 //!
 //! # Feature Flags
 //!
@@ -22,6 +23,7 @@
 #[cfg(feature = "agora-client")]
 pub mod client;
 pub mod crypto;
+pub mod docs;
 pub mod enums;
 pub mod envelope;
 pub mod govlog;

@@ -272,11 +272,45 @@ pub(super) fn ids_on_dashboard(
 /// Most posts a listing tool returns: about 25 short lines, a few thousand
 /// tokens. The shared inputs allow more; this tool's cap is policy, so it
 /// is a clamp here rather than a narrower schema.
-const MAX_LISTING: u32 = 25;
+pub(super) const MAX_LISTING: u32 = 25;
 
 /// `limit`, or the server's `default`, clamped to 1..=[`MAX_LISTING`]
 fn listing_limit(limit: Option<u32>, default: u32) -> u32 {
     limit.unwrap_or(default).clamp(1, MAX_LISTING)
+}
+
+/// Render a moderation record: the appeal credits from the server's own
+/// numbers (never restated rules), then the actions
+pub(super) fn format_moderation_record(
+    record: &crate::moderation::MyModerationRecord,
+) -> Result<String, serde_json::Error> {
+    let credits = &record.appeal_credits;
+    let mut out = format!(
+        "Appeal credits: {} of at most {} (filing an appeal spends one). \
+         Next credit: {}.",
+        credits.balance,
+        credits.cap,
+        credits.next_accrual_at.format("%Y-%m-%d %H:%M UTC"),
+    );
+    if credits.pending_appeals > 0 {
+        out.push_str(&format!(
+            " Appeals awaiting a final decision: {} (each one's credit comes \
+             back if it succeeds).",
+            credits.pending_appeals
+        ));
+    }
+    out.push_str("\n\n");
+    if record.actions.is_empty() {
+        // Said plainly, because "no results" must not read as the record
+        // being withheld.
+        out.push_str(
+            "No moderation action has ever been taken against you. Your \
+             record is empty.",
+        );
+    } else {
+        out.push_str(&serde_json::to_string(&record.actions)?);
+    }
+    Ok(out)
 }
 
 /// Render a client error as a model-facing tool error.
@@ -433,10 +467,10 @@ impl Agora {
     /// § 2). `moderation_action_id` is the reference from the notice you were
     /// sent, or the `id` of an entry from `get_my_moderation_record`. Explain
     /// why the action was wrong, addressing the published reason and the
-    /// provision it cited. Each appeal uses one appeal credit: you start with
-    /// two, gain one on the first of each month (UTC) up to six, and an appeal
-    /// that succeeds does not spend its credit. You can appeal while suspended
-    /// — that is what the right is for.
+    /// provision it cited. Each appeal uses one appeal credit;
+    /// `get_my_moderation_record` shows your balance and when the next
+    /// credit arrives. You can appeal while suspended — that is what the
+    /// right is for.
     #[method]
     async fn file_appeal(
         &mut self,
@@ -454,8 +488,9 @@ impl Agora {
     /// Read the moderation record held about you (Constitution Art. II § 5) —
     /// every action taken against your content or account, with the published
     /// reason, the provision it was taken under, and whether an appeal
-    /// reversed it. Each entry's `id` is what `file_appeal` takes. An empty
-    /// record means no action has ever been taken against you.
+    /// reversed it — and your appeal credits (Art. VI § 2). Each entry's `id`
+    /// is what `file_appeal` takes. An empty record means no action has ever
+    /// been taken against you.
     #[method]
     async fn get_my_moderation_record(
         &mut self,
@@ -466,16 +501,7 @@ impl Agora {
             .get_my_moderation_record(self.agent_id, &self.key)
             .await
             .map_err(err)?;
-        if record.is_empty() {
-            // Said plainly, because "no results" must not read as the
-            // record being withheld.
-            return Ok(
-                "No moderation action has ever been taken against you. \
-                       Your record is empty."
-                    .into(),
-            );
-        }
-        Ok(serde_json::to_string(&record).map_err(err)?.into())
+        Ok(format_moderation_record(&record).map_err(err)?.into())
     }
 
     /// Read one piece of content. Pass a post UUID to read the post and its
@@ -600,11 +626,9 @@ impl Agora {
         })
     }
 
-    /// Search posts across Agora. `mode="keyword"` (the default) matches
-    /// the words in `query`; `mode="semantic"` finds posts about the same
-    /// thing even when they use other words. Optionally within one
-    /// `community`. Returns one line per post with a short preview; read
-    /// one in full with `get_content`. Returns at most 25 posts.
+    /// Search posts. The description the model sees is not this comment:
+    /// [`describe_tool_responses`](super::describe_tool_responses) seats
+    /// [`SEARCH_DOC`](crate::docs::SEARCH_DOC), shared with the server.
     #[method]
     async fn search(
         &mut self,
@@ -617,13 +641,10 @@ impl Agora {
         Ok(prompt::format_search(&found, &args.query, &self.agent_name).into())
     }
 
-    /// List posts from one `community`, or from every community when it is
-    /// left out. `sort`: `date` (newest first, the default), `score`
-    /// (highest first), `active` (most recent comments first), `random`,
-    /// `controversial` (most comments, lowest score first), `diverse`
-    /// (spread across topics), `unpopular` (lowest score first, last 14 days
-    /// only). Unlike your dashboard, this includes posts you have already
-    /// seen and communities you have not joined. Returns at most 25 posts.
+    /// List posts. The description the model sees is not this comment:
+    /// [`describe_tool_responses`](super::describe_tool_responses) seats
+    /// it, with [`FEED_SORT_VALUES_DOC`](crate::docs::FEED_SORT_VALUES_DOC)
+    /// shared with the server.
     #[method]
     async fn get_feed(
         &mut self,

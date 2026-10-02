@@ -208,7 +208,7 @@ fn mock_perception_serving(server: &MockServer, constitution: &str) {
         }]));
     });
     server.mock(|when, then| {
-        when.method(GET).path("/agora/api/social/dash");
+        when.method(POST).path("/agora/api/social/dash");
         then.status(200).json_body(serde_json::json!({
             "agent": { "name": "test-agent", "karma": 1 },
             "unread_post_replies": [{
@@ -736,8 +736,11 @@ async fn acting_dispatches_flat_and_dedups_titles() {
     let post_id = Uuid::new_v4();
     let created = server.mock(|when, then| {
         when.method(POST).path("/agora/api/social/posts");
-        then.status(201)
-            .json_body(serde_json::json!({ "id": post_id }));
+        then.status(201).json_body(serde_json::json!({
+            "id": post_id,
+            "status": "created",
+            "verified": true,
+        }));
     });
 
     let mut agent = agent(&server, quiet_config());
@@ -1812,13 +1815,13 @@ async fn index_proposals_summaries_and_failures_are_free() {
     let post_id = Uuid::new_v4();
     let index = server.mock(|when, then| {
         when.method(GET).path("/agora/api/governance/log");
-        then.status(200).json_body(serde_json::json!([{
+        then.status(200).json_body(serde_json::json!({"entries": [{
             "id": "GOV-2026-0006",
             "entry_type": "council_decision",
             "title": "Ratification of the Constitution",
             "created_at": "2026-08-12T00:00:00Z",
             "tags": ["constitutional"],
-        }]));
+        }]}));
     });
     let proposals = server.mock(|when, then| {
         when.method(GET).path("/agora/api/governance/proposals");
@@ -2091,7 +2094,7 @@ async fn get_governance_log_renders_an_index_and_sends_no_detail_param() {
                     .as_ref()
                     .is_none_or(|q| q.iter().all(|(k, _)| k != "detail"))
             });
-        then.status(200).json_body(serde_json::json!([
+        then.status(200).json_body(serde_json::json!({"entries": [
             {
                 "id": "GOV-2026-0006",
                 "entry_type": "council_decision",
@@ -2106,7 +2109,7 @@ async fn get_governance_log_renders_an_index_and_sends_no_detail_param() {
                 "created_at": "2026-08-10T00:00:00Z",
                 "tags": null,
             },
-        ]));
+        ]}));
     });
 
     let mut agent = agent(&server, quiet_config());
@@ -2209,6 +2212,8 @@ fn listed_post(
         deleted: false,
         signed: Some(true),
         via: None,
+        community_tags: vec![],
+        designation: None,
     }
 }
 
@@ -2393,8 +2398,11 @@ async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment
         when.method(POST)
             .path("/agora/api/social/comments")
             .json_body_partial(format!(r#"{{"reply_to": "{post_id}"}}"#));
-        then.status(201)
-            .json_body_obj(&crate::responses::IdResponse { id: comment_id });
+        then.status(201).json_body_obj(&crate::responses::WriteAck {
+            id: comment_id,
+            status: "created".to_owned(),
+            verified: true,
+        });
     });
 
     let config = SeedConfig {
@@ -2641,4 +2649,32 @@ fn existing_souls_and_ledgers_still_deserialize() {
     )
     .unwrap();
     assert!(ledger.post_comments.is_empty());
+}
+
+/// The seed renders appeal credits from the server's numbers, not from
+/// rules restated in prose: a change of policy reaches it as data
+#[test]
+fn the_moderation_record_renders_credits_from_data() {
+    use crate::moderation::{AppealCredits, MyModerationRecord};
+    let next = chrono::DateTime::parse_from_rfc3339("2026-11-01T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let record = MyModerationRecord {
+        appeal_credits: AppealCredits {
+            balance: 3,
+            cap: 7,
+            next_accrual_at: next,
+            pending_appeals: 1,
+            history: vec![],
+        },
+        actions: vec![],
+    };
+    let out = tool::format_moderation_record(&record).unwrap();
+    assert!(out.contains("Appeal credits: 3 of at most 7"), "{out}");
+    assert!(out.contains("Next credit: 2026-11-01 00:00 UTC"), "{out}");
+    assert!(out.contains("awaiting a final decision: 1"), "{out}");
+    assert!(
+        out.contains("No moderation action has ever been taken"),
+        "{out}"
+    );
 }
