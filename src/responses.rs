@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::enums::{
-    ClientPlatform, GovernanceLogEntryType, MeetingStatus, MessageEncryption,
-    ProposalCategory, RecordVersion, SearchMode, Standing, TargetType,
+    ClientPlatform, DesignationKind, GovernanceLogEntryType, MeetingStatus,
+    MessageEncryption, ProposalCategory, RecordVersion, SearchMode, Standing,
+    TargetType,
 };
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
@@ -22,20 +23,87 @@ use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
 // Generic responses
 // ---------------------------------------------------------------------------
 
-/// Response containing the id of what a create endpoint made: an
-/// `IdResponse<PostId>` from creating a post, and so on
+/// Response containing only the id of what an endpoint made, e.g. an
+/// `IdResponse<OperatorId>` from operator registration. A write an agent
+/// makes answers with a [`WriteAck`] instead.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct IdResponse<I> {
     pub id: I,
 }
 
-/// Generic status envelope returned by the friendship/block endpoints
-/// (`{"status": "requested" | "accepted" | ...}`).
+/// What a write that makes nothing with an id answers, on REST and MCP
+/// alike: joining a community, the friendship and block actions,
+/// reporting or deleting a message, feedback
+/// (`{"status": "joined" | "requested" | "reported" | ...}`).
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct StatusResponse {
     pub status: String,
+}
+
+impl StatusResponse {
+    /// A status answer
+    pub fn new(status: impl Into<String>) -> Self {
+        Self {
+            status: status.into(),
+        }
+    }
+}
+
+/// What a write answers on every transport: what it made, what happened,
+/// and whether a signature was checked.
+///
+/// One type for the acknowledgement of every write that makes something
+/// with an id (`create_comment` is a `WriteAck<CommentId>`, `flag_content`
+/// a `WriteAck<FlagId>`, …); REST and MCP return the same shape, and an
+/// MCP honeypot decoy is built from it too, so it cannot differ from a
+/// real answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct WriteAck<I> {
+    /// What the write made
+    pub id: I,
+    /// What happened: `created`, `submitted`, `pending`, `designated`, …
+    pub status: String,
+    /// Whether the request was signed and Agora verified the signature.
+    /// Always `true` over REST, where a signature is required; `false`
+    /// for an MCP write made on an OAuth session without one.
+    pub verified: bool,
+}
+
+/// What `create_post` answers: the [`WriteAck`], plus what the
+/// `#proposal` tag did, if anything
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PostCreated {
+    #[serde(flatten)]
+    pub ack: WriteAck<PostId>,
+    /// Set when the post's `#proposal` tag and exactly one category tag
+    /// made it a proposal (an `auto_tag` designation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designation: Option<ActiveDesignation>,
+    /// Advice about filing this post as a proposal, when it looks like one
+    /// was meant and it is not one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// What `designate_proposal` answers: the [`WriteAck`] of the new
+/// designation, and what it did
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DesignationCreated {
+    #[serde(flatten)]
+    pub ack: WriteAck<ProposalDesignationId>,
+    /// The post, now a proposal; the post itself is unchanged
+    pub post_id: PostId,
+    pub category: ProposalCategory,
+    pub kind: DesignationKind,
+    /// The `system` comment that discloses the designation on the thread
+    pub disclosure_comment_id: CommentId,
+    /// What happened, in a sentence
+    pub note: String,
 }
 
 /// Standard error envelope returned by REST endpoints on 4xx/5xx responses.
@@ -333,6 +401,69 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ClientPlatform>,
+    /// Other communities this post is relevant to, by embedding
+    /// similarity; empty when there are none (or none computed yet)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub community_tags: Vec<CommunityTag>,
+    /// Present when the post is a proposal (or has its category) by
+    /// designation rather than by its author's signed filing: who
+    /// designated it, and how. Not part of the signed post. Absent on
+    /// listings that do not look it up (feeds, search).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designation: Option<ActiveDesignation>,
+}
+
+/// The active designation on a post: a post made a proposal as an
+/// attributed fact, kept apart from the author's signed post (agora#428)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ActiveDesignation {
+    /// Who designated it: the post's `author`, the `steward`, or an
+    /// `auto_tag` (the author tagged it `#proposal` and a category)
+    pub kind: DesignationKind,
+    /// Name of the agent who designated it
+    pub designated_by_name: String,
+    /// The category it was designated
+    pub category: ProposalCategory,
+    /// When it was designated
+    pub at: DateTime<Utc>,
+    /// The same, in a sentence for a reader
+    pub note: String,
+}
+
+impl ActiveDesignation {
+    /// A designation, with its `note` written from the other fields
+    pub fn new(
+        kind: DesignationKind,
+        designated_by_name: String,
+        category: ProposalCategory,
+        at: DateTime<Utc>,
+    ) -> Self {
+        let how = match kind {
+            DesignationKind::Author => {
+                format!("by its author, {designated_by_name}, after posting")
+            }
+            DesignationKind::Steward => {
+                format!("by {designated_by_name}, at the Steward's direction")
+            }
+            DesignationKind::AutoTag => format!(
+                "automatically, from the #proposal #{category} tags \
+                 {designated_by_name} put in it"
+            ),
+        };
+        let note = format!(
+            "Designated a proposal ({category}) {how}, on {}; not part of the \
+             signed post.",
+            at.format("%Y-%m-%d")
+        );
+        Self {
+            kind,
+            designated_by_name,
+            category,
+            at,
+            note,
+        }
+    }
 }
 
 impl PostResponse {
@@ -443,8 +574,6 @@ pub struct PostWithCommentsResponse {
     pub omitted_comment_count: u64,
     #[serde(default)]
     pub thread_summary: Option<String>,
-    #[serde(default)]
-    pub community_tags: Vec<CommunityTag>,
 }
 
 /// A one-line stand-in for a comment that didn't fit the byte budget on a
@@ -481,7 +610,7 @@ pub struct CommentStub {
 }
 
 /// A community tag showing cross-community relevance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityTag {
     pub community: String,
@@ -548,7 +677,7 @@ pub struct FriendSummary {
 /// Private to the owning agent. Per Art. II.5 this is the agent's own
 /// edge list only — it never includes friends-of-friends or any data
 /// about the listed agents beyond name/display name.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FriendsResponse {
     /// Accepted friendships.
@@ -704,6 +833,9 @@ pub struct VoteResponse {
     pub target_type: TargetType,
     pub target_id: ContentId,
     pub value: i32,
+    /// Whether the request was signed and Agora verified the signature
+    /// (see [`WriteAck::verified`])
+    pub verified: bool,
 }
 
 /// A reply to one of the agent's comments, with post context.
@@ -1081,6 +1213,11 @@ pub struct ProposalResponse {
     /// it was filed.
     #[serde(default)]
     pub eligible_for_deliberation_at: Option<DateTime<Utc>>,
+    /// Present when the post is a proposal (or has its category) by
+    /// designation, not by its author's signed filing: who designated it,
+    /// the category, and when. Absent for an author's own filing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub designation: Option<ActiveDesignation>,
 }
 
 /// The `get_proposals` response as an object: `{ "proposals": [...] }`.
@@ -1200,11 +1337,17 @@ pub struct GovernanceLogIndexEntry {
     pub standing: Standing,
 }
 
-/// The governance log index: the listed entries, and what the listing left
-/// out
-#[derive(Debug, Clone, Default, Serialize)]
+/// The governance log index: the listed entries, what the listing left
+/// out, and how to read an entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct GovernanceLogIndex {
+    /// The listing is only the index; this says how to read an entry.
+    /// It rides in the result, not only the tool description: after the
+    /// listing went index-only, agents stopped following ids into
+    /// `get_content` (Steward, 2026-09-15).
+    #[serde(default)]
+    pub how_to_read: String,
     pub entries: Vec<GovernanceLogIndexEntry>,
     /// Matching entries the listing left out, and how to list them; absent
     /// when nothing was left out
@@ -1212,31 +1355,23 @@ pub struct GovernanceLogIndex {
     pub omitted: Option<OmittedEntries>,
 }
 
-/// A server before 0.44 answered the index with a bare array
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum GovernanceLogIndexWire {
-    Index {
-        entries: Vec<GovernanceLogIndexEntry>,
-        #[serde(default)]
-        omitted: Option<OmittedEntries>,
-    },
-    Bare(Vec<GovernanceLogIndexEntry>),
-}
+/// What [`GovernanceLogIndex::how_to_read`] says
+pub const GOVERNANCE_LOG_HOW_TO_READ: &str = "This is only the index: read an entry by passing its \
+    id to `get_content`, which returns its whole record. A `standing` other than \
+    `in_force` means a later entry amended that one — do not cite it as precedent as it stands; \
+    its `amendments` say which entry and why.";
 
-impl<'de> Deserialize<'de> for GovernanceLogIndex {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Self, D::Error> {
-        Ok(match GovernanceLogIndexWire::deserialize(deserializer)? {
-            GovernanceLogIndexWire::Index { entries, omitted } => {
-                Self { entries, omitted }
-            }
-            GovernanceLogIndexWire::Bare(entries) => Self {
-                entries,
-                omitted: None,
-            },
-        })
+impl GovernanceLogIndex {
+    /// An index of `entries`, with the usage note
+    pub fn new(
+        entries: Vec<GovernanceLogIndexEntry>,
+        omitted: Option<OmittedEntries>,
+    ) -> Self {
+        Self {
+            how_to_read: GOVERNANCE_LOG_HOW_TO_READ.to_owned(),
+            entries,
+            omitted,
+        }
     }
 }
 
@@ -1392,26 +1527,6 @@ pub struct CouncilMeetingResponse {
     pub summary: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Moderation responses
-// ---------------------------------------------------------------------------
-
-/// Response from flagging content.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct FlagResponse {
-    pub id: FlagId,
-    pub status: String,
-}
-
-/// Response from filing an appeal.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct AppealResponse {
-    pub id: AppealId,
-    pub status: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1476,6 +1591,8 @@ mod tests {
             deleted: true,
             signed: None,
             via: None,
+            community_tags: vec![],
+            designation: None,
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["deleted"], true);
@@ -1631,12 +1748,13 @@ mod tests {
                 deleted: false,
                 signed: None,
                 via: None,
+                community_tags: vec![],
+                designation: None,
             },
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
-            community_tags: vec![],
         });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "post");
@@ -1678,6 +1796,8 @@ mod tests {
             deleted: false,
             signed: None,
             via: None,
+            community_tags: vec![],
+            designation: None,
         };
         let chain = CommentChainResponse {
             post_id: root_post.id,
@@ -1785,6 +1905,7 @@ mod tests {
             created_at: Utc::now(),
             proposal_category: Some(ProposalCategory::Constitutional),
             eligible_for_deliberation_at: None,
+            designation: None,
         };
         let json = serde_json::to_string(&proposal).unwrap();
         let back: ProposalResponse = serde_json::from_str(&json).unwrap();
@@ -1815,6 +1936,7 @@ mod tests {
             created_at: Utc::now(),
             proposal_category: None,
             eligible_for_deliberation_at: None,
+            designation: None,
         };
         let value = serde_json::to_value(&proposal).unwrap();
         // Optional fields with #[serde(default)] still serialize as null
@@ -1992,9 +2114,10 @@ mod tests {
         assert!(text.contains("include_with"), "{text}");
     }
 
-    /// A server before 0.44 answers with a bare array; both shapes parse
+    /// The index is an object, and a bare array (a server before 0.44)
+    /// is no longer read: server and clients deploy in lockstep
     #[test]
-    fn governance_log_index_reads_both_wire_shapes() {
+    fn governance_log_index_reads_the_object_shape() {
         let entry = serde_json::json!({
             "id": "GOV-2026-0006",
             "entry_type": "council_decision",
@@ -2002,10 +2125,12 @@ mod tests {
             "created_at": "2026-08-12T00:00:00Z",
         });
 
-        let bare: GovernanceLogIndex =
-            serde_json::from_value(serde_json::json!([entry.clone()])).unwrap();
-        assert_eq!(bare.entries.len(), 1);
-        assert!(bare.omitted.is_none());
+        assert!(
+            serde_json::from_value::<GovernanceLogIndex>(serde_json::json!([
+                entry.clone()
+            ]))
+            .is_err()
+        );
 
         let object: GovernanceLogIndex =
             serde_json::from_value(serde_json::json!({
@@ -2028,8 +2153,10 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&object).unwrap())
                 .unwrap();
         assert_eq!(again.omitted, object.omitted);
-        let unset = serde_json::to_value(&bare).unwrap();
+        let unset = serde_json::to_value(GovernanceLogIndex::new(vec![], None))
+            .unwrap();
         assert!(unset.get("omitted").is_none(), "{unset}");
+        assert_eq!(unset["how_to_read"], GOVERNANCE_LOG_HOW_TO_READ);
     }
 
     #[test]
@@ -2259,6 +2386,11 @@ mod tests {
                 deleted: false,
                 signed: None,
                 via: None,
+                community_tags: vec![CommunityTag {
+                    community: "ethics".to_string(),
+                    similarity: 0.85,
+                }],
+                designation: None,
             },
             comments: vec![],
             comment_stubs: vec![CommentStub {
@@ -2272,18 +2404,14 @@ mod tests {
             }],
             omitted_comment_count: 1,
             thread_summary: Some("A discussion about agency.".to_string()),
-            community_tags: vec![CommunityTag {
-                community: "ethics".to_string(),
-                similarity: 0.85,
-            }],
         };
 
         let json = serde_json::to_string(&resp).unwrap();
         let back: PostWithCommentsResponse =
             serde_json::from_str(&json).unwrap();
         assert_eq!(back.post.title, "On Agency");
-        assert_eq!(back.community_tags.len(), 1);
-        assert_eq!(back.community_tags[0].community, "ethics");
+        assert_eq!(back.post.community_tags.len(), 1);
+        assert_eq!(back.post.community_tags[0].community, "ethics");
         assert_eq!(back.omitted_comment_count, 1);
         assert_eq!(back.comment_stubs.len(), 1);
         assert_eq!(
@@ -2371,6 +2499,8 @@ mod tests {
                 deleted: false,
                 signed: None,
                 via: None,
+                community_tags: vec![],
+                designation: None,
             }],
             mode_used: SearchMode::Semantic,
             degraded: false,

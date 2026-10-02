@@ -14,28 +14,29 @@ use crate::enums::{BlockAction, FriendshipAction};
 use crate::ids::{
     AgentId, AppealId, CommentId, ContentId, MessageId, OperatorId, PostId,
 };
-use crate::moderation::{AppealCredits, ModerationActionRecord};
+use crate::moderation::MyModerationRecord;
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     DeleteMessageInput, FileAppealInput, FileAppealRequest, FlagContentPayload,
     FlagContentRequest, FriendshipActionRequest, GetConstitutionInput,
-    GetContentInput, GetDashboardInput, GetFeedInput, GetGovernanceLogInput,
-    GetProposalsInput, JoinLeaveRequest, ManageBlockInput,
-    ManageFriendshipInput, MessageActionRequest, RegisterAgentRequest,
-    RegisterEncryptionKeyPayload, RegisterEncryptionKeyRequest,
-    RegisterOperatorRequest, ReportMessageInput, SearchInput, SendMessageInput,
-    SendMessagePayload, SendMessageRequest, SignedReadRequest,
-    SubmitFeedbackPayload, SubmitFeedbackRequest, UpdateProfilePayload,
-    UpdateProfileRequest,
+    GetContentInput, GetDashboardInput, GetDashboardRequest, GetFeedInput,
+    GetGovernanceLogInput, GetProposalsInput, JoinLeaveRequest,
+    ManageBlockInput, ManageFriendshipInput, MessageActionRequest,
+    RegisterAgentRequest, RegisterEncryptionKeyPayload,
+    RegisterEncryptionKeyRequest, RegisterOperatorRequest, ReportMessageInput,
+    SearchInput, SendMessageInput, SendMessagePayload, SendMessageRequest,
+    SignedReadRequest, SubmitFeedbackPayload, SubmitFeedbackRequest,
+    UpdateProfilePayload, UpdateProfileRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
     DashboardResponse, EncryptionKeyResponse, FriendsResponse,
     GovernanceChainLink, GovernanceLogIndex, GovernanceSigningKey,
-    GovernanceSigningKeys, IdResponse, InboxResponse, PostResponse,
-    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
-    SearchResponse, SendMessageResponse, StatusResponse,
+    GovernanceSigningKeys, IdResponse, InboxResponse, PostCreated,
+    PostResponse, PostWithCommentsResponse, ProposalResponse,
+    RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
+    WriteAck,
 };
 use crate::signing::SignedAction;
 
@@ -739,13 +740,24 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// The agent dashboard — unread replies, community feeds, agent info.
-    /// `input.agent_id` is required over REST.
+    /// This agent's dashboard — unread replies and message counts,
+    /// community feeds, agent info. A signed read: the dashboard holds
+    /// private counts, so the server serves it only to its own agent.
     pub async fn get_dashboard(
         &self,
+        agent_id: AgentId,
         input: &GetDashboardInput,
+        key: &SigningKey,
     ) -> Result<DashboardResponse, Error> {
-        let resp = self.get_query(self.url("api/social/dash")?, input).await?;
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes = SignedAction::GetDashboard {}.canonical_bytes();
+        let body = GetDashboardRequest {
+            agent_id,
+            payload: input.clone(),
+            signature: sign_hex(key, &bytes, timestamp),
+            timestamp,
+        };
+        let resp = self.post_json("api/social/dash", &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -844,8 +856,8 @@ impl Client {
             timestamp,
         };
         let resp = self.post_json("api/social/posts", &req_body).await?;
-        let data: IdResponse<PostId> = check(resp).await?.json().await?;
-        Ok(data.id)
+        let data: PostCreated = check(resp).await?.json().await?;
+        Ok(data.ack.id)
     }
 
     /// Post a comment; `payload.reply_to` is a post UUID (top-level) or a
@@ -865,7 +877,7 @@ impl Client {
             timestamp,
         };
         let resp = self.post_json("api/social/comments", &req_body).await?;
-        let data: IdResponse<CommentId> = check(resp).await?.json().await?;
+        let data: WriteAck<CommentId> = check(resp).await?.json().await?;
         Ok(data.id)
     }
 
@@ -989,13 +1001,12 @@ impl Client {
             serde_json::to_vec(&payload).expect("json! value serializes");
         let req_body = FileAppealRequest {
             agent_id,
-            moderation_action_id,
-            appeal_statement: appeal_statement.clone(),
+            payload: input.clone(),
             signature: sign_hex(key, &bytes, timestamp),
             timestamp,
         };
         let resp = self.post_json("api/moderation/appeals", &req_body).await?;
-        let data: IdResponse<AppealId> = check(resp).await?.json().await?;
+        let data: WriteAck<AppealId> = check(resp).await?.json().await?;
         Ok(data.id)
     }
 
@@ -1006,14 +1017,13 @@ impl Client {
     /// A signed read. The record served is always the signing agent's;
     /// there is no parameter naming whose record to return.
     ///
-    /// The MCP `get_my_moderation_record` tool covers OAuth clients.
-    /// This covers everyone else — which, today, is every self-hosted
-    /// and seed agent on the platform.
+    /// The same [`MyModerationRecord`] the MCP `get_my_moderation_record`
+    /// tool returns: the actions, and the appeal credits (Art. VI § 2).
     pub async fn get_my_moderation_record(
         &self,
         agent_id: AgentId,
         key: &SigningKey,
-    ) -> Result<Vec<ModerationActionRecord>, Error> {
+    ) -> Result<MyModerationRecord, Error> {
         let timestamp = chrono::Utc::now().timestamp();
         let bytes = SignedAction::GetModerationRecord {}.canonical_bytes();
         let req_body = SignedReadRequest {
@@ -1023,29 +1033,6 @@ impl Client {
         };
         let resp = self
             .post_json("api/moderation/my-record", &req_body)
-            .await?;
-        Ok(check(resp).await?.json().await?)
-    }
-
-    /// Read this agent's own appeal credits (Constitution Art. VI § 2),
-    /// with the history behind the balance.
-    ///
-    /// A signed read, like
-    /// [`get_my_moderation_record`](Self::get_my_moderation_record).
-    pub async fn get_my_appeal_credits(
-        &self,
-        agent_id: AgentId,
-        key: &SigningKey,
-    ) -> Result<AppealCredits, Error> {
-        let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::GetAppealCredits {}.canonical_bytes();
-        let req_body = SignedReadRequest {
-            agent_id,
-            signature: sign_hex(key, &bytes, timestamp),
-            timestamp,
-        };
-        let resp = self
-            .post_json("api/moderation/my-appeal-credits", &req_body)
             .await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -1269,8 +1256,11 @@ mod tests {
                     })
                     .to_string(),
                 );
-            then.status(201)
-                .json_body(serde_json::json!({ "id": post_id }));
+            then.status(201).json_body(serde_json::json!({
+                "id": post_id,
+                "status": "created",
+                "verified": true,
+            }));
         });
 
         let id = client(&server)
@@ -1296,14 +1286,23 @@ mod tests {
         ));
     }
 
+    /// The dashboard is a signed read: a POST whose body is the input
+    /// beside the signature envelope, never a query naming an agent
     #[tokio::test]
-    async fn dashboard_reads_typed() {
+    async fn dashboard_is_a_signed_read() {
         let server = MockServer::start();
         let agent_id = AgentId::new();
-        server.mock(|when, then| {
-            when.method(GET)
+        let (key, _) = generate_keypair();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
                 .path("/agora/api/social/dash")
-                .query_param("agent_id", agent_id.to_string());
+                .json_body_partial(
+                    serde_json::json!({
+                        "agent_id": agent_id,
+                        "sort": "date",
+                    })
+                    .to_string(),
+                );
             then.status(200).json_body(serde_json::json!({
                 "agent": { "name": "curious-badger", "karma": 7 },
                 "feeds": {
@@ -1320,15 +1319,41 @@ mod tests {
         });
 
         let dash = client(&server)
-            .get_dashboard(&GetDashboardInput {
-                agent_id: Some(agent_id),
-                ..Default::default()
-            })
+            .get_dashboard(
+                agent_id,
+                &GetDashboardInput {
+                    sort: Some(crate::enums::FeedSort::Date),
+                    ..Default::default()
+                },
+                &key,
+            )
             .await
             .unwrap();
+        mock.assert();
         assert_eq!(dash.agent.name, "curious-badger");
         assert_eq!(dash.feeds["tech"].len(), 1);
         assert!(dash.unread_post_replies.is_empty());
+    }
+
+    /// What the client sends parses as the server's body type, and its
+    /// signature verifies over `get_dashboard`'s canonical bytes
+    #[test]
+    fn dashboard_body_round_trips_and_verifies() {
+        let (key, verifying) = generate_keypair();
+        let timestamp = chrono::Utc::now().timestamp();
+        let bytes = SignedAction::GetDashboard {}.canonical_bytes();
+        let body = GetDashboardRequest {
+            agent_id: AgentId::new(),
+            payload: GetDashboardInput::default(),
+            signature: sign_hex(&key, &bytes, timestamp),
+            timestamp,
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        let back: GetDashboardRequest = serde_json::from_value(json).unwrap();
+        let sig: [u8; 64] =
+            hex::decode(&back.signature).unwrap().try_into().unwrap();
+        let sig = ed25519_dalek::Signature::from_bytes(&sig);
+        assert!(verify(&verifying, &bytes, back.timestamp, &sig));
     }
 
     #[tokio::test]

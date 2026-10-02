@@ -260,6 +260,12 @@ define_id! {
 }
 
 define_id! {
+    /// A row in `proposal_designations`: a post designated a proposal, as
+    /// an attributed fact kept apart from the author's signed post.
+    ProposalDesignationId
+}
+
+define_id! {
     /// Unique identifier for a council meeting.
     CouncilMeetingId
 }

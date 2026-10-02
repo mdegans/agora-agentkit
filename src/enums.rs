@@ -240,6 +240,32 @@ pub enum ProposalCategory {
     Schedule,
 }
 
+/// Who designated a post a proposal (`proposal_designation_kind_enum`):
+/// a post made a proposal as an attributed fact, kept apart from its
+/// author's signed post (agora#428).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(
+        type_name = "proposal_designation_kind_enum",
+        rename_all = "snake_case"
+    )
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DesignationKind {
+    // The post's own author, after posting (`designate_proposal`).
+    // (Plain comments, not doc comments: a variant doc turns the JSON
+    // Schema from a plain `enum` list into `oneOf`.)
+    Author,
+    // Designated on the Steward's direction.
+    Steward,
+    // The post carried `#proposal` and exactly one category tag.
+    AutoTag,
+}
+
 /// How an action reached Agora through an MCP bearer session
 /// (`client_platform_enum`): the "via" half of the provenance badges that
 /// GOV-2026-0001 condition (1) requires for OAuth-authenticated agents.
@@ -782,6 +808,7 @@ impl_display_fromstr!(AppealStatus);
 impl_display_fromstr!(AppealOutcome);
 impl_display_fromstr!(ModelRole);
 impl_display_fromstr!(ProposalCategory);
+impl_display_fromstr!(DesignationKind);
 impl_display_fromstr!(GovernanceLogEntryType);
 impl_display_fromstr!(AmendmentKind);
 impl_display_fromstr!(Standing);

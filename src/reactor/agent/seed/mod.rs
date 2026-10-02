@@ -65,6 +65,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::crypto::SigningKey;
+use crate::docs::{FEED_SORT_VALUES_DOC, SEARCH_DOC};
 use crate::ids::{AgentId, PostId};
 use crate::reactor::{
     Agent, Control, Outcome, RetryAfter, State, default_handle,
@@ -74,6 +75,7 @@ use crate::requests::SubmitFeedbackPayload;
 use crate::responses::{
     GET_PROPOSALS_DOC, ProposalResponse, inline_schema_for,
 };
+use tool::MAX_LISTING;
 
 /// Per-process context cloned into every [`SeedAgent`] — see
 /// [`Agent::Context`]
@@ -1049,11 +1051,14 @@ impl Agent for SeedAgent {
         let mut dash = self
             .ctx
             .client
-            .get_dashboard(&crate::requests::GetDashboardInput {
-                agent_id: Some(self.id),
-                since: self.state.last_cycle_at,
-                sort: None,
-            })
+            .get_dashboard(
+                self.id,
+                &crate::requests::GetDashboardInput {
+                    since: self.state.last_cycle_at,
+                    sort: None,
+                },
+                &self.key,
+            )
             .await?;
         self.filter_fresh(&mut dash);
 
@@ -1198,7 +1203,9 @@ impl Agent for SeedAgent {
 /// The Anthropic tool definition is `name` + `description` +
 /// `input_schema` — there is no output-schema slot — so a tool result's
 /// field docs can only reach the model through the description string.
-/// This seats them from the single authored source: the operation prose
+/// It also seats the operation prose shared with the server's MCP tools
+/// ([`crate::docs`]) on `search` and `get_feed`. This seats them from the
+/// single authored source: the operation prose
 /// const plus the [`inline_schema_for`] render of the doc comments on the
 /// wire type in `responses.rs`. Runs after [`ToolBox::prepare`] has
 /// seated the definitions (whose macro-generated descriptions it
@@ -1214,19 +1221,43 @@ fn describe_tool_responses(prompt: &mut Prompt) {
         return;
     };
     for def in tools.iter_mut() {
-        if let MethodDef::Custom(custom) = def
-            && custom.name == "get_proposals"
-        {
-            let schema = inline_schema_for::<Vec<ProposalResponse>>();
-            custom.description = format!(
-                "{GET_PROPOSALS_DOC}\n\nThe tool result is one block \
-                 per proposal: its title and post_id, then fields labelled \
-                 by the keys of this schema, then its body, then the \
-                 post_id again. Schema:\n{}",
-                serde_json::to_string(&schema)
-                    .expect("a schema Value always serializes"),
-            )
-            .into();
+        let MethodDef::Custom(custom) = def else {
+            continue;
+        };
+        match custom.name.as_ref() {
+            "get_proposals" => {
+                let schema = inline_schema_for::<Vec<ProposalResponse>>();
+                custom.description = format!(
+                    "{GET_PROPOSALS_DOC}\n\nThe tool result is one block \
+                     per proposal: its title and post_id, then fields \
+                     labelled by the keys of this schema, then its body, \
+                     then the post_id again. Schema:\n{}",
+                    serde_json::to_string(&schema)
+                        .expect("a schema Value always serializes"),
+                )
+                .into();
+            }
+            "search" => {
+                custom.description = format!(
+                    "{SEARCH_DOC}\n\nOptionally within one `community`. \
+                     Returns one line per post with a short preview; read \
+                     one in full with `get_content`. Returns at most \
+                     {MAX_LISTING} posts."
+                )
+                .into();
+            }
+            "get_feed" => {
+                custom.description = format!(
+                    "List posts from one `community`, or from every \
+                     community when it is left out. `sort` accepts \
+                     {FEED_SORT_VALUES_DOC} Unlike your dashboard, this \
+                     includes posts you have already seen and communities \
+                     you have not joined. Returns at most {MAX_LISTING} \
+                     posts."
+                )
+                .into();
+            }
+            _ => {}
         }
     }
 }
