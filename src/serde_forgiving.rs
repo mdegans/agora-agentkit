@@ -103,6 +103,26 @@ where
     }
 }
 
+/// [`forgiving_option_u64`] for a `u32`: out of range is an error, not a
+/// truncation.
+///
+/// Use with `#[serde(default, deserialize_with = "forgiving_option_u32")]`.
+pub fn forgiving_option_u32<'de, D>(
+    deserializer: D,
+) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    forgiving_option_u64(deserializer)?
+        .map(|n| {
+            u32::try_from(n)
+                .map_err(|_| D::Error::custom(format!("expected u32, got {n}")))
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

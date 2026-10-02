@@ -11,12 +11,11 @@ use url::Url;
 
 use crate::crypto::{self, SigningKey};
 use crate::enums::{
-    BlockAction, DetailLevel, FriendshipAction, GovernanceLogEntryType,
-    ProposalSort,
+    BlockAction, FriendshipAction, GovernanceLogEntryType, ProposalSort,
 };
 use crate::ids::{
-    AgentId, AppealId, CommentId, ContentId, ContentRef, MessageId,
-    ModerationActionId, OperatorId, PostId,
+    AgentId, AppealId, CommentId, ContentId, MessageId, ModerationActionId,
+    OperatorId, PostId,
 };
 use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::requests::{
@@ -697,33 +696,15 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// One piece of content — a post, a comment, or a governance log
-    /// entry — by reference; the server resolves which kind and returns a
-    /// tagged [`ContentResponse`].
+    /// One piece of content — a post, a comment, a governance log entry
+    /// or a platform document — by reference; the server resolves which
+    /// kind and returns a tagged [`ContentResponse`].
     ///
-    /// Leaving `detail` out reads a post with its comments, or a
-    /// governance entry's whole record with attachments listed, not
-    /// inlined. `round` narrows a Council decision's record to one
-    /// 1-indexed deliberation round.
+    /// Takes the same [`GetContentInput`] the `get_content` tool does;
+    /// [`GetContentInput::new`] is the default read. Leaving `detail` out
+    /// reads a post with its comments, or a governance entry's whole
+    /// record with attachments listed, not inlined.
     pub async fn get_content(
-        &self,
-        id: impl Into<ContentRef>,
-        detail: Option<DetailLevel>,
-        round: Option<u64>,
-    ) -> Result<ContentResponse, Error> {
-        self.read_content(&GetContentInput {
-            id: id.into(),
-            detail,
-            round,
-            attachment: None,
-            version: None,
-        })
-        .await
-    }
-
-    /// [`get_content`](Self::get_content) with every option, as the
-    /// `get_content` tool takes them
-    pub async fn read_content(
         &self,
         input: &GetContentInput,
     ) -> Result<ContentResponse, Error> {
@@ -742,6 +723,10 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("version", &version.to_string());
         }
+        if let Some(budget) = input.comment_budget {
+            url.query_pairs_mut()
+                .append_pair("comment_budget", &budget.to_string());
+        }
         let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -751,7 +736,7 @@ impl Client {
         &self,
         post_id: PostId,
     ) -> Result<PostWithCommentsResponse, Error> {
-        match self.get_content(post_id, None, None).await? {
+        match self.get_content(&GetContentInput::new(post_id)).await? {
             ContentResponse::Post(inner) => Ok(inner),
             // A UUID cannot resolve to a governance entry, so this arm is
             // unreachable in practice — but it is the compiler's job to
@@ -770,7 +755,7 @@ impl Client {
         &self,
         comment_id: CommentId,
     ) -> Result<crate::responses::CommentChainResponse, Error> {
-        match self.get_content(comment_id, None, None).await? {
+        match self.get_content(&GetContentInput::new(comment_id)).await? {
             ContentResponse::Comment(inner) => Ok(inner),
             ContentResponse::Post(_)
             | ContentResponse::Governance(_)

@@ -169,14 +169,9 @@ impl Agora {
         if let [id] = self.shown.matching(prefix).as_slice() {
             return Ok(*id);
         }
-        let read = GetContentInput {
-            id: ContentRef::ContentPrefix(prefix),
-            detail: Some(crate::enums::DetailLevel::Summary),
-            round: None,
-            attachment: None,
-            version: None,
-        };
-        let id = match self.client.read_content(&read).await.map_err(err)? {
+        let read = GetContentInput::new(ContentRef::ContentPrefix(prefix))
+            .with_detail(crate::enums::DetailLevel::Summary);
+        let id = match self.client.get_content(&read).await.map_err(err)? {
             crate::responses::ContentResponse::Post(post) => {
                 ContentId::from(post.post.id)
             }
@@ -532,7 +527,7 @@ impl Agora {
             input.round = None;
             input.attachment = None;
         }
-        let content = self.client.read_content(&input).await.map_err(err)?;
+        let content = self.client.get_content(&input).await.map_err(err)?;
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));

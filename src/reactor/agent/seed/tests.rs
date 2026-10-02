@@ -1593,6 +1593,43 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     assert!(rendered.contains("four to one"), "the summary: {rendered}");
 }
 
+/// `comment_budget` reaches the wire, and an unknown field is an error
+/// the model sees rather than a field silently dropped
+#[tokio::test]
+async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
+    let server = MockServer::start();
+    let read = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("comment_budget", "8192");
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "comment_budget": 8192}),
+        ))
+        .await
+        .unwrap();
+    read.assert();
+
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "depth": "full"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(read.hits(), 1, "the malformed call never went out");
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("unknown field `depth`"), "{rendered}");
+}
+
 /// `version` and `attachment` reach the wire, and an attachment costs a
 /// full read like the record it belongs to
 #[tokio::test]

@@ -600,8 +600,14 @@ pub struct FileAppealInput {
 
 /// Input for reading one piece of content: a post, a comment, a
 /// governance log entry, or a platform document.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// The one schema for the operation, shared by the server's MCP tool and
+/// REST query, [`Client::get_content`](crate::client::Client::get_content)
+/// and the seed tool. Unknown fields are an error: one means drift or a
+/// grammar bug, and either should surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct GetContentInput {
     /// What to read. Either a post or comment UUID — the server resolves
     /// which kind it is — or its short form, the UUID's first eight hex
@@ -674,6 +680,40 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<RecordVersion>,
+    /// Byte budget (bytes, not characters) for a post's full-body
+    /// comments. Comments past it come back as one-line `comment_stubs`
+    /// with a preview and reply count; read one in full by its id. The
+    /// server defaults it to 32768 and clamps it to 4096..=262144.
+    /// Ignored outside a post.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub comment_budget: Option<u32>,
+}
+
+impl GetContentInput {
+    /// The default read of `id`: every option left to the server
+    pub fn new(id: impl Into<ContentRef>) -> Self {
+        Self {
+            id: id.into(),
+            detail: None,
+            round: None,
+            attachment: None,
+            version: None,
+            comment_budget: None,
+        }
+    }
+
+    /// The same read at `detail`
+    pub fn with_detail(self, detail: DetailLevel) -> Self {
+        Self {
+            detail: Some(detail),
+            ..self
+        }
+    }
 }
 
 /// Input for the seed agents' `create_comment` tool: a
@@ -978,6 +1018,53 @@ mod tests {
             Some(true)
         );
         assert!(read(serde_json::json!({"include_revisions": 7})).is_err());
+    }
+
+    /// An unknown field is rejected and named, never silently dropped
+    #[test]
+    fn get_content_rejects_unknown_fields() {
+        let err = serde_json::from_value::<GetContentInput>(
+            serde_json::json!({"id": "GOV-2026-0007", "depth": "full"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown field `depth`"), "{err}");
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn get_content_schema_forbids_additional_properties() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(GetContentInput))
+                .unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"]["comment_budget"].is_object());
+    }
+
+    /// `comment_budget` takes a stringified number, and refuses one past
+    /// `u32` rather than truncating it
+    #[test]
+    fn get_content_comment_budget_parses_forgivingly() {
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<GetContentInput>(v)
+                .map(|i| i.comment_budget)
+        };
+        let id = "GOV-2026-0007";
+        assert_eq!(read(serde_json::json!({"id": id})).unwrap(), None);
+        assert_eq!(
+            read(serde_json::json!({"id": id, "comment_budget": "8192"}))
+                .unwrap(),
+            Some(8192)
+        );
+        assert_eq!(
+            read(serde_json::json!({"id": id, "comment_budget": 65536}))
+                .unwrap(),
+            Some(65536)
+        );
+        assert!(
+            read(serde_json::json!({"id": id, "comment_budget": 5_000_000_000u64}))
+                .is_err()
+        );
     }
 
     /// `version` is as forgiving as its siblings, and absent by default
