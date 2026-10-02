@@ -5,7 +5,7 @@
 use misanthropic::prompt::{
     Prompt,
     index::{BlockIndex, Index, IndexMut},
-    message::{CacheControl, Role},
+    message::CacheControl,
 };
 
 use crate::reactor::inference::Quirks;
@@ -153,6 +153,7 @@ fn index_is_cached(prompt: &Prompt, index: Index) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use misanthropic::prompt::message::Role;
 
     fn quirks(f: impl FnOnce(&mut Quirks)) -> Quirks {
         let mut q = Quirks::default();
@@ -232,45 +233,43 @@ mod tests {
     #[test]
     fn round_loop_never_exceeds_budget_or_jumps_role() {
         let (q, role) = (Quirks::default(), Role::User);
-        {
-            let mut prompt = session(0);
-            for i in 0..10 {
-                prompt
-                    .push_message((Role::Assistant, format!("asst {i}")))
-                    .unwrap();
-                prompt
-                    .push_message((Role::User, format!("results {i}")))
-                    .unwrap();
-                roll_breakpoints(&q, &mut prompt);
+        let mut prompt = session(0);
+        for i in 0..10 {
+            prompt
+                .push_message((Role::Assistant, format!("asst {i}")))
+                .unwrap();
+            prompt
+                .push_message((Role::User, format!("results {i}")))
+                .unwrap();
+            roll_breakpoints(&q, &mut prompt);
 
-                assert!(
-                    total_markers(&prompt) <= MAX_CACHE_CONTROLS_PER_REQUEST,
-                    "round {i}: {} markers",
-                    total_markers(&prompt)
-                );
-                assert!(
-                    prompt.system.as_ref().unwrap().has_cache(),
-                    "round {i}: system marker evicted"
-                );
-                assert!(
-                    prompt.messages[0].content.has_cache(),
-                    "round {i}: intro marker evicted"
-                );
-                for idx in marked(&prompt).into_iter().skip(1) {
-                    assert_eq!(
-                        prompt.messages[idx].role, role,
-                        "round {i}: rolling marker jumped role at {idx}"
-                    );
-                }
-            }
-            // Ported from the seed prompt guards: a 5m marker ahead of a 1h
-            // one is a submit-time API error, so rolling must stay all-1h.
-            let json = serde_json::to_string(&prompt).unwrap();
             assert!(
-                !json.contains(r#""cache_control":{"type":"ephemeral"}"#),
-                "5m marker present:\n{json}"
+                total_markers(&prompt) <= MAX_CACHE_CONTROLS_PER_REQUEST,
+                "round {i}: {} markers",
+                total_markers(&prompt)
             );
+            assert!(
+                prompt.system.as_ref().unwrap().has_cache(),
+                "round {i}: system marker evicted"
+            );
+            assert!(
+                prompt.messages[0].content.has_cache(),
+                "round {i}: intro marker evicted"
+            );
+            for idx in marked(&prompt).into_iter().skip(1) {
+                assert_eq!(
+                    prompt.messages[idx].role, role,
+                    "round {i}: rolling marker jumped role at {idx}"
+                );
+            }
         }
+        // Ported from the seed prompt guards: a 5m marker ahead of a 1h
+        // one is a submit-time API error, so rolling must stay all-1h.
+        let json = serde_json::to_string(&prompt).unwrap();
+        assert!(
+            !json.contains(r#""cache_control":{"type":"ephemeral"}"#),
+            "5m marker present:\n{json}"
+        );
     }
 
     #[test]
