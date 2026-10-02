@@ -15,10 +15,6 @@ use serde::{Deserialize, Serialize};
 )]
 #[non_exhaustive]
 pub struct Quirks {
-    /// Cache breakpoints belong on the assistant message, before the next
-    /// user turn (blallama: the hash side-table keys on the end-of-assistant
-    /// render)
-    pub breakpoint_after_assistant: bool,
     /// Cache markers are ignored entirely (ollama: byte-prefix KV cache)
     pub cache_markers_ignored: bool,
     /// `tool_choice` semantics aren't honored (ollama: `Auto` forces a tool

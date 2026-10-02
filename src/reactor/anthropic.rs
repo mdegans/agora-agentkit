@@ -60,7 +60,6 @@ impl From<EndpointVariant> for Quirks {
                 quirks.web_fetch_unsupported = true;
             }
             EndpointVariant::Blallama => {
-                quirks.breakpoint_after_assistant = true;
                 quirks.output_config_cache_safe = true;
                 // No server-side tool runner yet. Anthropic-conformant
                 // deviations are bugs — except improvements — so expect these
@@ -393,11 +392,9 @@ mod tests {
         assert!(ollama.cache_markers_ignored);
         assert!(ollama.tool_choice_not_respected);
         assert!(ollama.cache_stats_unreported);
-        assert!(!ollama.breakpoint_after_assistant);
         assert!(!ollama.output_config_cache_safe);
 
         let blallama = Quirks::from(EndpointVariant::Blallama);
-        assert!(blallama.breakpoint_after_assistant);
         assert!(blallama.output_config_cache_safe);
         assert!(!blallama.cache_markers_ignored);
         assert!(!blallama.tool_choice_not_respected);
