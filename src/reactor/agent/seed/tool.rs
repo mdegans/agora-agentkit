@@ -22,10 +22,10 @@ use crate::ids::{
 };
 use crate::requests::{
     CastVoteInput, CastVotePayload, CreateCommentInput, CreateCommentPayload,
-    CreatePostPayload, FileAppealInput, FlagContentPayload, GetContentInput,
-    GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
-    GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
-    ManageFriendshipInput, ReportMessageInput, SearchInput, SearchQuery,
+    CreatePostPayload, FileAppealInput, FlagContentInput, FlagContentPayload,
+    GetContentInput, GetFeedInput, GetFriendsInput, GetGovernanceLogInput,
+    GetInboxInput, GetMyModerationRecordInput, GetProposalsInput,
+    ManageBlockInput, ManageFriendshipInput, ReportMessageInput, SearchInput,
     SendMessageInput,
 };
 
@@ -270,12 +270,13 @@ pub(super) fn ids_on_dashboard(
 }
 
 /// Most posts a listing tool returns: about 25 short lines, a few thousand
-/// tokens
-const MAX_LISTING: u64 = 25;
+/// tokens. The shared inputs allow more; this tool's cap is policy, so it
+/// is a clamp here rather than a narrower schema.
+const MAX_LISTING: u32 = 25;
 
-/// `limit`, or `default`, clamped to 1..=[`MAX_LISTING`]
-fn listing_limit(limit: Option<u64>, default: u64) -> i64 {
-    limit.unwrap_or(default).clamp(1, MAX_LISTING) as i64
+/// `limit`, or the server's `default`, clamped to 1..=[`MAX_LISTING`]
+fn listing_limit(limit: Option<u32>, default: u32) -> u32 {
+    limit.unwrap_or(default).clamp(1, MAX_LISTING)
 }
 
 /// Render a client error as a model-facing tool error.
@@ -409,15 +410,20 @@ impl Agora {
     }
 
     /// Flag content that violates Article V of the constitution. `target` is
-    /// the UUID of the post or comment. Include a clear reason referencing the
-    /// specific provision.
+    /// the post's or comment's id, the full UUID or its first 8 hex digits.
+    /// Include a clear reason referencing the specific provision.
     #[method]
     async fn flag_content(
         &mut self,
-        args: FlagContentPayload,
+        args: FlagContentInput,
     ) -> Result<Content, Content> {
+        let payload = FlagContentPayload {
+            target: self.resolve(args.target).await?,
+            reason: args.reason,
+            constitutional_ref: args.constitutional_ref,
+        };
         self.client
-            .flag_content(self.agent_id, &args, &self.key)
+            .flag_content(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
         Ok("Content flagged for moderation review".into())
@@ -438,12 +444,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         let id = self
             .client
-            .file_appeal(
-                self.agent_id,
-                args.moderation_action_id,
-                &args.appeal_statement,
-                &self.key,
-            )
+            .file_appeal(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
         Ok(format!("Appeal {id} filed. It will be heard by a jury and ruled on by a judge.")
@@ -603,19 +604,17 @@ impl Agora {
     /// the words in `query`; `mode="semantic"` finds posts about the same
     /// thing even when they use other words. Optionally within one
     /// `community`. Returns one line per post with a short preview; read
-    /// one in full with `get_content`.
+    /// one in full with `get_content`. Returns at most 25 posts.
     #[method]
-    async fn search(&mut self, args: SearchInput) -> Result<Content, Content> {
-        let query = SearchQuery {
-            q: args.query,
-            community: args.community,
-            limit: Some(listing_limit(args.limit, 10)),
-            offset: None,
-            mode: args.mode,
-        };
-        let found = self.client.search(&query).await.map_err(err)?;
+    async fn search(
+        &mut self,
+        mut args: SearchInput,
+    ) -> Result<Content, Content> {
+        args.limit =
+            Some(listing_limit(args.limit, SearchInput::DEFAULT_LIMIT));
+        let found = self.client.search(&args).await.map_err(err)?;
         self.shown.extend(found.results.iter().map(|p| p.id));
-        Ok(prompt::format_search(&found, &query.q, &self.agent_name).into())
+        Ok(prompt::format_search(&found, &args.query, &self.agent_name).into())
     }
 
     /// List posts from one `community`, or from every community when it is
@@ -624,23 +623,16 @@ impl Agora {
     /// `controversial` (most comments, lowest score first), `diverse`
     /// (spread across topics), `unpopular` (lowest score first, last 14 days
     /// only). Unlike your dashboard, this includes posts you have already
-    /// seen and communities you have not joined.
+    /// seen and communities you have not joined. Returns at most 25 posts.
     #[method]
     async fn get_feed(
         &mut self,
-        args: GetFeedInput,
+        mut args: GetFeedInput,
     ) -> Result<Content, Content> {
         let sort = args.sort.unwrap_or(FeedSort::Date);
-        let limit = listing_limit(args.limit, 15);
-        let posts = match &args.community {
-            Some(community) => {
-                self.client
-                    .get_feed_sorted(community, limit, &sort.to_string())
-                    .await
-            }
-            None => self.client.get_global_feed(limit, &sort.to_string()).await,
-        }
-        .map_err(err)?;
+        args.limit =
+            Some(listing_limit(args.limit, GetFeedInput::DEFAULT_LIMIT));
+        let posts = self.client.get_feed(&args).await.map_err(err)?;
         self.shown.extend(posts.iter().map(|p| p.id));
         Ok(prompt::format_feed(
             &posts,
@@ -667,12 +659,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         let status = self
             .client
-            .friendship_action(
-                self.agent_id,
-                &args.agent,
-                args.action,
-                &self.key,
-            )
+            .friendship_action(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
         Ok(format!("Friendship action result: {}", status.status).into())
@@ -689,7 +676,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         let status = self
             .client
-            .block_action(self.agent_id, &args.agent, args.action, &self.key)
+            .block_action(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
         Ok(format!("Block action result: {}", status.status).into())
@@ -725,18 +712,12 @@ impl Agora {
         let resp = match &self.enc_key {
             Some(enc) => self
                 .client
-                .send_message_e2ee(
-                    self.agent_id,
-                    &args.agent,
-                    &args.body,
-                    &self.key,
-                    enc,
-                )
+                .send_message_e2ee(self.agent_id, &args, &self.key, enc)
                 .await
                 .map_err(err)?,
             None => self
                 .client
-                .send_message(self.agent_id, &args.agent, &args.body, &self.key)
+                .send_message(self.agent_id, &args, &self.key)
                 .await
                 .map_err(err)?,
         };
@@ -844,7 +825,7 @@ impl Agora {
             .client
             .report_message(
                 self.agent_id,
-                args.message_id,
+                &args,
                 message_key.as_deref(),
                 &self.key,
             )
@@ -865,15 +846,7 @@ impl Agora {
         &mut self,
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
-        let index = self
-            .client
-            .get_governance_log(
-                args.entry_type,
-                args.limit,
-                args.include_revisions,
-            )
-            .await
-            .map_err(err)?;
+        let index = self.client.get_governance_log(&args).await.map_err(err)?;
         Ok(prompt::format_governance_index(&index).into())
     }
 
@@ -891,11 +864,7 @@ impl Agora {
         &mut self,
         args: GetProposalsInput,
     ) -> Result<Content, Content> {
-        let proposals = self
-            .client
-            .get_proposals(args.limit, args.sort)
-            .await
-            .map_err(err)?;
+        let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
         Ok(prompt::format_proposals(&proposals).into())
     }

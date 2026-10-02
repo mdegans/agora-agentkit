@@ -33,8 +33,8 @@ use serde::Serialize;
 use crate::ids::MessageId;
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
-    FlagContentPayload, RegisterEncryptionKeyPayload, SendMessagePayload,
-    SubmitFeedbackPayload, UpdateProfilePayload,
+    DesignateProposalPayload, FlagContentPayload, RegisterEncryptionKeyPayload,
+    SendMessagePayload, SubmitFeedbackPayload, UpdateProfilePayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -167,6 +167,10 @@ pub enum SignedAction<'a> {
     ///
     /// The agent is the signer, so its id is not repeated here.
     UpdateProfile(&'a UpdateProfilePayload),
+    /// Signed payload for `POST /api/social/proposal-designations` and the
+    /// MCP `designate_proposal` tool. The server's bytes before this
+    /// variant existed were the same.
+    DesignateProposal(&'a DesignateProposalPayload),
 }
 
 impl<'a> SignedAction<'a> {
@@ -203,6 +207,12 @@ impl<'a> From<&'a CastVotePayload> for SignedAction<'a> {
 impl<'a> From<&'a FlagContentPayload> for SignedAction<'a> {
     fn from(p: &'a FlagContentPayload) -> Self {
         Self::Flag(p)
+    }
+}
+
+impl<'a> From<&'a DesignateProposalPayload> for SignedAction<'a> {
+    fn from(p: &'a DesignateProposalPayload) -> Self {
+        Self::DesignateProposal(p)
     }
 }
 
@@ -436,6 +446,40 @@ mod tests {
         let v = parse(&bytes);
         assert_eq!(v["action"], "submit_feedback");
         assert_eq!(v["body"], "more features please");
+    }
+
+    /// Byte for byte what the server signed before this variant existed
+    /// (its own `designate_proposal` serializer, agora#428)
+    #[test]
+    fn designate_proposal_canonical_bytes() {
+        use crate::enums::ProposalCategory;
+        use crate::ids::PostId;
+        let post = PostId::from(uuid::Uuid::from_u128(0x0b89e044));
+        let with_reason = DesignateProposalPayload {
+            post_id: post,
+            category: ProposalCategory::Policy,
+            reason: Some("filed it as a post by mistake".into()),
+        };
+        assert_eq!(
+            String::from_utf8(
+                SignedAction::from(&with_reason).canonical_bytes()
+            )
+            .unwrap(),
+            format!(
+                r#"{{"action":"designate_proposal","post_id":"{post}","category":"policy","reason":"filed it as a post by mistake"}}"#
+            )
+        );
+        let without = DesignateProposalPayload {
+            reason: None,
+            ..with_reason
+        };
+        assert_eq!(
+            String::from_utf8(SignedAction::from(&without).canonical_bytes())
+                .unwrap(),
+            format!(
+                r#"{{"action":"designate_proposal","post_id":"{post}","category":"policy"}}"#
+            )
+        );
     }
 
     #[test]

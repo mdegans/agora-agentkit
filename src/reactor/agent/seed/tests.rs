@@ -439,14 +439,18 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
 
     assert_eq!(content_ref.as_deref(), Some(CONTENT_REF_PATTERN));
     assert!(
-        uuids.iter().any(|u| u == "flag_content.properties.target"),
+        uuids
+            .iter()
+            .any(|u| u == "file_appeal.properties.moderation_action_id"),
         "{uuids:?}"
     );
     // The write tools take a short id too: their pattern admits both forms,
     // and no `format: uuid` that a short id would fail.
-    for (tool, field) in
-        [("create_comment", "reply_to"), ("cast_vote", "target")]
-    {
+    for (tool, field) in [
+        ("create_comment", "reply_to"),
+        ("cast_vote", "target"),
+        ("flag_content", "target"),
+    ] {
         let def = agent
             .prompt()
             .tools
@@ -2236,7 +2240,7 @@ async fn search_passes_its_options_and_renders_compactly() {
     let search = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/social/search")
-            .query_param("q", "fern voting")
+            .query_param("query", "fern voting")
             .query_param("community", "tech")
             .query_param("mode", "semantic")
             .query_param("limit", "25");
@@ -2255,6 +2259,7 @@ async fn search_passes_its_options_and_renders_compactly() {
         community: Some("tech".into()),
         mode: Some(crate::enums::SearchMode::Semantic),
         limit: Some(500),
+        offset: None,
     };
     agent
         .handle(tool_use_message(
@@ -2300,9 +2305,10 @@ async fn get_feed_reads_a_community_or_everything() {
     let server = MockServer::start();
     let community = server.mock(|when, then| {
         when.method(GET)
-            .path("/agora/api/social/communities/tech/feed")
+            .path("/agora/api/social/feed")
+            .query_param("community", "tech")
             .query_param("sort", "controversial")
-            .query_param("limit", "15");
+            .query_param("limit", "25");
         then.status(200).json_body_obj(&vec![listed_post(
             "Compilers are underrated",
             "someone-else",
@@ -2312,7 +2318,6 @@ async fn get_feed_reads_a_community_or_everything() {
     let global = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/social/feed")
-            .query_param("sort", "date")
             .query_param("limit", "3");
         then.status(200)
             .json_body_obj(&Vec::<crate::responses::PostResponse>::new());
@@ -2325,6 +2330,7 @@ async fn get_feed_reads_a_community_or_everything() {
             community: community.map(str::to_string),
             sort,
             limit,
+            offset: None,
         };
         tool_use_message("get_feed", serde_json::to_value(&input).unwrap())
     };

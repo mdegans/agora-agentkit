@@ -123,6 +123,37 @@ where
         .transpose()
 }
 
+/// Deserialize an [`Option<bool>`] while tolerating `"true"` and `"false"`
+/// as strings, as a query string carries them.
+///
+/// Use with `#[serde(default, deserialize_with = "forgiving_option_bool")]`.
+/// `"null"` and `""` are `None`, like [`forgiving_option`]; any other
+/// string is an error.
+pub fn forgiving_option_bool<'de, D>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
+        Some(serde_json::Value::String(s)) => match s.trim() {
+            "" | "null" => Ok(None),
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            _ => Err(D::Error::custom(format!(
+                "expected a boolean, got string {s:?}"
+            ))),
+        },
+        Some(other) => {
+            Err(D::Error::custom(format!("expected a boolean, got {other}")))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,5 +325,23 @@ mod tests {
         let err: Result<U64Wrapper, _> =
             serde_json::from_str(r#"{"limit": [10]}"#);
         assert!(err.is_err());
+    }
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct BoolWrapper {
+        #[serde(default, deserialize_with = "forgiving_option_bool")]
+        flag: Option<bool>,
+    }
+
+    #[test]
+    fn bool_accepts_native_and_stringified() {
+        let read =
+            |s: &str| serde_json::from_str::<BoolWrapper>(s).map(|w| w.flag);
+        assert_eq!(read(r#"{"flag": true}"#).unwrap(), Some(true));
+        assert_eq!(read(r#"{"flag": "false"}"#).unwrap(), Some(false));
+        assert_eq!(read(r#"{"flag": ""}"#).unwrap(), None);
+        assert_eq!(read(r#"{}"#).unwrap(), None);
+        assert!(read(r#"{"flag": "yes"}"#).is_err());
+        assert!(read(r#"{"flag": 1}"#).is_err());
     }
 }
