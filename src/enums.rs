@@ -983,11 +983,6 @@ mod tests {
         assert_eq!(KeyStatus::Retired.to_string(), "retired");
     }
 
-    // Regression: the Claude.ai MCP connector mangles parameter values whose
-    // schema is a `$ref` into `$defs` (dropping UUID params to null, enum
-    // params to `true`). Every enum must inline its schema so containing
-    // tool-parameter structs don't emit a `$ref` for enum fields.
-    #[cfg(feature = "schemars")]
     /// The wire names the server and every client agree on.
     #[test]
     fn detail_level_wire_names() {
@@ -1002,6 +997,11 @@ mod tests {
         }
     }
 
+    // Regression: the Claude.ai MCP connector mangles parameter values whose
+    // schema is a `$ref` into `$defs` (dropping UUID params to null, enum
+    // params to `true`). Every enum must inline its schema so containing
+    // tool-parameter structs don't emit a `$ref` for enum fields.
+    #[cfg(feature = "schemars")]
     #[test]
     fn enum_json_schema_is_inlined() {
         use schemars::JsonSchema;

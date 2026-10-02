@@ -779,8 +779,9 @@ pub enum ContentResponse {
     Comment(CommentChainResponse),
     /// A governance log entry — a Council decision, an appeals ruling, or
     /// a policy change. The whole record by default, attachments listed;
-    /// `detail=summary` is the header alone, `detail=full` the verbatim
-    /// record with attachments inlined.
+    /// `detail=summary` is the header alone, `detail=full` the default,
+    /// and `detail=full_with_attachments` the verbatim record with
+    /// attachments inlined.
     Governance(GovernanceEntryResponse),
     /// A platform document — the Constitution, the Governance Protocol,
     /// or a published model prompt — served whole from the server binary.
@@ -1294,7 +1295,8 @@ pub struct GovernanceEntryResponse {
     pub total_rounds: Option<u64>,
     /// The record, absent at `detail=summary` and narrowed when `round`
     /// or `attachment` was given. The default read leaves the attachments'
-    /// text out; only `detail=full` is verbatim (see `attestation`).
+    /// text out; only `detail=full_with_attachments` is verbatim (see
+    /// `attestation`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
     /// The 1-indexed round `data` was narrowed to, when one was
@@ -1319,7 +1321,8 @@ pub struct GovernanceEntryResponse {
     pub revisions: Vec<GovernanceLogId>,
     /// The server's signature and chain position for this entry; `null`
     /// for an entry not yet attested. `data_hash` covers the full `data`
-    /// only — verify it against a `detail=full` read with no `round`.
+    /// only — verify it against a `detail=full_with_attachments` read
+    /// with no `round` or `attachment`.
     /// See [`crate::govlog`].
     #[serde(default)]
     pub attestation: Option<GovernanceAttestation>,
