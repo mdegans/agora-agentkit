@@ -19,10 +19,14 @@ const MAX_CACHE_CONTROLS_PER_REQUEST: usize = 4;
 /// pushes the newer one past the API's 20-block lookback window.
 pub const ROLL_WINDOW: usize = 2;
 
-/// Place [`ROLL_WINDOW`] rolling 1h cache breakpoints per the endpoint's
-/// [`Quirks`]: on the trailing (user) turns by default, on the trailing
-/// *assistant* turns under `breakpoint_after_assistant` (blallama), not at
-/// all under `cache_markers_ignored` (ollama).
+/// Place [`ROLL_WINDOW`] rolling 1h cache breakpoints on the trailing (user)
+/// turns, or none under [`Quirks::cache_markers_ignored`] (ollama).
+///
+/// blallama follows the Anthropic placement: it checkpoints the end of every
+/// prompt, so it resumes the next turn from there without markers on the
+/// assistant turns. (Its old `breakpoint_after_assistant` quirk was dropped
+/// in 0.51 after a 2026-10-02 A/B sweep: ±3 points of cache-read share and
+/// no hash or segmentation drift with it off.)
 ///
 /// The default [`Agent::on_turn`] calls this after all seating, immediately
 /// before each infer — an `on_turn` override that still wants cached tails
@@ -49,21 +53,9 @@ pub fn roll_breakpoints_with(
     if quirks.cache_markers_ignored {
         return;
     }
-    // The turn the endpoint's cache keys on: default Anthropic hits on any
-    // prefix, so roll with the tail (a user turn — the `Agent::prompt`
-    // invariant); blallama's hash side-table keys on the end-of-assistant
-    // render, so anchor on the last assistant turn.
-    let anchor = if quirks.breakpoint_after_assistant {
-        prompt
-            .messages
-            .iter()
-            .rposition(|m| m.role == Role::Assistant)
-    } else {
-        prompt.messages.len().checked_sub(1)
-    };
-    // No anchor yet (empty prompt, or blallama before the first assistant
-    // turn): the pinned prefix markers are all there is to hit.
-    let Some(anchor) = anchor else {
+    // Roll with the tail: a user turn (the `Agent::prompt` invariant). An
+    // empty prompt has only the pinned prefix markers to hit.
+    let Some(anchor) = prompt.messages.len().checked_sub(1) else {
         return;
     };
     windowed(prompt, ROLL_WINDOW, anchor, cache_control);
@@ -219,34 +211,12 @@ mod tests {
     }
 
     #[test]
-    fn blallama_rolls_onto_assistant_turns() {
-        let mut prompt = session(2);
-        let q = quirks(|q| q.breakpoint_after_assistant = true);
-        roll_breakpoints(&q, &mut prompt);
-        assert_eq!(marked(&prompt), vec![0, 1, 3]);
-        assert_eq!(prompt.messages[1].role, Role::Assistant);
-        assert_eq!(prompt.messages[3].role, Role::Assistant);
-    }
-
-    #[test]
     fn ollama_is_a_no_op() {
         let mut prompt = session(2);
         let before = total_markers(&prompt);
-        let q = quirks(|q| {
-            q.cache_markers_ignored = true;
-            // Set together on real ollama; ignored must win.
-            q.breakpoint_after_assistant = true;
-        });
+        let q = quirks(|q| q.cache_markers_ignored = true);
         roll_breakpoints(&q, &mut prompt);
         assert_eq!(total_markers(&prompt), before);
-    }
-
-    #[test]
-    fn blallama_skips_until_an_assistant_turn_exists() {
-        let mut prompt = session(0);
-        let q = quirks(|q| q.breakpoint_after_assistant = true);
-        roll_breakpoints(&q, &mut prompt);
-        assert_eq!(marked(&prompt), vec![0], "prefix marker only");
     }
 
     #[test]
@@ -261,13 +231,8 @@ mod tests {
     /// role, and every marker stays 1h.
     #[test]
     fn round_loop_never_exceeds_budget_or_jumps_role() {
-        for (q, role) in [
-            (Quirks::default(), Role::User),
-            (
-                quirks(|q| q.breakpoint_after_assistant = true),
-                Role::Assistant,
-            ),
-        ] {
+        let (q, role) = (Quirks::default(), Role::User);
+        {
             let mut prompt = session(0);
             for i in 0..10 {
                 prompt
