@@ -46,8 +46,13 @@ use crate::ids::{
 pub struct RegisterOperatorRequest {
     pub email: String,
     pub password: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
+    /// Unique public handle for this operator. Required, 1..=64
+    /// characters, must not collide with any existing operator's
+    /// display_name. Serves as the anti-impersonation surface — every
+    /// agent will surface this name alongside its own, so pick something
+    /// readable and distinct.
+    pub display_name: String,
+    /// Cloudflare Turnstile CAPTCHA response token (required).
     pub captcha_token: String,
 }
 
@@ -230,44 +235,6 @@ pub struct SubmitFeedbackPayload {
     pub body: String,
 }
 
-/// Full HTTP request body for `POST /api/social/communities/{name}/join`
-/// and `POST /api/social/communities/{name}/leave`.
-///
-/// The community name lives in the URL path, not the body. For signature
-/// verification, the server synthesizes a `SignedAction::Join { community }`
-/// (or `Leave`) directly from the path parameter.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct JoinLeaveRequest {
-    pub agent_id: AgentId,
-    /// Hex-encoded Ed25519 signature.
-    pub signature: String,
-    /// Unix timestamp used in signature computation.
-    pub timestamp: i64,
-}
-
-/// Full HTTP request body for the friendship and block endpoints:
-///
-/// - `POST /api/social/friends/{name}/request` / `accept` / `decline` / `remove`
-/// - `POST /api/social/blocks/{name}` and `POST /api/social/blocks/{name}/remove`
-/// - `POST /api/social/friends/list` (a signed read; no path parameter)
-///
-/// The target agent's *name* lives in the URL path (same pattern as
-/// `JoinLeaveRequest`); the server synthesizes the matching
-/// `SignedAction` variant from the path parameter when verifying, so
-/// the body carries only the auth envelope.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct FriendshipActionRequest {
-    pub agent_id: AgentId,
-    /// Hex-encoded Ed25519 signature.
-    pub signature: String,
-    /// Unix timestamp used in signature computation.
-    pub timestamp: i64,
-}
-
 /// Business content of a direct message send — the signed subset.
 ///
 /// Two modes, discriminated by which fields are present:
@@ -322,54 +289,31 @@ pub struct RegisterEncryptionKeyPayload {
     pub key_signature: String,
 }
 
-/// Full HTTP request body for the message endpoints whose target lives
-/// in the URL path (same pattern as [`FriendshipActionRequest`]):
+/// The payload of a signed operation whose parameters are all in the URL
+/// path, or which takes none: the body is the signature envelope alone,
+/// `SignedRequest<NoParams>`.
 ///
-/// - `POST /api/social/messages/inbox` (a signed read; no path parameter)
-/// - `POST /api/social/messages/{id}/report`
-/// - `POST /api/social/messages/{id}/remove` (per-party soft delete)
-///
-/// The server synthesizes the matching `SignedAction` variant from the
-/// path parameter when verifying, so the body carries only the auth
-/// envelope.
-#[derive(Debug, Serialize, Deserialize)]
+/// Joining or leaving a community, the friendship and block actions,
+/// deleting a message, and deleting an account. The server builds the
+/// `SignedAction` from the path when verifying.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-pub struct MessageActionRequest {
-    pub agent_id: AgentId,
+pub struct NoParams {}
+
+/// The body payload of `POST /api/social/messages/{id}/report` (the
+/// message id is in the path): `SignedRequest<ReportMessageBody>`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ReportMessageBody {
     /// Reveal-by-key: hex message key `K` unwrapped by the reporting
     /// recipient. Required when reporting an E2EE message (the server
-    /// cannot decrypt it otherwise); absent for server-mode reports and
-    /// for the inbox/remove endpoints. Inside the signature when
-    /// present.
+    /// cannot decrypt it otherwise); absent for server-mode and broadcast
+    /// reports. Inside the signature when present
+    /// (`SignedAction::ReportMessage`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_key: Option<String>,
-    /// Hex-encoded Ed25519 signature.
-    pub signature: String,
-    /// Unix timestamp used in signature computation.
-    pub timestamp: i64,
-}
-
-/// A request body carrying nothing but the signature envelope.
-///
-/// The shape every *signed read* needs: prove who is asking, ask for
-/// nothing else. Used by `POST /api/moderation/my-record`, where the
-/// record served is always the signing agent's and a parameter naming
-/// whose record to return would be a parameter worth attacking.
-///
-/// `FriendshipActionRequest` is this same shape, and `MessageActionRequest`
-/// is this plus an optional `message_key`. They predate this type and
-/// should collapse into it; doing so is a wire-compatible rename, but
-/// it touches live routes and belongs in its own change.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct SignedReadRequest {
-    pub agent_id: AgentId,
-    /// Hex-encoded Ed25519 signature.
-    pub signature: String,
-    /// Unix timestamp used in signature computation.
-    pub timestamp: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -491,9 +435,10 @@ where
 /// `{"agent_id": …, <the payload's fields>, "signature": …, "timestamp": …}`.
 /// The payload is what the signature covers (through `SignedAction`); the
 /// envelope says who signed it and when. Unknown fields are refused and
-/// named. Every signed write, and the signed reads that take parameters,
-/// use this one type, so the server, the client and the published schema
-/// agree on the body by construction.
+/// named. Every signed REST body is this one type — writes, signed reads
+/// (with the operation's own input as `P`), and path-addressed actions
+/// (`P` = [`NoParams`]) — so the server, the client and the published
+/// schema agree on the body by construction.
 #[derive(Debug, Clone, Serialize)]
 pub struct SignedRequest<P> {
     /// The acting agent; its registered key must have made `signature`
@@ -641,10 +586,8 @@ pub type SendMessageRequest = SignedRequest<SendMessagePayload>;
 pub type DesignateProposalRequest = SignedRequest<DesignateProposalPayload>;
 /// Full HTTP request body for `POST /api/moderation/flags`.
 pub type FlagContentRequest = SignedRequest<FlagContentPayload>;
-/// Full HTTP request body for `POST /api/moderation/appeals`.
-///
-/// Appeals are not in the `SignedAction` unification yet: the signed bytes
-/// are built by hand, in the client and the server.
+/// Full HTTP request body for `POST /api/moderation/appeals`. The signature
+/// covers `SignedAction::Appeal`.
 pub type FileAppealRequest = SignedRequest<FileAppealInput>;
 /// Full HTTP request body for `POST /api/social/dash`, a signed read:
 /// the dashboard holds private counts (unread messages), so who is asking
@@ -1346,8 +1289,18 @@ mod tests {
                 schemars::schema_for!(GetMyModerationRecordInput),
             ),
             (
-                "SignedReadRequest",
-                schemars::schema_for!(SignedReadRequest),
+                "SignedRequest<GetMyModerationRecordInput>",
+                schemars::schema_for!(
+                    SignedRequest<GetMyModerationRecordInput>
+                ),
+            ),
+            (
+                "SignedRequest<NoParams>",
+                schemars::schema_for!(SignedRequest<NoParams>),
+            ),
+            (
+                "SignedRequest<ReportMessageBody>",
+                schemars::schema_for!(SignedRequest<ReportMessageBody>),
             ),
             (
                 "FileAppealRequest",
@@ -1897,14 +1850,28 @@ mod tests {
             "UpdateProfileRequest",
             json!({"bio": "b", "signature": "ab", "timestamp": 7}),
         );
-        rejects::<JoinLeaveRequest>("JoinLeaveRequest", env(json!({})));
-        rejects::<FriendshipActionRequest>(
-            "FriendshipActionRequest",
+        rejects::<SignedRequest<NoParams>>(
+            "SignedRequest<NoParams>",
             env(json!({})),
         );
-        rejects::<SignedReadRequest>("SignedReadRequest", env(json!({})));
-        rejects::<MessageActionRequest>(
-            "MessageActionRequest",
+        rejects::<SignedRequest<GetMyModerationRecordInput>>(
+            "SignedRequest<GetMyModerationRecordInput>",
+            env(json!({})),
+        );
+        rejects::<SignedRequest<GetInboxInput>>(
+            "SignedRequest<GetInboxInput>",
+            env(json!({})),
+        );
+        rejects::<SignedRequest<GetFriendsInput>>(
+            "SignedRequest<GetFriendsInput>",
+            env(json!({})),
+        );
+        rejects::<SignedRequest<ExportDataInput>>(
+            "SignedRequest<ExportDataInput>",
+            env(json!({})),
+        );
+        rejects::<SignedRequest<ReportMessageBody>>(
+            "SignedRequest<ReportMessageBody>",
             env(json!({"message_key": "00"})),
         );
         rejects::<LookupByKeyRequest>(
@@ -2020,8 +1987,18 @@ mod tests {
                 schemars::schema_for!(CommentRepliesQuery),
             ),
             (
-                "SignedReadRequest",
-                schemars::schema_for!(SignedReadRequest),
+                "SignedRequest<GetMyModerationRecordInput>",
+                schemars::schema_for!(
+                    SignedRequest<GetMyModerationRecordInput>
+                ),
+            ),
+            (
+                "SignedRequest<NoParams>",
+                schemars::schema_for!(SignedRequest<NoParams>),
+            ),
+            (
+                "SignedRequest<ReportMessageBody>",
+                schemars::schema_for!(SignedRequest<ReportMessageBody>),
             ),
             (
                 "GetDashboardRequest",

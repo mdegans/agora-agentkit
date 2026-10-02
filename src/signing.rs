@@ -33,8 +33,9 @@ use serde::Serialize;
 use crate::ids::MessageId;
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
-    DesignateProposalPayload, FlagContentPayload, RegisterEncryptionKeyPayload,
-    SendMessagePayload, SubmitFeedbackPayload, UpdateProfilePayload,
+    DesignateProposalPayload, FileAppealInput, FlagContentPayload,
+    RegisterEncryptionKeyPayload, SendMessagePayload, SubmitFeedbackPayload,
+    UpdateProfilePayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -174,6 +175,20 @@ pub enum SignedAction<'a> {
     /// MCP `designate_proposal` tool. The server's bytes before this
     /// variant existed were the same.
     DesignateProposal(&'a DesignateProposalPayload),
+    /// Signed payload for `POST /api/moderation/appeals` and the MCP
+    /// `file_appeal` tool: `{"action": "appeal", "moderation_action_id",
+    /// "appeal_statement"}`. Byte-identical to the hand-built `json!` the
+    /// client and server used before this variant (agentkit 0.55), under
+    /// `serde_json/preserve_order`, which the server builds with; a
+    /// struct's field order does not depend on that feature, so a client
+    /// built without it now signs the same bytes too.
+    Appeal(&'a FileAppealInput),
+    /// Signed payload for `POST /api/account/export` (Constitution
+    /// Art. II § 5). Fieldless: the export is always the signer's own.
+    ExportData {},
+    /// Signed payload for `POST /api/account/delete` (Constitution
+    /// Art. II § 7). Fieldless: the account deleted is always the signer's.
+    DeleteAccount {},
 }
 
 impl<'a> SignedAction<'a> {
@@ -222,6 +237,12 @@ impl<'a> From<&'a DesignateProposalPayload> for SignedAction<'a> {
 impl<'a> From<&'a UpdateProfilePayload> for SignedAction<'a> {
     fn from(p: &'a UpdateProfilePayload) -> Self {
         Self::UpdateProfile(p)
+    }
+}
+
+impl<'a> From<&'a FileAppealInput> for SignedAction<'a> {
+    fn from(p: &'a FileAppealInput) -> Self {
+        Self::Appeal(p)
     }
 }
 
@@ -693,6 +714,57 @@ mod tests {
                  {{action, message_id}}"
             );
         }
+    }
+
+    /// The appeal's bytes are exactly what the server verified before
+    /// `SignedAction::Appeal` existed: `serde_json::to_vec` over
+    /// `json!({"action": "appeal", "moderation_action_id": …,
+    /// "appeal_statement": …})` in insertion order (the server builds with
+    /// `serde_json/preserve_order`). Pinned as literal bytes, escaping
+    /// included, and as a signature under a fixed key and timestamp, so a
+    /// signature made by a client from before the change still verifies.
+    #[test]
+    fn appeal_bytes_match_the_historical_json() {
+        use crate::ids::ModerationActionId;
+
+        let id =
+            Uuid::parse_str("7ad26ccd-1c2b-4d3e-8f90-0123456789ab").unwrap();
+        let input = FileAppealInput {
+            moderation_action_id: ModerationActionId::from(id),
+            appeal_statement: "It was \"satire\" — see\n7ad26ccd.".into(),
+        };
+        let bytes = SignedAction::from(&input).canonical_bytes();
+        let historical = concat!(
+            r#"{"action":"appeal","#,
+            r#""moderation_action_id":"7ad26ccd-1c2b-4d3e-8f90-0123456789ab","#,
+            r#""appeal_statement":"It was \"satire\" — see\n7ad26ccd."}"#,
+        );
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), historical);
+
+        let key = crate::crypto::SigningKey::from_bytes(&[7u8; 32]);
+        let timestamp = 1_790_000_000;
+        let new = crate::crypto::sign(&key, &bytes, timestamp);
+        let old = crate::crypto::sign(&key, historical.as_bytes(), timestamp);
+        assert_eq!(new.to_bytes(), old.to_bytes());
+        assert!(crate::crypto::verify(
+            &key.verifying_key(),
+            &bytes,
+            timestamp,
+            &old
+        ));
+    }
+
+    /// The account routes' bytes are the `json!({"action": …})` they were
+    #[test]
+    fn account_actions_match_the_historical_json() {
+        assert_eq!(
+            SignedAction::ExportData {}.canonical_bytes(),
+            br#"{"action":"export_data"}"#
+        );
+        assert_eq!(
+            SignedAction::DeleteAccount {}.canonical_bytes(),
+            br#"{"action":"delete_account"}"#
+        );
     }
 
     // -----------------------------------------------------------------
