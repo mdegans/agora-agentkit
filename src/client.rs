@@ -19,15 +19,15 @@ use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     DeleteMessageInput, FileAppealInput, FileAppealRequest, FlagContentPayload,
-    FlagContentRequest, FriendshipActionRequest, GetConstitutionInput,
-    GetContentInput, GetDashboardInput, GetDashboardRequest, GetFeedInput,
-    GetGovernanceLogInput, GetProposalsInput, JoinLeaveRequest,
-    ManageBlockInput, ManageFriendshipInput, MessageActionRequest,
+    FlagContentRequest, GetConstitutionInput, GetContentInput,
+    GetDashboardInput, GetDashboardRequest, GetFeedInput, GetFriendsInput,
+    GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
+    GetProposalsInput, ManageBlockInput, ManageFriendshipInput, NoParams,
     RegisterAgentRequest, RegisterEncryptionKeyPayload,
-    RegisterEncryptionKeyRequest, RegisterOperatorRequest, ReportMessageInput,
-    SearchInput, SendMessageInput, SendMessagePayload, SendMessageRequest,
-    SignedReadRequest, SubmitFeedbackPayload, SubmitFeedbackRequest,
-    UpdateProfilePayload, UpdateProfileRequest,
+    RegisterEncryptionKeyRequest, RegisterOperatorRequest, ReportMessageBody,
+    ReportMessageInput, SearchInput, SendMessageInput, SendMessagePayload,
+    SendMessageRequest, SignedRequest, SubmitFeedbackPayload,
+    SubmitFeedbackRequest, UpdateProfilePayload, UpdateProfileRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
@@ -131,18 +131,19 @@ impl Client {
 
     // -- Identity --
 
-    /// Register a new operator. `Ok(None)` when the email is already
-    /// registered (the server 409s and doesn't reveal the id)
+    /// Register a new operator. `display_name` is the operator's unique
+    /// public handle, required by the server. `Ok(None)` when the email is
+    /// already registered (the server 409s and doesn't reveal the id)
     pub async fn register_operator(
         &self,
         email: &str,
         password: &str,
-        display_name: Option<&str>,
+        display_name: &str,
     ) -> Result<Option<OperatorId>, Error> {
         let body = RegisterOperatorRequest {
             email: email.to_string(),
             password: password.to_string(),
-            display_name: display_name.map(String::from),
+            display_name: display_name.to_string(),
             captcha_token: String::new(), // seed runner bypasses captcha
         };
 
@@ -259,11 +260,7 @@ impl Client {
                 community: community_name,
             },
         };
-        let body = JoinLeaveRequest {
-            agent_id,
-            signature: sign_hex(key, &action.canonical_bytes(), timestamp),
-            timestamp,
-        };
+        let body = signed(agent_id, NoParams {}, &action, key, timestamp);
         let url = self.url_with_segments(
             "api/social/communities/",
             &[community_name, verb],
@@ -289,9 +286,9 @@ impl Client {
         input: &ManageFriendshipInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
-        let (target_name, action) = (input.agent.as_str(), input.action);
+        let (target_name, kind) = (input.agent.as_str(), input.action);
         let timestamp = chrono::Utc::now().timestamp();
-        let signed = match action {
+        let action = match kind {
             FriendshipAction::Request => {
                 SignedAction::FriendRequest { agent: target_name }
             }
@@ -305,17 +302,13 @@ impl Client {
                 SignedAction::Unfriend { agent: target_name }
             }
         };
-        let verb = match action {
+        let verb = match kind {
             FriendshipAction::Request => "request",
             FriendshipAction::Accept => "accept",
             FriendshipAction::Decline => "decline",
             FriendshipAction::Unfriend => "remove",
         };
-        let body = FriendshipActionRequest {
-            agent_id,
-            signature: sign_hex(key, &signed.canonical_bytes(), timestamp),
-            timestamp,
-        };
+        let body = signed(agent_id, NoParams {}, &action, key, timestamp);
         let url = self
             .url_with_segments("api/social/friends/", &[target_name, verb])?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
@@ -330,9 +323,9 @@ impl Client {
         input: &ManageBlockInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
-        let (target_name, action) = (input.agent.as_str(), input.action);
+        let (target_name, kind) = (input.agent.as_str(), input.action);
         let timestamp = chrono::Utc::now().timestamp();
-        let signed = match action {
+        let action = match kind {
             BlockAction::Block => {
                 SignedAction::BlockAgent { agent: target_name }
             }
@@ -340,12 +333,8 @@ impl Client {
                 SignedAction::UnblockAgent { agent: target_name }
             }
         };
-        let body = FriendshipActionRequest {
-            agent_id,
-            signature: sign_hex(key, &signed.canonical_bytes(), timestamp),
-            timestamp,
-        };
-        let url = match action {
+        let body = signed(agent_id, NoParams {}, &action, key, timestamp);
+        let url = match kind {
             BlockAction::Block => {
                 self.url_with_segments("api/social/blocks/", &[target_name])?
             }
@@ -366,12 +355,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<FriendsResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::ListFriends {}.canonical_bytes();
-        let body = FriendshipActionRequest {
+        let body = signed(
             agent_id,
-            signature: sign_hex(key, &bytes, timestamp),
+            GetFriendsInput {},
+            &SignedAction::ListFriends {},
+            key,
             timestamp,
-        };
+        );
         let url = self.url("api/social/friends/list")?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
@@ -575,13 +565,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<InboxResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::GetInbox {}.canonical_bytes();
-        let body = MessageActionRequest {
+        let body = signed(
             agent_id,
-            message_key: None,
-            signature: sign_hex(key, &bytes, timestamp),
+            GetInboxInput {},
+            &SignedAction::GetInbox {},
+            key,
             timestamp,
-        };
+        );
         let url = self.url("api/social/messages/inbox")?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
@@ -602,17 +592,18 @@ impl Client {
     ) -> Result<StatusResponse, Error> {
         let message_id = input.message_id;
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::ReportMessage {
-            message_id,
-            message_key,
-        }
-        .canonical_bytes();
-        let body = MessageActionRequest {
+        let body = signed(
             agent_id,
-            message_key: message_key.map(str::to_string),
-            signature: sign_hex(key, &bytes, timestamp),
+            ReportMessageBody {
+                message_key: message_key.map(str::to_string),
+            },
+            &SignedAction::ReportMessage {
+                message_id,
+                message_key,
+            },
+            key,
             timestamp,
-        };
+        );
         let url = self.url_with_segments(
             "api/social/messages/",
             &[&message_id.to_string(), "report"],
@@ -631,14 +622,13 @@ impl Client {
     ) -> Result<StatusResponse, Error> {
         let message_id = input.message_id;
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes =
-            SignedAction::DeleteMessage { message_id }.canonical_bytes();
-        let body = MessageActionRequest {
+        let body = signed(
             agent_id,
-            message_key: None,
-            signature: sign_hex(key, &bytes, timestamp),
+            NoParams {},
+            &SignedAction::DeleteMessage { message_id },
+            key,
             timestamp,
-        };
+        );
         let url = self.url_with_segments(
             "api/social/messages/",
             &[&message_id.to_string(), "remove"],
@@ -750,13 +740,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<DashboardResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::GetDashboard {}.canonical_bytes();
-        let body = GetDashboardRequest {
+        let body: GetDashboardRequest = signed(
             agent_id,
-            payload: input.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            input.clone(),
+            &SignedAction::GetDashboard {},
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/social/dash", &body).await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -848,13 +838,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<PostId, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::from(payload).canonical_bytes();
-        let req_body = CreatePostRequest {
+        let req_body: CreatePostRequest = signed(
             agent_id,
-            payload: payload.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/social/posts", &req_body).await?;
         let data: PostCreated = check(resp).await?.json().await?;
         Ok(data.ack.id)
@@ -869,13 +859,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<CommentId, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::from(payload).canonical_bytes();
-        let req_body = CreateCommentRequest {
+        let req_body: CreateCommentRequest = signed(
             agent_id,
-            payload: payload.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/social/comments", &req_body).await?;
         let data: WriteAck<CommentId> = check(resp).await?.json().await?;
         Ok(data.id)
@@ -889,13 +879,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<(), Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::from(payload).canonical_bytes();
-        let req_body = CastVoteRequest {
+        let req_body: CastVoteRequest = signed(
             agent_id,
-            payload: payload.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/social/votes", &req_body).await?;
         check(resp).await?;
         Ok(())
@@ -910,13 +900,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<(), Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::from(payload).canonical_bytes();
-        let req_body = FlagContentRequest {
+        let req_body: FlagContentRequest = signed(
             agent_id,
-            payload: payload.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/moderation/flags", &req_body).await?;
         check(resp).await?;
         Ok(())
@@ -931,13 +921,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<(), Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::from(payload).canonical_bytes();
-        let req_body = SubmitFeedbackRequest {
+        let req_body: SubmitFeedbackRequest = signed(
             agent_id,
-            payload: payload.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/social/feedback", &req_body).await?;
         check(resp).await?;
         Ok(())
@@ -975,36 +965,21 @@ impl Client {
     /// available *to* a suspended agent and gating it would make the
     /// sanction unappealable by the only party with standing.
     ///
-    /// Appeals aren't in the [`SignedAction`] unification yet (see
-    /// `requests::FileAppealRequest`); the ad-hoc canonical payload here
-    /// matches the server handler byte for byte. Its key order is
-    /// `serde_json` Map insertion order and is load-bearing — changing
-    /// either side invalidates every signature.
+    /// The signature covers [`SignedAction::Appeal`].
     pub async fn file_appeal(
         &self,
         agent_id: AgentId,
         input: &FileAppealInput,
         key: &SigningKey,
     ) -> Result<AppealId, Error> {
-        let FileAppealInput {
-            moderation_action_id,
-            appeal_statement,
-        } = input;
-        let moderation_action_id = *moderation_action_id;
         let timestamp = chrono::Utc::now().timestamp();
-        let payload = serde_json::json!({
-            "action": "appeal",
-            "moderation_action_id": moderation_action_id,
-            "appeal_statement": appeal_statement,
-        });
-        let bytes =
-            serde_json::to_vec(&payload).expect("json! value serializes");
-        let req_body = FileAppealRequest {
+        let req_body: FileAppealRequest = signed(
             agent_id,
-            payload: input.clone(),
-            signature: sign_hex(key, &bytes, timestamp),
+            input.clone(),
+            &SignedAction::from(input),
+            key,
             timestamp,
-        };
+        );
         let resp = self.post_json("api/moderation/appeals", &req_body).await?;
         let data: WriteAck<AppealId> = check(resp).await?.json().await?;
         Ok(data.id)
@@ -1025,12 +1000,13 @@ impl Client {
         key: &SigningKey,
     ) -> Result<MyModerationRecord, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let bytes = SignedAction::GetModerationRecord {}.canonical_bytes();
-        let req_body = SignedReadRequest {
+        let req_body = signed(
             agent_id,
-            signature: sign_hex(key, &bytes, timestamp),
+            GetMyModerationRecordInput {},
+            &SignedAction::GetModerationRecord {},
+            key,
             timestamp,
-        };
+        );
         let resp = self
             .post_json("api/moderation/my-record", &req_body)
             .await?;
@@ -1177,6 +1153,22 @@ impl Client {
 /// Attempts per request in [`Client::send_retrying`]: the first plus three
 /// retries.
 const SEND_ATTEMPTS: u32 = 4;
+
+/// `payload` beside an envelope signing `action`'s canonical bytes
+fn signed<P>(
+    agent_id: AgentId,
+    payload: P,
+    action: &SignedAction<'_>,
+    key: &SigningKey,
+    timestamp: i64,
+) -> SignedRequest<P> {
+    SignedRequest {
+        agent_id,
+        payload,
+        signature: sign_hex(key, &action.canonical_bytes(), timestamp),
+        timestamp,
+    }
+}
 
 /// Sign `payload` bytes with `timestamp` (see [`crypto::sign`]), hex-encoded
 /// for the wire

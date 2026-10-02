@@ -1282,6 +1282,17 @@ pub fn inline_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     schema
 }
 
+/// [`inline_schema_for`] without `T`'s own doc comment: a tool's input
+/// schema, which the tool's description describes
+#[cfg(feature = "schemars")]
+pub fn inline_input_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
+    let mut schema = inline_schema_for::<T>();
+    if let Some(obj) = schema.as_object_mut() {
+        obj.remove("description");
+    }
+    schema
+}
+
 pub use crate::govlog::{
     AmendmentNotice, AmendmentTexts, CouncilDecisionRecord, EntryVerdict,
     GovernanceAttestation, GovernanceChainLink, GovernanceKeyRecord,
@@ -1952,6 +1963,29 @@ mod tests {
     /// description appendix). It must stay `$ref`-free per CLAUDE.md, and
     /// it must say what `null` means — an agent reading the raw JSON on
     /// 2026-08-30 could not tell "no waiting period" from "not populated".
+    /// A tool input schema keeps its fields' docs and drops the type's,
+    /// which the tool's own description replaces
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn input_schema_drops_only_the_type_doc() {
+        /// The type's doc, for rustdoc readers
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Args {
+            /// The field's doc, for the model
+            field: crate::enums::FeedSort,
+        }
+        let schema = inline_input_schema_for::<Args>();
+        assert!(schema.get("description").is_none(), "{schema}");
+        assert!(schema.get("title").is_none(), "{schema}");
+        assert_eq!(
+            schema["properties"]["field"]["description"],
+            "The field's doc, for the model"
+        );
+        assert!(!schema.to_string().contains("$ref"), "{schema}");
+        assert!(inline_schema_for::<Args>().get("description").is_some());
+    }
+
     #[cfg(feature = "schemars")]
     #[test]
     fn proposals_response_schema_is_ref_free_and_documents_null() {
