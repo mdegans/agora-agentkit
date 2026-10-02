@@ -63,6 +63,11 @@ fn seat_notifications(
 /// tool pushed [`Notification`]s meanwhile, which are seated instead. Free so
 /// a `handle` override (e.g. a phase machine) can delegate its tool-using
 /// phase back to it.
+/// The text seated after a thinking-only quiescent turn's thought, so the
+/// turn renders as closed on every template. Visible to the model on its
+/// next turn; worded as what happened, not as something it said.
+pub const THINKING_ONLY_PLACEHOLDER: &str = "(no reply)";
+
 pub async fn default_handle<A: Agent>(
     agent: &mut A,
     response: response::Message,
@@ -93,25 +98,35 @@ pub async fn default_handle<A: Agent>(
         // unless a tool pushed content meanwhile, in which case seat that
         // and keep going so the model can react to it.
         //
-        // A turn that is *only* thinking (no text, no tool call) is not
-        // seated: it carries nothing the next turn can build on, and some
-        // chat templates (Mistral Small 4) render a thought with no answer
-        // after it as an open thought — a client error on resubmission.
-        // Observed 2026-09-12 on blallama with `thinking` enabled; Qwen and
-        // gpt-oss never produce the shape.
+        // A turn that is *only* thinking (no text, no tool call) is seated
+        // with a short placeholder text after the thought. Not seating it
+        // (the earlier behaviour) put the next instruction *inside* the
+        // previous user message, which grows a message the prefix cache
+        // already holds and costs the tail on caches anchored at message
+        // ends (coax on Mistral, ~5.5k, 2026-10-02). Seated, the previous
+        // prompt and the thought stay a prefix. The placeholder is needed
+        // because some chat templates (Mistral Small 4) render a thought
+        // with no answer after it as an open thought — a client error on
+        // resubmission (observed 2026-09-12 on blallama).
         let visible = response.inner.content.iter().any(|block| {
             !matches!(
                 block,
                 Block::Thought { .. } | Block::RedactedThought { .. }
             )
         });
-        if visible {
+        let mut turn = response.inner.clone();
+        if !visible {
+            tracing::debug!(
+                "thinking-only quiescent turn seated with a placeholder"
+            );
+            turn.content
+                .push(Block::from(THINKING_ONLY_PLACEHOLDER.to_string()));
+        }
+        {
             let (_, prompt) = agent.parts();
             prompt
-                .push_message(response.inner.clone())
+                .push_message(turn)
                 .map_err(|e| A::Error::from(boxed(e)))?;
-        } else {
-            tracing::debug!("thinking-only quiescent turn not seated");
         }
         let notes = agent.drain_notifications();
         if !notes.is_empty() {

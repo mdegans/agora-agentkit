@@ -603,17 +603,19 @@ async fn quiescence_walks_the_tail_to_done() {
     assert!(agent.state.completed);
 }
 
-/// A quiescent reply that is *only* thinking is not seated. Mistral Small 4
-/// produces the shape; its template renders a thought with no answer after
-/// it as an open thought, which blallama rejects on resubmission. The
-/// session still advances (reflect seats), and the transcript never carries
-/// the empty turn.
+/// A quiescent reply that is *only* thinking is seated with a placeholder
+/// text after the thought: the thought closes on every template (Mistral
+/// Small 4 renders a bare thought as open, a client error on resubmission),
+/// the earlier messages stay a byte prefix, and reflect starts a fresh user
+/// message instead of growing the previous one (a prefix-cache loss on
+/// caches anchored at message ends).
 #[tokio::test]
-async fn thinking_only_quiescence_is_not_seated() {
+async fn thinking_only_quiescence_is_seated_with_a_placeholder() {
     let server = MockServer::start();
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
-    let before = agent.prompt().messages.len();
+    let before = serde_json::to_value(&agent.prompt().messages).unwrap();
+    let before = before.as_array().unwrap().clone();
 
     let thought_only = response::Message::builder(
         "claude-haiku-4-5",
@@ -628,15 +630,22 @@ async fn thinking_only_quiescence_is_not_seated() {
 
     let control = agent.handle(thought_only).await.unwrap();
     assert_eq!(control, Control::Continue);
-    // Reflect merged into the trailing user turn — no assistant turn seated.
-    assert_eq!(agent.prompt().messages.len(), before);
-    assert_eq!(agent.prompt().messages.last().unwrap().role, Role::User);
-    assert!(transcript(&agent).contains("update your `## Memory`"));
+    let after = serde_json::to_value(&agent.prompt().messages).unwrap();
+    let after = after.as_array().unwrap();
+    assert_eq!(&after[..before.len()], &before[..], "prefix unchanged");
+    assert_eq!(after.len(), before.len() + 2, "{after:#?}");
+    let turn = after[before.len()].to_string();
     assert!(
-        !serde_json::to_string(agent.prompt())
-            .unwrap()
-            .contains("\"thinking\"")
+        turn.contains("\"thinking\"") && turn.contains("(no reply)"),
+        "{turn}"
     );
+    assert!(
+        turn.find("thinking").unwrap() < turn.find("(no reply)").unwrap(),
+        "the placeholder closes the thought"
+    );
+    let tail = &after[before.len() + 1];
+    assert_eq!(tail["role"], "user");
+    assert!(tail.to_string().contains("update your `## Memory`"));
 }
 
 /// A loaded state carrying a completed transcript starts over: fresh
