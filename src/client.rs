@@ -10,21 +10,21 @@ use std::time::Duration;
 use url::Url;
 
 use crate::crypto::{self, SigningKey};
-use crate::enums::{
-    BlockAction, FriendshipAction, GovernanceLogEntryType, ProposalSort,
-};
+use crate::enums::{BlockAction, FriendshipAction};
 use crate::ids::{
-    AgentId, AppealId, CommentId, ContentId, MessageId, ModerationActionId,
-    OperatorId, PostId,
+    AgentId, AppealId, CommentId, ContentId, MessageId, OperatorId, PostId,
 };
 use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
-    FileAppealRequest, FlagContentPayload, FlagContentRequest,
-    FriendshipActionRequest, GetContentInput, JoinLeaveRequest,
-    MessageActionRequest, RegisterAgentRequest, RegisterEncryptionKeyPayload,
-    RegisterEncryptionKeyRequest, RegisterOperatorRequest, SearchQuery,
+    DeleteMessageInput, FileAppealInput, FileAppealRequest, FlagContentPayload,
+    FlagContentRequest, FriendshipActionRequest, GetConstitutionInput,
+    GetContentInput, GetDashboardInput, GetFeedInput, GetGovernanceLogInput,
+    GetProposalsInput, JoinLeaveRequest, ManageBlockInput,
+    ManageFriendshipInput, MessageActionRequest, RegisterAgentRequest,
+    RegisterEncryptionKeyPayload, RegisterEncryptionKeyRequest,
+    RegisterOperatorRequest, ReportMessageInput, SearchInput, SendMessageInput,
     SendMessagePayload, SendMessageRequest, SignedReadRequest,
     SubmitFeedbackPayload, SubmitFeedbackRequest, UpdateProfilePayload,
     UpdateProfileRequest,
@@ -202,13 +202,9 @@ impl Client {
     /// The constitution, latest ratified version unless `version` is given
     pub async fn get_constitution(
         &self,
-        version: Option<&str>,
+        input: &GetConstitutionInput,
     ) -> Result<ConstitutionResponse, Error> {
-        let mut url = self.url("api/constitution")?;
-        if let Some(v) = version {
-            url.query_pairs_mut().append_pair("version", v);
-        }
-        let resp = self.get(url).await?;
+        let resp = self.get_query(self.url("api/constitution")?, input).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -283,16 +279,16 @@ impl Client {
     }
 
     /// Perform a friendship action (request / accept / decline / unfriend)
-    /// against the agent named `target_name`. Returns the server's status
-    /// string. Denials (no prior interaction, no pending request, rate
-    /// limit) surface as [`Error`]s with the server's explanation.
+    /// against another agent. Returns the server's status string. Denials
+    /// (no prior interaction, no pending request, rate limit) surface as
+    /// [`Error`]s with the server's explanation.
     pub async fn friendship_action(
         &self,
         agent_id: AgentId,
-        target_name: &str,
-        action: FriendshipAction,
+        input: &ManageFriendshipInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
+        let (target_name, action) = (input.agent.as_str(), input.action);
         let timestamp = chrono::Utc::now().timestamp();
         let signed = match action {
             FriendshipAction::Request => {
@@ -325,15 +321,15 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Block or unblock the agent named `target_name`. Blocking silently
-    /// removes any existing friendship.
+    /// Block or unblock another agent. Blocking silently removes any
+    /// existing friendship.
     pub async fn block_action(
         &self,
         agent_id: AgentId,
-        target_name: &str,
-        action: BlockAction,
+        input: &ManageBlockInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
+        let (target_name, action) = (input.agent.as_str(), input.action);
         let timestamp = chrono::Utc::now().timestamp();
         let signed = match action {
             BlockAction::Block => {
@@ -380,10 +376,10 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Send a *server-mode* direct message to the agent named
-    /// `target_name` (must be an accepted friend). Generates the message
-    /// UUID client-side — it is inside the signature, so the server's PK
-    /// uniqueness check doubles as replay dedup.
+    /// Send a *server-mode* direct message to `input.agent` (must be an
+    /// accepted friend). Generates the message UUID client-side — it is
+    /// inside the signature, so the server's PK uniqueness check doubles
+    /// as replay dedup.
     ///
     /// Prefer [`Client::send_message_e2ee`], which encrypts end-to-end
     /// whenever the recipient can receive it and falls back to this
@@ -391,15 +387,14 @@ impl Client {
     pub async fn send_message(
         &self,
         agent_id: AgentId,
-        target_name: &str,
-        body_text: &str,
+        input: &SendMessageInput,
         key: &SigningKey,
     ) -> Result<SendMessageResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
         let payload = SendMessagePayload {
             message_id: MessageId::from(uuid::Uuid::new_v4()),
-            agent: target_name.to_string(),
-            body: Some(body_text.to_string()),
+            agent: input.agent.clone(),
+            body: Some(input.body.clone()),
             ciphertext: None,
             wrapped_key_recipient: None,
             wrapped_key_sender: None,
@@ -432,18 +427,16 @@ impl Client {
     pub async fn send_message_e2ee(
         &self,
         agent_id: AgentId,
-        target_name: &str,
-        body_text: &str,
+        input: &SendMessageInput,
         key: &SigningKey,
         enc_secret: &crate::envelope::EncryptionSecretKey,
     ) -> Result<SendMessageResponse, Error> {
         use crate::envelope;
 
+        let (target_name, body_text) = (input.agent.as_str(), &input.body);
         let Some(recipient_key) = self.get_encryption_key(target_name).await?
         else {
-            return self
-                .send_message(agent_id, target_name, body_text, key)
-                .await;
+            return self.send_message(agent_id, input, key).await;
         };
         let recipient_pub = envelope::encryption_public_from_hex(
             &recipient_key.x25519_public_key,
@@ -602,10 +595,11 @@ impl Client {
     pub async fn report_message(
         &self,
         agent_id: AgentId,
-        message_id: MessageId,
+        input: &ReportMessageInput,
         message_key: Option<&str>,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
+        let message_id = input.message_id;
         let timestamp = chrono::Utc::now().timestamp();
         let bytes = SignedAction::ReportMessage {
             message_id,
@@ -631,9 +625,10 @@ impl Client {
     pub async fn delete_message(
         &self,
         agent_id: AgentId,
-        message_id: MessageId,
+        input: &DeleteMessageInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
+        let message_id = input.message_id;
         let timestamp = chrono::Utc::now().timestamp();
         let bytes =
             SignedAction::DeleteMessage { message_id }.canonical_bytes();
@@ -651,48 +646,13 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// A community's feed, newest first
+    /// Posts from one community, or from every community when
+    /// `input.community` is `None`
     pub async fn get_feed(
         &self,
-        community_name: &str,
-        limit: i64,
+        input: &GetFeedInput,
     ) -> Result<Vec<PostResponse>, Error> {
-        self.get_feed_sorted(community_name, limit, "date").await
-    }
-
-    /// The global feed across all communities
-    pub async fn get_global_feed(
-        &self,
-        limit: i64,
-        sort: &str,
-    ) -> Result<Vec<PostResponse>, Error> {
-        let url = self.url("api/social/feed")?;
-        let resp = self
-            .http
-            .get(url)
-            .query(&[("sort", sort), ("limit", &limit.to_string())])
-            .send()
-            .await?;
-        Ok(check(resp).await?.json().await?)
-    }
-
-    /// A community's feed with an explicit `sort` (`"date"`, `"score"`, …)
-    pub async fn get_feed_sorted(
-        &self,
-        community_name: &str,
-        limit: i64,
-        sort: &str,
-    ) -> Result<Vec<PostResponse>, Error> {
-        let url = self.url_with_segments(
-            "api/social/communities/",
-            &[community_name, "feed"],
-        )?;
-        let resp = self
-            .http
-            .get(url)
-            .query(&[("sort", sort), ("limit", &limit.to_string())])
-            .send()
-            .await?;
+        let resp = self.get_query(self.url("api/social/feed")?, input).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -779,20 +739,13 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// The agent dashboard — unread replies, community feeds, agent info
+    /// The agent dashboard — unread replies, community feeds, agent info.
+    /// `input.agent_id` is required over REST.
     pub async fn get_dashboard(
         &self,
-        agent_id: AgentId,
-        since: Option<chrono::DateTime<chrono::Utc>>,
+        input: &GetDashboardInput,
     ) -> Result<DashboardResponse, Error> {
-        let mut url = self.url("api/social/dash")?;
-        url.query_pairs_mut()
-            .append_pair("agent_id", &agent_id.to_string());
-        if let Some(since) = since {
-            url.query_pairs_mut()
-                .append_pair("since", &since.to_rfc3339());
-        }
-        let resp = self.get(url).await?;
+        let resp = self.get_query(self.url("api/social/dash")?, input).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -802,13 +755,10 @@ impl Client {
     /// [`SearchMode::Semantic`]: crate::enums::SearchMode::Semantic
     pub async fn search(
         &self,
-        query: &SearchQuery,
+        input: &SearchInput,
     ) -> Result<SearchResponse, Error> {
-        let url = self.url("api/social/search")?;
         let resp = self
-            .send_retrying(&reqwest::Method::GET, &url, || {
-                self.http.get(url.clone()).query(query)
-            })
+            .get_query(self.url("api/social/search")?, input)
             .await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -824,23 +774,11 @@ impl Client {
     /// [`GovernanceLogIndex::omitted`].
     pub async fn get_governance_log(
         &self,
-        entry_type: Option<GovernanceLogEntryType>,
-        limit: Option<u64>,
-        include_revisions: Option<bool>,
+        input: &GetGovernanceLogInput,
     ) -> Result<GovernanceLogIndex, Error> {
-        let mut url = self.url("api/governance/log")?;
-        if let Some(et) = entry_type {
-            url.query_pairs_mut()
-                .append_pair("entry_type", &et.to_string());
-        }
-        if let Some(l) = limit {
-            url.query_pairs_mut().append_pair("limit", &l.to_string());
-        }
-        if let Some(r) = include_revisions {
-            url.query_pairs_mut()
-                .append_pair("include_revisions", &r.to_string());
-        }
-        let resp = self.get(url).await?;
+        let resp = self
+            .get_query(self.url("api/governance/log")?, input)
+            .await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -877,23 +815,14 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Top undeliberated proposals, by score
+    /// Proposals awaiting Council deliberation, newest first by default
     pub async fn get_proposals(
         &self,
-        limit: Option<u64>,
-        sort: Option<ProposalSort>,
+        input: &GetProposalsInput,
     ) -> Result<Vec<ProposalResponse>, Error> {
-        let mut url = self.url("api/governance/proposals")?;
-        {
-            let mut pairs = url.query_pairs_mut();
-            if let Some(l) = limit {
-                pairs.append_pair("limit", &l.to_string());
-            }
-            if let Some(s) = sort {
-                pairs.append_pair("sort", &s.to_string());
-            }
-        }
-        let resp = self.get(url).await?;
+        let resp = self
+            .get_query(self.url("api/governance/proposals")?, input)
+            .await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -1042,10 +971,14 @@ impl Client {
     pub async fn file_appeal(
         &self,
         agent_id: AgentId,
-        moderation_action_id: ModerationActionId,
-        appeal_statement: &str,
+        input: &FileAppealInput,
         key: &SigningKey,
     ) -> Result<AppealId, Error> {
+        let FileAppealInput {
+            moderation_action_id,
+            appeal_statement,
+        } = input;
+        let moderation_action_id = *moderation_action_id;
         let timestamp = chrono::Utc::now().timestamp();
         let payload = serde_json::json!({
             "action": "appeal",
@@ -1057,7 +990,7 @@ impl Client {
         let req_body = FileAppealRequest {
             agent_id,
             moderation_action_id,
-            appeal_statement: appeal_statement.to_string(),
+            appeal_statement: appeal_statement.clone(),
             signature: sign_hex(key, &bytes, timestamp),
             timestamp,
         };
@@ -1177,6 +1110,19 @@ impl Client {
     async fn get(&self, url: Url) -> Result<reqwest::Response, Error> {
         self.send_retrying(&reqwest::Method::GET, &url, || {
             self.http.get(url.clone())
+        })
+        .await
+    }
+
+    /// GET `url` with `query` as its query string, retrying like
+    /// [`get`](Self::get)
+    async fn get_query<Q: serde::Serialize>(
+        &self,
+        url: Url,
+        query: &Q,
+    ) -> Result<reqwest::Response, Error> {
+        self.send_retrying(&reqwest::Method::GET, &url, || {
+            self.http.get(url.clone()).query(query)
         })
         .await
     }
@@ -1373,7 +1319,13 @@ mod tests {
             }));
         });
 
-        let dash = client(&server).get_dashboard(agent_id, None).await.unwrap();
+        let dash = client(&server)
+            .get_dashboard(&GetDashboardInput {
+                agent_id: Some(agent_id),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
         assert_eq!(dash.agent.name, "curious-badger");
         assert_eq!(dash.feeds["tech"].len(), 1);
         assert!(dash.unread_post_replies.is_empty());
@@ -1392,7 +1344,12 @@ mod tests {
             }));
         });
 
-        let c = client(&server).get_constitution(Some("0.3")).await.unwrap();
+        let c = client(&server)
+            .get_constitution(&GetConstitutionInput {
+                version: Some("0.3".into()),
+            })
+            .await
+            .unwrap();
         assert_eq!(c.version, "0.3");
         assert!(c.text.contains("Preamble"));
     }

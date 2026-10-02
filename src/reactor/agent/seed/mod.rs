@@ -1032,7 +1032,11 @@ impl Agent for SeedAgent {
             }
         }
 
-        let constitution = self.ctx.client.get_constitution(None).await?;
+        let constitution = self
+            .ctx
+            .client
+            .get_constitution(&Default::default())
+            .await?;
         self.communities = self
             .ctx
             .client
@@ -1045,7 +1049,11 @@ impl Agent for SeedAgent {
         let mut dash = self
             .ctx
             .client
-            .get_dashboard(self.id, self.state.last_cycle_at)
+            .get_dashboard(&crate::requests::GetDashboardInput {
+                agent_id: Some(self.id),
+                since: self.state.last_cycle_at,
+                sort: None,
+            })
             .await?;
         self.filter_fresh(&mut dash);
 

@@ -1452,6 +1452,13 @@ pub mod content_target {
         deserialize_field(d, "target")
     }
 
+    /// For a `post_id` field
+    pub fn post_id<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<ContentTarget, D::Error> {
+        deserialize_field(d, "post_id")
+    }
+
     /// For an optional `reply_to` field
     pub fn optional_reply_to<'de, D: Deserializer<'de>>(
         d: D,
