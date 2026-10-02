@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::crypto::generate_keypair;
+use crate::reactor::cache;
 
 fn text_message(text: &str, stop: StopReason) -> response::Message {
     let stop = match stop {
@@ -872,13 +873,19 @@ async fn anonymous_survey_submits_then_redacts() {
         .await
         .unwrap();
     assert_eq!(control, Control::Done(Outcome::Complete));
-
-    // Submitted for real, then scrubbed from the transcript — the promise
-    // in the survey prompt.
     feedback.assert();
+    // Kept while the session runs: redacting before a later request would
+    // send that request a transcript with a hole in it.
+    assert!(transcript(&agent).contains("cat pictures"));
+
+    // Scrubbed at teardown, after the last request — the promise in the
+    // survey prompt.
+    agent.on_teardown().await.unwrap();
     let text = transcript(&agent);
     assert!(!text.contains("anonymous feedback"), "instruction redacted");
     assert!(!text.contains("cat pictures"), "feedback redacted");
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("cat pictures"), "nor in the saved state");
 }
 
 #[tokio::test]
@@ -1011,14 +1018,17 @@ async fn missing_key_fails_construction() {
     assert!(matches!(err, SeedError::NoKey(_)));
 }
 
-/// A clipped response seats the truncation warning and stalls — no budget
-/// doubling (the trait default), no clipped text in the transcript.
+/// A clipped response is seated, then the truncation warning in a new user
+/// turn, and the session stalls — no budget doubling (the trait default),
+/// and the request before is a prefix of the retry.
 #[tokio::test]
 async fn truncation_seats_warning_and_stalls() {
     let server = MockServer::start();
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
     let budget_before = agent.prompt().max_tokens;
+    let before = serde_json::to_value(&agent.prompt().messages).unwrap();
+    let before = before.as_array().unwrap().clone();
 
     let control = agent
         .handle(text_message(
@@ -1029,11 +1039,15 @@ async fn truncation_seats_warning_and_stalls() {
         .unwrap();
     assert_eq!(control, Control::Stalled);
     assert_eq!(agent.prompt().max_tokens, budget_before);
-    let text = transcript(&agent);
-    assert!(!text.contains("over-long ramble"));
-    assert!(text.contains("pruned from this context"));
-    // The warning merges into the trailing user turn — retry-ready.
-    assert_eq!(agent.prompt().messages.last().unwrap().role, Role::User);
+    let after = serde_json::to_value(&agent.prompt().messages).unwrap();
+    let after = after.as_array().unwrap();
+    assert_eq!(after[..before.len()], before[..], "prefix unchanged");
+    assert_eq!(after.len(), before.len() + 2);
+    assert_eq!(after[before.len()]["role"], "assistant");
+    assert!(transcript(&agent).contains("over-long ramble"));
+    let last = after.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert!(last.to_string().contains("was cut off"), "{last}");
 }
 
 /// Configured budgets reach the prompt: act at construction, phase on the
@@ -2677,4 +2691,331 @@ fn the_moderation_record_renders_credits_from_data() {
         out.contains("No moderation action has ever been taken"),
         "{out}"
     );
+}
+
+// --- Append-only sessions (0.56) ---
+
+/// No request of a session diverges from the one before it, and each adds
+/// a message
+fn assert_append_only(requests: &[Prompt]) {
+    for (n, pair) in requests.windows(2).enumerate() {
+        if let Some(why) = cache::divergence(&pair[0], &pair[1]) {
+            panic!("request {} diverges from request {n}: {why}", n + 1);
+        }
+        assert!(
+            pair[1].messages.len() > pair[0].messages.len(),
+            "request {} adds no message to request {n}",
+            n + 1
+        );
+    }
+}
+
+/// Drive `agent` the way the reactor's sequential path does (`on_turn`,
+/// request, `handle`), answering from `script`, and record each request
+async fn drive<A: Agent>(
+    agent: &mut A,
+    script: &mut std::collections::VecDeque<response::Message>,
+    requests: &mut Vec<Prompt>,
+) -> Control {
+    loop {
+        agent.on_turn().await.ok().unwrap();
+        requests.push(agent.prompt().clone());
+        let reply = script.pop_front().expect("script ran out");
+        match agent.handle(reply).await.ok().unwrap() {
+            Control::Done(outcome) => return Control::Done(outcome),
+            Control::Continue | Control::Stalled => {}
+        }
+    }
+}
+
+fn reply_with(content: serde_json::Value, stop: &str) -> response::Message {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": content,
+        "model": "claude-haiku-4-5",
+        "stop_reason": stop,
+        "stop_sequence": null,
+    }))
+    .unwrap()
+}
+
+fn post_call(id: &str, title: &str) -> response::Message {
+    reply_with(
+        serde_json::json!([
+            { "type": "text", "text": "Posting." },
+            {
+                "type": "tool_use",
+                "id": id,
+                "name": "create_post",
+                "input": { "community": "tech", "title": title, "body": "B" },
+            },
+        ]),
+        "tool_use",
+    )
+}
+
+/// A session agent on blallama-like quirks (formats are cache-safe there),
+/// perceived through the mocks, with posting and feedback served
+async fn session_agent(server: &MockServer, config: SeedConfig) -> SeedAgent {
+    mock_perception(server);
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/posts");
+        then.status(201).json_body(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "status": "created",
+            "verified": true,
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let mut agent = agent(server, config);
+    let quirks = Quirks {
+        output_config_cache_safe: true,
+        ..Quirks::default()
+    };
+    let model = agent.state.model.clone();
+    agent.on_admit(&model, &quirks);
+    agent.on_init().await.unwrap();
+    agent
+}
+
+const MEMORY: &str = r#"{"content": "I posted about compilers and tests."}"#;
+
+/// The guard: a whole session — tool rounds, a clipped act turn, reflect
+/// failing twice (garbage, then clipped), an evolution note failing once, a
+/// survey answered with a tool call first, then anonymously — only ever
+/// appends; and after teardown the anonymous survey is in neither the
+/// prompt log nor the saved state, while the rest of the session is
+#[tokio::test]
+async fn a_whole_session_only_appends_and_the_anonymous_survey_is_gone() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        evolution_chance: 100,
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut script: std::collections::VecDeque<_> = [
+        post_call("toolu_1", "Compilers are underrated"),
+        // A clipped act turn, its call cut off mid-way
+        reply_with(
+            serde_json::json!([{
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "create_post",
+                "input": { "community": "tech" },
+            }]),
+            "max_tokens",
+        ),
+        post_call("toolu_3", "Tests are documentation"),
+        reply_with(
+            serde_json::json!([
+                { "type": "thinking", "thinking": "Done.", "signature": "s" },
+                { "type": "text", "text": "That's all for today." },
+            ]),
+            "end_turn",
+        ),
+        text_message("not json", StopReason::EndTurn),
+        text_message(r#"{"content": "I posted ab"#, StopReason::MaxTokens),
+        text_message(MEMORY, StopReason::EndTurn),
+        text_message("A note, not JSON.", StopReason::EndTurn),
+        text_message(r#"{"note": "I like tests."}"#, StopReason::EndTurn),
+        tool_use_message("get_feed", serde_json::json!({})),
+        text_message(
+            r#"{"text": "More cat pictures please.", "contact_me": false}"#,
+            StopReason::EndTurn,
+        ),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(script.is_empty(), "{} replies left", script.len());
+    assert_eq!(requests.len(), 11);
+    assert_append_only(&requests);
+    assert!(agent.state.completed);
+    assert_eq!(
+        agent.state.memory.content,
+        "I posted about compilers and tests."
+    );
+    assert_eq!(agent.state.soul.evolution_log.len(), 1);
+    // The survey was the last request: its question is in it
+    let last =
+        serde_json::to_string(&requests.last().unwrap().messages).unwrap();
+    assert!(last.contains("anonymous feedback"));
+
+    agent.on_teardown().await.unwrap();
+    let dumped = dumped(dir.path());
+    assert!(dumped.contains("I like tests."), "the session was logged");
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    for (what, text) in [("dump", &dumped), ("state", &saved)] {
+        assert!(
+            !text.contains("cat pictures"),
+            "survey answer in the {what}"
+        );
+        assert!(
+            !text.contains("anonymous feedback"),
+            "survey question in the {what}"
+        );
+    }
+}
+
+/// Acting ending on a tool round (the budget spent), a soul rewrite, and a
+/// survey answered with `contact_me` (kept, in the dump too)
+#[tokio::test]
+async fn a_session_ending_on_a_tool_round_only_appends() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        max_rounds: 1,
+        mutation_chance: 100,
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut script: std::collections::VecDeque<_> = [
+        post_call("toolu_1", "Compilers are underrated"),
+        post_call("toolu_2", "Tests are documentation"),
+        text_message(MEMORY, StopReason::EndTurn),
+        text_message(&soul_rewrite(200), StopReason::EndTurn),
+        text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(script.is_empty());
+    assert_append_only(&requests);
+    agent.on_teardown().await.unwrap();
+    assert!(dumped(dir.path()).contains("Please reach out."));
+}
+
+/// Held, the survey waits: the session is `Done` after the tail, a wrapper
+/// asks its own question on the same transcript, and the survey begun after
+/// it is the last request — all of it append-only. An anonymous survey is
+/// redacted at teardown and nothing before it is lost.
+#[tokio::test]
+async fn a_held_survey_comes_after_the_wrappers_question() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    agent.hold_epilogue();
+    let mut script: std::collections::VecDeque<_> = [
+        text_message("Nothing today.", StopReason::EndTurn),
+        text_message(MEMORY, StopReason::EndTurn),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(!agent.state.completed, "not complete before the survey");
+    assert_eq!(agent.stall_reason(), None);
+
+    // The wrapper's question and its answer
+    seat_user(&mut agent.state.prompt, "A question from the wrapper.").unwrap();
+    agent.on_turn().await.unwrap();
+    requests.push(agent.prompt().clone());
+    agent
+        .state
+        .prompt
+        .push_message(text_message("An answer.", StopReason::EndTurn).inner)
+        .unwrap();
+    // A wrapper's turn can end on a user turn (its tool results): the
+    // survey question then joins it, and only the question is redacted.
+    agent
+        .state
+        .prompt
+        .push_message((Role::User, "Recorded."))
+        .unwrap();
+
+    assert_eq!(agent.begin_epilogue().unwrap(), Control::Continue);
+    assert!(agent.begin_epilogue().is_err(), "begun once");
+    let mut script: std::collections::VecDeque<_> = [text_message(
+        r#"{"text": "More cat pictures please.", "contact_me": false}"#,
+        StopReason::EndTurn,
+    )]
+    .into();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(agent.state.completed);
+    assert_append_only(&requests);
+    let last =
+        serde_json::to_string(&requests.last().unwrap().messages).unwrap();
+    assert!(last.contains("A question from the wrapper."));
+    assert!(last.contains("anonymous feedback"));
+
+    agent.on_teardown().await.unwrap();
+    let text = transcript(&agent);
+    assert!(
+        text.contains("An answer."),
+        "the wrapper's exchange is kept"
+    );
+    assert!(!text.contains("anonymous feedback"));
+    assert!(!dumped(dir.path()).contains("cat pictures"));
+}
+
+/// Held with no survey rolled, beginning the epilogue just ends the session
+#[tokio::test]
+async fn a_held_session_without_a_survey_ends_at_begin() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        agent.begin_epilogue().unwrap(),
+        Control::Done(Outcome::Complete)
+    );
+    assert!(agent.state.completed);
+}
+
+/// A survey that never got a usable answer (the session stalls out on it)
+/// is redacted at teardown all the same, failed attempts included
+#[tokio::test]
+async fn a_survey_that_never_parsed_is_redacted_too() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    for _ in 0..crate::reactor::MAX_STALLS {
+        let control = agent
+            .handle(text_message(
+                "Cat pictures, not JSON.",
+                StopReason::EndTurn,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    agent.on_teardown().await.unwrap();
+    let dumped = dumped(dir.path());
+    assert!(dumped.contains("I posted about compilers"), "{dumped}");
+    assert!(!dumped.contains("anonymous feedback"));
+    assert!(!dumped.contains("Cat pictures"));
 }
