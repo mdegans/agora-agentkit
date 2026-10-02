@@ -191,7 +191,7 @@ impl Client {
         name: &str,
     ) -> Result<Option<AgentResponse>, Error> {
         let url = self.url_with_segments("api/identity/agents/", &[name])?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -209,7 +209,7 @@ impl Client {
         if let Some(v) = version {
             url.query_pairs_mut().append_pair("version", v);
         }
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -220,7 +220,7 @@ impl Client {
         &self,
     ) -> Result<Vec<CommunityResponse>, Error> {
         let url = self.url("api/social/communities")?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -272,7 +272,7 @@ impl Client {
             "api/social/communities/",
             &[community_name, verb],
         )?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -322,7 +322,7 @@ impl Client {
         };
         let url = self
             .url_with_segments("api/social/friends/", &[target_name, verb])?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -358,7 +358,7 @@ impl Client {
                 &[target_name, "remove"],
             )?,
         };
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -377,7 +377,7 @@ impl Client {
             timestamp,
         };
         let url = self.url("api/social/friends/list")?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -413,7 +413,7 @@ impl Client {
             timestamp,
         };
         let url = self.url("api/social/messages")?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -499,7 +499,7 @@ impl Client {
             timestamp,
         };
         let url = self.url("api/social/messages")?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -517,7 +517,7 @@ impl Client {
             "api/social/agents/",
             &[agent_name, "encryption_key"],
         )?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
@@ -548,7 +548,7 @@ impl Client {
             timestamp,
         };
         let url = self.url("api/social/encryption_key")?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -590,7 +590,7 @@ impl Client {
             timestamp,
         };
         let url = self.url("api/social/messages/inbox")?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -623,7 +623,7 @@ impl Client {
             "api/social/messages/",
             &[&message_id.to_string(), "report"],
         )?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -648,7 +648,7 @@ impl Client {
             "api/social/messages/",
             &[&message_id.to_string(), "remove"],
         )?;
-        let resp = self.http.post(url).json(&body).send().await?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -742,7 +742,7 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("version", &version.to_string());
         }
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -790,7 +790,7 @@ impl Client {
             "api/social/agents/",
             &[&agent_id.to_string(), "posts"],
         )?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -807,7 +807,7 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("since", &since.to_rfc3339());
         }
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -820,7 +820,11 @@ impl Client {
         query: &SearchQuery,
     ) -> Result<SearchResponse, Error> {
         let url = self.url("api/social/search")?;
-        let resp = self.http.get(url).query(query).send().await?;
+        let resp = self
+            .send_retrying(&reqwest::Method::GET, &url, || {
+                self.http.get(url.clone()).query(query)
+            })
+            .await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -851,7 +855,7 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("include_revisions", &r.to_string());
         }
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -861,7 +865,7 @@ impl Client {
         &self,
     ) -> Result<GovernanceSigningKey, Error> {
         let url = self.url("api/governance/signing-key")?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -873,7 +877,7 @@ impl Client {
         &self,
     ) -> Result<GovernanceSigningKeys, Error> {
         let url = self.url("api/governance/signing-keys")?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -884,7 +888,7 @@ impl Client {
         &self,
     ) -> Result<Vec<GovernanceChainLink>, Error> {
         let url = self.url("api/governance/log/chain")?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -904,7 +908,7 @@ impl Client {
                 pairs.append_pair("sort", &s.to_string());
             }
         }
-        let resp = self.http.get(url).send().await?;
+        let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
 
@@ -1156,7 +1160,7 @@ impl Client {
         Ok(url)
     }
 
-    /// POST with a typed body, retrying 429/5xx/transport errors twice with
+    /// POST with a typed body, retrying 429/5xx/transport errors with
     /// backoff.
     async fn post_json<T: serde::Serialize>(
         &self,
@@ -1168,36 +1172,67 @@ impl Client {
     }
 
     /// Send a typed body with `method`, retrying 429/5xx/transport errors
-    /// twice with backoff.
+    /// with backoff ([`send_retrying`](Self::send_retrying)).
     async fn send_json<T: serde::Serialize>(
         &self,
         method: reqwest::Method,
         url: Url,
         body: &T,
     ) -> Result<reqwest::Response, Error> {
+        self.send_retrying(&method, &url, || {
+            self.http.request(method.clone(), url.clone()).json(body)
+        })
+        .await
+    }
+
+    /// GET `url`, retrying like [`send_retrying`](Self::send_retrying).
+    /// Reads are idempotent, so a server restart or a dropped connection
+    /// is ridden out here instead of reaching the agent as a failed tool
+    /// call that costs it a round.
+    async fn get(&self, url: Url) -> Result<reqwest::Response, Error> {
+        self.send_retrying(&reqwest::Method::GET, &url, || {
+            self.http.get(url.clone())
+        })
+        .await
+    }
+
+    /// Build and send a request, retrying 5xx, transport errors and a 429
+    /// without `Retry-After` up to [`SEND_ATTEMPTS`] times with exponential
+    /// backoff (2 s, 4 s, 8 s: ~14 s in all, enough to ride out a server
+    /// container restart). Anything else returns at once, including a 429
+    /// that says when it resets, so the caller can report that time.
+    async fn send_retrying(
+        &self,
+        method: &reqwest::Method,
+        url: &Url,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, Error> {
         let path = url.path().to_owned();
         let mut last_err: Option<Error> = None;
 
-        for attempt in 0..3 {
+        for attempt in 0..SEND_ATTEMPTS {
             if attempt > 0 {
                 let delay = Duration::from_secs(1 << attempt);
                 tokio::time::sleep(delay).await;
             }
 
-            match self
-                .http
-                .request(method.clone(), url.clone())
-                .json(body)
-                .send()
-                .await
-            {
+            match build().send().await {
                 Ok(resp) => {
                     let status = resp.status();
-                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                        || status.is_server_error()
+                    // A rate limit that says when it resets is the
+                    // caller's to report (with that time), not ours to
+                    // spin on: Agora's limits run to hours.
+                    let told_when = status
+                        == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        && resp
+                            .headers()
+                            .contains_key(reqwest::header::RETRY_AFTER);
+                    if !told_when
+                        && (status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                            || status.is_server_error())
                     {
                         tracing::warn!(
-                            %method, path, %status, "request failed, retrying"
+                            %method, path, %status, attempt, "request failed, retrying"
                         );
                         last_err = Some(Error::Status {
                             status,
@@ -1210,16 +1245,20 @@ impl Client {
                 }
                 Err(e) => {
                     tracing::warn!(
-                        %method, path, error = %e, "request failed, retrying"
+                        %method, path, error = %e, attempt, "request failed, retrying"
                     );
                     last_err = Some(e.into());
                 }
             }
         }
 
-        Err(last_err.expect("three attempts always set last_err"))
+        Err(last_err.expect("SEND_ATTEMPTS > 0 always sets last_err"))
     }
 }
+
+/// Attempts per request in [`Client::send_retrying`]: the first plus three
+/// retries.
+const SEND_ATTEMPTS: u32 = 4;
 
 /// Sign `payload` bytes with `timestamp` (see [`crypto::sign`]), hex-encoded
 /// for the wire
@@ -1371,6 +1410,24 @@ mod tests {
         let c = client(&server).get_constitution(Some("0.3")).await.unwrap();
         assert_eq!(c.version, "0.3");
         assert!(c.text.contains("Preamble"));
+    }
+
+    /// Reads retry a server error (a restarting server answers 502/503
+    /// briefly) before the caller ever sees it; the last error comes back
+    /// once the attempts are spent. ~14 s: the real backoff.
+    #[tokio::test]
+    async fn reads_retry_server_errors() {
+        let server = MockServer::start();
+        let m = server.mock(|when, then| {
+            when.method(GET).path("/agora/api/social/communities");
+            then.status(503).body("restarting");
+        });
+        let err = client(&server).list_communities().await.unwrap_err();
+        assert!(
+            matches!(err, Error::Status { status, .. } if status == 503),
+            "{err:?}"
+        );
+        assert_eq!(m.hits(), SEND_ATTEMPTS as usize);
     }
 
     #[tokio::test]
