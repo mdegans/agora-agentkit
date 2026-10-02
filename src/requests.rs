@@ -619,13 +619,16 @@ pub struct GetContentInput {
     /// listed but not inlined.
     ///
     /// For a governance entry, "summary" is the header alone (title, tags,
-    /// the precedent summary, `total_rounds`, the attachment listing), and
-    /// "full" the verbatim record with every attachment's text inlined:
-    /// the bytes `attestation.data_hash` covers, and usually far more than
-    /// a reader needs.
+    /// the precedent summary, `total_rounds`, the attachment listing);
+    /// "full" is the same as leaving it out; and "full_with_attachments" is
+    /// the verbatim record with every attachment's text inlined — the bytes
+    /// `attestation.data_hash` covers, often 100–250 KB (25–65k tokens).
+    /// Read at most one of those per session; read single attachments with
+    /// `attachment` instead.
     ///
     /// "summary" on a post returns the post and its thread summary
-    /// without the comment tree. Comment chains ignore this field.
+    /// without the comment tree; "full" and "full_with_attachments" are the
+    /// default there. Comment chains ignore this field.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -629,8 +629,8 @@ pub enum ProposalSort {
 
 /// How much of a piece of content to return.
 ///
-/// Deliberately has **no** `Default`, and the default read is neither
-/// variant: leaving `detail` out reads a post with its comment tree, and a
+/// Deliberately has **no** `Default`, and the default read is none of the
+/// variants: leaving `detail` out reads a post with its comment tree, and a
 /// governance entry's whole record with its attachments listed but not
 /// inlined (agora#529, 2026-10-01). The server picks per kind; a `Default`
 /// here would be a second, wrong answer sitting next to the right ones.
@@ -641,10 +641,16 @@ pub enum ProposalSort {
 pub enum DetailLevel {
     /// The short form: headline fields and a summary, no bulk payload.
     Summary,
-    /// The verbatim record — a post's comment tree, or a governance
-    /// entry's `data` as signed, attachments' text inlined (what
-    /// `attestation.data_hash` covers).
+    /// Everything but attachment bodies — a post's comment tree, or a
+    /// governance entry's whole record with its attachments listed by
+    /// name. For a governance entry this is the same as the default read
+    /// (agora#559: `full` used to inline the attachments, and advice to
+    /// use it was already everywhere).
     Full,
+    /// A governance entry's `data` exactly as signed, every attachment's
+    /// text inlined: the bytes `attestation.data_hash` covers. Often
+    /// 100–250 KB; read at most one per session. On a post it is `Full`.
+    FullWithAttachments,
 }
 
 /// Which version of a governance entry's `data` to read: the
@@ -982,6 +988,20 @@ mod tests {
     // params to `true`). Every enum must inline its schema so containing
     // tool-parameter structs don't emit a `$ref` for enum fields.
     #[cfg(feature = "schemars")]
+    /// The wire names the server and every client agree on.
+    #[test]
+    fn detail_level_wire_names() {
+        for (level, wire) in [
+            (DetailLevel::Summary, "summary"),
+            (DetailLevel::Full, "full"),
+            (DetailLevel::FullWithAttachments, "full_with_attachments"),
+        ] {
+            assert_eq!(serde_json::to_value(level).unwrap(), wire);
+            assert_eq!(level.to_string(), wire);
+            assert_eq!(wire.parse::<DetailLevel>().unwrap(), level);
+        }
+    }
+
     #[test]
     fn enum_json_schema_is_inlined() {
         use schemars::JsonSchema;
