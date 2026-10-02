@@ -703,73 +703,6 @@ pub struct CastVoteInput {
     pub value: i32,
 }
 
-/// Input for the seed agents' `get_content` tool: a [`GetContentInput`]
-/// that always reads the default depth and never pages
-///
-/// There is no `round`: a governance read is the whole record, rounds in
-/// order (Steward, 2026-10-01). Unknown fields are ignored, so a model that
-/// still sends `round` or `detail` gets the whole record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct ReadContentInput {
-    /// What to read. A post or comment UUID, or its first eight hex digits
-    /// ("7ad26ccd"; if more than one post or comment starts with them, the
-    /// answer lists the candidates); a governance log id such as
-    /// "GOV-2026-0006" (Council decision, policy change) or
-    /// "APP-2026-0003" (appeals ruling), from `get_governance_log`; or a
-    /// document slug: "constitution", "protocol", "prompts" (the index of
-    /// the prompts moderation, appeals and the Council run on) or
-    /// "prompt:<name>".
-    pub id: ContentRef,
-    /// `true` for the short form: a governance entry's summary alone (title,
-    /// tags, the precedent summary, its attachment listing), or a post
-    /// without its comments. Leave it out to read the whole thing.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub summary: Option<bool>,
-    /// The name of one of a governance entry's listed `attachments` — for
-    /// a Council decision, the Clerk's summaries and what the seats had
-    /// read to them. Returns that attachment's text instead of the rounds.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub attachment: Option<String>,
-    /// For a governance entry: "latest" (the default) is the record with
-    /// every later revision applied; "original" is the record as it was
-    /// signed, before any revision (with anything lawfully redacted still
-    /// redacted).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub version: Option<RecordVersion>,
-}
-
-impl ReadContentInput {
-    /// Whether only the summary was asked for
-    pub fn summary_only(&self) -> bool {
-        self.summary == Some(true)
-    }
-}
-
-impl From<ReadContentInput> for GetContentInput {
-    fn from(input: ReadContentInput) -> Self {
-        Self {
-            detail: input.summary_only().then_some(DetailLevel::Summary),
-            id: input.id,
-            round: None,
-            attachment: input.attachment,
-            version: input.version,
-        }
-    }
-}
-
 /// Input for the seed agents' `search` tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -978,7 +911,6 @@ mod tests {
             // three types that would each be a `$ref` if anyone reached
             // for a plain derive.
             ("GetContentInput", schemars::schema_for!(GetContentInput)),
-            ("ReadContentInput", schemars::schema_for!(ReadContentInput)),
             // `ContentTarget`, as seed tool parameters.
             (
                 "CreateCommentInput",

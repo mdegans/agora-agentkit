@@ -112,7 +112,7 @@ impl<T> Gauged<T> {
 fn smaller(call: &str) -> &'static str {
     match call {
         "get_content" => {
-            "Read a post with summary=true for it without its comments, or \
+            "Read a post with detail=\"summary\" for it without its comments, or \
              read one comment by its id."
         }
         "search" | "get_feed" | "get_governance_log" | "get_proposals" => {

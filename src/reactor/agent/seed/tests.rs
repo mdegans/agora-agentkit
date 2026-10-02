@@ -1522,9 +1522,8 @@ fn has_param(req: &httpmock::prelude::HttpMockRequest, key: &str) -> bool {
         .is_some_and(|q| q.iter().any(|(k, _)| k == key))
 }
 
-/// A `GOV-` id goes to `api/content/{ref}` with no `detail` and no `round`
-/// — even when the model sends them from habit — so the server serves the
-/// whole record, which renders with its rounds numbered and in order. Each
+/// A bare `GOV-` id goes to `api/content/{ref}` with no `detail` and no
+/// `round`, so the server serves the whole record, which renders with its rounds numbered and in order. Each
 /// record read spends one of the two full reads; past them the summary
 /// comes back instead, free.
 #[tokio::test]
@@ -1554,11 +1553,7 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     let call = || {
         tool_use_message(
             "get_content",
-            serde_json::json!({
-                "id": "GOV-2026-0006",
-                "round": 2,
-                "detail": "full",
-            }),
+            serde_json::json!({"id": "GOV-2026-0006"}),
         )
     };
 
@@ -1598,10 +1593,10 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     assert!(rendered.contains("four to one"), "the summary: {rendered}");
 }
 
-/// `version` and `attachment` reach the wire, `round` never does, and an
-/// attachment costs a full read like the record it belongs to
+/// `version` and `attachment` reach the wire, and an attachment costs a
+/// full read like the record it belongs to
 #[tokio::test]
-async fn get_content_passes_version_and_attachment_and_never_a_round() {
+async fn get_content_passes_version_and_attachment() {
     let server = MockServer::start();
     let original = server.mock(|when, then| {
         when.method(GET)
@@ -1826,7 +1821,7 @@ async fn index_proposals_summaries_and_failures_are_free() {
             tool_use_message("get_proposals", serde_json::json!({})),
             tool_use_message(
                 "get_content",
-                serde_json::json!({"id": "GOV-2026-0006", "summary": true}),
+                serde_json::json!({"id": "GOV-2026-0006", "detail": "summary"}),
             ),
             tool_use_message(
                 "get_content",
@@ -1845,7 +1840,7 @@ async fn index_proposals_summaries_and_failures_are_free() {
     let rendered = transcript(&agent);
     assert!(!rendered.contains("full governance reads"), "{rendered}");
     assert!(
-        rendered.contains("summary=true for its summary alone (free)"),
+        rendered.contains("detail=\"summary\" for its summary alone (free)"),
         "the index says how to skim: {rendered}"
     );
     assert!(
@@ -1867,23 +1862,128 @@ async fn index_proposals_summaries_and_failures_are_free() {
     assert!(!transcript(&agent).contains("full governance reads"));
 }
 
-/// The seed tool's `get_content` offers no `round` and no `detail`; the
-/// shared request type keeps `round` for clients that page
-#[test]
-fn the_seed_read_has_no_paging_but_the_wire_type_does() {
-    let seed = serde_json::to_string(&schemars::schema_for!(
-        crate::requests::ReadContentInput
-    ))
-    .unwrap();
-    assert!(!seed.contains("\"round\""), "{seed}");
-    assert!(!seed.contains("\"detail\""), "{seed}");
-    assert!(seed.contains("\"summary\""), "{seed}");
-    assert!(seed.contains("\"attachment\""), "{seed}");
-    let wire = serde_json::to_string(&schemars::schema_for!(
+/// One schema for `get_content` everywhere: the seed tool's parameters
+/// are the shared [`GetContentInput`] the client sends and the server
+/// documents, so advice written against one holds for the other
+/// (2026-10-02: a duplicate seed-only type silently dropped `detail`).
+///
+/// [`GetContentInput`]: crate::requests::GetContentInput
+#[tokio::test]
+async fn get_contents_schema_is_the_shared_request_type() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let tool = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "get_content" =>
+            {
+                Some(c.schema.clone())
+            }
+            _ => None,
+        })
+        .expect("get_content is installed");
+    let shared = serde_json::to_value(schemars::schema_for!(
         crate::requests::GetContentInput
     ))
     .unwrap();
-    assert!(wire.contains("\"round\""), "{wire}");
+    // The tool macro rewrites descriptions, so compare the fields and the
+    // detail levels offered, not the bytes.
+    let keys = |v: &serde_json::Value| {
+        let mut k: Vec<String> = v["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&tool), keys(&shared));
+    let detail = tool["properties"]["detail"].to_string();
+    for level in ["summary", "full", "full_with_attachments"] {
+        assert!(
+            detail.contains(&format!("\"{level}\"")),
+            "{level}: {detail}"
+        );
+    }
+    for field in ["id", "detail", "round", "attachment", "version"] {
+        assert!(tool["properties"].get(field).is_some(), "{field}: {tool}");
+    }
+}
+
+/// `round` reaches the wire and spends a full read; one
+/// `full_with_attachments` read per session, and a second is served as the
+/// record without attachment bodies, saying why
+#[tokio::test]
+async fn get_content_pages_rounds_and_allows_one_verbatim_read() {
+    let server = MockServer::start();
+    let round = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("round", "2");
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let verbatim = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0007")
+            .query_param("detail", "full_with_attachments");
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0007",
+            Some(two_round_record()),
+        ));
+    });
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0007")
+            .matches(|req| !has_param(req, "detail"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0007",
+            Some(two_round_record()),
+        ));
+    });
+    let read =
+        |input: serde_json::Value| tool_use_message("get_content", input);
+
+    let mut pager = agent(&server, quiet_config());
+    seat_start(&mut pager);
+    pager
+        .handle(read(serde_json::json!({"id": "GOV-2026-0006", "round": 2})))
+        .await
+        .unwrap();
+    round.assert();
+
+    // Two verbatim asks fit the two full reads; only the first is served
+    // verbatim.
+    let mut reader = agent(&server, quiet_config());
+    seat_start(&mut reader);
+    for _ in 0..2 {
+        reader
+            .handle(read(serde_json::json!({
+                "id": "GOV-2026-0007",
+                "detail": "full_with_attachments",
+            })))
+            .await
+            .unwrap();
+    }
+    verbatim.assert_hits(1);
+    record.assert_hits(1);
+    let rendered = transcript(&reader);
+    assert_eq!(
+        rendered
+            .matches("used this session's one full_with_attachments read")
+            .count(),
+        1,
+        "{rendered}"
+    );
 }
 
 /// `include_revisions` reaches the wire, and what the server left out is
@@ -2041,7 +2141,7 @@ async fn an_oversized_post_read_is_left_out_with_a_note() {
         rendered.contains("would not fit in your 40000 token window"),
         "{rendered}"
     );
-    assert!(rendered.contains("summary=true"), "{rendered}");
+    assert!(rendered.contains("detail=\"summary\""), "{rendered}");
     assert!(!rendered.contains("OVERSIZED"), "{rendered}");
 }
 
