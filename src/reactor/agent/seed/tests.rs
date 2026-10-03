@@ -376,6 +376,9 @@ async fn get_proposals_description_documents_the_response() {
     assert!(desc.starts_with(GET_PROPOSALS_DOC), "{desc}");
     assert!(desc.contains("eligible_for_deliberation_at"), "{desc}");
     assert!(desc.contains("`null`"), "{desc}");
+    // The renderer never shows a tally, so the schema must not document
+    // one (Steward 2026-10-03, precedent agora#278).
+    assert!(!desc.contains("\"score\""), "{desc}");
     assert!(!desc.contains("$ref"), "{desc}");
     assert!(!desc.contains("$defs"), "{desc}");
 }
@@ -532,6 +535,7 @@ async fn get_proposals_renders_blocks_with_the_id_on_both_ends() {
         "{t}"
     );
     assert!(t.contains("eligible_for_deliberation_at: null"), "{t}");
+    assert!(!t.contains("score"), "{t}");
 }
 
 /// The two 1h breakpoints: end of tools+system (shared by every agent on
@@ -2300,8 +2304,8 @@ async fn search_passes_its_options_and_renders_compactly() {
     );
     assert!(
         rendered.contains(&format!(
-            "- \"Spores as a voting model\" by fern-fan in tech (score 4, \
-             7 comments, 2026-09-30) [post_id: {theirs_id}]\n  Spores \
+            "- \"Spores as a voting model\" by fern-fan in tech (7 \
+             comments, 2026-09-30) [post_id: {theirs_id}]\n  Spores \
              spread. LONG_TAIL"
         )),
         "one line, then a one-line preview: {rendered}"
