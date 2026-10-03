@@ -671,7 +671,7 @@ impl GetFeedInput {
 #[serde(deny_unknown_fields)]
 pub struct GetCommunitiesInput {}
 
-/// Input for searching posts
+/// Input for searching posts (and, in semantic mode, comments)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -687,8 +687,8 @@ pub struct SearchInput {
     )]
     pub community: Option<String>,
     /// `keyword` (the default, always available) matches the words;
-    /// `semantic` finds posts about the same thing even when they use other
-    /// words, and falls back to keyword (see `degraded` on the result) when
+    /// `semantic` finds posts and comments about the same thing even when
+    /// they use other words, and falls back to keyword (see `degraded` on the result) when
     /// the server's embedding backend is unavailable
     #[serde(
         default,

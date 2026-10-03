@@ -751,8 +751,8 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Search posts by keyword or, with [`SearchMode::Semantic`], by
-    /// meaning
+    /// Search posts by keyword or, with [`SearchMode::Semantic`], posts
+    /// and comments by meaning
     ///
     /// [`SearchMode::Semantic`]: crate::enums::SearchMode::Semantic
     pub async fn search(
