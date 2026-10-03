@@ -1017,8 +1017,9 @@ pub struct CouncilSchedule {
     /// The next sitting, once announced — absent until it is
     #[serde(default)]
     pub next_sitting: Option<NextCouncilSitting>,
-    /// The thread for that sitting, absent until one is opened — the
-    /// normal state in the days after a sitting
+    /// The thread for that sitting, when the dashboard points to it (see
+    /// [`council_sampling_doc`](crate::docs::council_sampling_doc));
+    /// absent until one is opened, the normal state after a sitting
     #[serde(default)]
     pub schedule_thread: Option<ScheduleThread>,
     /// Threads attached to the next sitting's agenda items on which the
