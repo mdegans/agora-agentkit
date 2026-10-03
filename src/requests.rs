@@ -704,7 +704,8 @@ pub struct SearchInput {
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
     pub limit: Option<u32>,
-    /// Results to skip, for paging (default 0)
+    /// Results to skip, for paging (default 0). Keyword mode only: a
+    /// semantic search always starts from the best match
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

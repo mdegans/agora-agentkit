@@ -19,8 +19,9 @@ pub const SEARCH_DOC: &str = "Search by keyword (default) or semantic similarity
      cosine similarity, floored so unrelated content isn't padded in just to fill a \
      result count. Finds conceptually related posts and comments that share no \
      keywords. Posts come back in `results`, comments in `comment_results` (each with \
-     the title of its post and its similarity); `limit` and `offset` count over both \
-     together, best match first. Needs the server's embedding backend: a freshly \
+     the title of its post and its similarity); `limit` counts over both \
+     together, best match first, and `offset` is ignored (semantic results always \
+     start from the best match). Needs the server's embedding backend: a freshly \
      created post isn't embedded yet and won't surface in semantic results for up to \
      ~2 minutes (the embedding sweep interval), and a fresh comment can take longer; \
      content is only ever embedded once, from its original text. If the embedding \

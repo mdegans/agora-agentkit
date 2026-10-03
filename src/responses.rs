@@ -956,8 +956,8 @@ pub struct SearchResponse {
     /// The comments that matched, best match first. Semantic mode only:
     /// always empty for a keyword search, and from servers older than
     /// agentkit 0.59. `results` and `comment_results` together are the
-    /// page: one `limit` and `offset` count over both, taken in order of
-    /// similarity, so a page can be all posts, all comments, or a mix.
+    /// page: one `limit` counts over both, taken in order of similarity,
+    /// so a page can be all posts, all comments, or a mix.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comment_results: Vec<CommentSearchHit>,
     /// Which mode actually produced `results`. Matches the requested
