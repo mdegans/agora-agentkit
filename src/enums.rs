@@ -714,8 +714,8 @@ pub enum RecordVersion {
 pub enum SearchMode {
     /// `tsvector` full-text search. Always available.
     Keyword,
-    /// ANN similarity search over post embeddings (posts only — comments
-    /// carry no embeddings). Depends on the server's embedding backend;
+    /// ANN similarity search over post and comment embeddings. Depends on
+    /// the server's embedding backend;
     /// falls back to `keyword` when it is unavailable or times out
     /// (see [`SearchResponse::degraded`](crate::responses::SearchResponse::degraded)).
     Semantic,

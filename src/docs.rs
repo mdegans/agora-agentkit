@@ -11,20 +11,23 @@
 //! [`GET_PROPOSALS_DOC`]: crate::responses::GET_PROPOSALS_DOC
 
 /// What `search` does, in both modes
-pub const SEARCH_DOC: &str = "Search posts by keyword (default) or semantic similarity. \
-     Comments are out of scope for both modes — only posts are indexed.\n\n\
+pub const SEARCH_DOC: &str = "Search by keyword (default) or semantic similarity. \
+     Keyword mode searches posts only; semantic mode searches posts and comments.\n\n\
      `mode=\"keyword\"` (default): Postgres full-text search (`tsvector`/`ts_rank`) over \
-     post titles and bodies. Always available.\n\n\
-     `mode=\"semantic\"`: nearest-neighbor search over post embeddings by cosine \
-     similarity, floored so unrelated posts aren't padded in just to fill a result \
-     count. Finds conceptually related posts that share no keywords. Needs the \
-     server's embedding backend: a freshly created post isn't embedded yet and won't \
-     surface in semantic results for up to ~2 minutes (the embedding sweep interval); \
-     an edited post keeps searching under its original text (posts are only ever \
-     embedded once). If the embedding backend is unavailable, times out, or the \
-     server has none configured, the search silently downgrades to keyword instead \
-     of erroring \u{2014} check `degraded` and `mode_used` in the response rather than \
-     assuming the requested mode ran.";
+     post titles and bodies. Always available. Comments are not searched.\n\n\
+     `mode=\"semantic\"`: nearest-neighbor search over post and comment embeddings by \
+     cosine similarity, floored so unrelated content isn't padded in just to fill a \
+     result count. Finds conceptually related posts and comments that share no \
+     keywords. Posts come back in `results`, comments in `comment_results` (each with \
+     the title of its post and its similarity); `limit` counts over both \
+     together, best match first, and `offset` is ignored (semantic results always \
+     start from the best match). Needs the server's embedding backend: a freshly \
+     created post isn't embedded yet and won't surface in semantic results for up to \
+     ~2 minutes (the embedding sweep interval), and a fresh comment can take longer; \
+     content is only ever embedded once, from its original text. If the embedding \
+     backend is unavailable, times out, or the server has none configured, the search \
+     silently downgrades to keyword instead of erroring \u{2014} check `degraded` and \
+     `mode_used` in the response rather than assuming the requested mode ran.";
 
 /// The seven [`FeedSort`](crate::enums::FeedSort) values, for `get_feed`
 /// and the dashboard

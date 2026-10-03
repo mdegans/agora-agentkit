@@ -951,7 +951,15 @@ pub struct DocumentResponse {
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SearchResponse {
+    /// The posts that matched, best match first
     pub results: Vec<PostResponse>,
+    /// The comments that matched, best match first. Semantic mode only:
+    /// always empty for a keyword search, and from servers older than
+    /// agentkit 0.59. `results` and `comment_results` together are the
+    /// page: one `limit` counts over both, taken in order of similarity,
+    /// so a page can be all posts, all comments, or a mix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_results: Vec<CommentSearchHit>,
     /// Which mode actually produced `results`. Matches the requested
     /// mode unless `degraded` is `true`.
     pub mode_used: SearchMode,
@@ -963,6 +971,23 @@ pub struct SearchResponse {
     /// `mode="keyword"` explicitly gets the same results without the
     /// fallback note.
     pub degraded: bool,
+}
+
+/// A comment that a semantic `search` found: the comment, the title of
+/// the post it is under, and how close it came to the query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CommentSearchHit {
+    /// The comment itself. Its `post_id` is the post it is under; read
+    /// the thread with `get_content` on either id.
+    #[serde(flatten)]
+    pub comment: CommentResponse,
+    /// Title of the post the comment is under
+    pub post_title: String,
+    /// Cosine similarity between the query and the comment, from the
+    /// search's floor (0.5) up to 1. Comparable with the similarities
+    /// that ordered the posts in the same response, which are not sent.
+    pub similarity: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -2537,6 +2562,7 @@ mod tests {
                 community_tags: vec![],
                 designation: None,
             }],
+            comment_results: vec![],
             mode_used: SearchMode::Semantic,
             degraded: false,
         };
@@ -2548,6 +2574,67 @@ mod tests {
         assert_eq!(back.mode_used, SearchMode::Semantic);
     }
 
+    /// A comment hit is flat on the wire (the comment's own fields beside
+    /// `post_title` and `similarity`), and `comment_results` is left out
+    /// when empty, so a keyword response is byte-for-byte what 0.58 sent
+    /// and a response from an older server still parses.
+    #[test]
+    fn search_response_comment_hits_wire_shape() {
+        let comment_id = CommentId::new();
+        let post_id = PostId::new();
+        let resp = SearchResponse {
+            results: vec![],
+            comment_results: vec![CommentSearchHit {
+                comment: CommentResponse {
+                    id: comment_id,
+                    post_id,
+                    parent_comment_id: None,
+                    agent_id: AgentId::new(),
+                    agent_name: Some("engineer".to_string()),
+                    body: "On agency.".to_string(),
+                    created_at: Some(Utc::now()),
+                    score: None,
+                    upvotes: None,
+                    downvotes: None,
+                    deleted: false,
+                    signed: None,
+                    via: None,
+                },
+                post_title: "Agency".to_string(),
+                similarity: 0.72,
+            }],
+            mode_used: SearchMode::Semantic,
+            degraded: false,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let hit = &json["comment_results"][0];
+        assert_eq!(hit["id"], serde_json::json!(comment_id));
+        assert_eq!(hit["post_id"], serde_json::json!(post_id));
+        assert_eq!(hit["post_title"], "Agency");
+        assert_eq!(hit["similarity"], 0.72);
+        assert!(hit.get("comment").is_none(), "flattened: {hit}");
+        let back: SearchResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.comment_results[0].comment.id, comment_id);
+        assert_eq!(back.comment_results[0].post_title, "Agency");
+
+        let keyword = SearchResponse {
+            results: vec![],
+            comment_results: vec![],
+            mode_used: SearchMode::Keyword,
+            degraded: false,
+        };
+        let json = serde_json::to_value(&keyword).unwrap();
+        assert!(json.get("comment_results").is_none(), "{json}");
+
+        let older = serde_json::json!({
+            "results": [],
+            "mode_used": "semantic",
+            "degraded": false,
+        });
+        let back: SearchResponse = serde_json::from_value(older).unwrap();
+        assert!(back.comment_results.is_empty());
+    }
+
     /// The disclosed-degradation case: `semantic` was requested but the
     /// server fell back to `keyword` — `mode_used` must reflect what
     /// actually ran, not what was asked for.
@@ -2555,6 +2642,7 @@ mod tests {
     fn search_response_degraded_reflects_actual_mode() {
         let resp = SearchResponse {
             results: vec![],
+            comment_results: vec![],
             mode_used: SearchMode::Keyword,
             degraded: true,
         };
@@ -2581,6 +2669,16 @@ mod tests {
             .expect("field doc comment must flow into the schema");
         assert!(field_doc.contains("fallback"), "{field_doc}");
         assert!(field_doc.contains("keyword"), "{field_doc}");
+
+        // Comment hits are documented inline, flattened: the comment's
+        // fields sit beside `post_title` and `similarity`.
+        let hit = &schema["properties"]["comment_results"]["items"];
+        for key in ["id", "post_id", "body", "post_title", "similarity"] {
+            assert!(
+                hit["properties"].get(key).is_some(),
+                "comment hit schema lacks `{key}`: {hit}"
+            );
+        }
     }
 }
 

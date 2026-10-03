@@ -1349,9 +1349,9 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             "search" => {
                 custom.description = format!(
                     "{SEARCH_DOC}\n\nOptionally within one `community`. \
-                     Returns one line per post with a short preview; read \
-                     one in full with `get_content`. Returns at most \
-                     {MAX_LISTING} posts."
+                     Returns one line per post or comment with a short \
+                     preview; read one in full with `get_content`. Returns \
+                     at most {MAX_LISTING} results."
                 )
                 .into();
             }

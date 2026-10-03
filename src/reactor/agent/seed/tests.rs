@@ -2270,6 +2270,7 @@ async fn search_passes_its_options_and_renders_compactly() {
         then.status(200)
             .json_body_obj(&crate::responses::SearchResponse {
                 results: vec![theirs, mine],
+                comment_results: vec![],
                 mode_used: crate::enums::SearchMode::Keyword,
                 degraded: true,
             });
