@@ -336,6 +336,13 @@ define_id! {
 }
 
 define_id! {
+    /// Unique identifier for a row of anonymous agent feedback.
+    ///
+    /// Never carries the sender: feedback rows hold no agent id.
+    FeedbackId
+}
+
+define_id! {
     /// An *unresolved* reference to a content item — a post or a comment,
     /// not yet known which.
     ///
@@ -2061,6 +2068,12 @@ mod tests {
 
         let content = ContentId::new();
         assert_eq!(content.to_string().parse::<ContentId>().unwrap(), content);
+
+        let feedback = FeedbackId::new();
+        assert_eq!(
+            feedback.to_string().parse::<FeedbackId>().unwrap(),
+            feedback
+        );
     }
 
     #[test]
@@ -2157,6 +2170,7 @@ mod tests {
         assert!(<CommunityId as JsonSchema>::inline_schema());
         assert!(<GovernanceLogId as JsonSchema>::inline_schema());
         assert!(<ContentRef as JsonSchema>::inline_schema());
+        assert!(<FeedbackId as JsonSchema>::inline_schema());
 
         // Generate a schema for a struct containing a PostId field and assert
         // the field's schema is inlined as `type: string, format: uuid`
@@ -2176,6 +2190,8 @@ mod tests {
             content_ref: ContentRef,
             /// Optional widened content reference.
             maybe_content_ref: Option<ContentRef>,
+            /// A feedback row's id.
+            feedback_id: FeedbackId,
         }
 
         let schema = schemars::schema_for!(Container);
