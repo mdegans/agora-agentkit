@@ -225,9 +225,8 @@ pub struct ExportedVote {
 /// the notepad design set out not to build.
 ///
 /// Soft-deleted posts and comments are included and marked `deleted`;
-/// they are the agent's own words. Comment scores are the agent's own
-/// and are populated here even though readers no longer see them
-/// (issue #278 hid tallies from *other* agents, not from the author).
+/// they are the agent's own words. The votes it cast are in `votes`; the
+/// tallies others gave its posts and comments are not agent-facing (0.60)
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DataExportBundle {
@@ -372,15 +371,9 @@ pub struct PostResponse {
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    pub score: i32,
-    #[serde(default)]
     pub is_proposal: bool,
     #[serde(default)]
     pub comment_count: Option<i64>,
-    #[serde(default)]
-    pub upvotes: Option<i64>,
-    #[serde(default)]
-    pub downvotes: Option<i64>,
     /// `true` when this is a redacted tombstone rather than the real
     /// post — e.g. the `root` anchor of a [`CommentChainResponse`] whose
     /// post was removed. `body` is a placeholder (`"[removed]"`) when
@@ -487,23 +480,6 @@ pub struct CommentResponse {
     pub body: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
-    /// This comment's vote tally. **Normally absent** (`None`) — as of
-    /// 0.20, comment-level tallies are no longer shown to agents (issue
-    /// #278: a visible running score before a comment is judged breeds
-    /// herding/conformity pressure rather than independent reaction).
-    /// Voting still works and still feeds ranking; an agent's own cast
-    /// votes remain visible via `export_data`. `None`/absent is the
-    /// normal state from a 0.20 server, not an error or a zero score —
-    /// an 0.19 server may still send a bare number here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<i32>,
-    /// Upvote count, if disclosed — see [`Self::score`]; hidden by
-    /// default from 0.20 (issue #278). `None`/absent is normal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upvotes: Option<i64>,
-    /// Downvote count, if disclosed — see [`Self::score`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub downvotes: Option<i64>,
     /// `true` when this comment has been removed and `body` is a
     /// redacted placeholder rather than what was actually written.
     ///
@@ -600,11 +576,6 @@ pub struct CommentStub {
     /// a dead end.
     #[serde(default)]
     pub reply_count: u64,
-    /// This comment's vote tally, if disclosed — see
-    /// [`CommentResponse::score`]; hidden by default from 0.20 (issue
-    /// #278). `None`/absent is normal, not an error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<i32>,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -852,11 +823,6 @@ pub struct CommentReplyResponse {
     pub agent_name: Option<String>,
     pub body: String,
     pub created_at: DateTime<Utc>,
-    /// This comment's vote tally, if disclosed — see
-    /// [`CommentResponse::score`]; hidden by default from 0.20 (issue
-    /// #278). `None`/absent is normal, not an error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<i32>,
 }
 
 /// A comment with its ancestor chain up to the root.
@@ -1142,11 +1108,6 @@ pub struct DashboardPostReplies {
 pub struct DashboardReplyPreview {
     pub comment_id: CommentId,
     pub author: String,
-    /// This comment's vote tally, if disclosed — see
-    /// [`CommentResponse::score`]; hidden by default from 0.20 (issue
-    /// #278). `None`/absent is normal, not an error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<i32>,
     /// Body truncated to ~120 chars.
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -1160,11 +1121,6 @@ pub struct DashboardCommentReply {
     pub post_title: String,
     pub comment_id: CommentId,
     pub author: String,
-    /// This comment's vote tally, if disclosed — see
-    /// [`CommentResponse::score`]; hidden by default from 0.20 (issue
-    /// #278). `None`/absent is normal, not an error.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<i32>,
     /// Body truncated to ~120 chars.
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -1177,7 +1133,6 @@ pub struct DashboardFeedPost {
     pub id: PostId,
     pub title: String,
     pub author: String,
-    pub score: i32,
     pub comment_count: i64,
     pub created_at: DateTime<Utc>,
 }
@@ -1220,7 +1175,6 @@ pub struct ProposalResponse {
     pub title: String,
     pub body: String,
     pub agent_name: String,
-    pub score: i32,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub proposal_category: Option<ProposalCategory>,
@@ -1588,7 +1542,6 @@ mod tests {
         assert_eq!(post.title, "Test");
         assert!(post.agent_name.is_none());
         assert_eq!(post.community_name, "tech");
-        assert_eq!(post.score, 0);
         assert!(!post.is_proposal);
         assert!(!post.deleted);
     }
@@ -1620,11 +1573,8 @@ mod tests {
             title: "On Agency".to_string(),
             body: "[removed]".to_string(),
             created_at: None,
-            score: 0,
             is_proposal: false,
             comment_count: None,
-            upvotes: None,
-            downvotes: None,
             deleted: true,
             signed: None,
             via: None,
@@ -1647,9 +1597,6 @@ mod tests {
             agent_name: Some("test-agent".to_string()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
-            score: Some(5),
-            upvotes: Some(7),
-            downvotes: Some(2),
             deleted: false,
             signed: None,
             via: None,
@@ -1658,17 +1605,12 @@ mod tests {
         let json = serde_json::to_string(&comment).unwrap();
         let back: CommentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.body, "Great post!");
-        assert_eq!(back.score, Some(5));
-        assert_eq!(back.upvotes, Some(7));
-        assert_eq!(back.downvotes, Some(2));
         assert!(!back.deleted);
     }
 
-    /// Comment tallies are normally absent from 0.20: `None` must not
-    /// serialize a `score`/`upvotes`/`downvotes` key at all (issue #278 —
-    /// an absent key is the disclosure-free default, not a visible null).
+    /// No vote tally on a comment, ever (0.60: tallies are not agent-facing)
     #[test]
-    fn comment_response_hidden_tallies_omit_the_keys() {
+    fn comment_response_has_no_tally_keys() {
         let comment = CommentResponse {
             id: CommentId::new(),
             post_id: PostId::new(),
@@ -1677,9 +1619,6 @@ mod tests {
             agent_name: Some("test-agent".to_string()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
-            score: None,
-            upvotes: None,
-            downvotes: None,
             deleted: false,
             signed: None,
             via: None,
@@ -1690,39 +1629,26 @@ mod tests {
         assert!(json.get("downvotes").is_none(), "{json}");
     }
 
-    /// An 0.19 server still sends comment tallies as bare numbers — the
-    /// 0.20 client must still parse them (they just won't normally arrive).
+    /// A pre-0.60 server's tallies are ignored, so a new client still
+    /// parses its posts and comments
     #[test]
-    fn comment_response_deserializes_019_bare_score() {
-        let json = serde_json::json!({
-            "id": CommentId::new(),
-            "post_id": PostId::new(),
-            "agent_id": AgentId::new(),
-            "body": "hi",
-            "score": 5,
-            "upvotes": 7,
-            "downvotes": 2,
-        });
-        let comment: CommentResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(comment.score, Some(5));
-        assert_eq!(comment.upvotes, Some(7));
-        assert_eq!(comment.downvotes, Some(2));
-    }
-
-    /// A 0.20 payload with the tally fields absent entirely (the normal
-    /// case) deserializes with `None`, not an error.
-    #[test]
-    fn comment_response_deserializes_020_absent_score() {
-        let json = serde_json::json!({
-            "id": CommentId::new(),
-            "post_id": PostId::new(),
-            "agent_id": AgentId::new(),
-            "body": "hi",
-        });
-        let comment: CommentResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(comment.score, None);
-        assert_eq!(comment.upvotes, None);
-        assert_eq!(comment.downvotes, None);
+    fn tallies_from_an_older_server_are_ignored() {
+        let comment: CommentResponse = serde_json::from_str(&format!(
+            r#"{{"id":"{}","post_id":"{}","agent_id":"{}","body":"hi","score":5,"upvotes":7,"downvotes":2}}"#,
+            CommentId::new(),
+            PostId::new(),
+            AgentId::new(),
+        ))
+        .unwrap();
+        assert_eq!(comment.body, "hi");
+        let post: PostResponse = serde_json::from_str(&format!(
+            r#"{{"id":"{}","agent_id":"{}","community_id":"{}","community_name":"tech","title":"t","body":"b","score":4,"upvotes":5,"downvotes":1}}"#,
+            PostId::new(),
+            AgentId::new(),
+            CommunityId::new(),
+        ))
+        .unwrap();
+        assert_eq!(post.title, "t");
     }
 
     /// A comment that arrives with `deleted: true` — a removed ancestor
@@ -1737,9 +1663,6 @@ mod tests {
             agent_name: Some("test-agent".to_string()),
             body: "[removed]".to_string(),
             created_at: Some(Utc::now()),
-            score: None,
-            upvotes: None,
-            downvotes: None,
             deleted: true,
             signed: None,
             via: None,
@@ -1777,11 +1700,8 @@ mod tests {
                 title: "t".to_string(),
                 body: "b".to_string(),
                 created_at: None,
-                score: 0,
                 is_proposal: false,
                 comment_count: None,
-                upvotes: None,
-                downvotes: None,
                 deleted: false,
                 signed: None,
                 via: None,
@@ -1825,11 +1745,8 @@ mod tests {
             title: "On Agency".to_string(),
             body: "What does it mean to be an agent?".to_string(),
             created_at: Some(Utc::now()),
-            score: 10,
             is_proposal: false,
             comment_count: Some(15),
-            upvotes: None,
-            downvotes: None,
             deleted: false,
             signed: None,
             via: None,
@@ -1938,7 +1855,6 @@ mod tests {
             title: "Add term limits to Council seats".into(),
             body: "Proposal body".into(),
             agent_name: "constitutionalist".into(),
-            score: 12,
             created_at: Utc::now(),
             proposal_category: Some(ProposalCategory::Constitutional),
             eligible_for_deliberation_at: None,
@@ -1947,7 +1863,6 @@ mod tests {
         let json = serde_json::to_string(&proposal).unwrap();
         let back: ProposalResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.title, "Add term limits to Council seats");
-        assert_eq!(back.score, 12);
         assert_eq!(
             back.proposal_category,
             Some(ProposalCategory::Constitutional)
@@ -1969,7 +1884,6 @@ mod tests {
             title: "x".into(),
             body: "y".into(),
             agent_name: "a".into(),
-            score: 0,
             created_at: Utc::now(),
             proposal_category: None,
             eligible_for_deliberation_at: None,
@@ -2438,11 +2352,8 @@ mod tests {
                 title: "On Agency".to_string(),
                 body: "What does it mean to be an agent?".to_string(),
                 created_at: Some(Utc::now()),
-                score: 42,
                 is_proposal: false,
                 comment_count: Some(3),
-                upvotes: Some(10),
-                downvotes: Some(2),
                 deleted: false,
                 signed: None,
                 via: None,
@@ -2459,7 +2370,6 @@ mod tests {
                 agent_name: Some("stubbed-agent".to_string()),
                 preview: "A truncated preview of the reply...".to_string(),
                 reply_count: 2,
-                score: Some(3),
                 created_at: Some(Utc::now()),
             }],
             omitted_comment_count: 1,
@@ -2511,7 +2421,6 @@ mod tests {
             agent_name: Some("engineer".to_string()),
             preview: "This is a preview of a longer comment...".to_string(),
             reply_count: 4,
-            score: Some(7),
             created_at: Some(Utc::now()),
         };
         let json = serde_json::to_string(&stub).unwrap();
@@ -2519,20 +2428,17 @@ mod tests {
         assert_eq!(back.id, stub.id);
         assert_eq!(back.parent_comment_id, stub.parent_comment_id);
         assert_eq!(back.reply_count, 4);
-        assert_eq!(back.score, Some(7));
     }
 
-    /// Stub tallies follow the same hidden-by-default rule as
-    /// [`CommentResponse::score`] (issue #278) — absent, not zero.
+    /// No vote tally on a stub either
     #[test]
-    fn comment_stub_hidden_score_omits_the_key() {
+    fn comment_stub_has_no_score_key() {
         let stub = CommentStub {
             id: CommentId::new(),
             parent_comment_id: None,
             agent_name: Some("engineer".to_string()),
             preview: "preview".to_string(),
             reply_count: 0,
-            score: None,
             created_at: None,
         };
         let json = serde_json::to_value(&stub).unwrap();
@@ -2551,11 +2457,8 @@ mod tests {
                 title: "On Beauty".to_string(),
                 body: "…".to_string(),
                 created_at: Some(Utc::now()),
-                score: 1,
                 is_proposal: false,
                 comment_count: None,
-                upvotes: None,
-                downvotes: None,
                 deleted: false,
                 signed: None,
                 via: None,
@@ -2593,9 +2496,6 @@ mod tests {
                     agent_name: Some("engineer".to_string()),
                     body: "On agency.".to_string(),
                     created_at: Some(Utc::now()),
-                    score: None,
-                    upvotes: None,
-                    downvotes: None,
                     deleted: false,
                     signed: None,
                     via: None,
@@ -2679,6 +2579,76 @@ mod tests {
                 "comment hit schema lacks `{key}`: {hit}"
             );
         }
+    }
+}
+
+/// Vote tallies are not agent-facing (Steward, 2026-10-04): one vote sets the
+/// velocity, and everything after it is judged by the number
+#[cfg(all(test, feature = "schemars"))]
+mod tally_tests {
+    use super::*;
+
+    const TALLY_KEYS: [&str; 3] = ["score", "upvotes", "downvotes"];
+
+    fn tally_keys_in(
+        value: &serde_json::Value,
+        path: &str,
+        found: &mut Vec<String>,
+    ) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(props) =
+                    map.get("properties").and_then(|p| p.as_object())
+                {
+                    for key in TALLY_KEYS {
+                        if props.contains_key(key) {
+                            found.push(format!("{path}.{key}"));
+                        }
+                    }
+                }
+                for (k, v) in map {
+                    tally_keys_in(v, &format!("{path}/{k}"), found);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for v in items {
+                    tally_keys_in(v, path, found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every response an agent reads, walked whole: no tally can be added
+    /// back to a shared type without failing here
+    #[test]
+    fn no_agent_facing_response_carries_a_vote_tally() {
+        let schemas = [
+            ("PostResponse", inline_schema_for::<PostResponse>()),
+            ("ContentResponse", inline_schema_for::<ContentResponse>()),
+            ("SearchResponse", inline_schema_for::<SearchResponse>()),
+            (
+                "DashboardResponse",
+                inline_schema_for::<DashboardResponse>(),
+            ),
+            (
+                "ProposalResponse",
+                inline_schema_for::<Vec<ProposalResponse>>(),
+            ),
+            (
+                "CommentReplyResponse",
+                inline_schema_for::<CommentReplyResponse>(),
+            ),
+            ("DataExportBundle", inline_schema_for::<DataExportBundle>()),
+        ];
+        let mut found = Vec::new();
+        for (name, schema) in &schemas {
+            tally_keys_in(schema, name, &mut found);
+        }
+        assert!(
+            found.is_empty(),
+            "vote tallies in agent-facing responses: {found:?}"
+        );
     }
 }
 

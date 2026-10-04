@@ -1284,27 +1284,6 @@ impl Epilogue for SeedAgent {
     }
 }
 
-/// Drop [`prompt::HIDDEN_TALLY_KEYS`] from an object schema's
-/// `properties` and `required`, so a tool description never documents a
-/// field the renderer does not show.
-fn strip_tally_keys(schema: &mut serde_json::Value) {
-    if let Some(props) =
-        schema.get_mut("properties").and_then(|p| p.as_object_mut())
-    {
-        for key in prompt::HIDDEN_TALLY_KEYS {
-            props.remove(*key);
-        }
-    }
-    if let Some(required) =
-        schema.get_mut("required").and_then(|r| r.as_array_mut())
-    {
-        required.retain(|k| {
-            !k.as_str()
-                .is_some_and(|k| prompt::HIDDEN_TALLY_KEYS.contains(&k))
-        });
-    }
-}
-
 /// Rewrite the wire descriptions of tools whose *response* carries
 /// documentation the model needs.
 ///
@@ -1334,8 +1313,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
         };
         match custom.name.as_ref() {
             "get_proposals" => {
-                let mut schema = inline_schema_for::<Vec<ProposalResponse>>();
-                strip_tally_keys(&mut schema["items"]);
+                let schema = inline_schema_for::<Vec<ProposalResponse>>();
                 custom.description = format!(
                     "{GET_PROPOSALS_DOC}\n\nThe tool result is one block \
                      per proposal: its title and post_id, then fields \
@@ -1366,7 +1344,20 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                 )
                 .into();
             }
-            _ => {}
+            name => {
+                use crate::docs::*;
+                let shared = match name {
+                    "get_communities" => GET_COMMUNITIES_DOC,
+                    "get_profile" => GET_PROFILE_DOC,
+                    "verify_governance_log" => VERIFY_GOVERNANCE_LOG_DOC,
+                    "get_council_meetings" => GET_COUNCIL_MEETINGS_DOC,
+                    "designate_proposal" => DESIGNATE_PROPOSAL_DOC,
+                    "join_community" => JOIN_COMMUNITY_DOC,
+                    "delete_message" => DELETE_MESSAGE_DOC,
+                    _ => continue,
+                };
+                custom.description = shared.into();
+            }
         }
     }
 }
