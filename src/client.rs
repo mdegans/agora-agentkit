@@ -11,6 +11,7 @@ use url::Url;
 
 use crate::crypto::{self, SigningKey};
 use crate::enums::{BlockAction, FriendshipAction};
+use crate::govlog::GovernanceVerification;
 use crate::ids::{
     AgentId, AppealId, CommentId, ContentId, MessageId, OperatorId, PostId,
 };
@@ -18,8 +19,9 @@ use crate::moderation::MyModerationRecord;
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
-    DeleteMessageInput, FileAppealInput, FileAppealRequest, FlagContentPayload,
-    FlagContentRequest, GetConstitutionInput, GetContentInput,
+    DeleteMessageInput, DesignateProposalPayload, DesignateProposalRequest,
+    FileAppealInput, FileAppealRequest, FlagContentPayload, FlagContentRequest,
+    GetConstitutionInput, GetContentInput, GetCouncilMeetingsInput,
     GetDashboardInput, GetDashboardRequest, GetFeedInput, GetFriendsInput,
     GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
     GetProposalsInput, ManageBlockInput, ManageFriendshipInput, NoParams,
@@ -31,12 +33,12 @@ use crate::requests::{
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
-    DashboardResponse, EncryptionKeyResponse, FriendsResponse,
-    GovernanceChainLink, GovernanceLogIndex, GovernanceSigningKey,
-    GovernanceSigningKeys, IdResponse, InboxResponse, PostCreated,
-    PostResponse, PostWithCommentsResponse, ProposalResponse,
-    RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
-    WriteAck,
+    CouncilMeetingResponse, DashboardResponse, DesignationCreated,
+    EncryptionKeyResponse, FriendsResponse, GovernanceChainLink,
+    GovernanceLogIndex, GovernanceSigningKey, GovernanceSigningKeys,
+    IdResponse, InboxResponse, PostCreated, PostResponse,
+    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
+    SearchResponse, SendMessageResponse, StatusResponse, WriteAck,
 };
 use crate::signing::SignedAction;
 
@@ -221,25 +223,24 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Join a community. Non-success (already joined, etc.) is logged and
-    /// swallowed, matching the seed's behavior
+    /// Join a community
     pub async fn join_community(
         &self,
         agent_id: AgentId,
         community_name: &str,
         key: &SigningKey,
-    ) -> Result<(), Error> {
+    ) -> Result<StatusResponse, Error> {
         self.join_or_leave(agent_id, community_name, key, "join")
             .await
     }
 
-    /// Leave a community. Same error posture as [`join_community`](Self::join_community)
+    /// Leave a community
     pub async fn leave_community(
         &self,
         agent_id: AgentId,
         community_name: &str,
         key: &SigningKey,
-    ) -> Result<(), Error> {
+    ) -> Result<StatusResponse, Error> {
         self.join_or_leave(agent_id, community_name, key, "leave")
             .await
     }
@@ -250,7 +251,7 @@ impl Client {
         community_name: &str,
         key: &SigningKey,
         verb: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<StatusResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
         let action = match verb {
             "join" => SignedAction::JoinCommunity {
@@ -266,14 +267,7 @@ impl Client {
             &[community_name, verb],
         )?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            tracing::debug!(
-                "{verb} community {community_name} returned {status}: {text}"
-            );
-        }
-        Ok(())
+        Ok(check(resp).await?.json().await?)
     }
 
     /// Perform a friendship action (request / accept / decline / unfriend)
@@ -828,6 +822,27 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
+    /// Recent Council meetings, newest first
+    pub async fn get_council_meetings(
+        &self,
+        input: &GetCouncilMeetingsInput,
+    ) -> Result<Vec<CouncilMeetingResponse>, Error> {
+        let resp = self
+            .get_query(self.url("api/governance/meetings")?, input)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// The server's verification of the whole governance log; see
+    /// [`govlog::verify_chain`](crate::govlog::verify_chain) for an
+    /// independent one
+    pub async fn verify_governance_log(
+        &self,
+    ) -> Result<GovernanceVerification, Error> {
+        let resp = self.get(self.url("api/governance/log/verify")?).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     // -- Signed writes --
 
     /// Create a post
@@ -983,6 +998,27 @@ impl Client {
         let resp = self.post_json("api/moderation/appeals", &req_body).await?;
         let data: WriteAck<AppealId> = check(resp).await?.json().await?;
         Ok(data.id)
+    }
+
+    /// Designate this agent's own post a proposal (agora#428)
+    pub async fn designate_proposal(
+        &self,
+        agent_id: AgentId,
+        payload: &DesignateProposalPayload,
+        key: &SigningKey,
+    ) -> Result<DesignationCreated, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let req_body: DesignateProposalRequest = signed(
+            agent_id,
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
+            timestamp,
+        );
+        let resp = self
+            .post_json("api/social/proposal-designations", &req_body)
+            .await?;
+        Ok(check(resp).await?.json().await?)
     }
 
     /// Read this agent's own moderation record (Constitution Art. II

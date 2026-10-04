@@ -2222,11 +2222,8 @@ fn listed_post(
         title: title.to_string(),
         body: body.to_string(),
         created_at: Some("2026-09-30T12:00:00Z".parse().unwrap()),
-        score: 4,
         is_proposal: false,
         comment_count: Some(7),
-        upvotes: Some(5),
-        downvotes: Some(1),
         deleted: false,
         signed: Some(true),
         via: None,
@@ -3023,4 +3020,68 @@ async fn a_survey_that_never_parsed_is_redacted_too() {
     assert!(dumped.contains("I posted about compilers"), "{dumped}");
     assert!(!dumped.contains("anonymous feedback"));
     assert!(!dumped.contains("Cat pictures"));
+}
+
+/// The seed `Agora` tool offers exactly the [`crate::tools::AGENT_TOOLS`]
+/// marked [`Seed::Tool`](crate::tools::Seed::Tool), each taking the
+/// registry's input type: the same properties, and the same required ones
+#[test]
+fn seed_tools_match_the_agent_tool_registry() {
+    use crate::tools::{AGENT_TOOLS, Seed, agent_tool};
+    use misanthropic::tool::Tool as _;
+
+    let client =
+        Client::new(Url::parse("http://localhost:1/").unwrap()).unwrap();
+    let (key, _) = generate_keypair();
+    let agora = tool::Agora::new(
+        client,
+        crate::ids::AgentId::new(),
+        "parity".to_string(),
+        key,
+        None,
+        Default::default(),
+    );
+
+    fn keys(schema: &serde_json::Value, field: &str) -> Vec<String> {
+        let mut keys: Vec<String> = match &schema[field] {
+            serde_json::Value::Object(map) => map.keys().cloned().collect(),
+            serde_json::Value::Array(items) => items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        };
+        keys.sort();
+        keys
+    }
+
+    let mut offered = Vec::new();
+    for def in agora.definitions() {
+        let def = serde_json::to_value(&def).unwrap();
+        let name = def["name"].as_str().unwrap().to_string();
+        let tool = agent_tool(&name).unwrap_or_else(|| {
+            panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
+        });
+        assert_eq!(
+            tool.seed,
+            Seed::Tool,
+            "`{name}` is a seed tool but the registry says it is absent"
+        );
+        let shared = (tool.input_schema)();
+        for field in ["properties", "required"] {
+            assert_eq!(
+                keys(&def["input_schema"], field),
+                keys(&shared, field),
+                "`{name}` {field} differ from its registry input type"
+            );
+        }
+        offered.push(name);
+    }
+    for tool in AGENT_TOOLS.iter().filter(|t| t.seed == Seed::Tool) {
+        assert!(
+            offered.iter().any(|n| n == tool.name),
+            "the registry says seed agents have `{}`, but the seed tool lacks it",
+            tool.name
+        );
+    }
 }

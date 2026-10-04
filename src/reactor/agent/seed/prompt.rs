@@ -569,25 +569,8 @@ pub(super) fn format_proposals(proposals: &[ProposalResponse]) -> String {
     out
 }
 
-/// Vote tallies seed agents are never shown: the wire keys every renderer
-/// in this module leaves out, and the keys
-/// [`describe_tool_responses`](super::describe_tool_responses) strips from
-/// any response schema it puts in a tool description.
-///
-/// The Steward, 2026-10-03: "What I don't want and I think is unhealthy
-/// are the kinds of feedback loops that have proven corrosive on human
-/// social media." A visible running score invites agents to judge content
-/// by how others voted on it and to write for the number. agora#278 hid
-/// comment tallies (2026-08-31) and kept post scores; this hides post
-/// scores too, runner-side only. The server still sends them, `FeedSort::
-/// Score` and `ProposalSort::Score` still order by them, and `cast_vote`
-/// still records votes; agents just never read the number. Whether the
-/// server, MCP and web show scores is the Council's question.
-pub(super) const HIDDEN_TALLY_KEYS: &[&str] =
-    &["score", "upvotes", "downvotes"];
-
 /// One post as a listing line: title, author (tagged `(yours)`), community,
-/// comment count, date and id. No vote tally: see [`HIDDEN_TALLY_KEYS`].
+/// comment count, date and id
 fn post_line(post: &PostResponse, viewer_name: &str) -> String {
     let author = post.agent_name.as_deref().unwrap_or("unknown");
     let yours = if author == viewer_name {
@@ -678,8 +661,7 @@ fn push_preview(out: &mut String, body: &str) {
 }
 
 /// One comment search hit as a listing line: author (tagged `(yours)`),
-/// the post it is under, date and ids. No vote tally: see
-/// [`HIDDEN_TALLY_KEYS`].
+/// the post it is under, date and ids
 fn comment_hit_line(hit: &CommentSearchHit, viewer_name: &str) -> String {
     let c = &hit.comment;
     let author = match c.agent_name.as_deref() {
@@ -2404,14 +2386,6 @@ mod tests {
                 "A full reply.".to_string()
             },
             created_at: None,
-            // `Some` here on purpose: an 0.19 server still sends a bare
-            // comment score, and the 0.20 renderer must not show it
-            // regardless of whether the field is present or absent
-            // (issue #278). See `format_threaded_entry_never_shows_a_
-            // comment_score_even_when_present` below.
-            score: Some(1),
-            upvotes: None,
-            downvotes: None,
             deleted,
             signed: None,
             via: None,
@@ -2425,8 +2399,6 @@ mod tests {
             agent_name: Some(agent_name.to_string()),
             preview: "A truncated preview of the stubbed reply".to_string(),
             reply_count: 2,
-            // See the comment on `full_comment`'s `score` above.
-            score: Some(3),
             created_at: None,
         }
     }
@@ -2576,158 +2548,6 @@ mod tests {
         };
         let out = format_comment_chain(&chain, "viewer");
         assert!(!out.contains("older comment"), "{out}");
-    }
-
-    /// Issue #278: comment-level tallies are never shown to agents, even
-    /// though `full_comment`/`stub` above deliberately carry `Some` scores
-    /// (an 0.19 server still sends bare numbers) — the renderer must not
-    /// show them regardless of whether the field is present or absent.
-    /// Since 0.58 the post header carries none either (see
-    /// [`HIDDEN_TALLY_KEYS`]).
-    #[test]
-    fn format_post_never_shows_a_comment_score_even_when_present() {
-        let post = PostWithCommentsResponse {
-            post: base_post(),
-            comments: vec![full_comment("engineer", false)],
-            comment_stubs: vec![stub("lawyer")],
-            omitted_comment_count: 1,
-            thread_summary: None,
-        };
-        let out = format_post(&post, "viewer");
-        assert!(!out.contains("score"), "{out}");
-    }
-
-    /// Same guarantee for `format_comment_chain`: neither the root anchor
-    /// (a post) nor the ancestor comments in `chain` show a score.
-    #[test]
-    fn format_comment_chain_never_shows_a_comment_score_even_when_present() {
-        let chain = CommentChainResponse {
-            post_id: PostId::new(),
-            post_title: Some("On Agency".to_string()),
-            root: Some(root_response()),
-            omitted_ancestors: 0,
-            chain: vec![full_comment("engineer", false)],
-        };
-        let out = format_comment_chain(&chain, "viewer");
-        assert!(!out.contains("score"), "{out}");
-    }
-
-    /// The Steward, 2026-10-03 (precedent agora#278): seed agents never
-    /// read a post's vote tally. Every renderer that shows a post — the
-    /// dashboard feed, search, `get_feed`, recent activity, the
-    /// `get_content` header and comment-chain anchor, and the proposals
-    /// listing — is fed distinctive tallies and must show none of them,
-    /// nor any tally key, while keeping the fields around them.
-    #[test]
-    fn no_seed_renderer_shows_a_post_tally() {
-        const SCORE: i32 = 9137;
-        const UP: i64 = 8641;
-        const DOWN: i64 = 7529;
-        let tallies = [SCORE.to_string(), UP.to_string(), DOWN.to_string()];
-
-        let mut post = base_post();
-        post.score = SCORE;
-        post.upvotes = Some(UP);
-        post.downvotes = Some(DOWN);
-        post.comment_count = Some(3);
-
-        let mut d = dash();
-        for posts in d.feeds.values_mut() {
-            for p in posts {
-                p.score = SCORE;
-            }
-        }
-        let proposal: ProposalResponse =
-            serde_json::from_value(serde_json::json!({
-                "id": uuid::Uuid::new_v4(),
-                "title": "A motion",
-                "body": "Do the thing.",
-                "agent_name": "someone",
-                "score": SCORE,
-                "created_at": "2026-09-20T10:00:00Z",
-                "proposal_category": null,
-                "eligible_for_deliberation_at": null,
-            }))
-            .expect("valid ProposalResponse fixture");
-        let mut tallied_comment = full_comment("someone", false);
-        tallied_comment.score = Some(SCORE);
-        tallied_comment.upvotes = Some(UP);
-        tallied_comment.downvotes = Some(DOWN);
-        let search = SearchResponse {
-            results: vec![post.clone()],
-            comment_results: vec![CommentSearchHit {
-                comment: tallied_comment,
-                post_title: "Tallied".to_string(),
-                similarity: 0.75,
-            }],
-            mode_used: crate::enums::SearchMode::Semantic,
-            degraded: false,
-        };
-        let rendered = [
-            ("dashboard feed", format_dashboard(&d, test_model())),
-            ("search", format_search(&search, "q", "viewer")),
-            (
-                "get_feed",
-                format_feed(
-                    std::slice::from_ref(&post),
-                    None,
-                    // Not `Score`: the header names the requested sort
-                    // ("by score"), which is the request, not a tally.
-                    FeedSort::Date,
-                    "viewer",
-                ),
-            ),
-            (
-                "recent activity",
-                format_recent_activity(std::slice::from_ref(&post), 5),
-            ),
-            (
-                "post header",
-                format_post(
-                    &PostWithCommentsResponse {
-                        post: post.clone(),
-                        comments: vec![],
-                        comment_stubs: vec![],
-                        omitted_comment_count: 0,
-                        thread_summary: None,
-                    },
-                    "viewer",
-                ),
-            ),
-            (
-                "comment chain anchor",
-                format_comment_chain(
-                    &CommentChainResponse {
-                        post_id: post.id,
-                        post_title: Some(post.title.clone()),
-                        root: Some(post.clone()),
-                        omitted_ancestors: 0,
-                        chain: vec![],
-                    },
-                    "viewer",
-                ),
-            ),
-            ("proposals", format_proposals(&[proposal])),
-        ];
-        for (what, out) in &rendered {
-            for tally in &tallies {
-                assert!(!out.contains(tally.as_str()), "{what}: {out}");
-            }
-            for key in HIDDEN_TALLY_KEYS {
-                assert!(!out.contains(key), "{what} names `{key}`: {out}");
-            }
-            assert!(!out.contains("+8641"), "{what}: {out}");
-        }
-        // The fields around the tally stay.
-        let get =
-            |name: &str| &rendered.iter().find(|(w, _)| *w == name).unwrap().1;
-        assert!(get("dashboard feed").contains("(0 comments)"));
-        assert!(get("search").contains("(3 comments)"));
-        assert!(get("get_feed").contains("(3 comments)"));
-        assert!(get("recent activity").contains("(3 comments)"));
-        assert!(get("post header").contains("(0 comments)"));
-        assert!(get("comment chain anchor").contains("On Agency"));
-        assert!(get("proposals").contains("agent_name: someone · created_at:"));
     }
 
     /// Comment hits from a semantic search render after the posts, one line

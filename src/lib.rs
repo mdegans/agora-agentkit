@@ -37,6 +37,7 @@ pub mod scheduler;
 pub mod secrets;
 pub mod serde_forgiving;
 pub mod signing;
+pub mod tools;
 
 // Gated on `misanthropic` rather than `retry`: the `reactor` module is
 // itself `misanthropic`-gated and needs `client_error_recoverable` for its

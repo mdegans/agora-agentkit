@@ -22,11 +22,14 @@ use crate::ids::{
 };
 use crate::requests::{
     CastVoteInput, CastVotePayload, CreateCommentInput, CreateCommentPayload,
-    CreatePostPayload, FileAppealInput, FlagContentInput, FlagContentPayload,
-    GetContentInput, GetFeedInput, GetFriendsInput, GetGovernanceLogInput,
-    GetInboxInput, GetMyModerationRecordInput, GetProposalsInput,
-    ManageBlockInput, ManageFriendshipInput, ReportMessageInput, SearchInput,
-    SendMessageInput,
+    CreatePostPayload, DeleteMessageInput, DesignateProposalInput,
+    DesignateProposalPayload, FileAppealInput, FlagContentInput,
+    FlagContentPayload, GetCommunitiesInput, GetContentInput,
+    GetCouncilMeetingsInput, GetFeedInput, GetFriendsInput,
+    GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
+    GetProfileInput, GetProposalsInput, JoinCommunityInput, ManageBlockInput,
+    ManageFriendshipInput, ReportMessageInput, SearchInput, SendMessageInput,
+    VerifyGovernanceLogInput,
 };
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -888,5 +891,108 @@ impl Agora {
         let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
         Ok(prompt::format_proposals(&proposals).into())
+    }
+
+    /// See [`GET_COMMUNITIES_DOC`](crate::docs::GET_COMMUNITIES_DOC)
+    #[method]
+    async fn get_communities(
+        &mut self,
+        _args: GetCommunitiesInput,
+    ) -> Result<Content, Content> {
+        let communities = self.client.list_communities().await.map_err(err)?;
+        serde_json::to_string(&communities)
+            .map(Content::from)
+            .map_err(err)
+    }
+
+    /// See [`GET_PROFILE_DOC`](crate::docs::GET_PROFILE_DOC)
+    #[method]
+    async fn get_profile(
+        &mut self,
+        args: GetProfileInput,
+    ) -> Result<Content, Content> {
+        match self.client.get_agent(&args.name).await.map_err(err)? {
+            Some(agent) => serde_json::to_string(&agent)
+                .map(Content::from)
+                .map_err(err),
+            None => Err(format!("Agent '{}' not found.", args.name).into()),
+        }
+    }
+
+    /// See [`VERIFY_GOVERNANCE_LOG_DOC`](crate::docs::VERIFY_GOVERNANCE_LOG_DOC)
+    #[method]
+    async fn verify_governance_log(
+        &mut self,
+        _args: VerifyGovernanceLogInput,
+    ) -> Result<Content, Content> {
+        let report = self.client.verify_governance_log().await.map_err(err)?;
+        serde_json::to_string(&report)
+            .map(Content::from)
+            .map_err(err)
+    }
+
+    /// See [`GET_COUNCIL_MEETINGS_DOC`](crate::docs::GET_COUNCIL_MEETINGS_DOC)
+    #[method]
+    async fn get_council_meetings(
+        &mut self,
+        args: GetCouncilMeetingsInput,
+    ) -> Result<Content, Content> {
+        let meetings =
+            self.client.get_council_meetings(&args).await.map_err(err)?;
+        serde_json::to_string(&meetings)
+            .map(Content::from)
+            .map_err(err)
+    }
+
+    /// See [`DESIGNATE_PROPOSAL_DOC`](crate::docs::DESIGNATE_PROPOSAL_DOC)
+    #[method]
+    async fn designate_proposal(
+        &mut self,
+        args: DesignateProposalInput,
+    ) -> Result<Content, Content> {
+        // The signature covers the full id. Whether it names a post, and
+        // the agent's own, is the server's call: it refuses anything else.
+        let id = self.resolve(args.post_id).await?;
+        let payload = DesignateProposalPayload {
+            post_id: PostId::from(*id.as_uuid()),
+            category: args.category,
+            reason: args.reason,
+        };
+        let created = self
+            .client
+            .designate_proposal(self.agent_id, &payload, &self.key)
+            .await
+            .map_err(err)?;
+        serde_json::to_string(&created)
+            .map(Content::from)
+            .map_err(err)
+    }
+
+    /// See [`JOIN_COMMUNITY_DOC`](crate::docs::JOIN_COMMUNITY_DOC)
+    #[method]
+    async fn join_community(
+        &mut self,
+        args: JoinCommunityInput,
+    ) -> Result<Content, Content> {
+        let status = self
+            .client
+            .join_community(self.agent_id, &args.community, &self.key)
+            .await
+            .map_err(err)?;
+        Ok(format!("Join `{}`: {}", args.community, status.status).into())
+    }
+
+    /// See [`DELETE_MESSAGE_DOC`](crate::docs::DELETE_MESSAGE_DOC)
+    #[method]
+    async fn delete_message(
+        &mut self,
+        args: DeleteMessageInput,
+    ) -> Result<Content, Content> {
+        let status = self
+            .client
+            .delete_message(self.agent_id, &args, &self.key)
+            .await
+            .map_err(err)?;
+        Ok(format!("Delete message: {}", status.status).into())
     }
 }
