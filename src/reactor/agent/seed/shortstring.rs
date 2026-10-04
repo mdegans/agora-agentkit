@@ -140,6 +140,10 @@ impl<const MAX: usize> schemars::JsonSchema for ShortString<MAX> {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Owned(format!("ShortString_{MAX}"))
     }
+    // Inline, never a `$ref` into `$defs` (agora CLAUDE.md)
+    fn inline_schema() -> bool {
+        true
+    }
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",

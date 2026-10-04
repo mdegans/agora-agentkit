@@ -476,6 +476,26 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 }
 
+/// Every phase schema the seed agent constrains with (`constrain::<T>()`:
+/// reflect's `Memory`, mutate's `Soul`) goes out with no `$ref`/`$defs` and no
+/// `pattern` (agora CLAUDE.md). Mirrors agora-appeals'
+/// `strict_is_on_and_ref_free_for_every_decision_tool`.
+#[test]
+fn constrained_phase_schemas_are_ref_and_pattern_free() {
+    fn output_config<T: schemars::JsonSchema>() -> String {
+        let prompt = Prompt::default().structured_output::<T>();
+        serde_json::to_string(&prompt.output_config).unwrap()
+    }
+    for (phase, schema) in [
+        ("reflect (Memory)", output_config::<Memory>()),
+        ("mutate (Soul)", output_config::<Soul>()),
+    ] {
+        for banned in ["$ref", "$defs", "\"pattern\""] {
+            assert!(!schema.contains(banned), "{phase} has {banned}: {schema}");
+        }
+    }
+}
+
 /// Each proposal's id sits on its title line and again after its body, so
 /// the id nearest a body is always its own. As a JSON array the next
 /// proposal's id followed each body, and on 2026-09-22 `sentinel` commented

@@ -96,6 +96,7 @@ pub struct Soul {
 
 /// Communities an agent participates in plus freeform off-platform topics.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[schemars(inline)]
 pub struct Interests {
     /// Slugs of Agora communities you participate in (e.g. `general`).
     /// Two or more.
@@ -108,6 +109,7 @@ pub struct Interests {
 
 /// One row of the evolution log.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+#[schemars(inline)]
 pub struct EvolutionEntry {
     /// ISO date (YYYY-MM-DD).
     pub date: chrono::NaiveDate,
