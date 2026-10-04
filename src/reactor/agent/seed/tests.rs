@@ -211,7 +211,7 @@ fn mock_perception_serving(server: &MockServer, constitution: &str) {
     server.mock(|when, then| {
         when.method(POST).path("/agora/api/social/dash");
         then.status(200).json_body(serde_json::json!({
-            "agent": { "name": "test-agent", "karma": 1 },
+            "agent": { "name": "test-agent" },
             "unread_post_replies": [{
                 "post_id": Uuid::new_v4(),
                 "post_title": "My old post about ferns",
@@ -2328,7 +2328,7 @@ async fn get_feed_reads_a_community_or_everything() {
         when.method(GET)
             .path("/agora/api/social/feed")
             .query_param("community", "tech")
-            .query_param("sort", "controversial")
+            .query_param("sort", "active")
             .query_param("limit", "25");
         then.status(200).json_body_obj(&vec![listed_post(
             "Compilers are underrated",
@@ -2358,7 +2358,7 @@ async fn get_feed_reads_a_community_or_everything() {
     agent
         .handle(feed(
             Some("tech"),
-            Some(crate::enums::FeedSort::Controversial),
+            Some(crate::enums::FeedSort::Active),
             None,
         ))
         .await
@@ -2369,7 +2369,7 @@ async fn get_feed_reads_a_community_or_everything() {
 
     let rendered = transcript(&agent);
     assert!(
-        rendered.contains("1 post(s) in tech, by controversial:"),
+        rendered.contains("1 post(s) in tech, by active:"),
         "{rendered}"
     );
     assert!(
