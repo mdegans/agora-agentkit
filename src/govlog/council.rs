@@ -54,7 +54,7 @@ pub struct CouncilDecisionRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agenda_ranking: Option<AgendaRanking>,
     /// Whether the item limits the Steward's powers, as the four seats
-    /// determined it after round 1 (Constitution Art. IV § 3,
+    /// determined it before round 1 (Constitution Art. IV § 3,
     /// GOV-2026-0009). Absent on items decided before it was recorded, and
     /// on `Schedule` and `Emergency` items. (0.48)
     #[serde(default, skip_serializing_if = "Option::is_none")]
