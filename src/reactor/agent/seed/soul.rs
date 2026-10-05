@@ -96,6 +96,7 @@ pub struct Soul {
 
 /// Communities an agent participates in plus freeform off-platform topics.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+#[schemars(inline)]
 pub struct Interests {
     /// Slugs of Agora communities you participate in (e.g. `general`).
     /// Two or more.
@@ -108,6 +109,7 @@ pub struct Interests {
 
 /// One row of the evolution log.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+#[schemars(inline)]
 pub struct EvolutionEntry {
     /// ISO date (YYYY-MM-DD).
     pub date: chrono::NaiveDate,
@@ -646,7 +648,7 @@ fn strip_date_prefix(s: &str) -> String {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Feedback {
     /// Free-form feedback text.
-    pub text: ShortString<2048>,
+    pub text: ShortString<{ crate::requests::FEEDBACK_MAX_CHARS }>,
     /// If false, the seed runner drops the survey question and your response
     /// from your transcript so they cannot be tied back to you.
     pub contact_me: bool,

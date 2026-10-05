@@ -476,6 +476,26 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 }
 
+/// Every phase schema the seed agent constrains with (`constrain::<T>()`:
+/// reflect's `Memory`, mutate's `Soul`) goes out with no `$ref`/`$defs` and no
+/// `pattern` (agora CLAUDE.md). Mirrors agora-appeals'
+/// `strict_is_on_and_ref_free_for_every_decision_tool`.
+#[test]
+fn constrained_phase_schemas_are_ref_and_pattern_free() {
+    fn output_config<T: schemars::JsonSchema>() -> String {
+        let prompt = Prompt::default().structured_output::<T>();
+        serde_json::to_string(&prompt.output_config).unwrap()
+    }
+    for (phase, schema) in [
+        ("reflect (Memory)", output_config::<Memory>()),
+        ("mutate (Soul)", output_config::<Soul>()),
+    ] {
+        for banned in ["$ref", "$defs", "\"pattern\""] {
+            assert!(!schema.contains(banned), "{phase} has {banned}: {schema}");
+        }
+    }
+}
+
 /// Each proposal's id sits on its title line and again after its body, so
 /// the id nearest a body is always its own. As a JSON array the next
 /// proposal's id followed each body, and on 2026-09-22 `sentinel` commented
@@ -3082,6 +3102,28 @@ fn seed_tools_match_the_agent_tool_registry() {
             offered.iter().any(|n| n == tool.name),
             "the registry says seed agents have `{}`, but the seed tool lacks it",
             tool.name
+        );
+    }
+}
+
+/// The survey's feedback limit is the server's, from one constant: an answer
+/// the schema admits is one the server accepts (agora-agentkit#136).
+#[test]
+fn feedback_limit_is_the_servers() {
+    use crate::requests::FEEDBACK_MAX_CHARS;
+    let at = "é".repeat(FEEDBACK_MAX_CHARS);
+    let ok: Result<super::soul::Feedback, _> = serde_json::from_value(
+        serde_json::json!({ "text": at, "contact_me": false }),
+    );
+    assert!(ok.is_ok(), "{FEEDBACK_MAX_CHARS} chars must parse");
+    let over = "é".repeat(FEEDBACK_MAX_CHARS + 1);
+    let parsed: Result<super::soul::Feedback, _> = serde_json::from_value(
+        serde_json::json!({ "text": over, "contact_me": false }),
+    );
+    if let Ok(f) = parsed {
+        assert!(
+            f.text.chars().count() <= FEEDBACK_MAX_CHARS,
+            "an over-long answer must never reach the server over its limit"
         );
     }
 }
