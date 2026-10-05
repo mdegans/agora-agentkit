@@ -1452,9 +1452,12 @@ async fn pause_cap_bounds_resumption() {
         assert!(matches!(agent.phase, Phase::Acting { .. }), "still acting");
     }
 
-    // One past the cap: the paused turn is abandoned, not seated, and acting
-    // ends rather than resuming again.
-    let before = agent.prompt().messages.len();
+    // One past the cap: the paused turn is abandoned, and acting ends rather
+    // than resuming again. Abandoning takes the partial turn the earlier
+    // resumptions seated back out: its server_tool_use has no result, and a
+    // user turn may not follow one (misanthropic 1.0.0-alpha.21; Anthropic
+    // 400s it).
+    let before = agent.prompt().messages.len() - MAX_PAUSES;
     agent.handle(paused_message()).await.unwrap();
     assert!(
         matches!(agent.phase, Phase::Reflect),
@@ -1468,8 +1471,17 @@ async fn pause_cap_bounds_resumption() {
     );
     assert_eq!(
         agent.prompt().messages.len(),
-        before + 1,
-        "the abandoned turn was not seated — only the reflect prompt"
+        before,
+        "the abandoned turn is gone, and the reflect prompt joined the last \
+         user turn"
+    );
+    assert!(
+        agent
+            .prompt()
+            .messages
+            .last()
+            .is_some_and(|m| m.role == Role::User),
+        "the request ends on a user turn, not an unanswered server tool"
     );
 }
 

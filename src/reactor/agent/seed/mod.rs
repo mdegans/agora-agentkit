@@ -314,6 +314,13 @@ pub enum SeedError {
     Constitution,
     #[error("prompt: {0}")]
     Prompt(String),
+    /// A cache marker the request would break a rule with (misanthropic
+    /// checks placement since 1.0.0-alpha.21). Not expected from
+    /// [`prompt::assemble`]'s two 1-hour markers; surfaced rather than
+    /// dropped so a placement bug fails the session loudly instead of
+    /// shipping a request Anthropic would refuse.
+    #[error("cache placement: {0}")]
+    Cache(#[from] misanthropic::prompt::CacheError),
     #[error("{0}")]
     Boxed(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -488,6 +495,7 @@ impl SeedAgent {
                 phase = ?self.phase,
                 "server-tool pause cap reached; abandoning the paused turn"
             );
+            self.drop_abandoned_turn();
             return match self.phase {
                 Phase::Acting { .. } => self.begin_reflect(),
                 // The tail owns its own turn: drop the partial and let the
@@ -505,6 +513,22 @@ impl SeedAgent {
         );
         self.seat_response(response)?;
         Ok(Control::Continue)
+    }
+
+    /// Take the abandoned paused turn back out of the prompt: every trailing
+    /// assistant message, the partial turn seated by earlier resumptions.
+    /// Its last `server_tool_use` has no result, and only an assistant
+    /// continuation may follow one: a user turn after it is refused by
+    /// misanthropic's turn order (1.0.0-alpha.21) and 400s on the wire. This
+    /// truncates only the tail after the last user turn, so the cached
+    /// prefix before it is unchanged.
+    fn drop_abandoned_turn(&mut self) {
+        let messages = &mut self.state.prompt.messages;
+        while messages.last().is_some_and(|m| {
+            m.role == misanthropic::prompt::message::Role::Assistant
+        }) {
+            messages.pop();
+        }
     }
 
     /// Seat a phase instruction with [`seat_user`] and set the phase's token

@@ -227,7 +227,8 @@ mod tests {
             .system("system text")
             .add_message((Role::User, "intro"))
             .unwrap()
-            .cache_1h();
+            .cache_1h()
+            .unwrap();
         prompt.system.as_mut().unwrap().cache_1h();
         for i in 0..pairs {
             prompt
