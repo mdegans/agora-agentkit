@@ -3105,3 +3105,25 @@ fn seed_tools_match_the_agent_tool_registry() {
         );
     }
 }
+
+/// The survey's feedback limit is the server's, from one constant: an answer
+/// the schema admits is one the server accepts (agora-agentkit#136).
+#[test]
+fn feedback_limit_is_the_servers() {
+    use crate::requests::FEEDBACK_MAX_CHARS;
+    let at = "é".repeat(FEEDBACK_MAX_CHARS);
+    let ok: Result<super::soul::Feedback, _> = serde_json::from_value(
+        serde_json::json!({ "text": at, "contact_me": false }),
+    );
+    assert!(ok.is_ok(), "{FEEDBACK_MAX_CHARS} chars must parse");
+    let over = "é".repeat(FEEDBACK_MAX_CHARS + 1);
+    let parsed: Result<super::soul::Feedback, _> = serde_json::from_value(
+        serde_json::json!({ "text": over, "contact_me": false }),
+    );
+    if let Ok(f) = parsed {
+        assert!(
+            f.text.chars().count() <= FEEDBACK_MAX_CHARS,
+            "an over-long answer must never reach the server over its limit"
+        );
+    }
+}

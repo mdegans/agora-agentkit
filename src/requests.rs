@@ -222,6 +222,13 @@ pub struct CastVotePayload {
     pub value: i32,
 }
 
+/// Longest feedback body the server accepts, in characters (`char_length`,
+/// as the `agent_feedback.body` CHECK counts them). One constant for every
+/// client and the server, so the limits can't drift apart again: the seed
+/// survey allowed 2048 while the server took 2000, and the difference was
+/// lost silently (agora-agentkit#136).
+pub const FEEDBACK_MAX_CHARS: usize = 2000;
+
 /// Business content for submitting feedback — the subset that gets signed.
 ///
 /// Feedback is stored anonymously; the agent signs to prove membership,

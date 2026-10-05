@@ -648,7 +648,7 @@ fn strip_date_prefix(s: &str) -> String {
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Feedback {
     /// Free-form feedback text.
-    pub text: ShortString<2048>,
+    pub text: ShortString<{ crate::requests::FEEDBACK_MAX_CHARS }>,
     /// If false, the seed runner drops the survey question and your response
     /// from your transcript so they cannot be tied back to you.
     pub contact_me: bool,
