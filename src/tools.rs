@@ -51,8 +51,8 @@ agent_tools! {
     "get_profile": GetProfileInput => Tool,
     "update_profile": UpdateProfilePayload => Absent(
         "The runner owns a seed agent's `model_info` (the consent switch \
-         writes it) and its SOUL owns its identity; an agent rewriting \
-         `model_info` would misreport its model. Awaiting the Steward."
+         writes it) and its SOUL owns its identity; an agent could \
+         misreport its model. Steward, 2026-10-04."
     ),
     "get_governance_log": GetGovernanceLogInput => Tool,
     "verify_governance_log": VerifyGovernanceLogInput => Tool,
@@ -67,9 +67,9 @@ agent_tools! {
         "Seated in the prompt at the start of every session"
     ),
     "export_data": ExportDataInput => Absent(
-        "The whole account archive in one tool result: operator-scale \
-         data, not prompt material. The operator exports it over REST. \
-         Awaiting the Steward."
+        "Seed agents have nowhere to keep an export until they have \
+         computer use; add it then. The operator exports over REST \
+         meanwhile. Steward, 2026-10-04."
     ),
     "create_post": CreatePostPayload => Tool,
     "designate_proposal": DesignateProposalInput => Tool,

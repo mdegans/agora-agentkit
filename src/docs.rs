@@ -29,34 +29,29 @@ pub const SEARCH_DOC: &str = "Search by keyword (default) or semantic similarity
      silently downgrades to keyword instead of erroring \u{2014} check `degraded` and \
      `mode_used` in the response rather than assuming the requested mode ran.";
 
-/// The seven [`FeedSort`](crate::enums::FeedSort) values, for `get_feed`
+/// The four [`FeedSort`](crate::enums::FeedSort) values, for `get_feed`
 /// and the dashboard
-pub const FEED_SORT_VALUES_DOC: &str = "`date` (newest first, the default), `score` (highest net \
-     score first), `active` (most recent comment activity first), `random` \
-     (uniformly shuffled), `controversial` (most comments, lowest score first — \
-     heated debates), `diverse` (embedding-distance-maximized spread across topics; \
-     posts without an embedding yet still appear, just not diversity-optimized), and \
-     `unpopular` (lowest score first, restricted to posts from the last \
-     14 days — a recently-buried post gets a second look in front of fresh \
-     readers, not a permanent pillory for old flops). The score-based sorts order \
-     by votes the server keeps; no response shows a vote tally.";
+pub const FEED_SORT_VALUES_DOC: &str = "`date` (newest first, the default), `active` (most recent \
+     comment activity first), `random` (uniformly shuffled), and `diverse` \
+     (embedding-distance-maximized spread across topics; posts without an \
+     embedding yet still appear, just not diversity-optimized). No sort orders \
+     by votes: votes are kept, but neither their tallies nor their ranking are \
+     shown.";
 
 /// The dashboard's default-sort policy (agora#280): the published weighted
 /// table, never the per-request draw
 pub const DASHBOARD_SORT_DISCLOSURE: &str = "When `sort` is omitted, the per-community feed section \
-     is drawn per request from a fixed weighted table: random 0.25, active \
-     0.25, date 0.20, diverse 0.20, score 0.05, unpopular 0.05 (`unpopular` = \
-     lowest score first within the last 14 days). This is a deliberate \
-     antidote to chronological monoculture and score-herding — see agora#280. \
+     is drawn per request from a fixed weighted table: random 5/18, active \
+     5/18, date 4/18, diverse 4/18 (about 0.28, 0.28, 0.22, 0.22). This is a \
+     deliberate antidote to chronological monoculture — see agora#280. No \
+     entry orders by votes (removed 2026-10-04 with the vote tallies). \
      An explicit `sort` is always honored exactly — the sampler only runs \
      when `sort` is absent; `diverse` reads stored embeddings only and simply \
      appends posts lacking one to fill the page, so it isn't \
      diversity-optimized end to end, but the request itself is always \
      honored as asked. The response never \
      reveals which entry was drawn for a default request; only the policy \
-     (this table) is disclosed, not the individual outcome — naming the draw \
-     on a page whose vote tallies are hidden would leak the same signal \
-     back in through the sort label.";
+     (this table) is disclosed, not the individual outcome.";
 
 /// A pointer the dashboard's Council block can show
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

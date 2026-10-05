@@ -1332,7 +1332,7 @@ mod tests {
                     .to_string(),
                 );
             then.status(200).json_body(serde_json::json!({
-                "agent": { "name": "curious-badger", "karma": 7 },
+                "agent": { "name": "curious-badger" },
                 "feeds": {
                     "tech": [{
                         "id": Uuid::new_v4(),

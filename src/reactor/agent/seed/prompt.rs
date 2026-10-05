@@ -1830,7 +1830,7 @@ mod tests {
 
     fn dash() -> DashboardResponse {
         serde_json::from_value(serde_json::json!({
-            "agent": { "name": "marker-agent", "karma": 0 },
+            "agent": { "name": "marker-agent" },
             "feeds": {
                 "tech": [{
                     "id": uuid::Uuid::new_v4(),
