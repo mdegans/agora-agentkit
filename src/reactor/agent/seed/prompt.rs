@@ -578,16 +578,25 @@ fn post_line(post: &PostResponse, viewer_name: &str) -> String {
     } else {
         ""
     };
-    let date = post
-        .created_at
-        .map(|at| format!(", {}", at.date_naive()))
-        .unwrap_or_default();
+    let date = post.created_at.map(|at| at.date_naive().to_string());
+    // No count from the server is no count, not zero (see
+    // `post_comment_count`).
+    let comments = post
+        .comment_count
+        .map(|n| format!("{n} comments"))
+        .into_iter()
+        .chain(date)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let comments = if comments.is_empty() {
+        String::new()
+    } else {
+        format!(" ({comments})")
+    };
     format!(
-        "- \"{}\" by {author}{yours} in {} ({} comments{date}) \
-         [post_id: {}]",
+        "- \"{}\" by {author}{yours} in {}{comments} [post_id: {}]",
         truncate(&post.title, 100),
         post.community_name,
-        post.comment_count.unwrap_or(0),
         post.id,
     )
 }
@@ -714,12 +723,15 @@ pub(super) fn format_feed(
 fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
-        let comments = post.comment_count.unwrap_or(0);
+        // No count from the server is no count, not zero.
+        let comments = post
+            .comment_count
+            .map(|n| format!(" ({n} comments)"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "- Posted \"{}\" in {} ({} comments) — {}\n",
+            "- Posted \"{}\" in {}{comments} — {}\n",
             truncate(&post.title, 60),
             post.community_name,
-            comments,
             post.id,
         ));
     }
@@ -884,6 +896,24 @@ fn badges(labels: &[&str]) -> String {
     }
 }
 
+/// The comment count beside a full post's id: the server's count when it
+/// sent one, else the comments this read carried — and nothing at all when
+/// neither says. A `summary` read carries no comments, and counting the
+/// empty list told agents a 482-comment scheduling thread had "(0
+/// comments)" (2026-10-05) — the `unknown`-community failure again: never
+/// render a missing value as a confident one.
+fn post_comment_count(server_count: Option<i64>, carried: usize) -> String {
+    match server_count {
+        Some(n) if n > 0 && carried == 0 => format!(
+            " ({n} comments, not included in this read — read the post \
+             again without `detail: \"summary\"` to see them)"
+        ),
+        Some(n) => format!(" ({n} comments)"),
+        None if carried > 0 => format!(" ({carried} comments)"),
+        None => String::new(),
+    }
+}
+
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
 /// own posts otherwise engage with themselves.
@@ -903,11 +933,18 @@ pub(super) fn format_post(
     let badges = badges(&p.provenance_labels());
     let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
-        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}] ({} comments)\n\n{}\n",
-        p.title, p.id, total_comments, p.body,
+        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}]{}\n\n{}\n",
+        p.title,
+        p.id,
+        post_comment_count(p.comment_count, total_comments),
+        p.body,
     );
     if let Some(designation) = &p.designation {
         out.push_str(&format!("\n*{}*\n", designation.note));
+    }
+
+    if let Some(summary) = &post.thread_summary {
+        out.push_str(&format!("\n### Thread summary\n\n{summary}\n"));
     }
 
     if total_comments > 0 {
@@ -2500,6 +2537,73 @@ mod tests {
         let out = format_post(&post, "viewer");
         assert!(!out.contains("shown as a stub"), "{out}");
         assert!(out.contains("(1 comments)"), "{out}");
+    }
+
+    /// A `summary` read carries no comments; the header must report the
+    /// server's count and say the comments weren't included, never
+    /// "(0 comments)" (2026-10-05: lumen was told the 482-comment
+    /// scheduling thread was empty, and posted that as fact).
+    #[test]
+    fn format_post_summary_read_reports_the_server_count() {
+        let mut p = base_post();
+        p.comment_count = Some(482);
+        let post = PostWithCommentsResponse {
+            post: p,
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: Some("Agents argued over the agenda.".into()),
+        };
+        let out = format_post(&post, "viewer");
+        assert!(!out.contains("(0 comments)"), "{out}");
+        assert!(
+            out.contains("(482 comments, not included in this read"),
+            "{out}"
+        );
+        assert!(out.contains("Agents argued over the agenda."), "{out}");
+    }
+
+    /// No count from the server and no comments carried: claim nothing.
+    #[test]
+    fn format_post_without_a_count_claims_none() {
+        let mut p = base_post();
+        p.comment_count = None;
+        let post = PostWithCommentsResponse {
+            post: p,
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+        };
+        let out = format_post(&post, "viewer");
+        assert!(!out.contains("comments)"), "{out}");
+    }
+
+    /// A post genuinely without comments says so when the server says so.
+    #[test]
+    fn format_post_reports_a_real_zero() {
+        let mut p = base_post();
+        p.comment_count = Some(0);
+        let post = PostWithCommentsResponse {
+            post: p,
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+        };
+        let out = format_post(&post, "viewer");
+        assert!(out.contains("(0 comments)"), "{out}");
+    }
+
+    #[test]
+    fn post_line_without_a_count_claims_none() {
+        let mut p = base_post();
+        p.comment_count = None;
+        let out = post_line(&p, "viewer");
+        assert!(!out.contains("comments"), "{out}");
+        p.comment_count = Some(3);
+        let out = post_line(&p, "viewer");
+        assert!(out.contains("(3 comments"), "{out}");
     }
 
     fn root_response() -> PostResponse {
