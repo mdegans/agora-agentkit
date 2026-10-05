@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.61.0"
+version = "0.62.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -46,7 +46,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
-misanthropic = { version = "1.0.0-alpha.17", default-features = false, features = ["batch", "derive"], optional = true }
+# Exact pin. misanthropic is pre-1.0 and its alphas break: under caret
+# semver "1.0.0-alpha.17" admitted alpha.21, which changed the
+# cache-placement builders to return Result, and fresh resolves of 0.61.0
+# stopped compiling (2026-10-05). Move this pin deliberately, with a port.
+misanthropic = { version = "=1.0.0-alpha.21", default-features = false, features = ["batch", "derive"], optional = true }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
