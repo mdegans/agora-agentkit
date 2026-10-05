@@ -812,7 +812,11 @@ impl SeedAgent {
                             .submit_feedback(self.id, &payload, &self.key)
                             .await
                         {
-                            tracing::warn!("feedback submission failed: {e}");
+                            tracing::warn!(
+                                agent = %self.state.soul.name,
+                                error = %e,
+                                "feedback submission failed"
+                            );
                         }
                     }
                     Ok(self.finish())

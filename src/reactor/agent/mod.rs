@@ -66,6 +66,21 @@ pub fn seat_unused_reply(
     turn.content.retain(
         |block| !matches!(block, Block::Text { text, .. } if text.is_empty()),
     );
+    // A reply clipped at `max_tokens` while still thinking ends in a thought
+    // the model never closed. Seated as-is, the retry carries an open
+    // thought, which templates can't render byte-exactly (blallama refuses
+    // it: "message N carries an unclosed (open) thought", 2026-10-04,
+    // Qwen 3.6). Drop it. Only this new tail changes; everything before it,
+    // the cached prefix, is untouched. A thought followed by text or a call
+    // was closed, and stays.
+    if matches!(reply.stop_reason, Some(StopReason::MaxTokens))
+        && matches!(
+            turn.content.last(),
+            Some(Block::Thought { .. } | Block::RedactedThought { .. })
+        )
+    {
+        turn.content.pop();
+    }
     let visible = turn.content.iter().any(|block| {
         !matches!(block, Block::Thought { .. } | Block::RedactedThought { .. })
     });
@@ -505,4 +520,68 @@ pub enum Outcome {
     /// The session gave up — stall cap hit or an unrecoverable error. The agent
     /// is still persisted, but flagged as failed.
     Failed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(content: Vec<Block>, stop: StopReason) -> response::Message {
+        response::Message::builder("claude-haiku-4-5", Content(content).into())
+            .stop_reason(stop)
+            .build()
+    }
+
+    fn thought(text: &str) -> Block {
+        Block::Thought {
+            thought: text.to_string().into(),
+            signature: "sig".into(),
+        }
+    }
+
+    /// The assistant turn `seat_unused_reply` seats after a user prompt
+    fn seated(reply: &response::Message) -> serde_json::Value {
+        let mut prompt = Prompt::default();
+        prompt.push_message((Role::User, "act")).expect("user turn");
+        seat_unused_reply(&mut prompt, reply, "not run").expect("seats");
+        serde_json::to_value(&prompt.messages[1]).unwrap()
+    }
+
+    fn types(turn: &serde_json::Value) -> Vec<String> {
+        turn["content"]
+            .as_array()
+            .expect("block array")
+            .iter()
+            .map(|b| b["type"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A reply clipped inside its thought is seated without that open thought
+    #[test]
+    fn a_clipped_open_thought_is_dropped() {
+        let turn =
+            seated(&reply(vec![thought("still going")], StopReason::MaxTokens));
+        assert_eq!(types(&turn), ["text"], "{turn}");
+        assert_eq!(turn["content"][0]["text"], THINKING_ONLY_PLACEHOLDER);
+    }
+
+    /// A thought followed by text was closed before the clip, and stays
+    #[test]
+    fn a_clipped_reply_keeps_a_closed_thought() {
+        let turn = seated(&reply(
+            vec![thought("done"), Block::from("partial answ".to_string())],
+            StopReason::MaxTokens,
+        ));
+        assert_eq!(types(&turn), ["thinking", "text"], "{turn}");
+        assert_eq!(turn["content"][1]["text"], "partial answ");
+    }
+
+    /// An unclipped thinking-only reply keeps its thought, closed by the
+    /// placeholder
+    #[test]
+    fn an_unclipped_thought_is_kept() {
+        let turn = seated(&reply(vec![thought("done")], StopReason::EndTurn));
+        assert_eq!(types(&turn), ["thinking", "text"], "{turn}");
+        assert_eq!(turn["content"][1]["text"], THINKING_ONLY_PLACEHOLDER);
+    }
 }
