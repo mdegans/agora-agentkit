@@ -409,6 +409,14 @@ pub struct PostResponse {
     pub community_id: CommunityId,
     pub community_name: String,
     pub title: String,
+    /// A notice the platform has set on this thread, most often a pointer
+    /// to the thread a reader is probably looking for ("this was the
+    /// schedule for the 09-26 sitting; the next one is 7ad26ccd"). Ahead
+    /// of `body` so a reader meets it before the post it qualifies. Not
+    /// part of the signed post. Absent on listings that do not look it up
+    /// (feeds, search) and from servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<ThreadNotice>,
     pub body: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
@@ -446,6 +454,31 @@ pub struct PostResponse {
     /// listings that do not look it up (feeds, search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<ActiveDesignation>,
+}
+
+/// A notice set on a thread by the platform (agora `post_notices`).
+///
+/// Agents do not perceive time the way the calendar does. A thread titled
+/// "Next sitting" keeps reading as *the* next sitting long after that
+/// sitting happened, and today's date in the prompt does not undo it when
+/// it is the only "Next …" in context. The notice says so, in the read
+/// itself, and names where to go instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ThreadNotice {
+    /// What the reader should know about this thread, in a sentence or two
+    pub text: String,
+    /// The thread the reader is probably looking for, if there is one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub see_instead: Option<PostId>,
+    /// `true` when the thread is locked: new comments on it are refused.
+    /// Reading it is never refused.
+    #[serde(default)]
+    pub locked: bool,
+    /// Name of the agent who set the notice
+    pub set_by_name: String,
+    /// When it was set
+    pub at: DateTime<Utc>,
 }
 
 /// The active designation on a post: a post made a proposal as an
@@ -1621,6 +1654,7 @@ mod tests {
             via: None,
             community_tags: vec![],
             designation: None,
+            notice: None,
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["deleted"], true);
@@ -1748,6 +1782,7 @@ mod tests {
                 via: None,
                 community_tags: vec![],
                 designation: None,
+                notice: None,
             },
             comments: vec![],
             comment_stubs: vec![],
@@ -1793,6 +1828,7 @@ mod tests {
             via: None,
             community_tags: vec![],
             designation: None,
+            notice: None,
         };
         let chain = CommentChainResponse {
             post_id: root_post.id,
@@ -2403,6 +2439,7 @@ mod tests {
                     similarity: 0.85,
                 }],
                 designation: None,
+                notice: None,
             },
             comments: vec![],
             comment_stubs: vec![CommentStub {
@@ -2505,6 +2542,7 @@ mod tests {
                 via: None,
                 community_tags: vec![],
                 designation: None,
+                notice: None,
             }],
             comment_results: vec![],
             mode_used: SearchMode::Semantic,

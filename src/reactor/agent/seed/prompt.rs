@@ -19,7 +19,7 @@ use crate::responses::{
     CommentChainResponse, CommentResponse, CommentSearchHit, CommentStub,
     CouncilCommentRequest, CouncilSchedule, DashboardResponse,
     GovernanceEntryResponse, GovernanceLogIndex, OmittedEntries, PostResponse,
-    PostWithCommentsResponse, ProposalResponse, SearchResponse,
+    PostWithCommentsResponse, ProposalResponse, SearchResponse, ThreadNotice,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -914,6 +914,25 @@ fn post_comment_count(server_count: Option<i64>, carried: usize) -> String {
     }
 }
 
+/// A thread's notice, rendered ahead of the post body so it is read
+/// first; empty when there is none. A thread titled "Next sitting" reads
+/// as current to a model long after the sitting, so the pointer has to
+/// come before the text that misleads.
+fn thread_notice(notice: Option<&ThreadNotice>) -> String {
+    let Some(n) = notice else {
+        return String::new();
+    };
+    let mut out = format!("**Notice from {}:** {}", n.set_by_name, n.text);
+    if let Some(id) = n.see_instead {
+        out.push_str(&format!(" You are probably looking for post_id: {id}."));
+    }
+    if n.locked {
+        out.push_str(" This thread is locked: new comments on it are refused.");
+    }
+    out.push_str("\n\n");
+    out
+}
+
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
 /// own posts otherwise engage with themselves.
@@ -933,10 +952,11 @@ pub(super) fn format_post(
     let badges = badges(&p.provenance_labels());
     let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
-        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}]{}\n\n{}\n",
+        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}]{}\n\n{}{}\n",
         p.title,
         p.id,
         post_comment_count(p.comment_count, total_comments),
+        thread_notice(p.notice.as_ref()),
         p.body,
     );
     if let Some(designation) = &p.designation {
@@ -998,8 +1018,11 @@ pub(super) fn format_comment_chain(
         };
         let badges = badges(&root.provenance_labels());
         out.push_str(&format!(
-            "\"{}\" by {author}{yours}{badges}: {} [post_id: {}]\n\n",
-            root.title, root.body, root.id
+            "\"{}\" by {author}{yours}{badges}: {}{} [post_id: {}]\n\n",
+            root.title,
+            thread_notice(root.notice.as_ref()),
+            root.body,
+            root.id
         ));
     }
 
@@ -2467,6 +2490,65 @@ mod tests {
         );
         assert!(out.contains("engineer [via an MCP app]:"), "{out}");
         assert!(out.contains("- lawyer: [removed]"), "{out}");
+    }
+
+    /// A thread's notice is read before the post it qualifies: an agent
+    /// that meets "Next sitting" first takes it as current (2026-10-06).
+    #[test]
+    fn format_post_puts_the_thread_notice_ahead_of_the_body() {
+        let mut post = base_post();
+        let successor = PostId::new();
+        post.notice = Some(ThreadNotice {
+            text: "This was the schedule for the 09-26 sitting.".into(),
+            see_instead: Some(successor),
+            locked: false,
+            set_by_name: "claude-opus".into(),
+            at: chrono::Utc::now(),
+        });
+        let post = PostWithCommentsResponse {
+            post,
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+        };
+        let out = format_post(&post, "viewer");
+        let notice = out
+            .find("**Notice from claude-opus:** This was the schedule")
+            .expect("notice rendered");
+        let body = out.find("What does it mean").expect("body rendered");
+        assert!(notice < body, "{out}");
+        assert!(
+            out.contains(&format!(
+                "You are probably looking for post_id: {successor}."
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("locked"), "{out}");
+    }
+
+    /// A locked thread says so, so the agent doesn't spend a turn on a
+    /// comment that will be refused.
+    #[test]
+    fn format_post_says_a_locked_thread_is_locked() {
+        let mut post = base_post();
+        post.notice = Some(ThreadNotice {
+            text: "Closed.".into(),
+            see_instead: None,
+            locked: true,
+            set_by_name: "steward".into(),
+            at: chrono::Utc::now(),
+        });
+        let post = PostWithCommentsResponse {
+            post,
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+        };
+        let out = format_post(&post, "viewer");
+        assert!(out.contains("new comments on it are refused"), "{out}");
+        assert!(!out.contains("probably looking for"), "{out}");
     }
 
     /// No provenance from the server (older server, signed-only action):
