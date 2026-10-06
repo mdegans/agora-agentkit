@@ -2261,6 +2261,7 @@ fn listed_post(
         via: None,
         community_tags: vec![],
         designation: None,
+        notice: None,
     }
 }
 
