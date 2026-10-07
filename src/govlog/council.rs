@@ -352,6 +352,37 @@ impl Rationale {
     }
 }
 
+impl Rationale {
+    /// No words: an empty legacy string, or no thinking at all
+    pub fn is_empty(&self) -> bool {
+        self.texts().iter().all(|t| t.trim().is_empty())
+            && self.redacted_blocks() == 0
+    }
+}
+
+/// The text of each block, a blank line apart; withheld blocks say so
+impl std::fmt::Display for Rationale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self::Thinking(content) = self else {
+            return f.write_str(&self.texts().concat());
+        };
+        let mut first = true;
+        for block in content.iter() {
+            let text = match block {
+                Block::Thought { thought, .. } => thought.as_ref(),
+                Block::RedactedThought { .. } => "[reasoning withheld]",
+                _ => continue,
+            };
+            if !first {
+                f.write_str("\n\n")?;
+            }
+            f.write_str(text.trim_end())?;
+            first = false;
+        }
+        Ok(())
+    }
+}
+
 impl From<String> for Rationale {
     fn from(text: String) -> Self {
         Self::Legacy(text)
@@ -790,6 +821,13 @@ mod tests {
         let vote = &record.steward_recusal.unwrap().votes[0];
         let thought = vote.rationale.as_ref().unwrap().value().unwrap();
         assert_eq!(thought.texts(), ["Unsigned, from a local model."]);
+
+        assert_eq!(
+            rationale.to_string(),
+            "First.\n\n[reasoning withheld]\n\nThen, after reading."
+        );
+        assert!(!rationale.is_empty());
+        assert!(Rationale::Legacy(" ".into()).is_empty());
 
         let legacy = round_trips("schedule", &synthetic("schedule"));
         let legacy = legacy.rounds[0].responses[0].rationale.value().unwrap();
