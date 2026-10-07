@@ -248,28 +248,27 @@ pub enum Thought {
 
 /// `value` as a seat's thinking, if `key` is a rationale that holds one
 pub fn thinking(key: &str, value: &Value) -> Option<Vec<Thought>> {
-    use misanthropic::prompt::message::Block;
+    use misanthropic::prompt::message::Thought as Block;
     if key != "rationale" || !value.is_array() {
         return None;
     }
-    let super::Rationale::Thinking(content) =
+    let super::Rationale::Thinking(thoughts) =
         serde_json::from_value(value.clone()).ok()?
     else {
         return None;
     };
     Some(
-        content
-            .iter()
-            .filter_map(|block| match block {
-                Block::Thought {
-                    thought, signature, ..
-                } => Some(if signature.is_empty() {
-                    Thought::Own(thought.to_string())
-                } else {
-                    Thought::Summary(thought.to_string())
-                }),
-                Block::RedactedThought { .. } => Some(Thought::Withheld),
-                _ => None,
+        thoughts
+            .into_iter()
+            .map(|thought| match thought {
+                Block::Thinking { thought, signature } => {
+                    if signature.is_empty() {
+                        Thought::Own(thought.into_owned())
+                    } else {
+                        Thought::Summary(thought.into_owned())
+                    }
+                }
+                Block::Redacted { .. } => Thought::Withheld,
             })
             .collect(),
     )

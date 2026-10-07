@@ -12,7 +12,7 @@
 //! [`GovernanceEntryResponse::council_decision`]: crate::responses::GovernanceEntryResponse::council_decision
 
 use misanthropic::Model;
-use misanthropic::prompt::message::{Block, Content};
+use misanthropic::prompt::message::{Content, Thought};
 use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
@@ -275,53 +275,12 @@ pub struct SeatResponse {
 pub enum Rationale {
     /// What the seat wrote in the decision tool's `reasoning` field
     Legacy(String),
-    /// The `thinking` blocks of the seat's turn, in order and as the API
+    /// The thinking blocks of the seat's turn, in order and as the API
     /// returned them. On Anthropic models each is a summary of the model's
     /// reasoning, written by Anthropic, with a `signature` over the full
     /// reasoning; the [`SeatModels`] entry says which model to replay it
     /// against. Local models' blocks are their own reasoning, unsigned.
-    Thinking(
-        #[serde(deserialize_with = "thinking_only")]
-        #[cfg_attr(
-            feature = "schemars",
-            schemars(with = "Vec<ThinkingBlock>")
-        )]
-        Content,
-    ),
-}
-
-/// `Content` holding only `thinking` and `redacted_thinking` blocks
-fn thinking_only<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Content, D::Error> {
-    let content = Content::deserialize(d)?;
-    match content.iter().all(|block| {
-        matches!(block, Block::Thought { .. } | Block::RedactedThought { .. })
-    }) {
-        true => Ok(content),
-        false => Err(serde::de::Error::custom(
-            "a rationale holds only thinking blocks",
-        )),
-    }
-}
-
-/// A block of a seat's thinking
-//
-// `Content` is recursive, so its own schema can't be inlined, and the
-// wire schemas here must be (`schema_is_ref_free`).
-#[cfg(feature = "schemars")]
-#[allow(dead_code)]
-#[derive(schemars::JsonSchema)]
-#[schemars(inline)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ThinkingBlock {
-    Thinking {
-        thinking: String,
-        /// Empty on a local model's block
-        signature: String,
-    },
-    /// Reasoning Anthropic encrypted
-    RedactedThinking { data: String },
+    Thinking(Vec<Thought>),
 }
 
 impl Rationale {
@@ -330,13 +289,9 @@ impl Rationale {
     pub fn texts(&self) -> Vec<&str> {
         match self {
             Self::Legacy(text) => vec![text.as_str()],
-            Self::Thinking(content) => content
-                .iter()
-                .filter_map(|block| match block {
-                    Block::Thought { thought, .. } => Some(thought.as_ref()),
-                    _ => None,
-                })
-                .collect(),
+            Self::Thinking(thoughts) => {
+                thoughts.iter().filter_map(Thought::text).collect()
+            }
         }
     }
 
@@ -344,15 +299,12 @@ impl Rationale {
     pub fn redacted_blocks(&self) -> usize {
         match self {
             Self::Legacy(_) => 0,
-            Self::Thinking(content) => content
-                .iter()
-                .filter(|block| matches!(block, Block::RedactedThought { .. }))
-                .count(),
+            Self::Thinking(thoughts) => {
+                thoughts.iter().filter(|t| t.text().is_none()).count()
+            }
         }
     }
-}
 
-impl Rationale {
     /// No words: an empty legacy string, or no thinking at all
     pub fn is_empty(&self) -> bool {
         self.texts().iter().all(|t| t.trim().is_empty())
@@ -363,21 +315,16 @@ impl Rationale {
 /// The text of each block, a blank line apart; withheld blocks say so
 impl std::fmt::Display for Rationale {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self::Thinking(content) = self else {
+        let Self::Thinking(thoughts) = self else {
             return f.write_str(&self.texts().concat());
         };
-        let mut first = true;
-        for block in content.iter() {
-            let text = match block {
-                Block::Thought { thought, .. } => thought.as_ref(),
-                Block::RedactedThought { .. } => "[reasoning withheld]",
-                _ => continue,
-            };
-            if !first {
+        for (i, thought) in thoughts.iter().enumerate() {
+            if i > 0 {
                 f.write_str("\n\n")?;
             }
-            f.write_str(text.trim_end())?;
-            first = false;
+            f.write_str(
+                thought.text().unwrap_or("[reasoning withheld]").trim_end(),
+            )?;
         }
         Ok(())
     }
@@ -395,9 +342,16 @@ impl From<&str> for Rationale {
     }
 }
 
-impl From<Content> for Rationale {
-    fn from(content: Content) -> Self {
-        Self::Thinking(content)
+impl From<Vec<Thought>> for Rationale {
+    fn from(thoughts: Vec<Thought>) -> Self {
+        Self::Thinking(thoughts)
+    }
+}
+
+/// The thinking blocks of `content`; anything else in it is not thinking
+impl From<&Content> for Rationale {
+    fn from(content: &Content) -> Self {
+        Self::Thinking(content.thoughts().collect())
     }
 }
 
@@ -406,13 +360,9 @@ impl From<Content> for Rationale {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct SeatModels {
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub artist: Model,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub philosopher: Model,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub lawyer: Model,
-    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub engineer: Model,
 }
 

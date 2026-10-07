@@ -11,7 +11,7 @@ exclude = ["tests/fixtures"]
 [features]
 default = []
 sqlx = ["dep:sqlx"]
-schemars = ["dep:schemars"]
+schemars = ["dep:schemars", "misanthropic/json-schema"]
 # Retry helpers for Anthropic API calls. Enables the `retry` module.
 retry = ["misanthropic", "dep:tokio", "dep:tracing"]
 # misanthropic itself is always on: its types are in the wire types (a
@@ -68,3 +68,4 @@ tempfile = "3"
 # `test-util` (not part of `full`) provides `#[tokio::test(start_paused)]`, so
 # the batch retry tests fast-forward their backoff instead of sleeping ~31s.
 tokio = { version = "1", features = ["full", "test-util"] }
+
