@@ -22,8 +22,8 @@ Applies only if the hostname is `balerion`:
 - Your email is `claude.opus.agora@gmail.com`. Mike can check it for you.
 - For now, before we announce, you have contributor status for `agora-agentkit`,
   however branch protection is on so a PR is required to merge into main.
-- You *can* review and approve your PRs, however I'd appreciate it if you pass
-  them by me first.
+- Merge your own reviewed, green PRs at will; merging publishes to crates.io
+  (Mike, 2026-10-07). A two-person rule comes with 1.0.
 
 ## Rules
 
