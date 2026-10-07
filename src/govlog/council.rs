@@ -11,6 +11,8 @@
 //!
 //! [`GovernanceEntryResponse::council_decision`]: crate::responses::GovernanceEntryResponse::council_decision
 
+use misanthropic::Model;
+use misanthropic::prompt::message::{Content, Thought};
 use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
@@ -20,7 +22,7 @@ use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 /// The `data` of a `council_decision` entry. See the [module docs](self).
 ///
 /// The entry's tags are on the entry, not in `data`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct CouncilDecisionRecord {
@@ -72,6 +74,9 @@ pub struct CouncilDecisionRecord {
     /// summaries and everything a seat had read to it. (0.42)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<CouncilAttachment>,
+    /// The model each seat ran on. Absent from entries before 0.64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seat_models: Option<SeatModels>,
     /// The entry's blinding value (see [`blind_data`](super::blind_data)).
     /// Absent from entries that predate blinding.
     #[serde(
@@ -122,7 +127,7 @@ pub enum DecisionCategory {
 }
 
 /// One round of deliberation
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct CouncilRound {
@@ -163,7 +168,7 @@ pub struct StewardEmergency {
 
 /// The four seats' determination of whether an item limits the Steward's
 /// powers (Constitution Art. IV § 3, GOV-2026-0009)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct StewardRecusal {
@@ -177,13 +182,17 @@ pub struct StewardRecusal {
 }
 
 /// One seat's answer to whether an item limits the Steward's powers
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct RecusalVote {
     pub seat: CouncilSeat,
-    /// The seat's reasoning, written before its answer
+    /// The seat's explanation for the record; before 0.64, its reasoning,
+    /// written before its answer
     pub reason: Redactable<String>,
+    /// The seat's thinking before it answered (0.64)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<Redactable<Rationale>>,
     pub limits_steward_powers: bool,
 }
 
@@ -221,7 +230,7 @@ impl From<CouncilSeat> for CouncilMember {
 }
 
 /// One seat's turn in a round
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct SeatResponse {
@@ -234,8 +243,8 @@ pub struct SeatResponse {
     /// a refusal is recorded as a fact, never as a vote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vote: Option<CouncilVote>,
-    /// The seat's reasoning. Empty on a refused turn.
-    pub rationale: Redactable<String>,
+    /// Why the seat said it. Empty on a refused turn.
+    pub rationale: Redactable<Rationale>,
     /// Questions the seat put to the others or the Steward. A redaction
     /// can take one question or the whole list.
     pub questions: Redactable<Vec<Redactable<String>>>,
@@ -248,6 +257,124 @@ pub struct SeatResponse {
     /// 2026-09-18; from GOV-2026-0003 on it duplicates `rationale`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_text: Option<Redactable<String>>,
+}
+
+/// Why a seat said what it said.
+///
+/// Until 0.64 the seats wrote their reasoning into a `reasoning` field of
+/// the decision tool, which is not something a model should be asked to
+/// do: Anthropic's `reasoning_extraction` safeguard declines exactly that
+/// ([docs]). The seats now think before they answer, and the record keeps
+/// what the API returns for that thinking.
+///
+/// [docs]: https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback#keep-reasoning-in-thinking-blocks
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(untagged)]
+pub enum Rationale {
+    /// What the seat wrote in the decision tool's `reasoning` field
+    Legacy(String),
+    /// The thinking blocks of the seat's turn, in order and as the API
+    /// returned them. On Anthropic models each is a summary of the model's
+    /// reasoning, written by Anthropic, with a `signature` over the full
+    /// reasoning; the [`SeatModels`] entry says which model to replay it
+    /// against. Local models' blocks are their own reasoning, unsigned.
+    Thinking(Vec<Thought>),
+}
+
+impl Rationale {
+    /// The text of every thinking block, in order. A legacy rationale is
+    /// one item.
+    pub fn texts(&self) -> Vec<&str> {
+        match self {
+            Self::Legacy(text) => vec![text.as_str()],
+            Self::Thinking(thoughts) => {
+                thoughts.iter().filter_map(Thought::text).collect()
+            }
+        }
+    }
+
+    /// Thinking the API withheld: `redacted_thinking` blocks
+    pub fn redacted_blocks(&self) -> usize {
+        match self {
+            Self::Legacy(_) => 0,
+            Self::Thinking(thoughts) => {
+                thoughts.iter().filter(|t| t.text().is_none()).count()
+            }
+        }
+    }
+
+    /// No words: an empty legacy string, or no thinking at all
+    pub fn is_empty(&self) -> bool {
+        self.texts().iter().all(|t| t.trim().is_empty())
+            && self.redacted_blocks() == 0
+    }
+}
+
+/// The text of each block, a blank line apart; withheld blocks say so
+impl std::fmt::Display for Rationale {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self::Thinking(thoughts) = self else {
+            return f.write_str(&self.texts().concat());
+        };
+        for (i, thought) in thoughts.iter().enumerate() {
+            if i > 0 {
+                f.write_str("\n\n")?;
+            }
+            f.write_str(
+                thought.text().unwrap_or("[reasoning withheld]").trim_end(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl From<String> for Rationale {
+    fn from(text: String) -> Self {
+        Self::Legacy(text)
+    }
+}
+
+impl From<&str> for Rationale {
+    fn from(text: &str) -> Self {
+        Self::Legacy(text.to_owned())
+    }
+}
+
+impl From<Vec<Thought>> for Rationale {
+    fn from(thoughts: Vec<Thought>) -> Self {
+        Self::Thinking(thoughts)
+    }
+}
+
+/// The thinking blocks of `content`; anything else in it is not thinking
+impl From<&Content> for Rationale {
+    fn from(content: &Content) -> Self {
+        Self::Thinking(content.thoughts().collect())
+    }
+}
+
+/// The model each seat ran on
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct SeatModels {
+    pub artist: Model,
+    pub philosopher: Model,
+    pub lawyer: Model,
+    pub engineer: Model,
+}
+
+impl SeatModels {
+    pub fn get(&self, seat: CouncilSeat) -> &Model {
+        match seat {
+            CouncilSeat::Artist => &self.artist,
+            CouncilSeat::Philosopher => &self.philosopher,
+            CouncilSeat::Lawyer => &self.lawyer,
+            CouncilSeat::Engineer => &self.engineer,
+        }
+    }
 }
 
 /// A voting Council seat. The fifth vote is the Steward's.
@@ -555,6 +682,43 @@ mod tests {
                     {"member": "engineer", "rationale": "Conflicted."}
                 ]);
             }
+            "thinking" => {
+                data["seat_models"] = serde_json::json!({
+                    "artist": "claude-opus-4-6",
+                    "philosopher": "claude-opus-4-6",
+                    "lawyer": "claude-opus-4-6",
+                    "engineer": "qwen3.8-35b-a3b"
+                });
+                data["rounds"] = serde_json::json!([{
+                    "number": 1,
+                    "round_type": "independent",
+                    "responses": [{
+                        "role": "lawyer",
+                        "position": "p",
+                        "vote": "yes",
+                        "rationale": [
+                            {"type": "thinking", "thinking": "First.",
+                             "signature": "EqQBCkgIARABGAIiQL"},
+                            {"type": "redacted_thinking", "data": "EmwKAhgBEgy3"},
+                            {"type": "thinking", "thinking": "Then, after reading.",
+                             "signature": "EqQBCkgIARABGAIiQM"}
+                        ],
+                        "questions": [],
+                        "ready_to_vote": false
+                    }],
+                    "steward_contribution": null
+                }]);
+                data["steward_recusal"] = serde_json::json!({
+                    "votes": [
+                        {"seat": "engineer", "reason": "Art. IV § 2 is untouched.",
+                         "rationale": [{"type": "thinking",
+                            "thinking": "Unsigned, from a local model.",
+                            "signature": ""}],
+                         "limits_steward_powers": false}
+                    ],
+                    "recused": false
+                });
+            }
             "recused_refusal" => {
                 data = synthetic("refusal");
                 data["final_votes"]["steward"] = "recused".into();
@@ -574,6 +738,7 @@ mod tests {
             "attachments",
             "recusal",
             "recused_refusal",
+            "thinking",
         ] {
             round_trips(name, &synthetic(name));
         }
@@ -586,6 +751,54 @@ mod tests {
         );
         let refused = round_trips("refusal", &synthetic("refusal"));
         assert_eq!(refused.rounds[0].responses[0].vote, None);
+    }
+
+    /// A seat's rationale is its turn's thinking blocks from 0.64, each
+    /// kept as the API returned it so a signed one can be replayed
+    #[test]
+    fn a_thinking_rationale_reads_back() {
+        let record = round_trips("thinking", &synthetic("thinking"));
+        let models = record.seat_models.as_ref().unwrap();
+        assert_eq!(models.get(CouncilSeat::Lawyer).name(), "claude-opus-4-6");
+        assert_eq!(models.get(CouncilSeat::Engineer).name(), "qwen3.8-35b-a3b");
+
+        let response = &record.rounds[0].responses[0];
+        let rationale = response.rationale.value().unwrap();
+        assert!(matches!(rationale, Rationale::Thinking(_)));
+        assert_eq!(rationale.texts(), ["First.", "Then, after reading."]);
+        assert_eq!(rationale.redacted_blocks(), 1);
+
+        let vote = &record.steward_recusal.unwrap().votes[0];
+        let thought = vote.rationale.as_ref().unwrap().value().unwrap();
+        assert_eq!(thought.texts(), ["Unsigned, from a local model."]);
+
+        assert_eq!(
+            rationale.to_string(),
+            "First.\n\n[reasoning withheld]\n\nThen, after reading."
+        );
+        assert!(!rationale.is_empty());
+        assert!(Rationale::Legacy(" ".into()).is_empty());
+
+        let legacy = round_trips("schedule", &synthetic("schedule"));
+        let legacy = legacy.rounds[0].responses[0].rationale.value().unwrap();
+        assert_eq!(legacy, &Rationale::Legacy("r".into()));
+    }
+
+    #[test]
+    fn a_thinking_rationale_can_be_redacted() {
+        let amd: GovernanceLogId = "AMD-2026-0009".parse().unwrap();
+        let redacted = super::super::redact_data(
+            &synthetic("thinking"),
+            &["/rounds/0/responses/0/rationale".into()],
+            &amd,
+            Blind::random(),
+        )
+        .unwrap();
+        let record = round_trips("thinking", &redacted);
+        assert_eq!(
+            record.rounds[0].responses[0].rationale.redacted_by(),
+            Some(&amd)
+        );
     }
 
     /// Recusal, abstention rationales and a recused Steward's emergency
@@ -679,7 +892,7 @@ mod tests {
             panic!("round 1 has four responses");
         };
         assert_eq!(first.position, gone);
-        assert_eq!(first.rationale, gone);
+        assert_eq!(first.rationale.redacted_by(), Some(&amd));
         assert_eq!(first.raw_text, Some(gone.clone()));
         assert!(!first.questions.is_redacted());
         assert_eq!(second.questions.redacted_by(), Some(&amd));

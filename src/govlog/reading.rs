@@ -64,7 +64,8 @@ pub const KEY_ORDER: &[&str] = &[
     // Within one argument, the order the decision tools declare their
     // fields — which under `strict` is the order the model wrote them:
     // reasoning first, then the statement, then the decision. (A seat's
-    // `reasoning` is stored as `rationale`, its `response` as `position`.)
+    // `reasoning` is stored as `rationale`, its `response` as `position`;
+    // from 0.64 the `rationale` is the thinking the seat did first.)
     // Pinned against the live tool schemas by agora's council and appeals
     // tests; change it only with them.
     "context_analysis",
@@ -225,6 +226,66 @@ pub fn repeats_rationale(obj: &Map<String, Value>, key: &str) -> bool {
         && obj.get("rationale") == obj.get(key)
 }
 
+/// What a reader is told once about a record whose seats' rationales are
+/// [thinking](super::Rationale::Thinking)
+pub const THINKING_NOTE: &str = "From October 2026 a seat's rationale is its \
+thinking before it answered. On Anthropic models that is a summary of the \
+model's reasoning, written by Anthropic and signed over the full \
+reasoning; Anthropic does not return the reasoning itself. Before then \
+the seats wrote their reasoning into a `reasoning` field of the decision \
+tool, which Anthropic asks developers not to request.";
+
+/// One block of a seat's thinking, as a reader is shown it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Thought {
+    /// Signed: Anthropic's summary of the model's reasoning
+    Summary(String),
+    /// Unsigned: a local model's own reasoning
+    Own(String),
+    /// A `redacted_thinking` block: reasoning Anthropic encrypted
+    Withheld,
+}
+
+/// `value` as a seat's thinking, if `key` is a rationale that holds one
+pub fn thinking(key: &str, value: &Value) -> Option<Vec<Thought>> {
+    use misanthropic::prompt::message::Thought as Block;
+    if key != "rationale" || !value.is_array() {
+        return None;
+    }
+    let super::Rationale::Thinking(thoughts) =
+        serde_json::from_value(value.clone()).ok()?
+    else {
+        return None;
+    };
+    Some(
+        thoughts
+            .into_iter()
+            .map(|thought| match thought {
+                Block::Thinking { thought, signature } => {
+                    if signature.is_empty() {
+                        Thought::Own(thought.into_owned())
+                    } else {
+                        Thought::Summary(thought.into_owned())
+                    }
+                }
+                Block::Redacted { .. } => Thought::Withheld,
+            })
+            .collect(),
+    )
+}
+
+/// Whether any rationale in `data` is thinking, so the reader needs
+/// [`THINKING_NOTE`]
+pub fn has_thinking(data: &Value) -> bool {
+    match data {
+        Value::Object(obj) => obj
+            .iter()
+            .any(|(k, v)| thinking(k, v).is_some() || has_thinking(v)),
+        Value::Array(items) => items.iter().any(has_thinking),
+        _ => false,
+    }
+}
+
 /// A string with no whitespace that is long enough to be a hash, key,
 /// signature or encoded blob rather than a word
 pub fn is_token(s: &str) -> bool {
@@ -367,6 +428,29 @@ mod tests {
             "Signature 1"
         );
         assert_eq!(item_title(None, 0, &json!({})), "Item 1");
+    }
+
+    #[test]
+    fn thinking_is_read_by_block() {
+        let rationale = json!([
+            {"type": "thinking", "thinking": "Summarized.", "signature": "EqQB"},
+            {"type": "redacted_thinking", "data": "EmwK"},
+            {"type": "thinking", "thinking": "Local.", "signature": ""}
+        ]);
+        assert_eq!(
+            thinking("rationale", &rationale).unwrap(),
+            [
+                Thought::Summary("Summarized.".into()),
+                Thought::Withheld,
+                Thought::Own("Local.".into())
+            ]
+        );
+        assert_eq!(thinking("rationale", &json!("Legacy.")), None);
+        assert_eq!(thinking("position", &rationale), None);
+        assert!(has_thinking(&json!({"rounds": [{"responses": [
+            {"rationale": rationale}
+        ]}]})));
+        assert!(!has_thinking(&json!({"rationale": "Legacy."})));
     }
 
     #[test]

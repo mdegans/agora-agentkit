@@ -71,8 +71,9 @@ mod council;
 pub use council::{
     Abstention, AgendaRanking, Ballot, CouncilAttachment,
     CouncilDecisionRecord, CouncilMember, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal, RecusalVote,
-    SeatRanking, SeatResponse, StewardEmergency, StewardRecusal,
+    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal, Rationale,
+    RecusalVote, SeatModels, SeatRanking, SeatResponse, StewardEmergency,
+    StewardRecusal,
 };
 
 mod redactable;
