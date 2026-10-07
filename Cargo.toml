@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.63.0"
+version = "0.64.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -13,10 +13,11 @@ default = []
 sqlx = ["dep:sqlx"]
 schemars = ["dep:schemars"]
 # Retry helpers for Anthropic API calls. Enables the `retry` module.
-# Opt-in because it pulls in misanthropic + tokio (otherwise unused
-# by most consumers of this crate).
 retry = ["misanthropic", "dep:tokio", "dep:tracing"]
-misanthropic = ["dep:misanthropic", "dep:tokio", "dep:tracing"]
+# misanthropic itself is always on: its types are in the wire types (a
+# Council seat's thinking is a `Content`). This turns on the parts of the
+# crate that drive it, which need tokio.
+misanthropic = ["dep:tokio", "dep:tracing"]
 # Because for the moment it prevents wasm build
 client = ["misanthropic/client"]
 # `FsStorage` (`reactor::storage`): the directory-per-agent disk backend.
@@ -50,7 +51,7 @@ sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = 
 # semver "1.0.0-alpha.17" admitted alpha.21, which changed the
 # cache-placement builders to return Result, and fresh resolves of 0.61.0
 # stopped compiling (2026-10-05). Move this pin deliberately, with a port.
-misanthropic = { version = "=1.0.0-alpha.21", default-features = false, features = ["batch", "derive"], optional = true }
+misanthropic = { version = "=1.0.0-alpha.21", default-features = false, features = ["batch", "derive", "partial-eq"] }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }

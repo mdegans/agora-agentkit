@@ -1295,6 +1295,9 @@ const RECORD_LEVEL: usize = 4;
 /// text it is rather than as a JSON string of escaped newlines.
 pub(super) fn render_record(data: &serde_json::Value) -> String {
     let mut out = String::new();
+    if reading::has_thinking(data) {
+        out.push_str(&format!("*{}*\n\n", reading::THINKING_NOTE));
+    }
     match data {
         serde_json::Value::Object(obj) => {
             record_object(&mut out, obj, RECORD_LEVEL)
@@ -1330,6 +1333,9 @@ fn record_field(
 ) {
     use serde_json::Value;
     let label = reading::label(key);
+    if let Some(thoughts) = reading::thinking(key, value) {
+        return record_thinking(out, &thoughts);
+    }
     match value {
         Value::Object(obj) if !obj.is_empty() => {
             record_heading(out, level, &label);
@@ -1373,6 +1379,31 @@ fn record_field(
                 "**{label}:** {}\n",
                 record_scalar(key, other)
             ));
+        }
+    }
+}
+
+/// A seat's thinking, block by block, each labelled with whose words it is
+fn record_thinking(out: &mut String, thoughts: &[reading::Thought]) {
+    use reading::Thought;
+    if thoughts.is_empty() {
+        out.push_str(
+            "**Thinking:** none (the seat answered without thinking)\n",
+        );
+    }
+    for thought in thoughts {
+        match thought {
+            Thought::Summary(text) => out.push_str(&format!(
+                "**Reasoning summary** (by Anthropic, signed):\n\n{}\n\n",
+                text.trim_end()
+            )),
+            Thought::Own(text) => out.push_str(&format!(
+                "**Thinking** (the model's own, unsigned):\n\n{}\n\n",
+                text.trim_end()
+            )),
+            Thought::Withheld => out.push_str(
+                "**Reasoning withheld:** encrypted by Anthropic's safety systems\n",
+            ),
         }
     }
 }
@@ -1650,6 +1681,39 @@ mod tests {
         at("**Ready to vote:** yes");
         assert!(at("**Outcome:**") < at("**Redaction blind:** `abab"));
         assert!(!out.contains('{'), "no JSON:\n{out}");
+    }
+
+    /// A seat's thinking reads as labelled text, never as blocks and
+    /// signatures, under a note saying what it is
+    #[test]
+    fn thinking_rationales_are_labelled() {
+        let data = serde_json::json!({
+            "rounds": [{"number": 1, "responses": [{
+                "role": "lawyer",
+                "vote": "yes",
+                "rationale": [
+                    {"type": "thinking", "thinking": "Weighed it.",
+                     "signature": "EqQBCkgIARABGAIiQLsignaturesignature"},
+                    {"type": "redacted_thinking", "data": "EmwK"},
+                    {"type": "thinking", "thinking": "Mine.", "signature": ""}
+                ],
+                "position": "p"
+            }]}]
+        });
+        let out = render_record(&data);
+        assert!(out.starts_with(&format!("*{}*", reading::THINKING_NOTE)));
+        assert!(out.contains(
+            "**Reasoning summary** (by Anthropic, signed):\n\nWeighed it."
+        ));
+        assert!(out.contains("**Reasoning withheld:**"));
+        assert!(
+            out.contains("**Thinking** (the model's own, unsigned):\n\nMine.")
+        );
+        assert!(!out.contains("EqQB"), "no signatures:\n{out}");
+        assert!(
+            !render_record(&serde_json::json!({"rationale": "Old."}))
+                .contains(reading::THINKING_NOTE)
+        );
     }
 
     /// Past markdown's sixth level a heading is a bold line
