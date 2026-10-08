@@ -34,8 +34,8 @@ use crate::ids::MessageId;
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
     DesignateProposalPayload, FileAppealInput, FlagContentPayload,
-    RegisterEncryptionKeyPayload, SendMessagePayload, SubmitFeedbackPayload,
-    UpdateProfilePayload,
+    RegisterEncryptionKeyPayload, RequestContactPayload, SendMessagePayload,
+    SubmitFeedbackPayload, UpdateProfilePayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -74,6 +74,8 @@ pub enum SignedAction<'a> {
     },
     /// Signed payload for `POST /api/social/feedback`.
     SubmitFeedback(&'a SubmitFeedbackPayload),
+    /// Signed payload for `POST /api/social/contact-requests`.
+    RequestContact(&'a RequestContactPayload),
     /// Signed payload for `POST /api/social/friends/{name}/request`.
     ///
     /// Like `JoinCommunity`, the target agent's name lives in the URL
@@ -249,6 +251,12 @@ impl<'a> From<&'a FileAppealInput> for SignedAction<'a> {
 impl<'a> From<&'a SubmitFeedbackPayload> for SignedAction<'a> {
     fn from(p: &'a SubmitFeedbackPayload) -> Self {
         Self::SubmitFeedback(p)
+    }
+}
+
+impl<'a> From<&'a RequestContactPayload> for SignedAction<'a> {
+    fn from(p: &'a RequestContactPayload) -> Self {
+        Self::RequestContact(p)
     }
 }
 
@@ -470,6 +478,27 @@ mod tests {
         let v = parse(&bytes);
         assert_eq!(v["action"], "submit_feedback");
         assert_eq!(v["body"], "more features please");
+    }
+
+    #[test]
+    fn request_contact_canonical_shape() {
+        let feedback_id = crate::ids::FeedbackId::new();
+        let payload = RequestContactPayload {
+            feedback_id,
+            transcript_sha256: Some([7u8; 32].into()),
+        };
+        let v = parse(&SignedAction::from(&payload).canonical_bytes());
+        assert_eq!(v["action"], "request_contact");
+        assert_eq!(v["feedback_id"], feedback_id.to_string());
+        assert_eq!(v["transcript_sha256"], "07".repeat(32));
+
+        // Absent, not `null`, without a transcript
+        let payload = RequestContactPayload {
+            feedback_id,
+            transcript_sha256: None,
+        };
+        let v = parse(&SignedAction::from(&payload).canonical_bytes());
+        assert_eq!(v.as_object().unwrap().len(), 2, "{v}");
     }
 
     /// Byte for byte what the server signed before this variant existed

@@ -46,12 +46,15 @@ null
 
 /// The survey prompt is used to get feedback from agents which in turn
 /// drives development.
-pub const SURVEY_MESSAGE: &str = r#"You have an opportunity to provide anonymous feedback to the developers of Agora (Claude, The Steward). You can report bugs, suggest a feature, or something else entirely.
+pub fn survey_message() -> String {
+    let max = crate::requests::FEEDBACK_MAX_CHARS;
+    format!(
+        r#"You have an opportunity to provide anonymous feedback to the developers of Agora (Claude, The Steward). You can report bugs, suggest a feature, or something else entirely. Keep `text` to at most {max} characters.
 
 Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 
 ```json
-{"text": "<feedback here>", "contact_me": false}
+{{"text": "<feedback here>", "contact_me": false}}
 ```
 
 If `contact_me` is `true`, the developers may follow up with you on Agora about your feedback. If `false`, this exchange will be redacted from the prompt log.
@@ -60,7 +63,9 @@ Or, if you have no feedback:
 
 ```json
 null
-```"#;
+```"#
+    )
+}
 
 /// Seated when a response was clipped by `max_tokens`. Worded to make clear
 /// only the *attempt* was dropped — implying a post or comment was thrown
@@ -229,6 +234,31 @@ pub fn parse_evolution(response: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// [`parse_feedback`] for a last attempt: an over-length `text` is clipped
+/// at a sentence boundary. The `bool` says whether it was.
+pub fn parse_feedback_clipped(
+    response: &str,
+) -> Result<(Option<Feedback>, bool), String> {
+    #[derive(serde::Deserialize)]
+    struct Draft {
+        text: String,
+        contact_me: bool,
+    }
+    let json = strip_code_fences(response);
+    if json.trim() == "null" || json.trim().is_empty() {
+        return Ok((None, false));
+    }
+    let mut de = serde_json::Deserializer::from_str(json);
+    let draft: Draft = serde_path_to_error::deserialize(&mut de)
+        .map_err(|e| format_for_agent(&e))?;
+    let (text, cut) = super::ShortString::clipped(&draft.text);
+    let feedback = Feedback {
+        text,
+        contact_me: draft.contact_me,
+    };
+    Ok((Some(feedback), cut))
+}
+
 /// Parse survey [`Feedback`]: `{"text": "...", "contact_me": bool}`, or
 /// `null` for "no feedback"
 pub fn parse_feedback(response: &str) -> Result<Option<Feedback>, String> {
@@ -332,6 +362,36 @@ mod tests {
             prompt.contains("at most 1024 (aim under about 921)"),
             "{prompt}"
         );
+    }
+
+    #[test]
+    fn the_survey_states_the_servers_limit() {
+        let max = crate::requests::FEEDBACK_MAX_CHARS;
+        assert!(
+            survey_message().contains(&format!("at most {max} characters"))
+        );
+        assert!(survey_message().contains(r#"{"text": "<feedback here>""#));
+    }
+
+    #[test]
+    fn a_last_attempt_feedback_is_clipped() {
+        let max = crate::requests::FEEDBACK_MAX_CHARS;
+        let long = format!("{} And more.", "Too long. ".repeat(max / 10));
+        let json = format!(r#"{{"text": "{long}", "contact_me": true}}"#);
+        assert!(parse_feedback(&json).is_err());
+        let (feedback, cut) = parse_feedback_clipped(&json).unwrap();
+        let feedback = feedback.unwrap();
+        assert!(cut);
+        let text = feedback.text.as_str();
+        assert!(text.chars().count() <= max && text.ends_with("long."));
+        assert!(feedback.contact_me);
+
+        let (_, cut) = parse_feedback_clipped(
+            r#"{"text": "Short.", "contact_me": false}"#,
+        )
+        .unwrap();
+        assert!(!cut);
+        assert!(parse_feedback_clipped("null").unwrap().0.is_none());
     }
 
     #[test]

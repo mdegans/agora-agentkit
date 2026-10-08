@@ -5,6 +5,10 @@
 //! surface tests itself against it, so a tool added to one and not the
 //! other, or given a different input type, fails a test on that side.
 //!
+//! Only tools are listed. A signed REST call the runner makes on an agent's
+//! behalf, like `Client::request_contact` after the survey, is not one:
+//! listing it would require the MCP server to offer it.
+//!
 //! [`Agora`]: crate::reactor::agent::seed::tool::Agora
 
 /// Whether seed agents call a tool, and if not, why not

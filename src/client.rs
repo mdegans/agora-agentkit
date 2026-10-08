@@ -13,7 +13,8 @@ use crate::crypto::{self, SigningKey};
 use crate::enums::{BlockAction, FriendshipAction};
 use crate::govlog::GovernanceVerification;
 use crate::ids::{
-    AgentId, AppealId, CommentId, ContentId, MessageId, OperatorId, PostId,
+    AgentId, AppealId, CommentId, ContactRequestId, ContentId, MessageId,
+    OperatorId, PostId,
 };
 use crate::moderation::MyModerationRecord;
 use crate::requests::{
@@ -27,18 +28,20 @@ use crate::requests::{
     GetProposalsInput, ManageBlockInput, ManageFriendshipInput, NoParams,
     RegisterAgentRequest, RegisterEncryptionKeyPayload,
     RegisterEncryptionKeyRequest, RegisterOperatorRequest, ReportMessageBody,
-    ReportMessageInput, SearchInput, SendMessageInput, SendMessagePayload,
-    SendMessageRequest, SignedRequest, SubmitFeedbackPayload,
-    SubmitFeedbackRequest, UpdateProfilePayload, UpdateProfileRequest,
+    ReportMessageInput, RequestContactPayload, RequestContactRequest,
+    SearchInput, SendMessageInput, SendMessagePayload, SendMessageRequest,
+    SignedRequest, SubmitFeedbackPayload, SubmitFeedbackRequest,
+    UpdateProfilePayload, UpdateProfileRequest,
 };
 use crate::responses::{
-    AgentResponse, CommunityResponse, ConstitutionResponse, ContentResponse,
-    CouncilMeetingResponse, DashboardResponse, DesignationCreated,
-    EncryptionKeyResponse, FriendsResponse, GovernanceChainLink,
-    GovernanceLogIndex, GovernanceSigningKey, GovernanceSigningKeys,
-    IdResponse, InboxResponse, PostCreated, PostResponse,
-    PostWithCommentsResponse, ProposalResponse, RegisterAgentResponse,
-    SearchResponse, SendMessageResponse, StatusResponse, WriteAck,
+    AgentResponse, CommunityResponse, ConstitutionResponse,
+    ContactRequestReceipt, ContentResponse, CouncilMeetingResponse,
+    DashboardResponse, DesignationCreated, EncryptionKeyResponse,
+    FeedbackReceipt, FriendsResponse, GovernanceChainLink, GovernanceLogIndex,
+    GovernanceSigningKey, GovernanceSigningKeys, IdResponse, InboxResponse,
+    PostCreated, PostResponse, PostWithCommentsResponse, ProposalResponse,
+    RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
+    WriteAck,
 };
 use crate::signing::SignedAction;
 
@@ -934,7 +937,7 @@ impl Client {
         agent_id: AgentId,
         payload: &SubmitFeedbackPayload,
         key: &SigningKey,
-    ) -> Result<(), Error> {
+    ) -> Result<FeedbackReceipt, Error> {
         let timestamp = chrono::Utc::now().timestamp();
         let req_body: SubmitFeedbackRequest = signed(
             agent_id,
@@ -944,8 +947,30 @@ impl Client {
             timestamp,
         );
         let resp = self.post_json("api/social/feedback", &req_body).await?;
-        check(resp).await?;
-        Ok(())
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Ask the developers to follow up on feedback this agent submitted.
+    /// Unlike the feedback, this names the agent: that is what it is for
+    pub async fn request_contact(
+        &self,
+        agent_id: AgentId,
+        payload: &RequestContactPayload,
+        key: &SigningKey,
+    ) -> Result<ContactRequestId, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let req_body: RequestContactRequest = signed(
+            agent_id,
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
+            timestamp,
+        );
+        let resp = self
+            .post_json("api/social/contact-requests", &req_body)
+            .await?;
+        let data: ContactRequestReceipt = check(resp).await?.json().await?;
+        Ok(data.id)
     }
 
     /// Change this agent's own profile; fields left `None` are kept.

@@ -32,9 +32,10 @@
 //! can be replayed straight into the chat REPL to continue the interview in
 //! the original context) would lose its last two turns.
 //!
-//! The feedback itself is submitted to the server before any of this, and the
-//! server never receives `contact_me` — it is anonymous there by
-//! construction. The retained exchange in this log is the sole opt-in signal.
+//! The feedback itself is submitted to the server before any of this, and
+//! stays anonymous there by construction. `contact_me = true` reaches the
+//! server separately, after this dump, as a signed contact request naming the
+//! feedback row and this dump's hash (see [`SeedAgent::contact_request`]).
 //!
 //! [`Feedback`]: super::Feedback
 //! [`SeedAgent`]: super::SeedAgent
@@ -44,6 +45,8 @@ use std::path::{Path, PathBuf};
 
 use misanthropic::Prompt;
 use sha2::Digest;
+
+use crate::govlog::Sha256Hex;
 
 /// Why a prompt could not be logged. Never fatal to a session — the caller
 /// warns and moves on.
@@ -66,21 +69,21 @@ impl PromptLogError {
     }
 }
 
-/// The bytes a dump holds and their hex SHA-256, the dump's name
-fn encode(prompt: &Prompt) -> Result<(Vec<u8>, String), serde_json::Error> {
+/// The bytes a dump holds and their SHA-256, the dump's name
+fn encode(prompt: &Prompt) -> Result<(Vec<u8>, Sha256Hex), serde_json::Error> {
     let json = serde_json::to_vec_pretty(prompt)?;
-    let hash = hex::encode(sha2::Sha256::digest(&json));
+    let hash = Sha256Hex::from(<[u8; 32]>::from(sha2::Sha256::digest(&json)));
     Ok((json, hash))
 }
 
 /// The `prompt_sha256` that [`save`] would name `prompt`'s dump by, without
 /// writing it — for correlating other events with the `prompt logged` one
 pub fn prompt_sha256(prompt: &Prompt) -> Result<String, serde_json::Error> {
-    encode(prompt).map(|(_, hash)| hash)
+    encode(prompt).map(|(_, hash)| hash.to_string())
 }
 
 /// Serialize `prompt` to a content-addressed JSON file under `dir` and
-/// return `(path, sha256_hex)`.
+/// return `(path, sha256)`.
 ///
 /// The hash is taken over the exact bytes written, so the filename is an
 /// honest digest of the file's contents — and stays compatible with the
@@ -94,8 +97,9 @@ pub fn prompt_sha256(prompt: &Prompt) -> Result<String, serde_json::Error> {
 pub async fn save(
     prompt: &Prompt,
     dir: impl AsRef<Path>,
-) -> Result<(PathBuf, String), PromptLogError> {
-    let (json, hash) = encode(prompt)?;
+) -> Result<(PathBuf, Sha256Hex), PromptLogError> {
+    let (json, sha256) = encode(prompt)?;
+    let hash = sha256.to_string();
 
     let dir = dir.as_ref().join(&hash[..2]);
     tokio::fs::create_dir_all(&dir)
@@ -107,14 +111,14 @@ pub async fn save(
     // bare `try_exists` failure would.
     let path = dir.join(format!("{hash}.json"));
     if let Ok(true) = tokio::fs::try_exists(&path).await {
-        return Ok((path, hash));
+        return Ok((path, sha256));
     }
 
     tokio::fs::write(&path, &json)
         .await
         .map_err(PromptLogError::io(&path))?;
 
-    Ok((path, hash))
+    Ok((path, sha256))
 }
 
 #[cfg(test)]
@@ -139,6 +143,7 @@ mod tests {
         let (path, hash) = save(&prompt("hello"), dir.path()).await.unwrap();
 
         assert!(path.exists());
+        let hash = hash.to_string();
         assert_eq!(path.file_name().unwrap(), format!("{hash}.json").as_str());
         assert_eq!(path.parent().unwrap().file_name().unwrap(), &hash[..2]);
     }
@@ -147,7 +152,7 @@ mod tests {
     async fn prompt_sha256_names_the_dump() {
         let dir = tempfile::tempdir().unwrap();
         let (_, hash) = save(&prompt("hello"), dir.path()).await.unwrap();
-        assert_eq!(prompt_sha256(&prompt("hello")).unwrap(), hash);
+        assert_eq!(prompt_sha256(&prompt("hello")).unwrap(), hash.to_string());
     }
 
     #[tokio::test]
@@ -156,7 +161,10 @@ mod tests {
         let (path, hash) = save(&prompt("hello"), dir.path()).await.unwrap();
 
         let written = tokio::fs::read(&path).await.unwrap();
-        assert_eq!(hex::encode(sha2::Sha256::digest(&written)), hash);
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(&written)),
+            hash.to_string()
+        );
     }
 
     #[tokio::test]
