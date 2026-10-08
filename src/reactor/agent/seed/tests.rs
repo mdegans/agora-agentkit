@@ -1809,7 +1809,7 @@ fn tool_use_with_usage(
 #[tokio::test]
 async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     let server = MockServer::start();
-    // ~40 KB of prose: about 13k tokens at a byte for every three.
+    // ~40 KB of prose: about 20k tokens at a byte for every two.
     let rationale = "The Council deliberated. ".repeat(1_600);
     let record = serde_json::json!({
         "rounds": [{"number": 1, "responses": [{"role": "lawyer", "rationale": rationale}]}]
@@ -1821,7 +1821,7 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     });
     let read = serde_json::json!({"id": "GOV-2026-0006"});
 
-    // 106k in context + 13k + the 10.2k reserve (4096 + 4096 + 2000) > 128k,
+    // 106k in context + 20k + the 10.2k reserve (4096 + 4096 + 2000) > 128k,
     // with room left for the round itself (MIN_ROUND_ROOM).
     let mut reader = agent(&server, quiet_config());
     seat_start(&mut reader);
@@ -1932,6 +1932,29 @@ async fn the_admitted_models_window_bounds_the_configs() {
     agent2.on_admit(&model, &Quirks::default());
     assert_eq!(agent2.context.window(), DEFAULT_CONTEXT_WINDOW);
 
+    // Under the 256k config alone, 115k is nowhere near the edge.
+    let mut roomy = super::tests::agent(
+        &server,
+        SeedConfig {
+            context_window: 262_144,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut roomy);
+    roomy
+        .handle(tool_use_with_usage(
+            "get_feed",
+            serde_json::json!({}),
+            115_000,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        matches!(roomy.phase, Phase::Acting { .. }),
+        "{:?}",
+        roomy.phase
+    );
+
     // Unreported (0) leaves the config's window.
     let mut agent3 = super::tests::agent(&server, quiet_config());
     model.max_input_tokens = 0;
@@ -1975,6 +1998,80 @@ async fn the_survey_is_skipped_when_it_would_not_fit() {
     assert_eq!(control, Control::Done(Outcome::Complete));
     assert!(agent.survey_mark.is_none(), "no survey seated");
     assert!(!transcript(&agent).contains("feedback"), "no survey prompt");
+}
+
+/// A reflect that fails near the edge is left out rather than seated, so
+/// the retry gets its whole budget back instead of what the failure left
+#[tokio::test]
+async fn a_failed_reflect_near_the_edge_is_left_out_for_the_retry() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    // 128k less 120k less 2k leaves 6,000 >= 4,096: reflect at full budget.
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    assert!(matches!(agent.phase, Phase::Reflect));
+    assert_eq!(agent.prompt().max_tokens.get(), 4_096);
+    let messages = agent.prompt().messages.len();
+
+    // An unparseable reply of 3,000 tokens: seated, the retry would have
+    // 3,000 to answer in.
+    let mut bad = text_with_usage("not json", 120_000);
+    bad.usage.output_tokens = 3_000;
+    let control = agent.handle(bad).await.unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(
+        agent.prompt().messages.len(),
+        messages,
+        "the reply is left out; the note joins the reflect turn"
+    );
+    assert!(!transcript(&agent).contains("not json"));
+    assert_eq!(agent.prompt().max_tokens.get(), 4_096, "full budget");
+
+    // The retry lands.
+    let control = agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(agent.state.memory.content.contains("compilers"));
+}
+
+/// With no room even for the floor, reflect is not sent: the session ends
+/// as failed rather than on a request the endpoint would refuse
+#[tokio::test]
+async fn no_room_for_reflect_ends_the_session() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    // 128k less 125.5k less 2k leaves 500 < 1,024.
+    let control = agent
+        .handle(text_with_usage("nothing to do", 125_500))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    assert!(!agent.state.completed);
+}
+
+/// Under a fixed thinking budget a closing phase needs more than the
+/// budget: the API refuses `max_tokens` at or under `budget_tokens`
+#[tokio::test]
+async fn a_thinking_budget_raises_the_phase_floor() {
+    let server = MockServer::start();
+    let config = SeedConfig {
+        thinking_budget_tokens: NonZeroU32::new(3_000),
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    // 2,500 of room would do without thinking; with a 3,000 budget it won't.
+    let control = agent
+        .handle(text_with_usage("nothing to do", 123_500))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
 }
 
 /// A closing phase is never sent asking for more than the context holds:

@@ -372,6 +372,8 @@ pub struct SeedAgent {
     /// for the last-attempt rescue and [`Agent::stall_reason`]
     phase_failures: usize,
     last_failure: Option<String>,
+    /// The current closing phase's `max_tokens` before any clamp
+    phase_budget: u32,
 }
 
 /// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
@@ -392,6 +394,10 @@ const NOT_RUN_NOW: &str =
 /// The error result a tool call gets in a turn clipped at `max_tokens`
 const NOT_RUN_CLIPPED: &str =
     "Not run: this turn was cut off at the length limit. Nothing was done.";
+
+/// The least `max_tokens` a closing phase is sent with (see
+/// `SeedAgent::phase_floor`)
+const MIN_PHASE_TOKENS: u32 = 1_024;
 
 /// The error result a tool call gets when acting ends because the context
 /// is nearly full. It asks for what the memory rewrite most needs: where
@@ -557,9 +563,12 @@ impl SeedAgent {
     ) -> Result<Control, SeedError> {
         self.phase_failures = 0;
         self.last_failure = None;
+        self.phase_budget = max_tokens;
         self.state.prompt.max_tokens =
             NonZeroU32::new(max_tokens).expect("nonzero");
-        self.fit_max_tokens();
+        if !self.fit_max_tokens() {
+            return Ok(self.out_of_room());
+        }
         let prompt = &mut self.state.prompt;
         prompt.output_config = prompt
             .output_config
@@ -610,24 +619,95 @@ impl SeedAgent {
             Some(StopReason::MaxTokens) => NOT_RUN_CLIPPED,
             _ => NOT_RUN_NOW,
         };
-        self.fit_max_tokens();
+        // Near the edge, seating the failed reply would leave the retry no
+        // room to answer in. Leave it out instead: the retry note joins the
+        // phase's own turn, which costs that tail on a prefix cache but
+        // gives the retry its whole budget back. A memory rewrite is worth
+        // more than the cache.
+        let closing = !matches!(self.phase, Phase::Acting { .. });
+        let unseat =
+            closing && self.context.phase_room() < u64::from(self.phase_budget);
+        if unseat {
+            let held = self.context.get();
+            self.context
+                .set(held.saturating_sub(reply.usage.output_tokens));
+            tracing::info!(
+                event_type = "phase_retry_unseated",
+                agent = %self.state.soul.name,
+                phase = ?self.phase,
+                held = self.context.get(),
+                window = self.context.window(),
+                "failed reply left out so the retry fits"
+            );
+        }
+        if closing {
+            self.state.prompt.max_tokens =
+                NonZeroU32::new(self.phase_budget).expect("nonzero");
+            if !self.fit_max_tokens() {
+                return Ok(self.out_of_room());
+            }
+        }
         let prompt = &mut self.state.prompt;
+        if unseat {
+            return seat_user(prompt, msg.to_string())
+                .map(|()| Control::Stalled)
+                .map_err(|e| SeedError::Prompt(e.to_string()));
+        }
         seat_unused_reply(prompt, reply, not_run)
             .and_then(|()| seat_user(prompt, msg.to_string()))
             .map(|()| Control::Stalled)
             .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
+    /// The least `max_tokens` worth sending a closing phase: enough to
+    /// answer in, and more than a fixed thinking budget (the API refuses
+    /// `max_tokens` at or under `budget_tokens`)
+    fn phase_floor(&self) -> u32 {
+        match self.state.prompt.thinking {
+            Some(Thinking::Enabled { budget_tokens, .. }) => {
+                MIN_PHASE_TOKENS.max(budget_tokens.get().saturating_add(1))
+            }
+            _ => MIN_PHASE_TOKENS,
+        }
+    }
+
+    /// End a session whose closing phase has no room left to be sent. With
+    /// the memory rewrite still owed it failed; past it, what is left is
+    /// optional and the session is complete.
+    fn out_of_room(&mut self) -> Control {
+        if matches!(self.phase, Phase::Reflect) {
+            Control::Done(Outcome::Failed)
+        } else {
+            self.finish()
+        }
+    }
+
     /// Lower a closing phase's `max_tokens` to what the context has room
     /// for, so the request is one the endpoint accepts: blallama refuses
     /// input + `max_tokens` past its window, as Anthropic does. Acting ends
     /// early enough that reflect never needs this (see [`MIN_ROUND_ROOM`]);
-    /// it is for retries and the optional phases after it.
-    fn fit_max_tokens(&mut self) {
+    /// it is for retries and the optional phases after it. False when not
+    /// even [`phase_floor`](Self::phase_floor) fits: the request would be
+    /// refused or useless, so the caller ends the session instead.
+    fn fit_max_tokens(&mut self) -> bool {
         let room = u32::try_from(self.context.phase_room()).unwrap_or(u32::MAX);
+        let floor = self.phase_floor();
+        if room < floor {
+            tracing::error!(
+                event_type = "context_exhausted",
+                agent = %self.state.soul.name,
+                phase = ?self.phase,
+                room,
+                floor,
+                held = self.context.get(),
+                window = self.context.window(),
+                "no room left to send a closing phase; the session ends"
+            );
+            return false;
+        }
         let prompt = &mut self.state.prompt;
         if room >= prompt.max_tokens.get() {
-            return;
+            return true;
         }
         tracing::warn!(
             event_type = "phase_budget_clamped",
@@ -639,19 +719,20 @@ impl SeedAgent {
             window = self.context.window(),
             "closing phase's max_tokens lowered to fit the context"
         );
-        prompt.max_tokens = NonZeroU32::new(room).unwrap_or(NonZeroU32::MIN);
+        prompt.max_tokens = NonZeroU32::new(room).expect("room >= floor > 0");
+        true
     }
 
     /// Whether an optional closing phase (mutate, evolve, survey) has room
     /// for its whole `budget`. Skipped when it doesn't: clipped, its JSON
     /// would not parse, and each retry would only fill the context more.
-    fn phase_fits(&self, phase: &str, budget: u32) -> bool {
+    fn phase_fits(&self, phase: Phase, budget: u32) -> bool {
         let fits = self.context.phase_room() >= u64::from(budget);
         if !fits {
             tracing::info!(
                 event_type = "phase_skipped_for_context",
                 agent = %self.state.soul.name,
-                phase,
+                phase = ?phase,
                 budget,
                 room = self.context.phase_room(),
                 "optional closing phase skipped: no room in the context"
@@ -701,9 +782,10 @@ impl SeedAgent {
             )
         };
         let mutate = mutate
-            && self.phase_fits("mutate", self.ctx.config.phase_max_tokens);
+            && self.phase_fits(Phase::Mutate, self.ctx.config.phase_max_tokens);
         let evolve = evolve
-            && self.phase_fits("evolve", self.ctx.config.evolve_max_tokens);
+            && self
+                .phase_fits(Phase::Evolve, self.ctx.config.evolve_max_tokens);
         if mutate {
             self.phase = Phase::Mutate;
             let instruction =
@@ -736,7 +818,9 @@ impl SeedAgent {
         let roll = self.ctx.config.force_survey
             || rand::thread_rng().gen_range(0..100)
                 < self.ctx.config.survey_chance;
-        if roll && self.phase_fits("survey", self.ctx.config.phase_max_tokens) {
+        if roll
+            && self.phase_fits(Phase::Survey, self.ctx.config.phase_max_tokens)
+        {
             self.phase = Phase::Survey;
             self.survey_mark = Some(SurveyMark::at(&self.state.prompt));
             // No `output_config`: `null` (no feedback) must stay expressible.
@@ -1065,6 +1149,7 @@ impl Agent for SeedAgent {
             context,
             shown,
             phase_failures: 0,
+            phase_budget: 0,
             last_failure: None,
         })
     }

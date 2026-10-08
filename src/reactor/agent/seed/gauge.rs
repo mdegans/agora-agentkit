@@ -128,12 +128,14 @@ impl ContextGauge {
     }
 }
 
-/// A rough token count for `text`: a byte for every three.
+/// A rough token count for `text`: a byte for every two. Prose runs nearer
+/// four bytes a token, but Agora results are JSON thick with UUIDs, which
+/// local tokenizers split finely; this errs on the side of the window.
 // TODO: count with the endpoint (`BatchBackend::count_tokens` /
 // misanthropic `Client::count_tokens`), which needs the inference backend
 // plumbed into the tools.
 pub(super) fn estimate_tokens(text: &str) -> u64 {
-    text.len() as u64 / 3
+    text.len() as u64 / 2
 }
 
 /// A [`Tool`] whose every result is counted into a [`ContextGauge`], and
@@ -306,19 +308,19 @@ mod tests {
     async fn every_result_is_counted_and_an_oversized_one_left_out() {
         let gauge = ContextGauge::new(40_000, CONTEXT_BUFFER_TOKENS);
         gauge.set(10_000);
-        // 30 KB is 10k tokens: 10k + 10k + 16k fits in 40k, twice does not.
-        let mut tool = Gauged::new(Echo { len: 30_000 }, gauge.clone());
+        // 20 KB is 10k tokens: 10k + 10k + 16k fits in 40k, twice does not.
+        let mut tool = Gauged::new(Echo { len: 20_000 }, gauge.clone());
 
         let first = tool.call(call("search")).await;
         assert!(!first.is_error);
-        assert_eq!(first.content.to_string().len(), 30_000);
+        assert_eq!(first.content.to_string().len(), 20_000);
         assert_eq!(gauge.get(), 20_000);
 
         let second = tool.call(call("search")).await;
         assert!(second.is_error);
         assert_eq!(second.tool_use_id, "toolu_1", "still answers the call");
         let note = second.content.to_string();
-        assert!(note.contains("about 10000 tokens (29 KB)"), "{note}");
+        assert!(note.contains("about 10000 tokens (19 KB)"), "{note}");
         assert!(note.contains("about 20000 already"), "{note}");
         assert!(note.contains("smaller limit"), "{note}");
         assert!(gauge.get() > 20_000 && gauge.get() < 20_200, "the note");
