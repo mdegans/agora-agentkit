@@ -119,10 +119,8 @@ pub struct Agora {
     governance_reads: usize,
     /// Whether this session's one `full_with_attachments` read is spent
     verbatim_read: bool,
-    /// Tokens in context, for the full-record guard
+    /// Tokens in context and the window, for the full-record guard
     context: ContextGauge,
-    /// The context window the guard keeps a full record inside
-    context_window: u64,
     /// Ids shown this session, for resolving short ids
     shown: ShownIds,
 }
@@ -146,7 +144,6 @@ impl Agora {
             governance_reads: 0,
             verbatim_read: false,
             context: ContextGauge::default(),
-            context_window: super::DEFAULT_CONTEXT_WINDOW,
             shown: ShownIds::default(),
         }
     }
@@ -201,17 +198,10 @@ impl Agora {
     }
 
     /// Return a governance entry's summary instead of its record when the
-    /// record would not fit: `context` tokens already held, plus the
-    /// record, plus [`CONTEXT_BUFFER_TOKENS`], against `window`
-    ///
-    /// [`CONTEXT_BUFFER_TOKENS`]: super::CONTEXT_BUFFER_TOKENS
-    pub fn with_context_guard(
-        mut self,
-        context: ContextGauge,
-        window: u64,
-    ) -> Self {
+    /// record would not fit: the tokens `context` holds, plus the record,
+    /// plus its reserve, against its window (see [`ContextGauge::fits`])
+    pub fn with_context_guard(mut self, context: ContextGauge) -> Self {
         self.context = context;
-        self.context_window = window;
         self
     }
 
@@ -585,7 +575,7 @@ impl Agora {
                 // Counted by `Gauged` on the way out, like every result.
                 let tokens = estimate_tokens(&rendered);
                 let held = self.context.get();
-                if self.context.fits(tokens, self.context_window) {
+                if self.context.fits(tokens) {
                     self.governance_reads += 1;
                     if verbatim_refused {
                         return Ok(format!(
@@ -611,7 +601,7 @@ impl Agora {
                      your {} token window, so this is the summary, and the \
                      read was not counted.\n\n{summary}",
                     rendered.len() / 1024,
-                    self.context_window,
+                    self.context.window(),
                 )
                 .into()
             }

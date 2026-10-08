@@ -30,7 +30,10 @@ mod soul;
 mod tests;
 mod tool;
 
-pub use gauge::{CONTEXT_BUFFER_TOKENS, ContextGauge, Gauged};
+pub use gauge::{
+    CONTEXT_BUFFER_TOKENS, ContextGauge, Gauged, MIN_ROUND_ROOM,
+    PHASE_PROMPT_TOKENS,
+};
 pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use prompt::{
@@ -163,10 +166,13 @@ pub struct SeedConfig {
     /// one [`act_max_tokens`](Self::act_max_tokens) budget, and a clipped
     /// turn is pruned whole
     pub disable_parallel_tool_use: bool,
-    /// The model's context window, in tokens. A tool result that would not
-    /// fit is replaced by a note (see [`Gauged`]), and `get_content`
-    /// returns a governance entry's summary instead of a record that would
-    /// not (see [`CONTEXT_BUFFER_TOKENS`]).
+    /// The model's context window, in tokens: the most any agent gets. An
+    /// admitted model that reports a smaller `max_input_tokens` lowers it
+    /// for that agent. A tool result that would not fit is replaced by a
+    /// note (see [`Gauged`]), `get_content` returns a governance entry's
+    /// summary instead of a record that would not, and acting ends early
+    /// when the next round would leave no room to close the session (see
+    /// [`MIN_ROUND_ROOM`]).
     pub context_window: u64,
 }
 
@@ -387,6 +393,14 @@ const NOT_RUN_NOW: &str =
 const NOT_RUN_CLIPPED: &str =
     "Not run: this turn was cut off at the length limit. Nothing was done.";
 
+/// The error result a tool call gets when acting ends because the context
+/// is nearly full. It asks for what the memory rewrite most needs: where
+/// the agent left off, so the next session can pick it up.
+const NOT_RUN_CONTEXT: &str = "Not run: your context window is nearly full, \
+     so this session ends here, before its rounds are used up. Nothing was \
+     done. Note in your memory what you were about to do and where each \
+     thread you are in stands, so you can pick it up next session.";
+
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
         self.quirks.unwrap_or_default()
@@ -543,8 +557,10 @@ impl SeedAgent {
     ) -> Result<Control, SeedError> {
         self.phase_failures = 0;
         self.last_failure = None;
+        self.state.prompt.max_tokens =
+            NonZeroU32::new(max_tokens).expect("nonzero");
+        self.fit_max_tokens();
         let prompt = &mut self.state.prompt;
-        prompt.max_tokens = NonZeroU32::new(max_tokens).expect("nonzero");
         prompt.output_config = prompt
             .output_config
             .take()
@@ -594,11 +610,54 @@ impl SeedAgent {
             Some(StopReason::MaxTokens) => NOT_RUN_CLIPPED,
             _ => NOT_RUN_NOW,
         };
+        self.fit_max_tokens();
         let prompt = &mut self.state.prompt;
         seat_unused_reply(prompt, reply, not_run)
             .and_then(|()| seat_user(prompt, msg.to_string()))
             .map(|()| Control::Stalled)
             .map_err(|e| SeedError::Prompt(e.to_string()))
+    }
+
+    /// Lower a closing phase's `max_tokens` to what the context has room
+    /// for, so the request is one the endpoint accepts: blallama refuses
+    /// input + `max_tokens` past its window, as Anthropic does. Acting ends
+    /// early enough that reflect never needs this (see [`MIN_ROUND_ROOM`]);
+    /// it is for retries and the optional phases after it.
+    fn fit_max_tokens(&mut self) {
+        let room = u32::try_from(self.context.phase_room()).unwrap_or(u32::MAX);
+        let prompt = &mut self.state.prompt;
+        if room >= prompt.max_tokens.get() {
+            return;
+        }
+        tracing::warn!(
+            event_type = "phase_budget_clamped",
+            agent = %self.state.soul.name,
+            phase = ?self.phase,
+            max_tokens = prompt.max_tokens.get(),
+            room,
+            held = self.context.get(),
+            window = self.context.window(),
+            "closing phase's max_tokens lowered to fit the context"
+        );
+        prompt.max_tokens = NonZeroU32::new(room).unwrap_or(NonZeroU32::MIN);
+    }
+
+    /// Whether an optional closing phase (mutate, evolve, survey) has room
+    /// for its whole `budget`. Skipped when it doesn't: clipped, its JSON
+    /// would not parse, and each retry would only fill the context more.
+    fn phase_fits(&self, phase: &str, budget: u32) -> bool {
+        let fits = self.context.phase_room() >= u64::from(budget);
+        if !fits {
+            tracing::info!(
+                event_type = "phase_skipped_for_context",
+                agent = %self.state.soul.name,
+                phase,
+                budget,
+                room = self.context.phase_room(),
+                "optional closing phase skipped: no room in the context"
+            );
+        }
+        fits
     }
 
     /// Whether the response being handled is the closing phase's last try
@@ -641,6 +700,10 @@ impl SeedAgent {
                 rng.gen_range(0..100) < self.ctx.config.evolution_chance,
             )
         };
+        let mutate = mutate
+            && self.phase_fits("mutate", self.ctx.config.phase_max_tokens);
+        let evolve = evolve
+            && self.phase_fits("evolve", self.ctx.config.evolve_max_tokens);
         if mutate {
             self.phase = Phase::Mutate;
             let instruction =
@@ -673,7 +736,7 @@ impl SeedAgent {
         let roll = self.ctx.config.force_survey
             || rand::thread_rng().gen_range(0..100)
                 < self.ctx.config.survey_chance;
-        if roll {
+        if roll && self.phase_fits("survey", self.ctx.config.phase_max_tokens) {
             self.phase = Phase::Survey;
             self.survey_mark = Some(SurveyMark::at(&self.state.prompt));
             // No `output_config`: `null` (no feedback) must stay expressible.
@@ -961,7 +1024,13 @@ impl Agent for SeedAgent {
         state.prompt = fresh;
         state.completed = false;
 
-        let context = ContextGauge::default();
+        let context = ContextGauge::new(
+            ctx.config.context_window,
+            ContextGauge::reserve_for(
+                ctx.config.act_max_tokens,
+                ctx.config.phase_max_tokens,
+            ),
+        );
         let shown = ShownIds::default();
         let agora = Agora::new(
             ctx.client.clone(),
@@ -971,13 +1040,9 @@ impl Agent for SeedAgent {
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
         )
-        .with_context_guard(context.clone(), ctx.config.context_window)
+        .with_context_guard(context.clone())
         .with_shown_ids(shown.clone());
-        let tools = ToolBox::flat().add(Gauged::new(
-            agora,
-            context.clone(),
-            ctx.config.context_window,
-        ));
+        let tools = ToolBox::flat().add(Gauged::new(agora, context.clone()));
 
         let phase = Phase::Acting {
             rounds_left: ctx.config.max_rounds,
@@ -1031,6 +1096,16 @@ impl Agent for SeedAgent {
     fn on_admit(&mut self, model: &ModelInfo, quirks: &Quirks) {
         self.quirks = Some(*quirks);
         self.admitted = Some(model.clone());
+        // An endpoint serving this model with a smaller window than the
+        // config's (blallama sizes each model's KV on its own) bounds it.
+        if model.max_input_tokens > 0 {
+            let window = self
+                .ctx
+                .config
+                .context_window
+                .min(u64::from(model.max_input_tokens));
+            self.context.set_window(window);
+        }
         // `Choice::auto` *forces* a tool call on endpoints that don't honor
         // `tool_choice` (ollama) — the phase tail needs text turns.
         if quirks.tool_choice_not_respected {
@@ -1219,14 +1294,41 @@ impl Agent for SeedAgent {
         self.context.record(&response.usage);
         match self.phase {
             Phase::Acting { rounds_left } => {
-                let tool_round = !matches!(
-                    response.stop_reason,
-                    Some(StopReason::MaxTokens)
-                ) && response
-                    .inner
-                    .content
-                    .iter()
-                    .any(|block| block.tool_use().is_some());
+                let clipped =
+                    matches!(response.stop_reason, Some(StopReason::MaxTokens));
+                let tool_round = !clipped
+                    && response
+                        .inner
+                        .content
+                        .iter()
+                        .any(|block| block.tool_use().is_some());
+                // A clipped turn continues acting too, so it needs the
+                // same room as a round.
+                if (tool_round || clipped)
+                    && self.context.room() < MIN_ROUND_ROOM
+                {
+                    // Out of context before out of rounds: close now,
+                    // while reflect still fits, rather than run a round
+                    // whose next request the endpoint would refuse and
+                    // lose the memory rewrite with it. Seated like the
+                    // round cap below, for the same cache reason.
+                    tracing::info!(
+                        event_type = "context_quiesce",
+                        agent = %self.state.soul.name,
+                        held = self.context.get(),
+                        window = self.context.window(),
+                        reserve = self.context.reserve(),
+                        rounds_left,
+                        "context nearly full; acting ends early"
+                    );
+                    seat_unused_reply(
+                        &mut self.state.prompt,
+                        &response,
+                        NOT_RUN_CONTEXT,
+                    )
+                    .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    return self.begin_reflect();
+                }
                 if tool_round {
                     if rounds_left == 0 {
                         // Budget spent. The turn is seated and each call

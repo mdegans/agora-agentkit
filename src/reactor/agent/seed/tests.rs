@@ -1821,11 +1821,12 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     });
     let read = serde_json::json!({"id": "GOV-2026-0006"});
 
-    // 100k in context + 13k + the 16k buffer > 128k.
+    // 106k in context + 13k + the 10.2k reserve (4096 + 4096 + 2000) > 128k,
+    // with room left for the round itself (MIN_ROUND_ROOM).
     let mut reader = agent(&server, quiet_config());
     seat_start(&mut reader);
     reader
-        .handle(tool_use_with_usage("get_content", read.clone(), 100_000))
+        .handle(tool_use_with_usage("get_content", read.clone(), 106_000))
         .await
         .unwrap();
     let rendered = transcript(&reader);
@@ -1854,6 +1855,142 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     let rendered = transcript(&reader);
     assert!(rendered.contains("### Record"), "{rendered}");
     assert!(!rendered.contains("would not fit"), "{rendered}");
+}
+
+/// `text_message` with `input_tokens` of usage, as the gauge reads it
+fn text_with_usage(text: &str, input_tokens: u64) -> response::Message {
+    let mut message = text_message(text, StopReason::EndTurn);
+    message.usage.input_tokens = input_tokens;
+    message
+}
+
+/// A tool round that would leave no room to close the session ends acting
+/// before its rounds are used up: the calls are answered "not run", nothing
+/// reaches the server, and reflect follows while it still fits. With room,
+/// the same round runs.
+#[tokio::test]
+async fn a_nearly_full_context_ends_acting_and_reflects() {
+    let server = MockServer::start();
+    let feed = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/social/feed");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    // The default window (128k) less the reserve (4096 + 4096 + 2000) less
+    // MIN_ROUND_ROOM leaves 109,808 tokens of history before acting ends.
+    let input = serde_json::json!({});
+
+    let mut roomy = agent(&server, quiet_config());
+    seat_start(&mut roomy);
+    roomy
+        .handle(tool_use_with_usage("get_feed", input.clone(), 100_000))
+        .await
+        .unwrap();
+    assert!(
+        matches!(roomy.phase, Phase::Acting { .. }),
+        "{:?}",
+        roomy.phase
+    );
+    assert_eq!(feed.hits(), 1, "the round ran");
+
+    let mut full = agent(&server, quiet_config());
+    seat_start(&mut full);
+    let control = full
+        .handle(tool_use_with_usage("get_feed", input, 112_000))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
+    assert!(matches!(full.phase, Phase::Reflect), "{:?}", full.phase);
+    assert_eq!(feed.hits(), 1, "the full agent's call never ran");
+    let rendered = transcript(&full);
+    assert!(rendered.contains(NOT_RUN_CONTEXT), "{rendered}");
+    assert!(rendered.contains("update your `## Memory`"), "{rendered}");
+
+    // Reflect fits and lands: the memory is written.
+    let control = full.handle(text_with_usage(MEMORY, 113_000)).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(full.state.memory.content.contains("compilers"));
+}
+
+/// The admitted model's window bounds the config's: cogito served at 128k
+/// beside a 256k config closes at 128k, and an endpoint advertising more
+/// than the config never raises it.
+#[tokio::test]
+async fn the_admitted_models_window_bounds_the_configs() {
+    let server = MockServer::start();
+    let big = SeedConfig {
+        context_window: 262_144,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, big);
+    let mut model = agent.model();
+    model.max_input_tokens = 131_072;
+    agent.on_admit(&model, &Quirks::default());
+    assert_eq!(agent.context.window(), 131_072);
+
+    let mut agent2 = super::tests::agent(&server, quiet_config());
+    model.max_input_tokens = 262_144;
+    agent2.on_admit(&model, &Quirks::default());
+    assert_eq!(agent2.context.window(), DEFAULT_CONTEXT_WINDOW);
+
+    // Unreported (0) leaves the config's window.
+    let mut agent3 = super::tests::agent(&server, quiet_config());
+    model.max_input_tokens = 0;
+    agent3.on_admit(&model, &Quirks::default());
+    assert_eq!(agent3.context.window(), DEFAULT_CONTEXT_WINDOW);
+
+    // At 128k, a history that fit under 256k ends acting.
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_with_usage(
+            "get_feed",
+            serde_json::json!({}),
+            115_000,
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(agent.phase, Phase::Reflect), "{:?}", agent.phase);
+}
+
+/// After reflect, an optional phase without room for its whole budget is
+/// skipped rather than clipped, and the session still completes
+#[tokio::test]
+async fn the_survey_is_skipped_when_it_would_not_fit() {
+    let server = MockServer::start();
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 100_000))
+        .await
+        .unwrap();
+    assert!(matches!(agent.phase, Phase::Reflect));
+    // 128k less 123k held less the instruction leaves under 4096.
+    let control = agent
+        .handle(text_with_usage(MEMORY, 123_000))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(agent.survey_mark.is_none(), "no survey seated");
+    assert!(!transcript(&agent).contains("feedback"), "no survey prompt");
+}
+
+/// A closing phase is never sent asking for more than the context holds:
+/// its `max_tokens` comes down to the room left
+#[tokio::test]
+async fn a_closing_phase_asks_for_no_more_than_fits() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    // 128k less 124k held less the 2k instruction: 2,000 tokens to answer in.
+    agent
+        .handle(text_with_usage("nothing to do", 124_000))
+        .await
+        .unwrap();
+    assert!(matches!(agent.phase, Phase::Reflect));
+    assert_eq!(agent.prompt().max_tokens.get(), 2_000);
 }
 
 /// Only a delivered record spends: the index, the proposal queue and a
