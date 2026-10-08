@@ -71,6 +71,16 @@ pub trait RetryAfter {
     fn is_fatal(&self) -> bool {
         self.retry_after().is_none()
     }
+
+    /// Whether the endpoint could not be reached at all: the connection was
+    /// refused or never made, so nothing was served and the request never
+    /// ran. A [`Reactor`] [holding](Reactor::with_unreachable_hold) on
+    /// these retries them without limit. An error the server *answered*
+    /// with, a 500 included, is never unreachable: a request that crashes
+    /// the server would otherwise crash it again each time it came back.
+    fn unreachable(&self) -> bool {
+        false
+    }
 }
 
 // Anthropic error classification lives here rather than in
@@ -144,6 +154,12 @@ impl RetryAfter for misanthropic::client::Error {
             Error::Parse(_) | Error::UnexpectedResponse { .. } => None,
         }
     }
+
+    /// Only a failure to connect: refused, or timed out before a connection
+    /// was made. A reset mid-response may have been the request's own doing.
+    fn unreachable(&self) -> bool {
+        matches!(self, Self::HTTP(e) if e.is_connect())
+    }
 }
 
 /// Something went wrong in the [`Agent`] [`Reactor`]
@@ -181,6 +197,15 @@ impl<I: Inference, S: Storage, A: Agent> RetryAfter for ReactorError<I, S, A> {
             ReactorError::AgentError(e) => e.retry_after(),
             ReactorError::StorageError(e) => e.retry_after(),
             ReactorError::Shared(report) => report.retry_after,
+        }
+    }
+
+    fn unreachable(&self) -> bool {
+        match self {
+            ReactorError::InferenceError(e) => e.unreachable(),
+            ReactorError::AgentError(e) => e.unreachable(),
+            ReactorError::StorageError(e) => e.unreachable(),
+            ReactorError::Shared(_) => false,
         }
     }
 }
@@ -303,6 +328,8 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
     /// [`State`] of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]).
     /// Drained into [`Report::rejected`] so the caller can re-route them.
     rejected: BTreeMap<AgentId, serde_json::Value>,
+    /// See [`with_unreachable_hold`](Self::with_unreachable_hold)
+    unreachable_hold: Option<Duration>,
 }
 
 /// A [`Reactor`] using an [`anthropic::Client`] for [`Inference`].
@@ -373,8 +400,21 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             errors: BTreeMap::new(),
             unsaved: BTreeMap::new(),
             rejected: BTreeMap::new(),
+            unreachable_hold: None,
         }
         .with_agents(agents)
+    }
+
+    /// Hold a session while its endpoint is unreachable
+    /// ([`RetryAfter::unreachable`]): retry every `every`, without limit,
+    /// instead of failing the session once the retry budget is spent. A
+    /// session that fails loses what it hasn't saved, a seed agent's memory
+    /// rewrite included, so for a local endpoint that restarts (a deploy, a
+    /// test run on the same machine) waiting it out loses nothing. Applies to
+    /// the agent-major path; a batch submission is not a session.
+    pub fn with_unreachable_hold(mut self, every: Duration) -> Self {
+        self.unreachable_hold = Some(every);
+        self
     }
 
     /// Add [`Agent`]s to self.
@@ -421,8 +461,9 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     async fn drive_one(
         inference: &I,
         agent: &mut A,
+        hold: Option<Duration>,
     ) -> (Result<Outcome, ReactorError<I, S, A>>, bool) {
-        let driven = Self::drive_inner(inference, agent).await;
+        let driven = Self::drive_inner(inference, agent, hold).await;
         let stalled = matches!(driven, Ok(None));
         let driven = driven.map(|o| o.unwrap_or(Outcome::Failed));
         let teardown =
@@ -512,6 +553,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     async fn drive_inner(
         inference: &I,
         agent: &mut A,
+        hold: Option<Duration>,
     ) -> Result<Option<Outcome>, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
         let mut stalls = 0usize;
@@ -520,11 +562,36 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             // Retry inference while the error advertises a wait (a 429/529
             // with — or courtesy-defaulted to — a backoff), scaling the wait
             // linearly per attempt. Fatal errors and exhausted budgets
-            // surface immediately.
+            // surface immediately. An unreachable endpoint, when holding,
+            // is waited out without spending the budget.
             let mut attempt: u32 = 0;
+            let mut held: u32 = 0;
             let response = loop {
                 match inference.infer(agent.prompt()).await {
-                    Ok(response) => break response,
+                    Ok(response) => {
+                        if held > 0 {
+                            tracing::info!(
+                                event_type = "endpoint_reachable",
+                                agent_id = %agent.id(),
+                                held,
+                                "endpoint back; the session resumes"
+                            );
+                        }
+                        break response;
+                    }
+                    Err(e) if hold.is_some() && e.unreachable() => {
+                        let every = hold.expect("checked");
+                        held += 1;
+                        tracing::warn!(
+                            event_type = "endpoint_unreachable",
+                            agent_id = %agent.id(),
+                            held,
+                            wait_secs = every.as_secs(),
+                            error = %e,
+                            "endpoint unreachable; holding the session"
+                        );
+                        tokio::time::sleep(every).await;
+                    }
                     Err(e) => match e.retry_after() {
                         Some(wait) if attempt < MAX_INFER_RETRIES => {
                             attempt += 1;
@@ -576,13 +643,14 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         inference: &I,
         storage: &SharedStorage<'_, S>,
         agents: Vec<A>,
+        hold: Option<Duration>,
     ) -> Vec<Persist<I, S, A>> {
         let limit = inference.max_concurrency().get();
         futures::stream::iter(agents)
             .map(|mut agent| async move {
                 let started = Started::now();
                 let (result, stalled) =
-                    Self::drive_one(inference, &mut agent).await;
+                    Self::drive_one(inference, &mut agent, hold).await;
                 let saved = Self::settle(
                     storage, &mut agent, &result, stalled, started,
                 )
@@ -1136,7 +1204,12 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
         let storage = futures::lock::Mutex::new(&mut self.storage);
         let (mut to_persist, seq_persist) = futures::join!(
             Self::run_round_major(inference, &storage, batch),
-            Self::run_agent_major(inference, &storage, sequential),
+            Self::run_agent_major(
+                inference,
+                &storage,
+                sequential,
+                self.unreachable_hold,
+            ),
         );
         drop(storage);
         to_persist.extend(seq_persist);
