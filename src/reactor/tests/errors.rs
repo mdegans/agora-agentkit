@@ -239,3 +239,83 @@ async fn sequential_transient_infer_exhausts_budget() {
     // The first attempt + every retry in the budget.
     assert_eq!(calls.load(Ordering::SeqCst), MAX_INFER_RETRIES as usize + 1);
 }
+
+/// Holding, a session waits out an unreachable endpoint however long it
+/// takes, past the retry budget, and completes when it comes back
+#[tokio::test]
+async fn a_held_session_waits_out_an_unreachable_endpoint() {
+    let failures = MAX_INFER_RETRIES as usize * 4;
+    let inference = FlakyInfer::unreachable(failures);
+    let calls = inference.calls.clone();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        inference,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    )
+    .with_unreachable_hold(Duration::from_millis(1));
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.done, 1, "{:?}", report.errors);
+    assert_eq!(calls.load(Ordering::SeqCst), failures + 1);
+}
+
+/// Without a hold, unreachable is just transient: the budget still applies
+#[tokio::test]
+async fn an_unheld_session_spends_its_budget_on_an_unreachable_endpoint() {
+    let inference = FlakyInfer::unreachable(usize::MAX);
+    let calls = inference.calls.clone();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        inference,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    );
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_INFER_RETRIES as usize + 1);
+}
+
+/// A hold covers only an endpoint that can't be reached. An error the
+/// server answered with keeps its budget, so a request that crashes the
+/// server is not sent again forever.
+#[tokio::test]
+async fn a_hold_does_not_extend_to_answered_errors() {
+    let inference = FlakyInfer::failing(usize::MAX);
+    let calls = inference.calls.clone();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        inference,
+        MemStore::default(),
+        vec![agent(Behavior::Complete, 1)],
+    )
+    .with_unreachable_hold(Duration::from_millis(1));
+    let report = reactor.run().await.unwrap();
+
+    assert_eq!(report.failed, 1);
+    assert_eq!(calls.load(Ordering::SeqCst), MAX_INFER_RETRIES as usize + 1);
+}
+
+/// A refused connection is unreachable; an answered 500 is not
+#[cfg(feature = "agora-client")]
+#[tokio::test]
+async fn only_a_failed_connection_is_unreachable() {
+    use crate::reactor::RetryAfter;
+
+    // A port nothing listens on: bind one, then let it go.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let refused = reqwest::get(format!("http://127.0.0.1:{port}/"))
+        .await
+        .expect_err("nothing listens there");
+    let refused = misanthropic::client::Error::HTTP(refused);
+    assert!(refused.unreachable(), "{refused}");
+
+    let answered = misanthropic::client::Error::NonJsonResponse {
+        status: 500,
+        body: "blallama is restarting after a fatal backend error".into(),
+    };
+    assert!(!answered.unreachable());
+    assert!(answered.retry_after().is_some(), "still bounded-retryable");
+}

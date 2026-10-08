@@ -68,14 +68,22 @@ enum TestError {
     /// A transient error carrying a retry hint, for exercising classification.
     #[error("transient, retry after {0:?}")]
     Transient(Duration),
+    /// The endpoint could not be reached (a refused connection, say).
+    #[error("unreachable")]
+    Unreachable,
 }
 
 impl RetryAfter for TestError {
     fn retry_after(&self) -> Option<Duration> {
         match self {
             TestError::Transient(d) => Some(*d),
+            TestError::Unreachable => Some(Duration::from_millis(1)),
             _ => None,
         }
+    }
+
+    fn unreachable(&self) -> bool {
+        matches!(self, TestError::Unreachable)
     }
 }
 
@@ -794,6 +802,8 @@ struct FlakyInfer {
     failures_left: AtomicUsize,
     /// Total `infer` calls, for asserting the retry count.
     calls: Arc<AtomicUsize>,
+    /// Fail as unreachable rather than transient
+    unreachable: bool,
 }
 
 impl FlakyInfer {
@@ -801,6 +811,15 @@ impl FlakyInfer {
         Self {
             failures_left: AtomicUsize::new(n),
             calls: Arc::default(),
+            unreachable: false,
+        }
+    }
+
+    /// `n` failures to reach the endpoint, then responses
+    fn unreachable(n: usize) -> Self {
+        Self {
+            unreachable: true,
+            ..Self::failing(n)
         }
     }
 }
@@ -822,7 +841,9 @@ impl Inference for FlakyInfer {
                 n.checked_sub(1)
             })
             .is_ok();
-        if failing {
+        if failing && self.unreachable {
+            Err(TestError::Unreachable)
+        } else if failing {
             Err(TestError::Transient(Duration::from_millis(1)))
         } else {
             Ok(message(StopReason::EndTurn))
