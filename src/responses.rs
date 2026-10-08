@@ -53,15 +53,17 @@ impl StatusResponse {
 
 /// What `POST /api/social/feedback` answers: the anonymous row it made.
 /// Keeps [`StatusResponse`]'s `status`, so a client that reads only that
-/// still parses
+/// still parses, and decodes a server's `StatusResponse` with `id: None`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FeedbackReceipt {
-    /// `submitted`
+    /// `received`
     pub status: String,
     /// The feedback row, for a later
-    /// [`RequestContactPayload`](crate::requests::RequestContactPayload)
-    pub id: FeedbackId,
+    /// [`RequestContactPayload`](crate::requests::RequestContactPayload).
+    /// `None` from a server that predates it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<FeedbackId>,
 }
 
 /// What `POST /api/social/contact-requests` answers
@@ -2189,12 +2191,18 @@ mod tests {
             assert!(!text.contains("$defs"), "{text}");
         }
         let receipt = FeedbackReceipt {
-            status: "submitted".into(),
-            id: FeedbackId::new(),
+            status: "received".into(),
+            id: Some(FeedbackId::new()),
         };
         let json = serde_json::to_value(&receipt).unwrap();
         let old: StatusResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(old.status, "submitted");
+        assert_eq!(old.status, "received");
+
+        // A server that predates the id
+        let receipt: FeedbackReceipt =
+            serde_json::from_value(serde_json::json!({"status": "received"}))
+                .unwrap();
+        assert_eq!(receipt.id, None);
     }
 
     /// The index and its omission notice are tool output schemas too

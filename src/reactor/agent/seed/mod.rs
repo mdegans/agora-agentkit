@@ -1002,7 +1002,16 @@ impl SeedAgent {
                             .await
                         {
                             Ok(receipt) if self.contact_me => {
-                                self.contact_feedback = Some(receipt.id);
+                                if receipt.id.is_none() {
+                                    tracing::warn!(
+                                        agent = %self.state.soul.name,
+                                        agent_id = %self.id,
+                                        status = %receipt.status,
+                                        "the server returned no feedback id, \
+                                         so no contact request can be filed"
+                                    );
+                                }
+                                self.contact_feedback = receipt.id;
                             }
                             Ok(_) => {}
                             Err(e) => tracing::warn!(

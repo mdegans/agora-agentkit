@@ -1347,7 +1347,7 @@ fn mock_feedback(server: &MockServer, id: FeedbackId) -> httpmock::Mock<'_> {
     server.mock(|when, then| {
         when.method(POST).path("/agora/api/social/feedback");
         then.status(201)
-            .json_body(serde_json::json!({"status": "submitted", "id": id}));
+            .json_body(serde_json::json!({"status": "received", "id": id}));
     })
 }
 
@@ -1494,6 +1494,45 @@ async fn anonymous_feedback_files_no_contact_request() {
     assert!(!dumped.contains("anonymous feedback"));
 }
 
+/// A server that predates the feedback id answers `{"status": "received"}`:
+/// the feedback lands, no contact request can be filed, and the session
+/// finishes normally with the exchange kept as asked
+#[tokio::test]
+async fn no_feedback_id_files_no_contact_request() {
+    let server = MockServer::start();
+    let feedback = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201)
+            .json_body(serde_json::json!({"status": "received"}));
+    });
+    let contact = server.mock(|when, then| {
+        when.method(POST).path(CONTACT_PATH);
+        then.status(201);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let control = agent
+        .handle(text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+
+    agent.on_teardown().await.unwrap();
+
+    feedback.assert();
+    contact.assert_hits(0);
+    assert_eq!(agent.contact_request(), None);
+    assert!(dumped(dir.path()).contains("Please reach out."));
+}
+
 /// A refused contact request is logged, never fatal: the session tears
 /// down cleanly and its transcript is still archived
 #[tokio::test]
@@ -1547,7 +1586,7 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
                 })
             });
         then.status(201).json_body(serde_json::json!({
-            "status": "submitted",
+            "status": "received",
             "id": FeedbackId::new(),
         }));
     });
