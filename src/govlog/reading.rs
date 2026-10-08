@@ -149,6 +149,9 @@ pub fn label(key: &str) -> String {
     match key {
         super::BLIND_KEY => return "Redaction blind".to_string(),
         "raw_text" => return "Raw model output".to_string(),
+        // Not "Ready to vote": beside a seat's vote, "Ready to vote: no" was
+        // read as the vote itself (a GOV-2026-0009 report, 2026-10-08).
+        "ready_to_vote" => return "Ready".to_string(),
         _ => {}
     }
     if key.starts_with("agora_") {
@@ -160,6 +163,16 @@ pub fn label(key: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
+    }
+}
+
+/// How a boolean field reads: "yes" or "no", except where a bare "no" beside
+/// a seat's vote would read as the vote. A seat not yet ready is "not yet".
+pub fn bool_text(key: &str, value: bool) -> &'static str {
+    match (key, value) {
+        (_, true) => "yes",
+        ("ready_to_vote", false) => "not yet",
+        (_, false) => "no",
     }
 }
 
