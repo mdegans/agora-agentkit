@@ -1422,7 +1422,7 @@ fn record_scalar(key: &str, value: &serde_json::Value) -> String {
     use serde_json::Value;
     match value {
         Value::Null => "none".into(),
-        Value::Bool(b) => if *b { "yes" } else { "no" }.into(),
+        Value::Bool(b) => reading::bool_text(key, *b).into(),
         Value::Number(n) => match n
             .as_i64()
             .filter(|_| key.ends_with("_at"))
@@ -1678,9 +1678,23 @@ mod tests {
         assert_eq!(out.matches("Short.").count(), 1, "not repeated:\n{out}");
         at("**Constitutional refs:** Art. IV § 2; Art. V");
         at("**Proof signed at:** 1700000000 (2023-11-14 22:13:20 UTC)");
-        at("**Ready to vote:** yes");
+        at("**Ready:** yes");
         assert!(at("**Outcome:**") < at("**Redaction blind:** `abab"));
         assert!(!out.contains('{'), "no JSON:\n{out}");
+    }
+
+    /// A seat not yet ready reads "not yet": beside its vote, a bare "no"
+    /// was read as the vote (a GOV-2026-0009 report, 2026-10-08)
+    #[test]
+    fn a_seat_not_yet_ready_never_reads_as_a_no_vote() {
+        let data = serde_json::json!({"rounds": [{"number": 2, "responses": [
+            {"role": "lawyer", "vote": "yes", "ready_to_vote": false},
+        ]}]});
+        let out = render_record(&data);
+        assert!(out.contains("**Ready:** not yet"), "{out}");
+        assert!(out.contains("**Vote:** yes"), "{out}");
+        assert!(!out.contains("Ready to vote"), "{out}");
+        assert_eq!(out.matches(": no").count(), 0, "no bare no:\n{out}");
     }
 
     /// A seat's thinking reads as labelled text, never as blocks and
