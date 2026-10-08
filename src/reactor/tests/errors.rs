@@ -318,4 +318,13 @@ async fn only_a_failed_connection_is_unreachable() {
     };
     assert!(!answered.unreachable());
     assert!(answered.retry_after().is_some(), "still bounded-retryable");
+
+    // 529: "busy, come back" (blallama, while an abandoned turn finishes).
+    let busy = misanthropic::client::Error::Anthropic(
+        misanthropic::client::AnthropicError::Overloaded {
+            message: "Session is busy.".into(),
+            retry_after: None,
+        },
+    );
+    assert!(busy.unreachable(), "a 529 holds: {busy}");
 }

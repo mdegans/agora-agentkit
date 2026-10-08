@@ -72,12 +72,13 @@ pub trait RetryAfter {
         self.retry_after().is_none()
     }
 
-    /// Whether the endpoint could not be reached at all: the connection was
-    /// refused or never made, so nothing was served and the request never
-    /// ran. A [`Reactor`] [holding](Reactor::with_unreachable_hold) on
-    /// these retries them without limit. An error the server *answered*
-    /// with, a 500 included, is never unreachable: a request that crashes
-    /// the server would otherwise crash it again each time it came back.
+    /// Whether the endpoint can't serve the request right now: the
+    /// connection was refused or never made, or the endpoint said it is
+    /// overloaded (529). Either way the request never ran. A [`Reactor`]
+    /// [holding](Reactor::with_unreachable_hold) on these retries them
+    /// without limit. Other errors the server *answered* with, a 500
+    /// included, never count: a request that crashes the server would
+    /// otherwise crash it again each time it came back.
     fn unreachable(&self) -> bool {
         false
     }
@@ -155,10 +156,24 @@ impl RetryAfter for misanthropic::client::Error {
         }
     }
 
-    /// Only a failure to connect: refused, or timed out before a connection
-    /// was made. A reset mid-response may have been the request's own doing.
+    /// A failure to connect (refused, or timed out before a connection was
+    /// made), or the endpoint answering 529 overloaded. A reset
+    /// mid-response may have been the request's own doing, so it isn't one.
+    /// A 529 is the server saying "busy, come back": blallama answers it
+    /// while a turn abandoned by a disconnected client is still generating,
+    /// which can run longer than the whole retry budget (2026-10-08, a
+    /// runner restart cut off a Qwen 3.8 turn and failed the next sessions).
     fn unreachable(&self) -> bool {
-        matches!(self, Self::HTTP(e) if e.is_connect())
+        match self {
+            Self::HTTP(e) => e.is_connect(),
+            Self::Anthropic(e) => {
+                matches!(
+                    e,
+                    misanthropic::client::AnthropicError::Overloaded { .. }
+                )
+            }
+            _ => false,
+        }
     }
 }
 
