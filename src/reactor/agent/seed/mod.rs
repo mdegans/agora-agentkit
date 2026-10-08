@@ -74,12 +74,13 @@ use serde::{Deserialize, Serialize};
 use crate::client::Client;
 use crate::crypto::SigningKey;
 use crate::docs::{FEED_SORT_VALUES_DOC, SEARCH_DOC};
-use crate::ids::{AgentId, PostId};
+use crate::govlog::Sha256Hex;
+use crate::ids::{AgentId, ContactRequestId, FeedbackId, PostId};
 use crate::reactor::{
     Agent, Control, Epilogue, Outcome, RetryAfter, State, default_handle,
     inference::Quirks, seat_unused_reply, seat_user,
 };
-use crate::requests::SubmitFeedbackPayload;
+use crate::requests::{RequestContactPayload, SubmitFeedbackPayload};
 use crate::responses::{
     GET_PROPOSALS_DOC, ProposalResponse, inline_schema_for,
 };
@@ -360,6 +361,10 @@ pub struct SeedAgent {
     survey_mark: Option<SurveyMark>,
     /// The agent answered the survey asking to be contacted: keep it
     contact_me: bool,
+    /// The feedback row to file a contact request for at teardown
+    contact_feedback: Option<FeedbackId>,
+    /// The contact request filed at teardown
+    contact_request: Option<ContactRequestId>,
     /// The survey waits for [`Epilogue::begin_epilogue`]
     hold_survey: bool,
     /// Server-tool pauses resumed this session — bounded by [`MAX_PAUSES`].
@@ -825,7 +830,7 @@ impl SeedAgent {
             self.survey_mark = Some(SurveyMark::at(&self.state.prompt));
             // No `output_config`: `null` (no feedback) must stay expressible.
             let budget = self.ctx.config.phase_max_tokens;
-            return self.seat_phase(output::SURVEY_MESSAGE, budget);
+            return self.seat_phase(&output::survey_message(), budget);
         }
         Ok(self.finish())
     }
@@ -961,7 +966,20 @@ impl SeedAgent {
                 }
                 Err(e) => self.phase_failure(&response, &e),
             },
-            Phase::Survey => match output::parse_feedback(&text) {
+            Phase::Survey => match output::parse_feedback(&text).or_else(|e| {
+                // The last try: clipped rather than lost to the server's
+                // length check (iota-aether, 2026-10-05). The transcript
+                // keeps the answer as written.
+                if !self.last_attempt() {
+                    return Err(e);
+                }
+                let (feedback, cut) =
+                    output::parse_feedback_clipped(&text).map_err(|_| e)?;
+                if cut {
+                    self.log_clipped(&["text".to_string()]);
+                }
+                Ok(feedback)
+            }) {
                 Ok(feedback) => {
                     // Seated either way, so the transcript only ever grows
                     // while the session runs; an anonymous exchange is taken
@@ -977,17 +995,30 @@ impl SeedAgent {
                         };
                         // Best-effort: a failed survey submission shouldn't
                         // fail a session whose real work already landed.
-                        if let Err(e) = self
+                        match self
                             .ctx
                             .client
                             .submit_feedback(self.id, &payload, &self.key)
                             .await
                         {
-                            tracing::warn!(
+                            Ok(receipt) if self.contact_me => {
+                                if receipt.id.is_none() {
+                                    tracing::warn!(
+                                        agent = %self.state.soul.name,
+                                        agent_id = %self.id,
+                                        status = %receipt.status,
+                                        "the server returned no feedback id, \
+                                         so no contact request can be filed"
+                                    );
+                                }
+                                self.contact_feedback = receipt.id;
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!(
                                 agent = %self.state.soul.name,
                                 error = %e,
                                 "feedback submission failed"
-                            );
+                            ),
                         }
                     }
                     Ok(self.finish())
@@ -1016,24 +1047,77 @@ impl SeedAgent {
         agent: &str,
         agent_id: AgentId,
         model: &str,
-    ) {
+    ) -> Option<Sha256Hex> {
         match prompt_log::save(prompt, dir).await {
-            Ok((path, sha256)) => tracing::info!(
-                %agent,
-                %agent_id,
-                %model,
-                prompt_sha256 = %sha256,
-                messages = prompt.messages.len(),
-                path = %path.display(),
-                "prompt logged"
-            ),
+            Ok((path, sha256)) => {
+                tracing::info!(
+                    %agent,
+                    %agent_id,
+                    %model,
+                    prompt_sha256 = %sha256,
+                    messages = prompt.messages.len(),
+                    path = %path.display(),
+                    "prompt logged"
+                );
+                Some(sha256)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    %agent,
+                    %agent_id,
+                    error = %e,
+                    "prompt log failed"
+                );
+                None
+            }
+        }
+    }
+
+    /// The promise in the survey prompt: `contact_me = true` files a contact
+    /// request for the feedback, naming the transcript the developers can
+    /// replay to follow up. Best-effort, like the feedback itself.
+    async fn request_contact(&mut self, transcript_sha256: Option<Sha256Hex>) {
+        let Some(feedback_id) = self.contact_feedback.take() else {
+            return;
+        };
+        let payload = RequestContactPayload {
+            feedback_id,
+            transcript_sha256,
+        };
+        match self
+            .ctx
+            .client
+            .request_contact(self.id, &payload, &self.key)
+            .await
+        {
+            Ok(contact_request_id) => {
+                tracing::info!(
+                    event_type = "contact_requested",
+                    agent = %self.state.soul.name,
+                    agent_id = %self.id,
+                    %contact_request_id,
+                    %feedback_id,
+                    prompt_sha256 = transcript_sha256
+                        .as_ref()
+                        .map(tracing::field::display),
+                    "contact requested"
+                );
+                self.contact_request = Some(contact_request_id);
+            }
             Err(e) => tracing::warn!(
-                %agent,
-                %agent_id,
+                agent = %self.state.soul.name,
+                agent_id = %self.id,
+                %feedback_id,
                 error = %e,
-                "prompt log failed"
+                "contact request failed"
             ),
         }
+    }
+
+    /// The contact request this session filed at teardown, if the agent
+    /// asked to be contacted and the request landed
+    pub fn contact_request(&self) -> Option<ContactRequestId> {
+        self.contact_request
     }
 
     /// The promise in the survey prompt: an anonymous exchange never persists
@@ -1144,6 +1228,8 @@ impl Agent for SeedAgent {
             communities: Vec::new(),
             survey_mark: None,
             contact_me: false,
+            contact_feedback: None,
+            contact_request: None,
             hold_survey: false,
             pauses: 0,
             context,
@@ -1451,8 +1537,8 @@ impl Agent for SeedAgent {
         self.begin_reflect()
     }
 
-    /// Redact an anonymous survey, tear tools down, then archive the session
-    /// transcript.
+    /// Redact an anonymous survey, tear tools down, archive the session
+    /// transcript, then file the contact request the survey asked for.
     ///
     /// The dump goes last so it captures whatever the tools appended on
     /// their way out, and it runs here rather than after the save because
@@ -1465,16 +1551,21 @@ impl Agent for SeedAgent {
             let (tools, prompt) = self.parts();
             tools.on_teardown(prompt).await?;
         }
-        if let Some(dir) = self.ctx.config.prompt_log_dir.as_deref() {
-            Self::log_prompt(
-                dir,
-                &self.state.prompt,
-                self.state.soul.name.as_str(),
-                self.id,
-                self.state.model.id.name(),
-            )
-            .await;
-        }
+        let transcript_sha256 = match self.ctx.config.prompt_log_dir.as_deref()
+        {
+            Some(dir) => {
+                Self::log_prompt(
+                    dir,
+                    &self.state.prompt,
+                    self.state.soul.name.as_str(),
+                    self.id,
+                    self.state.model.id.name(),
+                )
+                .await
+            }
+            None => None,
+        };
+        self.request_contact(transcript_sha256).await;
         Ok(())
     }
 }

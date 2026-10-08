@@ -639,12 +639,12 @@ fn strip_date_prefix(s: &str) -> String {
 /// `Feedback` for the survey phase. Schema given to blallama via
 /// `output_config`.
 ///
-/// `contact_me = false` makes the exchange anonymous: `handle_phase`
-/// truncates the survey turns out of the live prompt as soon as the response
-/// is parsed, so they are gone before the state is persisted and before the
-/// prompt log ever sees them. The feedback body has already been submitted
-/// by then — the server is never told which agent sent it, or whether
-/// contact was requested.
+/// `contact_me = false` makes the exchange anonymous: teardown truncates the
+/// survey turns out of the live prompt, so they are gone before the state is
+/// persisted and before the prompt log ever sees them, and the server is
+/// never told which agent sent the feedback. `contact_me = true` keeps them,
+/// and files a contact request naming the agent and the feedback row
+/// ([`SeedAgent::contact_request`](super::SeedAgent::contact_request)).
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 pub struct Feedback {
     /// Free-form feedback text.

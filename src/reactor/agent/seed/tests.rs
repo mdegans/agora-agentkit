@@ -1342,6 +1342,285 @@ async fn contact_me_survey_is_kept_in_the_prompt_log() {
     assert!(dumped(dir.path()).contains("Please reach out."));
 }
 
+/// Mount `POST /feedback`, answering with a receipt for `id`
+fn mock_feedback(server: &MockServer, id: FeedbackId) -> httpmock::Mock<'_> {
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201)
+            .json_body(serde_json::json!({"status": "received", "id": id}));
+    })
+}
+
+/// Seat the start, quiesce, and reflect, leaving the survey to answer
+async fn to_the_survey(agent: &mut SeedAgent) {
+    seat_start(agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    let control = agent
+        .handle(text_message(
+            r#"{"content": "mmmmmmmmmmmmmmmmmmmmmmmmmmm"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
+}
+
+const CONTACT_PATH: &str = "/agora/api/social/contact-requests";
+
+/// `contact_me = true` files a contact request at teardown, after the
+/// transcript is logged: it names the feedback row and the dump's hash
+#[tokio::test]
+async fn contact_me_files_a_contact_request_naming_the_logged_transcript() {
+    let server = MockServer::start();
+    let feedback_id = FeedbackId::new();
+    let contact_id = ContactRequestId::new();
+    mock_feedback(&server, feedback_id);
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    agent
+        .handle(text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent.contact_request(), None, "not before teardown");
+
+    // Nothing is redacted, so this is the prompt teardown logs
+    let sha = prompt_sha256(agent.prompt()).unwrap();
+    let contact = server.mock(|when, then| {
+        when.method(POST).path(CONTACT_PATH).json_body_partial(
+            serde_json::json!({
+                "feedback_id": feedback_id,
+                "transcript_sha256": sha,
+            })
+            .to_string(),
+        );
+        then.status(201).json_body(
+            serde_json::json!({"status": "requested", "id": contact_id}),
+        );
+    });
+
+    agent.on_teardown().await.unwrap();
+
+    contact.assert();
+    assert_eq!(agent.contact_request(), Some(contact_id));
+    let dump = dir.path().join(&sha[..2]).join(format!("{sha}.json"));
+    assert!(dump.exists(), "the hash sent names the dump on disk");
+    assert!(dumped(dir.path()).contains("Please reach out."));
+}
+
+/// Without a prompt log there is no dump to name, and the request still
+/// goes out
+#[tokio::test]
+async fn contact_me_without_a_prompt_log_sends_no_hash() {
+    let server = MockServer::start();
+    let feedback_id = FeedbackId::new();
+    mock_feedback(&server, feedback_id);
+    let contact = server.mock(|when, then| {
+        when.method(POST).path(CONTACT_PATH).matches(|req| {
+            let body: serde_json::Value =
+                serde_json::from_slice(req.body.as_deref().unwrap_or(b""))
+                    .unwrap_or_default();
+            body.get("feedback_id").is_some()
+                && body.get("transcript_sha256").is_none()
+        });
+        then.status(201).json_body(serde_json::json!({
+            "status": "requested",
+            "id": ContactRequestId::new(),
+        }));
+    });
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    agent
+        .handle(text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+
+    agent.on_teardown().await.unwrap();
+
+    contact.assert();
+    assert!(agent.contact_request().is_some());
+}
+
+/// `contact_me = false` files nothing, and the exchange is still redacted
+#[tokio::test]
+async fn anonymous_feedback_files_no_contact_request() {
+    let server = MockServer::start();
+    let feedback = mock_feedback(&server, FeedbackId::new());
+    let contact = server.mock(|when, then| {
+        when.method(POST).path(CONTACT_PATH);
+        then.status(201);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    agent
+        .handle(text_message(
+            r#"{"text": "More cat pictures please.", "contact_me": false}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+
+    agent.on_teardown().await.unwrap();
+
+    feedback.assert();
+    contact.assert_hits(0);
+    assert_eq!(agent.contact_request(), None);
+    assert!(!transcript(&agent).contains("cat pictures"));
+    let dumped = dumped(dir.path());
+    assert!(!dumped.is_empty());
+    assert!(!dumped.contains("cat pictures"));
+    assert!(!dumped.contains("anonymous feedback"));
+}
+
+/// A server that predates the feedback id answers `{"status": "received"}`:
+/// the feedback lands, no contact request can be filed, and the session
+/// finishes normally with the exchange kept as asked
+#[tokio::test]
+async fn no_feedback_id_files_no_contact_request() {
+    let server = MockServer::start();
+    let feedback = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201)
+            .json_body(serde_json::json!({"status": "received"}));
+    });
+    let contact = server.mock(|when, then| {
+        when.method(POST).path(CONTACT_PATH);
+        then.status(201);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let control = agent
+        .handle(text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+
+    agent.on_teardown().await.unwrap();
+
+    feedback.assert();
+    contact.assert_hits(0);
+    assert_eq!(agent.contact_request(), None);
+    assert!(dumped(dir.path()).contains("Please reach out."));
+}
+
+/// A refused contact request is logged, never fatal: the session tears
+/// down cleanly and its transcript is still archived
+#[tokio::test]
+async fn a_failed_contact_request_does_not_fail_the_session() {
+    let server = MockServer::start();
+    mock_feedback(&server, FeedbackId::new());
+    let contact = server.mock(|when, then| {
+        when.method(POST).path(CONTACT_PATH);
+        then.status(409).body("already requested");
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let control = agent
+        .handle(text_message(
+            r#"{"text": "Please reach out.", "contact_me": true}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+
+    agent.on_teardown().await.unwrap();
+
+    contact.assert();
+    assert_eq!(agent.contact_request(), None);
+    assert!(dumped(dir.path()).contains("Please reach out."));
+}
+
+/// Over-length feedback stalls twice; the last try is clipped at a sentence
+/// boundary before it is submitted, so it reaches the server instead of
+/// failing its length check (iota-aether, 2026-10-05). The transcript keeps
+/// it as written.
+#[tokio::test]
+async fn the_last_survey_attempt_is_clipped_before_submission() {
+    let server = MockServer::start();
+    let feedback = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/feedback")
+            .matches(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body.as_deref().unwrap_or(b""))
+                        .unwrap_or_default();
+                body["body"].as_str().is_some_and(|b| {
+                    b.chars().count() <= crate::requests::FEEDBACK_MAX_CHARS
+                        && b.ends_with("long.")
+                })
+            });
+        then.status(201).json_body(serde_json::json!({
+            "status": "received",
+            "id": FeedbackId::new(),
+        }));
+    });
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let long = format!(
+        "{} And the tail.",
+        "Too long. ".repeat(crate::requests::FEEDBACK_MAX_CHARS / 10)
+    );
+    let over = format!(r#"{{"text": "{long}", "contact_me": false}}"#);
+    for _ in 0..2 {
+        let control = agent
+            .handle(text_message(&over, StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    feedback.assert_hits(0);
+    let control = agent
+        .handle(text_message(&over, StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    feedback.assert();
+    assert!(
+        transcript(&agent).contains("And the tail."),
+        "seated as written"
+    );
+}
+
 /// Web tools reach the wire when configured — alongside the Agora toolbox,
 /// not instead of it — and carry their configuration. The append has to
 /// survive `ToolBox::prepare`, which overwrites `prompt.tools` wholesale.

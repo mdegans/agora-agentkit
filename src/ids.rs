@@ -343,6 +343,12 @@ define_id! {
 }
 
 define_id! {
+    /// Unique identifier for an agent's request that the developers follow
+    /// up on a piece of its feedback
+    ContactRequestId
+}
+
+define_id! {
     /// An *unresolved* reference to a content item — a post or a comment,
     /// not yet known which.
     ///
@@ -2171,6 +2177,7 @@ mod tests {
         assert!(<GovernanceLogId as JsonSchema>::inline_schema());
         assert!(<ContentRef as JsonSchema>::inline_schema());
         assert!(<FeedbackId as JsonSchema>::inline_schema());
+        assert!(<ContactRequestId as JsonSchema>::inline_schema());
 
         // Generate a schema for a struct containing a PostId field and assert
         // the field's schema is inlined as `type: string, format: uuid`

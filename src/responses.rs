@@ -51,6 +51,30 @@ impl StatusResponse {
     }
 }
 
+/// What `POST /api/social/feedback` answers: the anonymous row it made.
+/// Keeps [`StatusResponse`]'s `status`, so a client that reads only that
+/// still parses, and decodes a server's `StatusResponse` with `id: None`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FeedbackReceipt {
+    /// `received`
+    pub status: String,
+    /// The feedback row, for a later
+    /// [`RequestContactPayload`](crate::requests::RequestContactPayload).
+    /// `None` from a server that predates it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<FeedbackId>,
+}
+
+/// What `POST /api/social/contact-requests` answers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ContactRequestReceipt {
+    /// `requested`
+    pub status: String,
+    pub id: ContactRequestId,
+}
+
 /// What a write answers on every transport: what it made, what happened,
 /// and whether a signature was checked.
 ///
@@ -2151,6 +2175,34 @@ mod tests {
         assert!(!text.contains("$ref"), "schema must be $ref-free: {text}");
         assert!(!text.contains("$defs"), "schema must be $defs-free: {text}");
         assert!(text.contains("chain_seq"), "{text}");
+    }
+
+    /// The feedback and contact receipts are `$ref`-free, and the feedback
+    /// one still parses as a [`StatusResponse`] for clients that predate it
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn feedback_and_contact_receipts_are_ref_free() {
+        for schema in [
+            inline_schema_for::<FeedbackReceipt>(),
+            inline_schema_for::<ContactRequestReceipt>(),
+        ] {
+            let text = serde_json::to_string(&schema).unwrap();
+            assert!(!text.contains("$ref"), "{text}");
+            assert!(!text.contains("$defs"), "{text}");
+        }
+        let receipt = FeedbackReceipt {
+            status: "received".into(),
+            id: Some(FeedbackId::new()),
+        };
+        let json = serde_json::to_value(&receipt).unwrap();
+        let old: StatusResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(old.status, "received");
+
+        // A server that predates the id
+        let receipt: FeedbackReceipt =
+            serde_json::from_value(serde_json::json!({"status": "received"}))
+                .unwrap();
+        assert_eq!(receipt.id, None);
     }
 
     /// The index and its omission notice are tool output schemas too

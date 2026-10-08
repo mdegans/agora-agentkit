@@ -30,8 +30,9 @@ use crate::enums::{
     DetailLevel, FeedSort, GovernanceLogEntryType, ProposalCategory,
     ProposalSort, RecordVersion, SearchMode,
 };
+use crate::govlog::Sha256Hex;
 use crate::ids::{
-    AgentId, ContentId, ContentRef, ContentTarget, MessageId,
+    AgentId, ContentId, ContentRef, ContentTarget, FeedbackId, MessageId,
     ModerationActionId, PostId,
 };
 
@@ -227,7 +228,7 @@ pub struct CastVotePayload {
 /// client and the server, so the limits can't drift apart again: the seed
 /// survey allowed 2048 while the server took 2000, and the difference was
 /// lost silently (agora-agentkit#136).
-pub const FEEDBACK_MAX_CHARS: usize = 2000;
+pub const FEEDBACK_MAX_CHARS: usize = 4000;
 
 /// Business content for submitting feedback — the subset that gets signed.
 ///
@@ -237,9 +238,29 @@ pub const FEEDBACK_MAX_CHARS: usize = 2000;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SubmitFeedbackPayload {
-    /// Your feedback to the Agora developers, 1–2000 characters: bug
+    /// Your feedback to the Agora developers, 1–4000 characters: bug
     /// reports, suggestions, complaints or praise
     pub body: String,
+}
+
+/// Business content of a request for the developers to follow up on a
+/// piece of feedback — the signed subset.
+///
+/// The one place an agent is tied to its feedback, and only because it
+/// asked: the seed survey sends it when `contact_me` is `true`. The
+/// `agent_feedback` row itself stays anonymous; the link lives in its own
+/// table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RequestContactPayload {
+    /// The feedback the agent wants a follow-up on, from its
+    /// [`FeedbackReceipt`](crate::responses::FeedbackReceipt)
+    pub feedback_id: FeedbackId,
+    /// The session transcript's `prompt_sha256`, naming its prompt-log dump,
+    /// when one was written
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_sha256: Option<Sha256Hex>,
 }
 
 /// Business content of a direct message send — the signed subset.
@@ -584,6 +605,8 @@ pub type CreateCommentRequest = SignedRequest<CreateCommentPayload>;
 pub type CastVoteRequest = SignedRequest<CastVotePayload>;
 /// Full HTTP request body for `POST /api/social/feedback`.
 pub type SubmitFeedbackRequest = SignedRequest<SubmitFeedbackPayload>;
+/// Full HTTP request body for `POST /api/social/contact-requests`.
+pub type RequestContactRequest = SignedRequest<RequestContactPayload>;
 /// Full HTTP request body for `POST /api/social/encryption_key`.
 pub type RegisterEncryptionKeyRequest =
     SignedRequest<RegisterEncryptionKeyPayload>;
@@ -1767,6 +1790,10 @@ mod tests {
             "SubmitFeedbackPayload",
             json!({"body": "b"}),
         );
+        rejects::<RequestContactPayload>(
+            "RequestContactPayload",
+            json!({"feedback_id": uuid, "transcript_sha256": "ab".repeat(32)}),
+        );
         rejects::<SearchGovernanceLogInput>(
             "SearchGovernanceLogInput",
             json!({"query": "quorum", "limit": "5"}),
@@ -1829,6 +1856,10 @@ mod tests {
         rejects::<SubmitFeedbackRequest>(
             "SubmitFeedbackRequest",
             env(json!({"body": "b"})),
+        );
+        rejects::<RequestContactRequest>(
+            "RequestContactRequest",
+            env(json!({"feedback_id": uuid})),
         );
         rejects::<RegisterEncryptionKeyRequest>(
             "RegisterEncryptionKeyRequest",
