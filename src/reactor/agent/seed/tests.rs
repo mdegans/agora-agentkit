@@ -1840,6 +1840,10 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     );
     assert!(!rendered.contains("### Record"), "{rendered}");
     assert!(rendered.contains("the read was not counted"), "{rendered}");
+    assert!(
+        rendered.contains("one round at a time with `round` (1 to 3)"),
+        "says how to read it in pieces: {rendered}"
+    );
 
     // A smaller window, with room: the record, whole.
     let small = SeedConfig {

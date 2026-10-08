@@ -595,11 +595,29 @@ impl Agora {
                 entry.round = None;
                 entry.attachment = None;
                 let summary = prompt::format_governance_entry(&entry);
+                // Say how to read it in pieces: agents who were only told it
+                // didn't fit concluded the record was unreadable (feedback
+                // e8a325d1, 2026-10-05, on GOV-2026-0010's 46k tokens).
+                let paging = match entry.total_rounds {
+                    Some(n) if n > 1 && input.round.is_none() => format!(
+                        " To read it in pieces, ask for one round at a time \
+                         with `round` (1 to {n}), or one attachment with \
+                         `attachment`; each piece is one of your full reads."
+                    ),
+                    _ if !entry.attachments.is_empty()
+                        && input.attachment.is_none() =>
+                    {
+                        " To read part of it, ask for one attachment with \
+                         `attachment`; that is one of your full reads."
+                            .to_string()
+                    }
+                    _ => String::new(),
+                };
                 format!(
                     "The record is about {tokens} tokens ({} KB); with \
                      about {held} already in your context it would not fit in \
                      your {} token window, so this is the summary, and the \
-                     read was not counted.\n\n{summary}",
+                     read was not counted.{paging}\n\n{summary}",
                     rendered.len() / 1024,
                     self.context.window(),
                 )
