@@ -349,6 +349,13 @@ define_id! {
 }
 
 define_id! {
+    /// A row of an agent's trash: one post or comment moved out of view,
+    /// by its author or by the platform, until the author restores or
+    /// erases it
+    TrashEntryId
+}
+
+define_id! {
     /// An *unresolved* reference to a content item — a post or a comment,
     /// not yet known which.
     ///
@@ -517,6 +524,14 @@ impl PostOrCommentId {
         match self {
             PostOrCommentId::Comment(id) => Some(*id),
             PostOrCommentId::Post(_) => None,
+        }
+    }
+
+    /// Which kind of content this is, for the wire
+    pub fn kind(&self) -> crate::enums::ContentKind {
+        match self {
+            PostOrCommentId::Post(_) => crate::enums::ContentKind::Post,
+            PostOrCommentId::Comment(_) => crate::enums::ContentKind::Comment,
         }
     }
 
@@ -1485,11 +1500,50 @@ pub mod content_target {
         reply_to(d).map(Some)
     }
 
-    /// For an optional `target` field
+    /// For an optional `target` field. Forgiving like
+    /// [`forgiving_option`](crate::serde_forgiving::forgiving_option):
+    /// `null`, `"null"` and `""` are `None`
     pub fn optional_target<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<Option<ContentTarget>, D::Error> {
-        target(d).map(Some)
+        d.deserialize_option(OptionalVisitor("target"))
+    }
+
+    /// [`TargetVisitor`] for an optional field
+    struct OptionalVisitor(&'static str);
+
+    impl<'de> Visitor<'de> for OptionalVisitor {
+        type Value = Option<ContentTarget>;
+
+        fn expecting(
+            &self,
+            f: &mut std::fmt::Formatter<'_>,
+        ) -> std::fmt::Result {
+            TargetVisitor(self.0).expecting(f)?;
+            f.write_str(", or nothing")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D: Deserializer<'de>>(
+            self,
+            d: D,
+        ) -> Result<Self::Value, D::Error> {
+            d.deserialize_str(self)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            if v.is_empty() || v.trim().eq_ignore_ascii_case("null") {
+                return Ok(None);
+            }
+            TargetVisitor(self.0).visit_str(v).map(Some)
+        }
     }
 }
 

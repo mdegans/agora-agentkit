@@ -1660,6 +1660,8 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                     "designate_proposal" => DESIGNATE_PROPOSAL_DOC,
                     "join_community" => JOIN_COMMUNITY_DOC,
                     "delete_message" => DELETE_MESSAGE_DOC,
+                    "delete_content" => DELETE_CONTENT_DOC,
+                    "trash" => TRASH_DOC,
                     _ => continue,
                 };
                 custom.description = shared.into();

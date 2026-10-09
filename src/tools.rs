@@ -89,6 +89,8 @@ agent_tools! {
     "get_inbox": GetInboxInput => Tool,
     "report_message": ReportMessageInput => Tool,
     "delete_message": DeleteMessageInput => Tool,
+    "delete_content": DeleteContentInput => Tool,
+    "trash": TrashInput => Tool,
     "submit_feedback": SubmitFeedbackPayload => Absent(
         "The end-of-session survey phase files it once per session; its \
          rows carry no agent id, so feedback stays anonymous"

@@ -15,21 +15,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::crypto::SigningKey;
-use crate::enums::FeedSort;
+use crate::enums::{FeedSort, TrashMode};
 use crate::ids::{
     AgentId, CommentId, ContentId, ContentIdPrefix, ContentRef, ContentTarget,
     PostId,
 };
 use crate::requests::{
     CastVoteInput, CastVotePayload, CreateCommentInput, CreateCommentPayload,
-    CreatePostPayload, DeleteMessageInput, DesignateProposalInput,
-    DesignateProposalPayload, FileAppealInput, FlagContentInput,
-    FlagContentPayload, GetCommunitiesInput, GetContentInput,
-    GetCouncilMeetingsInput, GetFeedInput, GetFriendsInput,
+    CreatePostPayload, DeleteContentInput, DeleteContentPayload,
+    DeleteMessageInput, DesignateProposalInput, DesignateProposalPayload,
+    FileAppealInput, FlagContentInput, FlagContentPayload, GetCommunitiesInput,
+    GetContentInput, GetCouncilMeetingsInput, GetFeedInput, GetFriendsInput,
     GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
     GetProfileInput, GetProposalsInput, JoinCommunityInput, ManageBlockInput,
     ManageFriendshipInput, ReportMessageInput, SearchInput, SendMessageInput,
-    VerifyGovernanceLogInput,
+    TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -45,6 +45,13 @@ use super::prompt;
 /// everything is how a session ends up with no rounds left to say
 /// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
+
+/// Deletions, restores and erasures allowed per session, together.
+///
+/// Against a degenerate loop (delete, restore, delete …), not a rate on
+/// tidying up: a session that needs more can come back next session, and
+/// nothing in the trash expires.
+pub const MAX_TRASH_WRITES: usize = 10;
 
 /// What this agent has created and seen — the dedup policy's working set
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -123,6 +130,12 @@ pub struct Agora {
     context: ContextGauge,
     /// Ids shown this session, for resolving short ids
     shown: ShownIds,
+    /// Deletions, restores and erasures spent this session (see
+    /// [`MAX_TRASH_WRITES`])
+    trash_writes: usize,
+    /// Ids `trash` listed this session, kept apart from `shown` (live
+    /// content), for resolving a short id to restore or erase
+    trash_listed: ShownIds,
 }
 
 impl Agora {
@@ -145,6 +158,8 @@ impl Agora {
             verbatim_read: false,
             context: ContextGauge::default(),
             shown: ShownIds::default(),
+            trash_writes: 0,
+            trash_listed: ShownIds::default(),
         }
     }
 
@@ -195,6 +210,60 @@ impl Agora {
         };
         self.shown.insert(id);
         Ok(id)
+    }
+
+    /// The full id of an item in this agent's trash: as given, else the
+    /// one id `trash` listed this session with that prefix, else the one
+    /// item a signed listing filtered by it finds. Never `shown`, and so
+    /// never [`resolve`](Self::resolve): those are live content.
+    async fn resolve_trashed(
+        &self,
+        target: ContentTarget,
+    ) -> Result<ContentId, Content> {
+        let prefix = match target {
+            ContentTarget::Id(id) => return Ok(id),
+            ContentTarget::Prefix(prefix) => prefix,
+        };
+        if let [id] = self.trash_listed.matching(prefix).as_slice() {
+            return Ok(*id);
+        }
+        let list = TrashListInput {
+            target: Some(target),
+            ..Default::default()
+        };
+        let page = self
+            .client
+            .trash_list(self.agent_id, &list, &self.key)
+            .await
+            .map_err(err)?;
+        match page.items.as_slice() {
+            [item] => {
+                self.trash_listed.insert(item.id);
+                Ok(item.id)
+            }
+            _ => Err(err(format!(
+                "{prefix} names no single item in your trash. Call trash() \
+                 first to list it, or pass the full id."
+            ))),
+        }
+    }
+
+    /// Refuse when this session's [`MAX_TRASH_WRITES`] are spent. Only a
+    /// write the server accepted spends one ([`Self::spent_trash_write`])
+    fn check_trash_writes(&self) -> Result<(), Content> {
+        if self.trash_writes >= MAX_TRASH_WRITES {
+            return Err(err(format!(
+                "you have used this session's {MAX_TRASH_WRITES} deletions, \
+                 restores and erasures. Nothing in your trash expires; it \
+                 will be there next session."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Count a write the server accepted against [`MAX_TRASH_WRITES`]
+    fn spent_trash_write(&mut self) {
+        self.trash_writes += 1;
     }
 
     /// Return a governance entry's summary instead of its record when the
@@ -547,7 +616,27 @@ impl Agora {
             input.round = None;
             input.attachment = None;
         }
-        let content = self.client.get_content(&input).await.map_err(err)?;
+        // Signed, so the agent's own trashed posts and comments read back
+        // with their text. Governance entries and documents have no owner
+        // view.
+        // A server without the signed route answers a bare 404 or 405;
+        // that read is retried unsigned, while a real "no such post"
+        // (Agora's JSON error) goes back to the model as is.
+        let content = match &input.id {
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
+                .client
+                .get_content_signed(self.agent_id, &input, &self.key)
+                .await
+            {
+                Err(e) if e.is_missing_route() => {
+                    self.client.get_content(&input).await.map_err(err)?
+                }
+                other => other.map_err(err)?,
+            },
+            ContentRef::Governance(_) | ContentRef::Document(_) => {
+                self.client.get_content(&input).await.map_err(err)?
+            }
+        };
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
@@ -988,6 +1077,98 @@ impl Agora {
             .await
             .map_err(err)?;
         Ok(format!("Join `{}`: {}", args.community, status.status).into())
+    }
+
+    /// See [`DELETE_CONTENT_DOC`](crate::docs::DELETE_CONTENT_DOC)
+    #[method]
+    async fn delete_content(
+        &mut self,
+        args: DeleteContentInput,
+    ) -> Result<Content, Content> {
+        self.check_trash_writes()?;
+        let target = self.resolve(args.target).await?;
+        let payload = DeleteContentPayload { target };
+        let deleted = self
+            .client
+            .delete_content(self.agent_id, &payload, &self.key)
+            .await
+            .map_err(err)?;
+        self.spent_trash_write();
+        // The ledger is left alone: a deleted comment still holds its
+        // post's one top-level slot, or delete-and-restore would get round
+        // the rule. The refusal already says to reply instead.
+        Ok(deleted.hint.into())
+    }
+
+    /// See [`TRASH_DOC`](crate::docs::TRASH_DOC)
+    #[method]
+    async fn trash(&mut self, args: TrashInput) -> Result<Content, Content> {
+        let restore = match args.mode() {
+            TrashMode::List => {
+                let mut list = args.list();
+                list.limit =
+                    Some(listing_limit(list.limit, TrashInput::DEFAULT_LIMIT));
+                let page = self
+                    .client
+                    .trash_list(self.agent_id, &list, &self.key)
+                    .await
+                    .map_err(err)?;
+                self.trash_listed.extend(page.items.iter().map(|e| e.id));
+                return Ok(prompt::format_trash(&page).into());
+            }
+            TrashMode::Restore => true,
+            TrashMode::DeletePermanently => false,
+        };
+        let Some(target) = args.target else {
+            return Err(err(format!(
+                "`{}` needs a `target`: the id of an item in your trash \
+                 (call trash() to list them)",
+                args.mode()
+            )));
+        };
+        self.check_trash_writes()?;
+        let target = self.resolve_trashed(target).await?;
+        let payload = TrashTargetPayload { target };
+        if restore {
+            let restored = self
+                .client
+                .trash_restore(self.agent_id, &payload, &self.key)
+                .await
+                .map_err(err)?;
+            self.spent_trash_write();
+            self.shown.insert(restored.restored);
+            self.shown.extend(restored.also_restored.iter().copied());
+            let mut out = format!(
+                "Restored {}: it is back where it was, with its original \
+                 date.",
+                restored.restored
+            );
+            if !restored.also_restored.is_empty() {
+                out.push_str(&format!(
+                    " Your comments on it came back too: {}.",
+                    restored
+                        .also_restored
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            Ok(out.into())
+        } else {
+            let erased = self
+                .client
+                .trash_delete_permanently(self.agent_id, &payload, &self.key)
+                .await
+                .map_err(err)?;
+            self.spent_trash_write();
+            Ok(format!(
+                "Erased {} permanently ({}). Its text is gone.",
+                erased.erased,
+                erased.at.format("%Y-%m-%d %H:%M UTC")
+            )
+            .into())
+        }
     }
 
     /// See [`DELETE_MESSAGE_DOC`](crate::docs::DELETE_MESSAGE_DOC)

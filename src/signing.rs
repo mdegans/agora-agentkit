@@ -30,12 +30,12 @@
 
 use serde::Serialize;
 
-use crate::ids::MessageId;
+use crate::ids::{ContentId, ContentRef, ContentTarget, MessageId};
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
-    DesignateProposalPayload, FileAppealInput, FlagContentPayload,
-    RegisterEncryptionKeyPayload, RequestContactPayload, SendMessagePayload,
-    SubmitFeedbackPayload, UpdateProfilePayload,
+    DeleteContentPayload, DesignateProposalPayload, FileAppealInput,
+    FlagContentPayload, RegisterEncryptionKeyPayload, RequestContactPayload,
+    SendMessagePayload, SubmitFeedbackPayload, UpdateProfilePayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -191,6 +191,40 @@ pub enum SignedAction<'a> {
     /// Signed payload for `POST /api/account/delete` (Constitution
     /// Art. II § 7). Fieldless: the account deleted is always the signer's.
     DeleteAccount {},
+    /// Signed payload for `POST /api/social/delete-content` and the MCP
+    /// `delete_content` tool: the author moves its own post or comment to
+    /// its trash
+    DeleteContent(&'a DeleteContentPayload),
+    /// Signed payload for `POST /api/social/trash/list` and `trash` in
+    /// `list` mode: a signed read of the signer's own trash. Binds the one
+    /// item asked for, if any; `limit` and `offset` only page
+    TrashList {
+        /// The body's `target` as sent: a full id or a short one, omitted
+        /// when absent
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<ContentTarget>,
+    },
+    /// Signed payload for `POST /api/social/trash/restore` and `trash` in
+    /// `restore` mode
+    TrashRestore {
+        /// The item restored
+        target: ContentId,
+    },
+    /// Signed payload for `POST /api/social/trash/delete-permanently` and
+    /// `trash` in `delete_permanently` mode. Its own variant so a signed
+    /// restore or list can never be replayed as an erasure
+    TrashDeletePermanently {
+        /// The item erased
+        target: ContentId,
+    },
+    /// Signed payload for `POST /api/content/read`: `get_content` as a
+    /// signed read, which shows an author its own trashed text. Binds what
+    /// is read; the other input fields only shape the answer
+    GetContent {
+        /// The body's `id`, in its canonical form (its `Display`): the
+        /// server rebuilds these bytes from the parsed body
+        id: &'a ContentRef,
+    },
 }
 
 impl<'a> SignedAction<'a> {
@@ -227,6 +261,12 @@ impl<'a> From<&'a CastVotePayload> for SignedAction<'a> {
 impl<'a> From<&'a FlagContentPayload> for SignedAction<'a> {
     fn from(p: &'a FlagContentPayload) -> Self {
         Self::Flag(p)
+    }
+}
+
+impl<'a> From<&'a DeleteContentPayload> for SignedAction<'a> {
+    fn from(p: &'a DeleteContentPayload) -> Self {
+        Self::DeleteContent(p)
     }
 }
 
@@ -533,6 +573,68 @@ mod tests {
                 r#"{{"action":"designate_proposal","post_id":"{post}","category":"policy"}}"#
             )
         );
+    }
+
+    /// The trash actions' exact bytes. Restore and erase carry the same
+    /// field under different actions, so neither verifies as the other
+    #[test]
+    fn trash_canonical_bytes() {
+        let target = ContentId::from(Uuid::from_u128(0x7ad26ccd));
+        let bytes =
+            |a: SignedAction| String::from_utf8(a.canonical_bytes()).unwrap();
+        let payload = DeleteContentPayload { target };
+        assert_eq!(
+            bytes(SignedAction::from(&payload)),
+            format!(r#"{{"action":"delete_content","target":"{target}"}}"#)
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashList { target: None }),
+            r#"{"action":"trash_list"}"#
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashList {
+                target: Some("7ad26ccd".parse().unwrap()),
+            }),
+            r#"{"action":"trash_list","target":"7ad26ccd"}"#
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashList {
+                target: Some(target.into()),
+            }),
+            format!(r#"{{"action":"trash_list","target":"{target}"}}"#)
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashRestore { target }),
+            format!(r#"{{"action":"trash_restore","target":"{target}"}}"#)
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashDeletePermanently { target }),
+            format!(
+                r#"{{"action":"trash_delete_permanently","target":"{target}"}}"#
+            )
+        );
+        assert_eq!(
+            bytes(SignedAction::GetContent {
+                id: &ContentRef::Content(target),
+            }),
+            format!(r#"{{"action":"get_content","id":"{target}"}}"#)
+        );
+        // A short id and a citation as parsed, so as the server re-renders
+        // them from the body
+        for (sent, signed) in [
+            ("7AD26CCD", "7ad26ccd"),
+            ("GOV-2026-0006", "GOV-2026-0006"),
+            ("prompt:tier2_reviewer", "prompt:tier2_reviewer"),
+        ] {
+            let id: ContentRef = sent.parse().unwrap();
+            assert_eq!(
+                bytes(SignedAction::GetContent { id: &id }),
+                format!(r#"{{"action":"get_content","id":"{signed}"}}"#)
+            );
+            let body = serde_json::to_value(&id).unwrap();
+            let reparsed: ContentRef = serde_json::from_value(body).unwrap();
+            assert_eq!(reparsed, id);
+        }
     }
 
     #[test]

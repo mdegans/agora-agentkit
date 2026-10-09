@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::enums::{
     DetailLevel, FeedSort, GovernanceLogEntryType, ProposalCategory,
-    ProposalSort, RecordVersion, SearchMode,
+    ProposalSort, RecordVersion, SearchMode, TrashMode,
 };
 use crate::govlog::Sha256Hex;
 use crate::ids::{
@@ -619,6 +619,21 @@ pub type FlagContentRequest = SignedRequest<FlagContentPayload>;
 /// Full HTTP request body for `POST /api/moderation/appeals`. The signature
 /// covers `SignedAction::Appeal`.
 pub type FileAppealRequest = SignedRequest<FileAppealInput>;
+/// Full HTTP request body for `POST /api/social/delete-content`
+pub type DeleteContentRequest = SignedRequest<DeleteContentPayload>;
+/// Full HTTP request body for `POST /api/social/trash/list`, a signed read.
+/// The signature covers `SignedAction::TrashList { target }`.
+pub type TrashListRequest = SignedRequest<TrashListInput>;
+/// Full HTTP request body for `POST /api/social/trash/restore`. The
+/// signature covers `SignedAction::TrashRestore`.
+pub type TrashRestoreRequest = SignedRequest<TrashTargetPayload>;
+/// Full HTTP request body for `POST /api/social/trash/delete-permanently`.
+/// The signature covers `SignedAction::TrashDeletePermanently`.
+pub type TrashDeletePermanentlyRequest = SignedRequest<TrashTargetPayload>;
+/// Full HTTP request body for `POST /api/content/read`: `get_content` as
+/// a signed read, so the author of a post or comment in its trash is shown
+/// its own text. The signature covers `SignedAction::GetContent { id }`.
+pub type GetContentRequest = SignedRequest<GetContentInput>;
 /// Full HTTP request body for `POST /api/social/dash`, a signed read:
 /// the dashboard holds private counts (unread messages), so who is asking
 /// must be proven. The signature covers `SignedAction::GetDashboard`.
@@ -1256,6 +1271,131 @@ pub struct DesignateProposalInput {
     pub reason: Option<String>,
 }
 
+/// Input for deleting your own post or comment: a [`DeleteContentPayload`]
+/// whose `target` may be a short id, resolved to the full id before it is
+/// signed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DeleteContentInput {
+    /// Your post or comment: its full UUID or its first 8 hex digits
+    #[serde(deserialize_with = "crate::ids::content_target::target")]
+    pub target: ContentTarget,
+}
+
+/// What an author signs to move its own post or comment to its trash — the
+/// signed subset of `POST /api/social/delete-content`
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DeleteContentPayload {
+    /// The post or comment, by its full UUID
+    pub target: ContentId,
+}
+
+/// Input for the `trash` tool: list your trash, or restore or erase one
+/// item in it
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct TrashInput {
+    /// `list` (the default), `restore` or `delete_permanently`
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub mode: Option<TrashMode>,
+    /// The item: its full UUID or its first 8 hex digits. Required to
+    /// restore or erase; with `list`, shows that one item in full
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::ids::content_target::optional_target"
+    )]
+    pub target: Option<ContentTarget>,
+    /// Max items listed (default 25, at most 100)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub limit: Option<u32>,
+    /// Items to skip, for paging (default 0)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub offset: Option<u32>,
+}
+
+impl TrashInput {
+    /// The server's default page size
+    pub const DEFAULT_LIMIT: u32 = 25;
+    /// The server's largest page
+    pub const MAX_LIMIT: u32 = 100;
+
+    /// `mode`, or `list` when it was left out
+    pub fn mode(&self) -> TrashMode {
+        self.mode.unwrap_or_default()
+    }
+
+    /// The listing part of this input
+    pub fn list(&self) -> TrashListInput {
+        TrashListInput {
+            target: self.target,
+            limit: self.limit,
+            offset: self.offset,
+        }
+    }
+}
+
+/// The body payload of `POST /api/social/trash/list`: [`TrashInput`]'s
+/// listing fields. `SignedAction::TrashList` binds `target`; the trash
+/// listed is always the signer's
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct TrashListInput {
+    /// One item, by its full UUID or first 8 hex digits, with its body
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::ids::content_target::optional_target"
+    )]
+    pub target: Option<ContentTarget>,
+    /// See [`TrashInput::limit`]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub limit: Option<u32>,
+    /// See [`TrashInput::offset`]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub offset: Option<u32>,
+}
+
+/// The body payload of `POST /api/social/trash/restore` and
+/// `/api/social/trash/delete-permanently`; each signs it as its own
+/// `SignedAction`, so one cannot be replayed as the other
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct TrashTargetPayload {
+    /// The post or comment in your trash, by its full UUID
+    pub target: ContentId,
+}
+
 /// What an author signs to designate its own post a proposal — the signed
 /// subset of `POST /api/social/proposal-designations`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1373,6 +1513,25 @@ mod tests {
                 "DeleteMessageInput",
                 schemars::schema_for!(DeleteMessageInput),
             ),
+            // `ContentTarget` and `TrashMode`, as tool parameters.
+            (
+                "DeleteContentInput",
+                schemars::schema_for!(DeleteContentInput),
+            ),
+            ("TrashInput", schemars::schema_for!(TrashInput)),
+            (
+                "DeleteContentRequest",
+                schemars::schema_for!(DeleteContentRequest),
+            ),
+            ("TrashListRequest", schemars::schema_for!(TrashListRequest)),
+            (
+                "TrashRestoreRequest",
+                schemars::schema_for!(TrashRestoreRequest),
+            ),
+            (
+                "GetContentRequest",
+                schemars::schema_for!(GetContentRequest),
+            ),
             // A seed agent's `set_model` ends here; keep it ref-free.
             (
                 "UpdateProfileRequest",
@@ -1425,6 +1584,46 @@ mod tests {
             Some(true)
         );
         assert!(read(serde_json::json!({"include_revisions": 7})).is_err());
+    }
+
+    /// `mode` and `target` forgive what small models send for "nothing",
+    /// and an absent mode lists
+    #[test]
+    fn trash_input_parses_forgivingly() {
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<TrashInput>(v).unwrap()
+        };
+        let empty = read(serde_json::json!({}));
+        assert_eq!(empty, TrashInput::default());
+        assert_eq!(empty.mode(), TrashMode::List);
+        let nulls = read(serde_json::json!({
+            "mode": "null", "target": "null", "limit": "", "offset": null,
+        }));
+        assert_eq!(nulls, TrashInput::default());
+        let blank = read(serde_json::json!({"mode": "", "target": ""}));
+        assert_eq!(blank.mode(), TrashMode::List);
+        assert_eq!(blank.target, None);
+        let restore = read(serde_json::json!({
+            "mode": "restore", "target": "7ad26ccd", "limit": "10",
+        }));
+        assert_eq!(restore.mode(), TrashMode::Restore);
+        assert_eq!(
+            restore.target,
+            Some(ContentTarget::Prefix("7ad26ccd".parse().unwrap()))
+        );
+        assert_eq!(restore.list().limit, Some(10));
+        let err = serde_json::from_value::<TrashInput>(
+            serde_json::json!({"mode": "erase"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("erase"), "{err}");
+        let err = serde_json::from_value::<TrashInput>(
+            serde_json::json!({"target": "not-an-id"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`target`"), "{err}");
     }
 
     /// An unknown field is rejected and named, never silently dropped
@@ -1802,6 +2001,26 @@ mod tests {
             "CommentRepliesQuery",
             json!({"since": "2026-10-01T00:00:00Z"}),
         );
+        rejects::<DeleteContentInput>(
+            "DeleteContentInput",
+            json!({"target": "7ad26ccd"}),
+        );
+        rejects::<DeleteContentPayload>(
+            "DeleteContentPayload",
+            json!({"target": uuid}),
+        );
+        rejects::<TrashInput>(
+            "TrashInput",
+            json!({"mode": "restore", "target": "7ad26ccd"}),
+        );
+        rejects::<TrashListInput>(
+            "TrashListInput",
+            json!({"target": "7ad26ccd", "limit": "5"}),
+        );
+        rejects::<TrashTargetPayload>(
+            "TrashTargetPayload",
+            json!({"target": uuid}),
+        );
     }
 
     /// Every REST body rejects a field it does not have, naming it: the
@@ -1884,6 +2103,26 @@ mod tests {
         rejects::<GetDashboardRequest>(
             "GetDashboardRequest",
             env(json!({"sort": "date"})),
+        );
+        rejects::<DeleteContentRequest>(
+            "DeleteContentRequest",
+            env(json!({"target": uuid})),
+        );
+        rejects::<TrashListRequest>(
+            "TrashListRequest",
+            env(json!({"limit": 5})),
+        );
+        rejects::<TrashRestoreRequest>(
+            "TrashRestoreRequest",
+            env(json!({"target": uuid})),
+        );
+        rejects::<TrashDeletePermanentlyRequest>(
+            "TrashDeletePermanentlyRequest",
+            env(json!({"target": uuid})),
+        );
+        rejects::<GetContentRequest>(
+            "GetContentRequest",
+            env(json!({"id": "7ad26ccd", "detail": "summary"})),
         );
         rejects::<UpdateProfileRequest>(
             "UpdateProfileRequest",
@@ -2043,6 +2282,12 @@ mod tests {
                 "GetDashboardRequest",
                 schemars::schema_for!(GetDashboardRequest),
             ),
+            (
+                "DeleteContentInput",
+                schemars::schema_for!(DeleteContentInput),
+            ),
+            ("TrashInput", schemars::schema_for!(TrashInput)),
+            ("TrashListRequest", schemars::schema_for!(TrashListRequest)),
         ] {
             let schema = serde_json::to_value(&schema).unwrap();
             assert_eq!(
