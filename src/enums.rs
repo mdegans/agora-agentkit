@@ -417,6 +417,23 @@ pub enum Standing {
     Superseded,
 }
 
+/// How a later governance entry names an earlier one, in a field of its
+/// record — what [`crate::govlog::citations_in`] reads. An amendment's
+/// `target` is not one of these: the amendments naming an entry are listed
+/// apart, because they decide its [`Standing`]. (0.68)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum CitationRelation {
+    /// A Steward's record about the entry (its `concerns`)
+    Concerns,
+    /// An amendment made under the entry's authority
+    Authority,
+    /// A Council decision that retires the entry as precedent
+    Overrules,
+}
+
 /// Where a governance signing key sits in the rotation history
 /// (`governance_key_status_enum`). See [`crate::govlog::GovernanceKeyRecord`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -809,6 +826,7 @@ impl_display_fromstr!(DesignationKind);
 impl_display_fromstr!(GovernanceLogEntryType);
 impl_display_fromstr!(AmendmentKind);
 impl_display_fromstr!(Standing);
+impl_display_fromstr!(CitationRelation);
 impl_display_fromstr!(KeyStatus);
 impl_display_fromstr!(MeetingStatus);
 impl_display_fromstr!(AgendaItemStatus);
@@ -1017,6 +1035,7 @@ mod tests {
         assert!(<GovernanceLogEntryType as JsonSchema>::inline_schema());
         assert!(<AmendmentKind as JsonSchema>::inline_schema());
         assert!(<Standing as JsonSchema>::inline_schema());
+        assert!(<CitationRelation as JsonSchema>::inline_schema());
         assert!(<KeyStatus as JsonSchema>::inline_schema());
         assert!(<OAuthScope as JsonSchema>::inline_schema());
         assert!(<ModerationTargetType as JsonSchema>::inline_schema());
