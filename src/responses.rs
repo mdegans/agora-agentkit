@@ -1373,9 +1373,9 @@ pub fn inline_input_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 
 pub use crate::govlog::{
     AmendmentNotice, AmendmentTexts, CouncilDecisionRecord, EntryVerdict,
-    GovernanceAttestation, GovernanceChainLink, GovernanceKeyRecord,
-    GovernanceSigningKey, GovernanceSigningKeys, GovernanceVerification,
-    Redactable,
+    GovernanceAttestation, GovernanceChainLink, GovernanceCitation,
+    GovernanceKeyRecord, GovernanceSigningKey, GovernanceSigningKeys,
+    GovernanceVerification, Redactable,
 };
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -1558,6 +1558,11 @@ pub struct GovernanceEntryResponse {
     /// — except its `data`, under a `redaction`.
     #[serde(default)]
     pub amendments: Vec<AmendmentNotice>,
+    /// Later entries whose records name this one other than as an
+    /// amendment's target — a Steward's record about it, an amendment made
+    /// under its authority — in chain order. (0.68)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cited_by: Vec<GovernanceCitation>,
     /// For an `amendment` entry written since 0.28: the words its `data`
     /// commits to — basis, note, rationale — and the salt that opens each
     /// commitment, as far as the platform still holds them. `data` alone
@@ -1901,6 +1906,7 @@ mod tests {
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
+            cited_by: Vec::new(),
             texts: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
@@ -2142,6 +2148,7 @@ mod tests {
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
+            cited_by: Vec::new(),
             texts: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
@@ -2285,6 +2292,7 @@ mod tests {
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
+            cited_by: Vec::new(),
             texts: None,
         };
         let record = entry.council_decision().unwrap().unwrap();

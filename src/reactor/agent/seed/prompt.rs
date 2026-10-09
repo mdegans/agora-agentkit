@@ -11,7 +11,7 @@ use misanthropic::prompt::{Prompt, message::Role};
 use crate::enums::{
     AmendmentKind, FeedSort, RecordVersion, SearchMode, Standing,
 };
-use crate::govlog::{Sha256Hex, reading};
+use crate::govlog::{CitationRelation, Sha256Hex, reading};
 use crate::ids::CommentId;
 #[cfg(test)]
 use crate::ids::PostId;
@@ -1191,6 +1191,26 @@ pub(super) fn format_governance_entry(
             },
         ));
     }
+    // Later entries that say something about this one: a reader holding
+    // only this entry otherwise has no way to know they exist.
+    for c in &entry.cited_by {
+        out.push_str(&format!(
+            "**Cited by {}** ({}, {}): {}\n",
+            c.id,
+            match c.relation {
+                CitationRelation::Concerns =>
+                    "a Steward's record about this entry",
+                CitationRelation::Authority => {
+                    "an amendment made under this entry's authority"
+                }
+                CitationRelation::Overrules => {
+                    "a Council decision overruling this entry"
+                }
+            },
+            c.created_at.format("%Y-%m-%d"),
+            c.title,
+        ));
+    }
     match entry.version {
         Some(RecordVersion::Original) => {
             out.push_str("Read as originally signed, before any revision.\n")
@@ -1520,6 +1540,56 @@ mod tests {
     use super::*;
     use crate::enums::ClientPlatform;
 
+    /// A later record about an entry is listed on the entry itself, so a
+    /// reader of the entry alone learns it exists (agora 5137804f).
+    #[test]
+    fn an_entry_lists_the_records_that_cite_it() {
+        use crate::govlog::GovernanceCitation;
+        use chrono::{TimeZone, Utc};
+
+        let entry = GovernanceEntryResponse {
+            id: "GOV-2026-0011".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "Seat one Council agent on Fable 5".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("Approved 5-0.".into()),
+            total_rounds: None,
+            data: None,
+            round: None,
+            attachments: Vec::new(),
+            attachment: None,
+            version: None,
+            revisions: Vec::new(),
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            cited_by: vec![GovernanceCitation {
+                id: "REC-2026-0012".parse().unwrap(),
+                entry_type: crate::enums::GovernanceLogEntryType::StewardRecord,
+                title: "Refusal handling replaced before the Council's \
+                        approval"
+                    .into(),
+                relation: CitationRelation::Concerns,
+                created_at: Utc
+                    .with_ymd_and_hms(2026, 10, 5, 19, 43, 0)
+                    .unwrap(),
+            }],
+            texts: None,
+        };
+
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains(
+                "**Cited by REC-2026-0012** (a Steward's record about this \
+                 entry, 2026-10-05): Refusal handling replaced"
+            ),
+            "{out}"
+        );
+        // Before the summary, where a reader looks first.
+        assert!(out.find("Cited by").unwrap() < out.find("Approved").unwrap());
+    }
+
     /// An entry that is no longer in force says so before anything an
     /// agent might quote out of it.
     #[test]
@@ -1556,6 +1626,7 @@ mod tests {
                 rationale: None,
                 created_at: Utc::now(),
             }],
+            cited_by: Vec::new(),
             texts: None,
         };
 
@@ -1775,6 +1846,7 @@ mod tests {
                 rationale: None,
                 created_at: Utc::now(),
             }],
+            cited_by: Vec::new(),
             texts: None,
         };
         let out = format_governance_entry(&entry);
@@ -1823,6 +1895,7 @@ mod tests {
             attestation: None,
             standing: Standing::InForce,
             amendments: Vec::new(),
+            cited_by: Vec::new(),
             texts: None,
         };
         let out = format_governance_entry(&entry);

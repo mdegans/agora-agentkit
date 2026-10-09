@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-pub use crate::enums::{AmendmentKind, KeyStatus, Standing};
+pub use crate::enums::{AmendmentKind, CitationRelation, KeyStatus, Standing};
 
 mod texts;
 pub use texts::{
@@ -1497,6 +1497,70 @@ impl AmendmentNotice {
     }
 }
 
+/// A later entry that names this one in its record, other than as an
+/// amendment's target: a Steward's record about it, an amendment made under
+/// its authority, a decision overruling it. What a reader of the entry
+/// needs to know exists, so it is listed beside the entry rather than found
+/// only by reading forward. (0.68)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GovernanceCitation {
+    pub id: GovernanceLogId,
+    pub entry_type: GovernanceLogEntryType,
+    pub title: String,
+    pub relation: CitationRelation,
+    pub created_at: DateTime<Utc>,
+}
+
+/// The entries `data` names, and how: the links a later entry of
+/// `entry_type` makes to earlier ones, read from its record's own fields.
+/// An amendment's `target` is left out (see [`CitationRelation`]). A field
+/// that doesn't parse names nothing, rather than failing the read it sits
+/// beside. (0.68)
+pub fn citations_in(
+    entry_type: GovernanceLogEntryType,
+    data: &serde_json::Value,
+) -> Vec<(GovernanceLogId, CitationRelation)> {
+    #[derive(Deserialize)]
+    struct Concerns {
+        #[serde(default)]
+        concerns: Vec<GovernanceLogId>,
+    }
+    #[derive(Deserialize)]
+    struct Authority {
+        #[serde(default)]
+        authority: Option<GovernanceLogId>,
+    }
+    #[derive(Deserialize)]
+    struct Overrules {
+        #[serde(default)]
+        overrules: Vec<GovernanceLogId>,
+    }
+    fn each(
+        ids: impl IntoIterator<Item = GovernanceLogId>,
+        relation: CitationRelation,
+    ) -> Vec<(GovernanceLogId, CitationRelation)> {
+        ids.into_iter().map(|id| (id, relation)).collect()
+    }
+    match entry_type {
+        GovernanceLogEntryType::StewardRecord => {
+            serde_json::from_value::<Concerns>(data.clone())
+                .map(|c| each(c.concerns, CitationRelation::Concerns))
+        }
+        GovernanceLogEntryType::Amendment => {
+            serde_json::from_value::<Authority>(data.clone())
+                .map(|a| each(a.authority, CitationRelation::Authority))
+        }
+        GovernanceLogEntryType::CouncilDecision => {
+            serde_json::from_value::<Overrules>(data.clone())
+                .map(|o| each(o.overrules, CitationRelation::Overrules))
+        }
+        _ => Ok(Vec::new()),
+    }
+    .unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Key rotation
 // ---------------------------------------------------------------------------
@@ -2923,6 +2987,60 @@ pub fn verify_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each kind of record names what it cites in its own field; a
+    /// malformed field, or an entry type that cites nothing, names nothing.
+    #[test]
+    fn citations_are_read_from_each_records_own_field() {
+        use serde_json::json;
+        let id = |s: &str| s.parse::<GovernanceLogId>().unwrap();
+        assert_eq!(
+            citations_in(
+                GovernanceLogEntryType::StewardRecord,
+                &json!({"title": "t", "concerns": ["GOV-2026-0011", "AMD-2026-0004"]}),
+            ),
+            vec![
+                (id("GOV-2026-0011"), CitationRelation::Concerns),
+                (id("AMD-2026-0004"), CitationRelation::Concerns),
+            ]
+        );
+        assert_eq!(
+            citations_in(
+                GovernanceLogEntryType::Amendment,
+                &json!({"target": "APP-2026-0001", "authority": "GOV-2026-0005"}),
+            ),
+            vec![(id("GOV-2026-0005"), CitationRelation::Authority)],
+            "the target is not a citation: it is listed under `amendments`"
+        );
+        assert_eq!(
+            citations_in(
+                GovernanceLogEntryType::CouncilDecision,
+                &json!({"overrules": ["APP-2026-0002"]}),
+            ),
+            vec![(id("APP-2026-0002"), CitationRelation::Overrules)]
+        );
+        assert!(
+            citations_in(
+                GovernanceLogEntryType::Amendment,
+                &json!({"authority": null})
+            )
+            .is_empty()
+        );
+        assert!(
+            citations_in(
+                GovernanceLogEntryType::StewardRecord,
+                &json!({"concerns": "GOV-2026-0011"})
+            )
+            .is_empty()
+        );
+        assert!(
+            citations_in(
+                GovernanceLogEntryType::AppealsCourtDecision,
+                &json!({"concerns": ["GOV-2026-0011"]}),
+            )
+            .is_empty()
+        );
+    }
     use crate::crypto::generate_keypair;
     use serde_json::json;
 
