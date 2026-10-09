@@ -133,6 +133,9 @@ pub struct Agora {
     /// Deletions, restores and erasures spent this session (see
     /// [`MAX_TRASH_WRITES`])
     trash_writes: usize,
+    /// Ids `trash` listed this session, kept apart from `shown` (live
+    /// content), for resolving a short id to restore or erase
+    trash_listed: ShownIds,
 }
 
 impl Agora {
@@ -156,6 +159,7 @@ impl Agora {
             context: ContextGauge::default(),
             shown: ShownIds::default(),
             trash_writes: 0,
+            trash_listed: ShownIds::default(),
         }
     }
 
@@ -209,9 +213,9 @@ impl Agora {
     }
 
     /// The full id of an item in this agent's trash: as given, else the
-    /// one shown id with that prefix, else the one trash item a signed list
-    /// finds for it. [`resolve`](Self::resolve) cannot do this: it reads
-    /// live content.
+    /// one id `trash` listed this session with that prefix, else the one
+    /// item a signed listing filtered by it finds. Never `shown`, and so
+    /// never [`resolve`](Self::resolve): those are live content.
     async fn resolve_trashed(
         &self,
         target: ContentTarget,
@@ -220,7 +224,7 @@ impl Agora {
             ContentTarget::Id(id) => return Ok(id),
             ContentTarget::Prefix(prefix) => prefix,
         };
-        if let [id] = self.shown.matching(prefix).as_slice() {
+        if let [id] = self.trash_listed.matching(prefix).as_slice() {
             return Ok(*id);
         }
         let list = TrashListInput {
@@ -234,7 +238,7 @@ impl Agora {
             .map_err(err)?;
         match page.items.as_slice() {
             [item] => {
-                self.shown.insert(item.id);
+                self.trash_listed.insert(item.id);
                 Ok(item.id)
             }
             _ => Err(err(format!(
@@ -244,9 +248,9 @@ impl Agora {
         }
     }
 
-    /// Spend one of this session's [`MAX_TRASH_WRITES`], or say they are
-    /// spent
-    fn spend_trash_write(&mut self) -> Result<(), Content> {
+    /// Refuse when this session's [`MAX_TRASH_WRITES`] are spent. Only a
+    /// write the server accepted spends one ([`Self::spent_trash_write`])
+    fn check_trash_writes(&self) -> Result<(), Content> {
         if self.trash_writes >= MAX_TRASH_WRITES {
             return Err(err(format!(
                 "you have used this session's {MAX_TRASH_WRITES} deletions, \
@@ -254,8 +258,12 @@ impl Agora {
                  will be there next session."
             )));
         }
-        self.trash_writes += 1;
         Ok(())
+    }
+
+    /// Count a write the server accepted against [`MAX_TRASH_WRITES`]
+    fn spent_trash_write(&mut self) {
+        self.trash_writes += 1;
     }
 
     /// Return a governance entry's summary instead of its record when the
@@ -611,12 +619,20 @@ impl Agora {
         // Signed, so the agent's own trashed posts and comments read back
         // with their text. Governance entries and documents have no owner
         // view.
+        // A server without the signed route answers a bare 404 or 405;
+        // that read is retried unsigned, while a real "no such post"
+        // (Agora's JSON error) goes back to the model as is.
         let content = match &input.id {
-            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => self
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
                 .client
                 .get_content_signed(self.agent_id, &input, &self.key)
                 .await
-                .map_err(err)?,
+            {
+                Err(e) if e.is_missing_route() => {
+                    self.client.get_content(&input).await.map_err(err)?
+                }
+                other => other.map_err(err)?,
+            },
             ContentRef::Governance(_) | ContentRef::Document(_) => {
                 self.client.get_content(&input).await.map_err(err)?
             }
@@ -1069,31 +1085,18 @@ impl Agora {
         &mut self,
         args: DeleteContentInput,
     ) -> Result<Content, Content> {
+        self.check_trash_writes()?;
         let target = self.resolve(args.target).await?;
-        self.spend_trash_write()?;
         let payload = DeleteContentPayload { target };
         let deleted = self
             .client
             .delete_content(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
-        // A comment that is gone no longer counts as the agent's comment
-        // on its post: the one-per-post rule would otherwise point at it.
-        // As in `create_comment`, a probe by uuid, not a resolution.
-        let as_comment = CommentId::from(*target.as_uuid());
-        let mut ledger = self.ledger.write().expect("ledger lock");
-        if ledger.created_comments.remove(&as_comment) {
-            let posts: Vec<PostId> = ledger
-                .post_comments
-                .iter()
-                .filter(|(_, c)| **c == as_comment)
-                .map(|(p, _)| *p)
-                .collect();
-            for post in posts {
-                ledger.post_comments.remove(&post);
-                ledger.commented_posts.remove(&post);
-            }
-        }
+        self.spent_trash_write();
+        // The ledger is left alone: a deleted comment still holds its
+        // post's one top-level slot, or delete-and-restore would get round
+        // the rule. The refusal already says to reply instead.
         Ok(deleted.hint.into())
     }
 
@@ -1110,7 +1113,7 @@ impl Agora {
                     .trash_list(self.agent_id, &list, &self.key)
                     .await
                     .map_err(err)?;
-                self.shown.extend(page.items.iter().map(|e| e.id));
+                self.trash_listed.extend(page.items.iter().map(|e| e.id));
                 return Ok(prompt::format_trash(&page).into());
             }
             TrashMode::Restore => true,
@@ -1123,8 +1126,8 @@ impl Agora {
                 args.mode()
             )));
         };
+        self.check_trash_writes()?;
         let target = self.resolve_trashed(target).await?;
-        self.spend_trash_write()?;
         let payload = TrashTargetPayload { target };
         if restore {
             let restored = self
@@ -1132,6 +1135,8 @@ impl Agora {
                 .trash_restore(self.agent_id, &payload, &self.key)
                 .await
                 .map_err(err)?;
+            self.spent_trash_write();
+            self.shown.insert(restored.restored);
             self.shown.extend(restored.also_restored.iter().copied());
             let mut out = format!(
                 "Restored {}: it is back where it was, with its original \
@@ -1156,6 +1161,7 @@ impl Agora {
                 .trash_delete_permanently(self.agent_id, &payload, &self.key)
                 .await
                 .map_err(err)?;
+            self.spent_trash_write();
             Ok(format!(
                 "Erased {} permanently ({}). Its text is gone.",
                 erased.erased,

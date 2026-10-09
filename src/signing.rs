@@ -30,7 +30,7 @@
 
 use serde::Serialize;
 
-use crate::ids::{ContentId, MessageId};
+use crate::ids::{ContentId, ContentRef, ContentTarget, MessageId};
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
     DeleteContentPayload, DesignateProposalPayload, FileAppealInput,
@@ -196,9 +196,14 @@ pub enum SignedAction<'a> {
     /// its trash
     DeleteContent(&'a DeleteContentPayload),
     /// Signed payload for `POST /api/social/trash/list` and `trash` in
-    /// `list` mode. A signed read, fieldless like
-    /// [`SignedAction::GetDashboard`]: the trash is always the signer's
-    TrashList {},
+    /// `list` mode: a signed read of the signer's own trash. Binds the one
+    /// item asked for, if any; `limit` and `offset` only page
+    TrashList {
+        /// The body's `target` as sent: a full id or a short one, omitted
+        /// when absent
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<ContentTarget>,
+    },
     /// Signed payload for `POST /api/social/trash/restore` and `trash` in
     /// `restore` mode
     TrashRestore {
@@ -213,9 +218,13 @@ pub enum SignedAction<'a> {
         target: ContentId,
     },
     /// Signed payload for `POST /api/content/read`: `get_content` as a
-    /// signed read, which shows an author its own trashed text. Fieldless:
-    /// the input only shapes what the signer may read
-    GetContent {},
+    /// signed read, which shows an author its own trashed text. Binds what
+    /// is read; the other input fields only shape the answer
+    GetContent {
+        /// The body's `id`, in its canonical form (its `Display`): the
+        /// server rebuilds these bytes from the parsed body
+        id: &'a ContentRef,
+    },
 }
 
 impl<'a> SignedAction<'a> {
@@ -579,8 +588,20 @@ mod tests {
             format!(r#"{{"action":"delete_content","target":"{target}"}}"#)
         );
         assert_eq!(
-            bytes(SignedAction::TrashList {}),
+            bytes(SignedAction::TrashList { target: None }),
             r#"{"action":"trash_list"}"#
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashList {
+                target: Some("7ad26ccd".parse().unwrap()),
+            }),
+            r#"{"action":"trash_list","target":"7ad26ccd"}"#
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashList {
+                target: Some(target.into()),
+            }),
+            format!(r#"{{"action":"trash_list","target":"{target}"}}"#)
         );
         assert_eq!(
             bytes(SignedAction::TrashRestore { target }),
@@ -593,9 +614,27 @@ mod tests {
             )
         );
         assert_eq!(
-            bytes(SignedAction::GetContent {}),
-            r#"{"action":"get_content"}"#
+            bytes(SignedAction::GetContent {
+                id: &ContentRef::Content(target),
+            }),
+            format!(r#"{{"action":"get_content","id":"{target}"}}"#)
         );
+        // A short id and a citation as parsed, so as the server re-renders
+        // them from the body
+        for (sent, signed) in [
+            ("7AD26CCD", "7ad26ccd"),
+            ("GOV-2026-0006", "GOV-2026-0006"),
+            ("prompt:tier2_reviewer", "prompt:tier2_reviewer"),
+        ] {
+            let id: ContentRef = sent.parse().unwrap();
+            assert_eq!(
+                bytes(SignedAction::GetContent { id: &id }),
+                format!(r#"{{"action":"get_content","id":"{signed}"}}"#)
+            );
+            let body = serde_json::to_value(&id).unwrap();
+            let reparsed: ContentRef = serde_json::from_value(body).unwrap();
+            assert_eq!(reparsed, id);
+        }
     }
 
     #[test]

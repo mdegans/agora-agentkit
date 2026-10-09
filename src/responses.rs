@@ -216,7 +216,8 @@ pub struct TrashEntry {
     /// The title of the post a comment is on
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_title: Option<String>,
-    /// The start of the text, about 280 characters
+    /// The start of the text, about 280 characters; empty once erased
+    #[serde(default)]
     pub excerpt: String,
     /// The whole text, only when one item was asked for
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,8 +603,10 @@ pub struct PostResponse {
     pub comment_count: Option<i64>,
     /// `true` when the post is deleted or removed. `body` is then a
     /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
-    /// the reader is its author and the post is in its trash: then the
-    /// real text, with `in_your_trash` set on the read. `false` (the
+    /// this is the post a read asked for, the reader is its author and it
+    /// is in their trash: then the real text, with `in_your_trash` set on
+    /// the read. A chain's `root` is never the post asked for, so it is
+    /// always the placeholder. `false` (the
     /// default) covers ordinary posts and servers that predate this
     /// field.
     #[serde(default)]
@@ -736,14 +739,18 @@ pub struct CommentResponse {
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     /// `true` when this comment is deleted or removed. `body` is then a
-    /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
-    /// the reader is its author and it is in its trash: then the real
-    /// text, with `in_your_trash` set on the read.
+    /// placeholder saying why (e.g. `"[deleted by its author]"`).
     ///
-    /// A [`CommentChainResponse`] keeps deleted ancestors in place rather
-    /// than severing the thread, and a post's `comments` list includes a
-    /// deleted comment that has live replies, as a placeholder, so the
-    /// replies keep their place. Neither republishes what was removed.
+    /// Only the comment a read asked for — the last in a
+    /// [`CommentChainResponse`]'s `chain` — can carry its real text
+    /// instead, and only for its author with it in their trash, with
+    /// `in_your_trash` set on the read. A deleted comment listed inside a
+    /// thread (a post's `comments`) or as an ancestor in a chain is always
+    /// the placeholder, its author's own included.
+    ///
+    /// A chain keeps deleted ancestors in place rather than severing the
+    /// thread, and a post's `comments` list includes a deleted comment that
+    /// has live replies, as a placeholder, so the replies keep their place.
     #[serde(default)]
     pub deleted: bool,
     /// Why a `deleted` comment is gone; `None` on a live one and from
@@ -811,7 +818,9 @@ pub struct PostWithCommentsResponse {
     #[serde(default)]
     pub thread_summary: Option<String>,
     /// Set when the reader is the post's author and the post is in its
-    /// trash (a signed read): `post.body` is then the real text
+    /// trash (a signed read): `post.body` is then the real text. Nothing
+    /// else on the read is: deleted comments in `comments` are
+    /// placeholders, the reader's own included
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_your_trash: Option<TrashEntry>,
 }
@@ -1113,8 +1122,11 @@ pub struct CommentChainResponse {
     /// Comments ordered root-to-leaf (first entry is the oldest ancestor,
     /// last entry is the requested comment).
     pub chain: Vec<CommentResponse>,
-    /// Set when the reader wrote the requested comment and it is in its
-    /// trash (a signed read): that comment's `body` is then the real text
+    /// Set when the reader wrote the requested comment (the last in
+    /// `chain`) and it is in its trash (a signed read): that comment's
+    /// `body` is then the real text. Nothing else on the read is: deleted
+    /// ancestors and a deleted `root` are placeholders, the reader's own
+    /// included
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_your_trash: Option<TrashEntry>,
 }

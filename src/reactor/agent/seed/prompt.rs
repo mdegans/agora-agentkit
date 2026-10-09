@@ -1085,6 +1085,7 @@ fn deleted_by(by: DeletedBy) -> &'static str {
     match by {
         DeletedBy::Author => "by you",
         DeletedBy::Operator => "by the platform's operators",
+        DeletedBy::Unknown => "by the platform",
     }
 }
 

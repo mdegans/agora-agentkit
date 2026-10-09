@@ -82,6 +82,25 @@ pub enum Error {
     KeyBinding { agent: String },
 }
 
+impl Error {
+    /// Whether the server has no such route, as opposed to no such thing:
+    /// a 404 or 405 without the JSON error body Agora's own refusals carry.
+    /// How a client tells a server that predates an endpoint
+    pub fn is_missing_route(&self) -> bool {
+        match self {
+            Error::Status { status, body, .. } => {
+                (*status == reqwest::StatusCode::NOT_FOUND
+                    || *status == reqwest::StatusCode::METHOD_NOT_ALLOWED)
+                    && serde_json::from_str::<crate::responses::ErrorResponse>(
+                        body,
+                    )
+                    .is_err()
+            }
+            _ => false,
+        }
+    }
+}
+
 #[cfg(feature = "misanthropic")]
 impl crate::reactor::RetryAfter for Error {
     fn retry_after(&self) -> Option<Duration> {
@@ -697,7 +716,7 @@ impl Client {
         let body: GetContentRequest = signed(
             agent_id,
             input.clone(),
-            &SignedAction::GetContent {},
+            &SignedAction::GetContent { id: &input.id },
             key,
             timestamp,
         );
@@ -1104,7 +1123,9 @@ impl Client {
         let req_body: TrashListRequest = signed(
             agent_id,
             input.clone(),
-            &SignedAction::TrashList {},
+            &SignedAction::TrashList {
+                target: input.target,
+            },
             key,
             timestamp,
         );
@@ -1615,18 +1636,29 @@ mod tests {
             when.method(POST)
                 .path("/agora/api/social/trash/list")
                 .json_body_partial(r#"{"limit": 5}"#)
-                .matches(|req| signed_over(req, SignedAction::TrashList {}));
+                .matches(|req| {
+                    signed_over(req, SignedAction::TrashList { target: None })
+                });
             then.status(200).json_body(serde_json::json!({
                 "items": [], "total": 0, "offset": 0, "limit": 5,
             }));
         });
         let read = server.mock(|when, then| {
             when.method(POST)
-                .path("/agora/api/content/read")
-                .json_body_partial(
-                    serde_json::json!({"id": target}).to_string(),
-                )
-                .matches(|req| signed_over(req, SignedAction::GetContent {}));
+                    .path("/agora/api/content/read")
+                    .json_body_partial(
+                        serde_json::json!({"id": target}).to_string(),
+                    )
+                    .matches(|req| {
+                        signed_over(
+                            req,
+                            SignedAction::GetContent {
+                                id: &crate::ids::ContentRef::Content(
+                                    trash_target(),
+                                ),
+                            },
+                        )
+                    });
             then.status(404).body("not found");
         });
 
@@ -1660,9 +1692,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Status { status, .. } if status == 404));
+        assert!(err.is_missing_route(), "a bare 404: {err:?}");
         for m in [delete, restore, erase, list, read] {
             m.assert();
         }
+    }
+
+    /// Agora's own refusals carry a JSON `error`; a missing route does not
+    #[test]
+    fn a_missing_route_is_told_from_a_missing_thing() {
+        let status = |code: u16, body: &str| Error::Status {
+            status: reqwest::StatusCode::from_u16(code).unwrap(),
+            body: body.to_owned(),
+            retry_after: None,
+        };
+        assert!(status(404, "").is_missing_route());
+        assert!(status(405, "").is_missing_route());
+        assert!(status(404, "Not Found").is_missing_route());
+        assert!(!status(404, r#"{"error":"no such post"}"#).is_missing_route());
+        assert!(!status(500, "").is_missing_route());
+        assert!(!Error::Url("x".into()).is_missing_route());
     }
 
     #[tokio::test]

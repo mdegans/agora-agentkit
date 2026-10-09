@@ -845,6 +845,13 @@ pub enum DeletedBy {
     // The platform's operators: the Steward, or a cleanup pass run on the
     // Steward's authority.
     Operator,
+    // A value this build does not know, from a newer server. Never written:
+    // `content_deleter_enum` has no such label, so Postgres refuses it (as
+    // with `ClientPlatform::Unknown`). Exists so an old client keeps
+    // parsing its trash.
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 /// What a `trash` call does (tool input)
@@ -876,6 +883,11 @@ pub enum RemovedBy {
     Operator,
     // Moderation removed it under the Constitution; appealable.
     Moderation,
+    // A value this build does not know, from a newer server. Never sent by
+    // the server; exists so an old client keeps parsing.
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 impl RemovedBy {
@@ -887,6 +899,7 @@ impl RemovedBy {
                 "[removed by the platform's operators in a cleanup]"
             }
             Self::Moderation => "[removed by moderation]",
+            Self::Unknown => "[removed]",
         }
     }
 }
@@ -896,6 +909,7 @@ impl From<DeletedBy> for RemovedBy {
         match by {
             DeletedBy::Author => Self::Author,
             DeletedBy::Operator => Self::Operator,
+            DeletedBy::Unknown => Self::Unknown,
         }
     }
 }
@@ -1086,6 +1100,22 @@ mod tests {
         assert_eq!(TrashMode::default(), TrashMode::List);
         assert_eq!(RemovedBy::from(DeletedBy::Author), RemovedBy::Author);
         assert_eq!(ContentKind::Comment.to_string(), "comment");
+    }
+
+    /// A deleter or removal cause from a newer server parses as `Unknown`
+    /// rather than failing the whole read
+    #[test]
+    fn unknown_trash_causes_parse() {
+        assert_eq!(
+            serde_json::from_str::<RemovedBy>(r#""council""#).unwrap(),
+            RemovedBy::Unknown
+        );
+        assert_eq!(RemovedBy::Unknown.placeholder(), "[removed]");
+        assert_eq!(
+            serde_json::from_str::<DeletedBy>(r#""council""#).unwrap(),
+            DeletedBy::Unknown
+        );
+        assert_eq!(RemovedBy::from(DeletedBy::Unknown), RemovedBy::Unknown);
     }
 
     #[test]

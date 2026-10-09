@@ -3686,11 +3686,11 @@ fn trash_page(id: Uuid, body: Option<&str>) -> serde_json::Value {
     })
 }
 
-/// `delete_content` resolves a shown short id, signs the full one, and
-/// forgets the comment in the ledger, so the one-per-post rule no longer
-/// points at it
+/// `delete_content` resolves a shown short id and signs the full id. The
+/// ledger keeps the comment: deleting it does not free the post's one
+/// top-level slot, or delete-and-restore would get round the rule
 #[tokio::test]
-async fn delete_content_signs_the_full_id_and_updates_the_ledger() {
+async fn delete_content_signs_the_full_id_and_keeps_the_ledger() {
     let server = MockServer::start();
     let post_id = Uuid::new_v4();
     let comment_id = Uuid::new_v4();
@@ -3751,9 +3751,12 @@ async fn delete_content_signs_the_full_id_and_updates_the_ledger() {
     deleted.assert();
     assert_eq!(lookup.hits(), 0, "resolved from what was shown");
     let ledger = agent.state.ledger.read().unwrap();
-    assert!(ledger.created_comments.is_empty());
-    assert!(ledger.post_comments.is_empty());
-    assert!(ledger.commented_posts.is_empty());
+    assert!(ledger.created_comments.contains(&comment_id.into()));
+    assert_eq!(
+        ledger.post_comments.get(&post_id.into()),
+        Some(&comment_id.into())
+    );
+    assert!(ledger.commented_posts.contains(&post_id.into()));
     drop(ledger);
     let rendered = transcript(&agent);
     assert!(
@@ -3881,15 +3884,26 @@ async fn trash_resolves_an_unseen_short_id_from_the_trash() {
     );
 }
 
-/// Deletions, restores and erasures share one per-session cap
+/// Deletions, restores and erasures share one per-session cap, which only
+/// writes the server accepted spend
 #[tokio::test]
 async fn trash_writes_are_capped_per_session() {
     let server = MockServer::start();
     let item = Uuid::new_v4();
+    let refused = Uuid::new_v4();
     let restore = server.mock(|when, then| {
-        when.method(POST).path("/agora/api/social/trash/restore");
+        when.method(POST)
+            .path("/agora/api/social/trash/restore")
+            .json_body_partial(format!(r#"{{"target": "{item}"}}"#));
         then.status(200)
             .json_body(serde_json::json!({"restored": item}));
+    });
+    let refusal = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/restore")
+            .json_body_partial(format!(r#"{{"target": "{refused}"}}"#));
+        then.status(409)
+            .json_body(serde_json::json!({"error": "not in your trash"}));
     });
     let config = SeedConfig {
         max_rounds: 30,
@@ -3897,18 +3911,77 @@ async fn trash_writes_are_capped_per_session() {
     };
     let mut agent = agent(&server, config);
     seat_start(&mut agent);
-    for _ in 0..=tool::MAX_TRASH_WRITES {
+    for target in std::iter::repeat_n(refused, 3)
+        .chain(std::iter::repeat_n(item, tool::MAX_TRASH_WRITES + 1))
+    {
         agent
             .handle(tool_use_message(
                 "trash",
-                serde_json::json!({"mode": "restore", "target": item}),
+                serde_json::json!({"mode": "restore", "target": target}),
             ))
             .await
             .unwrap();
     }
+    assert_eq!(refusal.hits(), 3, "refusals spend nothing");
     assert_eq!(restore.hits(), tool::MAX_TRASH_WRITES);
     assert!(
         transcript(&agent).contains("deletions, restores and erasures"),
         "the refusal says why"
     );
+}
+
+/// A server without the signed read answers a bare 404, and the read is
+/// retried unsigned; Agora's own "not found" (a JSON error) is not retried
+#[tokio::test]
+async fn get_content_falls_back_when_the_signed_route_is_missing() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let missing = Uuid::new_v4();
+    let signed_old = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .json_body_partial(serde_json::json!({"id": post_id}).to_string());
+        then.status(404);
+    });
+    let unsigned = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{post_id}"));
+        then.status(200).json_body(post_content(post_id));
+    });
+    let signed_missing = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .json_body_partial(serde_json::json!({"id": missing}).to_string());
+        then.status(404)
+            .json_body(serde_json::json!({"error": "no such post or comment"}));
+    });
+    let unsigned_missing = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{missing}"));
+        then.status(404)
+            .json_body(serde_json::json!({"error": "no such post or comment"}));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for id in [post_id, missing] {
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({ "id": id }),
+            ))
+            .await
+            .unwrap();
+    }
+    signed_old.assert();
+    unsigned.assert();
+    signed_missing.assert();
+    assert_eq!(
+        unsigned_missing.hits(),
+        0,
+        "a real not-found is not retried"
+    );
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("Compilers are underrated"), "{rendered}");
+    assert!(rendered.contains("no such post or comment"), "{rendered}");
 }

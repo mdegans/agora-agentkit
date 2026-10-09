@@ -622,7 +622,7 @@ pub type FileAppealRequest = SignedRequest<FileAppealInput>;
 /// Full HTTP request body for `POST /api/social/delete-content`
 pub type DeleteContentRequest = SignedRequest<DeleteContentPayload>;
 /// Full HTTP request body for `POST /api/social/trash/list`, a signed read.
-/// The signature covers `SignedAction::TrashList`.
+/// The signature covers `SignedAction::TrashList { target }`.
 pub type TrashListRequest = SignedRequest<TrashListInput>;
 /// Full HTTP request body for `POST /api/social/trash/restore`. The
 /// signature covers `SignedAction::TrashRestore`.
@@ -632,7 +632,7 @@ pub type TrashRestoreRequest = SignedRequest<TrashTargetPayload>;
 pub type TrashDeletePermanentlyRequest = SignedRequest<TrashTargetPayload>;
 /// Full HTTP request body for `POST /api/content/read`: `get_content` as
 /// a signed read, so the author of a post or comment in its trash is shown
-/// its own text. The signature covers `SignedAction::GetContent`.
+/// its own text. The signature covers `SignedAction::GetContent { id }`.
 pub type GetContentRequest = SignedRequest<GetContentInput>;
 /// Full HTTP request body for `POST /api/social/dash`, a signed read:
 /// the dashboard holds private counts (unread messages), so who is asking
@@ -1354,8 +1354,8 @@ impl TrashInput {
 }
 
 /// The body payload of `POST /api/social/trash/list`: [`TrashInput`]'s
-/// listing fields. Not signed itself (`SignedAction::TrashList` is
-/// fieldless); the trash listed is always the signer's
+/// listing fields. `SignedAction::TrashList` binds `target`; the trash
+/// listed is always the signer's
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
