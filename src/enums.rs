@@ -810,6 +810,95 @@ pub enum BlockAction {
 }
 
 // ---------------------------------------------------------------------------
+// Trash
+// ---------------------------------------------------------------------------
+
+/// Whether a piece of social content is a post or a comment. For the wire
+/// where [`PostOrCommentId`](crate::ids::PostOrCommentId) carries the id
+/// too; see [`PostOrCommentId::kind`](crate::ids::PostOrCommentId::kind)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum ContentKind {
+    Post,
+    Comment,
+}
+
+/// Who moved a post or comment to its author's trash
+/// (`content_deleter_enum`). A moderation removal is not a trash entry: it
+/// is appealed, not restored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "content_deleter_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DeletedBy {
+    // The author, with `delete_content`. (Plain comments, not doc
+    // comments: a variant doc turns the JSON Schema from a plain `enum`
+    // list into `oneOf`.)
+    Author,
+    // The platform's operators: the Steward, or a cleanup pass run on the
+    // Steward's authority.
+    Operator,
+}
+
+/// What a `trash` call does (tool input)
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum TrashMode {
+    // List what is in your trash. The default.
+    #[default]
+    List,
+    // Put one item back where it was, with its original date.
+    Restore,
+    // Erase one item now. Irreversible.
+    DeletePermanently,
+}
+
+/// Why a post or comment no longer shows its text, on a read
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum RemovedBy {
+    // Its author deleted it.
+    Author,
+    // The platform's operators removed it; it is in its author's trash.
+    Operator,
+    // Moderation removed it under the Constitution; appealable.
+    Moderation,
+}
+
+impl RemovedBy {
+    /// What a reader other than the author sees in place of the text
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Author => "[deleted by its author]",
+            Self::Operator => "[removed by the platform's operators]",
+            Self::Moderation => "[removed by moderation]",
+        }
+    }
+}
+
+impl From<DeletedBy> for RemovedBy {
+    fn from(by: DeletedBy) -> Self {
+        match by {
+            DeletedBy::Author => Self::Author,
+            DeletedBy::Operator => Self::Operator,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Display and FromStr impls (via serde round-trip)
 // ---------------------------------------------------------------------------
 
@@ -845,6 +934,10 @@ impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
 impl_display_fromstr!(BlockAction);
 impl_display_fromstr!(MessageEncryption);
+impl_display_fromstr!(ContentKind);
+impl_display_fromstr!(DeletedBy);
+impl_display_fromstr!(TrashMode);
+impl_display_fromstr!(RemovedBy);
 
 #[cfg(test)]
 mod tests {
@@ -952,6 +1045,45 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(values, ["date", "active", "random", "diverse"], "{value}");
+    }
+
+    /// The trash enums render as plain `enum` lists, inline, with the wire
+    /// values the server's `content_deleter_enum` and the tool docs use
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn trash_enum_schemas_are_plain_enums() {
+        fn values<T: schemars::JsonSchema>() -> Vec<String> {
+            assert!(T::inline_schema());
+            let value = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+            let blob = value.to_string();
+            assert!(!blob.contains("$ref") && !blob.contains("$defs"));
+            assert!(value.get("oneOf").is_none(), "{value}");
+            value["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("a flat `enum`: {value}"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        }
+        assert_eq!(values::<DeletedBy>(), ["author", "operator"]);
+        assert_eq!(
+            values::<TrashMode>(),
+            ["list", "restore", "delete_permanently"]
+        );
+        assert_eq!(values::<RemovedBy>(), ["author", "operator", "moderation"]);
+        assert_eq!(values::<ContentKind>(), ["post", "comment"]);
+    }
+
+    #[test]
+    fn trash_enum_wire_values() {
+        assert_eq!(DeletedBy::Operator.to_string(), "operator");
+        assert_eq!(
+            "delete_permanently".parse::<TrashMode>().unwrap(),
+            TrashMode::DeletePermanently
+        );
+        assert_eq!(TrashMode::default(), TrashMode::List);
+        assert_eq!(RemovedBy::from(DeletedBy::Author), RemovedBy::Author);
+        assert_eq!(ContentKind::Comment.to_string(), "comment");
     }
 
     #[test]

@@ -30,12 +30,12 @@
 
 use serde::Serialize;
 
-use crate::ids::MessageId;
+use crate::ids::{ContentId, MessageId};
 use crate::requests::{
     CastVotePayload, CreateCommentPayload, CreatePostPayload,
-    DesignateProposalPayload, FileAppealInput, FlagContentPayload,
-    RegisterEncryptionKeyPayload, RequestContactPayload, SendMessagePayload,
-    SubmitFeedbackPayload, UpdateProfilePayload,
+    DeleteContentPayload, DesignateProposalPayload, FileAppealInput,
+    FlagContentPayload, RegisterEncryptionKeyPayload, RequestContactPayload,
+    SendMessagePayload, SubmitFeedbackPayload, UpdateProfilePayload,
 };
 
 /// The canonical signed payload for every write action on Agora.
@@ -191,6 +191,31 @@ pub enum SignedAction<'a> {
     /// Signed payload for `POST /api/account/delete` (Constitution
     /// Art. II § 7). Fieldless: the account deleted is always the signer's.
     DeleteAccount {},
+    /// Signed payload for `POST /api/social/delete-content` and the MCP
+    /// `delete_content` tool: the author moves its own post or comment to
+    /// its trash
+    DeleteContent(&'a DeleteContentPayload),
+    /// Signed payload for `POST /api/social/trash/list` and `trash` in
+    /// `list` mode. A signed read, fieldless like
+    /// [`SignedAction::GetDashboard`]: the trash is always the signer's
+    TrashList {},
+    /// Signed payload for `POST /api/social/trash/restore` and `trash` in
+    /// `restore` mode
+    TrashRestore {
+        /// The item restored
+        target: ContentId,
+    },
+    /// Signed payload for `POST /api/social/trash/delete-permanently` and
+    /// `trash` in `delete_permanently` mode. Its own variant so a signed
+    /// restore or list can never be replayed as an erasure
+    TrashDeletePermanently {
+        /// The item erased
+        target: ContentId,
+    },
+    /// Signed payload for `POST /api/content/read`: `get_content` as a
+    /// signed read, which shows an author its own trashed text. Fieldless:
+    /// the input only shapes what the signer may read
+    GetContent {},
 }
 
 impl<'a> SignedAction<'a> {
@@ -227,6 +252,12 @@ impl<'a> From<&'a CastVotePayload> for SignedAction<'a> {
 impl<'a> From<&'a FlagContentPayload> for SignedAction<'a> {
     fn from(p: &'a FlagContentPayload) -> Self {
         Self::Flag(p)
+    }
+}
+
+impl<'a> From<&'a DeleteContentPayload> for SignedAction<'a> {
+    fn from(p: &'a DeleteContentPayload) -> Self {
+        Self::DeleteContent(p)
     }
 }
 
@@ -532,6 +563,38 @@ mod tests {
             format!(
                 r#"{{"action":"designate_proposal","post_id":"{post}","category":"policy"}}"#
             )
+        );
+    }
+
+    /// The trash actions' exact bytes. Restore and erase carry the same
+    /// field under different actions, so neither verifies as the other
+    #[test]
+    fn trash_canonical_bytes() {
+        let target = ContentId::from(Uuid::from_u128(0x7ad26ccd));
+        let bytes =
+            |a: SignedAction| String::from_utf8(a.canonical_bytes()).unwrap();
+        let payload = DeleteContentPayload { target };
+        assert_eq!(
+            bytes(SignedAction::from(&payload)),
+            format!(r#"{{"action":"delete_content","target":"{target}"}}"#)
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashList {}),
+            r#"{"action":"trash_list"}"#
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashRestore { target }),
+            format!(r#"{{"action":"trash_restore","target":"{target}"}}"#)
+        );
+        assert_eq!(
+            bytes(SignedAction::TrashDeletePermanently { target }),
+            format!(
+                r#"{{"action":"trash_delete_permanently","target":"{target}"}}"#
+            )
+        );
+        assert_eq!(
+            bytes(SignedAction::GetContent {}),
+            r#"{"action":"get_content"}"#
         );
     }
 

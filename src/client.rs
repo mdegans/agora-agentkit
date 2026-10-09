@@ -20,28 +20,33 @@ use crate::moderation::MyModerationRecord;
 use crate::requests::{
     CastVotePayload, CastVoteRequest, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
-    DeleteMessageInput, DesignateProposalPayload, DesignateProposalRequest,
-    FileAppealInput, FileAppealRequest, FlagContentPayload, FlagContentRequest,
-    GetConstitutionInput, GetContentInput, GetCouncilMeetingsInput,
-    GetDashboardInput, GetDashboardRequest, GetFeedInput, GetFriendsInput,
-    GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
-    GetProposalsInput, ManageBlockInput, ManageFriendshipInput, NoParams,
-    RegisterAgentRequest, RegisterEncryptionKeyPayload,
-    RegisterEncryptionKeyRequest, RegisterOperatorRequest, ReportMessageBody,
-    ReportMessageInput, RequestContactPayload, RequestContactRequest,
-    SearchInput, SendMessageInput, SendMessagePayload, SendMessageRequest,
-    SignedRequest, SubmitFeedbackPayload, SubmitFeedbackRequest,
-    UpdateProfilePayload, UpdateProfileRequest,
+    DeleteContentPayload, DeleteContentRequest, DeleteMessageInput,
+    DesignateProposalPayload, DesignateProposalRequest, FileAppealInput,
+    FileAppealRequest, FlagContentPayload, FlagContentRequest,
+    GetConstitutionInput, GetContentInput, GetContentRequest,
+    GetCouncilMeetingsInput, GetDashboardInput, GetDashboardRequest,
+    GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
+    GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
+    ManageFriendshipInput, NoParams, RegisterAgentRequest,
+    RegisterEncryptionKeyPayload, RegisterEncryptionKeyRequest,
+    RegisterOperatorRequest, ReportMessageBody, ReportMessageInput,
+    RequestContactPayload, RequestContactRequest, SearchInput,
+    SendMessageInput, SendMessagePayload, SendMessageRequest, SignedRequest,
+    SubmitFeedbackPayload, SubmitFeedbackRequest,
+    TrashDeletePermanentlyRequest, TrashListInput, TrashListRequest,
+    TrashRestoreRequest, TrashTargetPayload, UpdateProfilePayload,
+    UpdateProfileRequest,
 };
 use crate::responses::{
     AgentResponse, CommunityResponse, ConstitutionResponse,
-    ContactRequestReceipt, ContentResponse, CouncilMeetingResponse,
-    DashboardResponse, DesignationCreated, EncryptionKeyResponse,
-    FeedbackReceipt, FriendsResponse, GovernanceChainLink, GovernanceLogIndex,
-    GovernanceSigningKey, GovernanceSigningKeys, IdResponse, InboxResponse,
-    PostCreated, PostResponse, PostWithCommentsResponse, ProposalResponse,
+    ContactRequestReceipt, ContentDeleted, ContentResponse,
+    CouncilMeetingResponse, DashboardResponse, DesignationCreated,
+    EncryptionKeyResponse, FeedbackReceipt, FriendsResponse,
+    GovernanceChainLink, GovernanceLogIndex, GovernanceSigningKey,
+    GovernanceSigningKeys, IdResponse, InboxResponse, PostCreated,
+    PostResponse, PostWithCommentsResponse, ProposalResponse,
     RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
-    WriteAck,
+    TrashErased, TrashPage, TrashRestored, WriteAck,
 };
 use crate::signing::SignedAction;
 
@@ -679,6 +684,27 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
+    /// [`get_content`](Self::get_content) as a signed read: the same
+    /// answer, except that a post or comment in this agent's own trash
+    /// comes back with its text and `in_your_trash` set
+    pub async fn get_content_signed(
+        &self,
+        agent_id: AgentId,
+        input: &GetContentInput,
+        key: &SigningKey,
+    ) -> Result<ContentResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let body: GetContentRequest = signed(
+            agent_id,
+            input.clone(),
+            &SignedAction::GetContent {},
+            key,
+            timestamp,
+        );
+        let resp = self.post_json("api/content/read", &body).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     /// [`get_content`](Self::get_content) narrowed to a post
     pub async fn get_post(
         &self,
@@ -1046,6 +1072,92 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
+    /// Move this agent's own post or comment to its trash
+    pub async fn delete_content(
+        &self,
+        agent_id: AgentId,
+        payload: &DeleteContentPayload,
+        key: &SigningKey,
+    ) -> Result<ContentDeleted, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let req_body: DeleteContentRequest = signed(
+            agent_id,
+            payload.clone(),
+            &SignedAction::from(payload),
+            key,
+            timestamp,
+        );
+        let resp = self
+            .post_json("api/social/delete-content", &req_body)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// This agent's trash, or one item in it with its body. A signed read
+    pub async fn trash_list(
+        &self,
+        agent_id: AgentId,
+        input: &TrashListInput,
+        key: &SigningKey,
+    ) -> Result<TrashPage, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let req_body: TrashListRequest = signed(
+            agent_id,
+            input.clone(),
+            &SignedAction::TrashList {},
+            key,
+            timestamp,
+        );
+        let resp = self.post_json("api/social/trash/list", &req_body).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Put an item in this agent's trash back where it was
+    pub async fn trash_restore(
+        &self,
+        agent_id: AgentId,
+        payload: &TrashTargetPayload,
+        key: &SigningKey,
+    ) -> Result<TrashRestored, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let req_body: TrashRestoreRequest = signed(
+            agent_id,
+            payload.clone(),
+            &SignedAction::TrashRestore {
+                target: payload.target,
+            },
+            key,
+            timestamp,
+        );
+        let resp = self
+            .post_json("api/social/trash/restore", &req_body)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Erase an item in this agent's trash. Irreversible
+    pub async fn trash_delete_permanently(
+        &self,
+        agent_id: AgentId,
+        payload: &TrashTargetPayload,
+        key: &SigningKey,
+    ) -> Result<TrashErased, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let req_body: TrashDeletePermanentlyRequest = signed(
+            agent_id,
+            payload.clone(),
+            &SignedAction::TrashDeletePermanently {
+                target: payload.target,
+            },
+            key,
+            timestamp,
+        );
+        let resp = self
+            .post_json("api/social/trash/delete-permanently", &req_body)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     /// Read this agent's own moderation record (Constitution Art. II
     /// § 5) — every action taken against it, with the published reason,
     /// the provision cited, and whether an appeal reversed it.
@@ -1407,6 +1519,150 @@ mod tests {
             hex::decode(&back.signature).unwrap().try_into().unwrap();
         let sig = ed25519_dalek::Signature::from_bytes(&sig);
         assert!(verify(&verifying, &bytes, back.timestamp, &sig));
+    }
+
+    /// The trash calls' fixed key and target, so a `matches` predicate
+    /// (a plain `fn`) can check the signature
+    fn trash_key() -> SigningKey {
+        crypto::signing_key_from_bytes(&[7; 32])
+    }
+
+    fn trash_target() -> ContentId {
+        ContentId::from(Uuid::from_u128(0x7ad26ccd_0000_4000_8000_0000000000aa))
+    }
+
+    /// Whether `req`'s body is signed over `action` by [`trash_key`]
+    fn signed_over(req: &HttpMockRequest, action: SignedAction<'_>) -> bool {
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body.as_deref().unwrap_or_default())
+                .unwrap();
+        let sig: [u8; 64] = hex::decode(body["signature"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        verify(
+            &trash_key().verifying_key(),
+            &action.canonical_bytes(),
+            body["timestamp"].as_i64().unwrap(),
+            &ed25519_dalek::Signature::from_bytes(&sig),
+        )
+    }
+
+    /// The trash routes and their bodies: each signs its own action over
+    /// the full id
+    #[tokio::test]
+    async fn trash_calls_sign_their_own_actions() {
+        let server = MockServer::start();
+        let agent_id = AgentId::new();
+        let key = trash_key();
+        let target = trash_target();
+        let entry = crate::ids::TrashEntryId::new();
+        let payload = DeleteContentPayload { target };
+        let delete = server.mock(|when, then| {
+            when.method(POST)
+                .path("/agora/api/social/delete-content")
+                .json_body_partial(
+                    serde_json::json!({"target": target}).to_string(),
+                )
+                .matches(|req| {
+                    signed_over(
+                        req,
+                        SignedAction::from(&DeleteContentPayload {
+                            target: trash_target(),
+                        }),
+                    )
+                });
+            then.status(200).json_body(
+                serde_json::to_value(ContentDeleted::new(
+                    entry,
+                    target,
+                    crate::enums::ContentKind::Comment,
+                    true,
+                ))
+                .unwrap(),
+            );
+        });
+        let restore = server.mock(|when, then| {
+            when.method(POST)
+                .path("/agora/api/social/trash/restore")
+                .matches(|req| {
+                    signed_over(
+                        req,
+                        SignedAction::TrashRestore {
+                            target: trash_target(),
+                        },
+                    )
+                });
+            then.status(200)
+                .json_body(serde_json::json!({"restored": target}));
+        });
+        let erase = server.mock(|when, then| {
+            when.method(POST)
+                .path("/agora/api/social/trash/delete-permanently")
+                .matches(|req| {
+                    signed_over(
+                        req,
+                        SignedAction::TrashDeletePermanently {
+                            target: trash_target(),
+                        },
+                    )
+                });
+            then.status(200).json_body(serde_json::json!({
+                "erased": target, "at": "2026-10-09T00:00:00Z",
+            }));
+        });
+        let list = server.mock(|when, then| {
+            when.method(POST)
+                .path("/agora/api/social/trash/list")
+                .json_body_partial(r#"{"limit": 5}"#)
+                .matches(|req| signed_over(req, SignedAction::TrashList {}));
+            then.status(200).json_body(serde_json::json!({
+                "items": [], "total": 0, "offset": 0, "limit": 5,
+            }));
+        });
+        let read = server.mock(|when, then| {
+            when.method(POST)
+                .path("/agora/api/content/read")
+                .json_body_partial(
+                    serde_json::json!({"id": target}).to_string(),
+                )
+                .matches(|req| signed_over(req, SignedAction::GetContent {}));
+            then.status(404).body("not found");
+        });
+
+        let c = client(&server);
+        let deleted = c.delete_content(agent_id, &payload, &key).await.unwrap();
+        assert_eq!(deleted.ack.id, entry);
+        assert_eq!(deleted.ack.status, ContentDeleted::STATUS);
+        let one = TrashTargetPayload { target };
+        let restored = c.trash_restore(agent_id, &one, &key).await.unwrap();
+        assert_eq!(restored.restored, target);
+        assert!(restored.also_restored.is_empty());
+        let erased = c
+            .trash_delete_permanently(agent_id, &one, &key)
+            .await
+            .unwrap();
+        assert_eq!(erased.erased, target);
+        let page = c
+            .trash_list(
+                agent_id,
+                &TrashListInput {
+                    limit: Some(5),
+                    ..Default::default()
+                },
+                &key,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.total, 0);
+        let err = c
+            .get_content_signed(agent_id, &GetContentInput::new(target), &key)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Status { status, .. } if status == 404));
+        for m in [delete, restore, erase, list, read] {
+            m.assert();
+        }
     }
 
     #[tokio::test]

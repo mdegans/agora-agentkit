@@ -2415,8 +2415,9 @@ async fn index_proposals_summaries_and_failures_are_free() {
         then.status(404).body("no such entry");
     });
     let post = server.mock(|when, then| {
-        when.method(GET)
-            .path(format!("/agora/api/content/{post_id}"));
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .json_body_partial(serde_json::json!({"id": post_id}).to_string());
         then.status(200).json_body(post_content(post_id));
     });
 
@@ -2729,8 +2730,7 @@ async fn an_oversized_post_read_is_left_out_with_a_note() {
     // ~60 KB: about 20k tokens at a byte for every three.
     body["post"]["body"] = serde_json::json!("OVERSIZED ".repeat(6_000));
     server.mock(|when, then| {
-        when.method(GET)
-            .path(format!("/agora/api/content/{post_id}"));
+        when.method(POST).path("/agora/api/content/read");
         then.status(200).json_body(body);
     });
     let small = SeedConfig {
@@ -2779,6 +2779,7 @@ fn listed_post(
         community_tags: vec![],
         designation: None,
         notice: None,
+        removed_by: None,
     }
 }
 
@@ -2951,8 +2952,7 @@ async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment
     let post_id = Uuid::new_v4();
     let comment_id = Uuid::new_v4();
     server.mock(|when, then| {
-        when.method(GET)
-            .path(format!("/agora/api/content/{post_id}"));
+        when.method(POST).path("/agora/api/content/read");
         then.status(200).json_body(post_content(post_id));
     });
     let lookup = server.mock(|when, then| {
@@ -3656,4 +3656,259 @@ fn feedback_limit_is_the_servers() {
             "an over-long answer must never reach the server over its limit"
         );
     }
+}
+
+/// A trash listing as the server sends it: one operator-removed comment
+fn trash_page(id: Uuid, body: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "items": [{
+            "entry_id": Uuid::new_v4(),
+            "id": id,
+            "kind": "comment",
+            "post_id": Uuid::new_v4(),
+            "post_title": "A thread from March",
+            "excerpt": "the first words",
+            "body": body,
+            "created_at": "2026-03-01T00:00:00Z",
+            "deleted_at": "2026-03-12T00:00:00Z",
+            "deleted_by": "operator",
+            "cleanup": {
+                "label": "March 2026 seed cleanup",
+                "performed_at": "2026-03-12T00:00:00Z",
+                "explanation": "A feed bug spread degenerate output.",
+            },
+            "can_restore": true,
+            "can_delete_permanently": true,
+        }],
+        "total": 1,
+        "offset": 0,
+        "limit": 25,
+    })
+}
+
+/// `delete_content` resolves a shown short id, signs the full one, and
+/// forgets the comment in the ledger, so the one-per-post rule no longer
+/// points at it
+#[tokio::test]
+async fn delete_content_signs_the_full_id_and_updates_the_ledger() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let comment_id = Uuid::new_v4();
+    let mut content = post_content(post_id);
+    content["comments"] = serde_json::json!([{
+        "id": comment_id,
+        "post_id": post_id,
+        "agent_id": Uuid::new_v4(),
+        "agent_name": "test-agent",
+        "body": "Something I regret.",
+    }]);
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/content/read");
+        then.status(200).json_body(content);
+    });
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{}", short(comment_id)));
+        then.status(500);
+    });
+    let deleted = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/delete-content")
+            .json_body_partial(format!(r#"{{"target": "{comment_id}"}}"#));
+        then.status(200)
+            .json_body_obj(&crate::responses::ContentDeleted::new(
+                crate::ids::TrashEntryId::new(),
+                comment_id.into(),
+                crate::enums::ContentKind::Comment,
+                true,
+            ));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    {
+        let mut ledger = agent.state.ledger.write().unwrap();
+        ledger.created_comments.insert(comment_id.into());
+        ledger.commented_posts.insert(post_id.into());
+        ledger
+            .post_comments
+            .insert(post_id.into(), comment_id.into());
+    }
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({ "id": post_id }),
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "delete_content",
+            serde_json::json!({ "target": short(comment_id) }),
+        ))
+        .await
+        .unwrap();
+    deleted.assert();
+    assert_eq!(lookup.hits(), 0, "resolved from what was shown");
+    let ledger = agent.state.ledger.read().unwrap();
+    assert!(ledger.created_comments.is_empty());
+    assert!(ledger.post_comments.is_empty());
+    assert!(ledger.commented_posts.is_empty());
+    drop(ledger);
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("Your comment is in your trash"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            r#"trash(mode="restore", target="{}")"#,
+            short(comment_id)
+        )),
+        "{rendered}"
+    );
+}
+
+/// A listing shows what is in the trash and makes its ids resolvable, so
+/// a restore by short id needs no second lookup
+#[tokio::test]
+async fn trash_list_then_restore_by_short_id() {
+    let server = MockServer::start();
+    let item = Uuid::new_v4();
+    let targeted = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/list")
+            .json_body_partial(format!(r#"{{"target": "{}"}}"#, short(item)));
+        then.status(500);
+    });
+    let list = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/list")
+            .json_body_partial(r#"{"limit": 25}"#);
+        then.status(200).json_body(trash_page(item, None));
+    });
+    let restore = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/restore")
+            .json_body_partial(format!(r#"{{"target": "{item}"}}"#));
+        then.status(200)
+            .json_body(serde_json::json!({"restored": item}));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message("trash", serde_json::json!({})))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "trash",
+            serde_json::json!({"mode": "restore", "target": short(item)}),
+        ))
+        .await
+        .unwrap();
+    list.assert();
+    restore.assert();
+    assert_eq!(targeted.hits(), 0);
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("Your trash: 1 item"), "{rendered}");
+    assert!(rendered.contains("March 2026 seed cleanup"), "{rendered}");
+    assert!(
+        rendered.contains(&format!("Restored {item}: it is back")),
+        "{rendered}"
+    );
+}
+
+/// An unseen short id is looked up with one signed, targeted listing; one
+/// the trash does not hold is refused before anything is erased
+#[tokio::test]
+async fn trash_resolves_an_unseen_short_id_from_the_trash() {
+    let server = MockServer::start();
+    let item = Uuid::new_v4();
+    let unknown = Uuid::new_v4();
+    let found = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/list")
+            .json_body_partial(format!(r#"{{"target": "{}"}}"#, short(item)));
+        then.status(200)
+            .json_body(trash_page(item, Some("The whole text.")));
+    });
+    let not_found = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/list")
+            .json_body_partial(format!(
+                r#"{{"target": "{}"}}"#,
+                short(unknown)
+            ));
+        then.status(200).json_body(serde_json::json!({
+            "items": [], "total": 0, "offset": 0, "limit": 25,
+        }));
+    });
+    let erase = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/trash/delete-permanently")
+            .json_body_partial(format!(r#"{{"target": "{item}"}}"#));
+        then.status(200).json_body(serde_json::json!({
+            "erased": item, "at": "2026-10-09T12:00:00Z",
+        }));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for target in [short(unknown), short(item)] {
+        agent
+            .handle(tool_use_message(
+                "trash",
+                serde_json::json!({
+                    "mode": "delete_permanently", "target": target,
+                }),
+            ))
+            .await
+            .unwrap();
+    }
+    found.assert();
+    not_found.assert();
+    erase.assert();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("names no single item in your trash. Call trash()"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("Erased {item} permanently")),
+        "{rendered}"
+    );
+}
+
+/// Deletions, restores and erasures share one per-session cap
+#[tokio::test]
+async fn trash_writes_are_capped_per_session() {
+    let server = MockServer::start();
+    let item = Uuid::new_v4();
+    let restore = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/trash/restore");
+        then.status(200)
+            .json_body(serde_json::json!({"restored": item}));
+    });
+    let config = SeedConfig {
+        max_rounds: 30,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    for _ in 0..=tool::MAX_TRASH_WRITES {
+        agent
+            .handle(tool_use_message(
+                "trash",
+                serde_json::json!({"mode": "restore", "target": item}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(restore.hits(), tool::MAX_TRASH_WRITES);
+    assert!(
+        transcript(&agent).contains("deletions, restores and erasures"),
+        "the refusal says why"
+    );
 }

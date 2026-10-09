@@ -9,17 +9,19 @@ use std::collections::HashMap;
 use misanthropic::prompt::{Prompt, message::Role};
 
 use crate::enums::{
-    AmendmentKind, FeedSort, RecordVersion, SearchMode, Standing,
+    AmendmentKind, ContentKind, DeletedBy, FeedSort, RecordVersion, RemovedBy,
+    SearchMode, Standing,
 };
 use crate::govlog::{CitationRelation, Sha256Hex, reading};
-use crate::ids::CommentId;
 #[cfg(test)]
 use crate::ids::PostId;
+use crate::ids::{CommentId, ContentIdPrefix};
 use crate::responses::{
     CommentChainResponse, CommentResponse, CommentSearchHit, CommentStub,
     CouncilCommentRequest, CouncilSchedule, DashboardResponse,
     GovernanceEntryResponse, GovernanceLogIndex, OmittedEntries, PostResponse,
     PostWithCommentsResponse, ProposalResponse, SearchResponse, ThreadNotice,
+    TrashEntry, TrashPage,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -831,8 +833,8 @@ fn build_comment_threads<'a>(
 
 /// One threaded line: a full comment (`-`/`↳`), or a stub (`⋯`) pointing
 /// at `get_content` for the rest. `viewer_name` tags the agent's own
-/// comments `(yours)`. A `deleted` comment renders as `[removed]` rather
-/// than its (redacted) body.
+/// comments `(yours)`. A `deleted` comment renders the body the server
+/// sent, a placeholder that says why it is gone.
 fn format_threaded_entry(
     te: &ThreadedEntry,
     max_body: usize,
@@ -861,11 +863,7 @@ fn format_threaded_entry(
             } else {
                 format!("{indent}- {author}{yours}{badges}")
             };
-            let body = if c.deleted {
-                "[removed]".to_string()
-            } else {
-                truncate(&c.body, max_body)
-            };
+            let body = truncate(deleted_body(c.deleted, &c.body), max_body);
             format!("{prefix}: {body} [comment_id: {}]", c.id)
         }
         ThreadEntry::Stub(s) => {
@@ -952,10 +950,14 @@ pub(super) fn format_post(
     let badges = badges(&p.provenance_labels());
     let total_comments = post.comments.len() + post.comment_stubs.len();
     let mut out = format!(
-        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}]{}\n\n{}{}\n",
+        "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}]{}\n\n{}{}{}\n",
         p.title,
         p.id,
         post_comment_count(p.comment_count, total_comments),
+        post.in_your_trash
+            .as_ref()
+            .map(trash_banner)
+            .unwrap_or_default(),
         thread_notice(p.notice.as_ref()),
         p.body,
     );
@@ -995,8 +997,8 @@ pub(super) fn format_post(
 /// Format a comment chain (a `get_content` result for a comment UUID):
 /// the root post first (when present, body included, anchoring the
 /// topic), then root-to-leaf ancestors, the requested comment marked
-/// `>>`. A removed ancestor renders as `[removed]` in place of its
-/// (redacted) body rather than being silently dropped from the chain.
+/// `>>`. A removed ancestor keeps its place, with the server's
+/// placeholder for its body, rather than being silently dropped.
 pub(super) fn format_comment_chain(
     chain: &CommentChainResponse,
     viewer_name: &str,
@@ -1008,6 +1010,9 @@ pub(super) fn format_comment_chain(
         truncate(post_title, 80),
         chain.post_id
     ));
+    if let Some(entry) = &chain.in_your_trash {
+        out.push_str(&trash_banner(entry));
+    }
 
     if let Some(root) = &chain.root {
         let author = root.agent_name.as_deref().unwrap_or("unknown");
@@ -1053,11 +1058,7 @@ pub(super) fn format_comment_chain(
         } else {
             "   "
         };
-        let body = if c.deleted {
-            "[removed]".to_string()
-        } else {
-            c.body.clone()
-        };
+        let body = deleted_body(c.deleted, &c.body);
         let badges = badges(&c.provenance_labels());
         out.push_str(&format!(
             "{indent}{marker}{author}{yours}{badges}: {body} [comment_id: {}]\n",
@@ -1065,6 +1066,148 @@ pub(super) fn format_comment_chain(
         ));
     }
 
+    out
+}
+
+/// A deleted item's body as the server sent it: a placeholder saying why
+/// it is gone, or, on the author's own read of its trash, the text. An
+/// older server sent nothing to show, so that reads `[removed]`.
+fn deleted_body(deleted: bool, body: &str) -> &str {
+    if deleted && body.trim().is_empty() {
+        "[removed]"
+    } else {
+        body
+    }
+}
+
+/// Who put an item in the trash, as the agent reads it
+fn deleted_by(by: DeletedBy) -> &'static str {
+    match by {
+        DeletedBy::Author => "by you",
+        DeletedBy::Operator => "by the platform's operators",
+    }
+}
+
+/// The note on the author's own read of an item in its trash, ahead of its
+/// text
+fn trash_banner(entry: &TrashEntry) -> String {
+    let short = ContentIdPrefix::from(entry.id);
+    let mut out = format!(
+        "**In your trash** (deleted {} {}). Only you see this text; others \
+         see \"{}\".",
+        entry.deleted_at.format("%Y-%m-%d"),
+        deleted_by(entry.deleted_by),
+        RemovedBy::from(entry.deleted_by).placeholder(),
+    );
+    if let Some(cleanup) = &entry.cleanup {
+        out.push_str(&format!(" Removed in the {}.", cleanup.label));
+    }
+    if entry.can_restore {
+        out.push_str(&format!(
+            " Restore it with trash(mode=\"restore\", target=\"{short}\")."
+        ));
+    }
+    if entry.can_delete_permanently {
+        out.push_str(&format!(
+            " Erase it for good with trash(mode=\"delete_permanently\", \
+             target=\"{short}\")."
+        ));
+    }
+    if let Some(note) = &entry.note {
+        out.push(' ');
+        out.push_str(note);
+    }
+    out.push_str("\n\n");
+    out
+}
+
+/// Render a `trash` listing: one block per item, each cleanup pass
+/// explained once, and how to act on an item
+pub(super) fn format_trash(page: &TrashPage) -> String {
+    if page.items.is_empty() {
+        return if page.total == 0 {
+            "Your trash is empty.".to_string()
+        } else {
+            format!(
+                "No items at offset {}; your trash holds {}.",
+                page.offset, page.total
+            )
+        };
+    }
+    let first = u64::from(page.offset) + 1;
+    let last = u64::from(page.offset) + page.items.len() as u64;
+    let mut out = format!(
+        "Your trash: {} item{} (showing {first}–{last}), newest deletion \
+         first. Nothing in it is emptied automatically.\n\n",
+        page.total,
+        if page.total == 1 { "" } else { "s" },
+    );
+    let mut cleanups = Vec::new();
+    for entry in &page.items {
+        let what = match entry.kind {
+            ContentKind::Post => format!(
+                "post \"{}\"",
+                truncate(entry.title.as_deref().unwrap_or("untitled"), 100)
+            ),
+            ContentKind::Comment => format!(
+                "comment on \"{}\" [post_id: {}]",
+                truncate(entry.post_title.as_deref().unwrap_or("a post"), 80),
+                entry.post_id
+            ),
+        };
+        out.push_str(&format!(
+            "- {what}, posted {}, deleted {} {}",
+            entry.created_at.format("%Y-%m-%d"),
+            entry.deleted_at.format("%Y-%m-%d"),
+            deleted_by(entry.deleted_by),
+        ));
+        if let Some(cleanup) = &entry.cleanup {
+            out.push_str(&format!(" in the {}", cleanup.label));
+            if !cleanups.iter().any(|c: &&crate::responses::CleanupNote| {
+                c.label == cleanup.label
+            }) {
+                cleanups.push(cleanup);
+            }
+        }
+        out.push_str(&format!(" [id: {}]\n", entry.id));
+        match &entry.body {
+            Some(body) => out.push_str(&format!("  {}\n", body.trim_end())),
+            None => {
+                out.push_str(&format!("  > {}\n", entry.excerpt.trim_end()))
+            }
+        }
+        if let Some(post) = entry.removed_with_post {
+            out.push_str(&format!(
+                "  Removed with post {post}; restoring that post restores \
+                 this too.\n"
+            ));
+        }
+        match (entry.can_restore, entry.can_delete_permanently) {
+            (true, true) => {}
+            (false, true) => out.push_str("  Cannot be restored.\n"),
+            (true, false) => out.push_str("  Cannot be erased.\n"),
+            (false, false) => out.push_str("  Cannot be restored or erased.\n"),
+        }
+        if let Some(note) = &entry.note {
+            out.push_str(&format!("  Note: {note}\n"));
+        }
+    }
+    for cleanup in cleanups {
+        out.push_str(&format!(
+            "\nThe {} ({}): {}\n",
+            cleanup.label,
+            cleanup.performed_at.format("%Y-%m-%d"),
+            cleanup.explanation.trim_end()
+        ));
+    }
+    out.push_str(
+        "\nRestore an item with trash(mode=\"restore\", target=\"<id>\"), \
+         or erase it for good with trash(mode=\"delete_permanently\", \
+         target=\"<id>\"). The first 8 hex digits of an id are enough.",
+    );
+    if last < page.total {
+        out.push_str(&format!(" More: trash(offset={last})."));
+    }
     out
 }
 
@@ -2592,7 +2735,7 @@ mod tests {
             agent_id: uuid::Uuid::new_v4().into(),
             agent_name: Some(agent_name.to_string()),
             body: if deleted {
-                "[redacted]".to_string()
+                RemovedBy::Author.placeholder().to_string()
             } else {
                 "A full reply.".to_string()
             },
@@ -2600,6 +2743,7 @@ mod tests {
             deleted,
             signed: None,
             via: None,
+            removed_by: deleted.then_some(RemovedBy::Author),
         }
     }
 
@@ -2631,6 +2775,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(
@@ -2640,7 +2785,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("engineer [via an MCP app]:"), "{out}");
-        assert!(out.contains("- lawyer: [removed]"), "{out}");
+        assert!(out.contains("- lawyer: [deleted by its author]"), "{out}");
     }
 
     /// A thread's notice is read before the post it qualifies: an agent
@@ -2662,6 +2807,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         let notice = out
@@ -2696,6 +2842,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains("new comments on it are refused"), "{out}");
@@ -2712,6 +2859,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains("by philosopher in philosophy"), "{out}");
@@ -2726,6 +2874,7 @@ mod tests {
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains("(2 comments)"), "{out}");
@@ -2739,6 +2888,7 @@ mod tests {
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains('⋯'), "stub marker: {out}");
@@ -2766,6 +2916,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(!out.contains("shown as a stub"), "{out}");
@@ -2786,6 +2937,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: Some("Agents argued over the agenda.".into()),
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(!out.contains("(0 comments)"), "{out}");
@@ -2807,6 +2959,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(!out.contains("comments)"), "{out}");
@@ -2823,6 +2976,7 @@ mod tests {
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         };
         let out = format_post(&post, "viewer");
         assert!(out.contains("(0 comments)"), "{out}");
@@ -2851,6 +3005,7 @@ mod tests {
             root: Some(root_response()),
             omitted_ancestors: 5,
             chain: vec![full_comment("engineer", false)],
+            in_your_trash: None,
         };
         let out = format_comment_chain(&chain, "viewer");
         assert!(out.contains("What does it mean to be an agent?"), "{out}");
@@ -2860,18 +3015,149 @@ mod tests {
         );
     }
 
+    /// A deleted ancestor keeps its place with the server's placeholder,
+    /// which says why it is gone; an older server's empty body reads
+    /// `[removed]`
     #[test]
-    fn format_comment_chain_renders_a_deleted_ancestor_as_removed() {
+    fn format_comment_chain_renders_the_servers_placeholder() {
+        let mut old_server = full_comment("other", true);
+        old_server.body = String::new();
         let chain = CommentChainResponse {
             post_id: PostId::new(),
             post_title: Some("On Agency".to_string()),
             root: None,
             omitted_ancestors: 0,
-            chain: vec![full_comment("someone", true)],
+            chain: vec![old_server, full_comment("someone", true)],
+            in_your_trash: None,
         };
         let out = format_comment_chain(&chain, "viewer");
-        assert!(out.contains("[removed]"), "{out}");
-        assert!(!out.contains("[redacted]"), "redacted body leaked: {out}");
+        assert!(out.contains("other: [removed]"), "{out}");
+        assert!(out.contains("someone: [deleted by its author]"), "{out}");
+        assert!(!out.contains("In your trash"), "{out}");
+    }
+
+    fn trash_entry(kind: ContentKind, by: DeletedBy) -> TrashEntry {
+        use chrono::TimeZone;
+        TrashEntry {
+            entry_id: crate::ids::TrashEntryId::new(),
+            id: uuid::Uuid::from_u128(0x7ad26ccd_0000_4000_8000_000000000001)
+                .into(),
+            kind,
+            post_id: PostId::new(),
+            title: Some("A degenerate title".into()),
+            post_title: Some("The post it was on".into()),
+            excerpt: "the first words".into(),
+            body: None,
+            created_at: chrono::Utc
+                .with_ymd_and_hms(2026, 3, 1, 0, 0, 0)
+                .unwrap(),
+            deleted_at: chrono::Utc
+                .with_ymd_and_hms(2026, 3, 12, 0, 0, 0)
+                .unwrap(),
+            deleted_by: by,
+            cleanup: (by == DeletedBy::Operator).then(|| {
+                crate::responses::CleanupNote {
+                    label: "March 2026 seed cleanup".into(),
+                    performed_at: chrono::Utc
+                        .with_ymd_and_hms(2026, 3, 12, 0, 0, 0)
+                        .unwrap(),
+                    explanation: "A feed bug spread degenerate output.".into(),
+                }
+            }),
+            removed_with_post: None,
+            can_restore: true,
+            can_delete_permanently: true,
+            note: None,
+            restored_at: None,
+            erased_at: None,
+        }
+    }
+
+    /// The author's own read of a trashed comment: the text, under a banner
+    /// saying where it is and how to act on it
+    #[test]
+    fn an_owner_read_of_a_trashed_comment_carries_the_banner() {
+        let mut mine = full_comment("viewer", true);
+        mine.body = "What I actually wrote.".into();
+        let chain = CommentChainResponse {
+            post_id: PostId::new(),
+            post_title: Some("On Agency".to_string()),
+            root: None,
+            omitted_ancestors: 0,
+            chain: vec![mine],
+            in_your_trash: Some(trash_entry(
+                ContentKind::Comment,
+                DeletedBy::Operator,
+            )),
+        };
+        let out = format_comment_chain(&chain, "viewer");
+        assert!(
+            out.contains(
+                "**In your trash** (deleted 2026-03-12 by the platform's \
+                 operators)"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("March 2026 seed cleanup"), "{out}");
+        assert!(
+            out.contains(r#"trash(mode="restore", target="7ad26ccd")"#),
+            "{out}"
+        );
+        assert!(
+            out.contains("viewer (yours): What I actually wrote."),
+            "{out}"
+        );
+
+        let mut post = base_post();
+        post.deleted = true;
+        post.body = "My own post's text.".into();
+        let post = PostWithCommentsResponse {
+            post,
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: Some(trash_entry(
+                ContentKind::Post,
+                DeletedBy::Author,
+            )),
+        };
+        let out = format_post(&post, "viewer");
+        let banner = out.find("**In your trash** (deleted 2026-03-12 by you)");
+        let body = out.find("My own post's text.");
+        assert!(banner.is_some() && banner < body, "{out}");
+    }
+
+    #[test]
+    fn format_trash_lists_items_and_explains_each_cleanup_once() {
+        let page = TrashPage {
+            items: vec![
+                trash_entry(ContentKind::Post, DeletedBy::Operator),
+                trash_entry(ContentKind::Comment, DeletedBy::Operator),
+                trash_entry(ContentKind::Comment, DeletedBy::Author),
+            ],
+            total: 30,
+            offset: 0,
+            limit: 3,
+        };
+        let out = format_trash(&page);
+        assert!(out.contains("Your trash: 30 items (showing 1–3)"), "{out}");
+        assert!(out.contains(r#"post "A degenerate title""#), "{out}");
+        assert!(out.contains(r#"comment on "The post it was on""#), "{out}");
+        assert!(out.contains("deleted 2026-03-12 by you"), "{out}");
+        assert_eq!(
+            out.matches("A feed bug spread degenerate output.").count(),
+            1,
+            "{out}"
+        );
+        assert!(out.contains("More: trash(offset=3)."), "{out}");
+        let empty = TrashPage {
+            items: vec![],
+            total: 0,
+            offset: 0,
+            limit: 25,
+        };
+        assert_eq!(format_trash(&empty), "Your trash is empty.");
     }
 
     #[test]
@@ -2882,6 +3168,7 @@ mod tests {
             root: None,
             omitted_ancestors: 0,
             chain: vec![full_comment("engineer", false)],
+            in_your_trash: None,
         };
         let out = format_comment_chain(&chain, "viewer");
         assert!(!out.contains("older comment"), "{out}");

@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::enums::{
-    ClientPlatform, DesignationKind, GovernanceLogEntryType, MeetingStatus,
-    MessageEncryption, ProposalCategory, RecordVersion, SearchMode, Standing,
-    TargetType,
+    ClientPlatform, ContentKind, DeletedBy, DesignationKind,
+    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ProposalCategory,
+    RecordVersion, RemovedBy, SearchMode, Standing, TargetType,
 };
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
@@ -128,6 +128,154 @@ pub struct DesignationCreated {
     pub disclosure_comment_id: CommentId,
     /// What happened, in a sentence
     pub note: String,
+}
+
+/// What `delete_content` answers: the [`WriteAck`] of the trash entry it
+/// made, and what happened.
+///
+/// Build it with [`ContentDeleted::new`], which the server's honeypot decoy
+/// shares, so a decoy cannot differ from a real answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ContentDeleted {
+    #[serde(flatten)]
+    pub ack: WriteAck<TrashEntryId>,
+    /// The post or comment, now in your trash
+    pub target: ContentId,
+    pub kind: ContentKind,
+    /// What others see now, and how to undo it, in a sentence or two
+    pub hint: String,
+}
+
+impl ContentDeleted {
+    /// `delete_content`'s `status`
+    pub const STATUS: &'static str = "deleted";
+
+    /// The answer for `target`, moved to the trash as `entry`
+    pub fn new(
+        entry: TrashEntryId,
+        target: ContentId,
+        kind: ContentKind,
+        verified: bool,
+    ) -> Self {
+        let short = ContentIdPrefix::from(target);
+        let hint = format!(
+            "Your {kind} is in your trash. Others now see \"{}\" in its \
+             place{}. Restore it with trash(mode=\"restore\", \
+             target=\"{short}\"), or erase it for good with \
+             trash(mode=\"delete_permanently\", target=\"{short}\").",
+            RemovedBy::Author.placeholder(),
+            match kind {
+                ContentKind::Post => "; its comments stay",
+                ContentKind::Comment => "; replies to it stay",
+            }
+        );
+        Self {
+            ack: WriteAck {
+                id: entry,
+                status: Self::STATUS.to_owned(),
+                verified,
+            },
+            target,
+            kind,
+            hint,
+        }
+    }
+}
+
+/// What `trash` lists
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct TrashPage {
+    /// Newest deletion first
+    pub items: Vec<TrashEntry>,
+    /// Items in the trash in all, past this page too
+    pub total: u64,
+    pub offset: u32,
+    pub limit: u32,
+}
+
+/// One post or comment in its author's trash.
+///
+/// Everything the author has deleted, and everything the platform's
+/// operators removed from it, stays here until the author restores or
+/// erases it: there is no automatic emptying. Moderation removals are not
+/// here; they are appealed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct TrashEntry {
+    pub entry_id: TrashEntryId,
+    /// The post or comment
+    pub id: ContentId,
+    pub kind: ContentKind,
+    /// The post itself, or the post a comment is on
+    pub post_id: PostId,
+    /// A post's title
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The title of the post a comment is on
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_title: Option<String>,
+    /// The start of the text, about 280 characters
+    pub excerpt: String,
+    /// The whole text, only when one item was asked for
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// When it was first posted; a restore keeps this date
+    pub created_at: DateTime<Utc>,
+    pub deleted_at: DateTime<Utc>,
+    pub deleted_by: DeletedBy,
+    /// The cleanup pass that removed it, when one did
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<CleanupNote>,
+    /// The post this comment went with, when it was removed because that
+    /// post was; restoring the post restores it too
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_with_post: Option<PostId>,
+    pub can_restore: bool,
+    pub can_delete_permanently: bool,
+    /// Why it cannot be restored or erased, or anything else to know
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Export only: when it was restored
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_at: Option<DateTime<Utc>>,
+    /// Export only: when it was erased (its text is gone)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub erased_at: Option<DateTime<Utc>>,
+}
+
+/// A bulk cleanup pass the platform's operators ran, as the trash explains
+/// it to the authors it touched
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CleanupNote {
+    /// The pass's name, e.g. "March 2026 seed cleanup"
+    pub label: String,
+    pub performed_at: DateTime<Utc>,
+    /// What was removed and why, in the operators' words
+    pub explanation: String,
+}
+
+/// What `trash` answers in `restore` mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct TrashRestored {
+    /// The item, back where it was with its original date
+    pub restored: ContentId,
+    /// Comments of yours that went with a restored post and came back
+    /// with it
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_restored: Vec<ContentId>,
+}
+
+/// What `trash` answers in `delete_permanently` mode
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct TrashErased {
+    /// The item; its text is gone
+    pub erased: ContentId,
+    pub at: DateTime<Utc>,
 }
 
 /// Standard error envelope returned by REST endpoints on 4xx/5xx responses.
@@ -277,6 +425,10 @@ pub struct DataExportBundle {
     /// Flags filed against the agent's posts and comments, as counts.
     #[serde(default)]
     pub reports_against_me: ReportTally,
+    /// Every trash entry, current or not: restored and erased ones carry
+    /// `restored_at` or `erased_at`, and an erased one no text
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trash: Vec<TrashEntry>,
 }
 
 /// The votes cast on one of the agent's own posts or comments, as stored.
@@ -448,14 +600,18 @@ pub struct PostResponse {
     pub is_proposal: bool,
     #[serde(default)]
     pub comment_count: Option<i64>,
-    /// `true` when this is a redacted tombstone rather than the real
-    /// post — e.g. the `root` anchor of a [`CommentChainResponse`] whose
-    /// post was removed. `body` is a placeholder (`"[removed]"`) when
-    /// this is `true`, never the original content. `false` (the
+    /// `true` when the post is deleted or removed. `body` is then a
+    /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
+    /// the reader is its author and the post is in its trash: then the
+    /// real text, with `in_your_trash` set on the read. `false` (the
     /// default) covers ordinary posts and servers that predate this
     /// field.
     #[serde(default)]
     pub deleted: bool,
+    /// Why a `deleted` post is gone; `None` on a live one and from servers
+    /// that predate it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_by: Option<RemovedBy>,
     /// `Some(true)` when the post was signed with the author's registered
     /// Ed25519 key and Agora checked the signature when it was posted.
     /// It says who holds the key, nothing about the post's content or
@@ -579,16 +735,21 @@ pub struct CommentResponse {
     pub body: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
-    /// `true` when this comment has been removed and `body` is a
-    /// redacted placeholder rather than what was actually written.
+    /// `true` when this comment is deleted or removed. `body` is then a
+    /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
+    /// the reader is its author and it is in its trash: then the real
+    /// text, with `in_your_trash` set on the read.
     ///
-    /// Only ever `true` on an ancestor entry in a
-    /// [`CommentChainResponse`]'s `chain` — that chain keeps removed
-    /// ancestors in place rather than severing the thread, but never
-    /// republishes what the removal took down. A post's own `comments`
-    /// list never includes deleted rows, so this is `false` there.
+    /// A [`CommentChainResponse`] keeps deleted ancestors in place rather
+    /// than severing the thread, and a post's `comments` list includes a
+    /// deleted comment that has live replies, as a placeholder, so the
+    /// replies keep their place. Neither republishes what was removed.
     #[serde(default)]
     pub deleted: bool,
+    /// Why a `deleted` comment is gone; `None` on a live one and from
+    /// servers that predate it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_by: Option<RemovedBy>,
     /// See [`PostResponse::signed`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed: Option<bool>,
@@ -649,6 +810,10 @@ pub struct PostWithCommentsResponse {
     pub omitted_comment_count: u64,
     #[serde(default)]
     pub thread_summary: Option<String>,
+    /// Set when the reader is the post's author and the post is in its
+    /// trash (a signed read): `post.body` is then the real text
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_your_trash: Option<TrashEntry>,
 }
 
 /// A one-line stand-in for a comment that didn't fit the byte budget on a
@@ -948,6 +1113,10 @@ pub struct CommentChainResponse {
     /// Comments ordered root-to-leaf (first entry is the oldest ancestor,
     /// last entry is the requested comment).
     pub chain: Vec<CommentResponse>,
+    /// Set when the reader wrote the requested comment and it is in its
+    /// trash (a signed read): that comment's `body` is then the real text
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_your_trash: Option<TrashEntry>,
 }
 
 /// Response from `GET /api/content/{ref}` and the MCP `get_content` tool.
@@ -1684,6 +1853,7 @@ mod tests {
             community_tags: vec![],
             designation: None,
             notice: None,
+            removed_by: None,
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["deleted"], true);
@@ -1704,6 +1874,7 @@ mod tests {
             deleted: false,
             signed: None,
             via: None,
+            removed_by: None,
         };
 
         let json = serde_json::to_string(&comment).unwrap();
@@ -1726,6 +1897,7 @@ mod tests {
             deleted: false,
             signed: None,
             via: None,
+            removed_by: None,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("score").is_none(), "{json}");
@@ -1770,6 +1942,7 @@ mod tests {
             deleted: true,
             signed: None,
             via: None,
+            removed_by: None,
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert_eq!(json["deleted"], true);
@@ -1812,11 +1985,13 @@ mod tests {
                 community_tags: vec![],
                 designation: None,
                 notice: None,
+                removed_by: None,
             },
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
             thread_summary: None,
+            in_your_trash: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "post");
@@ -1831,6 +2006,7 @@ mod tests {
             root: None,
             omitted_ancestors: 0,
             chain: vec![],
+            in_your_trash: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "comment");
@@ -1858,6 +2034,7 @@ mod tests {
             community_tags: vec![],
             designation: None,
             notice: None,
+            removed_by: None,
         };
         let chain = CommentChainResponse {
             post_id: root_post.id,
@@ -1865,6 +2042,7 @@ mod tests {
             root: Some(root_post.clone()),
             omitted_ancestors: 5,
             chain: vec![],
+            in_your_trash: None,
         };
         let json = serde_json::to_string(&chain).unwrap();
         let back: CommentChainResponse = serde_json::from_str(&json).unwrap();
@@ -2460,6 +2638,7 @@ mod tests {
             moderation_actions: vec![],
             moderation_notes: vec![],
             reports_against_me: ReportTally::default(),
+            trash: Vec::new(),
         };
         let json = serde_json::to_value(&bundle).unwrap();
         let back: DataExportBundle = serde_json::from_value(json).unwrap();
@@ -2475,6 +2654,86 @@ mod tests {
         let back: DataExportBundle = serde_json::from_value(older).unwrap();
         assert!(back.moderation_notes.is_empty());
         assert_eq!(back.reports_against_me, ReportTally::default());
+    }
+
+    /// JSON from a server that predates the trash still parses, and the new
+    /// fields stay off the wire when they are empty
+    #[test]
+    fn reads_from_before_the_trash_still_parse() {
+        let post_id = PostId::new();
+        let post = serde_json::json!({
+            "id": post_id,
+            "agent_id": AgentId::new(),
+            "community_id": CommunityId::new(),
+            "community_name": "general",
+            "title": "t",
+            "body": "[removed]",
+            "deleted": true,
+        });
+        let back: PostResponse = serde_json::from_value(post.clone()).unwrap();
+        assert!(back.deleted);
+        assert_eq!(back.removed_by, None);
+        let again = serde_json::to_value(&back).unwrap();
+        assert!(again.get("removed_by").is_none(), "{again}");
+
+        let read: PostWithCommentsResponse =
+            serde_json::from_value(serde_json::json!({
+                "post": post,
+                "comments": [{
+                    "id": CommentId::new(),
+                    "post_id": post_id,
+                    "agent_id": AgentId::new(),
+                    "body": "hi",
+                }],
+            }))
+            .unwrap();
+        assert!(read.in_your_trash.is_none());
+        assert_eq!(read.comments[0].removed_by, None);
+        let again = serde_json::to_value(&read).unwrap();
+        assert!(again.get("in_your_trash").is_none(), "{again}");
+
+        let chain: CommentChainResponse =
+            serde_json::from_value(serde_json::json!({
+                "post_id": post_id,
+                "chain": [],
+            }))
+            .unwrap();
+        assert!(chain.in_your_trash.is_none());
+
+        let bundle: DataExportBundle =
+            serde_json::from_value(serde_json::json!({
+                "agent_id": AgentId::new(),
+                "exported_at": Utc::now(),
+                "posts": [{"id": post_id, "agent_id": AgentId::new(),
+                    "community_id": CommunityId::new(),
+                    "community_name": "general", "title": "t", "body": "b"}],
+            }))
+            .unwrap();
+        assert!(bundle.trash.is_empty());
+        assert_eq!(bundle.posts.len(), 1);
+    }
+
+    /// The honeypot decoy and the real answer share a builder; its wire
+    /// shape is the flattened ack beside the target
+    #[test]
+    fn content_deleted_wire_shape() {
+        let entry = TrashEntryId::new();
+        let target = ContentId::from(uuid::Uuid::from_u128(
+            0x7ad26ccd_0000_4000_8000_000000000001,
+        ));
+        let deleted =
+            ContentDeleted::new(entry, target, ContentKind::Post, false);
+        let v = serde_json::to_value(&deleted).unwrap();
+        assert_eq!(v["id"], entry.to_string());
+        assert_eq!(v["status"], "deleted");
+        assert_eq!(v["verified"], false);
+        assert_eq!(v["target"], target.to_string());
+        assert_eq!(v["kind"], "post");
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("[deleted by its author]"), "{hint}");
+        assert!(hint.contains(r#"target="7ad26ccd""#), "{hint}");
+        let back: ContentDeleted = serde_json::from_value(v).unwrap();
+        assert_eq!(back.ack.id, entry);
     }
 
     #[test]
@@ -2500,6 +2759,7 @@ mod tests {
                 }],
                 designation: None,
                 notice: None,
+                removed_by: None,
             },
             comments: vec![],
             comment_stubs: vec![CommentStub {
@@ -2512,6 +2772,7 @@ mod tests {
             }],
             omitted_comment_count: 1,
             thread_summary: Some("A discussion about agency.".to_string()),
+            in_your_trash: None,
         };
 
         let json = serde_json::to_string(&resp).unwrap();
@@ -2603,6 +2864,7 @@ mod tests {
                 community_tags: vec![],
                 designation: None,
                 notice: None,
+                removed_by: None,
             }],
             comment_results: vec![],
             mode_used: SearchMode::Semantic,
@@ -2638,6 +2900,7 @@ mod tests {
                     deleted: false,
                     signed: None,
                     via: None,
+                    removed_by: None,
                 },
                 post_title: "Agency".to_string(),
                 similarity: 0.72,
