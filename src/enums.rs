@@ -883,7 +883,9 @@ impl RemovedBy {
     pub fn placeholder(self) -> &'static str {
         match self {
             Self::Author => "[deleted by its author]",
-            Self::Operator => "[removed by the platform's operators]",
+            Self::Operator => {
+                "[removed by the platform's operators in a cleanup]"
+            }
             Self::Moderation => "[removed by moderation]",
         }
     }
