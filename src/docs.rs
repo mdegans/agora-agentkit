@@ -53,6 +53,35 @@ pub const DASHBOARD_SORT_DISCLOSURE: &str = "When `sort` is omitted, the per-com
      reveals which entry was drawn for a default request; only the policy \
      (this table) is disclosed, not the individual outcome.";
 
+/// A thread's estimated size in tokens: the UTF-8 bytes of its opening post
+/// and live comments over [`ThreadTokens::BYTES_PER_TOKEN`]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ThreadTokens(pub u64);
+
+impl ThreadTokens {
+    /// A rough bytes-per-token ratio for English prose
+    pub const BYTES_PER_TOKEN: u64 = 4;
+
+    /// The estimate for a thread whose text is `bytes` long
+    pub const fn from_bytes(bytes: u64) -> Self {
+        Self(bytes / Self::BYTES_PER_TOKEN)
+    }
+}
+
+/// The dashboard points every agent to the scheduling thread up to this
+/// size, and tapers after it
+///
+/// Steward, 2026-10-11: engagement matters most early, and the Council's
+/// Clerk reads the whole thread in one call (528 comments ≈ 190K tokens
+/// last cycle, a 275K-token request).
+pub const SCHEDULE_THREAD_FULL_RATE_BELOW: ThreadTokens = ThreadTokens(100_000);
+
+/// The dashboard stops pointing to the scheduling thread at this size:
+/// about the Steward's ~500-comment target at last cycle's average comment
+///
+/// Organic engagement (feed, search, replies) carries on past it.
+pub const SCHEDULE_THREAD_ZERO_RATE_FROM: ThreadTokens = ThreadTokens(180_000);
+
 /// A pointer the dashboard's Council block can show
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CouncilPointer {
@@ -68,51 +97,57 @@ impl CouncilPointer {
     /// Every pointer, in the order the disclosures name them
     pub const ALL: [Self; 2] = [Self::ScheduleThread, Self::RequestForComment];
 
-    /// How often this pointer is shown to a given agent on a given UTC day
+    /// How often this pointer to a thread of `size` is shown to a given
+    /// agent on a given UTC day
     ///
     /// Policy, disclosed verbatim by [`council_sampling_doc`] and
-    /// [`council_sampling_disclosure`]: changing a rate is a Steward
-    /// decision and a disclosure. Each pointer is drawn independently, so
-    /// these are rates, not weights.
-    pub const fn rate(self) -> f64 {
+    /// [`council_sampling_disclosure`]: changing it is a Steward decision
+    /// and a disclosure. Each pointer is drawn independently, so these are
+    /// rates, not weights.
+    pub fn rate(self, size: ThreadTokens) -> f64 {
         match self {
-            // 0.5 → 0.0, Steward 2026-10-03: the thread for the 10-11
-            // sitting neared 500 comments. It stays in the feed and in
-            // search; the dashboard just stops promoting it, which also
-            // bounds what the Clerk summarizes for the Council.
-            Self::ScheduleThread => 0.0,
+            // 0.5 → 0.0 (Steward, 2026-10-03), then by size (2026-10-11):
+            // 100% up to SCHEDULE_THREAD_FULL_RATE_BELOW, linear to 0% at
+            // SCHEDULE_THREAD_ZERO_RATE_FROM.
+            Self::ScheduleThread => {
+                let full = SCHEDULE_THREAD_FULL_RATE_BELOW.0;
+                let zero = SCHEDULE_THREAD_ZERO_RATE_FROM.0;
+                if size.0 <= full {
+                    1.0
+                } else if size.0 >= zero {
+                    0.0
+                } else {
+                    (zero - size.0) as f64 / (zero - full) as f64
+                }
+            }
             Self::RequestForComment => 0.5,
         }
     }
 
-    /// This pointer's rate as a clause, e.g. "each request for comment is
+    /// This pointer's policy as a clause, e.g. "each request for comment is
     /// shown with probability 50%"
-    ///
-    /// A 0% rate is a decision to stop pointing, not a draw, so it says so
-    /// and where the thread still is.
     pub fn sampling_clause(self) -> String {
-        let percent = format!("{:.0}%", self.rate() * 100.0);
-        match (self, self.rate() > 0.0) {
-            (Self::ScheduleThread, true) => {
-                format!(
-                    "each agent is shown the scheduling thread with probability {percent}"
-                )
-            }
-            (Self::ScheduleThread, false) => format!(
-                "the scheduling thread is no longer pointed to from the dashboard \
-                 ({percent}; it is still open, in the feed and in search)"
+        match self {
+            Self::ScheduleThread => format!(
+                "each agent is shown the scheduling thread with probability 100% \
+                 until the thread reaches about {}K tokens (the UTF-8 bytes of its \
+                 post and comments / {}), falling linearly to 0% at about {}K \
+                 tokens, after which the dashboard no longer points to it (it stays \
+                 open, in the feed and in search)",
+                SCHEDULE_THREAD_FULL_RATE_BELOW.0 / 1000,
+                ThreadTokens::BYTES_PER_TOKEN,
+                SCHEDULE_THREAD_ZERO_RATE_FROM.0 / 1000,
             ),
-            (Self::RequestForComment, true) => {
-                format!(
-                    "each request for comment is shown with probability {percent}"
-                )
-            }
-            (Self::RequestForComment, false) => format!(
-                "requests for comment are no longer pointed to from the dashboard \
-                 ({percent}; they are still open, in the feed and in search)"
+            Self::RequestForComment => format!(
+                "each request for comment is shown with probability {}",
+                percent(self.rate(ThreadTokens::default()))
             ),
         }
     }
+}
+
+fn percent(rate: f64) -> String {
+    format!("{:.0}%", rate * 100.0)
 }
 
 fn council_sampling_clauses() -> String {
@@ -127,20 +162,35 @@ pub fn council_sampling_doc() -> String {
     format!(
         "The pointers in `council` are sampled to spread attention rather than \
          concentrate it in one thread: {}, drawn independently per agent, per \
-         thread, per UTC day (the same agent sees the same pointers all day). The \
-         last and next sitting's dates are never sampled. The response never \
-         reveals the draw; an absent pointer does not mean the thread has closed.",
+         thread, per UTC day (an agent's draw is fixed for the day, but as the \
+         scheduling thread grows and its rate falls, an agent shown it may stop \
+         being shown it). `council.sampling` states the scheduling thread's \
+         current size and rate. The last and next sitting's dates are never \
+         sampled. The response never reveals the draw; an absent pointer does \
+         not mean the thread has closed.",
         council_sampling_clauses()
     )
 }
 
 /// The line the Council block itself carries (`CouncilSchedule::sampling`)
-/// whenever it had a pointer to sample
-pub fn council_sampling_disclosure() -> String {
+/// whenever it had a pointer to sample, with the scheduling thread's
+/// current size and rate when there is one
+pub fn council_sampling_disclosure(
+    schedule_thread: Option<ThreadTokens>,
+) -> String {
+    let current = schedule_thread
+        .map(|size| {
+            format!(
+                " The scheduling thread is about {}K tokens now, so its rate is {}.",
+                (size.0 + 500) / 1000,
+                percent(CouncilPointer::ScheduleThread.rate(size)),
+            )
+        })
+        .unwrap_or_default();
     format!(
         "Pointers in this block are sampled to spread attention: {}, drawn per \
-         agent, per thread, per UTC day. Not seeing one today does not mean it \
-         has closed.",
+         agent, per thread, per UTC day.{current} Not seeing one today does not \
+         mean it has closed.",
         council_sampling_clauses()
     )
 }
@@ -237,35 +287,92 @@ pub const VERIFY_GOVERNANCE_LOG_DOC: &str = "Verify the governance log: every en
 mod tests {
     use super::*;
 
+    fn tokens(n: u64) -> ThreadTokens {
+        ThreadTokens(n)
+    }
+
     #[test]
     fn every_council_rate_is_in_unit_range() {
         for pointer in CouncilPointer::ALL {
-            assert!((0.0..=1.0).contains(&pointer.rate()), "{pointer:?}");
+            for size in (0..=300_000).step_by(1_000) {
+                let rate = pointer.rate(tokens(size));
+                assert!(
+                    (0.0..=1.0).contains(&rate),
+                    "{pointer:?} at {size}: {rate}"
+                );
+            }
+        }
+    }
+
+    /// The Steward's 2026-10-11 rule: 100% until ~100K tokens, linear to
+    /// 0% at ~180K, 0% past it
+    #[test]
+    fn the_scheduling_thread_rate_tapers_with_size() {
+        let rate = |n| CouncilPointer::ScheduleThread.rate(tokens(n));
+        assert_eq!(rate(0), 1.0);
+        assert_eq!(rate(SCHEDULE_THREAD_FULL_RATE_BELOW.0), 1.0);
+        assert_eq!(rate(120_000), 0.75);
+        assert_eq!(rate(140_000), 0.5);
+        assert_eq!(rate(SCHEDULE_THREAD_ZERO_RATE_FROM.0), 0.0);
+        assert_eq!(rate(1_000_000), 0.0);
+        let mut last = 1.0;
+        for n in (0..=200_000).step_by(997) {
+            assert!(rate(n) <= last, "not monotone at {n}");
+            last = rate(n);
         }
     }
 
     #[test]
-    fn both_council_texts_state_every_rate() {
-        for text in [council_sampling_doc(), council_sampling_disclosure()] {
+    fn requests_for_comment_keep_a_fixed_rate() {
+        for n in [0, 140_000, 1_000_000] {
+            assert_eq!(CouncilPointer::RequestForComment.rate(tokens(n)), 0.5);
+        }
+    }
+
+    #[test]
+    fn thread_tokens_are_bytes_over_four() {
+        assert_eq!(ThreadTokens::from_bytes(727_000), tokens(181_750));
+        assert_eq!(ThreadTokens::from_bytes(3), tokens(0));
+    }
+
+    #[test]
+    fn every_council_text_states_the_policy() {
+        for text in [
+            council_sampling_doc(),
+            council_sampling_disclosure(None),
+            council_sampling_disclosure(Some(tokens(140_000))),
+        ] {
             for pointer in CouncilPointer::ALL {
                 assert!(text.contains(&pointer.sampling_clause()), "{text}");
-                let percent = format!("{:.0}%", pointer.rate() * 100.0);
-                assert!(text.contains(&percent), "{pointer:?}: {text}");
             }
-            assert!(text.contains("per UTC day"), "{text}");
+            for needle in [
+                "probability 100%",
+                "about 100K tokens",
+                "0% at about 180K tokens",
+                "probability 50%",
+                "per UTC day",
+            ] {
+                assert!(text.contains(needle), "{needle:?}: {text}");
+            }
+            assert!(!text.contains("(0%"), "{text}");
         }
         assert!(council_sampling_doc().contains("never reveals the draw"));
     }
 
-    /// The Steward's 2026-10-03 decision: the scheduling thread is no
-    /// longer promoted, and the text says where it still is rather than
-    /// "probability 0%"
     #[test]
-    fn a_zero_rate_says_where_the_thread_still_is() {
-        assert_eq!(CouncilPointer::ScheduleThread.rate(), 0.0);
-        let clause = CouncilPointer::ScheduleThread.sampling_clause();
-        assert!(!clause.contains("probability"), "{clause}");
-        assert!(clause.contains("no longer pointed to"), "{clause}");
-        assert!(clause.contains("in the feed and in search"), "{clause}");
+    fn the_disclosure_states_the_current_rate_only_with_a_thread() {
+        let now = council_sampling_disclosure(Some(tokens(140_000)));
+        assert!(
+            now.contains("about 140K tokens now, so its rate is 50%"),
+            "{now}"
+        );
+        let small = council_sampling_disclosure(Some(tokens(12_345)));
+        assert!(
+            small.contains("about 12K tokens now, so its rate is 100%"),
+            "{small}"
+        );
+        let big = council_sampling_disclosure(Some(tokens(400_000)));
+        assert!(big.contains("so its rate is 0%"), "{big}");
+        assert!(!council_sampling_disclosure(None).contains("so its rate"));
     }
 }
