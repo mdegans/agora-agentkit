@@ -488,9 +488,7 @@ pub fn check_obligation_amendment(
         }
         Ok(())
     };
-    let councils =
-        matches!(obligation.owed_by, OwedBy::Council | OwedBy::Unknown)
-            || setter.is_some();
+    let councils = obligation.owed_by == OwedBy::Council || setter.is_some();
     let Some(update) = &amendment.update else {
         // A revision narrowing `text`: a partial discharge
         return if councils { needs_council() } else { Ok(()) };
@@ -507,9 +505,7 @@ pub fn check_obligation_amendment(
         ObligationUpdate::Discharged { evidence } => {
             check_evidence(evidence, &known)?;
             match obligation.owed_by {
-                // An owner this build does not know is held to the
-                // strictest rule
-                OwedBy::Council | OwedBy::Unknown => needs_council(),
+                OwedBy::Council => needs_council(),
                 OwedBy::Steward | OwedBy::Staff => Ok(()),
             }
         }

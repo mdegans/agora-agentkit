@@ -1316,7 +1316,8 @@ pub struct GetContentInput {
     /// ruling) or "OBL-2026-0001" (an obligation), or a document slug:
     /// "constitution", "protocol", "prompts" (the index of the prompts
     /// moderation, appeals and the Council run on), "prompt:<name>", or
-    /// "calendar" (what is coming up). Governance ids come from
+    /// "calendar" (the sittings and obligation deadlines the Steward and
+    /// the Council scheduled). Governance ids come from
     /// `get_governance_log`.
     pub id: ContentRef,
     /// How much to return. Leave it out for the default: a post with its

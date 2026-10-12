@@ -333,8 +333,7 @@ fn format_council(council: &CouncilSchedule) -> String {
             ));
         } else {
             out.push_str(&format!(
-                "The next sitting is expected around {} — around, not on: \
-                 the Council is convened by hand and the date moves.\n",
+                "The next sitting is expected around {}.\n",
                 next.expected_around.date_naive()
             ));
         }
@@ -409,7 +408,7 @@ pub(super) const UPCOMING_SHOWN: usize = 5;
 fn format_upcoming(items: &[CalendarItem]) -> String {
     let lines: Vec<String> = items
         .iter()
-        .filter_map(format_calendar_item)
+        .map(format_calendar_item)
         .take(UPCOMING_SHOWN)
         .collect();
     if lines.is_empty() {
@@ -429,14 +428,10 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// One [`CalendarItem`] as a line, or `None` for one this build does not
-/// know. Sittings are hedged with "around": their dates move, and one read
-/// as a deadline is read as missed.
-pub(super) fn format_calendar_item(item: &CalendarItem) -> Option<String> {
-    let minute = |at: &chrono::DateTime<chrono::Utc>| {
-        at.format("%Y-%m-%d %H:%M UTC").to_string()
-    };
-    Some(match item {
+/// One [`CalendarItem`] as a line. Sittings are hedged with "around":
+/// their dates move, and one read as a deadline is read as missed.
+pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
+    match item {
         CalendarItem::Sitting {
             event_kind,
             title,
@@ -471,27 +466,7 @@ pub(super) fn format_calendar_item(item: &CalendarItem) -> Option<String> {
             "{due}: {obligation} due, owed by {owed_by}: \"{}\"",
             truncate(&one_line(text), 80)
         ),
-        CalendarItem::PollCloses {
-            post_id,
-            title,
-            closes_at,
-        } => format!(
-            "{}: poll closes on \"{}\" [post_id: {post_id}]",
-            minute(closes_at),
-            truncate(title, 80)
-        ),
-        CalendarItem::CommentWindowCloses {
-            post_id,
-            title,
-            closes_at,
-        } => format!(
-            "{}: comment window ends on the Constitutional proposal \"{}\" \
-             [post_id: {post_id}]",
-            minute(closes_at),
-            truncate(title, 80)
-        ),
-        CalendarItem::Unknown => return None,
-    })
+    }
 }
 
 /// `get_content("calendar")`
@@ -504,10 +479,7 @@ pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
         return out;
     }
     for item in &calendar.items {
-        let Some(line) = format_calendar_item(item) else {
-            continue;
-        };
-        out.push_str(&format!("- {line}\n"));
+        out.push_str(&format!("- {}\n", format_calendar_item(item)));
         if let CalendarItem::Sitting {
             notes: Some(notes), ..
         } = item
@@ -2971,10 +2943,9 @@ mod tests {
 
     /// The dashboard's two obligation surfaces, as the Steward reviews
     /// them: the Council block, with the past-due count attributed to the
-    /// Steward, and the Upcoming block, which carries only what the
-    /// Steward or the Council controls (later sittings and obligation
-    /// deadlines; the server leaves out the next sitting, polls and
-    /// comment windows). Exact text, so a change to either is a
+    /// Steward, and the Upcoming block: later sittings and obligation
+    /// deadlines (the server leaves out the next sitting, which the
+    /// Council block already gives). Exact text, so a change to either is a
     /// deliberate one.
     #[test]
     fn the_upcoming_block_and_the_obligation_count_read_as_reviewed() {
@@ -3005,7 +2976,6 @@ mod tests {
                 notes: Some("Council-owed overdue items".into()),
                 obligations_due: 1,
             },
-            CalendarItem::Unknown,
             CalendarItem::ObligationDue {
                 obligation: "OBL-2026-0007".parse().unwrap(),
                 text: "Publish the\nsix-month review".into(),
@@ -3017,8 +2987,7 @@ mod tests {
         assert!(
             out.contains(
                 "### The Council\n\n\
-                 The next sitting is expected around 2026-10-17 — around, not \
-                 on: the Council is convened by hand and the date moves.\n\
+                 The next sitting is expected around 2026-10-17.\n\
                  Past due, and on the Steward to bring forward: 2 lapsed and 1 \
                  overdue obligations. List them with \
                  get_governance_log(view=\"obligations\").\n\n\
@@ -3033,10 +3002,6 @@ mod tests {
         let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("### Upcoming"), "{out}");
         assert!(!out.contains("Past due"), "{out}");
-        // Only items this build does not know: no block either
-        let mut d = dash();
-        d.upcoming = vec![CalendarItem::Unknown];
-        assert!(!format_dashboard(&d, test_model()).contains("### Upcoming"));
     }
 
     #[test]

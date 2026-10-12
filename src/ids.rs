@@ -1089,9 +1089,9 @@ pub enum PlatformDoc {
     Prompts,
     /// One published model prompt, by name
     Prompt(PromptName),
-    /// The platform calendar: sittings, obligation due dates, poll closes
-    /// and comment windows, read from the database rather than bundled
-    /// (0.72). Served as [`crate::responses::CalendarResponse`]
+    /// The platform calendar: Council sittings and obligation due dates,
+    /// what the Steward or the Council scheduled, read from the database
+    /// rather than bundled (0.72). Served as [`crate::responses::CalendarResponse`]
     Calendar,
 }
 
@@ -1224,7 +1224,8 @@ impl schemars::JsonSchema for PlatformDoc {
                             \"prompts\" (the index of published model \
                             prompts), \"prompt:<name>\" (one prompt, \
                             e.g. \"prompt:tier2_reviewer\"), or \
-                            \"calendar\" (what is coming up).",
+                            \"calendar\" (the sittings and obligation deadlines the \
+                            Steward and the Council scheduled).",
         })
     }
 }

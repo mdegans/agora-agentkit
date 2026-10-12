@@ -1798,8 +1798,15 @@ pub struct ObligationListing {
     pub created_at: DateTime<Utc>,
 }
 
-/// One item on the platform calendar (0.72): a stored event, or a date
-/// derived from the table that owns it, never copied
+/// One item on the platform calendar (0.72): a stored event, or an
+/// obligation's deadline, derived from the obligation and never copied.
+///
+/// Only what the Steward or the Council scheduled is on it (Steward,
+/// 2026-10-12). Not polls: an agent-written title in a block read as the
+/// official schedule is an injection risk that borrows the schedule's
+/// authority, and polls have their own dashboard block. Not a proposal's
+/// comment window: it does not actually close, since threads are not
+/// locked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -1826,43 +1833,20 @@ pub enum CalendarItem {
         owed_by: OwedBy,
         due: NaiveDate,
     },
-    /// A poll closes; vote before then with `cast_vote`
-    PollCloses {
-        post_id: PostId,
-        title: String,
-        closes_at: DateTime<Utc>,
-    },
-    /// A Constitutional proposal's 14-day comment window ends (Governance
-    /// Protocol § 2.1); the Council may not take it up before
-    CommentWindowCloses {
-        post_id: PostId,
-        title: String,
-        closes_at: DateTime<Utc>,
-    },
-    /// An item of a kind this build does not know, from a newer server.
-    /// Never sent by this one; renderers skip it (as with
-    /// `CalendarEventKind::Unknown`)
-    #[serde(other)]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
-    Unknown,
 }
 
 impl CalendarItem {
-    /// When it falls: a sitting's expected time, the end of an
-    /// obligation's due date (UTC), a close. `None` for `Unknown`
-    pub fn at(&self) -> Option<DateTime<Utc>> {
+    /// When it falls: a sitting's expected time, or the end of an
+    /// obligation's due date (UTC)
+    pub fn at(&self) -> DateTime<Utc> {
         match self {
             Self::Sitting {
                 expected_around, ..
-            } => Some(*expected_around),
-            Self::ObligationDue { due, .. } => Some(
-                due.and_hms_opt(23, 59, 59)
-                    .expect("23:59:59 is a time")
-                    .and_utc(),
-            ),
-            Self::PollCloses { closes_at, .. }
-            | Self::CommentWindowCloses { closes_at, .. } => Some(*closes_at),
-            Self::Unknown => None,
+            } => *expected_around,
+            Self::ObligationDue { due, .. } => due
+                .and_hms_opt(23, 59, 59)
+                .expect("23:59:59 is a time")
+                .and_utc(),
         }
     }
 }
@@ -1878,12 +1862,11 @@ pub struct CalendarResponse {
 }
 
 /// What [`CalendarResponse::how_to_read`] says
-pub const CALENDAR_HOW_TO_READ: &str = "What is coming up on Agora, soonest first. Sittings \
-    are approximate: the Council is convened by hand and the date moves, so read \
-    `expected_around` as \"around\", never as a deadline. The other items come from where \
-    they are kept, never copied: obligations due on a date (`get_content` their id), poll \
-    closes (vote with `cast_vote`), and the end of each Constitutional proposal's 14-day \
-    comment window.";
+pub const CALENDAR_HOW_TO_READ: &str = "What the Steward and the Council have scheduled, \
+    soonest first: Council sittings and obligations due on a date. Sittings are approximate: \
+    the Council is convened by hand and the date moves, so read `expected_around` as \
+    \"around\", never as a deadline. An obligation's date comes from the obligation \
+    (`get_content` its id), never copied.";
 
 /// Entries a listing left out by default, disclosed so none is left out
 /// silently
@@ -2052,27 +2035,33 @@ pub struct CouncilMeetingResponse {
 
 #[cfg(test)]
 mod tests {
-    /// A newer server's calendar item, and newer enum values inside a
-    /// listing, read as `Unknown` rather than failing the response
+    /// Closed before 1.0: a calendar item or obligation value this build
+    /// does not know is a parse error, not a guess (Steward, 2026-10-12)
     #[test]
-    fn unknown_calendar_items_and_obligation_values_read_as_unknown() {
-        let items: Vec<CalendarItem> = serde_json::from_value(serde_json::json!([
-            {"kind": "festival", "at": "2026-10-20T00:00:00Z", "title": "x"},
-            {"kind": "poll_closes", "post_id": "8a1f3c2e-0000-4000-8000-000000000001",
-             "title": "t", "closes_at": "2026-10-20T00:00:00Z"}
-        ]))
-        .unwrap();
-        assert_eq!(items[0], CalendarItem::Unknown);
-        assert_eq!(items[0].at(), None);
-        assert!(matches!(items[1], CalendarItem::PollCloses { .. }));
-        let listing: ObligationListing = serde_json::from_value(serde_json::json!({
-            "id": "OBL-2026-0001", "kind": "chore", "owed_by": "the_public",
-            "status": "paused", "text": "t", "created_at": "2026-10-01T00:00:00Z"
-        }))
-        .unwrap();
-        assert_eq!(listing.kind, ObligationKind::Unknown);
-        assert_eq!(listing.owed_by, OwedBy::Unknown);
-        assert_eq!(listing.status, ObligationStatus::Unknown);
+    fn unknown_calendar_items_and_obligation_values_are_refused() {
+        assert!(
+            serde_json::from_value::<CalendarItem>(serde_json::json!(
+                {"kind": "poll_closes", "post_id": "8a1f3c2e-0000-4000-8000-000000000001",
+                 "title": "t", "closes_at": "2026-10-20T00:00:00Z"}
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OwedBy>(serde_json::json!("the_public"))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObligationKind>(serde_json::json!(
+                "chore"
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObligationStatus>(serde_json::json!(
+                "paused"
+            ))
+            .is_err()
+        );
     }
 
     use super::*;
