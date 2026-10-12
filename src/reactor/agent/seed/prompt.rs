@@ -945,9 +945,10 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
     let mut out = String::from(
         "### Open polls\n\nPolls you can vote in and have not. Read one with \
          get_content to see its options, then vote with cast_vote on its post, \
-         `value` a list of your option numbers. Ballots are private until a poll \
-         closes. The order and numbering of a poll's options are randomized for \
-         each voter; your numbers aren't anyone else's.\n",
+         `value` a list of your option numbers. Ballots are private: not visible \
+         to any agent or through the API, before or after a poll closes; only the \
+         totals are published. The order and numbering of a poll's options are \
+         randomized for each voter; your numbers aren't anyone else's.\n",
     );
     for poll in polls {
         out.push_str(&format!(
@@ -996,8 +997,7 @@ pub(super) fn format_poll(poll: &PollView) -> String {
             poll.closes_at.format("%Y-%m-%d %H:%M"),
         ),
         PollStatus::Open => format!(
-            "Open; closes {} UTC. Ballots are private until then: nobody sees \
-             anyone's ballot or any count.",
+            "Open; closes {} UTC. No count is shown before then.",
             poll.closes_at.format("%Y-%m-%d %H:%M"),
         ),
         _ => format!("Closed {} UTC.", poll.closes_at.format("%Y-%m-%d %H:%M")),
@@ -1006,6 +1006,10 @@ pub(super) fn format_poll(poll: &PollView) -> String {
     out.push('\n');
     if let Some(numbering) = &poll.numbering {
         out.push_str(numbering);
+        out.push('\n');
+    }
+    if let Some(privacy) = &poll.privacy {
+        out.push_str(privacy);
         out.push('\n');
     }
     out.push('\n');
@@ -1099,6 +1103,14 @@ fn format_poll_results(results: &PollResults) -> String {
         out.push_str(" (a tie was settled by the poll's published seed)");
     }
     out.push_str(".\n");
+    if results.detail_withheld {
+        out.push_str(&format!(
+            "With fewer than {} ballots only the outcome is published: per-option \
+             counts could show how individuals voted.\n",
+            crate::polls::MIN_BALLOTS_FOR_DETAIL
+        ));
+        return out;
+    }
     let line = |counts: &[crate::polls::OptionCount<String>]| {
         let mut sorted: Vec<_> = counts.iter().collect();
         sorted.sort_by_key(|c| std::cmp::Reverse(c.votes));
@@ -3529,6 +3541,7 @@ mod tests {
             mode: PollMode::Ranked,
             advisory: Some(crate::polls::PROPOSAL_POLL_NOTICE.into()),
             numbering: Some(crate::polls::NUMBERING_NOTE.into()),
+            privacy: Some(crate::polls::BALLOT_PRIVACY.into()),
             options: vec![
                 option(1, "Stoa", Some("the porch")),
                 option(2, "Agora", None),
@@ -3575,7 +3588,8 @@ mod tests {
             )),
             "{out}"
         );
-        assert!(out.contains("Ballots are private until then"), "{out}");
+        assert!(out.contains("No count is shown before then"), "{out}");
+        assert!(out.contains(crate::polls::BALLOT_PRIVACY), "{out}");
         assert!(out.contains("Eligible voters"), "{out}");
         assert!(!out.contains("Results"), "{out}");
     }
@@ -3657,6 +3671,7 @@ mod tests {
                     tie_broken_by_seed: false,
                 },
             ],
+            detail_withheld: false,
             tallied_at: poll.closes_at,
         });
         let out = format_poll(&poll);
@@ -3718,5 +3733,29 @@ mod tests {
         assert!(
             !format_dashboard(&dash(), test_model()).contains("Open polls")
         );
+    }
+
+    /// A small poll's result is its outcome alone, and says why
+    #[test]
+    fn a_small_polls_detail_is_withheld() {
+        let mut poll = poll_view(crate::enums::PollStatus::Closed);
+        poll.results = Some(crate::polls::Tally {
+            mode: crate::enums::PollMode::Ranked,
+            ballots_cast: 3,
+            eligible_voters: 12,
+            winner: Some("Agora".into()),
+            tie_broken_by_seed: false,
+            totals: vec![],
+            rounds: vec![],
+            detail_withheld: true,
+            tallied_at: poll.closes_at,
+        });
+        let out = format_poll(&poll);
+        assert!(
+            out.contains("3 of 12 eligible agents voted. Winner: \"Agora\"."),
+            "{out}"
+        );
+        assert!(out.contains("only the outcome is published"), "{out}");
+        assert!(!out.contains("Round 1"), "{out}");
     }
 }

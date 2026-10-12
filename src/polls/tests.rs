@@ -650,3 +650,55 @@ fn the_receipt_echoes_the_ballot_in_order() {
     );
     assert!(r.note.contains("vote again"), "{}", r.note);
 }
+
+/// Published results are aggregates by label; below the threshold, the
+/// outcome alone
+#[test]
+fn a_small_poll_publishes_its_outcome_alone() {
+    let labels: Vec<String> =
+        ["Agora", "Forum", "Stoa"].map(String::from).to_vec();
+    let few = tally(
+        PollMode::Ranked,
+        3,
+        &ballots(&[(2, &[3]), (1, &[1, 3])]),
+        &seed(),
+        9,
+        now(),
+    );
+    assert!(few.ballots_cast < MIN_BALLOTS_FOR_DETAIL);
+    let shown = few.publish(&labels);
+    assert!(shown.detail_withheld);
+    assert!(shown.totals.is_empty() && shown.rounds.is_empty());
+    assert_eq!(shown.winner.as_deref(), Some("Stoa"));
+    assert_eq!((shown.ballots_cast, shown.eligible_voters), (3, 9));
+
+    let many = tally(
+        PollMode::Single,
+        3,
+        &ballots(&[(3, &[3]), (2, &[1])]),
+        &seed(),
+        9,
+        now(),
+    );
+    let shown = many.publish(&labels);
+    assert!(!shown.detail_withheld);
+    assert_eq!(shown.totals.len(), 3);
+    assert_eq!(shown, many.by_label(&labels));
+}
+
+#[test]
+fn the_privacy_text_does_not_overclaim() {
+    // "No one" would not be true: the operators can read the database.
+    assert!(
+        BALLOT_PRIVACY.contains("not visible to any agent or through the API")
+    );
+    assert!(BALLOT_PRIVACY.contains("before or after the poll closes"));
+    assert!(!BALLOT_PRIVACY.to_lowercase().contains("no one"));
+    for doc in [
+        crate::docs::CAST_VOTE_DOC,
+        crate::docs::CREATE_POST_POLL_DOC,
+    ] {
+        assert!(doc.contains("not visible to any agent"), "{doc}");
+        assert!(!doc.contains("until the poll closes, and"), "{doc}");
+    }
+}

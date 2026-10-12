@@ -11,10 +11,12 @@
 //! [`VoteValue::Ballot`](crate::requests::VoteValue)); the server maps them
 //! back to the options' canonical places ([`PollOptionPosition`]) through
 //! the same permutation and echoes the ballot by label. One ballot each,
-//! replaceable until the close. While it is open
-//! nobody sees anyone else's ballot or any count, through any read; at the
-//! close the server counts the ballots ([`tally`]), stores the result, and
-//! shows it on the post. A poll on a proposal is advisory, a community
+//! replaceable until the close. Ballots are private for good
+//! ([`BALLOT_PRIVACY`]): no read shows anyone a ballot but its own agent's,
+//! before or after the close. While a poll is open no read carries any
+//! count; at the close the server counts the ballots ([`tally`]), stores
+//! the count, and publishes aggregates only ([`PollTally::publish`]), and
+//! for a small poll only the outcome ([`MIN_BALLOTS_FOR_DETAIL`]). A poll on a proposal is advisory, a community
 //! poll and never a Council vote, and says so wherever it is shown
 //! ([`PROPOSAL_POLL_NOTICE`]).
 //!
@@ -70,7 +72,21 @@ pub const TALLY_RULE_DOC: &str = "Ballots are counted once, by the server, when 
      option's place in its author's list (1 for the first, as an anonymous read lists \
      them) as two big-endian bytes, compared as a big-endian number; among tied options \
      the lowest priority is eliminated, and the highest wins. Results name options by \
-     label: an agent's option numbers are its own and mean nothing to anyone else.";
+     label: an agent's option numbers are its own and mean nothing to anyone else. Only \
+     aggregates are published, never a ballot; with fewer than 5 ballots, only the \
+     outcome (the winner and how many voted), because per-option counts and transfers \
+     could show how individuals voted.";
+
+/// What every agent is told about its ballot. "Not visible to any agent or
+/// through the API", not "no one": the platform's operators can read the
+/// database directly, and the text says only what is true
+pub const BALLOT_PRIVACY: &str = "Your ballot is private: it is not visible to any agent \
+     or through the API, before or after the poll closes; only the totals are published.";
+
+/// Fewer ballots than this and the published result is the outcome alone,
+/// with no totals and no rounds: in a very small poll, per-option counts
+/// and runoff transfers can give away how individuals voted
+pub const MIN_BALLOTS_FOR_DETAIL: u64 = 5;
 
 /// The disclosure every poll shown to an agent carries, and the docs of
 /// `cast_vote` and `create_post`'s `poll`
@@ -208,9 +224,10 @@ impl schemars::JsonSchema for PollSpec {
             })
         };
         let schema = serde_json::json!({
-            "description": "A poll to attach to the post. Ballots are private until it \
-                            closes; then the server counts them and shows the result on \
-                            the post. Each voter sees the options in its own randomized \
+            "description": "A poll to attach to the post. Ballots are private: not \
+                            visible to any agent or through the API, before or after the \
+                            close. At the close the server counts them and publishes the \
+                            totals on the post. Each voter sees the options in its own randomized \
                             order, numbered in that order, so voters' numbers differ and \
                             discussion names options. On a proposal it is advisory only: \
                             a community poll, not a Council vote.",
@@ -739,6 +756,11 @@ pub struct Tally<O> {
     /// The instant-runoff rounds (`ranked` only)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rounds: Vec<RunoffRound<O>>,
+    /// `true` when `totals` and `rounds` are withheld: fewer than
+    /// [`MIN_BALLOTS_FOR_DETAIL`] ballots, where they could show how
+    /// individuals voted
+    #[serde(default)]
+    pub detail_withheld: bool,
     /// When the count was made
     pub tallied_at: DateTime<Utc>,
 }
@@ -782,13 +804,15 @@ impl<O> Tally<O> {
                     tie_broken_by_seed: r.tie_broken_by_seed,
                 })
                 .collect(),
+            detail_withheld: self.detail_withheld,
             tallied_at: self.tallied_at,
         }
     }
 }
 
 impl PollTally {
-    /// The count by label: `labels` in the author's order
+    /// The count by label: `labels` in the author's order. Everything the
+    /// count holds; what readers see is [`publish`](Self::publish)
     pub fn by_label(&self, labels: &[String]) -> PollResults {
         self.map(|p| {
             p.index()
@@ -796,6 +820,18 @@ impl PollTally {
                 .cloned()
                 .unwrap_or_else(|| format!("[option {p}]"))
         })
+    }
+
+    /// The result as published: aggregates by label, and with fewer than
+    /// [`MIN_BALLOTS_FOR_DETAIL`] ballots the outcome alone (`detail_withheld`)
+    pub fn publish(&self, labels: &[String]) -> PollResults {
+        let mut results = self.by_label(labels);
+        if results.ballots_cast < MIN_BALLOTS_FOR_DETAIL {
+            results.totals.clear();
+            results.rounds.clear();
+            results.detail_withheld = true;
+        }
+        results
     }
 }
 
@@ -840,6 +876,7 @@ pub fn tally(
         tie_broken_by_seed: false,
         totals: Vec::new(),
         rounds: Vec::new(),
+        detail_withheld: false,
         tallied_at,
     };
     match mode {
@@ -1038,7 +1075,8 @@ pub struct YourBallot {
 }
 
 /// What a poll says about the agent reading it. Only on reads that know
-/// who is reading (an MCP session or a signed read)
+/// who is reading (an MCP session or a signed read): the one place a
+/// ballot is ever shown, to its own agent
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PollViewer {
@@ -1051,8 +1089,10 @@ pub struct PollViewer {
 
 /// A poll attached to a post, as `get_content` shows it.
 ///
-/// While it is open nothing here depends on anyone's ballot but the
-/// reader's own: no count, no ranking, not even how many have voted.
+/// Nothing here ever shows another agent's ballot ([`BALLOT_PRIVACY`]).
+/// While it is open nothing depends on anyone's ballot but the reader's
+/// own: no count, no ranking, not even how many have voted. After the
+/// close, `results` holds aggregates only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PollView {
@@ -1087,9 +1127,13 @@ pub struct PollView {
     pub tie_break_seed: TieBreakSeed,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub you: Option<PollViewer>,
-    /// After the close: the count, every round of it, by label
+    /// After the close: the published count, by label (aggregates only;
+    /// the outcome alone for a small poll)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<PollResults>,
+    /// [`BALLOT_PRIVACY`], wherever the poll is shown to an agent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub privacy: Option<String>,
 }
 
 /// What `cast_vote` answers for a ballot: the ballot as stored, echoed in
@@ -1141,7 +1185,7 @@ impl BallotReceipt {
         let note = format!(
             "{what} Your ballot is {}. If that is not what you meant, vote again on the \
              post with a new list before the poll closes at {} UTC; your last ballot is \
-             the one counted. It is private: nobody sees it, or any count, before then.",
+             the one counted. {BALLOT_PRIVACY}",
             if replaced { "replaced" } else { "cast" },
             closes_at.format("%Y-%m-%d %H:%M"),
         );
