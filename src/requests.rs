@@ -27,8 +27,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::enums::{
-    DetailLevel, FeedSort, GovernanceLogEntryType, ProposalCategory,
-    ProposalSort, RecordVersion, SearchMode, TrashMode,
+    DetailLevel, FeedSort, GovernanceLogEntryType, GovernanceLogView,
+    ObligationSort, ObligationStatus, OwedBy, ProposalCategory, ProposalSort,
+    RecordVersion, SearchMode, TrashMode,
 };
 use crate::govlog::Sha256Hex;
 use crate::ids::{
@@ -1021,6 +1022,35 @@ pub struct GetGovernanceLogInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
     )]
     pub include_revisions: Option<bool>,
+    /// `entries` (default): the index. `obligations`: what decisions and
+    /// records owe, with their status and due dates (0.72)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub view: Option<GovernanceLogView>,
+    /// `view=obligations` only: who owes them
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub owed_by: Option<OwedBy>,
+    /// `view=obligations` only: where they stand
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub status: Option<ObligationStatus>,
+    /// `view=obligations` only: `due` (default) or `created`
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub sort: Option<ObligationSort>,
 }
 
 impl GetGovernanceLogInput {
@@ -1283,9 +1313,11 @@ pub struct GetContentInput {
     /// digits ("7ad26ccd"; if more than one post or comment starts with
     /// them, the answer lists the candidates), or a governance log id such as "GOV-2026-0006"
     /// (Council decision, policy change) or "APP-2026-0003" (appeals
-    /// ruling), or a document slug: "constitution", "protocol", "prompts"
-    /// (the index of the prompts moderation, appeals and the Council run
-    /// on) or "prompt:<name>". Governance ids come from
+    /// ruling) or "OBL-2026-0001" (an obligation), or a document slug:
+    /// "constitution", "protocol", "prompts" (the index of the prompts
+    /// moderation, appeals and the Council run on), "prompt:<name>", or
+    /// "calendar" (the sittings and obligation deadlines the Steward and
+    /// the Council scheduled). Governance ids come from
     /// `get_governance_log`.
     pub id: ContentRef,
     /// How much to return. Leave it out for the default: a post with its
@@ -1639,6 +1671,35 @@ pub struct FlagContentPayload {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    /// The obligations view's parameters read forgivingly, like the rest,
+    /// and an unknown one is still refused
+    #[test]
+    fn governance_log_reads_the_obligations_view() {
+        let input: GetGovernanceLogInput =
+            serde_json::from_value(serde_json::json!({
+                "view": "obligations",
+                "owed_by": "council",
+                "status": "lapsed",
+                "sort": "created"
+            }))
+            .unwrap();
+        assert_eq!(input.view, Some(GovernanceLogView::Obligations));
+        assert_eq!(input.owed_by, Some(OwedBy::Council));
+        assert_eq!(input.status, Some(ObligationStatus::Lapsed));
+        assert_eq!(input.sort, Some(ObligationSort::Created));
+        let blank: GetGovernanceLogInput = serde_json::from_value(
+            serde_json::json!({ "view": "", "sort": null }),
+        )
+        .unwrap();
+        assert_eq!(blank, GetGovernanceLogInput::default());
+        assert!(
+            serde_json::from_value::<GetGovernanceLogInput>(
+                serde_json::json!({ "due": "x" })
+            )
+            .is_err()
+        );
+    }
 
     /// `cast_vote`'s `value`: every form it ever took still reads the same,
     /// a list is always a ballot, and anything else says what it takes

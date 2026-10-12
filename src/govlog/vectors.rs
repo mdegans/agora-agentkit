@@ -9,10 +9,11 @@
 //! byte-stable. Regenerate with `just vectors`.
 
 use super::tests::{
-    Chain, at, certify, chain, gov, key_id, link, rec, resalted, root, roots,
-    v1,
+    Chain, at, certify, chain, gov, key_id, link, obl, rec, resalted, root,
+    roots, v1,
 };
 use super::*;
+use crate::enums::{ObligationKind, OwedBy};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -515,6 +516,245 @@ fn cases() -> Vec<Case> {
     out.push(Case::new(
         "record_series_mismatch",
         "A Steward's record outside the REC- series, and a council decision \
+         inside it.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    // -- obligations --
+
+    let mut obligation = Obligation::new(
+        ObligationKind::Review,
+        OwedBy::Council,
+        "A six-month review of optional signatures",
+        "we will review this in six months",
+        "round 3, Lawyer",
+    );
+    obligation.source = Some(gov(1));
+    obligation.until = Some(Until::Date {
+        date: "2027-04-01".parse().unwrap(),
+    });
+    // Stored as a writer stores it: blinded, under a fixed blind so the
+    // files are byte-stable (a revision would otherwise add a random one).
+    let obligation = blind_data(
+        &serde_json::to_value(obligation).unwrap(),
+        Blind::from([9; 32]),
+    )
+    .unwrap();
+    let with_obligation = || {
+        let mut c = Chain::new();
+        c.decision(&steward);
+        c.push(
+            &steward,
+            obl(1),
+            GovernanceLogEntryType::Obligation,
+            obligation.clone(),
+            false,
+        );
+        c
+    };
+    let plan: crate::ids::PostId =
+        "91e791c0-0000-4000-8000-000000000000".parse().unwrap();
+
+    let mut c = with_obligation();
+    let keep = |c: &mut Chain, update, authority: Option<GovernanceLogId>| {
+        let mut draft = AmendmentDraft::obligation(
+            obl(1),
+            c.hash_at(2),
+            update,
+            "Art. V § 3",
+            "status",
+        );
+        if let Some(authority) = authority {
+            draft = draft.with_authority(authority);
+        }
+        c.amend(&steward, &draft);
+    };
+    keep(&mut c, ObligationUpdate::Planned { plan }, None);
+    keep(&mut c, ObligationUpdate::Lapsed, None);
+    let decision = c.decision(&steward);
+    keep(
+        &mut c,
+        ObligationUpdate::Rescheduled {
+            until: Some(Until::NextSitting),
+        },
+        Some(decision.clone()),
+    );
+    keep(
+        &mut c,
+        ObligationUpdate::Discharged {
+            evidence: Evidence::Governance {
+                id: decision.clone(),
+            },
+        },
+        Some(decision),
+    );
+    out.push(Case::new(
+        "obligation_kept",
+        "An obligation (OBL-) created by a decision, then planned, lapsed, \
+         rescheduled and discharged by amendments carrying an `update` of \
+         their own kind. Each names the obligation; none changes standing.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = with_obligation();
+    let draft = AmendmentDraft::obligation(
+        gov(1),
+        c.hash_at(1),
+        ObligationUpdate::Lapsed,
+        "sweep",
+        "missed",
+    );
+    c.amend(&steward, &draft);
+    out.push(Case::new(
+        "obligation_kind_on_a_decision",
+        "A `lapsed` amendment naming a council decision. The obligation \
+         kinds are valid only on an obligation, so it takes no effect.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = with_obligation();
+    let mut draft = AmendmentDraft::obligation(
+        obl(1),
+        c.hash_at(2),
+        ObligationUpdate::Lapsed,
+        "sweep",
+        "missed",
+    );
+    draft.amendment.kind = AmendmentKind::Withdrawn;
+    c.amend(&steward, &draft);
+    let mut draft = AmendmentDraft::obligation(
+        obl(1),
+        c.hash_at(2),
+        ObligationUpdate::Withdrawn,
+        "b",
+        "n",
+    );
+    draft.amendment.update = None;
+    c.amend(&steward, &draft);
+    let mut draft = AmendmentDraft::new(
+        obl(1),
+        c.hash_at(2),
+        AmendmentKind::Correction,
+        "clerical",
+        "location corrected",
+    )
+    .unwrap();
+    draft.amendment.update = Some(ObligationUpdate::Lapsed);
+    c.amend(&steward, &draft);
+    out.push(Case::new(
+        "obligation_update_mismatch",
+        "Three malformed amendments of an obligation: a `withdrawn` \
+         carrying a `lapsed` update, a `withdrawn` with no update, and a \
+         `correction` with one.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let revise = |c: &Chain, patch: Value| {
+        let benign: json_patch::Patch = serde_json::from_value(
+            json!([{"op": "replace", "path": "/quote", "value": "q"}]),
+        )
+        .unwrap();
+        let (mut draft, _) = AmendmentDraft::revision(
+            obl(1),
+            GovernanceLogEntryType::Obligation,
+            c.hash_at(2),
+            "clerical",
+            "revised",
+            &obligation,
+            benign,
+        )
+        .unwrap();
+        draft.amendment.revision.as_mut().unwrap().patch =
+            serde_json::from_value(patch).unwrap();
+        draft
+    };
+    let mut c = with_obligation();
+    // Through the builder, so its resulting_data_hash is the real one.
+    let (narrowed, _) = AmendmentDraft::revision(
+        obl(1),
+        GovernanceLogEntryType::Obligation,
+        c.hash_at(2),
+        "partial discharge",
+        "what is still owed",
+        &obligation,
+        serde_json::from_value::<json_patch::Patch>(json!([
+            {"op": "replace", "path": "/text", "value": "what is still owed"}
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    c.amend(&steward, &narrowed);
+    for patch in [
+        json!([{"op": "replace", "path": "/until", "value": {"when": "next_sitting"}}]),
+        json!([{"op": "remove", "path": "/until/date"}]),
+        json!([{"op": "move", "from": "/owed_by", "path": "/note"}]),
+        json!([{"op": "copy", "from": "/source", "path": "/note"}]),
+        json!([{"op": "replace", "path": "", "value": {}}]),
+    ] {
+        let draft = revise(&c, patch);
+        c.amend(&steward, &draft);
+    }
+    out.push(Case::new(
+        "obligation_revision_fixed_field",
+        "Revisions of an obligation. Narrowing its text is allowed; touching \
+         `until`, `owed_by`, `kind`, `source` or `agora_obligation` (at the \
+         path, below it, above it, or as a move or copy's `from`) is not, \
+         and takes no effect: the deadline moves only by `rescheduled`.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = with_obligation();
+    for kind in [
+        AmendmentKind::NonPrecedential,
+        AmendmentKind::Overruled,
+        AmendmentKind::Superseded,
+        AmendmentKind::Reinstated,
+        AmendmentKind::Correction,
+    ] {
+        let draft =
+            AmendmentDraft::new(obl(1), c.hash_at(2), kind, "basis", "note")
+                .unwrap();
+        c.amend(&steward, &draft);
+    }
+    out.push(Case::new(
+        "obligation_precedential_kind",
+        "The four kinds that change precedential force, naming an \
+         obligation, which has none: each takes no effect. A correction \
+         after them does.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        rec(1),
+        GovernanceLogEntryType::Obligation,
+        obligation.clone(),
+        false,
+    );
+    c.push(
+        &steward,
+        obl(1),
+        CouncilDecision,
+        json!({"title": "a decision wearing an OBL- id"}),
+        false,
+    );
+    out.push(Case::new(
+        "obligation_series_mismatch",
+        "An obligation outside the OBL- series, and a council decision \
          inside it.",
         &steward_pk,
         pinned.clone(),

@@ -1,0 +1,249 @@
+{
+  "description": "Three malformed amendments of an obligation: a `withdrawn` carrying a `lapsed` update, a `withdrawn` with no update, and a `correction` with one.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "OBL-2026-0001",
+      "entry_type": "obligation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "698c3d3efe32d9a6752d6636c6c63313bdaa1ed66bbe775395fedd34371d4c8d",
+        "entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "signature": "93ba9fa085637fcbb094ab7dd83b5e7735ed63b351fdd4a1efdb4c64e54e11574d661bcd04a49a97836cb0043340eef2cc43fe4672f64221d7986e5c27cff009",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "data_hash": "59c33f3b877eaf920012a086e1c313cb32208b1a6762c23495ce94235f41cf16",
+        "entry_hash": "251d7aae5684d8ccd9dd74ee86de2c1716dcce7dfb447b2a9bc6b4e65c6060e6",
+        "signature": "ad8bf939ca00ff44937ad96547110efcc3c08dde4af3ecd318a1c8f297200078c7287efc4df73dd8a23c580d88b6c56d6f650c558ed3ef5d65e43ee9604c2705",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "d2d13c41407fb4f011e871c44da7163f756c4f6b6e229dd2aac638a477bd420a"
+        },
+        "kind": "withdrawn",
+        "note": {
+          "commitment": "d9a081a7461b54d0a48db36916cc5e2227bffed3a72929a01687b10e31de0c5a"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "update": {
+          "kind": "lapsed"
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "5f260fd222cbc07b654b6ff4a50b57b197613b220250353c11fa136846cbaf12",
+          "text": "sweep"
+        },
+        "note": {
+          "salt": "13ba10f4c2763b6cf04d3c8d66beb26e57b806823e601775d0cfc422ba9c7c45",
+          "text": "missed"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0002",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:00.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 4,
+        "prev_hash": "251d7aae5684d8ccd9dd74ee86de2c1716dcce7dfb447b2a9bc6b4e65c6060e6",
+        "data_hash": "2f55faa5c759a4892bf46bf43418b2c069aa7999f122a2b436c6adfe7f41366d",
+        "entry_hash": "967ee076309b9815fd69cc64a9e4e82a304399f7f15c6aac4b18bab51ad34ebd",
+        "signature": "e0f3caccc26ec613d4fb2068b90eb363424a6e3ebcd4955498e2f4e5147f4edc04eb6e656ca17c8a05757805d79fdbe91929af1294b078a2747e4d89f5311907",
+        "signed_at": "2023-11-14T22:14:01Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "ab64ebe627925af8a716f309c0a35363a1f6d666fab44d503224091c2770880a"
+        },
+        "kind": "withdrawn",
+        "note": {
+          "commitment": "81a76d62bf4dd4042a2c1470d395d8ca0b9f7eb2415a661edc6df7d5f35690cc"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366"
+      },
+      "texts": {
+        "basis": {
+          "salt": "1089eb46624451fe8c5d1f2f40d8763fe2915a9bc08aa3103677c4b09edd4e0e",
+          "text": "b"
+        },
+        "note": {
+          "salt": "a9f19d2e96daefef265c27ac63138a5c6579ee502ec967c09b45cd9f6a94f4a5",
+          "text": "n"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0003",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:10.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 5,
+        "prev_hash": "967ee076309b9815fd69cc64a9e4e82a304399f7f15c6aac4b18bab51ad34ebd",
+        "data_hash": "a8ef63c2dc86d39b6ed67bcd3fd36977dbc62124b8dbae5835ec2033fa41bcca",
+        "entry_hash": "5ed68a7249787a167f7dd14f2b53f97ad2e9d49d321eaa6d353f2022ebe8381a",
+        "signature": "8fb74092fc50ca4ee1526d0ffe789f5c816ba11ead0749baf2c7c13d60321f5b784ea6760cbcc21f1dd4a5531180454c68f8777a21ce0ab780617c569b421007",
+        "signed_at": "2023-11-14T22:14:11Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "337bade3010022453f5313ec17b6db5eb8e95f505a21de474fe71ec52467c433"
+        },
+        "kind": "correction",
+        "note": {
+          "commitment": "d019b717249da3eabe034d866c2a2766a1a2782b0dc7a79af15dac4b11ca0331"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "update": {
+          "kind": "lapsed"
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "cb42dec003e3541bab687bcfefd1d52c730de763a0d0aad5bcd0066d6d8d79a0",
+          "text": "clerical"
+        },
+        "note": {
+          "salt": "0cb473ca8bd13e4168f1a7c711ef40fc13222b3a1a4b7c4c062eea1de22a4794",
+          "text": "location corrected"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "AMD-2026-0003",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "OBL-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": true
+      },
+      {
+        "id": "AMD-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": true
+      },
+      {
+        "id": "AMD-2026-0003",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": true
+      }
+    ]
+  }
+}

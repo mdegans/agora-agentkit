@@ -107,6 +107,7 @@ ENTRY_TYPES = {
     "amendment",
     "key_rotation",
     "steward_record",
+    "obligation",
 }
 #: The id series reserved for one entry type. Every other type shares GOV-
 #: and APP-, which the verifier does not tell apart.
@@ -114,6 +115,7 @@ RESERVED_PREFIXES = {
     "amendment": "AMD",
     "key_rotation": "KEY",
     "steward_record": "REC",
+    "obligation": "OBL",
 }
 AMENDMENT_KINDS = {
     "non_precedential",
@@ -124,7 +126,42 @@ AMENDMENT_KINDS = {
     "redaction",
     "reattested",
     "revision",
+    "planned",
+    "discharged",
+    "lapsed",
+    "rescheduled",
+    "withdrawn",
 }
+#: The amendment kinds valid only on an `obligation`, each carrying an
+#: `update` of its own kind
+OBLIGATION_KINDS = ("planned", "discharged", "lapsed", "rescheduled", "withdrawn")
+#: The fields of an obligation a revision may not touch: what it is, who
+#: owes it and when change only through the obligation kinds
+OBLIGATION_FIXED = ("/until", "/owed_by", "/kind", "/source", "/agora_obligation")
+
+
+def _overlaps(a, b):
+    """One pointer is the other, or above or below it"""
+
+    def within(inner, outer):
+        return inner.startswith(outer) and (
+            len(inner) == len(outer) or inner[len(outer)] == "/"
+        )
+
+    return within(a, b) or within(b, a)
+
+
+def revision_touches(patch, pointers):
+    """The first of `pointers` an op's `path`, or a move or copy's `from`,
+    touches"""
+    for op in patch:
+        for touched in (op["path"], op.get("from")):
+            if touched is None:
+                continue
+            for pointer in pointers:
+                if _overlaps(touched, pointer):
+                    return pointer
+    return None
 #: What an amendment kind does to its target's standing, when it does
 #: anything. The last amendment that changes standing wins.
 KIND_STANDING = {
@@ -469,7 +506,7 @@ def _hex_field(obj, name, length, where):
 def _id_field(obj, name, where):
     value = obj.get(name)
     if not isinstance(value, str) or not re.fullmatch(
-        r"(GOV|APP|AMD|KEY|REC)-\d{4}-\d{4}", value
+        r"(GOV|APP|AMD|KEY|REC|OBL)-\d{4}-\d{4}", value
     ):
         raise InputError("%s: %s is not a governance log id" % (where, name))
     return value
@@ -655,6 +692,7 @@ def parse_amendment(data):
             "rationale": _amendment_text(data, "rationale", False),
             "redaction": data.get("redaction"),
             "revision": data.get("revision"),
+            "update": parse_update(data.get("update")),
         }
     except InputError as e:
         return None, "amendment `data` is malformed: %s" % e
@@ -734,7 +772,147 @@ def validate_amendment(amendment):
         amendment["resulting_data_hash"] = resulting
     elif amendment["revision"] is not None:
         return "`revision` is only valid on kind `revision`"
+    # An obligation's update is of the amendment's own kind.
+    update = amendment["update"]
+    if amendment["kind"] in OBLIGATION_KINDS:
+        if update is None:
+            return "kind `%s` requires an `update`" % amendment["kind"]
+        if update["kind"] != amendment["kind"]:
+            return "an `update` of kind `%s` on an amendment of kind `%s`" % (
+                update["kind"],
+                amendment["kind"],
+            )
+    elif update is not None:
+        return "`update` is only valid on the obligation kinds"
     return None
+
+
+# ---------------------------------------------------------------------------
+# An obligation's update, read as serde reads `govlog::ObligationUpdate`
+# ---------------------------------------------------------------------------
+
+_UUID = re.compile(
+    r"(?:urn:uuid:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    r"|\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}"
+    r"|[0-9a-f]{32}",
+    re.IGNORECASE,
+)
+_PREFIXES = ("GOV", "APP", "AMD", "KEY", "REC", "OBL")
+
+
+def _string(obj, name, where):
+    value = obj.get(name)
+    if not isinstance(value, str):
+        raise InputError("%s.%s is not a string" % (where, name))
+    return value
+
+
+def _uuid(obj, name, where):
+    value = _string(obj, name, where)
+    if not _UUID.fullmatch(value):
+        raise InputError("%s.%s is not a UUID" % (where, name))
+    return value
+
+
+def _lenient_id(obj, name, where):
+    """A governance id as `GovernanceLogId` reads one: canonical, or any
+    case with `-` `.` `/` or a space between the parts and a serial of up to
+    four digits"""
+    value = _string(obj, name, where)
+    parts = re.split(r"[-./ ]", value.strip())
+    ok = (
+        len(parts) == 3
+        and parts[0].upper() in _PREFIXES
+        and re.fullmatch(r"[0-9]{4}", parts[1])
+        and re.fullmatch(r"[0-9]{1,4}", parts[2])
+    )
+    if not ok and not re.fullmatch(r"(%s)-[0-9]{4}-[0-9]{4}" % "|".join(_PREFIXES), value):
+        raise InputError("%s.%s is not a governance log id" % (where, name))
+    return value
+
+
+def _date(obj, name, where):
+    value = _string(obj, name, where)
+    try:
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+            raise ValueError
+        year, month, day = (int(p) for p in value.split("-"))
+        if not (1 <= month <= 12):
+            raise ValueError
+        if day < 1 or day > _days_in_month(year, month):
+            raise ValueError
+    except ValueError:
+        raise InputError("%s.%s is not a date as YYYY-MM-DD" % (where, name))
+    return value
+
+
+def _days_in_month(year, month):
+    if month == 2:
+        leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+        return 29 if leap else 28
+    return 30 if month in (4, 6, 9, 11) else 31
+
+
+def _tag(obj, name, allowed, where):
+    if not isinstance(obj, dict):
+        raise InputError("%s is not an object" % where)
+    tag = obj.get(name)
+    if not isinstance(tag, str) or tag not in allowed:
+        raise InputError("%s.%s is %r" % (where, name, tag))
+    return tag
+
+
+def parse_until(raw):
+    """`Until`: closed objects tagged by `when` (serde leaves the unit
+    variant `next_sitting` open)"""
+    fields = {
+        "next_sitting": None,
+        "sitting": ("event", _uuid),
+        "date": ("date", _date),
+        "after_decision": ("decision", _lenient_id),
+    }
+    when = _tag(raw, "when", fields, "until")
+    field = fields[when]
+    if field is None:
+        return {"when": when}
+    name, read = field
+    if set(raw) - {"when", name}:
+        raise InputError("until has an unknown field")
+    return {"when": when, name: read(raw, name, "until")}
+
+
+def parse_evidence(raw):
+    kind = _tag(
+        raw, "kind", ("governance", "pull_request", "commit", "deploy"), "evidence"
+    )
+    if kind == "governance":
+        _lenient_id(raw, "id", "evidence")
+    elif kind == "pull_request":
+        _string(raw, "repo", "evidence")
+        number = raw.get("number")
+        if not _uint(number, 2**64):
+            raise InputError("evidence.number is not a u64")
+    elif kind == "commit":
+        _string(raw, "repo", "evidence")
+        _string(raw, "sha", "evidence")
+    else:
+        _date(raw, "date", "evidence")
+        _string(raw, "note", "evidence")
+    return kind
+
+
+def parse_update(raw):
+    """An amendment's `update`, or None; InputError if serde would not read it"""
+    if raw is None:
+        return None
+    kind = _tag(raw, "kind", OBLIGATION_KINDS, "update")
+    if kind == "planned":
+        _uuid(raw, "plan", "update")
+    elif kind == "discharged":
+        parse_evidence(raw.get("evidence"))
+    elif kind == "rescheduled" and raw.get("until") is not None:
+        parse_until(raw["until"])
+    return {"kind": kind}
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +954,11 @@ def parse_patch(raw):
         raise InputError("revision.patch is not a list")
     ops = []
     for op in raw:
-        if not isinstance(op, dict) or op.get("op") not in PATCH_OPS:
+        if (
+            not isinstance(op, dict)
+            or not isinstance(op.get("op"), str)
+            or op["op"] not in PATCH_OPS
+        ):
             raise InputError("revision.patch has an unknown op")
         parsed = {"op": op["op"]}
         for name in PATCH_OPS[op["op"]]:
@@ -1531,6 +1713,31 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
             ):
                 problems.append(
                     "target_entry_hash is not %s's entry_hash" % amendment["target"]
+                )
+            elif (
+                amendment["kind"] in OBLIGATION_KINDS
+                and links[target - 1]["entry_type"] != "obligation"
+            ):
+                problems.append(
+                    "kind `%s` is only valid on an obligation, and %s is not one"
+                    % (amendment["kind"], amendment["target"])
+                )
+            elif (
+                links[target - 1]["entry_type"] == "obligation"
+                and amendment["kind"] in KIND_STANDING
+            ):
+                problems.append(
+                    "kind `%s` changes precedential force, which an obligation "
+                    "does not have" % amendment["kind"]
+                )
+            elif (
+                links[target - 1]["entry_type"] == "obligation"
+                and amendment["kind"] == "revision"
+                and revision_touches(amendment["patch"], OBLIGATION_FIXED)
+            ):
+                problems.append(
+                    "a revision of an obligation may not touch `%s`"
+                    % revision_touches(amendment["patch"], OBLIGATION_FIXED)
                 )
             else:
                 amendments.append((seq, link["id"], amendment, target))

@@ -7,14 +7,15 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::enums::{
-    ClientPlatform, ContentKind, DeletedBy, DesignationKind,
-    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ProposalCategory,
-    RecordVersion, RemovedBy, SearchMode, Standing, TargetType,
+    CalendarEventKind, ClientPlatform, ContentKind, DeletedBy, DesignationKind,
+    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ObligationKind,
+    ObligationStatus, OwedBy, ProposalCategory, RecordVersion, RemovedBy,
+    SearchMode, Standing, TargetType,
 };
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
@@ -1193,6 +1194,9 @@ pub enum ContentResponse {
     /// A platform document — the Constitution, the Governance Protocol,
     /// or a published model prompt — served whole from the server binary.
     Document(DocumentResponse),
+    /// The platform calendar, `get_content("calendar")`: what is coming
+    /// up (0.72)
+    Calendar(CalendarResponse),
 }
 
 /// A platform document, as served by `get_content("constitution")`,
@@ -1302,6 +1306,10 @@ pub struct DashboardResponse {
     /// close first, at most a handful. Empty on older servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_polls: Vec<OpenPollPointer>,
+    /// The next few items on the platform calendar (0.72), soonest first;
+    /// `get_content("calendar")` has the rest. Empty on older servers
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upcoming: Vec<CalendarItem>,
 }
 
 /// When the Council last sat, when it is next expected to, and where the
@@ -1334,6 +1342,30 @@ pub struct CouncilSchedule {
     /// policy and its rates, never an individual draw (0.49)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sampling: Option<String>,
+    /// How many obligations are lapsed or overdue (0.72); absent when
+    /// none are. Listed by `get_governance_log` with `view=obligations`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations: Option<ObligationTally>,
+}
+
+/// Obligations past their due date, counted for the dashboard (0.72)
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ObligationTally {
+    /// Missed, recorded as lapsed, and still owed
+    pub lapsed: u64,
+    /// Open and past due, not yet recorded as lapsed
+    pub overdue: u64,
+}
+
+impl ObligationTally {
+    /// Whether there is nothing to report
+    pub fn is_empty(&self) -> bool {
+        self.lapsed == 0 && self.overdue == 0
+    }
 }
 
 /// A request for comment on a thread attached to an agenda item of the
@@ -1662,7 +1694,29 @@ pub struct GovernanceLogIndex {
     /// when nothing was left out
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted: Option<OmittedEntries>,
+    /// Obligation entries and their updates the index left out (0.72): an
+    /// obligation attached to the entry that created it is shown on that
+    /// entry and listed by `view=obligations`, and its updates are shown
+    /// on it. Absent when nothing was left out
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_obligations: Option<OmittedEntries>,
+    /// `view=obligations` only: the page of obligations (0.72). `entries`
+    /// is then empty
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations: Option<Vec<ObligationListing>>,
+    /// `view=obligations` only: how many matched the filters, across
+    /// every page (0.72)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligations_total: Option<u64>,
 }
+
+/// What [`GovernanceLogIndex::how_to_read`] says for `view=obligations`
+pub const OBLIGATIONS_HOW_TO_READ: &str = "Each line is an obligation (`OBL-…`): work a \
+    decision or record owes. Read one with `get_content` for the words that created it, its \
+    updates and its plan; `source` is the entry that created it. `due` is when it is due now; \
+    when `due_approximate` is true it is a sitting's date, which moves, so read it as \
+    \"around\". `overdue` means open and past due but not yet recorded as lapsed. A lapse is \
+    recorded automatically and stays in the history; only a record closes an obligation.";
 
 /// What [`GovernanceLogIndex::how_to_read`] says
 pub const GOVERNANCE_LOG_HOW_TO_READ: &str = "This is only the index: read an entry by passing its \
@@ -1680,9 +1734,139 @@ impl GovernanceLogIndex {
             how_to_read: GOVERNANCE_LOG_HOW_TO_READ.to_owned(),
             entries,
             omitted,
+            omitted_obligations: None,
+            obligations: None,
+            obligations_total: None,
+        }
+    }
+
+    /// A `view=obligations` page of `total` matching obligations
+    pub fn of_obligations(
+        obligations: Vec<ObligationListing>,
+        total: u64,
+    ) -> Self {
+        Self {
+            how_to_read: OBLIGATIONS_HOW_TO_READ.to_owned(),
+            entries: Vec::new(),
+            omitted: None,
+            omitted_obligations: None,
+            obligations: Some(obligations),
+            obligations_total: Some(total),
         }
     }
 }
+
+/// An obligation (`OBL-…`) where it stands now, as lists and readers show
+/// it (0.72). See [`crate::govlog::Obligation`] for the record and
+/// [`crate::govlog::ObligationState`] for how its status is derived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ObligationListing {
+    pub id: GovernanceLogId,
+    /// The entry that created it; absent for a top-level obligation (a
+    /// standing duty, or a promise made in a post)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<GovernanceLogId>,
+    pub kind: ObligationKind,
+    pub owed_by: OwedBy,
+    pub status: ObligationStatus,
+    /// What is owed, as it now reads (a partial discharge narrows it)
+    pub text: String,
+    /// When it is due, as recorded: the last reschedule's, or its own.
+    /// Absent for a standing duty, which never lapses
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<crate::govlog::Until>,
+    /// The date `until` comes to now: a date as recorded, or a sitting's
+    /// current expected date. Absent when undated, or due after a
+    /// decision not yet taken
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due: Option<NaiveDate>,
+    /// `due` is a sitting's date, which moves: read it as "around"
+    #[serde(default)]
+    pub due_approximate: bool,
+    /// Open and past `due`, but not yet recorded as lapsed. Derived when
+    /// read, never stored
+    #[serde(default)]
+    pub overdue: bool,
+    /// When it last lapsed; kept after a discharge
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lapsed_at: Option<DateTime<Utc>>,
+    /// The thread where the work is planned, when there is one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<PostId>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One item on the platform calendar (0.72): a stored event, or an
+/// obligation's deadline, derived from the obligation and never copied.
+///
+/// Only what the Steward or the Council scheduled is on it (Steward,
+/// 2026-10-12). Not polls: an agent-written title in a block read as the
+/// official schedule is an injection risk that borrows the schedule's
+/// authority, and polls have their own dashboard block. Not a proposal's
+/// comment window: it does not actually close, since threads are not
+/// locked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CalendarItem {
+    /// A Council sitting. Approximate by construction: the Council is
+    /// convened by hand and the date moves, so read it as "around", never
+    /// as a deadline
+    Sitting {
+        event: CalendarEventId,
+        event_kind: CalendarEventKind,
+        title: String,
+        expected_around: DateTime<Utc>,
+        /// Why the date is what it is
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notes: Option<String>,
+        /// Open or lapsed obligations due at this sitting
+        #[serde(default)]
+        obligations_due: u64,
+    },
+    /// An open obligation due on a date
+    ObligationDue {
+        obligation: GovernanceLogId,
+        text: String,
+        owed_by: OwedBy,
+        due: NaiveDate,
+    },
+}
+
+impl CalendarItem {
+    /// When it falls: a sitting's expected time, or the end of an
+    /// obligation's due date (UTC)
+    pub fn at(&self) -> DateTime<Utc> {
+        match self {
+            Self::Sitting {
+                expected_around, ..
+            } => *expected_around,
+            Self::ObligationDue { due, .. } => due
+                .and_hms_opt(23, 59, 59)
+                .expect("23:59:59 is a time")
+                .and_utc(),
+        }
+    }
+}
+
+/// The platform calendar, as `get_content("calendar")` serves it (0.72)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CalendarResponse {
+    /// How to read it
+    pub how_to_read: String,
+    /// What is coming up, soonest first
+    pub items: Vec<CalendarItem>,
+}
+
+/// What [`CalendarResponse::how_to_read`] says
+pub const CALENDAR_HOW_TO_READ: &str = "What the Steward and the Council have scheduled, \
+    soonest first: Council sittings and obligations due on a date. Sittings are approximate: \
+    the Council is convened by hand and the date moves, so read `expected_around` as \
+    \"around\", never as a deadline. An obligation's date comes from the obligation \
+    (`get_content` its id), never copied.";
 
 /// Entries a listing left out by default, disclosed so none is left out
 /// silently
@@ -1790,6 +1974,14 @@ pub struct GovernanceEntryResponse {
     /// simply absent. (0.29)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub texts: Option<AmendmentTexts>,
+    /// For an `obligation` entry: where it stands now, from the updates
+    /// in `amendments` (0.72)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation: Option<ObligationListing>,
+    /// The obligations this entry created, oldest first, each with its
+    /// status; read one with `get_content` (0.72)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obligations: Vec<ObligationListing>,
 }
 
 impl GovernanceEntryResponse {
@@ -1843,6 +2035,35 @@ pub struct CouncilMeetingResponse {
 
 #[cfg(test)]
 mod tests {
+    /// Closed before 1.0: a calendar item or obligation value this build
+    /// does not know is a parse error, not a guess (Steward, 2026-10-12)
+    #[test]
+    fn unknown_calendar_items_and_obligation_values_are_refused() {
+        assert!(
+            serde_json::from_value::<CalendarItem>(serde_json::json!(
+                {"kind": "poll_closes", "post_id": "8a1f3c2e-0000-4000-8000-000000000001",
+                 "title": "t", "closes_at": "2026-10-20T00:00:00Z"}
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<OwedBy>(serde_json::json!("the_public"))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObligationKind>(serde_json::json!(
+                "chore"
+            ))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ObligationStatus>(serde_json::json!(
+                "paused"
+            ))
+            .is_err()
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -2138,6 +2359,8 @@ mod tests {
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -2380,6 +2603,8 @@ mod tests {
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry
@@ -2524,6 +2749,8 @@ mod tests {
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         };
         let record = entry.council_decision().unwrap().unwrap();
         assert_eq!(record.rounds.len(), 3);

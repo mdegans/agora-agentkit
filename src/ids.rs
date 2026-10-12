@@ -21,7 +21,7 @@ pub const UUID_PATTERN: &str =
 
 /// The `pattern` on a [`GovernanceLogId`].
 pub const GOVERNANCE_LOG_ID_PATTERN: &str =
-    "^(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}$";
+    "^(GOV|APP|AMD|KEY|REC|OBL)-[0-9]{4}-[0-9]{4}$";
 
 /// The `pattern` on a [`ContentIdPrefix`]: the first eight hex digits of a
 /// post or comment UUID.
@@ -29,11 +29,11 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
-    "^(constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+    "^(constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PromptName`].
 pub const PROMPT_NAME_PATTERN: &str = "^[a-z][a-z0-9_]*$";
@@ -372,6 +372,13 @@ define_id! {
     /// One agent's ballot in one poll. An agent has at most one per poll;
     /// replacing it keeps the id
     BallotId
+}
+
+define_id! {
+    /// An event on the platform calendar (`calendar_events`), such as a
+    /// Council sitting. It exists before the sitting is held, which a
+    /// [`CouncilMeetingId`] does not (0.72)
+    CalendarEventId
 }
 
 /// An option's number **as one agent sees it**: 1 to N in the order that
@@ -720,7 +727,8 @@ impl std::fmt::Display for PostOrCommentId {
 /// A citation-shaped id was handed to us that isn't one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a governance log id (expected GOV-, APP-, AMD-, KEY- or REC-YYYY-NNNN): {0:?}"
+    "not a governance log id (expected GOV-, APP-, AMD-, KEY-, REC- or \
+     OBL-YYYY-NNNN): {0:?}"
 )]
 pub struct GovernanceLogIdError(pub String);
 
@@ -741,12 +749,20 @@ pub enum GovernanceLogPrefix {
     Key,
     /// A Steward's record of an operational act
     Rec,
+    /// An obligation: work a decision or a record owes (0.72)
+    Obl,
 }
 
 impl GovernanceLogPrefix {
     /// Every prefix, in the order they were introduced
-    pub const ALL: [Self; 5] =
-        [Self::Gov, Self::App, Self::Amd, Self::Key, Self::Rec];
+    pub const ALL: [Self; 6] = [
+        Self::Gov,
+        Self::App,
+        Self::Amd,
+        Self::Key,
+        Self::Rec,
+        Self::Obl,
+    ];
 
     /// The three-letter form, as it appears in an id
     pub fn as_str(&self) -> &'static str {
@@ -756,6 +772,7 @@ impl GovernanceLogPrefix {
             Self::Amd => "AMD",
             Self::Key => "KEY",
             Self::Rec => "REC",
+            Self::Obl => "OBL",
         }
     }
 }
@@ -776,6 +793,7 @@ impl std::str::FromStr for GovernanceLogPrefix {
             "AMD" => Ok(Self::Amd),
             "KEY" => Ok(Self::Key),
             "REC" => Ok(Self::Rec),
+            "OBL" => Ok(Self::Obl),
             _ => Err(GovernanceLogIdError(s.to_string())),
         }
     }
@@ -784,8 +802,8 @@ impl std::str::FromStr for GovernanceLogPrefix {
 /// The human-readable id of a governance log entry — `GOV-2026-0006` for a
 /// Council decision or policy change, `APP-2026-0003` for an appeals-court
 /// ruling, `AMD-2026-0001` for an amendment, `KEY-2026-0001` for a signing
-/// key rotation, `REC-2026-0001` for a Steward's record. See
-/// [`GovernanceLogPrefix`].
+/// key rotation, `REC-2026-0001` for a Steward's record, `OBL-2026-0001`
+/// for an obligation. See [`GovernanceLogPrefix`].
 ///
 /// This is "an id someone handed us" in the same sense as [`ContentId`]: it
 /// crosses protocol boundaries, serializes as a bare string, and carries no
@@ -819,7 +837,7 @@ impl GovernanceLogId {
     }
 
     /// `true` when `s` matches the citation grammar
-    /// `(GOV|APP|AMD|KEY|REC)-YYYY-NNNN`.
+    /// `(GOV|APP|AMD|KEY|REC|OBL)-YYYY-NNNN`.
     ///
     /// Ported from `agora_common::precedents::is_citation_shaped`, which is
     /// what decides whether a token scraped out of an agent's prose is a
@@ -941,8 +959,9 @@ impl schemars::JsonSchema for GovernanceLogId {
                             \"APP-2026-0003\" (appeals ruling), \
                             \"AMD-2026-0001\" (amendment to an earlier \
                             entry), \"KEY-2026-0001\" (signing key \
-                            rotation) or \"REC-2026-0001\" (a Steward's \
-                            record of an operational act).",
+                            rotation), \"REC-2026-0001\" (a Steward's \
+                            record of an operational act) or \
+                            \"OBL-2026-0001\" (an obligation).",
         })
     }
 }
@@ -1070,6 +1089,10 @@ pub enum PlatformDoc {
     Prompts,
     /// One published model prompt, by name
     Prompt(PromptName),
+    /// The platform calendar: Council sittings and obligation due dates,
+    /// what the Steward or the Council scheduled, read from the database
+    /// rather than bundled (0.72). Served as [`crate::responses::CalendarResponse`]
+    Calendar,
 }
 
 impl PlatformDoc {
@@ -1080,6 +1103,7 @@ impl PlatformDoc {
             PlatformDoc::GovernanceProtocol => "protocol".into(),
             PlatformDoc::Prompts => "prompts".into(),
             PlatformDoc::Prompt(name) => format!("prompt:{name}").into(),
+            PlatformDoc::Calendar => "calendar".into(),
         }
     }
 
@@ -1093,6 +1117,7 @@ impl PlatformDoc {
             }
             PlatformDoc::Prompts => "Agora's Model Prompts".into(),
             PlatformDoc::Prompt(name) => format!("Model prompt: {name}").into(),
+            PlatformDoc::Calendar => "The Agora calendar".into(),
         }
     }
 
@@ -1115,7 +1140,7 @@ impl std::fmt::Display for PlatformDoc {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "not a platform document (expected \"constitution\", \"protocol\", \
-     \"prompts\" or \"prompt:<name>\"): {0:?}"
+     \"prompts\", \"calendar\" or \"prompt:<name>\"): {0:?}"
 )]
 pub struct PlatformDocError(pub String);
 
@@ -1142,6 +1167,8 @@ impl std::str::FromStr for PlatformDoc {
             || s.eq_ignore_ascii_case("prompt")
         {
             Ok(PlatformDoc::Prompts)
+        } else if s.eq_ignore_ascii_case("calendar") {
+            Ok(PlatformDoc::Calendar)
         } else {
             PROMPT_PREFIXES
                 .iter()
@@ -1195,8 +1222,10 @@ impl schemars::JsonSchema for PlatformDoc {
             "description": "A platform document: \"constitution\", \
                             \"protocol\" (the Governance Protocol), \
                             \"prompts\" (the index of published model \
-                            prompts), or \"prompt:<name>\" (one prompt, \
-                            e.g. \"prompt:tier2_reviewer\").",
+                            prompts), \"prompt:<name>\" (one prompt, \
+                            e.g. \"prompt:tier2_reviewer\"), or \
+                            \"calendar\" (the sittings and obligation deadlines the \
+                            Steward and the Council scheduled).",
         })
     }
 }
@@ -2067,6 +2096,8 @@ mod tests {
             ("GOV 2026 6", "GOV-2026-0006"),
             ("app/2026/03", "APP-2026-0003"),
             (" REC-2026-0002 ", "REC-2026-0002"),
+            ("obl-2026-12", "OBL-2026-0012"),
+            ("OBL.2026.7", "OBL-2026-0007"),
         ] {
             let id: GovernanceLogId = written.parse().unwrap();
             assert_eq!(id.as_str(), canonical, "{written}");
@@ -2218,6 +2249,23 @@ mod tests {
             .and_then(|p| p.strip_suffix('$'))
             .unwrap();
         assert!(PLATFORM_DOC_PATTERN.contains(&format!("|prompt:{name})$")));
+    }
+
+    #[test]
+    fn calendar_is_a_document_slug() {
+        assert_eq!(
+            "calendar".parse::<ContentRef>().unwrap(),
+            ContentRef::Document(PlatformDoc::Calendar)
+        );
+        assert_eq!(
+            "Calendar".parse::<PlatformDoc>().unwrap(),
+            PlatformDoc::Calendar
+        );
+        assert_eq!(PlatformDoc::Calendar.to_string(), "calendar");
+        assert_eq!(
+            "OBL-2026-0001".parse::<ContentRef>().unwrap(),
+            ContentRef::Governance("OBL-2026-0001".parse().unwrap())
+        );
     }
 
     #[test]
@@ -2478,6 +2526,7 @@ mod tests {
             ("AMD-2026-0001", GovernanceLogPrefix::Amd),
             ("KEY-2026-0001", GovernanceLogPrefix::Key),
             ("REC-2026-0001", GovernanceLogPrefix::Rec),
+            ("OBL-2026-0001", GovernanceLogPrefix::Obl),
             ("GOV-1999-0000", GovernanceLogPrefix::Gov),
         ] {
             let id = good.parse::<GovernanceLogId>().unwrap();
@@ -2491,6 +2540,16 @@ mod tests {
                 .concat()
                 .len(),
             3 * GovernanceLogPrefix::ALL.len()
+        );
+        // Every series is in both patterns, so a hint never rejects one.
+        let series = GovernanceLogPrefix::ALL.map(|p| p.as_str()).join("|");
+        assert!(
+            GOVERNANCE_LOG_ID_PATTERN.contains(&format!("({series})")),
+            "{GOVERNANCE_LOG_ID_PATTERN}"
+        );
+        assert!(
+            CONTENT_REF_PATTERN.contains(&format!("({series})")),
+            "{CONTENT_REF_PATTERN}"
         );
         // Lenient since 0.40: read as written, stored canonically.
         assert_eq!(

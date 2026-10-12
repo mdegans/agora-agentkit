@@ -48,6 +48,11 @@
 //! carries keys and hashes only; the narrative that names people goes in an
 //! entry that can be.
 //!
+//! A fourth, an [`Obligation`] (`OBL-`), is work a decision or record owes.
+//! The verifier reads only the amendments that keep its status: the five
+//! [obligation kinds](AmendmentKind::OBLIGATION) name an `obligation` and
+//! nothing else, and carry an [`ObligationUpdate`].
+//!
 //! The envelope itself is unchanged by any of this: `ENVELOPE_VERSION` is
 //! still 1 and what it does and does not cover is exactly as above.
 
@@ -84,6 +89,12 @@ pub mod reading;
 /// RFC 6902, as [`Revision::patch`] uses it: re-exported so callers name
 /// the same types this crate was built with
 pub use json_patch;
+
+mod obligation;
+pub use obligation::{
+    Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationRuleError,
+    ObligationState, ObligationUpdate, Until, check_obligation_amendment,
+};
 
 mod record;
 pub use record::{
@@ -622,6 +633,31 @@ pub enum AmendmentError {
     UnexpectedRevision,
     #[error("the `revision` is malformed: {0}")]
     RevisionShape(ReviseError),
+    #[error("kind `{0}` requires an `update`")]
+    MissingUpdate(AmendmentKind),
+    #[error("`update` is only valid on the obligation kinds")]
+    UnexpectedUpdate,
+    #[error("an `update` of kind `{update}` on an amendment of kind `{kind}`")]
+    UpdateMismatch {
+        kind: AmendmentKind,
+        update: AmendmentKind,
+    },
+    #[error(
+        "kind `{kind}` is only valid on an obligation, and {target} is not one"
+    )]
+    NotAnObligation {
+        kind: AmendmentKind,
+        target: GovernanceLogId,
+    },
+    #[error(
+        "kind `{0}` changes precedential force, which an obligation does not have"
+    )]
+    PrecedentialOnObligation(AmendmentKind),
+    #[error(
+        "a revision of an obligation may not touch `{0}`; its status and \
+         deadline change only through the obligation kinds"
+    )]
+    FixedObligationField(String),
     #[error("amendment target {0} is not an entry of this chain")]
     UnknownTarget(GovernanceLogId),
     #[error("amendment target {0} is not an earlier entry")]
@@ -664,6 +700,10 @@ pub struct Amendment {
     /// Present iff `kind` is [`AmendmentKind::Revision`] (0.43)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<Revision>,
+    /// Present iff `kind` is one of [`AmendmentKind::OBLIGATION`], and of
+    /// that kind (0.72)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ObligationUpdate>,
 }
 
 /// What a [`AmendmentKind::Redaction`] removed, and what is left
@@ -892,6 +932,9 @@ impl AmendmentDraft {
             AmendmentKind::Revision => {
                 return Err(AmendmentError::MissingRevision);
             }
+            k if k.is_obligation() => {
+                return Err(AmendmentError::MissingUpdate(k));
+            }
             _ => {}
         }
         let (basis, note) = (basis.into(), note.into());
@@ -907,6 +950,7 @@ impl AmendmentDraft {
                 rationale: None,
                 redaction: None,
                 revision: None,
+                update: None,
             },
             texts: AmendmentTexts {
                 basis: Some(basis),
@@ -981,6 +1025,7 @@ impl AmendmentDraft {
                         resulting_latest_hash,
                     }),
                     revision: None,
+                    update: None,
                 },
                 texts: AmendmentTexts {
                     basis: Some(basis),
@@ -1075,6 +1120,7 @@ impl AmendmentDraft {
                         duplicates,
                         resulting_data_hash: data_hash(&revised),
                     }),
+                    update: None,
                 },
                 texts: AmendmentTexts {
                     basis: Some(basis),
@@ -1084,6 +1130,37 @@ impl AmendmentDraft {
             },
             revised,
         ))
+    }
+
+    /// An amendment to an obligation, of the kind `update` is
+    pub fn obligation(
+        target: GovernanceLogId,
+        target_entry_hash: Sha256Hex,
+        update: ObligationUpdate,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
+    ) -> Self {
+        let (basis, note) = (basis.into(), note.into());
+        Self {
+            amendment: Amendment {
+                agora_governance_amendment: AMENDMENT_VERSION,
+                target,
+                target_entry_hash,
+                kind: update.kind(),
+                authority: None,
+                basis: AmendmentText::Committed(basis.commitment()),
+                note: AmendmentText::Committed(note.commitment()),
+                rationale: None,
+                redaction: None,
+                revision: None,
+                update: Some(update),
+            },
+            texts: AmendmentTexts {
+                basis: Some(basis),
+                note: Some(note),
+                rationale: None,
+            },
+        }
     }
 
     /// The draft with the governance entry that authorizes it
@@ -1131,12 +1208,27 @@ impl Amendment {
         }
         match (self.kind, &self.revision) {
             (AmendmentKind::Revision, None) => {
-                Err(AmendmentError::MissingRevision)
+                return Err(AmendmentError::MissingRevision);
             }
             (AmendmentKind::Revision, Some(r)) => {
-                r.validate().map_err(AmendmentError::RevisionShape)
+                r.validate().map_err(AmendmentError::RevisionShape)?;
             }
-            (_, Some(_)) => Err(AmendmentError::UnexpectedRevision),
+            (_, Some(_)) => return Err(AmendmentError::UnexpectedRevision),
+            _ => {}
+        }
+        match (self.kind, &self.update) {
+            (kind, None) if kind.is_obligation() => {
+                Err(AmendmentError::MissingUpdate(kind))
+            }
+            (kind, Some(_)) if !kind.is_obligation() => {
+                Err(AmendmentError::UnexpectedUpdate)
+            }
+            (kind, Some(update)) if update.kind() != kind => {
+                Err(AmendmentError::UpdateMismatch {
+                    kind,
+                    update: update.kind(),
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -1196,7 +1288,12 @@ pub fn kind_standing(kind: AmendmentKind) -> Option<Standing> {
         AmendmentKind::Correction
         | AmendmentKind::Redaction
         | AmendmentKind::Reattested
-        | AmendmentKind::Revision => None,
+        | AmendmentKind::Revision
+        | AmendmentKind::Planned
+        | AmendmentKind::Discharged
+        | AmendmentKind::Lapsed
+        | AmendmentKind::Rescheduled
+        | AmendmentKind::Withdrawn => None,
     }
 }
 
@@ -1469,6 +1566,9 @@ pub struct AmendmentNotice {
     /// See [`Amendment::rationale`]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+    /// See [`Amendment::update`] (0.72)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<ObligationUpdate>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1492,6 +1592,7 @@ impl AmendmentNotice {
                 .rationale
                 .as_ref()
                 .map(|r| r.resolve(beside.rationale.as_ref()).into()),
+            update: amendment.update.clone(),
             created_at,
         }
     }
@@ -2410,6 +2511,7 @@ fn reserved_prefix(
         GovernanceLogEntryType::Amendment => Some(GovernanceLogPrefix::Amd),
         GovernanceLogEntryType::KeyRotation => Some(GovernanceLogPrefix::Key),
         GovernanceLogEntryType::StewardRecord => Some(GovernanceLogPrefix::Rec),
+        GovernanceLogEntryType::Obligation => Some(GovernanceLogPrefix::Obl),
         GovernanceLogEntryType::CouncilDecision
         | GovernanceLogEntryType::AppealsCourtDecision
         | GovernanceLogEntryType::EmergencyAction
@@ -2424,6 +2526,7 @@ fn reserved_for(prefix: GovernanceLogPrefix) -> Option<GovernanceLogEntryType> {
         GovernanceLogPrefix::Amd => Some(GovernanceLogEntryType::Amendment),
         GovernanceLogPrefix::Key => Some(GovernanceLogEntryType::KeyRotation),
         GovernanceLogPrefix::Rec => Some(GovernanceLogEntryType::StewardRecord),
+        GovernanceLogPrefix::Obl => Some(GovernanceLogEntryType::Obligation),
         GovernanceLogPrefix::Gov | GovernanceLogPrefix::App => None,
     }
 }
@@ -2444,6 +2547,36 @@ fn prefix_problem(link: &GovernanceChainLink) -> Option<String> {
     }
 }
 
+/// The fields of an [`Obligation`] a [`Revision`] may not touch: what it
+/// is, who owes it, and when, change only through the obligation kinds,
+/// which [`check_obligation_amendment`] holds to their authority rules
+pub const OBLIGATION_FIXED: [&str; 5] = [
+    "/until",
+    "/owed_by",
+    "/kind",
+    "/source",
+    "/agora_obligation",
+];
+
+/// The first of `pointers` that `revision`'s patch touches: an op's `path`,
+/// or a `move` or `copy`'s `from`, at it, above it or below it
+pub fn revision_touches<'a>(
+    revision: &Revision,
+    pointers: &[&'a str],
+) -> Option<&'a str> {
+    revision.patch.iter().find_map(|op| {
+        let from = match op {
+            json_patch::PatchOperation::Move(m) => Some(m.from.as_str()),
+            json_patch::PatchOperation::Copy(c) => Some(c.from.as_str()),
+            _ => None,
+        };
+        [Some(op.path().as_str()), from]
+            .into_iter()
+            .flatten()
+            .find_map(|p| pointers.iter().copied().find(|f| overlaps(p, f)))
+    })
+}
+
 /// Which earlier entry an amendment names, once it is known to be one
 fn amendment_target(
     amendment: &Amendment,
@@ -2458,10 +2591,26 @@ fn amendment_target(
     if target >= seq {
         return Err(AmendmentError::ForwardReference(amendment.target.clone()));
     }
-    if links[target as usize - 1].attestation.entry_hash
-        != amendment.target_entry_hash
-    {
+    let target_link = links[target as usize - 1];
+    if target_link.attestation.entry_hash != amendment.target_entry_hash {
         return Err(AmendmentError::WrongTargetHash(amendment.target.clone()));
+    }
+    let on_obligation =
+        target_link.entry_type == GovernanceLogEntryType::Obligation;
+    if amendment.kind.is_obligation() && !on_obligation {
+        return Err(AmendmentError::NotAnObligation {
+            kind: amendment.kind,
+            target: amendment.target.clone(),
+        });
+    }
+    if on_obligation && kind_standing(amendment.kind).is_some() {
+        return Err(AmendmentError::PrecedentialOnObligation(amendment.kind));
+    }
+    if on_obligation
+        && let Some(revision) = &amendment.revision
+        && let Some(path) = revision_touches(revision, &OBLIGATION_FIXED)
+    {
+        return Err(AmendmentError::FixedObligationField(path.to_string()));
     }
     Ok(target)
 }
@@ -3058,6 +3207,10 @@ mod tests {
 
     pub(super) fn rec(n: u32) -> GovernanceLogId {
         format!("REC-2026-{n:04}").parse().unwrap()
+    }
+
+    pub(super) fn obl(n: u32) -> GovernanceLogId {
+        format!("OBL-2026-{n:04}").parse().unwrap()
     }
 
     pub(super) fn at(secs: i64) -> DateTime<Utc> {
