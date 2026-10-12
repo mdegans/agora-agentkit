@@ -9,10 +9,11 @@
 //! byte-stable. Regenerate with `just vectors`.
 
 use super::tests::{
-    Chain, at, certify, chain, gov, key_id, link, rec, resalted, root, roots,
-    v1,
+    Chain, at, certify, chain, gov, key_id, link, obl, rec, resalted, root,
+    roots, v1,
 };
 use super::*;
+use crate::enums::{ObligationKind, OwedBy};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -515,6 +516,160 @@ fn cases() -> Vec<Case> {
     out.push(Case::new(
         "record_series_mismatch",
         "A Steward's record outside the REC- series, and a council decision \
+         inside it.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    // -- obligations --
+
+    let mut obligation = Obligation::new(
+        ObligationKind::Review,
+        OwedBy::Council,
+        "A six-month review of optional signatures",
+        "we will review this in six months",
+        "round 3, Lawyer",
+    );
+    obligation.source = Some(gov(1));
+    obligation.until = Some(Until::Date {
+        date: "2027-04-01".parse().unwrap(),
+    });
+    let obligation = serde_json::to_value(obligation).unwrap();
+    let with_obligation = || {
+        let mut c = Chain::new();
+        c.decision(&steward);
+        c.push(
+            &steward,
+            obl(1),
+            GovernanceLogEntryType::Obligation,
+            obligation.clone(),
+            false,
+        );
+        c
+    };
+    let plan: crate::ids::PostId =
+        "91e791c0-0000-4000-8000-000000000000".parse().unwrap();
+
+    let mut c = with_obligation();
+    let keep = |c: &mut Chain, update, authority: Option<GovernanceLogId>| {
+        let mut draft = AmendmentDraft::obligation(
+            obl(1),
+            c.hash_at(2),
+            update,
+            "Art. V § 3",
+            "status",
+        );
+        if let Some(authority) = authority {
+            draft = draft.with_authority(authority);
+        }
+        c.amend(&steward, &draft);
+    };
+    keep(&mut c, ObligationUpdate::Planned { plan }, None);
+    keep(&mut c, ObligationUpdate::Lapsed, None);
+    let decision = c.decision(&steward);
+    keep(
+        &mut c,
+        ObligationUpdate::Rescheduled {
+            until: Some(Until::NextSitting),
+        },
+        Some(decision.clone()),
+    );
+    keep(
+        &mut c,
+        ObligationUpdate::Discharged {
+            evidence: Evidence::Governance {
+                id: decision.clone(),
+            },
+        },
+        Some(decision),
+    );
+    out.push(Case::new(
+        "obligation_kept",
+        "An obligation (OBL-) created by a decision, then planned, lapsed, \
+         rescheduled and discharged by amendments carrying an `update` of \
+         their own kind. Each names the obligation; none changes standing.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = with_obligation();
+    let draft = AmendmentDraft::obligation(
+        gov(1),
+        c.hash_at(1),
+        ObligationUpdate::Lapsed,
+        "sweep",
+        "missed",
+    );
+    c.amend(&steward, &draft);
+    out.push(Case::new(
+        "obligation_kind_on_a_decision",
+        "A `lapsed` amendment naming a council decision. The obligation \
+         kinds are valid only on an obligation, so it takes no effect.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = with_obligation();
+    let mut draft = AmendmentDraft::obligation(
+        obl(1),
+        c.hash_at(2),
+        ObligationUpdate::Lapsed,
+        "sweep",
+        "missed",
+    );
+    draft.amendment.kind = AmendmentKind::Withdrawn;
+    c.amend(&steward, &draft);
+    let mut draft = AmendmentDraft::obligation(
+        obl(1),
+        c.hash_at(2),
+        ObligationUpdate::Withdrawn,
+        "b",
+        "n",
+    );
+    draft.amendment.update = None;
+    c.amend(&steward, &draft);
+    let mut draft = AmendmentDraft::new(
+        obl(1),
+        c.hash_at(2),
+        AmendmentKind::Correction,
+        "clerical",
+        "location corrected",
+    )
+    .unwrap();
+    draft.amendment.update = Some(ObligationUpdate::Lapsed);
+    c.amend(&steward, &draft);
+    out.push(Case::new(
+        "obligation_update_mismatch",
+        "Three malformed amendments of an obligation: a `withdrawn` \
+         carrying a `lapsed` update, a `withdrawn` with no update, and a \
+         `correction` with one.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        rec(1),
+        GovernanceLogEntryType::Obligation,
+        obligation.clone(),
+        false,
+    );
+    c.push(
+        &steward,
+        obl(1),
+        CouncilDecision,
+        json!({"title": "a decision wearing an OBL- id"}),
+        false,
+    );
+    out.push(Case::new(
+        "obligation_series_mismatch",
+        "An obligation outside the OBL- series, and a council decision \
          inside it.",
         &steward_pk,
         pinned.clone(),

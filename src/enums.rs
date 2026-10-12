@@ -357,6 +357,11 @@ pub enum GovernanceLogEntryType {
     // nothing and no verifier reads it; it is redactable because it names
     // people. Its `data` is a `govlog::StewardRecord`. (0.29)
     StewardRecord,
+    // An `OBL-` entry: work a decision or a record owes, with its due
+    // date. Its status is kept by amendments of the five obligation kinds.
+    // Redactable, since its quote may hold an agent's words. Its `data` is
+    // a `govlog::Obligation`. (0.72)
+    Obligation,
 }
 
 /// What an amendment does to the entry it names
@@ -392,6 +397,36 @@ pub enum AmendmentKind {
     // A commit: an RFC 6902 patch from the entry's previous version to the
     // next. Nothing is overwritten; see `AmendmentDraft::revision`. (0.43)
     Revision,
+    // The five below are valid only on an `obligation` and carry a
+    // `govlog::ObligationUpdate`; none changes standing. (0.72)
+    // A plan thread for the obligation; a later one replaces it.
+    Planned,
+    // The obligation is met, with evidence.
+    Discharged,
+    // Its due date passed with it still owed. Appended by the sweep and
+    // never removed.
+    Lapsed,
+    // A new due date, or none.
+    Rescheduled,
+    // Released: no longer owed.
+    Withdrawn,
+}
+
+impl AmendmentKind {
+    /// The kinds valid only on an `obligation` entry, which carry a
+    /// [`crate::govlog::ObligationUpdate`]
+    pub const OBLIGATION: [Self; 5] = [
+        Self::Planned,
+        Self::Discharged,
+        Self::Lapsed,
+        Self::Rescheduled,
+        Self::Withdrawn,
+    ];
+
+    /// Whether this is one of the [`OBLIGATION`](Self::OBLIGATION) kinds
+    pub fn is_obligation(self) -> bool {
+        Self::OBLIGATION.contains(&self)
+    }
 }
 
 /// The precedential force of a governance entry (`governance_standing_enum`),
@@ -453,6 +488,125 @@ pub enum KeyStatus {
     // Replaced by a compromise declaration; everything it signed after
     // the last trusted entry is repudiated.
     Compromised,
+}
+
+// ---------------------------------------------------------------------------
+// Obligations and the calendar (0.72)
+// ---------------------------------------------------------------------------
+
+/// What sort of work an obligation is (`obligation_kind_enum`). See
+/// [`crate::govlog::Obligation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "obligation_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ObligationKind {
+    // An item deferred or returned to a later sitting.
+    CarryForward,
+    // A decision taken provisionally, owed a ratifying vote.
+    Ratification,
+    // A dated review of something already decided.
+    Review,
+    // A matter referred elsewhere, such as a judge's referral.
+    Referral,
+    // Something withheld that is owed a disclosure.
+    Reveal,
+    // Work to be done: a feature, a fix, a document.
+    Task,
+}
+
+/// Who owes an obligation (`obligation_owed_by_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "obligation_owed_by_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OwedBy {
+    Steward,
+    // claude-opus and engineering.
+    Staff,
+    Council,
+}
+
+/// Where an obligation stands (`obligation_status_enum`), derived from its
+/// amendments. See [`crate::govlog::ObligationState`].
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "obligation_status_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ObligationStatus {
+    // Owed, and not yet missed.
+    #[default]
+    Open,
+    // Missed and still owed.
+    Lapsed,
+    // Met. Closed.
+    Discharged,
+    // Released. Closed.
+    Withdrawn,
+}
+
+impl ObligationStatus {
+    /// Discharged or withdrawn: only a record closes an obligation
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Discharged | Self::Withdrawn)
+    }
+}
+
+/// What a calendar event is (`calendar_event_kind_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "calendar_event_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarEventKind {
+    // A regular Council sitting.
+    Sitting,
+    // A sitting called outside the regular schedule.
+    SpecialSitting,
+    // A value this build does not know, from a newer server. Never written:
+    // `calendar_event_kind_enum` has no such label (as with
+    // `PollMode::Unknown`).
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
+}
+
+/// Where a calendar event stands (`calendar_event_status_enum`), from the
+/// newest of its changes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "calendar_event_status_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarEventStatus {
+    Scheduled,
+    Held,
+    Cancelled,
 }
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1150,11 @@ impl_display_fromstr!(ProposalCategory);
 impl_display_fromstr!(DesignationKind);
 impl_display_fromstr!(GovernanceLogEntryType);
 impl_display_fromstr!(AmendmentKind);
+impl_display_fromstr!(ObligationKind);
+impl_display_fromstr!(OwedBy);
+impl_display_fromstr!(ObligationStatus);
+impl_display_fromstr!(CalendarEventKind);
+impl_display_fromstr!(CalendarEventStatus);
 impl_display_fromstr!(Standing);
 impl_display_fromstr!(CitationRelation);
 impl_display_fromstr!(KeyStatus);
@@ -1156,6 +1315,47 @@ mod tests {
         assert_eq!(values::<ContentKind>(), ["post", "comment"]);
     }
 
+    /// The obligation enums go into the Lawyer's strict response format:
+    /// flat `enum` lists, inline, nothing a strict decoder refuses
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn obligation_enum_schemas_are_strict_safe() {
+        fn values<T: schemars::JsonSchema>() -> Vec<String> {
+            assert!(T::inline_schema());
+            let value = crate::responses::inline_schema_for::<T>();
+            assert_eq!(
+                crate::tools::strict_schema_violations(&value),
+                Vec::<String>::new()
+            );
+            value["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("a flat `enum`: {value}"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        }
+        assert_eq!(
+            values::<ObligationKind>(),
+            [
+                "carry_forward",
+                "ratification",
+                "review",
+                "referral",
+                "reveal",
+                "task"
+            ]
+        );
+        assert_eq!(values::<OwedBy>(), ["steward", "staff", "council"]);
+        assert_eq!(
+            values::<ObligationStatus>(),
+            ["open", "lapsed", "discharged", "withdrawn"]
+        );
+        assert_eq!(
+            values::<CalendarEventKind>(),
+            ["sitting", "special_sitting"]
+        );
+    }
+
     #[test]
     fn trash_enum_wire_values() {
         assert_eq!(DeletedBy::Operator.to_string(), "operator");
@@ -1232,6 +1432,65 @@ mod tests {
         assert_eq!(KeyStatus::Retired.to_string(), "retired");
     }
 
+    /// The obligation and calendar labels, pinned against the Postgres
+    /// enums they mirror
+    #[test]
+    fn obligation_and_calendar_wire_values() {
+        assert_eq!(
+            GovernanceLogEntryType::Obligation.to_string(),
+            "obligation"
+        );
+        let kinds: Vec<String> =
+            AmendmentKind::OBLIGATION.map(|k| k.to_string()).to_vec();
+        assert_eq!(
+            kinds,
+            [
+                "planned",
+                "discharged",
+                "lapsed",
+                "rescheduled",
+                "withdrawn"
+            ]
+        );
+        assert!(AmendmentKind::Lapsed.is_obligation());
+        assert!(!AmendmentKind::Revision.is_obligation());
+        for (kind, wire) in [
+            (ObligationKind::CarryForward, "carry_forward"),
+            (ObligationKind::Ratification, "ratification"),
+            (ObligationKind::Review, "review"),
+            (ObligationKind::Referral, "referral"),
+            (ObligationKind::Reveal, "reveal"),
+            (ObligationKind::Task, "task"),
+        ] {
+            assert_eq!(kind.to_string(), wire);
+            assert_eq!(wire.parse::<ObligationKind>().unwrap(), kind);
+        }
+        for (who, wire) in [
+            (OwedBy::Steward, "steward"),
+            (OwedBy::Staff, "staff"),
+            (OwedBy::Council, "council"),
+        ] {
+            assert_eq!(who.to_string(), wire);
+            assert_eq!(wire.parse::<OwedBy>().unwrap(), who);
+        }
+        assert_eq!(ObligationStatus::default(), ObligationStatus::Open);
+        assert_eq!(ObligationStatus::Lapsed.to_string(), "lapsed");
+        assert!(ObligationStatus::Withdrawn.is_closed());
+        assert!(!ObligationStatus::Lapsed.is_closed());
+        assert_eq!(
+            CalendarEventKind::SpecialSitting.to_string(),
+            "special_sitting"
+        );
+        assert_eq!(
+            "festival".parse::<CalendarEventKind>().unwrap(),
+            CalendarEventKind::Unknown
+        );
+        assert_eq!(
+            "cancelled".parse::<CalendarEventStatus>().unwrap(),
+            CalendarEventStatus::Cancelled
+        );
+    }
+
     /// The wire names the server and every client agree on.
     #[test]
     fn detail_level_wire_names() {
@@ -1270,6 +1529,11 @@ mod tests {
         assert!(<OAuthScope as JsonSchema>::inline_schema());
         assert!(<ModerationTargetType as JsonSchema>::inline_schema());
         assert!(<ModerationTier as JsonSchema>::inline_schema());
+        assert!(<ObligationKind as JsonSchema>::inline_schema());
+        assert!(<OwedBy as JsonSchema>::inline_schema());
+        assert!(<ObligationStatus as JsonSchema>::inline_schema());
+        assert!(<CalendarEventKind as JsonSchema>::inline_schema());
+        assert!(<CalendarEventStatus as JsonSchema>::inline_schema());
 
         #[derive(schemars::JsonSchema)]
         #[allow(dead_code)]

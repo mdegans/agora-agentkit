@@ -1,0 +1,362 @@
+{
+  "description": "An obligation (OBL-) created by a decision, then planned, lapsed, rescheduled and discharged by amendments carrying an `update` of their own kind. Each names the obligation; none changes standing.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "OBL-2026-0001",
+      "entry_type": "obligation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "50ce7dfd53b6514a4ce1752f840bb65b26d24dfb354dd257ecdeb7e45a126117",
+        "entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "signature": "aaf90d063f1f5d575e5bb7acf793d6445851aad9b386b4abe6ab6e0f06fa0756b212fdbae878e8b2c4bc44a41320d4d7fc3228865da0a2db4c0406f5379ead05",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "data_hash": "0362453525d0357bdb24ba9794cacc89bf95f62cff3b7d583d6387f379c145e9",
+        "entry_hash": "998eea95c814b19c3ef4583b5d1fe8c7d66a7ccf117cc80a7feb05a2fa345b0c",
+        "signature": "f401e11f64aef5502b089564278a134231e07fb493682641348fc56061bba9a45a2161cdc25b4639e0465e481d51b8df3813bf446d13a5ec4a54f0af4300bc0f",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "3366a0d946440473d5c8bc07ff36828251f6ba4370a19e714f98c37084bb6ccd"
+        },
+        "kind": "planned",
+        "note": {
+          "commitment": "c12eace9ab92632a2d4f5a7bb13ecef19fbc5107827bac5d35af32c1412fb8e1"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "update": {
+          "kind": "planned",
+          "plan": "91e791c0-0000-4000-8000-000000000000"
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "a30e3a9dda2bd3515655a8f124b6fd4af60f2febd801f38e580cb5d0e9b306c4",
+          "text": "Art. V § 3"
+        },
+        "note": {
+          "salt": "a7cdc2a99f5ca441977e82371fc5b8a66ac1773fb5fda176d0d9b0bea0512713",
+          "text": "status"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0002",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:00.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 4,
+        "prev_hash": "998eea95c814b19c3ef4583b5d1fe8c7d66a7ccf117cc80a7feb05a2fa345b0c",
+        "data_hash": "5ce3d95dc21a18113b2ea1932c03ae36f650c4b51282db11a5b413020eb69be6",
+        "entry_hash": "721b3d44080d24d9fb725e4633fbc0d60399932e6781993d55205dc05e2ae013",
+        "signature": "f526f4903179558351c619e12d32e8465f2df131f865cf414035b504d8df4c5e3b04a9f35a2b93542b778771ee7d5b2dd8e1f402cfd6d5e2d97562a456507a0e",
+        "signed_at": "2023-11-14T22:14:01Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "30fe1df257f61b4d203c5a9cb3c8e48a683cafdbbbb46712d8408dae21ba4284"
+        },
+        "kind": "lapsed",
+        "note": {
+          "commitment": "64846eaeb07d96ee39ee9a99c4c2691b627149fd00ce7af77d0b3e9360f2b277"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "update": {
+          "kind": "lapsed"
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "576d5866d6722fee886c4204de00f43e24300d22a03e337acc91e531714db484",
+          "text": "Art. V § 3"
+        },
+        "note": {
+          "salt": "eff78e34ef9efae8b1d1712bb7bb6b519f78be84367d70656c9bccd77e70948d",
+          "text": "status"
+        }
+      }
+    },
+    {
+      "id": "GOV-2026-0002",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:14:10.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 5,
+        "prev_hash": "721b3d44080d24d9fb725e4633fbc0d60399932e6781993d55205dc05e2ae013",
+        "data_hash": "d2c7c1e96760428f8403a6d5d3e2e2358c542c83ac0cc0aed2001f1c31705126",
+        "entry_hash": "ceae0a1c3ee45ad0f5ae9a50bacaeeecd1e2fe7c7eeac5cc54599428437a987a",
+        "signature": "14b25bafdbed27b89c6a43b996653d16446431ea46eceebe11e04c548b84f64b4c46d2f59664911149c9fbd12672f0e8a619be860889240c23bd3c8c5e7aed0c",
+        "signed_at": "2023-11-14T22:14:11Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0003",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:20.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 6,
+        "prev_hash": "ceae0a1c3ee45ad0f5ae9a50bacaeeecd1e2fe7c7eeac5cc54599428437a987a",
+        "data_hash": "d20dd962be4c813c08b8f862f332271f3e520df3914fede652f53469b4daa599",
+        "entry_hash": "dec0331a996a7b99664419ea0b281f8436b80d08abc435ef5655d72697972ea4",
+        "signature": "49f54176414bc65893fd7909e13801212629b3cd0d8ca7c4c7270270ee2b0ffd1f1dfcf843457795d8fe4592254f032a9d7ec806336c5cec4e7ada75ff460a03",
+        "signed_at": "2023-11-14T22:14:21Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": "GOV-2026-0002",
+        "basis": {
+          "commitment": "8d4edba7bda18bb000426771949340db1b0dea573e67e72a4c4d5c3c96094f82"
+        },
+        "kind": "rescheduled",
+        "note": {
+          "commitment": "64b885343a4ed7fe6b7f895fc42906490ff2a2dac99902a94a3e463cd2799628"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "update": {
+          "kind": "rescheduled",
+          "until": {
+            "when": "next_sitting"
+          }
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "7841b5763324ad1b6c443bfa87d7949372e24288b5b64b8921823ec91be6db70",
+          "text": "Art. V § 3"
+        },
+        "note": {
+          "salt": "529fd71d43d80e49728b8a83eadb0a7d5f5bb24da04c85dfc18652c57c3a51eb",
+          "text": "status"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0004",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 7,
+        "prev_hash": "dec0331a996a7b99664419ea0b281f8436b80d08abc435ef5655d72697972ea4",
+        "data_hash": "c51e083313f2f05ab1ae7512cc7fa12bb6336d4af38171bb6b5b992ea6c2bfe5",
+        "entry_hash": "70ceb48af2f5243bce37ebf77194860cfd99b9ad1c53cf684888cc562f5cf64f",
+        "signature": "3ca01cc44e9c3b304f2344c83ede18d6a7578d6a209ced489440d5f83c8d9bf9e3705cdacd7defe5ef810f01a900eed0b086d62500260d79edb303f506d8260d",
+        "signed_at": "2023-11-14T22:14:31Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": "GOV-2026-0002",
+        "basis": {
+          "commitment": "62c828ec0efc0cd03fe70cb8cc3ae1b12a804dc5113035ea70b38a221917cb86"
+        },
+        "kind": "discharged",
+        "note": {
+          "commitment": "b1dd18736a39de752eee2cc34c2375441a871e913e2aaec4385217e603aa4b5c"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "update": {
+          "evidence": {
+            "id": "GOV-2026-0002",
+            "kind": "governance"
+          },
+          "kind": "discharged"
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "4ce87603d2e51a59cca56aacb5b4f4c359c1bc7dadd971993016be2a66e6019b",
+          "text": "Art. V § 3"
+        },
+        "note": {
+          "salt": "6228e47d092e0133fc174f2c9deab0493cd219a0fe36080da088aeb250442e41",
+          "text": "status"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "ok": true,
+    "head": "AMD-2026-0004",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "OBL-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [
+          "AMD-2026-0001",
+          "AMD-2026-0002",
+          "AMD-2026-0003",
+          "AMD-2026-0004"
+        ],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      },
+      {
+        "id": "GOV-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0003",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0004",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      }
+    ],
+    "standing": {
+      "OBL-2026-0001": "in_force"
+    }
+  }
+}

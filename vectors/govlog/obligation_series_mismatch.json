@@ -1,0 +1,118 @@
+{
+  "description": "An obligation outside the OBL- series, and a council decision inside it.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "REC-2026-0001",
+      "entry_type": "obligation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "50ce7dfd53b6514a4ce1752f840bb65b26d24dfb354dd257ecdeb7e45a126117",
+        "entry_hash": "ffb2497ae53664a355859ae0707cdc55de58c2f1269915c2b381d07f1f39f8c9",
+        "signature": "4f449b8b2b5a9e1aa5b8c429c67618b990784943f98dba5edd5ddd8d7980e98b5140408569d5761fe0dd30abe162c60ff53c849c1a0d85d2d219e0e810a84f03",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "OBL-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "ffb2497ae53664a355859ae0707cdc55de58c2f1269915c2b381d07f1f39f8c9",
+        "data_hash": "38f56fcf5a982b2a84a25849f586c1a74c30a5eb712e0c7a4ebef3f1ec13fcf6",
+        "entry_hash": "2adc790dea7c6402864a9bae889e0955e6cd6cb1e996cdc0b721fdaa2bae2d80",
+        "signature": "42dfc43984433c6eda755498c2ec2ce213499d1c43b57166fa99b07dca820662148dc8584bccccbf0b0f2bfaf90a054d1aeeb11cae0b651039af70c6f8a15e05",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "OBL-2026-0001",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "REC-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": true
+      },
+      {
+        "id": "OBL-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": true
+      }
+    ]
+  }
+}

@@ -2019,6 +2019,7 @@ mod tests {
                        precedent"
                     .into(),
                 rationale: None,
+                update: None,
                 created_at: Utc::now(),
             }],
             cited_by: Vec::new(),
@@ -2239,6 +2240,7 @@ mod tests {
                 note: "raw_text identical to each seat's rationale removed"
                     .into(),
                 rationale: None,
+                update: None,
                 created_at: Utc::now(),
             }],
             cited_by: Vec::new(),

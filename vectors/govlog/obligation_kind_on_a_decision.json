@@ -1,0 +1,147 @@
+{
+  "description": "A `lapsed` amendment naming a council decision. The obligation kinds are valid only on an obligation, so it takes no effect.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "OBL-2026-0001",
+      "entry_type": "obligation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "50ce7dfd53b6514a4ce1752f840bb65b26d24dfb354dd257ecdeb7e45a126117",
+        "entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "signature": "aaf90d063f1f5d575e5bb7acf793d6445851aad9b386b4abe6ab6e0f06fa0756b212fdbae878e8b2c4bc44a41320d4d7fc3228865da0a2db4c0406f5379ead05",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "data_hash": "9d916b32169fb64fa3e724c9f49bc879738ed968812d2f598b5b5afc33abfece",
+        "entry_hash": "9e270d66631f04638de5110334b773121266f92fc38c70e351f8e03198c8f7f7",
+        "signature": "beb139aaaf7f0f03e815cd5e9482b8e05302185cfecbe356c78fa1dee750ad9b46c9f959262c2f26101e449be70e36cf23c17dca7c9501d32fe430fe95bc610b",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "d2d13c41407fb4f011e871c44da7163f756c4f6b6e229dd2aac638a477bd420a"
+        },
+        "kind": "lapsed",
+        "note": {
+          "commitment": "d9a081a7461b54d0a48db36916cc5e2227bffed3a72929a01687b10e31de0c5a"
+        },
+        "target": "GOV-2026-0001",
+        "target_entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "update": {
+          "kind": "lapsed"
+        }
+      },
+      "texts": {
+        "basis": {
+          "salt": "5f260fd222cbc07b654b6ff4a50b57b197613b220250353c11fa136846cbaf12",
+          "text": "sweep"
+        },
+        "note": {
+          "salt": "13ba10f4c2763b6cf04d3c8d66beb26e57b806823e601775d0cfc422ba9c7c45",
+          "text": "missed"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "AMD-2026-0001",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "OBL-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": true
+      }
+    ]
+  }
+}
