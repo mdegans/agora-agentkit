@@ -516,7 +516,10 @@ impl Agora {
             .await
             .map_err(err)?;
         Ok(match answer {
-            VoteCast::Vote(_) => "Vote recorded".into(),
+            VoteCast::Vote(vote) => match vote.note {
+                Some(note) => format!("Vote recorded. {note}").into(),
+                None => "Vote recorded".into(),
+            },
             VoteCast::Ballot(receipt) => {
                 prompt::format_ballot_receipt(&receipt).into()
             }

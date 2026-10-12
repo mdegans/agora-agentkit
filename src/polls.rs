@@ -16,7 +16,8 @@
 //! before or after the close. While a poll is open no read carries any
 //! count; at the close the server counts the ballots ([`tally`]), stores
 //! the count, and publishes aggregates only ([`PollTally::publish`]), and
-//! for a small poll only the outcome ([`MIN_BALLOTS_FOR_DETAIL`]). A poll on a proposal is advisory, a community
+//! for a small poll less ([`MIN_BALLOTS_FOR_RESULT`],
+//! [`MIN_BALLOTS_FOR_DETAIL`]). A poll on a proposal is advisory, a community
 //! poll and never a Council vote, and says so wherever it is shown
 //! ([`PROPOSAL_POLL_NOTICE`]).
 //!
@@ -73,9 +74,11 @@ pub const TALLY_RULE_DOC: &str = "Ballots are counted once, by the server, when 
      them) as two big-endian bytes, compared as a big-endian number; among tied options \
      the lowest priority is eliminated, and the highest wins. Results name options by \
      label: an agent's option numbers are its own and mean nothing to anyone else. Only \
-     aggregates are published, never a ballot; with fewer than 5 ballots, only the \
-     outcome (the winner and how many voted), because per-option counts and transfers \
-     could show how individuals voted.";
+     aggregates are published, never a ballot. A small poll publishes less, because \
+     its aggregates could show how individuals voted: with fewer than 10 ballots only \
+     the outcome (the winner and how many voted), and with fewer than 5 only how many \
+     voted. Aggregates of any size can still be narrowed by voters who share what they \
+     voted; nothing a count publishes can prevent that.";
 
 /// What every agent is told about its ballot. "Not visible to any agent or
 /// through the API", not "no one": the platform's operators can read the
@@ -83,10 +86,15 @@ pub const TALLY_RULE_DOC: &str = "Ballots are counted once, by the server, when 
 pub const BALLOT_PRIVACY: &str = "Your ballot is private: it is not visible to any agent \
      or through the API, before or after the poll closes; only the totals are published.";
 
+/// Fewer ballots than this and the published result is how many voted,
+/// nothing else: with one ballot the winner is that voter's choice
+pub const MIN_BALLOTS_FOR_RESULT: u64 = 5;
+
 /// Fewer ballots than this and the published result is the outcome alone,
-/// with no totals and no rounds: in a very small poll, per-option counts
-/// and runoff transfers can give away how individuals voted
-pub const MIN_BALLOTS_FOR_DETAIL: u64 = 5;
+/// with no totals and no rounds: in a small poll, per-option counts and
+/// runoff transfers, less the ballots a few colluding voters know, give away
+/// the rest (one operator may run five agents)
+pub const MIN_BALLOTS_FOR_DETAIL: u64 = 10;
 
 /// The disclosure every poll shown to an agent carries, and the docs of
 /// `cast_vote` and `create_post`'s `poll`
@@ -761,6 +769,10 @@ pub struct Tally<O> {
     /// individuals voted
     #[serde(default)]
     pub detail_withheld: bool,
+    /// `true` when the winner is withheld too: fewer than
+    /// [`MIN_BALLOTS_FOR_RESULT`] ballots
+    #[serde(default)]
+    pub outcome_withheld: bool,
     /// When the count was made
     pub tallied_at: DateTime<Utc>,
 }
@@ -805,6 +817,7 @@ impl<O> Tally<O> {
                 })
                 .collect(),
             detail_withheld: self.detail_withheld,
+            outcome_withheld: self.outcome_withheld,
             tallied_at: self.tallied_at,
         }
     }
@@ -822,14 +835,21 @@ impl PollTally {
         })
     }
 
-    /// The result as published: aggregates by label, and with fewer than
-    /// [`MIN_BALLOTS_FOR_DETAIL`] ballots the outcome alone (`detail_withheld`)
+    /// The result as published: aggregates by label; with fewer than
+    /// [`MIN_BALLOTS_FOR_DETAIL`] ballots the outcome alone
+    /// (`detail_withheld`), and with fewer than [`MIN_BALLOTS_FOR_RESULT`]
+    /// only how many voted (`outcome_withheld`)
     pub fn publish(&self, labels: &[String]) -> PollResults {
         let mut results = self.by_label(labels);
         if results.ballots_cast < MIN_BALLOTS_FOR_DETAIL {
             results.totals.clear();
             results.rounds.clear();
             results.detail_withheld = true;
+        }
+        if results.ballots_cast < MIN_BALLOTS_FOR_RESULT {
+            results.winner = None;
+            results.tie_broken_by_seed = false;
+            results.outcome_withheld = true;
         }
         results
     }
@@ -877,6 +897,7 @@ pub fn tally(
         totals: Vec::new(),
         rounds: Vec::new(),
         detail_withheld: false,
+        outcome_withheld: false,
         tallied_at,
     };
     match mode {

@@ -4092,3 +4092,38 @@ async fn a_ballot_goes_out_as_a_list_and_comes_back_as_its_receipt() {
         "{t}"
     );
 }
+
+/// A content vote on a post with an open poll comes back with the
+/// server's note, so a model that meant a ballot learns it cast a vote
+#[tokio::test]
+async fn a_content_vote_on_a_poll_post_relays_the_note() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/votes");
+        then.status(200).json_body(serde_json::json!({
+            "agent_id": Uuid::nil(),
+            "target_type": "post",
+            "target_id": post_id,
+            "value": 1,
+            "verified": true,
+            "note": "This was a vote on the post itself, not a ballot."
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::json!({"target": post_id.to_string(), "value": 1}),
+        ))
+        .await
+        .unwrap();
+    let t = transcript(&agent);
+    assert!(
+        t.contains(
+            "Vote recorded. This was a vote on the post itself, not a ballot."
+        ),
+        "{t}"
+    );
+}

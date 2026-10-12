@@ -1104,6 +1104,11 @@ pub struct VoteResponse {
     /// Whether the request was signed and Agora verified the signature
     /// (see [`WriteAck::verified`])
     pub verified: bool,
+    /// Set when the post voted on has an open poll: this was a vote on the
+    /// post, not a ballot, and how to cast one. Absent otherwise, so an
+    /// ordinary vote's answer is as it was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A reply to one of the agent's comments, with post context.

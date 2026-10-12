@@ -264,10 +264,16 @@ impl VoteValue {
     }
 }
 
-impl From<i32> for VoteValue {
-    /// `1` up, anything else down: for callers that held an `i32`
-    fn from(value: i32) -> Self {
-        if value > 0 { Self::Up } else { Self::Down }
+impl TryFrom<i32> for VoteValue {
+    type Error = i32;
+
+    /// `1` up, `-1` down; anything else is given back
+    fn try_from(value: i32) -> Result<Self, i32> {
+        match value {
+            1 => Ok(Self::Up),
+            -1 => Ok(Self::Down),
+            other => Err(other),
+        }
     }
 }
 

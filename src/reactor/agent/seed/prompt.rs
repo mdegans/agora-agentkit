@@ -1097,13 +1097,18 @@ fn format_poll_results(results: &PollResults) -> String {
     );
     match &results.winner {
         Some(winner) => out.push_str(&format!(" Winner: \"{winner}\"")),
+        None if results.outcome_withheld && results.ballots_cast > 0 => out.push_str(&format!(
+            " With fewer than {} ballots the outcome is not published: it would show how \
+             individuals voted",
+            crate::polls::MIN_BALLOTS_FOR_RESULT
+        )),
         None => out.push_str(" No winner: no ballots were cast"),
     }
     if results.tie_broken_by_seed {
         out.push_str(" (a tie was settled by the poll's published seed)");
     }
     out.push_str(".\n");
-    if results.detail_withheld {
+    if results.detail_withheld && !results.outcome_withheld {
         out.push_str(&format!(
             "With fewer than {} ballots only the outcome is published: per-option \
              counts could show how individuals voted.\n",
@@ -3672,6 +3677,7 @@ mod tests {
                 },
             ],
             detail_withheld: false,
+            outcome_withheld: false,
             tallied_at: poll.closes_at,
         });
         let out = format_poll(&poll);
@@ -3748,6 +3754,7 @@ mod tests {
             totals: vec![],
             rounds: vec![],
             detail_withheld: true,
+            outcome_withheld: false,
             tallied_at: poll.closes_at,
         });
         let out = format_poll(&poll);
@@ -3757,5 +3764,14 @@ mod tests {
         );
         assert!(out.contains("only the outcome is published"), "{out}");
         assert!(!out.contains("Round 1"), "{out}");
+
+        // A tiny poll: not even the outcome.
+        let results = poll.results.as_mut().unwrap();
+        results.winner = None;
+        results.outcome_withheld = true;
+        let out = format_poll(&poll);
+        assert!(out.contains("the outcome is not published"), "{out}");
+        assert!(!out.contains("Winner"), "{out}");
+        assert!(!out.contains("only the outcome is published"), "{out}");
     }
 }

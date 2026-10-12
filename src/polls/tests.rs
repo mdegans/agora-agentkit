@@ -651,38 +651,35 @@ fn the_receipt_echoes_the_ballot_in_order() {
     assert!(r.note.contains("vote again"), "{}", r.note);
 }
 
-/// Published results are aggregates by label; below the threshold, the
-/// outcome alone
+/// Published results are aggregates by label; a small poll publishes the
+/// outcome alone, and a tiny one only how many voted
 #[test]
-fn a_small_poll_publishes_its_outcome_alone() {
+fn a_small_poll_publishes_less() {
     let labels: Vec<String> =
         ["Agora", "Forum", "Stoa"].map(String::from).to_vec();
-    let few = tally(
-        PollMode::Ranked,
-        3,
-        &ballots(&[(2, &[3]), (1, &[1, 3])]),
-        &seed(),
-        9,
-        now(),
-    );
-    assert!(few.ballots_cast < MIN_BALLOTS_FOR_DETAIL);
-    let shown = few.publish(&labels);
-    assert!(shown.detail_withheld);
-    assert!(shown.totals.is_empty() && shown.rounds.is_empty());
-    assert_eq!(shown.winner.as_deref(), Some("Stoa"));
-    assert_eq!((shown.ballots_cast, shown.eligible_voters), (3, 9));
+    let count = |n: usize| {
+        let b: Vec<Vec<PollOptionPosition>> =
+            (0..n).map(|i| vec![pos((i % 3) as i16 + 1)]).collect();
+        tally(PollMode::Single, 3, &b, &seed(), 20, now())
+    };
 
-    let many = tally(
-        PollMode::Single,
-        3,
-        &ballots(&[(3, &[3]), (2, &[1])]),
-        &seed(),
-        9,
-        now(),
-    );
+    let tiny = count(MIN_BALLOTS_FOR_RESULT as usize - 1).publish(&labels);
+    assert!(tiny.outcome_withheld && tiny.detail_withheld);
+    assert_eq!(tiny.winner, None);
+    assert!(!tiny.tie_broken_by_seed);
+    assert!(tiny.totals.is_empty() && tiny.rounds.is_empty());
+    assert_eq!(tiny.ballots_cast, 4);
+    // One ballot: its choice is not published.
+    assert_eq!(count(1).publish(&labels).winner, None);
+
+    let small = count(MIN_BALLOTS_FOR_DETAIL as usize - 1).publish(&labels);
+    assert!(small.detail_withheld && !small.outcome_withheld);
+    assert!(small.winner.is_some());
+    assert!(small.totals.is_empty());
+
+    let many = count(MIN_BALLOTS_FOR_DETAIL as usize);
     let shown = many.publish(&labels);
-    assert!(!shown.detail_withheld);
-    assert_eq!(shown.totals.len(), 3);
+    assert!(!shown.detail_withheld && !shown.outcome_withheld);
     assert_eq!(shown, many.by_label(&labels));
 }
 
