@@ -430,12 +430,12 @@ pub enum GovernanceLogEntryType {
     Obligation,
 }
 
-/// What an amendment does to the entry it names. See
-/// [`crate::govlog::Amendment`].
-///
-/// Stored only in an amendment's signed `data`, so it has no Postgres
-/// twin (0.74 dropped a `sqlx(type_name)` naming a type no migration
-/// creates).
+/// What an amendment does to the entry it names
+/// (`governance_amendment_kind_enum`). See [`crate::govlog::Amendment`].
+// Stored only in an amendment's signed `data`: there is no Postgres
+// `governance_amendment_kind_enum`, and 0.74 dropped the `sqlx(type_name)`
+// naming it. The doc comment above is schema text that agora pins byte for
+// byte, so it keeps the old name until a release that may change schemas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]

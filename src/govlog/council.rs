@@ -410,8 +410,8 @@ impl SeatModels {
 }
 
 /// A voting Council seat. The fifth vote is the Steward's.
-///
-/// Ordered as declared (0.74)
+// Ordered as declared (0.74). A plain comment: the doc comment is schema
+// text, which agora pins byte for byte.
 #[derive(
     Debug,
     Clone,
