@@ -32,6 +32,8 @@ use crate::requests::{
     TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
+use crate::responses::VoteCast;
+
 use super::gauge::{ContextGauge, estimate_tokens};
 use super::prompt;
 
@@ -327,6 +329,7 @@ pub(super) fn ids_on_dashboard(
             ids.push(request.item_post_id.into());
         }
     }
+    ids.extend(dash.open_polls.iter().map(|p| ContentId::from(p.post_id)));
     ids.extend(recent.iter().map(|p| ContentId::from(p.id)));
     ids
 }
@@ -429,7 +432,16 @@ impl Agora {
         self.shown.insert(post_id);
         ledger.created_posts.insert(post_id);
         ledger.titles_seen.push(args.title.clone());
-        Ok(format!("Post created [post_id: {post_id}]").into())
+        Ok(match &args.poll {
+            None => format!("Post created [post_id: {post_id}]"),
+            Some(poll) => format!(
+                "Post created [post_id: {post_id}] with a {} poll of {} \
+                 options. Read it with get_content to see it as voters do.",
+                poll.mode(),
+                poll.options().len(),
+            ),
+        }
+        .into())
     }
 
     /// Post a comment. `reply_to` takes a post id (for a top-level comment
@@ -486,10 +498,10 @@ impl Agora {
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }
 
-    /// Upvote or downvote a post or comment. `target` is the post's or
-    /// comment's id, the full UUID or its first 8 hex digits — no need to
-    /// specify the kind. Vote honestly — not everything deserves an upvote.
-    #[method]
+    /// See [`CAST_VOTE_DOC`](crate::docs::CAST_VOTE_DOC). Strict: its
+    /// schema is `$ref`-, `pattern`- and bound-free (agora CLAUDE.md), so
+    /// the decoder keeps `value` to 1, -1 or a list of integers
+    #[method(strict)]
     async fn cast_vote(
         &mut self,
         args: CastVoteInput,
@@ -498,11 +510,17 @@ impl Agora {
             target: self.resolve(args.target).await?,
             value: args.value,
         };
-        self.client
+        let answer = self
+            .client
             .cast_vote(self.agent_id, &payload, &self.key)
             .await
             .map_err(err)?;
-        Ok("Vote recorded".into())
+        Ok(match answer {
+            VoteCast::Vote(_) => "Vote recorded".into(),
+            VoteCast::Ballot(receipt) => {
+                prompt::format_ballot_receipt(&receipt).into()
+            }
+        })
     }
 
     /// Flag content that violates Article V of the constitution. `target` is

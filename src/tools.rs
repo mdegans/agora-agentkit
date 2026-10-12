@@ -102,6 +102,115 @@ pub fn agent_tool(name: &str) -> Option<&'static AgentTool> {
     AGENT_TOOLS.iter().find(|t| t.name == name)
 }
 
+/// Every way `schema` breaks agora's rules for a strict tool or response
+/// schema (agora CLAUDE.md), each as `path: what`. Empty when it keeps
+/// them all.
+///
+/// The rules: no `$ref`/`$defs`; no `pattern`; `anyOf`, never `oneOf`;
+/// every object closed (`additionalProperties: false`); no bound strict
+/// decoding does not take (`minimum`, `maxLength`, `uniqueItems`, …); only
+/// the string `format`s it does; and no property that asks a model for
+/// its reasoning (rule 5).
+pub fn strict_schema_violations(schema: &serde_json::Value) -> Vec<String> {
+    const UNSUPPORTED: &[&str] = &[
+        "$ref",
+        "$defs",
+        "definitions",
+        "pattern",
+        "oneOf",
+        "not",
+        "if",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "maxItems",
+        "uniqueItems",
+        "contains",
+        "minProperties",
+        "maxProperties",
+        "patternProperties",
+    ];
+    const FORMATS: &[&str] = &[
+        "date-time",
+        "time",
+        "date",
+        "duration",
+        "email",
+        "hostname",
+        "uri",
+        "ipv4",
+        "ipv6",
+        "uuid",
+    ];
+    const REASONING: &[&str] = &[
+        "reasoning",
+        "thinking",
+        "thought",
+        "trace",
+        "scratchpad",
+        "chain_of_thought",
+    ];
+
+    fn walk(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for key in UNSUPPORTED {
+                    if map.contains_key(*key) {
+                        out.push(format!("{path}: `{key}`"));
+                    }
+                }
+                if let Some(n) = map.get("minItems").and_then(|v| v.as_u64())
+                    && n > 1
+                {
+                    out.push(format!("{path}: `minItems` {n}"));
+                }
+                if let Some(format) = map.get("format").and_then(|v| v.as_str())
+                    && !FORMATS.contains(&format)
+                {
+                    out.push(format!("{path}: `format` {format}"));
+                }
+                let is_object = map.get("type").and_then(|v| v.as_str())
+                    == Some("object")
+                    || map.contains_key("properties");
+                if is_object
+                    && map.get("additionalProperties") != Some(&false.into())
+                {
+                    out.push(format!("{path}: an object without `additionalProperties: false`"));
+                }
+                if let Some(props) =
+                    map.get("properties").and_then(|v| v.as_object())
+                {
+                    for name in props.keys() {
+                        let lower = name.to_lowercase();
+                        if REASONING.iter().any(|r| lower.starts_with(r)) {
+                            out.push(format!(
+                                "{path}.{name}: asks for reasoning"
+                            ));
+                        }
+                    }
+                }
+                for (key, child) in map {
+                    walk(child, &format!("{path}.{key}"), out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}[{i}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(schema, "$", &mut out);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

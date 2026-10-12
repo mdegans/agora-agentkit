@@ -449,12 +449,12 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
         "{uuids:?}"
     );
     // The write tools take a short id too: their pattern admits both forms,
-    // and no `format: uuid` that a short id would fail.
-    for (tool, field) in [
-        ("create_comment", "reply_to"),
-        ("cast_vote", "target"),
-        ("flag_content", "target"),
-    ] {
+    // and no `format: uuid` that a short id would fail. `cast_vote` is
+    // strict, so its `target` is a plain string instead
+    // (`cast_vote_is_strict_and_its_schema_keeps_the_strict_rules`).
+    for (tool, field) in
+        [("create_comment", "reply_to"), ("flag_content", "target")]
+    {
         let def = agent
             .prompt()
             .tools
@@ -3028,17 +3028,20 @@ async fn cast_vote_looks_up_an_unseen_short_id() {
             .json_body_partial(format!(
                 r#"{{"target": "{post_id}", "value": -1}}"#
             ));
-        then.status(200)
-            .json_body_obj(&crate::responses::StatusResponse {
-                status: "ok".into(),
-            });
+        then.status(200).json_body(serde_json::json!({
+            "agent_id": Uuid::nil(),
+            "target_type": "post",
+            "target_id": post_id,
+            "value": -1,
+            "verified": true
+        }));
     });
 
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
     let input = crate::requests::CastVoteInput {
         target: short(post_id).to_uppercase().parse().unwrap(),
-        value: -1,
+        value: crate::requests::VoteValue::Down,
     };
     agent
         .handle(tool_use_message(
@@ -3984,4 +3987,108 @@ async fn get_content_falls_back_when_the_signed_route_is_missing() {
     let rendered = transcript(&agent);
     assert!(rendered.contains("Compilers are underrated"), "{rendered}");
     assert!(rendered.contains("no such post or comment"), "{rendered}");
+}
+
+/// `cast_vote` goes out strict, its description the shared prose, its
+/// schema keeping every strict rule; `create_post` says how to attach a
+/// poll
+#[tokio::test]
+async fn cast_vote_is_strict_and_its_schema_keeps_the_strict_rules() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let find = |name: &str| {
+        agent
+            .prompt()
+            .tools
+            .iter()
+            .flatten()
+            .find_map(|d| match d {
+                misanthropic::tool::MethodDef::Custom(c) if c.name == name => {
+                    Some(c.clone())
+                }
+                _ => None,
+            })
+            .expect("the tool is installed")
+    };
+    let vote = find("cast_vote");
+    assert_eq!(vote.strict, Some(true));
+    assert_eq!(vote.description, crate::docs::CAST_VOTE_DOC);
+    assert_eq!(
+        crate::tools::strict_schema_violations(&vote.schema),
+        Vec::<String>::new(),
+        "{}",
+        vote.schema
+    );
+    let post = find("create_post");
+    assert!(
+        post.description
+            .ends_with(crate::docs::CREATE_POST_POLL_DOC)
+    );
+    assert_ne!(post.strict, Some(true), "create_post is not strict (yet)");
+    assert_eq!(
+        crate::tools::strict_schema_violations(
+            &post.schema["properties"]["poll"]
+        ),
+        Vec::<String>::new()
+    );
+}
+
+/// A list in `value` is a ballot: it is signed as sent, and the answer
+/// comes back as the receipt, the ballot echoed by number and label
+#[tokio::test]
+async fn a_ballot_goes_out_as_a_list_and_comes_back_as_its_receipt() {
+    use crate::enums::PollMode;
+    use crate::ids::{BallotId, PollId, PollOptionNumber};
+    use crate::polls::{BallotChoice, BallotReceipt};
+
+    let server = MockServer::start();
+    let post_id = PostId::new();
+    let receipt = BallotReceipt::new(
+        BallotId::new(),
+        false,
+        true,
+        PollId::new(),
+        post_id,
+        PollMode::Ranked,
+        vec![
+            BallotChoice {
+                number: PollOptionNumber::from(2),
+                label: "Agora".into(),
+            },
+            BallotChoice {
+                number: PollOptionNumber::from(5),
+                label: "Stoa".into(),
+            },
+        ],
+        chrono::Utc::now(),
+    );
+    let vote = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/votes")
+            .json_body_partial(format!(
+                r#"{{"target": "{post_id}", "value": [2, 5]}}"#
+            ));
+        then.status(200).json_body_obj(&receipt);
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "cast_vote",
+            serde_json::json!({"target": post_id.to_string(), "value": [2, 5]}),
+        ))
+        .await
+        .unwrap();
+    vote.assert();
+    let t = transcript(&agent);
+    assert!(
+        t.contains("Your ranking, most preferred first: 2. Agora, 5. Stoa."),
+        "{t}"
+    );
+    assert!(
+        t.contains(&format!("Ballot cast in the poll on [post_id: {post_id}]")),
+        "{t}"
+    );
 }

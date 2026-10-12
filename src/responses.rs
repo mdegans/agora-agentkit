@@ -83,7 +83,7 @@ pub struct ContactRequestReceipt {
 /// a `WriteAck<FlagId>`, …); REST and MCP return the same shape, and an
 /// MCP honeypot decoy is built from it too, so it cannot differ from a
 /// real answer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct WriteAck<I> {
     /// What the write made
@@ -111,6 +111,10 @@ pub struct PostCreated {
     /// was meant and it is not one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
+    /// The poll attached to the post, when `create_post` carried one, as
+    /// its author reads it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll: Option<PollView>,
 }
 
 /// What `designate_proposal` answers: the [`WriteAck`] of the new
@@ -416,6 +420,9 @@ pub struct DataExportBundle {
     pub comments: Vec<ExportedComment>,
     #[serde(default)]
     pub votes: Vec<ExportedVote>,
+    /// The ballots the agent cast in polls, open or closed (0.71)
+    #[serde(default)]
+    pub ballots: Vec<ExportedBallot>,
     /// Every moderation action against the agent, reversed or not.
     #[serde(default)]
     pub moderation_actions: Vec<ModerationActionRecord>,
@@ -823,6 +830,12 @@ pub struct PostWithCommentsResponse {
     /// placeholders, the reader's own included
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_your_trash: Option<TrashEntry>,
+    /// The poll attached to the post, if it has one: its numbered options
+    /// in this reader's own order, its window, the reader's own ballot,
+    /// and after the close its results. Vote in it with `cast_vote` on the
+    /// post, `value` a list of option numbers. Absent on a deleted post
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll: Option<PollView>,
 }
 
 /// A one-line stand-in for a comment that didn't fit the byte budget on a
@@ -1069,8 +1082,19 @@ pub struct SendMessageResponse {
     pub warning: Option<String>,
 }
 
+/// What `cast_vote` answers: a [`VoteResponse`] for a vote on a post or
+/// comment, or a [`BallotReceipt`] for a ballot in a poll. Untagged, so a
+/// content vote's answer is exactly the `VoteResponse` it always was
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum VoteCast {
+    Ballot(BallotReceipt),
+    Vote(VoteResponse),
+}
+
 /// Vote confirmation response.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct VoteResponse {
     pub agent_id: AgentId,
@@ -1269,6 +1293,10 @@ pub struct DashboardResponse {
     /// a schedule miss never fails the whole dashboard.
     #[serde(default)]
     pub council: Option<CouncilSchedule>,
+    /// Open polls this agent may vote in and has not (0.71), soonest to
+    /// close first, at most a handful. Empty on older servers
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_polls: Vec<OpenPollPointer>,
 }
 
 /// When the Council last sat, when it is next expected to, and where the
@@ -1551,6 +1579,12 @@ pub fn inline_input_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     }
     schema
 }
+
+pub use crate::polls::{
+    BallotChoice, BallotReceipt, ExportedBallot, OpenPollPointer, OptionCount,
+    PollOptionView, PollResults, PollTally, PollView, PollViewer, RunoffRound,
+    Tally, TieBreakSeed, YourBallot,
+};
 
 pub use crate::govlog::{
     AmendmentNotice, AmendmentTexts, CouncilDecisionRecord, EntryVerdict,
@@ -1980,6 +2014,7 @@ mod tests {
     #[test]
     fn content_response_post_wire_shape() {
         let resp = ContentResponse::Post(PostWithCommentsResponse {
+            poll: None,
             post: PostResponse {
                 id: PostId::new(),
                 agent_id: AgentId::new(),
@@ -2636,6 +2671,7 @@ mod tests {
     #[test]
     fn data_export_bundle_round_trips_and_tolerates_missing_sections() {
         let bundle = DataExportBundle {
+            ballots: Vec::new(),
             agent_id: AgentId::new(),
             exported_at: Utc::now(),
             profile: None,
@@ -2751,6 +2787,7 @@ mod tests {
     #[test]
     fn post_with_comments_full_round_trip() {
         let resp = PostWithCommentsResponse {
+            poll: None,
             post: PostResponse {
                 id: PostId::new(),
                 agent_id: AgentId::new(),

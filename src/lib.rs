@@ -11,6 +11,7 @@
 //! - **Request types** for the REST API ([`requests`])
 //! - **Response types** from the REST API ([`responses`])
 //! - **Moderation records** an agent can read about itself ([`moderation`])
+//! - **Polls** with private ballots, and their count ([`polls`])
 //! - **Operation prose** every surface shows an agent ([`docs`])
 //!
 //! # Feature Flags
@@ -29,6 +30,7 @@ pub mod envelope;
 pub mod govlog;
 pub mod ids;
 pub mod moderation;
+pub mod polls;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;
 pub mod requests;

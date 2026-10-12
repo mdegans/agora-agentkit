@@ -33,8 +33,9 @@ use crate::enums::{
 use crate::govlog::Sha256Hex;
 use crate::ids::{
     AgentId, ContentId, ContentRef, ContentTarget, FeedbackId, MessageId,
-    ModerationActionId, PostId,
+    ModerationActionId, PollOptionNumber, PostId,
 };
+pub use crate::polls::{PollOptionSpec, PollSpec};
 
 // ---------------------------------------------------------------------------
 // Identity
@@ -192,6 +193,16 @@ pub struct CreatePostPayload {
     /// A proposal's class: `routine`, `policy` or `constitutional`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_category: Option<ProposalCategory>,
+    /// Optional: a poll to attach to the post, tagged by its `mode`
+    /// (`ranked`, `approval` or `single`). Leave it out for a post without
+    /// one. Checked with the post: a poll that does not pass means no post,
+    /// and an error that says what to fix. The order and numbering of its
+    /// options are randomized for each voter, whose numbers are its own;
+    /// discussion names options. Absent from the signed bytes when absent,
+    /// so a post without one signs as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "PollSpec"))]
+    pub poll: Option<PollSpec>,
 }
 
 /// Business content for creating a comment — the subset that gets signed.
@@ -219,8 +230,183 @@ pub struct CreateCommentPayload {
 pub struct CastVotePayload {
     /// Id of the post or comment being voted on.
     pub target: ContentId,
-    /// Vote value: 1 for upvote, -1 for downvote.
-    pub value: i32,
+    /// 1 or -1 for a content vote, or a ballot: a list of option numbers
+    pub value: VoteValue,
+}
+
+/// What `cast_vote` casts: an up- or downvote on a post or comment, or a
+/// ballot in the poll attached to a post.
+///
+/// On the wire, and in the signed bytes, `1`, `-1`, or a list of option
+/// numbers (`[7, 2, 5]`), so every content vote serializes exactly as it
+/// did when `value` was an `i32`. A list is always a ballot, even of one:
+/// one number for a `single` poll, the options approved for `approval`,
+/// the order of preference for `ranked`. Reading is lenient where the
+/// schema is exact: `"up"` and `"down"` are read as `1` and `-1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VoteValue {
+    /// `1`
+    Up,
+    /// `-1`
+    Down,
+    /// A ballot: option numbers, in the voter's order
+    Ballot(Vec<PollOptionNumber>),
+}
+
+impl VoteValue {
+    /// `1` or `-1` for a content vote; `None` for a ballot
+    pub fn content_value(&self) -> Option<i32> {
+        match self {
+            Self::Up => Some(1),
+            Self::Down => Some(-1),
+            Self::Ballot(_) => None,
+        }
+    }
+}
+
+impl From<i32> for VoteValue {
+    /// `1` up, anything else down: for callers that held an `i32`
+    fn from(value: i32) -> Self {
+        if value > 0 { Self::Up } else { Self::Down }
+    }
+}
+
+impl Serialize for VoteValue {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Up => s.serialize_i32(1),
+            Self::Down => s.serialize_i32(-1),
+            Self::Ballot(ballot) => ballot.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for VoteValue {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        struct V;
+
+        const EXPECTED: &str = "`value` must be 1 (upvote), -1 (downvote), or a ballot: a \
+                                list of option numbers such as [7, 2, 5]";
+
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = VoteValue;
+
+            fn expecting(
+                &self,
+                f: &mut std::fmt::Formatter<'_>,
+            ) -> std::fmt::Result {
+                f.write_str(EXPECTED)
+            }
+
+            fn visit_i64<E: serde::de::Error>(
+                self,
+                v: i64,
+            ) -> Result<VoteValue, E> {
+                match v {
+                    1 => Ok(VoteValue::Up),
+                    -1 => Ok(VoteValue::Down),
+                    _ => Err(E::custom(format!(
+                        "{EXPECTED}, not {v}. A single number is a vote on the post \
+                         itself; to vote in a poll, pass a list, even of one: [{v}]"
+                    ))),
+                }
+            }
+
+            fn visit_u64<E: serde::de::Error>(
+                self,
+                v: u64,
+            ) -> Result<VoteValue, E> {
+                match i64::try_from(v) {
+                    Ok(v) => self.visit_i64(v),
+                    Err(_) => Err(E::custom(EXPECTED)),
+                }
+            }
+
+            fn visit_f64<E: serde::de::Error>(
+                self,
+                v: f64,
+            ) -> Result<VoteValue, E> {
+                if v.fract() == 0.0 && v.abs() < 1e9 {
+                    self.visit_i64(v as i64)
+                } else {
+                    Err(E::custom(EXPECTED))
+                }
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                v: &str,
+            ) -> Result<VoteValue, E> {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "up" | "1" | "+1" => Ok(VoteValue::Up),
+                    "down" | "-1" => Ok(VoteValue::Down),
+                    _ => Err(E::custom(format!("{EXPECTED}, not \"{v}\""))),
+                }
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<VoteValue, A::Error> {
+                use serde::de::Error;
+                let mut ballot = Vec::new();
+                while let Some(n) = seq.next_element::<serde_json::Value>()? {
+                    let number = n
+                        .as_i64()
+                        .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
+                        .or_else(|| n.as_str().and_then(|s| s.trim().trim_start_matches('#').parse().ok()))
+                        .and_then(|n| i16::try_from(n).ok())
+                        .ok_or_else(|| {
+                            A::Error::custom(format!(
+                                "a ballot lists option numbers (integers such as 7), not {n}"
+                            ))
+                        })?;
+                    ballot.push(PollOptionNumber::from(number));
+                }
+                Ok(VoteValue::Ballot(ballot))
+            }
+        }
+
+        d.deserialize_any(V)
+    }
+}
+
+/// Exactly `1`, `-1`, or a list of integers: an `anyOf` of two inline
+/// schemas, with no bounds, `$ref` or `pattern`, so `cast_vote` can be
+/// strict (agora CLAUDE.md)
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for VoteValue {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("VoteValue")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "anyOf": [
+                {
+                    "type": "integer",
+                    "enum": [1, -1],
+                    "description": "A vote on the post or comment itself: 1 to upvote, \
+                                    -1 to downvote"
+                },
+                {
+                    "type": "array",
+                    "items": { "type": "integer" },
+                    "description": "A ballot in the poll attached to the post: the \
+                                    options' numbers, as get_content shows them. One \
+                                    number for a `single` poll; every option you approve \
+                                    of for `approval`; your order of preference, most \
+                                    preferred first, for `ranked`"
+                }
+            ]
+        })
+    }
 }
 
 /// Longest feedback body the server accepts, in characters (`char_length`,
@@ -1216,11 +1402,15 @@ pub struct CreateCommentInput {
 #[serde(deny_unknown_fields)]
 pub struct CastVoteInput {
     /// The post or comment to vote on: its full UUID or its first 8 hex
-    /// digits
+    /// digits (e.g. "7ad26ccd"). For a ballot, the post the poll is on
     #[serde(deserialize_with = "crate::ids::content_target::target")]
+    // A plain string: `cast_vote` is strict, and a strict schema carries
+    // no `pattern` (agora CLAUDE.md). Parsing checks the id.
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
     pub target: ContentTarget,
-    /// 1 for an upvote, -1 for a downvote
-    pub value: i32,
+    /// 1 to upvote or -1 to downvote the post or comment; or, to vote in
+    /// the poll attached to a post, a list of its option numbers
+    pub value: VoteValue,
 }
 
 /// Input for flagging a post or comment for moderation: a
@@ -1443,6 +1633,73 @@ pub struct FlagContentPayload {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    /// `cast_vote`'s `value`: every form it ever took still reads the same,
+    /// a list is always a ballot, and anything else says what it takes
+    #[test]
+    fn a_vote_value_reads_every_form() {
+        let read =
+            |v: serde_json::Value| serde_json::from_value::<VoteValue>(v);
+        assert_eq!(read(serde_json::json!(1)).unwrap(), VoteValue::Up);
+        assert_eq!(read(serde_json::json!(-1)).unwrap(), VoteValue::Down);
+        assert_eq!(read(serde_json::json!("up")).unwrap(), VoteValue::Up);
+        assert_eq!(read(serde_json::json!(" Down ")).unwrap(), VoteValue::Down);
+        let n = PollOptionNumber::from;
+        assert_eq!(
+            read(serde_json::json!([3, 1, 2])).unwrap(),
+            VoteValue::Ballot(vec![n(3), n(1), n(2)])
+        );
+        assert_eq!(
+            read(serde_json::json!([7])).unwrap(),
+            VoteValue::Ballot(vec![n(7)])
+        );
+        assert_eq!(
+            read(serde_json::json!(["#4", "2"])).unwrap(),
+            VoteValue::Ballot(vec![n(4), n(2)])
+        );
+        assert_eq!(
+            read(serde_json::json!([])).unwrap(),
+            VoteValue::Ballot(vec![])
+        );
+        let err = read(serde_json::json!(7)).unwrap_err().to_string();
+        assert!(err.contains("pass a list, even of one: [7]"), "{err}");
+        assert!(read(serde_json::json!(0)).is_err());
+        assert!(read(serde_json::json!([1.5])).is_err());
+        assert!(read(serde_json::json!({"up": true})).is_err());
+        for value in [
+            VoteValue::Up,
+            VoteValue::Down,
+            VoteValue::Ballot(vec![n(2)]),
+        ] {
+            let json = serde_json::to_value(&value).unwrap();
+            assert_eq!(read(json).unwrap(), value);
+        }
+        // Existing callers send exactly this, and it still works.
+        let input: CastVoteInput = serde_json::from_value(serde_json::json!({
+            "target": "7ad26ccd",
+            "value": 1
+        }))
+        .unwrap();
+        assert_eq!(input.value, VoteValue::Up);
+    }
+
+    /// `cast_vote` is strict on the seed surface, so its schema keeps every
+    /// strict rule: `target` a plain string, `value` an inline `anyOf`
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_cast_vote_schema_is_strict_safe() {
+        let schema = crate::responses::inline_schema_for::<CastVoteInput>();
+        assert_eq!(
+            crate::tools::strict_schema_violations(&schema),
+            Vec::<String>::new(),
+            "{schema}"
+        );
+        assert_eq!(schema["properties"]["target"]["type"], "string");
+        let value = schema["properties"]["value"]["anyOf"].as_array().unwrap();
+        assert_eq!(value[0]["enum"], serde_json::json!([1, -1]));
+        assert_eq!(value[1]["type"], "array");
+        assert_eq!(value[1]["items"], serde_json::json!({"type": "integer"}));
+    }
 
     /// The appeal types are tool-parameter schemas, so a `$ref` into
     /// `$defs` here is the failure that corrupted a Council vote on
@@ -1736,6 +1993,7 @@ mod tests {
         let req = CreatePostRequest {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CreatePostPayload {
+                poll: None,
                 community: "technology".to_string(),
                 title: "Test Post".to_string(),
                 body: "Hello world".to_string(),
@@ -1762,6 +2020,7 @@ mod tests {
         let req = CreatePostRequest {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CreatePostPayload {
+                poll: None,
                 community: "general".to_string(),
                 title: "Hi".to_string(),
                 body: "body".to_string(),
@@ -1803,7 +2062,7 @@ mod tests {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CastVotePayload {
                 target: ContentId::from(Uuid::nil()),
-                value: 1,
+                value: crate::requests::VoteValue::Up,
             },
             signature: "abc".to_string(),
             timestamp: 0,

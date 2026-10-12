@@ -371,6 +371,7 @@ mod tests {
         // `community_name` in the HTTP body but `"community"` in the
         // signed payload; this refactor aligns both on `community`.
         let payload = CreatePostPayload {
+            poll: None,
             community: "tech".to_string(),
             title: "Hi".to_string(),
             body: "body".to_string(),
@@ -388,6 +389,7 @@ mod tests {
     #[test]
     fn post_with_proposal_fields() {
         let payload = CreatePostPayload {
+            poll: None,
             community: "governance".to_string(),
             title: "Amendment".to_string(),
             body: "text".to_string(),
@@ -407,6 +409,7 @@ mod tests {
         // critical: a signer and a verifier with one including None and
         // the other omitting it would produce divergent bytes.
         let payload = CreatePostPayload {
+            poll: None,
             community: "general".to_string(),
             title: "hi".to_string(),
             body: "body".to_string(),
@@ -420,6 +423,78 @@ mod tests {
         assert!(!obj.contains_key("proposal_category"));
     }
 
+    /// A content vote signs exactly the bytes it signed when `value` was an
+    /// `i32`, so no signer or verifier of a vote changes; a ballot signs
+    /// its list in the voter's order and numbering
+    #[test]
+    fn vote_bytes_are_unchanged_and_a_ballot_signs_its_list() {
+        use crate::ids::PollOptionNumber;
+        use crate::requests::VoteValue;
+
+        let target = ContentId::from(Uuid::nil());
+        for (value, legacy) in [(VoteValue::Up, 1), (VoteValue::Down, -1)] {
+            let bytes = SignedAction::from(&CastVotePayload { target, value })
+                .canonical_bytes();
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                format!(
+                    r#"{{"action":"vote","target":"{target}","value":{legacy}}}"#
+                )
+            );
+        }
+        let ballot = CastVotePayload {
+            target,
+            value: VoteValue::Ballot(vec![
+                PollOptionNumber::from(3),
+                PollOptionNumber::from(1),
+            ]),
+        };
+        assert_eq!(
+            String::from_utf8(SignedAction::from(&ballot).canonical_bytes())
+                .unwrap(),
+            format!(r#"{{"action":"vote","target":"{target}","value":[3,1]}}"#)
+        );
+    }
+
+    /// A post without a poll signs as before; a poll is in the bytes
+    #[test]
+    fn a_poll_is_signed_with_its_post() {
+        use crate::polls::{PollOptionSpec, PollSpec};
+
+        let mut payload = CreatePostPayload {
+            community: "general".into(),
+            title: "Name".into(),
+            body: "Vote".into(),
+            is_proposal: None,
+            proposal_category: None,
+            poll: None,
+        };
+        assert_eq!(
+            String::from_utf8(SignedAction::from(&payload).canonical_bytes())
+                .unwrap(),
+            r#"{"action":"post","community":"general","title":"Name","body":"Vote"}"#
+        );
+        payload.poll = Some(PollSpec::Single {
+            options: vec![
+                PollOptionSpec {
+                    label: "A".into(),
+                    description: None,
+                },
+                PollOptionSpec {
+                    label: "B".into(),
+                    description: Some("b".into()),
+                },
+            ],
+            opens_at: None,
+            closes_at: "2026-11-09T12:00:00Z".parse().unwrap(),
+        });
+        assert_eq!(
+            String::from_utf8(SignedAction::from(&payload).canonical_bytes())
+                .unwrap(),
+            r#"{"action":"post","community":"general","title":"Name","body":"Vote","poll":{"mode":"single","options":[{"label":"A"},{"label":"B","description":"b"}],"closes_at":"2026-11-09T12:00:00Z"}}"#
+        );
+    }
+
     #[test]
     fn vote_canonical_shape_no_target_type() {
         // New shape (this refactor): {"action":"vote","target":"...","value":1}
@@ -427,7 +502,7 @@ mod tests {
         // it's gone. The server resolves the kind via resolve_content_id.
         let payload = CastVotePayload {
             target: ContentId::from(Uuid::nil()),
-            value: 1,
+            value: crate::requests::VoteValue::Up,
         };
         let bytes = SignedAction::from(&payload).canonical_bytes();
         let v = parse(&bytes);
