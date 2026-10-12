@@ -18,7 +18,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Amendment, AmendmentError};
+use super::{Amendment, AmendmentError, OBLIGATION_FIXED, revision_touches};
 use crate::enums::{
     AmendmentKind, GovernanceLogEntryType, ObligationKind, ObligationStatus,
     OwedBy,
@@ -383,8 +383,8 @@ pub enum ObligationRuleError {
     )]
     NeedsCouncil(AmendmentKind),
     #[error(
-        "the authority {authority} is not later than {earlier}, the Council \
-         decision that set the deadline"
+        "the authority {authority} is not later than {earlier}: the \
+         obligation, or the Council decision that set its deadline"
     )]
     AuthorityNotLater {
         authority: GovernanceLogId,
@@ -396,10 +396,9 @@ pub enum ObligationRuleError {
     BadRepo(String),
 }
 
-/// Whether `amendment` may be appended to `obligation`, now at `state`
-/// ([`ObligationState::from_amendments`]). `entry` looks up an entry of the
-/// log by id. Amendments of other kinds are not this function's business
-/// and pass.
+/// Whether `amendment` may be appended to `obligation`, the entry `id` at
+/// `chain_seq`, now at `state` ([`ObligationState::from_amendments`]).
+/// `entry` looks up an entry of the log by id.
 ///
 /// The rules (agora `docs/design-obligations.md`):
 ///
@@ -409,21 +408,39 @@ pub enum ObligationRuleError {
 /// - `lapsed`: only a dated, open obligation lapses;
 /// - `rescheduled`, `withdrawn`: by whoever set the deadline. If a Council
 ///   decision did (the source, or the authority of the last reschedule),
-///   `authority` must be a later Council decision. A Council-owed
-///   obligation is withdrawn only by the Council.
+///   `authority` must be a Council decision. A Council-owed obligation is
+///   withdrawn only by the Council;
+/// - a `revision` never touches [`OBLIGATION_FIXED`]. One that narrows
+///   `text` is a partial discharge: if the Council owes the obligation or
+///   set its deadline, it needs a Council decision too. Its other fields
+///   are clerical.
 ///
-/// Nothing amends a closed obligation.
+/// A Council decision that authorizes anything here is later than the
+/// obligation and than the decision that set its deadline. Nothing but a
+/// revision or another non-obligation kind amends a closed obligation, and
+/// those kinds are otherwise not this function's business.
 pub fn check_obligation_amendment(
     obligation: &Obligation,
+    id: &GovernanceLogId,
+    chain_seq: u64,
     state: &ObligationState,
     amendment: &Amendment,
     entry: impl Fn(&GovernanceLogId) -> Option<KnownEntry>,
 ) -> Result<(), ObligationRuleError> {
     amendment.validate()?;
-    let Some(update) = &amendment.update else {
+    if let Some(revision) = &amendment.revision
+        && let Some(path) = revision_touches(revision, &OBLIGATION_FIXED)
+    {
+        return Err(AmendmentError::FixedObligationField(path.into()).into());
+    }
+    let narrows_text = amendment
+        .revision
+        .as_ref()
+        .is_some_and(|r| revision_touches(r, &["/text"]).is_some());
+    if amendment.update.is_none() && !narrows_text {
         return Ok(());
-    };
-    if state.status.is_closed() {
+    }
+    if amendment.update.is_some() && state.status.is_closed() {
         return Err(ObligationRuleError::Closed(state.status));
     }
     let known = |id: &GovernanceLogId| {
@@ -437,6 +454,9 @@ pub fn check_obligation_amendment(
         Ok((e.entry_type == GovernanceLogEntryType::CouncilDecision)
             .then_some(e))
     };
+    if let Some(authority) = &amendment.authority {
+        known(authority)?;
+    }
     // The Council decision that set the deadline, if one did
     let mut setter = None;
     for id in [obligation.source.as_ref(), state.until_authority.as_ref()]
@@ -444,30 +464,35 @@ pub fn check_obligation_amendment(
         .flatten()
     {
         if let Some(e) = council(id)? {
-            setter = Some((id, e));
+            setter = Some((id, e.chain_seq));
         }
     }
-    // `authority`, which must be a Council decision, later than `after`
-    let needs_council = |after: Option<(&GovernanceLogId, KnownEntry)>| {
+    // `authority`: a Council decision, later than the obligation and than
+    // the decision that set its deadline
+    let needs_council = || {
         let authority = amendment
             .authority
             .as_ref()
             .ok_or(ObligationRuleError::NeedsCouncil(amendment.kind))?;
         let decision = council(authority)?
             .ok_or(ObligationRuleError::NeedsCouncil(amendment.kind))?;
-        match after {
-            Some((earlier, e)) if decision.chain_seq <= e.chain_seq => {
-                Err(ObligationRuleError::AuthorityNotLater {
+        for (earlier, seq) in
+            [Some((id, chain_seq)), setter].into_iter().flatten()
+        {
+            if decision.chain_seq <= seq {
+                return Err(ObligationRuleError::AuthorityNotLater {
                     authority: authority.clone(),
                     earlier: earlier.clone(),
-                })
+                });
             }
-            _ => Ok(()),
         }
+        Ok(())
     };
-    if let Some(authority) = &amendment.authority {
-        known(authority)?;
-    }
+    let councils = obligation.owed_by == OwedBy::Council || setter.is_some();
+    let Some(update) = &amendment.update else {
+        // A revision narrowing `text`: a partial discharge
+        return if councils { needs_council() } else { Ok(()) };
+    };
     match update {
         ObligationUpdate::Planned { .. } => Ok(()),
         ObligationUpdate::Lapsed => match (&state.until, state.status) {
@@ -480,21 +505,18 @@ pub fn check_obligation_amendment(
         ObligationUpdate::Discharged { evidence } => {
             check_evidence(evidence, &known)?;
             match obligation.owed_by {
-                OwedBy::Council => needs_council(None),
+                OwedBy::Council => needs_council(),
                 OwedBy::Steward | OwedBy::Staff => Ok(()),
             }
         }
-        ObligationUpdate::Rescheduled { .. } | ObligationUpdate::Withdrawn => {
-            match setter {
-                Some(after) => needs_council(Some(after)),
-                None if obligation.owed_by == OwedBy::Council
-                    && amendment.kind == AmendmentKind::Withdrawn =>
-                {
-                    needs_council(None)
-                }
-                None => Ok(()),
-            }
-        }
+        ObligationUpdate::Rescheduled { .. } => match setter {
+            Some(_) => needs_council(),
+            None => Ok(()),
+        },
+        ObligationUpdate::Withdrawn => match councils {
+            true => needs_council(),
+            false => Ok(()),
+        },
     }
 }
 

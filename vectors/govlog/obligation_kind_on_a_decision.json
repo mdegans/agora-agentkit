@@ -33,9 +33,9 @@
         "envelope_version": 1,
         "chain_seq": 2,
         "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
-        "data_hash": "50ce7dfd53b6514a4ce1752f840bb65b26d24dfb354dd257ecdeb7e45a126117",
-        "entry_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
-        "signature": "aaf90d063f1f5d575e5bb7acf793d6445851aad9b386b4abe6ab6e0f06fa0756b212fdbae878e8b2c4bc44a41320d4d7fc3228865da0a2db4c0406f5379ead05",
+        "data_hash": "698c3d3efe32d9a6752d6636c6c63313bdaa1ed66bbe775395fedd34371d4c8d",
+        "entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "signature": "93ba9fa085637fcbb094ab7dd83b5e7735ed63b351fdd4a1efdb4c64e54e11574d661bcd04a49a97836cb0043340eef2cc43fe4672f64221d7986e5c27cff009",
         "signed_at": "2023-11-14T22:13:41Z",
         "retroactive": false
       }
@@ -47,10 +47,10 @@
       "attestation": {
         "envelope_version": 1,
         "chain_seq": 3,
-        "prev_hash": "503c979ed27534e9e7ce884b0ed69c879444b05a2894fa94cdf47ab5c256d004",
+        "prev_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
         "data_hash": "9d916b32169fb64fa3e724c9f49bc879738ed968812d2f598b5b5afc33abfece",
-        "entry_hash": "9e270d66631f04638de5110334b773121266f92fc38c70e351f8e03198c8f7f7",
-        "signature": "beb139aaaf7f0f03e815cd5e9482b8e05302185cfecbe356c78fa1dee750ad9b46c9f959262c2f26101e449be70e36cf23c17dca7c9501d32fe430fe95bc610b",
+        "entry_hash": "63ba2348c426b35170c3a7bde887ece3a9f5741476c4357cab36e904ccacdb23",
+        "signature": "1078f6c27bf5116f2a874da22176f18a33eb9ebce4e4cbe7daeb25cefa5a503a8694db7f311944fd4d5366125e515aa73d15a70a15b30dc3d423cfdd65771506",
         "signed_at": "2023-11-14T22:13:51Z",
         "retroactive": false
       },

@@ -1,0 +1,365 @@
+{
+  "description": "The four kinds that change precedential force, naming an obligation, which has none: each takes no effect. A correction after them does.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "OBL-2026-0001",
+      "entry_type": "obligation",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "698c3d3efe32d9a6752d6636c6c63313bdaa1ed66bbe775395fedd34371d4c8d",
+        "entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "signature": "93ba9fa085637fcbb094ab7dd83b5e7735ed63b351fdd4a1efdb4c64e54e11574d661bcd04a49a97836cb0043340eef2cc43fe4672f64221d7986e5c27cff009",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366",
+        "data_hash": "6b6be9d1246c35faf3d2e190aa40a55f6b46ce5a0fca6cb5275d1224c42d4e8e",
+        "entry_hash": "b22fd778ecd8f2f42250498f5f524d03288fbe0555c5777359d714f2d4c713b8",
+        "signature": "7d735f1c5cf786a84c87d110829316aa6ded8a3749c2c36f8bfbe14a6f34e6406f2e42ca622012b1931ec1d63e5e625bc748a155af59ad641c746138faa60308",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "bbb94ab35fc2aac994e4afc18dea2a858b2dfb39e2ef024504a61bae70618d95"
+        },
+        "kind": "non_precedential",
+        "note": {
+          "commitment": "3b26ed17a40e12316d6881e716fdffb6d52744e699c77f2b1f23ccbd0bd58694"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366"
+      },
+      "texts": {
+        "basis": {
+          "salt": "71ed81a6187f275e43ace8a505aa25aad8f941eabf6df723b3baeb04c216a43c",
+          "text": "basis"
+        },
+        "note": {
+          "salt": "30ccda87ae4dbd4e24f23fe4c7bdadd7e6f5be1744296657bad170c3da10f312",
+          "text": "note"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0002",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:00.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 4,
+        "prev_hash": "b22fd778ecd8f2f42250498f5f524d03288fbe0555c5777359d714f2d4c713b8",
+        "data_hash": "8d0b7511436796e23692093c04a1575cddb924f864e7363e0746a5f608644bbb",
+        "entry_hash": "c5a136d34d840f760fa335f8b931f0fa0cb5a4738938a6a619b5201103ad1e12",
+        "signature": "2d30bb07e39c80be211de9c5ce2a5e6af7bffac5de203165faff263d02ad88d45718ac5ae8f0ad6082ad7617af9de82a2d910a37e1c4a29d7b2b97976bd5be07",
+        "signed_at": "2023-11-14T22:14:01Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "1110e0fcc967ae362504c38c81ce0cb972a6f5963f3b4893f07419657362bf60"
+        },
+        "kind": "overruled",
+        "note": {
+          "commitment": "a92db9d6c0d4ba9b664d83bb5a9eb13ada72dd428dc39dd34689e743b83af687"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366"
+      },
+      "texts": {
+        "basis": {
+          "salt": "3bdaf5b86269737feec98e33d812dfac96b233390cf96348468bacab4eb472a4",
+          "text": "basis"
+        },
+        "note": {
+          "salt": "e1f51510dc6c823fc14af41726d8783806f69ab9910469f78e2fec8d648b9e25",
+          "text": "note"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0003",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:10.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 5,
+        "prev_hash": "c5a136d34d840f760fa335f8b931f0fa0cb5a4738938a6a619b5201103ad1e12",
+        "data_hash": "5e7d68211912c6a08c06375c23369a006e38cc26d140b111c0136c1c451d8109",
+        "entry_hash": "f1f8fd7e844dffc95695841ae1007ad861881b85e1cf4e3d7d2dd7567110c222",
+        "signature": "07eb909aa579353f79bd09febc044df1a868b1afe4d8845649ecc36158d8c16b378e308cc4c246dd12c71fb347237d04dce8a1346421f40d78a4bfc09f6fb707",
+        "signed_at": "2023-11-14T22:14:11Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "fcd1a1f0a508f512733db5dcf42f80ac689db8cac24dca6f675c2f8d936fc915"
+        },
+        "kind": "superseded",
+        "note": {
+          "commitment": "5eac1460d7af58548e59f2f2788110f23b68af08b519fdbc48d358a82c2096c6"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366"
+      },
+      "texts": {
+        "basis": {
+          "salt": "f3eb2545853ac614512e6097199d087bbb5be55e68fcf325b2bdd03b659f8b09",
+          "text": "basis"
+        },
+        "note": {
+          "salt": "4c4ee92db600ee08d9e5bdbfb5aa84074e952460e5b7e332c6291d8759ad43de",
+          "text": "note"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0004",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:20.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 6,
+        "prev_hash": "f1f8fd7e844dffc95695841ae1007ad861881b85e1cf4e3d7d2dd7567110c222",
+        "data_hash": "cef55639f769b615889b410b74f806fe5db4c68090ed4c47e888cbcb07ffb119",
+        "entry_hash": "494d73bde669ddc292b1686f7211599d5a34af16bc0d0f391de6c62f4b3bbdfe",
+        "signature": "8ec84e227801b5b27d81ada4686499ed94c0bc7fce975ff1e78b856c4bcc1c8a7c439455f59897a08f347e7a1d7ffdf34963591b7abc625840b85fc0d2539c04",
+        "signed_at": "2023-11-14T22:14:21Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "ff2192dfabf3dc333e7f37d8f729e28690929693cdfa8ba1241c6817dffc402b"
+        },
+        "kind": "reinstated",
+        "note": {
+          "commitment": "750f7775903c3234744d3fa9196a57a0d3e771aaecbe13a8163333a29d218388"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366"
+      },
+      "texts": {
+        "basis": {
+          "salt": "39587d26963302d5559b3863da631a7a563bdf8cb59e738c86a9f5323aa397b1",
+          "text": "basis"
+        },
+        "note": {
+          "salt": "5a04fa3b3fcd6dc18d9261b5f6aad77f5d96d78f04c869a27c03a8f763ababed",
+          "text": "note"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0005",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 7,
+        "prev_hash": "494d73bde669ddc292b1686f7211599d5a34af16bc0d0f391de6c62f4b3bbdfe",
+        "data_hash": "ea6d0d6b07057e9de828cbf5ce2aed6d08878665965247dd0cc0026602652e74",
+        "entry_hash": "50655b1893e6f168a1e9f964804b706b9eb0d30e6d5a715d8c0af6c179b2295e",
+        "signature": "178fa5ab50fc2178194c70d9126a4cdc6075de77969e64beeb29005f38fa9fd26e0dc5f1248a002d39076cd8208f5025c9f32522c2e4a373b21c1e18f4a61902",
+        "signed_at": "2023-11-14T22:14:31Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "38647b01726f2ecef94e46362667e0353297fe20598e06054885a7ee2a4516c3"
+        },
+        "kind": "correction",
+        "note": {
+          "commitment": "29f1c534e93b5dcb5e5ced45f3b80417def3101615623199b4683f9b6ea9961e"
+        },
+        "target": "OBL-2026-0001",
+        "target_entry_hash": "124a1aaa564397f9f92690f5aff4d18410ab6a64b17ae336902488559462a366"
+      },
+      "texts": {
+        "basis": {
+          "salt": "d811dc808b841b8604a49d56c189613c7a6b4e3572833a7c5b27649cd0bd9182",
+          "text": "basis"
+        },
+        "note": {
+          "salt": "8b681979bcc8944566235bb88b70dcdf2f100a0f1c0728e67016cd35105258f6",
+          "text": "note"
+        }
+      }
+    }
+  ],
+  "expect": {
+    "ok": false,
+    "head": "AMD-2026-0005",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "OBL-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [
+          "AMD-2026-0005"
+        ],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": true
+      },
+      {
+        "id": "AMD-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": true
+      },
+      {
+        "id": "AMD-2026-0003",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": true
+      },
+      {
+        "id": "AMD-2026-0004",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": true
+      },
+      {
+        "id": "AMD-2026-0005",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      }
+    ],
+    "standing": {
+      "OBL-2026-0001": "in_force"
+    }
+  }
+}

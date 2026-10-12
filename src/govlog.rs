@@ -649,6 +649,15 @@ pub enum AmendmentError {
         kind: AmendmentKind,
         target: GovernanceLogId,
     },
+    #[error(
+        "kind `{0}` changes precedential force, which an obligation does not have"
+    )]
+    PrecedentialOnObligation(AmendmentKind),
+    #[error(
+        "a revision of an obligation may not touch `{0}`; its status and \
+         deadline change only through the obligation kinds"
+    )]
+    FixedObligationField(String),
     #[error("amendment target {0} is not an entry of this chain")]
     UnknownTarget(GovernanceLogId),
     #[error("amendment target {0} is not an earlier entry")]
@@ -2538,6 +2547,36 @@ fn prefix_problem(link: &GovernanceChainLink) -> Option<String> {
     }
 }
 
+/// The fields of an [`Obligation`] a [`Revision`] may not touch: what it
+/// is, who owes it, and when, change only through the obligation kinds,
+/// which [`check_obligation_amendment`] holds to their authority rules
+pub const OBLIGATION_FIXED: [&str; 5] = [
+    "/until",
+    "/owed_by",
+    "/kind",
+    "/source",
+    "/agora_obligation",
+];
+
+/// The first of `pointers` that `revision`'s patch touches: an op's `path`,
+/// or a `move` or `copy`'s `from`, at it, above it or below it
+pub fn revision_touches<'a>(
+    revision: &Revision,
+    pointers: &[&'a str],
+) -> Option<&'a str> {
+    revision.patch.iter().find_map(|op| {
+        let from = match op {
+            json_patch::PatchOperation::Move(m) => Some(m.from.as_str()),
+            json_patch::PatchOperation::Copy(c) => Some(c.from.as_str()),
+            _ => None,
+        };
+        [Some(op.path().as_str()), from]
+            .into_iter()
+            .flatten()
+            .find_map(|p| pointers.iter().copied().find(|f| overlaps(p, f)))
+    })
+}
+
 /// Which earlier entry an amendment names, once it is known to be one
 fn amendment_target(
     amendment: &Amendment,
@@ -2556,13 +2595,22 @@ fn amendment_target(
     if target_link.attestation.entry_hash != amendment.target_entry_hash {
         return Err(AmendmentError::WrongTargetHash(amendment.target.clone()));
     }
-    if amendment.kind.is_obligation()
-        && target_link.entry_type != GovernanceLogEntryType::Obligation
-    {
+    let on_obligation =
+        target_link.entry_type == GovernanceLogEntryType::Obligation;
+    if amendment.kind.is_obligation() && !on_obligation {
         return Err(AmendmentError::NotAnObligation {
             kind: amendment.kind,
             target: amendment.target.clone(),
         });
+    }
+    if on_obligation && kind_standing(amendment.kind).is_some() {
+        return Err(AmendmentError::PrecedentialOnObligation(amendment.kind));
+    }
+    if on_obligation
+        && let Some(revision) = &amendment.revision
+        && let Some(path) = revision_touches(revision, &OBLIGATION_FIXED)
+    {
+        return Err(AmendmentError::FixedObligationField(path.to_string()));
     }
     Ok(target)
 }

@@ -633,14 +633,16 @@ fn an_obligation_lives_in_the_obl_series() {
 
 // -- the append rules --
 
-/// GOV-1 a Council decision at seq 1, GOV-2 a Council decision at seq 5,
-/// GOV-3 a policy change at seq 6, REC-1 a Steward's record at seq 2
+/// GOV-1 a Council decision at seq 1, REC-1 a Steward's record at seq 2,
+/// the obligation OBL-1 at seq 3 ([`OBL_SEQ`]), GOV-4 a Council decision
+/// at seq 4, GOV-2 one at seq 5, GOV-3 a policy change at seq 6
 fn known(id: &GovernanceLogId) -> Option<KnownEntry> {
     use GovernanceLogEntryType::*;
     let (entry_type, chain_seq) = match id.as_str() {
         "GOV-2026-0001" => (CouncilDecision, 1),
         "GOV-2026-0002" => (CouncilDecision, 5),
         "GOV-2026-0003" => (PolicyChange, 6),
+        "GOV-2026-0004" => (CouncilDecision, 4),
         "REC-2026-0001" => (StewardRecord, 2),
         _ => return None,
     };
@@ -648,6 +650,16 @@ fn known(id: &GovernanceLogId) -> Option<KnownEntry> {
         entry_type,
         chain_seq,
     })
+}
+
+const OBL_SEQ: u64 = 3;
+
+fn check_amendment(
+    o: &Obligation,
+    state: &ObligationState,
+    a: &Amendment,
+) -> Result<(), ObligationRuleError> {
+    check_obligation_amendment(o, &obl(1), OBL_SEQ, state, a, known)
 }
 
 fn check(
@@ -658,7 +670,7 @@ fn check(
 ) -> Result<(), ObligationRuleError> {
     let mut a = update(&obl(1), u);
     a.authority = authority;
-    check_obligation_amendment(o, state, &a, known)
+    check_amendment(o, state, &a)
 }
 
 fn open(o: &Obligation) -> ObligationState {
@@ -689,8 +701,9 @@ fn a_council_obligation_moves_only_with_a_later_council_decision() {
         check(&o, &s, resched(), Some(gov(1))),
         Err(AuthorityNotLater {
             authority: gov(1),
-            earlier: gov(1)
-        })
+            earlier: obl(1)
+        }),
+        "the source decision cannot move its own obligation"
     );
     assert_eq!(check(&o, &s, resched(), Some(gov(2))), Ok(()));
     assert_eq!(
@@ -838,7 +851,7 @@ fn lapses_closures_and_evidence_are_checked() {
     let mut a = update(&obl(1), ObligationUpdate::Lapsed);
     a.kind = AmendmentKind::Planned;
     assert!(matches!(
-        check_obligation_amendment(&o, &open(&o), &a, known),
+        check_amendment(&o, &open(&o), &a),
         Err(Shape(AmendmentError::UpdateMismatch { .. }))
     ));
     // Other kinds are not this function's business.
@@ -851,8 +864,220 @@ fn lapses_closures_and_evidence_are_checked() {
     )
     .unwrap()
     .amendment;
+    assert_eq!(check_amendment(&o, &closed, &correction), Ok(()));
+}
+
+/// Every path that asks for a Council decision asks for one later than
+/// the obligation, and than the decision that set its deadline
+#[test]
+fn a_council_authority_is_later_than_the_obligation_and_its_setter() {
+    use ObligationRuleError::*;
+    let older = |authority| AuthorityNotLater {
+        authority,
+        earlier: obl(1),
+    };
+    let done = || ObligationUpdate::Discharged {
+        evidence: Evidence::Governance { id: gov(1) },
+    };
+    let resched = || ObligationUpdate::Rescheduled {
+        until: Some(Until::NextSitting),
+    };
+    // Council-owed, from a Steward's record: discharge and withdrawal.
+    let o = Obligation {
+        source: Some(rec(1)),
+        ..review()
+    };
+    let s = open(&o);
+    for u in [done(), ObligationUpdate::Withdrawn] {
+        assert_eq!(check(&o, &s, u.clone(), Some(gov(1))), Err(older(gov(1))));
+        assert_eq!(check(&o, &s, u, Some(gov(4))), Ok(()));
+    }
+    // A Council source: discharge, reschedule, withdrawal.
+    let o = Obligation {
+        source: Some(gov(1)),
+        ..review()
+    };
+    let s = open(&o);
+    for u in [done(), resched(), ObligationUpdate::Withdrawn] {
+        assert_eq!(check(&o, &s, u.clone(), Some(gov(1))), Err(older(gov(1))));
+        assert_eq!(check(&o, &s, u, Some(gov(4))), Ok(()));
+    }
+    // Rescheduled by GOV-2 (seq 5): GOV-4 (seq 4) is later than the
+    // obligation but not than the decision that set its deadline.
+    let mut by_council = update(&obl(1), resched());
+    by_council.authority = Some(gov(2));
+    let s = ObligationState::from_amendments(&o, [(at(1), &by_council)]);
+    for u in [done(), resched(), ObligationUpdate::Withdrawn] {
+        assert_eq!(
+            check(&o, &s, u, Some(gov(4))),
+            Err(AuthorityNotLater {
+                authority: gov(4),
+                earlier: gov(2)
+            })
+        );
+    }
+}
+
+/// A revision of `o` by `patch`, which may be one the draft builder would
+/// refuse (a root `replace`): the rules must hold on what a writer could
+/// sign, not only on what the builder makes
+fn revision_draft(o: &Obligation, patch: Value) -> AmendmentDraft {
+    let latest = serde_json::to_value(o).unwrap();
+    let benign: json_patch::Patch = serde_json::from_value(
+        json!([{"op": "replace", "path": "/quote", "value": "q"}]),
+    )
+    .unwrap();
+    let (mut draft, _) = AmendmentDraft::revision(
+        obl(1),
+        GovernanceLogEntryType::Obligation,
+        data_hash(&json!("x")),
+        "b",
+        "n",
+        &latest,
+        benign,
+    )
+    .unwrap();
+    draft.amendment.revision.as_mut().unwrap().patch =
+        serde_json::from_value(patch).unwrap();
+    draft
+}
+
+fn revision(o: &Obligation, patch: Value) -> Amendment {
+    revision_draft(o, patch).amendment
+}
+
+#[test]
+fn a_revision_narrows_text_only_with_the_authority_a_discharge_needs() {
+    use ObligationRuleError::*;
+    let narrow = json!([{"op": "replace", "path": "/text", "value": "less"}]);
+    let clerical = json!([
+        {"op": "replace", "path": "/quote", "value": "q"},
+        {"op": "replace", "path": "/quote_location", "value": "round 4"},
+        {"op": "add", "path": "/thread", "value": plan(3)}
+    ]);
+    // Council-owed: text needs a later Council decision, the rest nothing.
+    let o = Obligation {
+        source: Some(rec(1)),
+        ..review()
+    };
+    let s = open(&o);
+    let mut a = revision(&o, narrow.clone());
     assert_eq!(
-        check_obligation_amendment(&o, &closed, &correction, known),
+        check_amendment(&o, &s, &a),
+        Err(NeedsCouncil(AmendmentKind::Revision))
+    );
+    a.authority = Some(gov(1));
+    assert_eq!(
+        check_amendment(&o, &s, &a),
+        Err(AuthorityNotLater {
+            authority: gov(1),
+            earlier: obl(1)
+        })
+    );
+    a.authority = Some(gov(4));
+    assert_eq!(check_amendment(&o, &s, &a), Ok(()));
+    assert_eq!(
+        check_amendment(&o, &s, &revision(&o, clerical.clone())),
         Ok(())
     );
+    // Staff-owed with a Council deadline: the Council's too.
+    let o = Obligation {
+        source: Some(gov(1)),
+        owed_by: OwedBy::Staff,
+        ..review()
+    };
+    assert_eq!(
+        check_amendment(&o, &open(&o), &revision(&o, narrow.clone())),
+        Err(NeedsCouncil(AmendmentKind::Revision))
+    );
+    // Staff-owed with the Steward's deadline: the Steward's.
+    let o = Obligation {
+        source: Some(rec(1)),
+        owed_by: OwedBy::Staff,
+        ..review()
+    };
+    assert_eq!(
+        check_amendment(&o, &open(&o), &revision(&o, narrow)),
+        Ok(())
+    );
+    // The fixed fields, never, by any op.
+    for patch in [
+        json!([{"op": "replace", "path": "/until", "value": null}]),
+        json!([{"op": "remove", "path": "/until/date"}]),
+        json!([{"op": "replace", "path": "/owed_by", "value": "staff"}]),
+        json!([{"op": "move", "from": "/source", "path": "/note"}]),
+        json!([{"op": "copy", "from": "/kind", "path": "/note"}]),
+        json!([{"op": "replace", "path": "", "value": {}}]),
+    ] {
+        let a = revision(&o, patch.clone());
+        assert!(
+            matches!(
+                check_amendment(&o, &open(&o), &a),
+                Err(Shape(AmendmentError::FixedObligationField(_)))
+            ),
+            "{patch}"
+        );
+    }
+}
+
+#[test]
+fn a_revision_of_a_fixed_field_or_a_precedential_kind_fails_verification() {
+    let (key, pk) = generate_keypair();
+    let anchor = KeyAnchor::pinned((&pk).into());
+    let latest = serde_json::to_value(Obligation {
+        source: Some(gov(1)),
+        ..review()
+    })
+    .unwrap();
+    let verdict = |draft: &AmendmentDraft| {
+        let mut c = with_obligation(&key);
+        let draft = AmendmentDraft {
+            amendment: Amendment {
+                target_entry_hash: c.hash_at(2),
+                ..draft.amendment.clone()
+            },
+            texts: draft.texts.clone(),
+        };
+        c.amend(&key, &draft);
+        let v = verify_chain(&c.links, &pk, &anchor, &roots());
+        (
+            v.ok,
+            v.entries[1].amended_by.len(),
+            v.entries[2].problem.clone(),
+        )
+    };
+    let obligation: Obligation = serde_json::from_value(latest).unwrap();
+    let revise = |patch: Value| revision_draft(&obligation, patch);
+    let fine =
+        revise(json!([{"op": "replace", "path": "/text", "value": "less"}]));
+    assert_eq!(verdict(&fine), (true, 1, None));
+    for patch in [
+        json!([{"op": "replace", "path": "/until", "value": {"when": "next_sitting"}}]),
+        json!([{"op": "replace", "path": "/until/date", "value": "2030-01-01"}]),
+        json!([{"op": "move", "from": "/owed_by", "path": "/note"}]),
+        json!([{"op": "replace", "path": "", "value": {}}]),
+    ] {
+        let (ok, applied, problem) = verdict(&revise(patch.clone()));
+        assert!(!ok && applied == 0, "{patch}");
+        assert!(problem.unwrap().contains("may not touch"), "{patch}");
+    }
+    for kind in [
+        AmendmentKind::NonPrecedential,
+        AmendmentKind::Overruled,
+        AmendmentKind::Superseded,
+        AmendmentKind::Reinstated,
+    ] {
+        let draft =
+            AmendmentDraft::new(obl(1), data_hash(&json!("x")), kind, "b", "n")
+                .unwrap();
+        let (ok, applied, problem) = verdict(&draft);
+        assert!(!ok && applied == 0, "{kind}");
+        assert!(problem.unwrap().contains("precedential force"), "{kind}");
+    }
+    for kind in [AmendmentKind::Correction, AmendmentKind::Reattested] {
+        let draft =
+            AmendmentDraft::new(obl(1), data_hash(&json!("x")), kind, "b", "n")
+                .unwrap();
+        assert_eq!(verdict(&draft), (true, 1, None), "{kind}");
+    }
 }

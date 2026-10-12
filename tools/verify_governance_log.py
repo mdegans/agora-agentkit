@@ -135,6 +135,33 @@ AMENDMENT_KINDS = {
 #: The amendment kinds valid only on an `obligation`, each carrying an
 #: `update` of its own kind
 OBLIGATION_KINDS = ("planned", "discharged", "lapsed", "rescheduled", "withdrawn")
+#: The fields of an obligation a revision may not touch: what it is, who
+#: owes it and when change only through the obligation kinds
+OBLIGATION_FIXED = ("/until", "/owed_by", "/kind", "/source", "/agora_obligation")
+
+
+def _overlaps(a, b):
+    """One pointer is the other, or above or below it"""
+
+    def within(inner, outer):
+        return inner.startswith(outer) and (
+            len(inner) == len(outer) or inner[len(outer)] == "/"
+        )
+
+    return within(a, b) or within(b, a)
+
+
+def revision_touches(patch, pointers):
+    """The first of `pointers` an op's `path`, or a move or copy's `from`,
+    touches"""
+    for op in patch:
+        for touched in (op["path"], op.get("from")):
+            if touched is None:
+                continue
+            for pointer in pointers:
+                if _overlaps(touched, pointer):
+                    return pointer
+    return None
 #: What an amendment kind does to its target's standing, when it does
 #: anything. The last amendment that changes standing wins.
 KIND_STANDING = {
@@ -1694,6 +1721,23 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
                 problems.append(
                     "kind `%s` is only valid on an obligation, and %s is not one"
                     % (amendment["kind"], amendment["target"])
+                )
+            elif (
+                links[target - 1]["entry_type"] == "obligation"
+                and amendment["kind"] in KIND_STANDING
+            ):
+                problems.append(
+                    "kind `%s` changes precedential force, which an obligation "
+                    "does not have" % amendment["kind"]
+                )
+            elif (
+                links[target - 1]["entry_type"] == "obligation"
+                and amendment["kind"] == "revision"
+                and revision_touches(amendment["patch"], OBLIGATION_FIXED)
+            ):
+                problems.append(
+                    "a revision of an obligation may not touch `%s`"
+                    % revision_touches(amendment["patch"], OBLIGATION_FIXED)
                 )
             else:
                 amendments.append((seq, link["id"], amendment, target))
