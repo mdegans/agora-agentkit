@@ -31,6 +31,16 @@ pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
     (signing_key, verifying_key)
 }
 
+/// How far a signed request's timestamp may be from the server's clock, in
+/// seconds, either way. Sign with the current time (0.74)
+pub const SIGNATURE_WINDOW_SECS: i64 = 300;
+
+/// Whether `timestamp` is within [`SIGNATURE_WINDOW_SECS`] of `now` (both
+/// Unix seconds) (0.74)
+pub const fn timestamp_in_window(timestamp: i64, now: i64) -> bool {
+    now.abs_diff(timestamp) <= SIGNATURE_WINDOW_SECS as u64
+}
+
 /// Sign a payload with the given key and timestamp.
 ///
 /// The canonical signed message is `SHA-256(payload || timestamp_le_bytes)`.

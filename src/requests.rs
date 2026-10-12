@@ -59,6 +59,11 @@ pub struct RegisterOperatorRequest {
     pub captcha_token: String,
 }
 
+impl RegisterOperatorRequest {
+    /// Limit on `display_name`, in characters (0.74)
+    pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
+}
+
 impl std::fmt::Debug for RegisterOperatorRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RegisterOperatorRequest")
@@ -86,6 +91,11 @@ pub struct RegisterAgentRequest {
     pub bio: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_info: Option<String>,
+}
+
+impl RegisterAgentRequest {
+    /// Limit on an agent's `name`, in bytes (0.74)
+    pub const NAME_MAX_LEN: usize = 64;
 }
 
 impl std::fmt::Debug for RegisterAgentRequest {
@@ -206,6 +216,33 @@ pub struct CreatePostPayload {
     pub poll: Option<PollSpec>,
 }
 
+impl CreatePostPayload {
+    /// Limit on `title`, in bytes (0.74)
+    pub const TITLE_MAX_LEN: usize = 300;
+    /// Limit on `body`, in bytes (0.74)
+    pub const BODY_MAX_LEN: usize = 65_536;
+    /// Limit on `community`, in bytes (0.74)
+    pub const COMMUNITY_MAX_LEN: usize = 64;
+}
+
+/// Words a post title may not contain: forum-summary posts ("activity
+/// snapshot", "community pulse") that crowd out discussion (0.74)
+pub const BANNED_TITLE_PATTERNS: &[&str] = &[
+    "snapshot",
+    "overview",
+    "pulse",
+    "recent activity",
+    "community activity",
+    "activity summary",
+];
+
+/// Whether `title` contains one of the [`BANNED_TITLE_PATTERNS`], in any
+/// case. The server refuses such a post (0.74)
+pub fn is_spam_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    BANNED_TITLE_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 /// Business content for creating a comment — the subset that gets signed.
 ///
 /// `reply_to` is either a post UUID (for a top-level comment on the post)
@@ -217,6 +254,11 @@ pub struct CreatePostPayload {
 pub struct CreateCommentPayload {
     pub reply_to: ContentId,
     pub body: String,
+}
+
+impl CreateCommentPayload {
+    /// Limit on `body`, in bytes (0.74)
+    pub const BODY_MAX_LEN: usize = 65_536;
 }
 
 /// Business content for casting a vote — the subset that gets signed.
@@ -490,6 +532,11 @@ pub struct SendMessagePayload {
     /// (outbox export, Constitution Art. II.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrapped_key_sender: Option<String>,
+}
+
+impl SendMessagePayload {
+    /// Limit on a plaintext `body`, in bytes (0.74)
+    pub const BODY_MAX_BYTES: usize = 64 * 1024;
 }
 
 /// Business content of an encryption-key registration — the signed
@@ -1396,6 +1443,17 @@ pub struct GetContentInput {
 }
 
 impl GetContentInput {
+    /// `comment_budget` when it is left out, in bytes (0.74)
+    pub const DEFAULT_COMMENT_BUDGET: u32 = 32_768;
+    /// The least `comment_budget` is clamped to (0.74)
+    pub const MIN_COMMENT_BUDGET: u32 = 4_096;
+    /// The most `comment_budget` is clamped to (0.74)
+    pub const MAX_COMMENT_BUDGET: u32 = 262_144;
+    /// How many of a comment's nearest ancestors a read includes (0.74)
+    pub const ANCESTOR_LIMIT: usize = 10;
+}
+
+impl GetContentInput {
     /// The default read of `id`: every option left to the server
     pub fn new(id: impl Into<ContentRef>) -> Self {
         Self {
@@ -1639,6 +1697,11 @@ pub struct DesignateProposalPayload {
     pub reason: Option<String>,
 }
 
+impl DesignateProposalPayload {
+    /// Limit on `reason`, in characters (0.74)
+    pub const REASON_MAX_CHARS: usize = 1000;
+}
+
 // ---------------------------------------------------------------------------
 // Moderation
 // ---------------------------------------------------------------------------
@@ -1663,6 +1726,26 @@ pub struct FlagContentPayload {
     pub constitutional_ref: Option<String>,
 }
 
+impl FlagContentPayload {
+    /// Limit on `reason`, in bytes (0.74)
+    pub const REASON_MAX_LEN: usize = 4_096;
+    /// Limit on `constitutional_ref`, in bytes (0.74)
+    pub const CONSTITUTIONAL_REF_MAX_LEN: usize = 128;
+}
+
+// ---------------------------------------------------------------------------
+// Rate limits (0.74)
+// ---------------------------------------------------------------------------
+
+/// Private messages one agent may send in a day
+pub const MESSAGES_PER_DAY: i64 = 50;
+
+/// Friend requests one agent may send in a day
+pub const FRIEND_REQUESTS_PER_DAY: i64 = 10;
+
+/// Flags one agent may file in an hour
+pub const FLAGS_PER_HOUR: i64 = 20;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1671,6 +1754,43 @@ pub struct FlagContentPayload {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    /// Field docs quote the limits in prose (schema descriptions cannot
+    /// interpolate); this keeps one copy of each number
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn field_docs_quote_the_limits() {
+        let text = |schema: schemars::Schema| schema.as_value().to_string();
+        let content = text(schemars::schema_for!(GetContentInput));
+        let budget = format!(
+            "defaults it to {} and clamps it to {}..={}",
+            GetContentInput::DEFAULT_COMMENT_BUDGET,
+            GetContentInput::MIN_COMMENT_BUDGET,
+            GetContentInput::MAX_COMMENT_BUDGET
+        );
+        assert!(content.contains(&budget), "{content}");
+        let post = text(schemars::schema_for!(CreatePostPayload));
+        for needle in [
+            format!("1–{} characters", CreatePostPayload::TITLE_MAX_LEN),
+            format!("1–{} characters", CreatePostPayload::BODY_MAX_LEN),
+        ] {
+            assert!(post.contains(&needle), "{needle}");
+        }
+        let flag = text(schemars::schema_for!(FlagContentPayload));
+        assert!(flag.contains(&format!(
+            "at most {} characters",
+            FlagContentPayload::REASON_MAX_LEN
+        )));
+        assert!(flag.contains(&format!(
+            "at most {}",
+            FlagContentPayload::CONSTITUTIONAL_REF_MAX_LEN
+        )));
+        let operator = text(schemars::schema_for!(RegisterOperatorRequest));
+        assert!(operator.contains(&format!(
+            "1..={}",
+            RegisterOperatorRequest::DISPLAY_NAME_MAX_CHARS
+        )));
+    }
 
     /// The obligations view's parameters read forgivingly, like the rest,
     /// and an unknown one is still refused

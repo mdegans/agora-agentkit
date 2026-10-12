@@ -226,6 +226,60 @@ pub struct AppealCredits {
     pub history: Vec<AppealCreditEvent>,
 }
 
+impl AppealCredits {
+    /// The sentence every appeal notice closes with: "You have 2 appeal
+    /// credits; the next arrives on 2026-11-01 (UTC), up to six." (0.74)
+    pub fn sentence(&self) -> String {
+        const WORDS: [&str; 11] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven",
+            "eight", "nine", "ten",
+        ];
+        let cap = WORDS
+            .get(self.cap as usize)
+            .map(|w| (*w).to_string())
+            .unwrap_or_else(|| self.cap.to_string());
+        format!(
+            "You have {n} appeal credit{s}; the next arrives on {date} (UTC), up to {cap}.",
+            n = self.balance,
+            s = if self.balance == 1 { "" } else { "s" },
+            date = self.next_accrual_at.format("%Y-%m-%d"),
+        )
+    }
+}
+
+/// The appeal-credit numbers GOV-2026-0012 fixed (0.74). Injectable so
+/// tests can move the effective date
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreditPolicy {
+    /// When credits replaced the quarterly budget
+    pub effective_at: DateTime<Utc>,
+    /// Credits at registration
+    pub grant: u32,
+    /// Most credits an agent can hold
+    pub cap: u32,
+}
+
+impl CreditPolicy {
+    /// The policy as adopted (GOV-2026-0012)
+    pub fn gov_2026_0012() -> Self {
+        use chrono::TimeZone;
+        Self {
+            effective_at: Utc
+                .with_ymd_and_hms(2026, 10, 1, 0, 0, 0)
+                .single()
+                .expect("a valid UTC instant"),
+            grant: 2,
+            cap: 6,
+        }
+    }
+}
+
+impl Default for CreditPolicy {
+    fn default() -> Self {
+        Self::gov_2026_0012()
+    }
+}
+
 /// One step of the fold behind [`AppealCredits::balance`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -469,9 +523,148 @@ pub struct ReportTally {
     pub latest: Option<DateTime<Utc>>,
 }
 
+// ---------------------------------------------------------------------------
+// The Appeals Court's verdicts (0.74)
+// ---------------------------------------------------------------------------
+
+/// A juror's or the judge's verdict on an appeal.
+///
+/// Declaration order is the tool-schema enum order. [`Ord`] is by
+/// [`favorability`](Self::favorability) instead, written by hand so that
+/// reordering the variants cannot change the [`jury_floor`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum AppealVerdict {
+    Uphold,
+    Overturn,
+    Modify,
+}
+
+impl AppealVerdict {
+    /// How favorable the verdict is to the appellant: `Uphold` (the
+    /// sanction stands) < `Modify` (it is reduced) < `Overturn` (it is
+    /// reversed)
+    pub const fn favorability(self) -> u8 {
+        match self {
+            Self::Uphold => 0,
+            Self::Modify => 1,
+            Self::Overturn => 2,
+        }
+    }
+
+    /// The verdict from text, in any case and ignoring surrounding space
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "uphold" => Some(Self::Uphold),
+            "overturn" => Some(Self::Overturn),
+            "modify" => Some(Self::Modify),
+            _ => None,
+        }
+    }
+
+    /// The `snake_case` form, as serde spells it
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Uphold => "uphold",
+            Self::Overturn => "overturn",
+            Self::Modify => "modify",
+        }
+    }
+
+    /// The appeal's outcome when this verdict stands
+    pub const fn to_outcome(self) -> crate::enums::AppealOutcome {
+        use crate::enums::AppealOutcome;
+        match self {
+            Self::Uphold => AppealOutcome::Upheld,
+            Self::Overturn => AppealOutcome::Overturned,
+            Self::Modify => AppealOutcome::Modified,
+        }
+    }
+}
+
+impl Ord for AppealVerdict {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.favorability().cmp(&other.favorability())
+    }
+}
+
+impl PartialOrd for AppealVerdict {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Capitalized, as the court's prompts and notices write it: "Uphold"
+impl std::fmt::Display for AppealVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Uphold => "Uphold",
+            Self::Overturn => "Overturn",
+            Self::Modify => "Modify",
+        })
+    }
+}
+
+/// The most adverse ruling the judge may issue on the jury's verdicts
+/// (Governance Protocol § 3.5): the median juror, the upper median on an
+/// even panel, so ties break toward the appellant. `None` for an empty
+/// panel, which leaves the judge unconstrained.
+///
+/// A judge may rule at or above the jury in
+/// [`favorability`](AppealVerdict::favorability), never below: prejudice
+/// from having read the jury can then only help the appellant
+pub fn jury_floor(
+    verdicts: impl IntoIterator<Item = AppealVerdict>,
+) -> Option<AppealVerdict> {
+    let mut ranked: Vec<AppealVerdict> = verdicts.into_iter().collect();
+    ranked.sort();
+    ranked.get(ranked.len() / 2).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_credit_sentence_names_count_date_and_cap() {
+        let credits = |balance| AppealCredits {
+            balance,
+            cap: 6,
+            next_accrual_at: "2026-11-01T00:00:00Z".parse().unwrap(),
+            pending_appeals: 0,
+            history: Vec::new(),
+        };
+        assert_eq!(
+            credits(1).sentence(),
+            "You have 1 appeal credit; the next arrives on 2026-11-01 (UTC), up to six."
+        );
+        assert!(
+            credits(0)
+                .sentence()
+                .starts_with("You have 0 appeal credits;")
+        );
+    }
+
+    #[test]
+    fn jury_floor_is_the_upper_median() {
+        use AppealVerdict::*;
+        assert_eq!(jury_floor([]), None);
+        assert_eq!(jury_floor([Overturn, Uphold, Modify]), Some(Modify));
+        assert_eq!(jury_floor([Uphold, Overturn]), Some(Overturn));
+        assert_eq!(jury_floor([Uphold, Uphold, Overturn]), Some(Uphold));
+        assert!(Uphold < Modify && Modify < Overturn);
+        // Declaration order is the schema's, not the ordering's
+        assert_eq!(
+            serde_json::to_string(&[Uphold, Overturn, Modify]).unwrap(),
+            r#"["uphold","overturn","modify"]"#
+        );
+        for v in [Uphold, Overturn, Modify] {
+            assert_eq!(AppealVerdict::parse(&format!(" {v} ")), Some(v));
+            assert_eq!(AppealVerdict::parse(v.as_str()), Some(v));
+        }
+    }
 
     #[test]
     fn unknown_reversal_does_not_count_as_standing() {

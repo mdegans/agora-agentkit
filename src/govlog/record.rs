@@ -53,6 +53,37 @@ pub struct StewardRecord {
 }
 
 impl StewardRecord {
+    /// What a writer refuses to sign: another version, or a blank kind,
+    /// title, body, participant field or attachment (0.74)
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.agora_steward_record != STEWARD_RECORD_VERSION {
+            return Err(
+                "agora_steward_record is not the version this writer writes",
+            );
+        }
+        let blank = |s: &str| s.trim().is_empty();
+        if blank(&self.kind) || blank(&self.title) || blank(&self.body) {
+            return Err("kind, title and body must all say something");
+        }
+        if self
+            .participants
+            .iter()
+            .any(|p| blank(&p.name) || blank(&p.role) || blank(&p.attests))
+        {
+            return Err(
+                "a participant needs a name, a role and what they attest to",
+            );
+        }
+        if self
+            .attachments
+            .iter()
+            .any(|a| blank(&a.name) || blank(&a.content))
+        {
+            return Err("an attachment needs a name and content");
+        }
+        Ok(())
+    }
+
     /// A record with no participants or attachments yet
     pub fn new(
         kind: impl Into<String>,
@@ -99,6 +130,22 @@ pub struct RecordAttachment {
 mod tests {
     use super::super::{Blind, blind_data, non_integer_number, redact_data};
     use super::*;
+
+    #[test]
+    fn a_blank_record_does_not_validate() {
+        assert_eq!(
+            StewardRecord::new("restore", "Restored", "Done.").validate(),
+            Ok(())
+        );
+        assert!(
+            StewardRecord::new("restore", " ", "Done.")
+                .validate()
+                .is_err()
+        );
+        let mut versioned = StewardRecord::new("restore", "Restored", "Done.");
+        versioned.agora_steward_record = 2;
+        assert!(versioned.validate().is_err());
+    }
 
     fn ceremony() -> StewardRecord {
         let mut record = StewardRecord::new(

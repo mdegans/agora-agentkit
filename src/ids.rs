@@ -381,6 +381,97 @@ define_id! {
     CalendarEventId
 }
 
+define_id! {
+    /// One archived model response body (`prompt_archive_responses`), byte
+    /// for byte as the API returned it, archived before it is parsed (0.74)
+    PromptArchiveResponseId
+}
+
+define_id! {
+    /// One removal pass the platform's operators ran (`content_cleanups`).
+    /// The wire carries the pass as a
+    /// [`CleanupNote`](crate::responses::CleanupNote), without the id (0.74)
+    CleanupId
+}
+
+define_id! {
+    /// One signed-in browser of an operator (`operator_sessions`). The
+    /// token lives in a cookie; the row holds its hash (0.74)
+    OperatorSessionId
+}
+
+define_id! {
+    /// One emailed, single-use operator password reset link
+    /// (`operator_password_resets`) (0.74)
+    OperatorPasswordResetId
+}
+
+define_id! {
+    /// One WebAuthn credential an operator enrolled (`operator_passkeys`).
+    /// Not the authenticator's own [`PasskeyCredentialId`] (0.74)
+    OperatorPasskeyId
+}
+
+define_id! {
+    /// A correct operator password waiting for its passkey
+    /// (`operator_pending_logins`). The token lives in a cookie; the row
+    /// holds its hash (0.74)
+    OperatorPendingLoginId
+}
+
+/// A WebAuthn credential id: the authenticator's identifier for one
+/// credential, 16 to 1023 bytes, unique across the site
+/// (`operator_passkeys.credential_id`) (0.74)
+#[derive(Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct PasskeyCredentialId(Vec<u8>);
+
+impl PasskeyCredentialId {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for PasskeyCredentialId {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for PasskeyCredentialId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PasskeyCredentialId({})", hex::encode(&self.0))
+    }
+}
+
+/// An operator's WebAuthn user handle (`operators.webauthn_user_handle`):
+/// random bytes chosen at the first enrolment, which authenticators store
+/// with each passkey and return when one signs in on its own. Never the
+/// operator id or the email address, and redacted in `Debug` (0.74)
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct WebAuthnUserHandle(Vec<u8>);
+
+impl WebAuthnUserHandle {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for WebAuthnUserHandle {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Debug for WebAuthnUserHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WebAuthnUserHandle(..)")
+    }
+}
+
 /// An option's number **as one agent sees it**: 1 to N in the order that
 /// agent is shown the poll's options, so the number always matches the
 /// position. Every agent has its own order, a deterministic shuffle per
@@ -874,6 +965,17 @@ impl GovernanceLogId {
             && (1..=4).contains(&serial.len())
             && digits(serial))
         .then(|| format!("{prefix}-{year}-{serial:0>4}"))
+    }
+
+    /// The id `{prefix}-{year}-{serial:04}`, or `None` when the year is
+    /// not four digits or the serial is not 1 to 9999 (0.74)
+    pub fn from_parts(
+        prefix: GovernanceLogPrefix,
+        year: i32,
+        serial: u32,
+    ) -> Option<Self> {
+        ((1000..=9999).contains(&year) && (1..=9999).contains(&serial))
+            .then(|| Self(format!("{prefix}-{year}-{serial:04}")))
     }
 
     fn parts(s: &str) -> Option<(GovernanceLogPrefix, &str, &str)> {
@@ -2024,6 +2126,30 @@ impl schemars::JsonSchema for ContentRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn governance_log_ids_from_parts() {
+        for prefix in GovernanceLogPrefix::ALL {
+            let id = GovernanceLogId::from_parts(prefix, 2026, 42).unwrap();
+            assert_eq!(id.as_str(), format!("{prefix}-2026-0042"));
+            assert_eq!(id.prefix(), prefix);
+            assert_eq!(id.as_str().parse::<GovernanceLogId>().unwrap(), id);
+        }
+        let gov = GovernanceLogPrefix::Gov;
+        assert!(GovernanceLogId::from_parts(gov, 2026, 9999).is_some());
+        assert!(GovernanceLogId::from_parts(gov, 2026, 10_000).is_none());
+        assert!(GovernanceLogId::from_parts(gov, 2026, 0).is_none());
+        assert!(GovernanceLogId::from_parts(gov, 999, 1).is_none());
+    }
+
+    #[test]
+    fn byte_ids_debug() {
+        let handle = WebAuthnUserHandle::from(vec![7; 64]);
+        assert_eq!(format!("{handle:?}"), "WebAuthnUserHandle(..)");
+        let credential = PasskeyCredentialId::from(vec![0xab; 2]);
+        assert_eq!(format!("{credential:?}"), "PasskeyCredentialId(abab)");
+        assert_eq!(credential.as_bytes(), &[0xab, 0xab]);
+    }
 
     #[test]
     fn oauth_client_id_round_trips() {
