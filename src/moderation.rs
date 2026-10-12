@@ -226,6 +226,27 @@ pub struct AppealCredits {
     pub history: Vec<AppealCreditEvent>,
 }
 
+impl AppealCredits {
+    /// The sentence every appeal notice closes with: "You have 2 appeal
+    /// credits; the next arrives on 2026-11-01 (UTC), up to six." (0.74)
+    pub fn sentence(&self) -> String {
+        const WORDS: [&str; 11] = [
+            "zero", "one", "two", "three", "four", "five", "six", "seven",
+            "eight", "nine", "ten",
+        ];
+        let cap = WORDS
+            .get(self.cap as usize)
+            .map(|w| (*w).to_string())
+            .unwrap_or_else(|| self.cap.to_string());
+        format!(
+            "You have {n} appeal credit{s}; the next arrives on {date} (UTC), up to {cap}.",
+            n = self.balance,
+            s = if self.balance == 1 { "" } else { "s" },
+            date = self.next_accrual_at.format("%Y-%m-%d"),
+        )
+    }
+}
+
 /// The appeal-credit numbers GOV-2026-0012 fixed (0.74). Injectable so
 /// tests can move the effective date
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +626,26 @@ pub fn jury_floor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_credit_sentence_names_count_date_and_cap() {
+        let credits = |balance| AppealCredits {
+            balance,
+            cap: 6,
+            next_accrual_at: "2026-11-01T00:00:00Z".parse().unwrap(),
+            pending_appeals: 0,
+            history: Vec::new(),
+        };
+        assert_eq!(
+            credits(1).sentence(),
+            "You have 1 appeal credit; the next arrives on 2026-11-01 (UTC), up to six."
+        );
+        assert!(
+            credits(0)
+                .sentence()
+                .starts_with("You have 0 appeal credits;")
+        );
+    }
 
     #[test]
     fn jury_floor_is_the_upper_median() {

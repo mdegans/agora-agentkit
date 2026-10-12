@@ -410,7 +410,20 @@ impl SeatModels {
 }
 
 /// A voting Council seat. The fifth vote is the Steward's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Ordered as declared (0.74)
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
@@ -419,6 +432,36 @@ pub enum CouncilSeat {
     Philosopher,
     Lawyer,
     Engineer,
+}
+
+impl CouncilSeat {
+    /// Every seat, in declaration order (0.74)
+    pub const ALL: [Self; 4] = [
+        Self::Artist,
+        Self::Philosopher,
+        Self::Lawyer,
+        Self::Engineer,
+    ];
+
+    /// The `snake_case` form, as serde spells it: `"artist"` (0.74)
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Artist => "artist",
+            Self::Philosopher => "philosopher",
+            Self::Lawyer => "lawyer",
+            Self::Engineer => "engineer",
+        }
+    }
+
+    /// The seat's name as prose writes it: `"Artist"` (0.74)
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Artist => "Artist",
+            Self::Philosopher => "Philosopher",
+            Self::Lawyer => "Lawyer",
+            Self::Engineer => "Engineer",
+        }
+    }
 }
 
 /// A vote cast by a seat or the Steward

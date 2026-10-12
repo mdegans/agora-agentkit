@@ -43,8 +43,9 @@ and agora uses them. No wire shape, schema text or signed byte changes.
   `DecisionCategory`; `ModerationActionType::words`;
   `GovernanceLogId::from_parts`; `govlog::{escape_pointer_token,
   unescape_pointer_token, pointer_tokens}` (RFC 6901);
-  `moderation::{AppealVerdict, jury_floor}`; `RemovedBy::placeholder` is
-  `const`.
+  `moderation::{AppealVerdict, jury_floor}`; `AppealCredits::sentence`;
+  `StewardRecord::validate`; `CouncilSeat::{ALL, as_str, name}` and `Ord`
+  (declaration order); `RemovedBy::placeholder` is `const`.
 
 ## 0.73.0
 
