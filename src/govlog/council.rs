@@ -16,7 +16,7 @@ use misanthropic::prompt::message::{Content, Thought};
 use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
-use crate::enums::{DecisionOutcome, RoundType};
+use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 
 /// The `data` of a `council_decision` entry. See the [module docs](self).
@@ -125,6 +125,38 @@ pub enum DecisionCategory {
     /// order without voting
     Schedule,
 }
+
+/// The two spell the same five categories (0.74)
+impl From<ProposalCategory> for DecisionCategory {
+    fn from(category: ProposalCategory) -> Self {
+        match category {
+            ProposalCategory::Routine => Self::Routine,
+            ProposalCategory::Policy => Self::Policy,
+            ProposalCategory::Constitutional => Self::Constitutional,
+            ProposalCategory::Emergency => Self::Emergency,
+            ProposalCategory::Schedule => Self::Schedule,
+        }
+    }
+}
+
+impl From<DecisionCategory> for ProposalCategory {
+    fn from(category: DecisionCategory) -> Self {
+        match category {
+            DecisionCategory::Routine => Self::Routine,
+            DecisionCategory::Policy => Self::Policy,
+            DecisionCategory::Constitutional => Self::Constitutional,
+            DecisionCategory::Emergency => Self::Emergency,
+            DecisionCategory::Schedule => Self::Schedule,
+        }
+    }
+}
+
+/// The tag a recused deferral carries on the record, which the next
+/// hearing's guard looks for (0.74)
+pub const RECUSED_DEFERRED_TAG: &str = "recused-deferred";
+
+/// The tag every decision with the Steward recused carries (0.74)
+pub const STEWARD_RECUSED_TAG: &str = "steward-recused";
 
 /// One round of deliberation
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

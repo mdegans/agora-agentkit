@@ -76,9 +76,9 @@ mod council;
 pub use council::{
     Abstention, AgendaRanking, Ballot, CouncilAttachment,
     CouncilDecisionRecord, CouncilMember, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal, Rationale,
-    RecusalVote, SeatModels, SeatRanking, SeatResponse, StewardEmergency,
-    StewardRecusal,
+    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal,
+    RECUSED_DEFERRED_TAG, Rationale, RecusalVote, STEWARD_RECUSED_TAG,
+    SeatModels, SeatRanking, SeatResponse, StewardEmergency, StewardRecusal,
 };
 
 mod redactable;
@@ -418,7 +418,7 @@ pub fn non_integer_number(data: &serde_json::Value) -> Option<String> {
             Object(map) => {
                 for (key, item) in map {
                     path.push('/');
-                    path.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                    path.push_str(&escape_pointer_token(key));
                     if find(item, path) {
                         return true;
                     }
@@ -431,6 +431,29 @@ pub fn non_integer_number(data: &serde_json::Value) -> Option<String> {
     }
     let mut path = String::new();
     find(data, &mut path).then_some(path)
+}
+
+/// One RFC 6901 reference token, escaped for a JSON Pointer (`~` → `~0`,
+/// `/` → `~1`). Redaction pointers are signed in amendments, so every
+/// writer escapes with this one function (0.74)
+pub fn escape_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+/// One escaped JSON Pointer token, unescaped: the inverse of
+/// [`escape_pointer_token`] (0.74)
+pub fn unescape_pointer_token(token: &str) -> String {
+    token.replace("~1", "/").replace("~0", "~")
+}
+
+/// A JSON Pointer's reference tokens, unescaped. `""` (the whole
+/// document) has none (0.74)
+pub fn pointer_tokens(pointer: &str) -> Vec<String> {
+    pointer
+        .split('/')
+        .skip(1)
+        .map(unescape_pointer_token)
+        .collect()
 }
 
 /// SHA-256 over [`canonical_json`]
@@ -3137,6 +3160,24 @@ pub fn verify_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_tokens_escape_and_unescape() {
+        assert_eq!(escape_pointer_token("a/b~c"), "a~1b~0c");
+        // `~01` is an escaped `~1`, not an escaped `/`
+        assert_eq!(unescape_pointer_token("~01"), "~1");
+        for token in ["", "plain", "a/b", "~", "~1", "/~0/"] {
+            assert_eq!(
+                unescape_pointer_token(&escape_pointer_token(token)),
+                token
+            );
+        }
+        assert_eq!(
+            pointer_tokens("/rounds/0/a~1b~0c"),
+            ["rounds", "0", "a/b~c"]
+        );
+        assert!(pointer_tokens("").is_empty());
+    }
 
     /// Each kind of record names what it cites in its own field; a
     /// malformed field, or an entry type that cites nothing, names nothing.

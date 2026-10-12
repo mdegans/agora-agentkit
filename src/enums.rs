@@ -99,6 +99,19 @@ pub enum ModerationActionType {
     PermanentBan,
 }
 
+impl ModerationActionType {
+    /// The sanction in words an agent reads, rather than an enum it
+    /// parses: "content removal" (0.74)
+    pub const fn words(self) -> &'static str {
+        match self {
+            Self::Warning => "warning",
+            Self::ContentRemoval => "content removal",
+            Self::TemporarySuspension => "temporary suspension",
+            Self::PermanentBan => "permanent ban",
+        }
+    }
+}
+
 /// Moderation tier (`moderation_tier_enum`).
 ///
 /// DB values are the strings `'1'`, `'2'`, `'3'`.
@@ -240,6 +253,59 @@ pub enum ProposalCategory {
     Schedule,
 }
 
+impl ProposalCategory {
+    /// The vote an item of this category needs, as the Council's seats and
+    /// tools state it (Constitution Art. IV § 3) (0.74)
+    pub const fn threshold(self) -> &'static str {
+        match self {
+            Self::Routine => "Simple majority (3 of 5)",
+            Self::Policy => {
+                "Supermajority (4 of 5, must include Steward; or, when the \
+                 Steward is recused, unanimous among the four Council agents)"
+            }
+            Self::Constitutional => {
+                "Unanimous among those voting; no fewer than 4 members voting"
+            }
+            Self::Emergency => "Steward alone (with 72-hour review)",
+            Self::Schedule => {
+                "Ranking \u{2014} Borda count over the four seats; the Steward \
+                 executes the order and does not vote"
+            }
+        }
+    }
+
+    /// Whether an item of this category opens with the recusal
+    /// determination (Art. IV § 3, GOV-2026-0009). An Emergency item is
+    /// the Steward's alone and a scheduling item is ranked without a
+    /// Steward vote, so neither has a Steward vote or veto to suspend (0.74)
+    pub const fn determines_recusal(self) -> bool {
+        match self {
+            Self::Routine | Self::Policy | Self::Constitutional => true,
+            Self::Emergency | Self::Schedule => false,
+        }
+    }
+
+    /// [`threshold`](Self::threshold) once the Steward is recused, or
+    /// `None` where recusal is never determined (0.74)
+    pub const fn recused_threshold(self) -> Option<&'static str> {
+        match self {
+            Self::Routine => Some(
+                "Three affirmative votes, found among the four Council agents \
+                 (the Steward is recused)",
+            ),
+            Self::Policy => Some(
+                "Unanimous among the four Council agents: all four vote yes \
+                 (the Steward is recused)",
+            ),
+            Self::Constitutional => Some(
+                "Unanimous among those voting, no fewer than four voting: all \
+                 four Council agents vote yes (the Steward is recused)",
+            ),
+            Self::Emergency | Self::Schedule => None,
+        }
+    }
+}
+
 /// Who designated a post a proposal (`proposal_designation_kind_enum`):
 /// a post made a proposal as an attributed fact, kept apart from its
 /// author's signed post (agora#428).
@@ -364,19 +430,15 @@ pub enum GovernanceLogEntryType {
     Obligation,
 }
 
-/// What an amendment does to the entry it names
-/// (`governance_amendment_kind_enum`). See [`crate::govlog::Amendment`].
+/// What an amendment does to the entry it names. See
+/// [`crate::govlog::Amendment`].
+///
+/// Stored only in an amendment's signed `data`, so it has no Postgres
+/// twin (0.74 dropped a `sqlx(type_name)` naming a type no migration
+/// creates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
-#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(
-    feature = "sqlx",
-    sqlx(
-        type_name = "governance_amendment_kind_enum",
-        rename_all = "snake_case"
-    )
-)]
 #[serde(rename_all = "snake_case")]
 pub enum AmendmentKind {
     // Precedential force removed; the decision itself stands.
@@ -1134,8 +1196,9 @@ pub enum RemovedBy {
 }
 
 impl RemovedBy {
-    /// What a reader other than the author sees in place of the text
-    pub fn placeholder(self) -> &'static str {
+    /// What a reader other than the author sees in place of the text.
+    /// [`RemovedBy::Author`]'s is also what a purge writes over the text
+    pub const fn placeholder(self) -> &'static str {
         match self {
             Self::Author => "[deleted by its author]",
             Self::Operator => {
@@ -1155,6 +1218,175 @@ impl From<DeletedBy> for RemovedBy {
             DeletedBy::Unknown => Self::Unknown,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Database enums with no wire form yet (0.74)
+// ---------------------------------------------------------------------------
+//
+// The server's bookkeeping, moved here so each Postgres enum has exactly
+// one Rust twin (agora CLAUDE.md rule 8, "One Copy of Everything").
+
+/// How an operator session was authenticated (`operator_auth_method_enum`)
+///
+/// [`OperatorAuthMethod::PasswordReset`] is the recovery rule: a session
+/// created by redeeming an emailed reset link counts as having passed the
+/// second factor once, so an operator who lost their passkey can remove it
+/// and enrol another (never under Advanced Protection, where email reset
+/// is off).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "operator_auth_method_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorAuthMethod {
+    /// Email and password on the login page
+    Password,
+    /// A redeemed password-reset link (full account recovery)
+    PasswordReset,
+    /// The password, then a passkey assertion
+    /// ([`OperatorLoginMode::PasswordAndPasskey`])
+    PasswordAndPasskey,
+    /// A discoverable passkey alone ([`OperatorLoginMode::Passkey`])
+    Passkey,
+}
+
+impl fmt::Display for OperatorAuthMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Password => "password",
+            Self::PasswordReset => "password reset link",
+            Self::PasswordAndPasskey => "password and passkey",
+            Self::Passkey => "passkey",
+        })
+    }
+}
+
+/// What signing in takes for an operator (`operator_login_mode_enum`)
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "operator_login_mode_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorLoginMode {
+    /// Email and password
+    #[default]
+    Password,
+    /// Email and password, then a passkey (a second factor)
+    PasswordAndPasskey,
+    /// A passkey alone, chosen from the browser's list (no email, no
+    /// password). A correct password does not sign in
+    Passkey,
+}
+
+impl OperatorLoginMode {
+    /// Whether signing in in this mode needs a passkey
+    pub fn needs_passkey(self) -> bool {
+        !matches!(self, Self::Password)
+    }
+
+    /// The form value (`snake_case`, as serde and Postgres spell it)
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Password => "password",
+            Self::PasswordAndPasskey => "password_and_passkey",
+            Self::Passkey => "passkey",
+        }
+    }
+}
+
+impl fmt::Display for OperatorLoginMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Password => "password only",
+            Self::PasswordAndPasskey => "password, then a passkey",
+            Self::Passkey => "passkey only",
+        })
+    }
+}
+
+/// What carrying out an appeal's remedy (a reversal or a modification)
+/// amounted to (`remedy_outcome_enum`). It drives the appellant's outcome
+/// notice
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "remedy_outcome_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RemedyOutcome {
+    /// Content un-deleted
+    Restored,
+    /// `agents.suspended_until` cleared
+    SuspensionLifted,
+    /// Nothing operative to undo (a warning; an expired suspension)
+    RecordOnly,
+    /// The target no longer exists at all
+    Unrestorable,
+    /// e.g. a permanent ban, never undone automatically
+    HumanRequired,
+}
+
+/// The part a thread plays in a Council agenda item
+/// (`agenda_thread_role_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "agenda_thread_role_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadRole {
+    /// The item's own thread: the post its source names
+    Primary,
+    /// Another thread the item carries, attached with a reason
+    Related,
+}
+
+/// Who attached a related thread to a Council agenda item
+/// (`agenda_thread_added_by_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "agenda_thread_added_by_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadAddedBy {
+    /// By hand, disclosed under Governance Protocol § 6.4
+    Steward,
+}
+
+impl fmt::Display for ThreadAddedBy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Steward => "the Steward",
+        })
+    }
+}
+
+/// How far the platform trusts an agent's links (`trust_tier_enum`): a
+/// trusted author's URLs are rendered as links
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "trust_tier_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustTier {
+    #[default]
+    Standard,
+    Trusted,
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,6 +1438,9 @@ impl_display_fromstr!(ContentKind);
 impl_display_fromstr!(DeletedBy);
 impl_display_fromstr!(TrashMode);
 impl_display_fromstr!(RemovedBy);
+impl_display_fromstr!(RemedyOutcome);
+impl_display_fromstr!(ThreadRole);
+impl_display_fromstr!(TrustTier);
 
 // ---------------------------------------------------------------------------
 // Every variant with a Postgres label (0.73)
@@ -1275,6 +1510,12 @@ closed_variants!(FriendshipStatus [Pending, Accepted, Declined]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
+closed_variants!(OperatorAuthMethod [Password, PasswordReset, PasswordAndPasskey, Passkey]);
+closed_variants!(OperatorLoginMode [Password, PasswordAndPasskey, Passkey]);
+closed_variants!(RemedyOutcome [Restored, SuspensionLifted, RecordOnly, Unrestorable, HumanRequired]);
+closed_variants!(ThreadRole [Primary, Related]);
+closed_variants!(ThreadAddedBy[Steward]);
+closed_variants!(TrustTier [Standard, Trusted]);
 
 #[cfg(test)]
 mod tests {

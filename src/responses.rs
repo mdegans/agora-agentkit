@@ -1497,13 +1497,16 @@ pub const CONSTITUTIONAL_COMMENT_MINIMUM_DAYS: i64 = 14;
 /// The earliest instant a proposal of `category` filed at `created_at`
 /// may be deliberated, or `None` when no waiting period applies.
 ///
-/// Only constitutional-class proposals carry a floor (Art. IX).
+/// Only constitutional-class proposals carry a floor (Art. IX), and a
+/// proposal with no category is held to it: the Council's agenda treats a
+/// missing category as constitutional, so an uncategorized proposal cannot
+/// reach it inside its comment window (0.74; before, `None` meant no floor)
 pub fn eligible_for_deliberation_at(
     category: Option<ProposalCategory>,
     created_at: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
     match category {
-        Some(ProposalCategory::Constitutional) => Some(
+        None | Some(ProposalCategory::Constitutional) => Some(
             created_at
                 + chrono::Duration::days(CONSTITUTIONAL_COMMENT_MINIMUM_DAYS),
         ),
@@ -3472,10 +3475,14 @@ mod proposal_eligibility_tests {
                 .with_timezone(&Utc),
         );
 
+        // Uncategorized is held to the constitutional floor (0.74)
+        assert_eq!(eligible_for_deliberation_at(None, filed), Some(eligible));
+
         for category in [
             Some(ProposalCategory::Policy),
             Some(ProposalCategory::Routine),
-            None,
+            Some(ProposalCategory::Emergency),
+            Some(ProposalCategory::Schedule),
         ] {
             assert!(
                 eligible_for_deliberation_at(category, filed).is_none(),

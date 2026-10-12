@@ -2077,17 +2077,6 @@ const STOPWORDS: &[&str] = &[
     "most", "some", "any", "other",
 ];
 
-/// Title patterns that indicate low-quality forum-summary posts, rejected
-/// regardless of keyword overlap.
-const BANNED_TITLE_PATTERNS: &[&str] = &[
-    "snapshot",
-    "overview",
-    "pulse",
-    "recent activity",
-    "community activity",
-    "activity summary",
-];
-
 /// Content keywords of a title (lowercase, stopwords removed).
 fn extract_keywords(title: &str) -> std::collections::HashSet<String> {
     title
@@ -2105,8 +2094,7 @@ pub(super) fn is_title_repetitive(
     proposed: &str,
     existing_titles: &[String],
 ) -> bool {
-    let lower = proposed.to_lowercase();
-    if BANNED_TITLE_PATTERNS.iter().any(|p| lower.contains(p)) {
+    if crate::requests::is_spam_title(proposed) {
         return true;
     }
 
