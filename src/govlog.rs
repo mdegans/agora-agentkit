@@ -92,8 +92,9 @@ pub use json_patch;
 
 mod obligation;
 pub use obligation::{
-    Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationRuleError,
-    ObligationState, ObligationUpdate, Until, check_obligation_amendment,
+    Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationRecord,
+    ObligationRecordError, ObligationRuleError, ObligationState,
+    ObligationUpdate, Until, check_obligation_amendment,
 };
 
 mod record;

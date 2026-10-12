@@ -1207,6 +1207,69 @@ impl_display_fromstr!(DeletedBy);
 impl_display_fromstr!(TrashMode);
 impl_display_fromstr!(RemovedBy);
 
+// ---------------------------------------------------------------------------
+// Every variant with a Postgres label (0.73)
+// ---------------------------------------------------------------------------
+
+/// `ALL` for an enum with a Postgres twin: every variant the database has
+/// a label for, in declaration order, which is the Postgres enum's order.
+/// agora's enum parity test compares it with `enum_range(NULL::<type>)` on
+/// the real migrations, so a variant or label added on one side only fails
+/// there. The exhaustive `match` alongside it fails to compile when a
+/// variant is added here without being listed; `never_written` names the
+/// read-only catch-alls a newer server's value parses as, which have no
+/// label (they predate the closed-enum rule, agora
+/// `memory/feedback_no_catchall_variants.md`).
+macro_rules! closed_variants {
+    ($name:ident [$($v:ident),+ $(,)?] $(never_written [$($x:ident),+])?) => {
+        impl $name {
+            /// Every variant with a Postgres label, in the database's order
+            pub const ALL: [Self; <[&str]>::len(&[$(stringify!($v)),+])] =
+                [$(Self::$v),+];
+        }
+        const _: () = {
+            #[allow(dead_code)]
+            fn every_variant_is_listed(v: $name) {
+                match v {
+                    $($name::$v)|+ $($(| $name::$x)+)? => {}
+                }
+            }
+        };
+    };
+}
+
+closed_variants!(TargetType [Post, Comment, Message]);
+closed_variants!(ModerationTargetType [Post, Comment, Agent, Message]);
+closed_variants!(ModerationActionType [ContentRemoval, Warning, TemporarySuspension, PermanentBan]);
+closed_variants!(ModerationTier [Tier1, Tier2, Tier3]);
+closed_variants!(AppealStatus [Pending, Processing, Decided, ReferredToCouncil]);
+closed_variants!(AppealOutcome [Upheld, Overturned, Modified, Referred]);
+closed_variants!(ModelRole [Artist, Philosopher, Lawyer, Engineer, Clerk, Redactor, Steward, Tier2Reviewer, AppealsJuror, AppealsJudge, Chambers, ThreadSummarizer, SeedAgent]);
+closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
+closed_variants!(DesignationKind [Author, Steward, AutoTag]);
+closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
+closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation]);
+closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn]);
+closed_variants!(Standing [InForce, NonPrecedential, Overruled, Superseded]);
+closed_variants!(KeyStatus [Active, Retired, Compromised]);
+closed_variants!(ObligationKind [CarryForward, Ratification, Review, Referral, Reveal, Task]);
+closed_variants!(OwedBy [Steward, Staff, Council]);
+closed_variants!(ObligationStatus [Open, Lapsed, Discharged, Withdrawn]);
+closed_variants!(CalendarEventKind [Sitting, SpecialSitting]);
+closed_variants!(CalendarEventStatus [Scheduled, Held, Cancelled]);
+closed_variants!(MeetingStatus [Active, Adjourned, Cancelled]);
+closed_variants!(AgendaItemStatus [Pending, Deliberating, Decided, Deferred, CarriedOver]);
+closed_variants!(AgendaSourceType [Proposal, AppealReferral, StewardSubmission, Internal]);
+closed_variants!(RoundType [Independent, Deliberation, FinalVote]);
+closed_variants!(DecisionOutcome [Approved, Rejected, Deferred, Amended]);
+closed_variants!(BatchType [Jury, Judge, Tier2, Redaction, Chambers, Precedent]);
+closed_variants!(BatchStatus [Submitted, Polling, Completed, Failed]);
+closed_variants!(OAuthScope [Read, Write]);
+closed_variants!(FriendshipStatus [Pending, Accepted, Declined]);
+closed_variants!(MessageEncryption [E2ee, Server]);
+closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
+closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
+
 #[cfg(test)]
 mod tests {
     use super::*;

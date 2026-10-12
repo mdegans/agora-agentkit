@@ -139,6 +139,20 @@ impl schemars::JsonSchema for Until {
     }
 }
 
+impl Until {
+    /// The date this is, when it is a date: what the projection stores as
+    /// the due date. Sitting deadlines resolve against the calendar when
+    /// read ([`crate::calendar::Calendar::resolve`]), never here.
+    pub fn fixed_date(&self) -> Option<NaiveDate> {
+        match self {
+            Self::Date { date } => Some(*date),
+            Self::NextSitting
+            | Self::Sitting { .. }
+            | Self::AfterDecision { .. } => None,
+        }
+    }
+}
+
 /// A date in signed data, read only as `YYYY-MM-DD`.
 ///
 /// chrono alone also reads `+2027-4-1` and `2027 - 04 - 01`. Every
@@ -351,6 +365,59 @@ impl ObligationState {
             }
         }
         state
+    }
+}
+
+/// One obligation entry as the log has it now: its latest version, and
+/// what its amendments add up to (0.73)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObligationRecord {
+    pub id: GovernanceLogId,
+    pub created_at: DateTime<Utc>,
+    pub chain_seq: u64,
+    /// Its latest version, every revision applied
+    pub obligation: Obligation,
+    /// What its amendments add up to
+    pub state: ObligationState,
+}
+
+/// Why a stored obligation entry could not be read as an [`ObligationRecord`]
+#[derive(Debug, thiserror::Error)]
+pub enum ObligationRecordError {
+    #[error("its revisions do not apply: {0}")]
+    Revisions(#[from] super::ReviseError),
+    #[error("it is not an obligation: {0}")]
+    Malformed(#[from] serde_json::Error),
+}
+
+impl ObligationRecord {
+    /// The entry `id` with its stored `data`, after `amendments`: those
+    /// naming it, with their `created_at`, in chain order. Revisions are
+    /// applied to `data` for the latest version, and the state is folded
+    /// from all of them ([`ObligationState::from_amendments`]).
+    pub fn from_log(
+        id: GovernanceLogId,
+        created_at: DateTime<Utc>,
+        chain_seq: u64,
+        data: &serde_json::Value,
+        amendments: &[(DateTime<Utc>, Amendment)],
+    ) -> Result<Self, ObligationRecordError> {
+        let latest = super::latest(
+            data,
+            amendments.iter().filter_map(|(_, a)| a.revision.as_ref()),
+        )?;
+        let obligation: Obligation = serde_json::from_value(latest)?;
+        let state = ObligationState::from_amendments(
+            &obligation,
+            amendments.iter().map(|(at, a)| (*at, a)),
+        );
+        Ok(Self {
+            id,
+            created_at,
+            chain_seq,
+            obligation,
+            state,
+        })
     }
 }
 
