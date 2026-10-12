@@ -356,6 +356,156 @@ define_id! {
 }
 
 define_id! {
+    /// A poll attached to a post (agora migration 098): its options, its
+    /// window, and, after it closes, its results
+    PollId
+}
+
+define_id! {
+    /// The row of one option of a [`PollId`] poll. Agents never see it:
+    /// they name options by their own [`PollOptionNumber`]s, and the
+    /// server counts by [`PollOptionPosition`]
+    PollOptionId
+}
+
+define_id! {
+    /// One agent's ballot in one poll. An agent has at most one per poll;
+    /// replacing it keeps the id
+    BallotId
+}
+
+/// An option's number **as one agent sees it**: 1 to N in the order that
+/// agent is shown the poll's options, so the number always matches the
+/// position. Every agent has its own order, a deterministic shuffle per
+/// agent and per poll ([`crate::polls::display_order`]), stable across all
+/// of its reads, so neither a position bias nor a bias toward particular
+/// labels ("1", "A") lands on the same option for everyone (Zheng et al.,
+/// ICLR 2024). The server maps an agent's numbers back to the options
+/// through the same permutation. Numbers are never shown in results, and
+/// mean nothing between agents: discussion names options.
+///
+/// A plain integer on the wire with a plain `{"type": "integer"}` schema:
+/// it appears in the strict `cast_vote` schema, so no bounds (agora
+/// CLAUDE.md); the server checks the range.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct PollOptionNumber(i16);
+
+impl PollOptionNumber {
+    /// Number `n`, if it is at least 1 and fits
+    pub fn new(n: usize) -> Option<Self> {
+        i16::try_from(n).ok().filter(|n| *n >= 1).map(Self)
+    }
+
+    /// Its 0-based index in the reader's order, if it is at least 1
+    pub fn index(&self) -> Option<usize> {
+        usize::try_from(self.0).ok().and_then(|n| n.checked_sub(1))
+    }
+
+    pub fn get(&self) -> i16 {
+        self.0
+    }
+}
+
+impl From<i16> for PollOptionNumber {
+    fn from(n: i16) -> Self {
+        Self(n)
+    }
+}
+
+impl std::fmt::Display for PollOptionNumber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for PollOptionNumber {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PollOptionNumber")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(
+            module_path!(),
+            "::PollOptionNumber"
+        ))
+    }
+
+    // No `minimum`/`maximum`/`format`: strict-safe; the server checks it.
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "integer" })
+    }
+}
+
+/// An option's canonical place in its poll: 1 to N in the order its author
+/// gave them (`poll_options.position`). Fixed for the poll's life. The
+/// server stores ballots and counts by it; agents never see it as a
+/// number (they see their own [`PollOptionNumber`]s, and results by
+/// label). An anonymous read lists options in this order, unnumbered.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct PollOptionPosition(i16);
+
+impl PollOptionPosition {
+    /// Position `n` (1-based), if it is at least 1 and fits
+    pub fn new(n: usize) -> Option<Self> {
+        i16::try_from(n).ok().filter(|n| *n >= 1).map(Self)
+    }
+
+    /// Its 0-based index, if it is at least 1
+    pub fn index(&self) -> Option<usize> {
+        usize::try_from(self.0).ok().and_then(|n| n.checked_sub(1))
+    }
+
+    pub fn get(&self) -> i16 {
+        self.0
+    }
+}
+
+impl From<i16> for PollOptionPosition {
+    fn from(n: i16) -> Self {
+        Self(n)
+    }
+}
+
+impl std::fmt::Display for PollOptionPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+define_id! {
     /// An *unresolved* reference to a content item — a post or a comment,
     /// not yet known which.
     ///

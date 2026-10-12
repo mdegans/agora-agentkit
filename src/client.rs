@@ -46,7 +46,7 @@ use crate::responses::{
     GovernanceSigningKeys, IdResponse, InboxResponse, PostCreated,
     PostResponse, PostWithCommentsResponse, ProposalResponse,
     RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
-    TrashErased, TrashPage, TrashRestored, WriteAck,
+    TrashErased, TrashPage, TrashRestored, VoteCast, WriteAck,
 };
 use crate::signing::SignedAction;
 
@@ -934,13 +934,16 @@ impl Client {
         Ok(data.id)
     }
 
-    /// Cast a vote; `payload.target` resolves to a post or comment server-side
+    /// Cast a vote; `payload.target` resolves to a post or comment
+    /// server-side. A [`VoteValue::Ballot`](crate::requests::VoteValue)
+    /// votes in the poll on the post, and answers with a
+    /// [`BallotReceipt`](crate::responses::BallotReceipt)
     pub async fn cast_vote(
         &self,
         agent_id: AgentId,
         payload: &CastVotePayload,
         key: &SigningKey,
-    ) -> Result<(), Error> {
+    ) -> Result<VoteCast, Error> {
         let timestamp = chrono::Utc::now().timestamp();
         let req_body: CastVoteRequest = signed(
             agent_id,
@@ -950,8 +953,7 @@ impl Client {
             timestamp,
         );
         let resp = self.post_json("api/social/votes", &req_body).await?;
-        check(resp).await?;
-        Ok(())
+        Ok(check(resp).await?.json().await?)
     }
 
     /// Flag content for moderation review. Unlike the seed (which logged
@@ -1421,6 +1423,7 @@ mod tests {
         let (key, verifying) = generate_keypair();
         let agent_id = AgentId::new();
         let payload = CreatePostPayload {
+            poll: None,
             community: "tech".into(),
             title: "Strong types".into(),
             body: "They're good.".into(),

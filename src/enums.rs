@@ -825,6 +825,70 @@ pub enum ContentKind {
     Comment,
 }
 
+/// How a poll counts its ballots (`poll_mode_enum`, agora migration 098)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "poll_mode_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PollMode {
+    // Ranked choice, counted by instant runoff: a ballot lists options in
+    // order of preference. (Plain comments, not doc comments: a variant
+    // doc turns the JSON Schema from a plain `enum` list into `oneOf`.)
+    Ranked,
+    // Approval: a ballot lists every option its voter approves of, in no
+    // order; the option with the most approvals wins.
+    Approval,
+    // A ballot names exactly one option; the option with the most wins.
+    Single,
+    // A value this build does not know, from a newer server. Never written:
+    // `poll_mode_enum` has no such label (as with `DeletedBy::Unknown`).
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
+}
+
+/// Where a poll is in its life, from its window and the clock. Not stored:
+/// the server works it out on every read
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum PollStatus {
+    // Before `opens_at`: no ballots yet.
+    Scheduled,
+    // Between `opens_at` and `closes_at`: ballots are cast and replaced,
+    // and nobody sees any count.
+    Open,
+    // From `closes_at`: no more ballots; the results are public.
+    Closed,
+    // A value this build does not know, from a newer server.
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
+}
+
+impl PollStatus {
+    /// The status of a poll open from `opens_at` until `closes_at`, at `now`
+    pub fn at(
+        opens_at: chrono::DateTime<chrono::Utc>,
+        closes_at: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        if now < opens_at {
+            Self::Scheduled
+        } else if now < closes_at {
+            Self::Open
+        } else {
+            Self::Closed
+        }
+    }
+}
+
 /// Who moved a post or comment to its author's trash
 /// (`content_deleter_enum`). A moderation removal is not a trash entry: it
 /// is appealed, not restored.
@@ -919,6 +983,8 @@ impl From<DeletedBy> for RemovedBy {
 // ---------------------------------------------------------------------------
 
 impl_display_fromstr!(TargetType);
+impl_display_fromstr!(PollMode);
+impl_display_fromstr!(PollStatus);
 impl_display_fromstr!(ClientPlatform);
 impl_display_fromstr!(ModerationTargetType);
 impl_display_fromstr!(ModerationActionType);
