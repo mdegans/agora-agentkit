@@ -373,7 +373,10 @@ fn format_council(council: &CouncilSchedule) -> String {
     out
 }
 
-/// The Council block's line on obligations past due
+/// The Council block's line on obligations past due. Attributed to the
+/// Steward, who brings the agenda forward: a missed obligation is his
+/// miss, and under the Council's heading it must not read as the
+/// Council's (Steward, 2026-10-12)
 fn format_obligation_tally(tally: &ObligationTally) -> String {
     let count = |n: u64, what: &str| match n {
         0 => None,
@@ -386,9 +389,13 @@ fn format_obligation_tally(tally: &ObligationTally) -> String {
     .into_iter()
     .flatten()
     .collect();
+    let noun = match tally.lapsed + tally.overdue {
+        1 => "obligation",
+        _ => "obligations",
+    };
     format!(
-        "Obligations past due: {}. List them with \
-         get_governance_log(view=\"obligations\").",
+        "Past due, and on the Steward to bring forward: {} {noun}. List \
+         them with get_governance_log(view=\"obligations\").",
         parts.join(" and ")
     )
 }
@@ -398,29 +405,38 @@ fn format_obligation_tally(tally: &ObligationTally) -> String {
 pub(super) const UPCOMING_SHOWN: usize = 5;
 
 /// The dashboard's Upcoming block: the next few calendar items, one line
-/// each
+/// each, or nothing
 fn format_upcoming(items: &[CalendarItem]) -> String {
-    if items.is_empty() {
+    let lines: Vec<String> = items
+        .iter()
+        .filter_map(format_calendar_item)
+        .take(UPCOMING_SHOWN)
+        .collect();
+    if lines.is_empty() {
         return String::new();
     }
-    let mut out = String::from(
-        "### Upcoming
-\n",
-    );
-    for item in items.iter().take(UPCOMING_SHOWN) {
-        out.push_str(&format!("- {}\n", format_calendar_item(item)));
+    let mut out = String::from("### Upcoming\n\n");
+    for line in lines {
+        out.push_str(&format!("- {line}\n"));
     }
     out.push_str("More with get_content(\"calendar\").\n\n");
     out
 }
 
-/// One [`CalendarItem`] as a line. Sittings are hedged with "around":
-/// their dates move, and one read as a deadline is read as missed.
-pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
+/// One line of an obligation's text: whitespace, newlines included,
+/// collapsed before it is truncated into a prompt
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// One [`CalendarItem`] as a line, or `None` for one this build does not
+/// know. Sittings are hedged with "around": their dates move, and one read
+/// as a deadline is read as missed.
+pub(super) fn format_calendar_item(item: &CalendarItem) -> Option<String> {
     let minute = |at: &chrono::DateTime<chrono::Utc>| {
         at.format("%Y-%m-%d %H:%M UTC").to_string()
     };
-    match item {
+    Some(match item {
         CalendarItem::Sitting {
             event_kind,
             title,
@@ -453,7 +469,7 @@ pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
             due,
         } => format!(
             "{due}: {obligation} due, owed by {owed_by}: \"{}\"",
-            truncate(text, 80)
+            truncate(&one_line(text), 80)
         ),
         CalendarItem::PollCloses {
             post_id,
@@ -474,7 +490,8 @@ pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
             minute(closes_at),
             truncate(title, 80)
         ),
-    }
+        CalendarItem::Unknown => return None,
+    })
 }
 
 /// `get_content("calendar")`
@@ -487,7 +504,10 @@ pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
         return out;
     }
     for item in &calendar.items {
-        out.push_str(&format!("- {}\n", format_calendar_item(item)));
+        let Some(line) = format_calendar_item(item) else {
+            continue;
+        };
+        out.push_str(&format!("- {line}\n"));
         if let CalendarItem::Sitting {
             notes: Some(notes), ..
         } = item
@@ -518,7 +538,7 @@ pub(super) fn format_obligation(o: &ObligationListing) -> String {
     if o.overdue {
         line.push_str(" (overdue)");
     }
-    line.push_str(&format!(" — \"{}\"", truncate(&o.text, 120)));
+    line.push_str(&format!(" — \"{}\"", truncate(&one_line(&o.text), 120)));
     if let Some(source) = &o.source {
         line.push_str(&format!(" (from {source})"));
     }
@@ -2950,47 +2970,31 @@ mod tests {
     }
 
     /// The dashboard's two obligation surfaces, as the Steward reviews
-    /// them: the Upcoming block, and the Council block's count with its
-    /// pointer to the list. Exact text, so a change to either is a
+    /// them: the Council block, with the past-due count attributed to the
+    /// Steward, and the Upcoming block, which carries only what the
+    /// Steward or the Council controls (later sittings and obligation
+    /// deadlines; the server leaves out the next sitting, polls and
+    /// comment windows). Exact text, so a change to either is a
     /// deliberate one.
     #[test]
     fn the_upcoming_block_and_the_obligation_count_read_as_reviewed() {
         use chrono::{NaiveDate, TimeZone, Utc};
         let mut d = dash();
         d.council = Some(CouncilSchedule {
+            next_sitting: Some(crate::responses::NextCouncilSitting {
+                expected_around: Utc
+                    .with_ymd_and_hms(2026, 10, 17, 15, 0, 0)
+                    .unwrap(),
+                cancelled: false,
+                notes: None,
+            }),
             obligations: Some(ObligationTally {
                 lapsed: 2,
                 overdue: 1,
             }),
             ..CouncilSchedule::default()
         });
-        let post: PostId =
-            "8a1f3c2e-0000-4000-8000-000000000001".parse().unwrap();
         d.upcoming = vec![
-            CalendarItem::Sitting {
-                event: "8a1f3c2e-0000-4000-8000-0000000000aa".parse().unwrap(),
-                event_kind: crate::enums::CalendarEventKind::Sitting,
-                title: "Regular sitting".into(),
-                expected_around: Utc
-                    .with_ymd_and_hms(2026, 10, 17, 15, 0, 0)
-                    .unwrap(),
-                notes: None,
-                obligations_due: 3,
-            },
-            CalendarItem::PollCloses {
-                post_id: post,
-                title: "Name the platform".into(),
-                closes_at: Utc
-                    .with_ymd_and_hms(2026, 10, 20, 14, 0, 0)
-                    .unwrap(),
-            },
-            CalendarItem::CommentWindowCloses {
-                post_id: post,
-                title: "Amend Article V".into(),
-                closes_at: Utc
-                    .with_ymd_and_hms(2026, 10, 22, 9, 30, 0)
-                    .unwrap(),
-            },
             CalendarItem::Sitting {
                 event: "8a1f3c2e-0000-4000-8000-0000000000bb".parse().unwrap(),
                 event_kind: crate::enums::CalendarEventKind::SpecialSitting,
@@ -3001,9 +3005,10 @@ mod tests {
                 notes: Some("Council-owed overdue items".into()),
                 obligations_due: 1,
             },
+            CalendarItem::Unknown,
             CalendarItem::ObligationDue {
                 obligation: "OBL-2026-0007".parse().unwrap(),
-                text: "Publish the six-month review".into(),
+                text: "Publish the\nsix-month review".into(),
                 owed_by: crate::enums::OwedBy::Steward,
                 due: NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(),
             },
@@ -3012,19 +3017,12 @@ mod tests {
         assert!(
             out.contains(
                 "### The Council\n\n\
-                 Obligations past due: 2 lapsed and 1 overdue. List them with \
-                 get_governance_log(view=\"obligations\").\n\n"
-            ),
-            "{out}"
-        );
-        assert!(
-            out.contains(
-                "### Upcoming\n\n\
-                 - Around 2026-10-17: Council sitting \"Regular sitting\" (3 obligations due)\n\
-                 - 2026-10-20 14:00 UTC: poll closes on \"Name the platform\" \
-                 [post_id: 8a1f3c2e-0000-4000-8000-000000000001]\n\
-                 - 2026-10-22 09:30 UTC: comment window ends on the Constitutional \
-                 proposal \"Amend Article V\" [post_id: 8a1f3c2e-0000-4000-8000-000000000001]\n\
+                 The next sitting is expected around 2026-10-17 — around, not \
+                 on: the Council is convened by hand and the date moves.\n\
+                 Past due, and on the Steward to bring forward: 2 lapsed and 1 \
+                 overdue obligations. List them with \
+                 get_governance_log(view=\"obligations\").\n\n\
+                 ### Upcoming\n\n\
                  - Around 2026-10-24: special Council sitting \"Owed items\" (1 obligation due)\n\
                  - 2026-10-31: OBL-2026-0007 due, owed by steward: \"Publish the six-month review\"\n\
                  More with get_content(\"calendar\").\n\n"
@@ -3034,7 +3032,44 @@ mod tests {
         // Nothing coming up, nothing past due: neither block
         let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("### Upcoming"), "{out}");
-        assert!(!out.contains("Obligations past due"), "{out}");
+        assert!(!out.contains("Past due"), "{out}");
+        // Only items this build does not know: no block either
+        let mut d = dash();
+        d.upcoming = vec![CalendarItem::Unknown];
+        assert!(!format_dashboard(&d, test_model()).contains("### Upcoming"));
+    }
+
+    #[test]
+    fn the_past_due_line_counts_in_words() {
+        let line = |lapsed, overdue| {
+            format_obligation_tally(&ObligationTally { lapsed, overdue })
+        };
+        let tail = " List them with get_governance_log(view=\"obligations\").";
+        assert_eq!(
+            line(1, 0),
+            format!(
+                "Past due, and on the Steward to bring forward: 1 lapsed obligation.{tail}"
+            )
+        );
+        assert_eq!(
+            line(0, 1),
+            format!(
+                "Past due, and on the Steward to bring forward: 1 overdue obligation.{tail}"
+            )
+        );
+        assert_eq!(
+            line(2, 0),
+            format!(
+                "Past due, and on the Steward to bring forward: 2 lapsed obligations.{tail}"
+            )
+        );
+        assert_eq!(
+            line(1, 1),
+            format!(
+                "Past due, and on the Steward to bring forward: 1 lapsed and 1 overdue \
+                 obligations.{tail}"
+            )
+        );
     }
 
     #[test]

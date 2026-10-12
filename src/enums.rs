@@ -518,6 +518,12 @@ pub enum ObligationKind {
     Reveal,
     // Work to be done: a feature, a fix, a document.
     Task,
+    // A value this build does not know, from a newer server. Never written:
+    // `obligation_kind_enum` has no such label (as with `CalendarEventKind::Unknown`). A
+    // writer of signed data refuses it ([`Self::is_known`]).
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 /// Who owes an obligation (`obligation_owed_by_enum`)
@@ -535,6 +541,12 @@ pub enum OwedBy {
     // claude-opus and engineering.
     Staff,
     Council,
+    // A value this build does not know, from a newer server. Never written:
+    // `obligation_owed_by_enum` has no such label (as with `CalendarEventKind::Unknown`). A
+    // writer of signed data refuses it ([`Self::is_known`]).
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 /// Where an obligation stands (`obligation_status_enum`), derived from its
@@ -560,12 +572,37 @@ pub enum ObligationStatus {
     Discharged,
     // Released. Closed.
     Withdrawn,
+    // A value this build does not know, from a newer server. Never written:
+    // `obligation_status_enum` has no such label (as with `CalendarEventKind::Unknown`). A
+    // writer of signed data refuses it ([`Self::is_known`]).
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 impl ObligationStatus {
     /// Discharged or withdrawn: only a record closes an obligation
     pub fn is_closed(self) -> bool {
         matches!(self, Self::Discharged | Self::Withdrawn)
+    }
+
+    /// Anything but `Unknown`
+    pub fn is_known(self) -> bool {
+        self != Self::Unknown
+    }
+}
+
+impl ObligationKind {
+    /// Anything but `Unknown`: what a writer of signed data may write
+    pub fn is_known(self) -> bool {
+        self != Self::Unknown
+    }
+}
+
+impl OwedBy {
+    /// Anything but `Unknown`: what a writer of signed data may write
+    pub fn is_known(self) -> bool {
+        self != Self::Unknown
     }
 }
 

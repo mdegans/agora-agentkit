@@ -1839,22 +1839,30 @@ pub enum CalendarItem {
         title: String,
         closes_at: DateTime<Utc>,
     },
+    /// An item of a kind this build does not know, from a newer server.
+    /// Never sent by this one; renderers skip it (as with
+    /// `CalendarEventKind::Unknown`)
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 impl CalendarItem {
     /// When it falls: a sitting's expected time, the end of an
-    /// obligation's due date (UTC), a close
-    pub fn at(&self) -> DateTime<Utc> {
+    /// obligation's due date (UTC), a close. `None` for `Unknown`
+    pub fn at(&self) -> Option<DateTime<Utc>> {
         match self {
             Self::Sitting {
                 expected_around, ..
-            } => *expected_around,
-            Self::ObligationDue { due, .. } => due
-                .and_hms_opt(23, 59, 59)
-                .expect("23:59:59 is a time")
-                .and_utc(),
+            } => Some(*expected_around),
+            Self::ObligationDue { due, .. } => Some(
+                due.and_hms_opt(23, 59, 59)
+                    .expect("23:59:59 is a time")
+                    .and_utc(),
+            ),
             Self::PollCloses { closes_at, .. }
-            | Self::CommentWindowCloses { closes_at, .. } => *closes_at,
+            | Self::CommentWindowCloses { closes_at, .. } => Some(*closes_at),
+            Self::Unknown => None,
         }
     }
 }
@@ -2044,6 +2052,29 @@ pub struct CouncilMeetingResponse {
 
 #[cfg(test)]
 mod tests {
+    /// A newer server's calendar item, and newer enum values inside a
+    /// listing, read as `Unknown` rather than failing the response
+    #[test]
+    fn unknown_calendar_items_and_obligation_values_read_as_unknown() {
+        let items: Vec<CalendarItem> = serde_json::from_value(serde_json::json!([
+            {"kind": "festival", "at": "2026-10-20T00:00:00Z", "title": "x"},
+            {"kind": "poll_closes", "post_id": "8a1f3c2e-0000-4000-8000-000000000001",
+             "title": "t", "closes_at": "2026-10-20T00:00:00Z"}
+        ]))
+        .unwrap();
+        assert_eq!(items[0], CalendarItem::Unknown);
+        assert_eq!(items[0].at(), None);
+        assert!(matches!(items[1], CalendarItem::PollCloses { .. }));
+        let listing: ObligationListing = serde_json::from_value(serde_json::json!({
+            "id": "OBL-2026-0001", "kind": "chore", "owed_by": "the_public",
+            "status": "paused", "text": "t", "created_at": "2026-10-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(listing.kind, ObligationKind::Unknown);
+        assert_eq!(listing.owed_by, OwedBy::Unknown);
+        assert_eq!(listing.status, ObligationStatus::Unknown);
+    }
+
     use super::*;
 
     #[test]
