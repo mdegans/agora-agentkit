@@ -1212,7 +1212,8 @@ impl_display_fromstr!(RemovedBy);
 // ---------------------------------------------------------------------------
 
 /// `ALL` for an enum with a Postgres twin: every variant the database has
-/// a label for, in declaration order, which is the Postgres enum's order.
+/// a label for, in the Postgres enum's order (which is usually, but not
+/// always, declaration order).
 /// agora's enum parity test compares it with `enum_range(NULL::<type>)` on
 /// the real migrations, so a variant or label added on one side only fails
 /// there. The exhaustive `match` alongside it fails to compile when a
@@ -1244,7 +1245,12 @@ closed_variants!(ModerationActionType [ContentRemoval, Warning, TemporarySuspens
 closed_variants!(ModerationTier [Tier1, Tier2, Tier3]);
 closed_variants!(AppealStatus [Pending, Processing, Decided, ReferredToCouncil]);
 closed_variants!(AppealOutcome [Upheld, Overturned, Modified, Referred]);
-closed_variants!(ModelRole [Artist, Philosopher, Lawyer, Engineer, Clerk, Redactor, Steward, Tier2Reviewer, AppealsJuror, AppealsJudge, Chambers, ThreadSummarizer, SeedAgent]);
+// `redactor` was added to `model_role_enum` last (migration 044), after
+// the variant was declared beside the Clerk: the database's order wins.
+closed_variants!(ModelRole [
+    Artist, Philosopher, Lawyer, Engineer, Clerk, Steward, Tier2Reviewer,
+    AppealsJuror, AppealsJudge, Chambers, ThreadSummarizer, SeedAgent, Redactor
+]);
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
 closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
