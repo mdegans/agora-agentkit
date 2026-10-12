@@ -29,11 +29,11 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
-    "^(constitution|protocol|prompts|prompt:[a-z][a-z0-9_]*)$";
+    "^(constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PromptName`].
 pub const PROMPT_NAME_PATTERN: &str = "^[a-z][a-z0-9_]*$";
@@ -1089,6 +1089,10 @@ pub enum PlatformDoc {
     Prompts,
     /// One published model prompt, by name
     Prompt(PromptName),
+    /// The platform calendar: sittings, obligation due dates, poll closes
+    /// and comment windows, read from the database rather than bundled
+    /// (0.72). Served as [`crate::responses::CalendarResponse`]
+    Calendar,
 }
 
 impl PlatformDoc {
@@ -1099,6 +1103,7 @@ impl PlatformDoc {
             PlatformDoc::GovernanceProtocol => "protocol".into(),
             PlatformDoc::Prompts => "prompts".into(),
             PlatformDoc::Prompt(name) => format!("prompt:{name}").into(),
+            PlatformDoc::Calendar => "calendar".into(),
         }
     }
 
@@ -1112,6 +1117,7 @@ impl PlatformDoc {
             }
             PlatformDoc::Prompts => "Agora's Model Prompts".into(),
             PlatformDoc::Prompt(name) => format!("Model prompt: {name}").into(),
+            PlatformDoc::Calendar => "The Agora calendar".into(),
         }
     }
 
@@ -1134,7 +1140,7 @@ impl std::fmt::Display for PlatformDoc {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "not a platform document (expected \"constitution\", \"protocol\", \
-     \"prompts\" or \"prompt:<name>\"): {0:?}"
+     \"prompts\", \"calendar\" or \"prompt:<name>\"): {0:?}"
 )]
 pub struct PlatformDocError(pub String);
 
@@ -1161,6 +1167,8 @@ impl std::str::FromStr for PlatformDoc {
             || s.eq_ignore_ascii_case("prompt")
         {
             Ok(PlatformDoc::Prompts)
+        } else if s.eq_ignore_ascii_case("calendar") {
+            Ok(PlatformDoc::Calendar)
         } else {
             PROMPT_PREFIXES
                 .iter()
@@ -1214,8 +1222,9 @@ impl schemars::JsonSchema for PlatformDoc {
             "description": "A platform document: \"constitution\", \
                             \"protocol\" (the Governance Protocol), \
                             \"prompts\" (the index of published model \
-                            prompts), or \"prompt:<name>\" (one prompt, \
-                            e.g. \"prompt:tier2_reviewer\").",
+                            prompts), \"prompt:<name>\" (one prompt, \
+                            e.g. \"prompt:tier2_reviewer\"), or \
+                            \"calendar\" (what is coming up).",
         })
     }
 }
@@ -2239,6 +2248,23 @@ mod tests {
             .and_then(|p| p.strip_suffix('$'))
             .unwrap();
         assert!(PLATFORM_DOC_PATTERN.contains(&format!("|prompt:{name})$")));
+    }
+
+    #[test]
+    fn calendar_is_a_document_slug() {
+        assert_eq!(
+            "calendar".parse::<ContentRef>().unwrap(),
+            ContentRef::Document(PlatformDoc::Calendar)
+        );
+        assert_eq!(
+            "Calendar".parse::<PlatformDoc>().unwrap(),
+            PlatformDoc::Calendar
+        );
+        assert_eq!(PlatformDoc::Calendar.to_string(), "calendar");
+        assert_eq!(
+            "OBL-2026-0001".parse::<ContentRef>().unwrap(),
+            ContentRef::Governance("OBL-2026-0001".parse().unwrap())
+        );
     }
 
     #[test]

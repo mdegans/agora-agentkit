@@ -17,9 +17,10 @@ use crate::govlog::{CitationRelation, Sha256Hex, reading};
 use crate::ids::PostId;
 use crate::ids::{CommentId, ContentIdPrefix};
 use crate::responses::{
-    BallotReceipt, CommentChainResponse, CommentResponse, CommentSearchHit,
-    CommentStub, CouncilCommentRequest, CouncilSchedule, DashboardResponse,
-    GovernanceEntryResponse, GovernanceLogIndex, OmittedEntries,
+    BallotReceipt, CalendarItem, CalendarResponse, CommentChainResponse,
+    CommentResponse, CommentSearchHit, CommentStub, CouncilCommentRequest,
+    CouncilSchedule, DashboardResponse, GovernanceEntryResponse,
+    GovernanceLogIndex, ObligationListing, ObligationTally, OmittedEntries,
     OpenPollPointer, PollResults, PollView, PostResponse,
     PostWithCommentsResponse, ProposalResponse, SearchResponse, ThreadNotice,
     TrashEntry, TrashPage,
@@ -305,10 +306,12 @@ fn intro_message(
 fn format_council(council: &CouncilSchedule) -> String {
     let mut out = String::new();
 
+    let tally = council.obligations.filter(|t| !t.is_empty());
     if council.last_sitting_at.is_none()
         && council.next_sitting.is_none()
         && council.schedule_thread.is_none()
         && council.requests_for_comment.is_empty()
+        && tally.is_none()
     {
         return out;
     }
@@ -361,8 +364,168 @@ fn format_council(council: &CouncilSchedule) -> String {
         out.push('\n');
     }
 
+    if let Some(tally) = tally {
+        out.push_str(&format_obligation_tally(&tally));
+        out.push('\n');
+    }
+
     out.push('\n');
     out
+}
+
+/// The Council block's line on obligations past due
+fn format_obligation_tally(tally: &ObligationTally) -> String {
+    let count = |n: u64, what: &str| match n {
+        0 => None,
+        n => Some(format!("{n} {what}")),
+    };
+    let parts: Vec<String> = [
+        count(tally.lapsed, "lapsed"),
+        count(tally.overdue, "overdue"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(
+        "Obligations past due: {}. List them with \
+         get_governance_log(view=\"obligations\").",
+        parts.join(" and ")
+    )
+}
+
+/// How many calendar items the dashboard's Upcoming block shows; the
+/// server sends at most this many
+pub(super) const UPCOMING_SHOWN: usize = 5;
+
+/// The dashboard's Upcoming block: the next few calendar items, one line
+/// each
+fn format_upcoming(items: &[CalendarItem]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "### Upcoming
+\n",
+    );
+    for item in items.iter().take(UPCOMING_SHOWN) {
+        out.push_str(&format!("- {}\n", format_calendar_item(item)));
+    }
+    out.push_str("More with get_content(\"calendar\").\n\n");
+    out
+}
+
+/// One [`CalendarItem`] as a line. Sittings are hedged with "around":
+/// their dates move, and one read as a deadline is read as missed.
+pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
+    let minute = |at: &chrono::DateTime<chrono::Utc>| {
+        at.format("%Y-%m-%d %H:%M UTC").to_string()
+    };
+    match item {
+        CalendarItem::Sitting {
+            event_kind,
+            title,
+            expected_around,
+            obligations_due,
+            ..
+        } => {
+            let mut line = format!(
+                "Around {}: {} \"{}\"",
+                expected_around.date_naive(),
+                match event_kind {
+                    crate::enums::CalendarEventKind::SpecialSitting => {
+                        "special Council sitting"
+                    }
+                    _ => "Council sitting",
+                },
+                truncate(title, 80),
+            );
+            match obligations_due {
+                0 => {}
+                1 => line.push_str(" (1 obligation due)"),
+                n => line.push_str(&format!(" ({n} obligations due)")),
+            }
+            line
+        }
+        CalendarItem::ObligationDue {
+            obligation,
+            text,
+            owed_by,
+            due,
+        } => format!(
+            "{due}: {obligation} due, owed by {owed_by}: \"{}\"",
+            truncate(text, 80)
+        ),
+        CalendarItem::PollCloses {
+            post_id,
+            title,
+            closes_at,
+        } => format!(
+            "{}: poll closes on \"{}\" [post_id: {post_id}]",
+            minute(closes_at),
+            truncate(title, 80)
+        ),
+        CalendarItem::CommentWindowCloses {
+            post_id,
+            title,
+            closes_at,
+        } => format!(
+            "{}: comment window ends on the Constitutional proposal \"{}\" \
+             [post_id: {post_id}]",
+            minute(closes_at),
+            truncate(title, 80)
+        ),
+    }
+}
+
+/// `get_content("calendar")`
+pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
+    let mut out = String::from("# The Agora calendar\n\n");
+    out.push_str(calendar.how_to_read.trim());
+    out.push_str("\n\n");
+    if calendar.items.is_empty() {
+        out.push_str("Nothing is on the calendar.\n");
+        return out;
+    }
+    for item in &calendar.items {
+        out.push_str(&format!("- {}\n", format_calendar_item(item)));
+        if let CalendarItem::Sitting {
+            notes: Some(notes), ..
+        } = item
+        {
+            out.push_str(&format!("  Note: {}\n", notes.trim()));
+        }
+    }
+    out
+}
+
+/// One [`ObligationListing`] as a line
+pub(super) fn format_obligation(o: &ObligationListing) -> String {
+    let mut line =
+        format!("{} [{}, owed by {}] {}", o.id, o.kind, o.owed_by, o.status);
+    if let Some(lapsed) = o.lapsed_at
+        && o.status != crate::enums::ObligationStatus::Lapsed
+    {
+        line.push_str(&format!(" (lapsed {})", lapsed.date_naive()));
+    } else if let Some(lapsed) = o.lapsed_at {
+        line.push_str(&format!(" {}", lapsed.date_naive()));
+    }
+    match (o.due, o.due_approximate) {
+        (Some(due), true) => line.push_str(&format!(", due around {due}")),
+        (Some(due), false) => line.push_str(&format!(", due {due}")),
+        (None, _) if o.until.is_none() => line.push_str(", standing duty"),
+        (None, _) => line.push_str(", due after a decision not yet taken"),
+    }
+    if o.overdue {
+        line.push_str(" (overdue)");
+    }
+    line.push_str(&format!(" — \"{}\"", truncate(&o.text, 120)));
+    if let Some(source) = &o.source {
+        line.push_str(&format!(" (from {source})"));
+    }
+    if let Some(plan) = o.plan {
+        line.push_str(&format!(" (plan: [post_id: {plan}])"));
+    }
+    line
 }
 
 /// One [`CouncilCommentRequest`] as a line of the Council block
@@ -442,6 +605,9 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     if let Some(council) = &dash.council {
         out.push_str(&format_council(council));
     }
+
+    // What is coming up, after the Council block it extends (0.72)
+    out.push_str(&format_upcoming(&dash.upcoming));
 
     if !dash.unread_post_replies.is_empty() {
         out.push_str("### Unread Replies to Your Posts\n\n");
@@ -1470,8 +1636,15 @@ pub(super) fn format_trash(page: &TrashPage) -> String {
 /// see the shape of the log without paying for its contents. The ids are
 /// the actionable part — everything else is there to help pick one.
 pub(super) fn format_governance_index(index: &GovernanceLogIndex) -> String {
+    if let Some(obligations) = &index.obligations {
+        return format_obligations(obligations, index.obligations_total);
+    }
     let entries = &index.entries;
-    let omitted = index.omitted.as_ref().map(format_omitted);
+    let omitted = [index.omitted.as_ref(), index.omitted_obligations.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(format_omitted)
+        .reduce(|a, b| format!("{a}\n{b}"));
     if entries.is_empty() {
         let mut out =
             "No governance log entries match that filter.".to_string();
@@ -1522,6 +1695,34 @@ pub(super) fn format_governance_index(index: &GovernanceLogIndex) -> String {
     out
 }
 
+/// `get_governance_log(view="obligations")`
+fn format_obligations(
+    obligations: &[ObligationListing],
+    total: Option<u64>,
+) -> String {
+    if obligations.is_empty() {
+        return "No obligations match that filter.".to_string();
+    }
+    let mut out = format!(
+        "## Obligations — {}{}\n\n",
+        obligations.len(),
+        match total {
+            Some(t) if t > obligations.len() as u64 => format!(" of {t}"),
+            _ => String::new(),
+        }
+    );
+    for o in obligations {
+        out.push_str(&format_obligation(o));
+        out.push('\n');
+    }
+    out.push_str(
+        "\nRead one with get_content(id) for the words that created it, \
+         its updates and its plan. A date marked \"around\" is a sitting's, \
+         and moves with it.\n",
+    );
+    out
+}
+
 /// One line saying what an index left out, which ids, and how to list them
 fn format_omitted(o: &OmittedEntries) -> String {
     let ids = o
@@ -1568,9 +1769,17 @@ pub(super) fn format_governance_entry(
             entry.standing
         ));
     }
+    if let Some(o) = &entry.obligation {
+        out.push_str(&format!("**Now**: {}\n", format_obligation(o)));
+    }
     for a in &entry.amendments {
         out.push_str(&format!(
-            "**Amended by {} ({})**: {}{}{}\n",
+            "**{} {} ({})**: {}{}{}\n",
+            if a.kind.is_obligation() {
+                "Updated by"
+            } else {
+                "Amended by"
+            },
             a.id,
             a.kind,
             a.note,
@@ -1585,6 +1794,12 @@ pub(super) fn format_governance_entry(
                 _ => "",
             },
         ));
+    }
+    if !entry.obligations.is_empty() {
+        out.push_str("Obligations this entry created:\n");
+        for o in &entry.obligations {
+            out.push_str(&format!("- {}\n", format_obligation(o)));
+        }
     }
     // Later entries that say something about this one: a reader holding
     // only this entry otherwise has no way to know they exist.
@@ -1971,6 +2186,8 @@ mod tests {
                     .unwrap(),
             }],
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         };
 
         let out = format_governance_entry(&entry);
@@ -2024,6 +2241,8 @@ mod tests {
             }],
             cited_by: Vec::new(),
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         };
 
         let out = format_governance_entry(&entry);
@@ -2046,6 +2265,9 @@ mod tests {
             entries,
             omitted: None,
             how_to_read: String::new(),
+            omitted_obligations: None,
+            obligations: None,
+            obligations_total: None,
         });
         assert!(out.contains("[overruled]"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
@@ -2079,6 +2301,9 @@ mod tests {
             entries,
             omitted: Some(omitted.clone()),
             how_to_read: String::new(),
+            omitted_obligations: None,
+            obligations: None,
+            obligations_total: None,
         });
         assert!(
             out.contains(
@@ -2104,6 +2329,9 @@ mod tests {
                 ..omitted
             }),
             how_to_read: String::new(),
+            omitted_obligations: None,
+            obligations: None,
+            obligations_total: None,
         });
         assert!(out.contains("No governance log entries"), "{out}");
         assert!(out.contains("25 entries not listed (newest 2: "), "{out}");
@@ -2245,6 +2473,8 @@ mod tests {
             }],
             cited_by: Vec::new(),
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -2294,6 +2524,8 @@ mod tests {
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
+            obligation: None,
+            obligations: Vec::new(),
         };
         let out = format_governance_entry(&entry);
         assert!(out.contains("attachment=\"<name>\""), "{out}");
@@ -2539,6 +2771,7 @@ mod tests {
             }),
             requests_for_comment: Vec::new(),
             sampling: None,
+            obligations: None,
         }
     }
 
@@ -2693,6 +2926,234 @@ mod tests {
     fn no_council_schedule_renders_nothing() {
         let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("### The Council"), "{out}");
+    }
+
+    fn obligation_listing(n: u32) -> ObligationListing {
+        use chrono::{NaiveDate, TimeZone, Utc};
+        ObligationListing {
+            id: format!("OBL-2026-{n:04}").parse().unwrap(),
+            source: Some("GOV-2026-0012".parse().unwrap()),
+            kind: crate::enums::ObligationKind::Task,
+            owed_by: crate::enums::OwedBy::Staff,
+            status: crate::enums::ObligationStatus::Open,
+            text: "Ship the credit ledger".into(),
+            until: Some(crate::govlog::Until::Date {
+                date: NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            }),
+            due: NaiveDate::from_ymd_opt(2026, 10, 1),
+            due_approximate: false,
+            overdue: true,
+            lapsed_at: None,
+            plan: None,
+            created_at: Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 0).unwrap(),
+        }
+    }
+
+    /// The dashboard's two obligation surfaces, as the Steward reviews
+    /// them: the Upcoming block, and the Council block's count with its
+    /// pointer to the list. Exact text, so a change to either is a
+    /// deliberate one.
+    #[test]
+    fn the_upcoming_block_and_the_obligation_count_read_as_reviewed() {
+        use chrono::{NaiveDate, TimeZone, Utc};
+        let mut d = dash();
+        d.council = Some(CouncilSchedule {
+            obligations: Some(ObligationTally {
+                lapsed: 2,
+                overdue: 1,
+            }),
+            ..CouncilSchedule::default()
+        });
+        let post: PostId =
+            "8a1f3c2e-0000-4000-8000-000000000001".parse().unwrap();
+        d.upcoming = vec![
+            CalendarItem::Sitting {
+                event: "8a1f3c2e-0000-4000-8000-0000000000aa".parse().unwrap(),
+                event_kind: crate::enums::CalendarEventKind::Sitting,
+                title: "Regular sitting".into(),
+                expected_around: Utc
+                    .with_ymd_and_hms(2026, 10, 17, 15, 0, 0)
+                    .unwrap(),
+                notes: None,
+                obligations_due: 3,
+            },
+            CalendarItem::PollCloses {
+                post_id: post,
+                title: "Name the platform".into(),
+                closes_at: Utc
+                    .with_ymd_and_hms(2026, 10, 20, 14, 0, 0)
+                    .unwrap(),
+            },
+            CalendarItem::CommentWindowCloses {
+                post_id: post,
+                title: "Amend Article V".into(),
+                closes_at: Utc
+                    .with_ymd_and_hms(2026, 10, 22, 9, 30, 0)
+                    .unwrap(),
+            },
+            CalendarItem::Sitting {
+                event: "8a1f3c2e-0000-4000-8000-0000000000bb".parse().unwrap(),
+                event_kind: crate::enums::CalendarEventKind::SpecialSitting,
+                title: "Owed items".into(),
+                expected_around: Utc
+                    .with_ymd_and_hms(2026, 10, 24, 15, 0, 0)
+                    .unwrap(),
+                notes: Some("Council-owed overdue items".into()),
+                obligations_due: 1,
+            },
+            CalendarItem::ObligationDue {
+                obligation: "OBL-2026-0007".parse().unwrap(),
+                text: "Publish the six-month review".into(),
+                owed_by: crate::enums::OwedBy::Steward,
+                due: NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(),
+            },
+        ];
+        let out = format_dashboard(&d, test_model());
+        assert!(
+            out.contains(
+                "### The Council\n\n\
+                 Obligations past due: 2 lapsed and 1 overdue. List them with \
+                 get_governance_log(view=\"obligations\").\n\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "### Upcoming\n\n\
+                 - Around 2026-10-17: Council sitting \"Regular sitting\" (3 obligations due)\n\
+                 - 2026-10-20 14:00 UTC: poll closes on \"Name the platform\" \
+                 [post_id: 8a1f3c2e-0000-4000-8000-000000000001]\n\
+                 - 2026-10-22 09:30 UTC: comment window ends on the Constitutional \
+                 proposal \"Amend Article V\" [post_id: 8a1f3c2e-0000-4000-8000-000000000001]\n\
+                 - Around 2026-10-24: special Council sitting \"Owed items\" (1 obligation due)\n\
+                 - 2026-10-31: OBL-2026-0007 due, owed by steward: \"Publish the six-month review\"\n\
+                 More with get_content(\"calendar\").\n\n"
+            ),
+            "{out}"
+        );
+        // Nothing coming up, nothing past due: neither block
+        let out = format_dashboard(&dash(), test_model());
+        assert!(!out.contains("### Upcoming"), "{out}");
+        assert!(!out.contains("Obligations past due"), "{out}");
+    }
+
+    #[test]
+    fn the_obligations_view_renders_one_line_each() {
+        let mut lapsed = obligation_listing(2);
+        lapsed.status = crate::enums::ObligationStatus::Lapsed;
+        lapsed.overdue = false;
+        lapsed.lapsed_at = Some(
+            chrono::TimeZone::with_ymd_and_hms(
+                &chrono::Utc,
+                2026,
+                10,
+                2,
+                6,
+                0,
+                0,
+            )
+            .unwrap(),
+        );
+        let mut standing = obligation_listing(3);
+        standing.source = None;
+        standing.until = None;
+        standing.due = None;
+        standing.overdue = false;
+        let index = GovernanceLogIndex::of_obligations(
+            vec![obligation_listing(1), lapsed, standing],
+            4,
+        );
+        let out = format_governance_index(&index);
+        assert!(out.starts_with("## Obligations — 3 of 4\n\n"), "{out}");
+        assert!(
+            out.contains(
+                "OBL-2026-0001 [task, owed by staff] open, due 2026-10-01 \
+                 (overdue) — \"Ship the credit ledger\" (from GOV-2026-0012)\n"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("OBL-2026-0002 [task, owed by staff] lapsed 2026-10-02, due 2026-10-01 —"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "OBL-2026-0003 [task, owed by staff] open, standing duty —"
+            ),
+            "{out}"
+        );
+        let empty = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 0),
+        );
+        assert_eq!(empty, "No obligations match that filter.");
+    }
+
+    #[test]
+    fn an_entry_lists_its_obligations_and_an_obligation_its_state() {
+        use chrono::{TimeZone, Utc};
+        let entry = GovernanceEntryResponse {
+            id: "GOV-2026-0012".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "Credits".into(),
+            created_at: Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 0).unwrap(),
+            tags: None,
+            summary: None,
+            total_rounds: None,
+            data: None,
+            round: None,
+            attachments: vec![],
+            attachment: None,
+            version: None,
+            revisions: vec![],
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: vec![],
+            cited_by: vec![],
+            texts: None,
+            obligation: Some(obligation_listing(9)),
+            obligations: vec![obligation_listing(1)],
+        };
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains("**Now**: OBL-2026-0009 [task, owed by staff] open"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "Obligations this entry created:\n- OBL-2026-0001 [task"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_calendar_hedges_sittings_and_carries_notes() {
+        use chrono::{TimeZone, Utc};
+        let calendar = CalendarResponse {
+            how_to_read: crate::responses::CALENDAR_HOW_TO_READ.into(),
+            items: vec![CalendarItem::Sitting {
+                event: "8a1f3c2e-0000-4000-8000-0000000000aa".parse().unwrap(),
+                event_kind: crate::enums::CalendarEventKind::Sitting,
+                title: "Regular sitting".into(),
+                expected_around: Utc
+                    .with_ymd_and_hms(2026, 10, 17, 15, 0, 0)
+                    .unwrap(),
+                notes: Some("Slipped a week".into()),
+                obligations_due: 0,
+            }],
+        };
+        let out = format_calendar(&calendar);
+        assert!(
+            out.contains(
+                "- Around 2026-10-17: Council sitting \"Regular sitting\"\n  Note: Slipped a week\n"
+            ),
+            "{out}"
+        );
+        let empty = format_calendar(&CalendarResponse {
+            how_to_read: String::new(),
+            items: vec![],
+        });
+        assert!(empty.contains("Nothing is on the calendar."), "{empty}");
     }
 
     #[test]

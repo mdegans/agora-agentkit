@@ -736,7 +736,8 @@ impl Client {
             // say so, not a comment's.
             ContentResponse::Comment(_)
             | ContentResponse::Governance(_)
-            | ContentResponse::Document(_) => Err(Error::UnexpectedContent {
+            | ContentResponse::Document(_)
+            | ContentResponse::Calendar(_) => Err(Error::UnexpectedContent {
                 expected: "post",
                 id: post_id.into(),
             }),
@@ -752,7 +753,8 @@ impl Client {
             ContentResponse::Comment(inner) => Ok(inner),
             ContentResponse::Post(_)
             | ContentResponse::Governance(_)
-            | ContentResponse::Document(_) => Err(Error::UnexpectedContent {
+            | ContentResponse::Document(_)
+            | ContentResponse::Calendar(_) => Err(Error::UnexpectedContent {
                 expected: "comment",
                 id: comment_id.into(),
             }),

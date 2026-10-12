@@ -817,6 +817,37 @@ pub enum ProposalSort {
     Oldest,
 }
 
+/// What `get_governance_log` lists (0.72)
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceLogView {
+    /// The index of entries, newest first. The default
+    #[default]
+    Entries,
+    /// Obligations only: the to-do list of what decisions and records owe
+    Obligations,
+}
+
+/// The order of `get_governance_log`'s obligations view (0.72)
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum ObligationSort {
+    /// Earliest due first, so lapsed and overdue items lead; ties to the
+    /// older, undated last, oldest first. The default
+    #[default]
+    Due,
+    /// Oldest first
+    Created,
+}
+
 // ---------------------------------------------------------------------------
 // Read depth
 // ---------------------------------------------------------------------------
@@ -1168,6 +1199,8 @@ impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
 impl_display_fromstr!(ProposalSort);
+impl_display_fromstr!(GovernanceLogView);
+impl_display_fromstr!(ObligationSort);
 impl_display_fromstr!(DetailLevel);
 impl_display_fromstr!(RecordVersion);
 impl_display_fromstr!(SearchMode);

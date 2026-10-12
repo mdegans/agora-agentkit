@@ -204,7 +204,8 @@ impl Agora {
                 }
             }
             crate::responses::ContentResponse::Governance(_)
-            | crate::responses::ContentResponse::Document(_) => {
+            | crate::responses::ContentResponse::Document(_)
+            | crate::responses::ContentResponse::Calendar(_) => {
                 return Err(err(format!(
                     "{prefix} is not a post or comment id"
                 )));
@@ -743,6 +744,9 @@ impl Agora {
                 };
                 format!("# {} ({v}{})\n\n{}", doc.title, doc.version, doc.text)
                     .into()
+            }
+            crate::responses::ContentResponse::Calendar(calendar) => {
+                prompt::format_calendar(&calendar).into()
             }
         })
     }
