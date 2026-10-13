@@ -22,7 +22,7 @@ mod ranking;
 mod votes;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
-pub use decided::{Decided, FinalRoundError};
+pub use decided::{Decided, FinalRoundError, RecordRuleError};
 pub use votes::{
     BlankStatement, NotASeatChoice, SeatChoice, SeatVote, SeatVotes, Statement,
     StewardVote, Vote, Votes,
@@ -973,6 +973,17 @@ mod tests {
         ] {
             let serde = serde_json::to_value(v).unwrap();
             assert_eq!(v.to_string(), capitalized(serde.as_str().unwrap()));
+        }
+    }
+
+    /// Every signed record keeps the rules a record is checked against
+    /// before signing
+    #[test]
+    fn every_signed_record_keeps_the_record_rules() {
+        for (name, data) in fixtures().into_iter().chain(revised_fixtures()) {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            assert_eq!(record.check(), Ok(()), "{name}");
         }
     }
 

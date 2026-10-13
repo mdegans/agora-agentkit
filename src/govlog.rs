@@ -78,9 +78,9 @@ pub use council::{
     CouncilDecisionRecord, CouncilMember, CouncilRound, CouncilSeat,
     CouncilVote, Decided, DecisionCategory, FinalRoundError, FinalVotes,
     NotASeatChoice, PlacedProposal, RECUSED_DEFERRED_TAG, Rationale,
-    RecusalVote, STEWARD_RECUSED_TAG, SeatChoice, SeatModels, SeatRanking,
-    SeatResponse, SeatVote, SeatVotes, Statement, StewardEmergency,
-    StewardRecusal, StewardVote, Vote, Votes,
+    RecordRuleError, RecusalVote, STEWARD_RECUSED_TAG, SeatChoice, SeatModels,
+    SeatRanking, SeatResponse, SeatVote, SeatVotes, Statement,
+    StewardEmergency, StewardRecusal, StewardVote, Vote, Votes,
 };
 
 mod redactable;

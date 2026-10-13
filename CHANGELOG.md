@@ -10,6 +10,10 @@ decides an item, moved here from the Council program (agora CLAUDE.md
 rule 8). No wire shape or signed byte changes. One schema text changes:
 the description of `CouncilDecisionRecord::abstentions`.
 
+- `CouncilDecisionRecord::check`: a Steward veto carries its rationale and a
+  rationale belongs to a veto (`RecordRuleError`), the same rule as
+  `StewardVote::Veto` for a record built any other way. Every signed record
+  passes it (no veto has ever been cast).
 - `govlog::{Statement, BlankStatement}`: words for the record that are
   never blank (`TryFrom<String>`, refused on deserialize too; a plain
   string schema, no `minLength` or `pattern`).

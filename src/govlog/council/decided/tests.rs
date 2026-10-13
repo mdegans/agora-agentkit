@@ -191,3 +191,34 @@ fn a_recused_deferral_says_why() {
             .starts_with("Deferred: 2 seat(s)")
     );
 }
+
+#[test]
+fn a_veto_without_its_rationale_is_refused_however_the_record_was_built() {
+    let mut r = record();
+    r.final_votes.steward = CouncilVote::Veto;
+    assert_eq!(r.check(), Err(RecordRuleError::VetoWithoutRationale));
+    r.veto_rationale = Some("  ".to_string().into());
+    assert_eq!(r.check(), Err(RecordRuleError::VetoWithoutRationale));
+    r.veto_rationale = Some("It limits the appeals court.".to_string().into());
+    assert_eq!(r.check(), Ok(()));
+    // Redacted after signing: it was there
+    r.veto_rationale =
+        Some(Redactable::Redacted("AMD-2026-0099".parse().unwrap()));
+    assert_eq!(r.check(), Ok(()));
+    r.final_votes.steward = CouncilVote::Yes;
+    assert_eq!(r.check(), Err(RecordRuleError::RationaleWithoutVeto));
+    // What Decided writes always passes
+    let round = four([
+        (CouncilVote::Yes, "a"),
+        (CouncilVote::Yes, "b"),
+        (CouncilVote::Yes, "c"),
+        (CouncilVote::Yes, "d"),
+    ]);
+    let votes = Votes {
+        seats: SeatVotes::from_final_round(&round).unwrap(),
+        steward: StewardVote::Veto {
+            rationale: statement("Because."),
+        },
+    };
+    assert_eq!(record().decided(Decided::Voted(votes)).check(), Ok(()));
+}

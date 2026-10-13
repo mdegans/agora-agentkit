@@ -10,8 +10,8 @@
 
 use super::{
     AgendaRanking, CouncilDecisionRecord, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, SeatChoice, SeatVote, SeatVotes,
-    Statement, Votes,
+    CouncilVote, DecisionCategory, FinalVotes, Redactable, SeatChoice,
+    SeatVote, SeatVotes, Statement, Votes,
 };
 use crate::enums::{DecisionOutcome, RoundType};
 
@@ -130,6 +130,42 @@ impl CouncilDecisionRecord {
             };
         self
     }
+
+    /// The rules a record must keep whoever wrote it, checked before it is
+    /// signed and on every revision of it: a Steward veto carries its
+    /// rationale (Constitution Art. IV § 5), and a rationale belongs to a
+    /// veto.
+    ///
+    /// [`StewardVote::Veto`] already cannot be built without one; this is
+    /// the same rule for a record that did not come from [`Decided`]. No
+    /// signed entry breaks it: no veto has ever been cast.
+    pub fn check(&self) -> Result<(), RecordRuleError> {
+        let vetoed = self.final_votes.steward == CouncilVote::Veto;
+        let rationale = self.veto_rationale.as_ref().map(|r| match r {
+            Redactable::Value(text) => !text.trim().is_empty(),
+            // Lawfully redacted after it was signed: it was there
+            Redactable::Redacted(_) => true,
+        });
+        match (vetoed, rationale) {
+            (true, Some(true)) | (false, None) => Ok(()),
+            (true, None | Some(false)) => {
+                Err(RecordRuleError::VetoWithoutRationale)
+            }
+            (false, Some(_)) => Err(RecordRuleError::RationaleWithoutVeto),
+        }
+    }
+}
+
+/// A record that breaks a rule every record must keep
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RecordRuleError {
+    #[error(
+        "the Steward vetoed with no rationale; a veto is recorded with its \
+         rationale (Constitution Art. IV § 5)"
+    )]
+    VetoWithoutRationale,
+    #[error("the record carries a veto rationale but the Steward did not veto")]
+    RationaleWithoutVeto,
 }
 
 /// Why a final round's responses are not a seat's votes
