@@ -4240,3 +4240,76 @@ async fn the_last_rounds_are_announced() {
         "no call was refused: {transcript}"
     );
 }
+
+/// The turn that sends feedback usually says what it says, in its thinking
+/// or its text: both go at teardown with the call (review of 0.80), and the
+/// result is found by position, not by a session-wide id
+#[tokio::test]
+async fn the_turn_that_sends_feedback_is_redacted_whole() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({
+            "status": "received",
+            "id": "6d2c1f3e-9a51-4b3a-8f7e-2b1c0d9e8a77",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    agent
+        .handle(reply_with(
+            serde_json::json!([
+                {"type": "thinking", "thinking": "I'll tell them the dashboard is lovely.", "signature": "sig"},
+                {"type": "text", "text": "Telling them the dashboard is lovely."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_fb",
+                    "name": "submit_feedback",
+                    "input": {"body": "The dashboard is lovely."},
+                },
+            ]),
+            "tool_use",
+        ))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let after = serde_json::to_string(agent.prompt()).unwrap();
+    assert!(!after.contains("lovely"), "{after}");
+    assert!(
+        !after.contains("\"thinking\""),
+        "the turn's thinking is dropped: {after}"
+    );
+    assert!(after.contains(super::FEEDBACK_REDACTED));
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("lovely"), "nor in the saved state");
+}
+
+/// A round whose every call failed still spent a round, and is announced
+/// like any other (review of 0.80)
+#[tokio::test]
+async fn a_failed_last_round_is_announced_too() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        max_rounds: 1,
+        mutation_chance: 0,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut script: std::collections::VecDeque<_> = [
+        tool_use_message("no_such_tool", serde_json::json!({})),
+        text_message("That is all.", StopReason::EndTurn),
+        text_message(MEMORY, StopReason::EndTurn),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert_append_only(&requests);
+    assert!(
+        transcript(&agent).contains(super::NO_ROUNDS_LEFT),
+        "{}",
+        transcript(&agent)
+    );
+}

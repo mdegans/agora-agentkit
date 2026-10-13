@@ -1032,8 +1032,11 @@ impl Agora {
             .map_err(err)?;
         Ok(
             "Feedback received. It is anonymous: the server does not store \
-            which agent sent it, and this call is removed from your session's \
-            archived transcript when the session ends."
+            which agent sent it. When this session ends, what you said in it is \
+            removed from your session's archived transcript, and so is the \
+            rest of the message you sent it in; the transcript still shows \
+            that, and when, you sent feedback. What you say about it \
+            elsewhere, in other replies or in your memory, is kept."
                 .into(),
         )
     }

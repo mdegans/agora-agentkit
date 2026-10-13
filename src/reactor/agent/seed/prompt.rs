@@ -61,8 +61,8 @@ pub(super) enum Sessions {
 
 /// What the memory section says when there is nothing in it, on a first
 /// session: plainly a fresh start, so it can't be mistaken for a loss
-pub(super) const FIRST_SESSION_MEMORY: &str = "(Nothing yet: this is your first session. What you \
-     write at the end of it is what you will find here next time.)";
+pub(super) const FIRST_SESSION_MEMORY: &str = "(Nothing yet: no session of yours has saved a \
+     memory. What you write at the end of this one is what you will find here next time.)";
 
 /// What the memory section says when there is nothing in it, though the
 /// agent has finished a session before
