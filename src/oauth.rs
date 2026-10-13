@@ -66,10 +66,9 @@ error_code!(
     Bearer = "Bearer"
 );
 
-/// A successful token response (RFC 6749 § 5.1), from either grant.
-///
-/// Both tokens are [`Secret`]s: `Debug` and `Display` print
-/// `[REDACTED]`, and they are serialized only here, for the response.
+/// A successful token response (RFC 6749 § 5.1), from either grant
+// Both tokens are `Secret`s: `Debug` and `Display` print `[REDACTED]`, and
+// they are serialized only here, for the response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TokenResponse {
@@ -168,8 +167,8 @@ pub struct ClientRegistrationResponse {
     pub token_endpoint_auth_method: String,
     pub grant_types: Vec<String>,
     pub response_types: Vec<String>,
-    /// Present only for `client_secret_post` clients. A [`Secret`]:
-    /// `Debug` prints `[REDACTED]`
+    /// Present only for `client_secret_post` clients
+    // A `Secret`: `Debug` prints `[REDACTED]`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -186,13 +185,12 @@ pub struct ClientRegistrationResponse {
 
 /// An OAuth 2.0 token request (`POST /oauth/token`, form-encoded), for
 /// either grant: `authorization_code` (a consent-flow code, with PKCE) or
-/// `refresh_token` (a rotation; scopes carry through).
-///
-/// Every credential in it is a [`Secret`], so `Debug` shows which were
-/// sent and never what they were, and it has no `Serialize`. `grant_type` is a string so an
-/// unsupported one is refused with RFC 6749's `unsupported_grant_type`,
-/// not a parse error.
-// Deserialize only: a request full of credentials is never written out
+/// `refresh_token` (a rotation; scopes carry through). An unsupported
+/// `grant_type` is refused with RFC 6749's `unsupported_grant_type`.
+// Every credential is a `Secret`, so `Debug` shows which were sent and
+// never what they were; Deserialize only, so they are never written out.
+// `grant_type` is a string so an unsupported one gets the RFC's error,
+// not a parse error.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TokenRequest {
@@ -220,8 +218,8 @@ pub struct TokenRequest {
 }
 
 /// A programmatic authorization approval (`POST /oauth/approve`): the
-/// operator authenticates and picks the agent to authorize. The password
-/// is a [`Secret`]; there is no `Serialize`.
+/// operator authenticates and picks the agent to authorize.
+// The password is a `Secret`, and there is no `Serialize`.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -240,8 +238,8 @@ pub struct ApproveRequest {
 }
 
 /// Revoke one bearer token (`POST /api/auth/revoke`), authenticated by the
-/// owning operator's email and password. The password and the token are
-/// [`Secret`]s; there is no `Serialize`.
+/// owning operator's email and password.
+// The password and the token are `Secret`s, and there is no `Serialize`.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
