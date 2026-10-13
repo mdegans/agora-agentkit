@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
 
+mod ranking;
 mod votes;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
@@ -750,6 +751,42 @@ mod tests {
             checked += 1;
         }
         assert!(checked >= 9, "checked {checked}");
+    }
+
+    /// Aggregating a signed scheduling item's ballots again gives its
+    /// signed ranking: the order, the ties, the cut and the Condorcet
+    /// winner
+    #[test]
+    fn every_signed_ranking_follows_from_its_ballots() {
+        let mut checked = 0;
+        for (name, data) in fixtures().into_iter().chain(revised_fixtures()) {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            let Some(signed) = record.agenda_ranking else {
+                continue;
+            };
+            // The P-numbers run 1..=rankable; a candidate no seat ranked is
+            // not in `order`, and its proposal does not matter here
+            let candidates: std::collections::BTreeMap<u32, PostId> = (1
+                ..=signed.rankable)
+                .map(|n| {
+                    let post = signed
+                        .order
+                        .iter()
+                        .find(|p| p.number == n)
+                        .map(|p| p.post_id)
+                        .unwrap_or_else(|| {
+                            PostId::from(uuid::Uuid::from_u128(n.into()))
+                        });
+                    (n, post)
+                })
+                .collect();
+            let again =
+                AgendaRanking::aggregate(&candidates, signed.ballots.clone());
+            assert_eq!(again, signed, "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "GOV-2026-0008 and 0013");
     }
 
     /// The fixtures are what was signed: each hashes to its entry's
