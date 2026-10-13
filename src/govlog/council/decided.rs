@@ -140,19 +140,49 @@ impl CouncilDecisionRecord {
     /// the same rule for a record that did not come from [`Decided`]. No
     /// signed entry breaks it: no veto has ever been cast.
     pub fn check(&self) -> Result<(), RecordRuleError> {
-        let vetoed = self.final_votes.steward == CouncilVote::Veto;
-        let rationale = self.veto_rationale.as_ref().map(|r| match r {
-            Redactable::Value(text) => !text.trim().is_empty(),
-            // Lawfully redacted after it was signed: it was there
-            Redactable::Redacted(_) => true,
-        });
-        match (vetoed, rationale) {
-            (true, Some(true)) | (false, None) => Ok(()),
-            (true, None | Some(false)) => {
-                Err(RecordRuleError::VetoWithoutRationale)
-            }
-            (false, Some(_)) => Err(RecordRuleError::RationaleWithoutVeto),
+        veto_rule(Some(self.final_votes.steward), self.veto_rationale.as_ref())
+    }
+
+    /// [`check`](Self::check) on a record's raw `data`, reading only what
+    /// the rule reads (`final_votes.steward` and `veto_rationale`), for a
+    /// writer that holds `data` rather than a record. Absent fields are
+    /// absent: data with no `final_votes` has no veto.
+    pub fn check_data(data: &serde_json::Value) -> Result<(), RecordRuleError> {
+        #[derive(serde::Deserialize)]
+        struct Steward {
+            steward: CouncilVote,
         }
+        #[derive(serde::Deserialize)]
+        struct Part {
+            final_votes: Option<Steward>,
+            veto_rationale: Option<Redactable<String>>,
+        }
+        let part: Part = serde_json::from_value(data.clone())
+            .map_err(|_| RecordRuleError::Unreadable)?;
+        veto_rule(
+            part.final_votes.map(|v| v.steward),
+            part.veto_rationale.as_ref(),
+        )
+    }
+}
+
+/// A Steward veto carries its rationale, and a rationale belongs to a veto
+fn veto_rule(
+    steward: Option<CouncilVote>,
+    rationale: Option<&Redactable<String>>,
+) -> Result<(), RecordRuleError> {
+    let vetoed = steward == Some(CouncilVote::Veto);
+    let rationale = rationale.map(|r| match r {
+        Redactable::Value(text) => !text.trim().is_empty(),
+        // Lawfully redacted after it was signed: it was there
+        Redactable::Redacted(_) => true,
+    });
+    match (vetoed, rationale) {
+        (true, Some(true)) | (false, None) => Ok(()),
+        (true, None | Some(false)) => {
+            Err(RecordRuleError::VetoWithoutRationale)
+        }
+        (false, Some(_)) => Err(RecordRuleError::RationaleWithoutVeto),
     }
 }
 
@@ -166,6 +196,8 @@ pub enum RecordRuleError {
     VetoWithoutRationale,
     #[error("the record carries a veto rationale but the Steward did not veto")]
     RationaleWithoutVeto,
+    #[error("the record's `final_votes` or `veto_rationale` does not read")]
+    Unreadable,
 }
 
 /// Why a final round's responses are not a seat's votes

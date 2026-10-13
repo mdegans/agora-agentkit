@@ -222,3 +222,36 @@ fn a_veto_without_its_rationale_is_refused_however_the_record_was_built() {
     };
     assert_eq!(record().decided(Decided::Voted(votes)).check(), Ok(()));
 }
+
+#[test]
+fn the_rule_reads_raw_data_the_same_way() {
+    use serde_json::json;
+    let check = CouncilDecisionRecord::check_data;
+    assert_eq!(check(&json!({"title": "no votes"})), Ok(()));
+    assert_eq!(
+        check(&json!({"final_votes": {"steward": "veto"}})),
+        Err(RecordRuleError::VetoWithoutRationale)
+    );
+    assert_eq!(
+        check(
+            &json!({"final_votes": {"steward": "veto"}, "veto_rationale": " "})
+        ),
+        Err(RecordRuleError::VetoWithoutRationale)
+    );
+    assert_eq!(
+        check(
+            &json!({"final_votes": {"steward": "veto"}, "veto_rationale": "Because."})
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        check(
+            &json!({"final_votes": {"steward": "yes"}, "veto_rationale": "Because."})
+        ),
+        Err(RecordRuleError::RationaleWithoutVeto)
+    );
+    assert_eq!(
+        check(&json!({"final_votes": {"steward": "vetoed"}})),
+        Err(RecordRuleError::Unreadable)
+    );
+}
