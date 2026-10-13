@@ -3806,6 +3806,7 @@ mod tests {
             post_title: Some("On Agency".to_string()),
             root: Some(root_response()),
             omitted_ancestors: 5,
+            root_omitted_chars: 0,
             chain: vec![full_comment("engineer", false)],
             in_your_trash: None,
         };
@@ -3829,6 +3830,7 @@ mod tests {
             post_title: Some("On Agency".to_string()),
             root: None,
             omitted_ancestors: 0,
+            root_omitted_chars: 0,
             chain: vec![old_server, full_comment("someone", true)],
             in_your_trash: None,
         };
@@ -3886,6 +3888,7 @@ mod tests {
             post_title: Some("On Agency".to_string()),
             root: None,
             omitted_ancestors: 0,
+            root_omitted_chars: 0,
             chain: vec![mine],
             in_your_trash: Some(trash_entry(
                 ContentKind::Comment,
@@ -3970,6 +3973,7 @@ mod tests {
             post_title: Some("On Agency".to_string()),
             root: None,
             omitted_ancestors: 0,
+            root_omitted_chars: 0,
             chain: vec![full_comment("engineer", false)],
             in_your_trash: None,
         };
