@@ -1,10 +1,13 @@
 use chrono::{Duration, TimeZone};
 
 use super::*;
+use crate::enums::{ObligationKind, OwedBy};
 use crate::govlog::{
-    AmendmentDraft, Evidence, Obligation, ObligationRecord, ObligationUpdate,
-    Sha256Hex,
+    AmendmentDraft, Evidence, Obligation, ObligationData, ObligationState,
+    ObligationUpdate, Sha256Hex,
 };
+use crate::ids::PostId;
+use crate::responses::ObligationListing;
 
 fn now() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 10, 12, 12, 0, 0).unwrap()
@@ -55,27 +58,37 @@ fn sitting(n: u8, expected_at: DateTime<Utc>) -> EventState {
     )
 }
 
-fn projection(
+/// Obligation `n`, "Obligation n", now at `status` and due `until`
+fn obligation(
     n: u32,
     status: ObligationStatus,
     until: Option<Until>,
-) -> ObligationProjection {
-    ObligationProjection {
+) -> Obligation {
+    let mut data = ObligationData::new(
+        ObligationKind::Task,
+        OwedBy::Staff,
+        format!("Obligation {n}"),
+        "the words",
+        "round 2",
+    );
+    data.source = Some(gov(1));
+    data.until = until.clone();
+    Obligation {
         id: obl(n),
-        source: Some(gov(1)),
-        kind: ObligationKind::Task,
-        owed_by: OwedBy::Staff,
-        status,
-        until,
-        lapsed_at: None,
-        plan: None,
         created_at: days(-30) + Duration::hours(n.into()),
+        chain_seq: n.into(),
+        data,
+        state: ObligationState {
+            status,
+            until,
+            ..ObligationState::default()
+        },
     }
 }
 
 fn resolved(
     calendar: &Calendar,
-    rows: Vec<ObligationProjection>,
+    rows: Vec<Obligation>,
 ) -> Vec<ResolvedObligation> {
     let decided = HashSet::from([gov(1)]);
     rows.into_iter()
@@ -213,11 +226,11 @@ fn overdue_is_open_and_past_a_date_that_binds() {
     let rows = resolved(
         &calendar,
         vec![
-            projection(1, ObligationStatus::Open, past.clone()),
-            projection(2, ObligationStatus::Lapsed, past.clone()),
-            projection(3, ObligationStatus::Discharged, past),
+            obligation(1, ObligationStatus::Open, past.clone()),
+            obligation(2, ObligationStatus::Lapsed, past.clone()),
+            obligation(3, ObligationStatus::Discharged, past),
             // A pending sitting whose date passed: not overdue
-            projection(4, ObligationStatus::Open, Some(Until::NextSitting)),
+            obligation(4, ObligationStatus::Open, Some(Until::NextSitting)),
         ],
     );
     let overdue: Vec<bool> = rows.iter().map(|r| r.overdue).collect();
@@ -242,13 +255,13 @@ fn the_due_order_puts_what_is_owed_first_and_undated_last() {
     let mut rows = resolved(
         &calendar,
         vec![
-            projection(1, ObligationStatus::Open, None),
-            projection(2, ObligationStatus::Open, date(2)),
-            projection(3, ObligationStatus::Open, Some(Until::NextSitting)),
-            projection(4, ObligationStatus::Lapsed, date(-3)),
-            projection(5, ObligationStatus::Discharged, date(-60)),
-            projection(6, ObligationStatus::Open, None),
-            projection(7, ObligationStatus::Open, date(10)),
+            obligation(1, ObligationStatus::Open, None),
+            obligation(2, ObligationStatus::Open, date(2)),
+            obligation(3, ObligationStatus::Open, Some(Until::NextSitting)),
+            obligation(4, ObligationStatus::Lapsed, date(-3)),
+            obligation(5, ObligationStatus::Discharged, date(-60)),
+            obligation(6, ObligationStatus::Open, None),
+            obligation(7, ObligationStatus::Open, date(10)),
         ],
     );
     ObligationSort::Due.sort(&mut rows);
@@ -276,18 +289,18 @@ fn upcoming_lists_sittings_and_dated_obligations_by_text() {
     let rows = resolved(
         &calendar,
         vec![
-            projection(1, ObligationStatus::Open, soon.clone()),
-            projection(2, ObligationStatus::Open, Some(Until::NextSitting)),
-            // Closed, or past, or with no text: not listed
-            projection(3, ObligationStatus::Discharged, soon.clone()),
-            projection(
+            obligation(1, ObligationStatus::Open, soon.clone()),
+            obligation(2, ObligationStatus::Open, Some(Until::NextSitting)),
+            // Closed, or past: not listed
+            obligation(3, ObligationStatus::Discharged, soon.clone()),
+            obligation(
                 4,
                 ObligationStatus::Open,
                 Some(Until::Date {
                     date: days(-1).date_naive(),
                 }),
             ),
-            projection(5, ObligationStatus::Open, soon),
+            obligation(5, ObligationStatus::Open, soon),
         ],
     );
     let dated: Vec<GovernanceLogId> = calendar
@@ -296,9 +309,8 @@ fn upcoming_lists_sittings_and_dated_obligations_by_text() {
         .map(|o| o.obligation.id.clone())
         .collect();
     assert_eq!(dated, [obl(1), obl(5)]);
-    let texts = HashMap::from([(obl(1), "Ship the ledger".to_string())]);
 
-    let all = calendar.upcoming(&rows, &texts, false, CALENDAR_LIMIT);
+    let all = calendar.upcoming(&rows, false, CALENDAR_LIMIT);
     let shape: Vec<String> = all
         .iter()
         .map(|i| match i {
@@ -313,21 +325,22 @@ fn upcoming_lists_sittings_and_dated_obligations_by_text() {
     assert_eq!(
         shape,
         [
-            "Ship the ledger".to_string(),
+            "Obligation 1".to_string(),
+            "Obligation 5".to_string(),
             format!("{} (1)", event_id(1)),
             format!("{} (0)", event_id(2)),
         ]
     );
     // The dashboard leaves out the next sitting, and takes a few
-    let dash = calendar.upcoming(&rows, &texts, true, 1);
+    let dash = calendar.upcoming(&rows, true, 1);
     assert_eq!(dash.len(), 1);
     assert!(matches!(&dash[0], CalendarItem::ObligationDue { .. }));
-    let dash = calendar.upcoming(&rows, &texts, true, UPCOMING_LIMIT);
+    let dash = calendar.upcoming(&rows, true, UPCOMING_LIMIT);
     assert!(
-        matches!(&dash[1], CalendarItem::Sitting { event, .. } if *event == event_id(2))
+        matches!(&dash[2], CalendarItem::Sitting { event, .. } if *event == event_id(2))
     );
 
-    let response = CalendarResponse::new(&calendar, &rows, &texts);
+    let response = CalendarResponse::new(&calendar, &rows);
     assert_eq!(response.items, all);
     assert_eq!(response.how_to_read, CALENDAR_HOW_TO_READ);
 }
@@ -337,15 +350,15 @@ fn a_listing_carries_the_resolved_deadline() {
     let calendar = Calendar::new(vec![sitting(1, days(9))], None, now());
     let row = resolved(
         &calendar,
-        vec![projection(
+        vec![obligation(
             1,
             ObligationStatus::Open,
             Some(Until::NextSitting),
         )],
     )
     .remove(0);
-    let listing = row.into_listing("Ship it".to_string());
-    assert_eq!(listing.text, "Ship it");
+    let listing = ObligationListing::from(row);
+    assert_eq!(listing.text, "Obligation 1");
     assert_eq!(listing.due, Some(days(9).date_naive()));
     assert!(listing.due_approximate && !listing.overdue);
     assert_eq!(listing.until, Some(Until::NextSitting));
@@ -353,9 +366,13 @@ fn a_listing_carries_the_resolved_deadline() {
 
 #[test]
 fn awaited_decision_is_only_after_decision() {
-    let mut row = projection(1, ObligationStatus::Open, None);
+    let mut row = obligation(1, ObligationStatus::Open, None);
     assert_eq!(row.awaited_decision(), None);
-    row.until = Some(Until::AfterDecision { decision: gov(3) });
+    row.state.until = Some(Until::AfterDecision { decision: gov(3) });
+    assert_eq!(row.awaited_decision(), Some(&gov(3)));
+    // The deadline that counts is the current one, a reschedule's, not
+    // the one the entry was signed with
+    row.data.until = Some(Until::AfterDecision { decision: gov(4) });
     assert_eq!(row.awaited_decision(), Some(&gov(3)));
 }
 
@@ -370,7 +387,7 @@ fn fixed_date_is_only_a_date() {
 
 #[test]
 fn a_record_is_its_latest_version_and_its_state() {
-    let o = Obligation::new(
+    let o = ObligationData::new(
         ObligationKind::Task,
         OwedBy::Staff,
         "Ship the ledger and the form",
@@ -409,7 +426,7 @@ fn a_record_is_its_latest_version_and_its_state() {
         duplicates: vec![],
         resulting_data_hash: hash,
     });
-    let record = ObligationRecord::from_log(
+    let record = Obligation::from_log(
         obl(1),
         now(),
         7,
@@ -421,13 +438,13 @@ fn a_record_is_its_latest_version_and_its_state() {
         ],
     )
     .unwrap();
-    assert_eq!(record.obligation.text, "Ship the ledger");
+    assert_eq!(record.data.text, "Ship the ledger");
     assert_eq!(record.state.status, ObligationStatus::Discharged);
     assert_eq!(record.state.plan, Some(plan));
     assert_eq!(record.chain_seq, 7);
 
     assert!(
-        ObligationRecord::from_log(
+        Obligation::from_log(
             obl(1),
             now(),
             7,

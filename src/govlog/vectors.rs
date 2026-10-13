@@ -524,7 +524,7 @@ fn cases() -> Vec<Case> {
 
     // -- obligations --
 
-    let mut obligation = Obligation::new(
+    let mut obligation = ObligationData::new(
         ObligationKind::Review,
         OwedBy::Council,
         "A six-month review of optional signatures",
