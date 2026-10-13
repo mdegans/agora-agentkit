@@ -2,6 +2,42 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.76.0
+
+Additive: the Council's votes and decisions, typed so that the record
+cannot leave out what the Constitution requires, and the arithmetic that
+decides an item, moved here from the Council program (agora CLAUDE.md
+rule 8). No wire shape, schema text or signed byte changes.
+
+- `govlog::{Statement, BlankStatement}`: words for the record that are
+  never blank (`TryFrom<String>`, refused on deserialize too; a plain
+  string schema, no `minLength` or `pattern`).
+- `govlog::StewardVote` (`Abstain { rationale }`, `Veto { rationale }`,
+  …), `SeatChoice`, `SeatVote { choice, statement }`, `Votes` (one per
+  member) and `Vote<'_>` (what `Votes::iter` yields). `Votes` converts into
+  the record's fields: `From<&Votes> for FinalVotes`, `abstentions()`,
+  `veto_rationale()`. There is no conversion back: records signed before
+  GOV-2026-0009 hold an `abstain` with no rationale.
+- `govlog::{Decided, FinalRoundError}`: `Voted(Votes)`, `Ranked`, `Tabled`,
+  `RecusedDeferral`. `CouncilDecisionRecord::decided` sets `final_votes`,
+  `outcome`, `vote_tally`, `veto_rationale`, `abstentions` and
+  `agenda_ranking` from one value. `Votes::from_final_round` reads the
+  seats' votes and statements from the final round, refusing a missing,
+  doubled, unvoted, non-seat or blank one.
+- The thresholds: `FinalVotes::{outcome, tally, yes_count, no_count,
+  voting_count, steward_recused}`, with the Council's tests. A new test
+  checks every signed outcome and tally against them.
+- The scheduling item's Borda count: `AgendaRanking::{aggregate, docket}`,
+  `SeatRanking::render`. A new test re-aggregates GOV-2026-0008's and
+  0013's ballots and gets their signed rankings back.
+- Prose names: `Display` and `name()` for `CouncilSeat` (`"Artist"`),
+  `CouncilVote` (`"Yes"`) and `DecisionCategory` (`"Policy"`);
+  `DecisionCategory::{threshold, determines_recusal, recused_threshold}`;
+  `From<CouncilSeat> for ModelRole`.
+- Fixtures: every signed Council decision (GOV-2026-0001..0013) as signed,
+  and the five revised ones as revised, each checked against its signed
+  hash.
+
 ## 0.75.0
 
 Breaking, before any obligation exists: one type for an obligation (agora
