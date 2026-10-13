@@ -120,7 +120,7 @@ impl CouncilDecisionRecord {
             match decided {
                 Decided::Voted(votes) => (
                     votes.veto_rationale().map(|r| r.to_string().into()),
-                    votes.abstentions(),
+                    votes.steward_abstention().into_iter().collect(),
                     None,
                 ),
                 Decided::Ranked(ranking) => (None, Vec::new(), Some(ranking)),

@@ -224,9 +224,9 @@ fn decided(steward: StewardVote) -> Votes {
     }
 }
 
-/// The record's fields come from the typed votes: the five bare votes,
-/// every abstention with its rationale, seats first and the Steward last,
-/// and a veto's rationale
+/// The record's fields come from the typed votes: the five bare votes, the
+/// Steward's abstention with its rationale (a seat's is its final-round
+/// statement, never copied), and a veto's rationale
 #[test]
 fn votes_become_the_records_fields() {
     let v = decided(StewardVote::Abstain {
@@ -236,13 +236,10 @@ fn votes_become_the_records_fields() {
         FinalVotes::from(&v),
         votes(Yes, Abstain, Yes, Defer, Abstain)
     );
-    let abstentions = serde_json::to_value(v.abstentions()).unwrap();
+    let abstention = serde_json::to_value(v.steward_abstention()).unwrap();
     assert_eq!(
-        abstentions,
-        serde_json::json!([
-            {"member": "philosopher", "rationale": "I stand aside: I wrote it."},
-            {"member": "steward", "rationale": "I'll let the Council decide."},
-        ])
+        abstention,
+        serde_json::json!({"member": "steward", "rationale": "I'll let the Council decide."})
     );
     assert_eq!(v.veto_rationale(), None);
 
@@ -254,7 +251,7 @@ fn votes_become_the_records_fields() {
         Some("It limits the appeals court.")
     );
     assert_eq!(v.outcome(Routine), Rejected);
-    assert_eq!(v.abstentions().len(), 1, "a veto is not an abstention");
+    assert_eq!(v.steward_abstention(), None, "a veto is not an abstention");
     assert_eq!(v.tally(), "2-0");
 }
 

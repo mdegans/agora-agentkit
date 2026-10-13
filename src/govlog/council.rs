@@ -70,8 +70,9 @@ pub struct CouncilDecisionRecord {
     /// on `Schedule` and `Emergency` items. (0.48)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steward_recusal: Option<StewardRecusal>,
-    /// The one-sentence rationale for each abstention in `final_votes`
-    /// (Art. IV § 3). (0.48)
+    /// The Steward's one-sentence rationale for an abstention (Art. IV
+    /// § 3). A seat's abstention rationale is its statement in the final
+    /// round, recorded there once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abstentions: Vec<Abstention>,
     /// Entries this decision retires as precedent. Only GOV-2026-0005

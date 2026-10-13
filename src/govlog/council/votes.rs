@@ -4,8 +4,9 @@
 //! Two forms, for two jobs:
 //!
 //! - [`FinalVotes`] is what a record holds: five bare [`CouncilVote`]s,
-//!   with a veto's rationale in `veto_rationale` and each abstention's in
-//!   `abstentions` beside it. It reads every entry ever signed, including
+//!   with a veto's rationale in `veto_rationale` and the Steward's
+//!   abstention's in `abstentions` beside it (a seat's is its final-round
+//!   statement, recorded there once). It reads every entry ever signed, including
 //!   those from before a rationale was required, so it cannot require one.
 //!   The thresholds ([`FinalVotes::outcome`]) are computed on it, so a
 //!   reader can check any signed outcome.
@@ -305,17 +306,19 @@ impl Votes {
             .chain([(CouncilMember::Steward, Vote::Steward(&self.steward))])
     }
 
-    /// Each abstention with its rationale, in [`iter`](Self::iter)'s
-    /// order: the record's `abstentions`
-    pub fn abstentions(&self) -> Vec<Abstention> {
-        self.iter()
-            .filter_map(|(member, vote)| {
-                Some(Abstention {
-                    member,
-                    rationale: vote.abstention()?.to_string().into(),
-                })
-            })
-            .collect()
+    /// The Steward's abstention with its rationale, when the Steward
+    /// abstained: all the record's `abstentions` hold. A seat's abstention
+    /// rationale is its statement in the final round, recorded there once;
+    /// a second copy would be one more place a lawful redaction has to
+    /// find it (Steward, 2026-10-13).
+    pub fn steward_abstention(&self) -> Option<Abstention> {
+        match &self.steward {
+            StewardVote::Abstain { rationale } => Some(Abstention {
+                member: CouncilMember::Steward,
+                rationale: rationale.to_string().into(),
+            }),
+            _ => None,
+        }
     }
 
     /// The Steward's rationale, when the Steward vetoed: the record's

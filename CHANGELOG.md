@@ -17,8 +17,11 @@ rule 8). No wire shape, schema text or signed byte changes.
   four seats', what the Steward is shown before voting, with
   `SeatVotes::from_final_round`), `Votes { seats, steward }` and `Vote<'_>`
   (what `Votes::iter` yields). `Votes` converts into
-  the record's fields: `From<&Votes> for FinalVotes`, `abstentions()`,
-  `veto_rationale()`. There is no conversion back: records signed before
+  the record's fields: `From<&Votes> for FinalVotes`,
+  `steward_abstention()`, `veto_rationale()`. The record's `abstentions`
+  hold only the Steward's: a seat's abstention rationale is its statement
+  in the final round, recorded there once (Steward, 2026-10-13); the
+  field's documentation says so. There is no conversion back: records signed before
   GOV-2026-0009 hold an `abstain` with no rationale.
 - `govlog::{Decided, FinalRoundError}`: `Voted(Votes)`, `Ranked`, `Tabled`,
   `RecusedDeferral`. `CouncilDecisionRecord::decided` sets `final_votes`,

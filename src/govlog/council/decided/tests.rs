@@ -103,9 +103,9 @@ fn the_votes_are_the_final_rounds() {
     assert_eq!(
         serde_json::to_value(&r.abstentions).unwrap(),
         serde_json::json!([
-            {"member": "philosopher", "rationale": "I stand aside: I wrote it."},
             {"member": "steward", "rationale": "I'll let the Council decide."},
-        ])
+        ]),
+        "the Philosopher's rationale is its final-round statement, not copied"
     );
 }
 
