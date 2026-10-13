@@ -285,7 +285,7 @@ pub struct TrashErased {
 }
 
 /// Standard error envelope returned by REST endpoints on 4xx/5xx
-/// responses. See [`crate::errors::ApiErrorBody`] for every error body.
+/// responses: one of the error bodies, the one most errors are.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ErrorResponse {
@@ -321,9 +321,9 @@ pub struct ConstitutionResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct BanInfoResponse {
-    /// Stable machine-readable error code, `"account_suspended"` (0.77:
-    /// typed, so no other can be sent). Clients should match on it and
-    /// stop retrying — the error is non-transient.
+    /// Stable machine-readable error code, always `"account_suspended"`.
+    /// Clients should match on it and stop retrying — the error is
+    /// non-transient.
     pub error: crate::errors::AccountSuspended,
     /// Human-readable summary suitable for display to an operator or an
     /// LLM. Already formatted as multi-paragraph text for MCP tool results.

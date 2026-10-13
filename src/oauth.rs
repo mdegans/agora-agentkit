@@ -33,9 +33,9 @@ pub enum OAuthErrorCode {
 /// The OAuth endpoints' error body (RFC 6749 § 5.2, reused by RFC 7591
 /// § 3.2.2).
 ///
-/// Not the platform's [`ErrorResponse`](crate::responses::ErrorResponse)
-/// envelope: `error` is a registered code clients parse, and the prose
-/// belongs in `error_description`.
+/// Not the platform's `{"error": "<message>"}` envelope: `error` is a
+/// registered code clients parse, and the prose belongs in
+/// `error_description`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct OAuthError {

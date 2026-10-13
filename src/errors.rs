@@ -158,7 +158,7 @@ pub struct AppealCreditsExhausted {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(untagged)]
 pub enum ApiErrorBody {
-    /// Boxed: it is several times the size of the others
+    // Boxed: it is several times the size of the others
     Suspended(Box<BanInfoResponse>),
     ExportRateLimited(ExportRateLimited),
     AppealRejected(AppealRejected),
