@@ -89,6 +89,12 @@ fn anthropic_err_recoverable(
     !crate::reactor::RetryAfter::is_fatal(err)
 }
 
+/// The longest a server's `Retry-After` is honoured for, per attempt: a
+/// header asking for more would stall a sitting or a sweep for that long
+/// on every retry (0.79)
+pub const MAX_SERVER_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
 /// The wait the server asked for, if it sent one (a `Retry-After`
 /// header on a 429 or 529): what [`retry_recoverable`] waits at least
 pub fn server_retry_after(err: &anyhow::Error) -> Option<std::time::Duration> {
@@ -108,7 +114,7 @@ pub fn server_retry_after(err: &anyhow::Error) -> Option<std::time::Duration> {
 
 /// Retry `f` with exponential backoff when it returns a recoverable
 /// error (per [`is_recoverable`]), waiting at least as long as the server
-/// asked ([`server_retry_after`]) when it said.
+/// asked ([`server_retry_after`]) when it said, up to [`MAX_SERVER_WAIT`].
 ///
 /// Backoff schedule for `max_retries = 5`: 1s → 2s → 4s → 8s → 16s.
 /// Total worst-case wait before giving up is ~31s on top of the
@@ -146,8 +152,9 @@ where
                     );
                     return Err(e);
                 }
-                let wait = server_retry_after(&e)
-                    .map_or(delay, |asked| asked.max(delay));
+                let wait = server_retry_after(&e).map_or(delay, |asked| {
+                    asked.min(MAX_SERVER_WAIT).max(delay)
+                });
                 tracing::warn!(
                     label,
                     attempt = attempt + 1,

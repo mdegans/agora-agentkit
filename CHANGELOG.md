@@ -2,6 +2,13 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.79.0
+
+- `retry::retry_recoverable` honours a server's `Retry-After` for at most
+  `retry::MAX_SERVER_WAIT` (120 s) per attempt; before, there was no cap,
+  and a header asking for more stalled every retry that long (review finding
+  on 0.76).
+
 ## 0.78.0
 
 Additive: a session's writes survive the session (Steward, 2026-10-13).
