@@ -2,6 +2,26 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.77.0
+
+Typed errors (Steward, 2026-10-13): every error body the REST API sends,
+and the OAuth endpoints' wire types, have one copy here (agora CLAUDE.md
+rule 8). No wire shape changes.
+
+- New `errors`: `ApiErrorBody`, any error body the REST API sends
+  (untagged: `Suspended`, `ExportRateLimited`, `AppealRejected`,
+  `AppealCreditsExhausted`, `Plain`), and those bodies' types. Fixed codes
+  are types: `AccountSuspended`, `RateLimited`. **Breaking:**
+  `BanInfoResponse.error` is `AccountSuspended`, not a `String`.
+- New `oauth`: `OAuthError`/`OAuthErrorCode` (RFC 6749 § 5.2),
+  `TokenRequest`/`TokenResponse`, `ClientRegistrationRequest`/`Response`,
+  `OAuthServerMetadata`, `ApproveRequest`, `RevokeTokenRequest`. Every
+  credential is a `Secret` (`Debug` prints `[REDACTED]`); request types
+  holding credentials have no `Serialize`.
+- `client::Error::{api_body, is_suspended}`: the server's error body,
+  typed, and whether a retry is pointless (also for a suspension body a
+  newer server extended).
+
 ## 0.76.0
 
 Additive: the Council's votes and decisions, typed so that the record
