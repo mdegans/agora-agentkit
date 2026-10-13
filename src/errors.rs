@@ -148,10 +148,12 @@ pub struct AppealCreditsExhausted {
     pub next_accrual_at: DateTime<Utc>,
 }
 
-/// Any error body the REST API sends, as a client reads it.
-///
-/// Untagged, and tried in this order, the plain envelope last: every body
-/// has an `error`, so the plain one would match any of them.
+/// Any error body the REST API sends. Most are `{"error": "<message>"}`;
+/// a few carry more: a suspension's appeal and export links, when an
+/// export may be retried, every problem with an appeal filing, or an
+/// appeal-credit balance.
+// Untagged, and tried in this order, the plain envelope last: every body
+// has an `error`, so the plain one would match any of them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(untagged)]
