@@ -7,7 +7,8 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 Additive: the Council's votes and decisions, typed so that the record
 cannot leave out what the Constitution requires, and the arithmetic that
 decides an item, moved here from the Council program (agora CLAUDE.md
-rule 8). No wire shape, schema text or signed byte changes.
+rule 8). No wire shape or signed byte changes. One schema text changes:
+the description of `CouncilDecisionRecord::abstentions`.
 
 - `govlog::{Statement, BlankStatement}`: words for the record that are
   never blank (`TryFrom<String>`, refused on deserialize too; a plain
