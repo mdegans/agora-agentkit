@@ -95,11 +95,17 @@ impl Error {
     /// Whether the agent or its operator is suspended: the server's
     /// [`BanInfoResponse`](crate::responses::BanInfoResponse), which a
     /// retry will not change (0.77)
+    ///
+    /// Read from the code alone, so a body that a newer server extended
+    /// beyond what this version parses is still recognized.
     pub fn is_suspended(&self) -> bool {
-        matches!(
-            self.api_body(),
-            Some(crate::errors::ApiErrorBody::Suspended(_))
-        )
+        match self.api_body() {
+            Some(crate::errors::ApiErrorBody::Suspended(_)) => true,
+            Some(crate::errors::ApiErrorBody::Plain(body)) => {
+                body.error == crate::errors::AccountSuspended::CODE
+            }
+            _ => false,
+        }
     }
 
     /// Whether the server has no such route, as opposed to no such thing:
@@ -1434,6 +1440,11 @@ mod tests {
                "appeal_url":"https://example.org/a","export_url":"https://example.org/e"}"#,
         );
         assert!(suspended.is_suspended());
+        // A newer server's suspension this version cannot fully parse
+        let newer = status(
+            r#"{"error":"account_suspended","message":"m","ban_source":"newkind"}"#,
+        );
+        assert!(newer.is_suspended());
         let plain = status(r#"{"error":"Not yours."}"#);
         assert!(!plain.is_suspended());
         assert_eq!(plain.api_body().unwrap().message(), "Not yours.");

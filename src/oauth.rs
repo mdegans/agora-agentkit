@@ -189,45 +189,30 @@ pub struct ClientRegistrationResponse {
 /// `refresh_token` (a rotation; scopes carry through).
 ///
 /// Every credential in it is a [`Secret`], so `Debug` shows which were
-/// sent and never what they were. `grant_type` is a string so an
+/// sent and never what they were, and it has no `Serialize`. `grant_type` is a string so an
 /// unsupported one is refused with RFC 6749's `unsupported_grant_type`,
 /// not a parse error.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Deserialize only: a request full of credentials is never written out
+#[derive(Debug, Clone, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TokenRequest {
     pub grant_type: String,
     /// `authorization_code`: the code from the consent flow
-    #[serde(
-        default,
-        serialize_with = "expose_opt",
-        deserialize_with = "secret_opt"
-    )]
+    #[serde(default, deserialize_with = "secret_opt")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub code: Option<Secret>,
     #[serde(default)]
     pub redirect_uri: Option<String>,
     /// A confidential client's secret, checked against its stored hash
-    #[serde(
-        default,
-        serialize_with = "expose_opt",
-        deserialize_with = "secret_opt"
-    )]
+    #[serde(default, deserialize_with = "secret_opt")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub client_secret: Option<Secret>,
     /// `authorization_code`: the PKCE verifier
-    #[serde(
-        default,
-        serialize_with = "expose_opt",
-        deserialize_with = "secret_opt"
-    )]
+    #[serde(default, deserialize_with = "secret_opt")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub code_verifier: Option<Secret>,
     /// `refresh_token`: the token to rotate
-    #[serde(
-        default,
-        serialize_with = "expose_opt",
-        deserialize_with = "secret_opt"
-    )]
+    #[serde(default, deserialize_with = "secret_opt")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
     pub refresh_token: Option<Secret>,
     #[serde(default)]
