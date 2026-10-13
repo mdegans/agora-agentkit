@@ -148,8 +148,47 @@ impl From<ProposalCategory> for DecisionCategory {
     }
 }
 
-impl From<DecisionCategory> for ProposalCategory {
-    fn from(category: DecisionCategory) -> Self {
+impl DecisionCategory {
+    /// The vote it needs, in words ([`ProposalCategory::threshold`]) (0.76)
+    pub const fn threshold(self) -> &'static str {
+        ProposalCategory::from_decision(self).threshold()
+    }
+
+    /// Whether an item of this category opens with the seats' recusal
+    /// determination ([`ProposalCategory::determines_recusal`]) (0.76)
+    pub const fn determines_recusal(self) -> bool {
+        ProposalCategory::from_decision(self).determines_recusal()
+    }
+
+    /// The vote it needs once the Steward is recused, if recusal is ever
+    /// determined ([`ProposalCategory::recused_threshold`]) (0.76)
+    pub const fn recused_threshold(self) -> Option<&'static str> {
+        ProposalCategory::from_decision(self).recused_threshold()
+    }
+
+    /// The category's name as the record and prose write it: `"Policy"`
+    /// (0.76)
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Routine => "Routine",
+            Self::Policy => "Policy",
+            Self::Constitutional => "Constitutional",
+            Self::Emergency => "Emergency",
+            Self::Schedule => "Schedule",
+        }
+    }
+}
+
+/// `"Policy"`: [`DecisionCategory::name`], the record's spelling (0.76)
+impl std::fmt::Display for DecisionCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl ProposalCategory {
+    /// [`From<DecisionCategory>`], in a `const fn`
+    const fn from_decision(category: DecisionCategory) -> Self {
         match category {
             DecisionCategory::Routine => Self::Routine,
             DecisionCategory::Policy => Self::Policy,
@@ -157,6 +196,12 @@ impl From<DecisionCategory> for ProposalCategory {
             DecisionCategory::Emergency => Self::Emergency,
             DecisionCategory::Schedule => Self::Schedule,
         }
+    }
+}
+
+impl From<DecisionCategory> for ProposalCategory {
+    fn from(category: DecisionCategory) -> Self {
+        Self::from_decision(category)
     }
 }
 
@@ -462,13 +507,33 @@ impl CouncilSeat {
         }
     }
 
-    /// The seat's name as prose writes it: `"Artist"` (0.74)
+    /// The seat's name as prose writes it: `"Artist"` (0.74). Also its
+    /// `Display` (0.76).
     pub const fn name(self) -> &'static str {
         match self {
             Self::Artist => "Artist",
             Self::Philosopher => "Philosopher",
             Self::Lawyer => "Lawyer",
             Self::Engineer => "Engineer",
+        }
+    }
+}
+
+/// `"Artist"`: [`CouncilSeat::name`] (0.76)
+impl std::fmt::Display for CouncilSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A seat is the model role that speaks for it (0.76)
+impl From<CouncilSeat> for crate::enums::ModelRole {
+    fn from(seat: CouncilSeat) -> Self {
+        match seat {
+            CouncilSeat::Artist => Self::Artist,
+            CouncilSeat::Philosopher => Self::Philosopher,
+            CouncilSeat::Lawyer => Self::Lawyer,
+            CouncilSeat::Engineer => Self::Engineer,
         }
     }
 }
@@ -498,6 +563,31 @@ pub enum CouncilVote {
     /// The Steward, on an item the seats found limits the Steward's
     /// powers: no vote and no veto. See `steward_recusal`. (0.48)
     Recused,
+}
+
+impl CouncilVote {
+    /// The vote as prose writes it: `"Yes"`, `"Abstain"` (0.76). Also its
+    /// `Display`, and how the Council stores a seat's vote in its
+    /// `deliberation_rounds` rows.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Yes => "Yes",
+            Self::No => "No",
+            Self::Abstain => "Abstain",
+            Self::Defer => "Defer",
+            Self::Concur => "Concur",
+            Self::Veto => "Veto",
+            Self::Ranked => "Ranked",
+            Self::Recused => "Recused",
+        }
+    }
+}
+
+/// `"Yes"`: [`CouncilVote::name`] (0.76)
+impl std::fmt::Display for CouncilVote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// The votes that decided the item
@@ -826,6 +916,51 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 3, "GOV-2026-0002, 0008, 0013");
+    }
+
+    /// The prose names: a category's is its serde form; a seat's and a
+    /// vote's are their serde forms capitalized (0.76)
+    #[test]
+    fn the_prose_names() {
+        use DecisionCategory as C;
+        for c in [
+            C::Routine,
+            C::Policy,
+            C::Constitutional,
+            C::Emergency,
+            C::Schedule,
+        ] {
+            assert_eq!(
+                serde_json::to_value(c).unwrap(),
+                c.to_string().as_str()
+            );
+            assert_eq!(c.threshold(), ProposalCategory::from(c).threshold());
+        }
+        let capitalized = |s: &str| {
+            let mut c = s.chars();
+            c.next()
+                .unwrap()
+                .to_uppercase()
+                .chain(c)
+                .collect::<String>()
+        };
+        for seat in CouncilSeat::ALL {
+            assert_eq!(seat.to_string(), capitalized(seat.as_str()));
+        }
+        use CouncilVote as V;
+        for v in [
+            V::Yes,
+            V::No,
+            V::Abstain,
+            V::Defer,
+            V::Concur,
+            V::Veto,
+            V::Ranked,
+            V::Recused,
+        ] {
+            let serde = serde_json::to_value(v).unwrap();
+            assert_eq!(v.to_string(), capitalized(serde.as_str().unwrap()));
+        }
     }
 
     /// The fixtures are what was signed: each hashes to its entry's
