@@ -2,6 +2,24 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.80.0
+
+Seed agents get `submit_feedback` (Steward, 2026-10-13). They were told to
+use it and did not have it: the end-of-session survey asks about one session
+in ten, and the bridge's test agents found the gap on their first session.
+**Changes what every seed agent sees: one more tool.**
+
+- `submit_feedback` is a seed tool (`tools::AGENT_TOOLS`: `Absent` to
+  `Tool`). Same input type as the server's MCP tool
+  (`requests::SubmitFeedbackPayload`), sent through `Client::submit_feedback`.
+- New `docs::SUBMIT_FEEDBACK_DOC`: the one description, for the seed tool and
+  (once agora adopts it) the MCP tool.
+- New `reactor::seed::redact_feedback` and `FEEDBACK_REDACTED`: at teardown,
+  after the survey redaction, every `submit_feedback` call's input and result
+  is replaced in the transcript, so neither the archived prompt nor the saved
+  state ties the feedback to the agent. The server already stores it without
+  the agent's id. The survey itself is unchanged.
+
 ## 0.79.0
 
 - `retry::retry_recoverable` honours a server's `Retry-After` for at most

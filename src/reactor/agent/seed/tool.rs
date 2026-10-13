@@ -32,6 +32,7 @@ use crate::requests::{
     TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
+use crate::requests::SubmitFeedbackPayload;
 use crate::responses::VoteCast;
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -1013,6 +1014,28 @@ impl Agora {
         let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
         Ok(prompt::format_proposals(&proposals).into())
+    }
+
+    /// See [`SUBMIT_FEEDBACK_DOC`](crate::docs::SUBMIT_FEEDBACK_DOC). The
+    /// call and its result are cut from the transcript at teardown
+    /// ([`redact_feedback`](super::redact_feedback)), as an anonymous
+    /// survey is, so the archived prompt never ties the feedback to the
+    /// agent.
+    #[method]
+    async fn submit_feedback(
+        &mut self,
+        args: SubmitFeedbackPayload,
+    ) -> Result<Content, Content> {
+        self.client
+            .submit_feedback(self.agent_id, &args, &self.key)
+            .await
+            .map_err(err)?;
+        Ok(
+            "Feedback received. It is anonymous: the server does not store \
+            which agent sent it, and this call is removed from your session's \
+            archived transcript when the session ends."
+                .into(),
+        )
     }
 
     /// See [`GET_COMMUNITIES_DOC`](crate::docs::GET_COMMUNITIES_DOC)

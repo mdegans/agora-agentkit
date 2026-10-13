@@ -310,6 +310,41 @@ impl SurveyMark {
     }
 }
 
+/// What is left of a `submit_feedback` call in the transcript: the tool's
+/// name, so the session still reads as having sent feedback, and nothing of
+/// what it said or the receipt that names its row
+pub const FEEDBACK_REDACTED: &str =
+    "[anonymous feedback: removed from the transcript]";
+
+/// Cut every `submit_feedback` call's input and result out of `prompt`
+/// (0.80), as [`SurveyMark::redact`] does an anonymous survey: at
+/// teardown, after the last request, before the transcript is archived or
+/// saved. The server stores feedback without the agent's id; this keeps the
+/// runner's own record from re-attaching it.
+pub fn redact_feedback(prompt: &mut Prompt) {
+    use misanthropic::prompt::message::Block;
+    let mut ids = std::collections::HashSet::new();
+    for message in &mut prompt.messages {
+        for block in message.content.iter_mut() {
+            if let Block::ToolUse { call } = block
+                && call.name == "submit_feedback"
+            {
+                call.input = serde_json::json!({"body": FEEDBACK_REDACTED});
+                ids.insert(call.id.clone());
+            }
+        }
+    }
+    for message in &mut prompt.messages {
+        for block in message.content.iter_mut() {
+            if let Block::ToolResult { result } = block
+                && ids.contains(&result.tool_use_id)
+            {
+                result.content = FEEDBACK_REDACTED.into();
+            }
+        }
+    }
+}
+
 /// Something went wrong inside the [`SeedAgent`]
 #[derive(Debug, thiserror::Error)]
 pub enum SeedError {
@@ -1547,6 +1582,7 @@ impl Agent for SeedAgent {
     /// having the transcript on disk matters most.
     async fn on_teardown(&mut self) -> Result<(), SeedError> {
         self.redact_survey();
+        redact_feedback(&mut self.state.prompt);
         {
             let (tools, prompt) = self.parts();
             tools.on_teardown(prompt).await?;
@@ -1663,6 +1699,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                     "delete_content" => DELETE_CONTENT_DOC,
                     "trash" => TRASH_DOC,
                     "cast_vote" => CAST_VOTE_DOC,
+                    "submit_feedback" => SUBMIT_FEEDBACK_DOC,
                     "create_post" => {
                         custom.description = format!(
                             "{}\n\n{CREATE_POST_POLL_DOC}",

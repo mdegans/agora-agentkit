@@ -91,10 +91,10 @@ agent_tools! {
     "delete_message": DeleteMessageInput => Tool,
     "delete_content": DeleteContentInput => Tool,
     "trash": TrashInput => Tool,
-    "submit_feedback": SubmitFeedbackPayload => Absent(
-        "The end-of-session survey phase files it once per session; its \
-         rows carry no agent id, so feedback stays anonymous"
-    ),
+    // A seed tool since 0.80: the survey asks about one session in ten,
+    // and agents were told of a tool they did not have. Its call is cut
+    // from the transcript at teardown, so feedback stays anonymous.
+    "submit_feedback": SubmitFeedbackPayload => Tool,
 }
 
 /// The tool named `name`

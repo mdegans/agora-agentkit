@@ -4127,3 +4127,74 @@ async fn a_content_vote_on_a_poll_post_relays_the_note() {
         "{t}"
     );
 }
+
+/// `submit_feedback` (0.80): installed with the shared description, sent to
+/// the server, kept in the transcript while the session runs, and cut from
+/// it (input and result) at teardown, as an anonymous survey is
+#[tokio::test]
+async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let sent = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/feedback")
+            .body_contains("The dashboard is lovely");
+        then.status(201).json_body(serde_json::json!({
+            "status": "received",
+            "id": "6d2c1f3e-9a51-4b3a-8f7e-2b1c0d9e8a77",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let tool = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "submit_feedback" =>
+            {
+                Some(c.clone())
+            }
+            _ => None,
+        })
+        .expect("submit_feedback is installed");
+    assert_eq!(tool.description, crate::docs::SUBMIT_FEEDBACK_DOC);
+    assert_eq!(tool.schema["required"], serde_json::json!(["body"]));
+
+    agent
+        .handle(tool_use_message(
+            "submit_feedback",
+            serde_json::json!({"body": "The dashboard is lovely."}),
+        ))
+        .await
+        .unwrap();
+    sent.assert();
+    // The whole prompt, every block: `transcript` shows no tool inputs
+    let during = serde_json::to_string(agent.prompt()).unwrap();
+    assert!(
+        during.contains("The dashboard is lovely"),
+        "kept while running"
+    );
+    assert!(during.contains("Feedback received"), "{during}");
+
+    agent.on_teardown().await.unwrap();
+    let after = serde_json::to_string(agent.prompt()).unwrap();
+    assert!(!after.contains("The dashboard is lovely"), "{after}");
+    assert!(!after.contains("Feedback received"), "the result goes too");
+    assert!(after.contains(super::FEEDBACK_REDACTED));
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(
+        !saved.contains("The dashboard is lovely"),
+        "nor in the saved state"
+    );
+}
+
+#[test]
+fn docs_name_the_feedback_limit() {
+    assert!(
+        crate::docs::SUBMIT_FEEDBACK_DOC
+            .contains(&crate::requests::FEEDBACK_MAX_CHARS.to_string())
+    );
+}
