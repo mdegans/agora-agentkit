@@ -140,6 +140,9 @@ struct TestAgent {
     /// Times `on_teardown` ran. The contract is exactly once, however the
     /// drive ends.
     teardowns: Arc<AtomicUsize>,
+    /// Times `on_saved` ran: once for a complete session whose save
+    /// committed, else never.
+    saves: Arc<AtomicUsize>,
     /// The [`Agent::Context`] received at construction, for asserting the
     /// plumbing.
     ctx: &'static str,
@@ -174,6 +177,7 @@ impl Agent for TestAgent {
             tools: misanthropic::tool::ToolBox::new(),
             model: model_info(false),
             teardowns: Arc::new(AtomicUsize::new(0)),
+            saves: Arc::new(AtomicUsize::new(0)),
             ctx: context,
             admitted: Arc::new(Mutex::new(None)),
         };
@@ -212,6 +216,11 @@ impl Agent for TestAgent {
         self.teardowns.fetch_add(1, Ordering::SeqCst);
         let (tools, prompt) = self.parts();
         tools.on_teardown(prompt).await?;
+        Ok(())
+    }
+
+    async fn on_saved(&mut self) -> Result<(), TestError> {
+        self.saves.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

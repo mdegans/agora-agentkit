@@ -39,6 +39,13 @@ impl FsStorage {
         self.root.join(id.to_string())
     }
 
+    /// `id`'s [`SessionJournal`], beside its `state.json`.
+    ///
+    /// [`SessionJournal`]: super::journal::SessionJournal
+    pub fn journal(&self, id: AgentId) -> super::journal::SessionJournal {
+        super::journal::SessionJournal::in_dir(self.agent_dir(id))
+    }
+
     /// Move `state.json` aside to `state.<utc-ms>.json`, suffixing `-N` on
     /// a same-millisecond collision (retries, tests).
     async fn archive(&self, dir: &Path) -> Result<(), std::io::Error> {

@@ -216,3 +216,92 @@ fn session_outcome_names_how_it_ended() {
         "complete"
     );
 }
+
+/// A store whose first `n` saves fail, then every save commits: the
+/// session-end save fails and the end-of-run retry commits.
+#[derive(Default, Clone)]
+struct FailFirst {
+    inner: MemStore,
+    left: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Storage for FailFirst {
+    type Error = TestError;
+
+    #[allow(deprecated)]
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), TestError> {
+        if self
+            .left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                n.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(TestError::Msg("disk hiccup".into()));
+        }
+        self.inner.save_raw(id, value).await
+    }
+
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<serde_json::Value, TestError> {
+        self.inner.load_raw(id).await
+    }
+}
+
+/// `on_saved` runs once for each complete session whose save committed, on
+/// both paths, and never for a session that stalled or errored.
+#[tokio::test]
+async fn on_saved_runs_once_only_after_a_committed_complete_session() {
+    let agents = vec![
+        agent(Behavior::Complete, 1),
+        batch_agent(Behavior::Complete, 1),
+        agent(Behavior::Stall, 1),
+        batch_agent(Behavior::Stall, 1),
+        agent(Behavior::ErrHandle, 1),
+        batch_agent(Behavior::ErrHandle, 1),
+    ];
+    let saves: Vec<_> = agents.iter().map(|a| a.saves.clone()).collect();
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::end_turns(64), MemStore::default(), agents);
+    reactor.run().await.unwrap();
+
+    let calls: Vec<usize> =
+        saves.iter().map(|s| s.load(Ordering::SeqCst)).collect();
+    assert_eq!(calls, [1, 1, 0, 0, 0, 0]);
+}
+
+/// A complete session whose state never committed gets no `on_saved`; one
+/// whose session-end save failed but the end-of-run retry committed gets it
+/// then, once.
+#[tokio::test]
+async fn on_saved_waits_for_the_save_that_commits() {
+    let never = agent(Behavior::Complete, 1);
+    let never_saves = never.saves.clone();
+    let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+        MockInference::end_turns(1),
+        PartialStore::commit(0),
+        vec![never],
+    );
+    let report = reactor.run().await.unwrap();
+    assert_eq!(report.done, 0);
+    assert_eq!(never_saves.load(Ordering::SeqCst), 0);
+
+    let retried = agent(Behavior::Complete, 1);
+    let retried_saves = retried.saves.clone();
+    let store = FailFirst {
+        left: Arc::new(AtomicUsize::new(1)),
+        ..Default::default()
+    };
+    let mut reactor: Reactor<_, _, TestAgent> =
+        Reactor::new(MockInference::end_turns(1), store, vec![retried]);
+    let report = reactor.run().await.unwrap();
+    assert_eq!(report.done, 1);
+    assert_eq!(retried_saves.load(Ordering::SeqCst), 1);
+}

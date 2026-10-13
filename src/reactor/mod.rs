@@ -32,6 +32,10 @@ pub use backend::{AgentNotFound, Inference, SaveError, Storage};
 pub mod storage;
 #[cfg(feature = "fs-storage")]
 pub use storage::FsStorage;
+#[cfg(feature = "fs-storage")]
+pub mod journal;
+#[cfg(feature = "fs-storage")]
+pub use journal::SessionJournal;
 
 pub mod inference;
 
@@ -518,6 +522,9 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             Err(_) => false,
         };
         let ending = Ending::of(result, stalled);
+        if saved && ending == Ending::Complete {
+            Self::saved(agent).await;
+        }
         let model = agent.prompt().model.to_string();
         let started_at = started.at.to_rfc3339();
         let duration_secs = started.instant.elapsed().as_secs_f64();
@@ -561,6 +568,18 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             ),
         }
         saved
+    }
+
+    /// [`Agent::on_saved`], for a complete session whose save committed. Its
+    /// error is logged, never the session's.
+    async fn saved(agent: &mut A) {
+        if let Err(e) = agent.on_saved().await {
+            tracing::warn!(
+                agent_id = %agent.id(),
+                error = %e,
+                "on_saved failed after a committed save"
+            );
+        }
     }
 
     /// The init + drive loop of [`drive_one`](Self::drive_one), split out so
@@ -966,10 +985,19 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             }
         }
 
-        for Persist { agent, result, .. } in agent_results {
+        for Persist {
+            mut agent,
+            result,
+            saved: settled,
+        } in agent_results
+        {
             let id = agent.id();
             let done =
                 matches!(result, Ok(Outcome::Complete)) && saved.contains(&id);
+            // `settle` already called it for a save that committed there.
+            if done && !settled {
+                Self::saved(&mut agent).await;
+            }
             match result {
                 Err(e) => {
                     self.errors.insert(id, e);
