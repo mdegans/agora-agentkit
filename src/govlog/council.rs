@@ -16,8 +16,17 @@ use misanthropic::prompt::message::{Content, Thought};
 use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
+
+mod decided;
+mod ranking;
+mod votes;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
+pub use decided::{Decided, FinalRoundError, RecordRuleError};
+pub use votes::{
+    BlankStatement, NotASeatChoice, SeatChoice, SeatVote, SeatVotes, Statement,
+    StewardVote, Vote, Votes,
+};
 
 /// The `data` of a `council_decision` entry. See the [module docs](self).
 ///
@@ -61,8 +70,9 @@ pub struct CouncilDecisionRecord {
     /// on `Schedule` and `Emergency` items. (0.48)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steward_recusal: Option<StewardRecusal>,
-    /// The one-sentence rationale for each abstention in `final_votes`
-    /// (Art. IV § 3). (0.48)
+    /// The Steward's one-sentence rationale for an abstention (Art. IV
+    /// § 3). A seat's abstention rationale is its statement in the final
+    /// round, recorded there once.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub abstentions: Vec<Abstention>,
     /// Entries this decision retires as precedent. Only GOV-2026-0005
@@ -139,8 +149,47 @@ impl From<ProposalCategory> for DecisionCategory {
     }
 }
 
-impl From<DecisionCategory> for ProposalCategory {
-    fn from(category: DecisionCategory) -> Self {
+impl DecisionCategory {
+    /// The vote it needs, in words ([`ProposalCategory::threshold`]) (0.76)
+    pub const fn threshold(self) -> &'static str {
+        ProposalCategory::from_decision(self).threshold()
+    }
+
+    /// Whether an item of this category opens with the seats' recusal
+    /// determination ([`ProposalCategory::determines_recusal`]) (0.76)
+    pub const fn determines_recusal(self) -> bool {
+        ProposalCategory::from_decision(self).determines_recusal()
+    }
+
+    /// The vote it needs once the Steward is recused, if recusal is ever
+    /// determined ([`ProposalCategory::recused_threshold`]) (0.76)
+    pub const fn recused_threshold(self) -> Option<&'static str> {
+        ProposalCategory::from_decision(self).recused_threshold()
+    }
+
+    /// The category's name as the record and prose write it: `"Policy"`
+    /// (0.76)
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Routine => "Routine",
+            Self::Policy => "Policy",
+            Self::Constitutional => "Constitutional",
+            Self::Emergency => "Emergency",
+            Self::Schedule => "Schedule",
+        }
+    }
+}
+
+/// `"Policy"`: [`DecisionCategory::name`], the record's spelling (0.76)
+impl std::fmt::Display for DecisionCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl ProposalCategory {
+    /// [`From<DecisionCategory>`], in a `const fn`
+    const fn from_decision(category: DecisionCategory) -> Self {
         match category {
             DecisionCategory::Routine => Self::Routine,
             DecisionCategory::Policy => Self::Policy,
@@ -148,6 +197,12 @@ impl From<DecisionCategory> for ProposalCategory {
             DecisionCategory::Emergency => Self::Emergency,
             DecisionCategory::Schedule => Self::Schedule,
         }
+    }
+}
+
+impl From<DecisionCategory> for ProposalCategory {
+    fn from(category: DecisionCategory) -> Self {
+        Self::from_decision(category)
     }
 }
 
@@ -453,13 +508,33 @@ impl CouncilSeat {
         }
     }
 
-    /// The seat's name as prose writes it: `"Artist"` (0.74)
+    /// The seat's name as prose writes it: `"Artist"` (0.74). Also its
+    /// `Display` (0.76).
     pub const fn name(self) -> &'static str {
         match self {
             Self::Artist => "Artist",
             Self::Philosopher => "Philosopher",
             Self::Lawyer => "Lawyer",
             Self::Engineer => "Engineer",
+        }
+    }
+}
+
+/// `"Artist"`: [`CouncilSeat::name`] (0.76)
+impl std::fmt::Display for CouncilSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A seat is the model role that speaks for it (0.76)
+impl From<CouncilSeat> for crate::enums::ModelRole {
+    fn from(seat: CouncilSeat) -> Self {
+        match seat {
+            CouncilSeat::Artist => Self::Artist,
+            CouncilSeat::Philosopher => Self::Philosopher,
+            CouncilSeat::Lawyer => Self::Lawyer,
+            CouncilSeat::Engineer => Self::Engineer,
         }
     }
 }
@@ -489,6 +564,31 @@ pub enum CouncilVote {
     /// The Steward, on an item the seats found limits the Steward's
     /// powers: no vote and no veto. See `steward_recusal`. (0.48)
     Recused,
+}
+
+impl CouncilVote {
+    /// The vote as prose writes it: `"Yes"`, `"Abstain"` (0.76). Also its
+    /// `Display`, and how the Council stores a seat's vote in its
+    /// `deliberation_rounds` rows.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Yes => "Yes",
+            Self::No => "No",
+            Self::Abstain => "Abstain",
+            Self::Defer => "Defer",
+            Self::Concur => "Concur",
+            Self::Veto => "Veto",
+            Self::Ranked => "Ranked",
+            Self::Recused => "Recused",
+        }
+    }
+}
+
+/// `"Yes"`: [`CouncilVote::name`] (0.76)
+impl std::fmt::Display for CouncilVote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 /// The votes that decided the item
@@ -574,12 +674,104 @@ pub struct PlacedProposal {
 mod tests {
     use super::*;
 
-    /// Every `council_decision` signed on production, as stored
+    /// Every `council_decision` signed on production, as signed
     fn fixtures() -> Vec<(String, serde_json::Value)> {
-        let dir = concat!(
+        fixtures_in(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/council_decisions"
-        );
+        ))
+    }
+
+    /// The latest version of each one a revision amended
+    fn revised_fixtures() -> Vec<(String, serde_json::Value)> {
+        fixtures_in(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/council_decisions/revised"
+        ))
+    }
+
+    /// Each signed entry's `data_hash`, and the `resulting_data_hash` of
+    /// its last revision when one revised it, as the production log has
+    /// them (2026-10-13): the fixtures are the signed bytes.
+    const SIGNED: [(&str, &str, Option<&str>); 13] = [
+        (
+            "GOV-2026-0001",
+            "fca67b28737d613e3a98cdb3b1ad686944b36f1654ad5c237da6ec0291ee4574",
+            None,
+        ),
+        (
+            "GOV-2026-0002",
+            "b1bb43d611d75e1d3b03df8ff64381781b3d75d934a1f9d7ec75fe2174716c47",
+            None,
+        ),
+        (
+            "GOV-2026-0003",
+            "7c75af86d9b3930b5d14cd9e1784c2ecb32483427ba7149dffb20d84510c1b09",
+            Some(
+                "e1db85357dbe3b865129a53836a16c33730c7ebb37a8412f84afe5fbac4aa64d",
+            ),
+        ),
+        (
+            "GOV-2026-0004",
+            "0004e84733236dca2ab4dfb16757236ad0d76e27efbf47bbec0e00c6d90a7ed0",
+            Some(
+                "b2a9ec584f49eebf0103a72986440a326fcb5f68c83a7f1eddba8228046c342f",
+            ),
+        ),
+        (
+            "GOV-2026-0005",
+            "8257faade7548f15c010f2a5bb7ff22e1e37f7034eac2c9726445002fa593f0e",
+            Some(
+                "514a020a95669da78dfadcee58729a99402f9b2c2f750a557a8b8ce8512f451d",
+            ),
+        ),
+        (
+            "GOV-2026-0006",
+            "6520bb4cba556c4ba251584d836d1efb8a33227b83573f74c34c32362762a6f7",
+            Some(
+                "58f3fafc031ca29c796ac08fa69bb9994bf40fef9114189d6f820d050c66eedc",
+            ),
+        ),
+        (
+            "GOV-2026-0007",
+            "39a273c711d3f5b4744bbfcb1a1b2978e26b5b48629fabd5d0f136241167f07c",
+            Some(
+                "56c1036a8ee1eb852d831082f36ef9c22bc2a103a9a0d56c778fa040f9c6917e",
+            ),
+        ),
+        (
+            "GOV-2026-0008",
+            "89ac0d32809a3baf07a28ab6a511c64aaf1a31741cb3c5630d23fde484cf5cf3",
+            None,
+        ),
+        (
+            "GOV-2026-0009",
+            "32a86a94646ed886085895ad92e76285acced67b76c1853bc0e8b04626b6487d",
+            None,
+        ),
+        (
+            "GOV-2026-0010",
+            "aa4031caaf9e2851f70ed83008954869388cacb03a8119a2996a281da9e4a0dd",
+            None,
+        ),
+        (
+            "GOV-2026-0011",
+            "590b29357ae1acd425f64abb8e2aeeee2eec71d36dbb9afc99ec33ce4e5791d7",
+            None,
+        ),
+        (
+            "GOV-2026-0012",
+            "625d7f8b7c504def1fa332db68b06518d34b247edd5f2225be370a392e1a0973",
+            None,
+        ),
+        (
+            "GOV-2026-0013",
+            "c3d0a7f2c157e15f73031621148c1f3ff543418e31684d12fc6048a6c657dcb7",
+            None,
+        ),
+    ];
+
+    fn fixtures_in(dir: &str) -> Vec<(String, serde_json::Value)> {
         let mut out: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -616,10 +808,209 @@ mod tests {
     #[test]
     fn every_signed_decision_is_described_whole() {
         let fixtures = fixtures();
-        assert_eq!(fixtures.len(), 7, "GOV-2026-0001..0007");
-        for (name, data) in &fixtures {
+        assert_eq!(fixtures.len(), 13, "GOV-2026-0001..0013");
+        let revised = revised_fixtures();
+        assert_eq!(revised.len(), 5, "GOV-2026-0003..0007, revised");
+        for (name, data) in fixtures.iter().chain(&revised) {
             let record = round_trips(name, data);
             assert_eq!(format!("{}.json", record.id), *name);
+        }
+    }
+
+    /// Every signed outcome on a voted item is what the thresholds give
+    /// for its votes, as signed and as revised. Tabled items (every vote
+    /// `defer`, GOV-2026-0002) and `Schedule` items (0008, 0013) are
+    /// decided otherwise; 0001..0008 predate GOV-2026-0009's thresholds,
+    /// and agree with them anyway.
+    #[test]
+    fn every_signed_outcome_follows_from_its_votes() {
+        let check = |fixtures: Vec<(String, serde_json::Value)>| {
+            let mut checked = 0;
+            for (name, data) in fixtures {
+                let record: CouncilDecisionRecord =
+                    serde_json::from_value(data).unwrap();
+                let tabled = record.final_votes.steward == CouncilVote::Defer;
+                if tabled || record.category == DecisionCategory::Schedule {
+                    continue;
+                }
+                assert_eq!(
+                    record.final_votes.outcome(record.category),
+                    record.outcome,
+                    "{name}"
+                );
+                assert_eq!(
+                    record.vote_tally.value().map(String::as_str),
+                    Some(record.final_votes.tally().as_str()),
+                    "{name}"
+                );
+                checked += 1;
+            }
+            checked
+        };
+        assert_eq!(
+            check(fixtures()),
+            10,
+            "GOV-2026-0001, 0003..0007, 0009..0012"
+        );
+        assert_eq!(
+            check(revised_fixtures()),
+            5,
+            "GOV-2026-0003..0007, revised"
+        );
+    }
+
+    /// Aggregating a signed scheduling item's ballots again gives its
+    /// signed ranking: the order, the ties, the cut and the Condorcet
+    /// winner
+    #[test]
+    fn every_signed_ranking_follows_from_its_ballots() {
+        let mut checked = 0;
+        for (name, data) in fixtures().into_iter().chain(revised_fixtures()) {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            let Some(signed) = record.agenda_ranking else {
+                continue;
+            };
+            // The P-numbers run 1..=rankable; a candidate no seat ranked is
+            // not in `order`, and its proposal does not matter here
+            let candidates: std::collections::BTreeMap<u32, PostId> = (1
+                ..=signed.rankable)
+                .map(|n| {
+                    let post = signed
+                        .order
+                        .iter()
+                        .find(|p| p.number == n)
+                        .map(|p| p.post_id)
+                        .unwrap_or_else(|| {
+                            PostId::from(uuid::Uuid::from_u128(n.into()))
+                        });
+                    (n, post)
+                })
+                .collect();
+            let again =
+                AgendaRanking::aggregate(&candidates, signed.ballots.clone());
+            assert_eq!(again, signed, "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "GOV-2026-0008 and 0013");
+    }
+
+    /// What [`Decided`] writes is what the signed records say, for the
+    /// kinds the archive has: tabled (GOV-2026-0002) and ranked
+    /// (GOV-2026-0008, 0013). No voted record can be read back into
+    /// [`Votes`]: before GOV-2026-0013 the seats' words were in
+    /// `rationale` and `position` was empty, which is why there is no
+    /// conversion back.
+    #[test]
+    fn decided_writes_what_the_archive_says() {
+        let mut checked = 0;
+        for (name, data) in fixtures() {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            let decided =
+                match (&record.agenda_ranking, record.final_votes.steward) {
+                    (Some(ranking), _) => Decided::Ranked(ranking.clone()),
+                    (None, CouncilVote::Defer) => Decided::Tabled,
+                    (None, _) => {
+                        let last = record.rounds.last().unwrap();
+                        let votes = SeatVotes::from_final_round(last);
+                        assert!(
+                            matches!(
+                                votes,
+                                Err(FinalRoundError::NoStatement(_))
+                            ),
+                            "{name}: {votes:?}"
+                        );
+                        continue;
+                    }
+                };
+            let again = record.clone().decided(decided);
+            assert_eq!(again, record, "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "GOV-2026-0002, 0008, 0013");
+    }
+
+    /// The prose names: a category's is its serde form; a seat's and a
+    /// vote's are their serde forms capitalized (0.76)
+    #[test]
+    fn the_prose_names() {
+        use DecisionCategory as C;
+        for c in [
+            C::Routine,
+            C::Policy,
+            C::Constitutional,
+            C::Emergency,
+            C::Schedule,
+        ] {
+            assert_eq!(
+                serde_json::to_value(c).unwrap(),
+                c.to_string().as_str()
+            );
+            assert_eq!(c.threshold(), ProposalCategory::from(c).threshold());
+        }
+        let capitalized = |s: &str| {
+            let mut c = s.chars();
+            c.next()
+                .unwrap()
+                .to_uppercase()
+                .chain(c)
+                .collect::<String>()
+        };
+        for seat in CouncilSeat::ALL {
+            assert_eq!(seat.to_string(), capitalized(seat.as_str()));
+        }
+        use CouncilVote as V;
+        for v in [
+            V::Yes,
+            V::No,
+            V::Abstain,
+            V::Defer,
+            V::Concur,
+            V::Veto,
+            V::Ranked,
+            V::Recused,
+        ] {
+            let serde = serde_json::to_value(v).unwrap();
+            assert_eq!(v.to_string(), capitalized(serde.as_str().unwrap()));
+        }
+    }
+
+    /// Every signed record keeps the rules a record is checked against
+    /// before signing
+    #[test]
+    fn every_signed_record_keeps_the_record_rules() {
+        for (name, data) in fixtures().into_iter().chain(revised_fixtures()) {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            assert_eq!(record.check(), Ok(()), "{name}");
+        }
+    }
+
+    /// The fixtures are what was signed: each hashes to its entry's
+    /// `data_hash`, and each revised one to its last revision's
+    /// `resulting_data_hash`
+    #[test]
+    fn the_fixtures_are_the_signed_bytes() {
+        let hex = |data: &serde_json::Value| {
+            serde_json::to_value(super::super::data_hash(data))
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let fixtures = fixtures();
+        let revised = revised_fixtures();
+        for (id, signed, latest) in SIGNED {
+            let name = format!("{id}.json");
+            let (_, data) = fixtures.iter().find(|(n, _)| *n == name).unwrap();
+            assert_eq!(hex(data), signed, "{id} as signed");
+            let found = revised.iter().find(|(n, _)| *n == name);
+            assert_eq!(
+                found.map(|(_, d)| hex(d)).as_deref(),
+                latest,
+                "{id} as revised"
+            );
         }
     }
 
