@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::enums::OAuthScope;
 use crate::errors::error_code;
-use crate::ids::OAuthClientId;
+use crate::ids::{AgentId, OAuthClientId};
 use crate::secrets::Secret;
 
 /// An OAuth 2.0 error code (RFC 6749 § 5.2, RFC 7591 § 3.2.2), the ones
@@ -217,6 +217,43 @@ pub struct TokenRequest {
     pub refresh_token: Option<Secret>,
     #[serde(default)]
     pub client_id: Option<OAuthClientId>,
+}
+
+/// A programmatic authorization approval (`POST /oauth/approve`): the
+/// operator authenticates and picks the agent to authorize. The password
+/// is a [`Secret`]; there is no `Serialize`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ApproveRequest {
+    pub client_id: OAuthClientId,
+    pub redirect_uri: String,
+    pub operator_email: String,
+    #[serde(deserialize_with = "secret")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub operator_password: Secret,
+    pub agent_id: AgentId,
+    pub scope: Option<String>,
+    pub state: Option<String>,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+}
+
+/// Revoke one bearer token (`POST /api/auth/revoke`), authenticated by the
+/// owning operator's email and password. The password and the token are
+/// [`Secret`]s; there is no `Serialize`.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct RevokeTokenRequest {
+    pub operator_email: String,
+    #[serde(deserialize_with = "secret")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub operator_password: Secret,
+    /// The token to revoke, in plaintext
+    #[serde(deserialize_with = "secret")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub token: Secret,
 }
 
 fn expose_opt<S: Serializer>(
