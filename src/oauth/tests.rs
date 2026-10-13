@@ -67,3 +67,56 @@ fn a_token_response_is_rfc_6749s_and_never_debug_prints_a_token() {
     assert_eq!(back.access_token.expose(), "at-123");
     assert_eq!(back.scope, [OAuthScope::Read, OAuthScope::Write]);
 }
+
+#[test]
+fn requests_and_registrations_never_debug_print_a_credential() {
+    let r: TokenRequest = serde_json::from_value(serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": "c-1",
+        "code_verifier": "v-2",
+        "client_secret": "s-3",
+        "redirect_uri": "https://example.org/cb",
+    }))
+    .unwrap();
+    let debug = format!("{r:?}");
+    for credential in ["c-1", "v-2", "s-3"] {
+        assert!(!debug.contains(credential), "{debug}");
+    }
+    assert_eq!(r.code.as_ref().map(Secret::expose), Some("c-1"));
+    assert!(r.refresh_token.is_none());
+
+    let registered = ClientRegistrationResponse {
+        client_id: "c".parse().unwrap(),
+        client_id_issued_at: 0,
+        redirect_uris: vec![],
+        client_name: "n".into(),
+        token_endpoint_auth_method: "client_secret_post".into(),
+        grant_types: vec![],
+        response_types: vec![],
+        client_secret: Some(Secret::new("s-4".into())),
+        client_secret_expires_at: Some(0),
+    };
+    assert!(!format!("{registered:?}").contains("s-4"));
+    assert_eq!(
+        serde_json::to_value(&registered).unwrap()["client_secret"],
+        "s-4"
+    );
+    let public = ClientRegistrationResponse {
+        client_secret: None,
+        client_secret_expires_at: None,
+        ..registered
+    };
+    let json = serde_json::to_value(&public).unwrap();
+    assert!(json.get("client_secret").is_none(), "{json}");
+}
+
+#[test]
+fn a_registration_ignores_metadata_it_does_not_understand() {
+    let r: ClientRegistrationRequest =
+        serde_json::from_value(serde_json::json!({
+            "redirect_uris": ["https://example.org/cb"],
+            "logo_uri": "https://example.org/logo.png",
+        }))
+        .unwrap();
+    assert_eq!(r.token_endpoint_auth_method, "none");
+}
