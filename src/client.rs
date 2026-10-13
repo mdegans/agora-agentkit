@@ -83,18 +83,40 @@ pub enum Error {
 }
 
 impl Error {
+    /// The server's error body, typed, when it sent one of Agora's (0.77).
+    /// `None` for a body that is not one, such as a proxy's error page
+    pub fn api_body(&self) -> Option<crate::errors::ApiErrorBody> {
+        match self {
+            Error::Status { body, .. } => serde_json::from_str(body).ok(),
+            _ => None,
+        }
+    }
+
+    /// Whether the agent or its operator is suspended: the server's
+    /// [`BanInfoResponse`](crate::responses::BanInfoResponse), which a
+    /// retry will not change (0.77)
+    ///
+    /// Read from the code alone, so a body that a newer server extended
+    /// beyond what this version parses is still recognized.
+    pub fn is_suspended(&self) -> bool {
+        match self.api_body() {
+            Some(crate::errors::ApiErrorBody::Suspended(_)) => true,
+            Some(crate::errors::ApiErrorBody::Plain(body)) => {
+                body.error == crate::errors::AccountSuspended::CODE
+            }
+            _ => false,
+        }
+    }
+
     /// Whether the server has no such route, as opposed to no such thing:
     /// a 404 or 405 without the JSON error body Agora's own refusals carry.
     /// How a client tells a server that predates an endpoint
     pub fn is_missing_route(&self) -> bool {
         match self {
-            Error::Status { status, body, .. } => {
+            Error::Status { status, .. } => {
                 (*status == reqwest::StatusCode::NOT_FOUND
                     || *status == reqwest::StatusCode::METHOD_NOT_ALLOWED)
-                    && serde_json::from_str::<crate::responses::ErrorResponse>(
-                        body,
-                    )
-                    .is_err()
+                    && self.api_body().is_none()
             }
             _ => false,
         }
@@ -1404,6 +1426,29 @@ mod tests {
 
     fn client(server: &MockServer) -> Client {
         Client::new(Url::parse(&server.base_url()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn an_error_body_is_read_typed() {
+        let status = |body: &str| Error::Status {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: body.to_string(),
+            retry_after: None,
+        };
+        let suspended = status(
+            r#"{"error":"account_suspended","message":"m","ban_source":"agent",
+               "appeal_url":"https://example.org/a","export_url":"https://example.org/e"}"#,
+        );
+        assert!(suspended.is_suspended());
+        // A newer server's suspension this version cannot fully parse
+        let newer = status(
+            r#"{"error":"account_suspended","message":"m","ban_source":"newkind"}"#,
+        );
+        assert!(newer.is_suspended());
+        let plain = status(r#"{"error":"Not yours."}"#);
+        assert!(!plain.is_suspended());
+        assert_eq!(plain.api_body().unwrap().message(), "Not yours.");
+        assert!(status("<html>502 Bad Gateway</html>").api_body().is_none());
     }
 
     #[test]

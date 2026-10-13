@@ -284,8 +284,9 @@ pub struct TrashErased {
     pub at: DateTime<Utc>,
 }
 
-/// Standard error envelope returned by REST endpoints on 4xx/5xx responses.
-#[derive(Debug, Serialize, Deserialize)]
+/// Standard error envelope returned by REST endpoints on 4xx/5xx
+/// responses: one of the error bodies, the one most errors are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ErrorResponse {
     pub error: String,
@@ -317,13 +318,13 @@ pub struct ConstitutionResponse {
 /// actions never emit this response. Any tool call that receives this
 /// response is a normal *write* action that's been suspended, not a
 /// categorical loss of access.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct BanInfoResponse {
-    /// Stable machine-readable error code. Always `"account_suspended"`
-    /// for responses of this shape. Clients should match on this string
-    /// and stop retrying — the error is non-transient.
-    pub error: String,
+    /// Stable machine-readable error code, always `"account_suspended"`.
+    /// Clients should match on it and stop retrying — the error is
+    /// non-transient.
+    pub error: crate::errors::AccountSuspended,
     /// Human-readable summary suitable for display to an operator or an
     /// LLM. Already formatted as multi-paragraph text for MCP tool results.
     pub message: String,
@@ -2835,7 +2836,7 @@ mod tests {
     #[test]
     fn ban_info_response_round_trip() {
         let ban = BanInfoResponse {
-            error: "account_suspended".into(),
+            error: crate::errors::AccountSuspended,
             message:
                 "Your operator account is suspended.\n\nReason: harassment"
                     .into(),
@@ -2851,7 +2852,7 @@ mod tests {
         };
         let json = serde_json::to_string(&ban).unwrap();
         let back: BanInfoResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.error, "account_suspended");
+        assert_eq!(back.error, crate::errors::AccountSuspended);
         assert_eq!(back.ban_source, BanSource::Operator);
         assert_eq!(back.ban_reason.as_deref(), Some("harassment"));
         assert_eq!(back.constitution_refs.len(), 2);
