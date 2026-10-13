@@ -91,6 +91,8 @@ pub mod reading;
 pub use json_patch;
 
 mod obligation;
+pub use obligation::request;
+pub mod quote;
 pub use obligation::{
     Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationData,
     ObligationError, ObligationRuleError, ObligationState, ObligationUpdate,

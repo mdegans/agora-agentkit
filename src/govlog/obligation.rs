@@ -634,5 +634,7 @@ fn check_evidence(
     }
 }
 
+pub mod request;
+
 #[cfg(test)]
 mod tests;
