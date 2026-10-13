@@ -4,8 +4,8 @@
 //! past-due count, kept here beside the types so a server and its clients
 //! cannot drift (agora `docs/design-obligations.md`).
 //!
-//! Pure: the server reads [`EventState`]s and [`ObligationProjection`]s
-//! from its tables, builds a [`Calendar`], and calls these. Nothing here
+//! Pure: the server reads [`EventState`]s from its tables and
+//! [`Obligation`]s from the log, builds a [`Calendar`], and calls these. Nothing here
 //! touches a database.
 //!
 //! The calendar holds only what the Steward or the Council scheduled
@@ -17,16 +17,15 @@
 //! their own dashboard block). Not a proposal's comment window: it does not
 //! actually close, since threads are not locked.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::enums::{
-    CalendarEventKind, CalendarEventStatus, ObligationKind, ObligationSort,
-    ObligationStatus, OwedBy,
+    CalendarEventKind, CalendarEventStatus, ObligationSort, ObligationStatus,
 };
-use crate::govlog::Until;
-use crate::ids::{CalendarEventId, CouncilMeetingId, GovernanceLogId, PostId};
+use crate::govlog::{Obligation, Until};
+use crate::ids::{CalendarEventId, CouncilMeetingId, GovernanceLogId};
 use crate::responses::{
     CALENDAR_HOW_TO_READ, CalendarItem, CalendarResponse, ObligationListing,
     ObligationTally,
@@ -222,16 +221,15 @@ impl Calendar {
     }
 
     /// The obligations due on a date still to come, the ones a date binds:
-    /// what [`upcoming`](Self::upcoming) lists beside the sittings, and so
-    /// whose text it needs
-    pub fn dated<'a>(
+    /// what [`upcoming`](Self::upcoming) lists beside the sittings
+    fn dated<'a>(
         &self,
         obligations: &'a [ResolvedObligation],
     ) -> Vec<&'a ResolvedObligation> {
         obligations
             .iter()
             .filter(|o| {
-                o.obligation.status == ObligationStatus::Open
+                o.obligation.state.status == ObligationStatus::Open
                     && o.resolved.date_binds
                     && o.resolved.sitting.is_none()
                     && o.resolved.due.is_some_and(|d| d >= self.today)
@@ -241,23 +239,23 @@ impl Calendar {
 
     /// What is coming up, soonest first, at most `limit` items: pending
     /// sittings and obligations due on a date. `obligations` is every
-    /// obligation, resolved against this calendar; `texts` holds the text
-    /// of each of [`dated`](Self::dated)'s, and one without a text is left
-    /// out. `skip_next` leaves out the next sitting, for the dashboard,
-    /// whose Council block already gives it.
+    /// obligation, resolved against this calendar. `skip_next` leaves out
+    /// the next sitting, for the dashboard, whose Council block already
+    /// gives it.
     ///
     /// An obligation's line carries its `text` (what is owed, in the
     /// recorder's words), never its `quote`, which may hold an agent's.
     pub fn upcoming(
         &self,
         obligations: &[ResolvedObligation],
-        texts: &HashMap<GovernanceLogId, String>,
         skip_next: bool,
         limit: usize,
     ) -> Vec<CalendarItem> {
         let due_at: Vec<(CalendarEventId, ObligationStatus)> = obligations
             .iter()
-            .filter_map(|o| Some((o.resolved.sitting?, o.obligation.status)))
+            .filter_map(|o| {
+                Some((o.resolved.sitting?, o.obligation.state.status))
+            })
             .collect();
         let mut items = self.sitting_items(&due_at);
         if skip_next && let Some(next) = self.next_sitting() {
@@ -268,8 +266,8 @@ impl Calendar {
         items.extend(self.dated(obligations).into_iter().filter_map(|o| {
             Some(CalendarItem::ObligationDue {
                 obligation: o.obligation.id.clone(),
-                text: texts.get(&o.obligation.id)?.clone(),
-                owed_by: o.obligation.owed_by,
+                text: o.obligation.data.text.clone(),
+                owed_by: o.obligation.data.owed_by,
                 due: o.resolved.due?,
             })
         }));
@@ -285,38 +283,10 @@ impl CalendarResponse {
     pub fn new(
         calendar: &Calendar,
         obligations: &[ResolvedObligation],
-        texts: &HashMap<GovernanceLogId, String>,
     ) -> Self {
         Self {
             how_to_read: CALENDAR_HOW_TO_READ.to_string(),
-            items: calendar.upcoming(obligations, texts, false, CALENDAR_LIMIT),
-        }
-    }
-}
-
-/// An obligation as the projection holds it: its status, deadline, plan
-/// and lapse, without its text, which a reader takes from the log
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObligationProjection {
-    pub id: GovernanceLogId,
-    pub source: Option<GovernanceLogId>,
-    pub kind: ObligationKind,
-    pub owed_by: OwedBy,
-    pub status: ObligationStatus,
-    /// `None` for a standing duty
-    pub until: Option<Until>,
-    pub lapsed_at: Option<DateTime<Utc>>,
-    pub plan: Option<PostId>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl ObligationProjection {
-    /// The `after_decision` decisions its deadline waits on: what a server
-    /// looks up before [`ResolvedObligation::new`]
-    pub fn awaited_decision(&self) -> Option<&GovernanceLogId> {
-        match &self.until {
-            Some(Until::AfterDecision { decision }) => Some(decision),
-            _ => None,
+            items: calendar.upcoming(obligations, false, CALENDAR_LIMIT),
         }
     }
 }
@@ -324,7 +294,7 @@ impl ObligationProjection {
 /// An obligation with its deadline resolved against the calendar
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedObligation {
-    pub obligation: ObligationProjection,
+    pub obligation: Obligation,
     pub resolved: Resolved,
     /// Open, and past a date that binds. Derived when read, never stored
     pub overdue: bool,
@@ -334,13 +304,15 @@ impl ResolvedObligation {
     /// `obligation` resolved against `calendar`; `decided` holds the
     /// decisions that are attested entries of the log
     pub fn new(
-        obligation: ObligationProjection,
+        obligation: Obligation,
         calendar: &Calendar,
         decided: &HashSet<GovernanceLogId>,
     ) -> Self {
         let resolved = calendar
-            .resolve(obligation.until.as_ref(), |id| decided.contains(id));
-        let overdue = obligation.status == ObligationStatus::Open
+            .resolve(obligation.state.until.as_ref(), |id| {
+                decided.contains(id)
+            });
+        let overdue = obligation.state.status == ObligationStatus::Open
             && resolved.date_binds
             && resolved.due.is_some_and(|d| d < calendar.today);
         Self {
@@ -350,30 +322,10 @@ impl ResolvedObligation {
         }
     }
 
-    /// The listing, with `text` from the log
-    pub fn into_listing(self, text: String) -> ObligationListing {
-        let o = self.obligation;
-        ObligationListing {
-            id: o.id,
-            source: o.source,
-            kind: o.kind,
-            owed_by: o.owed_by,
-            status: o.status,
-            text,
-            until: o.until,
-            due: self.resolved.due,
-            due_approximate: self.resolved.approximate,
-            overdue: self.overdue,
-            lapsed_at: o.lapsed_at,
-            plan: o.plan,
-            created_at: o.created_at,
-        }
-    }
-
     /// Discharged or withdrawn
     fn closed(&self) -> bool {
         !matches!(
-            self.obligation.status,
+            self.obligation.state.status,
             ObligationStatus::Open | ObligationStatus::Lapsed
         )
     }
@@ -414,13 +366,48 @@ impl ObligationSort {
     }
 }
 
+impl From<ResolvedObligation> for ObligationListing {
+    /// The listing the to-do list serves
+    fn from(r: ResolvedObligation) -> Self {
+        let ResolvedObligation {
+            obligation,
+            resolved,
+            overdue,
+        } = r;
+        let Obligation {
+            id,
+            created_at,
+            data,
+            state,
+            ..
+        } = obligation;
+        Self {
+            id,
+            source: data.source,
+            kind: data.kind,
+            owed_by: data.owed_by,
+            status: state.status,
+            text: data.text,
+            until: state.until,
+            due: resolved.due,
+            due_approximate: resolved.approximate,
+            overdue,
+            lapsed_at: state.lapsed_at,
+            plan: state.plan,
+            created_at,
+        }
+    }
+}
+
 impl From<&[ResolvedObligation]> for ObligationTally {
     /// Lapsed and overdue counts, for the dashboard
     fn from(rows: &[ResolvedObligation]) -> Self {
         Self {
             lapsed: rows
                 .iter()
-                .filter(|r| r.obligation.status == ObligationStatus::Lapsed)
+                .filter(|r| {
+                    r.obligation.state.status == ObligationStatus::Lapsed
+                })
                 .count() as u64,
             overdue: rows.iter().filter(|r| r.overdue).count() as u64,
         }

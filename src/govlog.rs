@@ -91,10 +91,12 @@ pub mod reading;
 pub use json_patch;
 
 mod obligation;
+pub use obligation::request;
+pub mod quote;
 pub use obligation::{
-    Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationRecord,
-    ObligationRecordError, ObligationRuleError, ObligationState,
-    ObligationUpdate, Until, check_obligation_amendment,
+    Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationData,
+    ObligationError, ObligationRuleError, ObligationState, ObligationUpdate,
+    Until,
 };
 
 mod record;
@@ -2571,9 +2573,9 @@ fn prefix_problem(link: &GovernanceChainLink) -> Option<String> {
     }
 }
 
-/// The fields of an [`Obligation`] a [`Revision`] may not touch: what it
+/// The fields of an [`ObligationData`] a [`Revision`] may not touch: what it
 /// is, who owes it, and when, change only through the obligation kinds,
-/// which [`check_obligation_amendment`] holds to their authority rules
+/// which [`Obligation::check_amendment`] holds to their authority rules
 pub const OBLIGATION_FIXED: [&str; 5] = [
     "/until",
     "/owed_by",

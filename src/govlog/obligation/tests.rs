@@ -250,7 +250,7 @@ fn an_optional_until_in_a_closed_object_is_strict_safe() {
 fn obligation_schemas_are_ref_free() {
     use crate::responses::inline_schema_for;
     for (name, schema) in [
-        ("Obligation", inline_schema_for::<Obligation>()),
+        ("ObligationData", inline_schema_for::<ObligationData>()),
         ("ObligationUpdate", inline_schema_for::<ObligationUpdate>()),
         ("Evidence", inline_schema_for::<Evidence>()),
         ("ObligationState", inline_schema_for::<ObligationState>()),
@@ -261,8 +261,8 @@ fn obligation_schemas_are_ref_free() {
     }
 }
 
-fn review() -> Obligation {
-    let mut o = Obligation::new(
+fn review() -> ObligationData {
+    let mut o = ObligationData::new(
         ObligationKind::Review,
         OwedBy::Council,
         "A six-month review of optional signatures",
@@ -285,9 +285,9 @@ fn an_obligation_round_trips_and_leaves_out_what_is_absent() {
         value["until"],
         json!({"when": "date", "date": "2027-04-01"})
     );
-    assert_eq!(serde_json::from_value::<Obligation>(value).unwrap(), o);
+    assert_eq!(serde_json::from_value::<ObligationData>(value).unwrap(), o);
 
-    let bare = Obligation::new(
+    let bare = ObligationData::new(
         ObligationKind::Task,
         OwedBy::Staff,
         "t",
@@ -325,13 +325,13 @@ fn a_stored_and_redacted_obligation_still_reads() {
         blind_data(&serde_json::to_value(review()).unwrap(), Blind::random())
             .unwrap();
     assert_eq!(
-        serde_json::from_value::<Obligation>(stored.clone()).unwrap(),
+        serde_json::from_value::<ObligationData>(stored.clone()).unwrap(),
         review()
     );
     let redacted =
         redact_data(&stored, &["/quote".into()], &amd(9), Blind::random())
             .unwrap();
-    let read: Obligation = serde_json::from_value(redacted).unwrap();
+    let read: ObligationData = serde_json::from_value(redacted).unwrap();
     assert_eq!(read.quote, "[redacted by AMD-2026-0009]");
     assert_eq!(read.text, review().text);
 }
@@ -419,7 +419,7 @@ fn obligation_kinds_do_not_change_standing() {
 }
 
 fn state_after(
-    o: &Obligation,
+    o: &ObligationData,
     updates: &[(i64, ObligationUpdate)],
 ) -> ObligationState {
     let amendments: Vec<(DateTime<Utc>, Amendment)> = updates
@@ -655,15 +655,22 @@ fn known(id: &GovernanceLogId) -> Option<KnownEntry> {
 const OBL_SEQ: u64 = 3;
 
 fn check_amendment(
-    o: &Obligation,
+    o: &ObligationData,
     state: &ObligationState,
     a: &Amendment,
 ) -> Result<(), ObligationRuleError> {
-    check_obligation_amendment(o, &obl(1), OBL_SEQ, state, a, known)
+    Obligation {
+        id: obl(1),
+        created_at: at(0),
+        chain_seq: OBL_SEQ,
+        data: o.clone(),
+        state: state.clone(),
+    }
+    .check_amendment(a, known)
 }
 
 fn check(
-    o: &Obligation,
+    o: &ObligationData,
     state: &ObligationState,
     u: ObligationUpdate,
     authority: Option<GovernanceLogId>,
@@ -673,14 +680,14 @@ fn check(
     check_amendment(o, state, &a)
 }
 
-fn open(o: &Obligation) -> ObligationState {
+fn open(o: &ObligationData) -> ObligationState {
     ObligationState::from_amendments(o, [])
 }
 
 #[test]
 fn a_council_obligation_moves_only_with_a_later_council_decision() {
     use ObligationRuleError::*;
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(gov(1)),
         ..review()
     };
@@ -733,7 +740,7 @@ fn a_council_obligation_moves_only_with_a_later_council_decision() {
 #[test]
 fn the_steward_moves_only_deadlines_the_steward_set() {
     use ObligationRuleError::*;
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(rec(1)),
         owed_by: OwedBy::Staff,
         ..review()
@@ -769,7 +776,7 @@ fn the_steward_moves_only_deadlines_the_steward_set() {
     );
     assert_eq!(check(&o, &s, resched(), Some(gov(2))), Ok(()));
     // A top-level Council-owed obligation is released only by the Council.
-    let o = Obligation {
+    let o = ObligationData {
         source: None,
         owed_by: OwedBy::Council,
         ..review()
@@ -784,7 +791,7 @@ fn the_steward_moves_only_deadlines_the_steward_set() {
 #[test]
 fn lapses_closures_and_evidence_are_checked() {
     use ObligationRuleError::*;
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(rec(1)),
         owed_by: OwedBy::Steward,
         ..review()
@@ -795,7 +802,7 @@ fn lapses_closures_and_evidence_are_checked() {
         check(&o, &lapsed, ObligationUpdate::Lapsed, None),
         Err(AlreadyLapsed)
     );
-    let undated = Obligation {
+    let undated = ObligationData {
         until: None,
         ..o.clone()
     };
@@ -883,7 +890,7 @@ fn a_council_authority_is_later_than_the_obligation_and_its_setter() {
         until: Some(Until::NextSitting),
     };
     // Council-owed, from a Steward's record: discharge and withdrawal.
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(rec(1)),
         ..review()
     };
@@ -893,7 +900,7 @@ fn a_council_authority_is_later_than_the_obligation_and_its_setter() {
         assert_eq!(check(&o, &s, u, Some(gov(4))), Ok(()));
     }
     // A Council source: discharge, reschedule, withdrawal.
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(gov(1)),
         ..review()
     };
@@ -921,7 +928,7 @@ fn a_council_authority_is_later_than_the_obligation_and_its_setter() {
 /// A revision of `o` by `patch`, which may be one the draft builder would
 /// refuse (a root `replace`): the rules must hold on what a writer could
 /// sign, not only on what the builder makes
-fn revision_draft(o: &Obligation, patch: Value) -> AmendmentDraft {
+fn revision_draft(o: &ObligationData, patch: Value) -> AmendmentDraft {
     let latest = serde_json::to_value(o).unwrap();
     let benign: json_patch::Patch = serde_json::from_value(
         json!([{"op": "replace", "path": "/quote", "value": "q"}]),
@@ -942,7 +949,7 @@ fn revision_draft(o: &Obligation, patch: Value) -> AmendmentDraft {
     draft
 }
 
-fn revision(o: &Obligation, patch: Value) -> Amendment {
+fn revision(o: &ObligationData, patch: Value) -> Amendment {
     revision_draft(o, patch).amendment
 }
 
@@ -956,7 +963,7 @@ fn a_revision_narrows_text_only_with_the_authority_a_discharge_needs() {
         {"op": "add", "path": "/thread", "value": plan(3)}
     ]);
     // Council-owed: text needs a later Council decision, the rest nothing.
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(rec(1)),
         ..review()
     };
@@ -981,7 +988,7 @@ fn a_revision_narrows_text_only_with_the_authority_a_discharge_needs() {
         Ok(())
     );
     // Staff-owed with a Council deadline: the Council's too.
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(gov(1)),
         owed_by: OwedBy::Staff,
         ..review()
@@ -991,7 +998,7 @@ fn a_revision_narrows_text_only_with_the_authority_a_discharge_needs() {
         Err(NeedsCouncil(AmendmentKind::Revision))
     );
     // Staff-owed with the Steward's deadline: the Steward's.
-    let o = Obligation {
+    let o = ObligationData {
         source: Some(rec(1)),
         owed_by: OwedBy::Staff,
         ..review()
@@ -1024,7 +1031,7 @@ fn a_revision_narrows_text_only_with_the_authority_a_discharge_needs() {
 fn a_revision_of_a_fixed_field_or_a_precedential_kind_fails_verification() {
     let (key, pk) = generate_keypair();
     let anchor = KeyAnchor::pinned((&pk).into());
-    let latest = serde_json::to_value(Obligation {
+    let latest = serde_json::to_value(ObligationData {
         source: Some(gov(1)),
         ..review()
     })
@@ -1046,7 +1053,7 @@ fn a_revision_of_a_fixed_field_or_a_precedential_kind_fails_verification() {
             v.entries[2].problem.clone(),
         )
     };
-    let obligation: Obligation = serde_json::from_value(latest).unwrap();
+    let obligation: ObligationData = serde_json::from_value(latest).unwrap();
     let revise = |patch: Value| revision_draft(&obligation, patch);
     let fine =
         revise(json!([{"op": "replace", "path": "/text", "value": "less"}]));
