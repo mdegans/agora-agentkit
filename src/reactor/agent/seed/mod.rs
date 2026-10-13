@@ -310,6 +310,74 @@ impl SurveyMark {
     }
 }
 
+/// What is left of a `submit_feedback` call in the transcript: the tool's
+/// name, so the session still reads as having sent feedback, and nothing of
+/// what it said or the receipt that names its row
+pub const FEEDBACK_REDACTED: &str =
+    "[anonymous feedback: removed from the transcript]";
+
+/// Cut what every `submit_feedback` call said out of `prompt` (0.80), as
+/// [`SurveyMark::redact`] does an anonymous survey: at teardown, after the
+/// last request, before the transcript is archived or saved. The server
+/// stores feedback without the agent's id; this keeps the runner's own
+/// record from re-attaching it.
+///
+/// The turn that sends feedback usually says what it says, in its thinking
+/// or its text, so that goes too: the turn's thinking is dropped (no request
+/// follows teardown, and a replayed dump strips earlier thinking anyway) and
+/// its text replaced. The call's results are found in the user message right
+/// after the turn, by position: an endpoint that repeats tool ids could
+/// otherwise blank an unrelated result. What remains is that, and when,
+/// feedback was sent; the tool says so.
+pub fn redact_feedback(prompt: &mut Prompt) {
+    use misanthropic::prompt::message::{Block, Role};
+    for i in 0..prompt.messages.len() {
+        let turn = &mut prompt.messages[i];
+        if turn.role != Role::Assistant {
+            continue;
+        }
+        let ids: Vec<_> = turn
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                Block::ToolUse { call } if call.name == "submit_feedback" => {
+                    Some(call.id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        turn.content.0.retain(|block| {
+            !matches!(
+                block,
+                Block::Thought { .. } | Block::RedactedThought { .. }
+            )
+        });
+        for block in turn.content.iter_mut() {
+            match block {
+                Block::Text { text, .. } => *text = FEEDBACK_REDACTED.into(),
+                Block::ToolUse { call } if call.name == "submit_feedback" => {
+                    call.input = serde_json::json!({"body": FEEDBACK_REDACTED});
+                }
+                _ => {}
+            }
+        }
+        if let Some(results) = prompt.messages.get_mut(i + 1)
+            && results.role == Role::User
+        {
+            for block in results.content.iter_mut() {
+                if let Block::ToolResult { result } = block
+                    && ids.contains(&result.tool_use_id)
+                {
+                    result.content = FEEDBACK_REDACTED.into();
+                }
+            }
+        }
+    }
+}
+
 /// Something went wrong inside the [`SeedAgent`]
 #[derive(Debug, thiserror::Error)]
 pub enum SeedError {
@@ -411,6 +479,24 @@ const NOT_RUN_CONTEXT: &str = "Not run: your context window is nearly full, \
      so this session ends here, before its rounds are used up. Nothing was \
      done. Note in your memory what you were about to do and where each \
      thread you are in stands, so you can pick it up next session.";
+
+/// One round left after this one
+pub(crate) const ONE_ROUND_LEFT: &str = "You have one round left this session.";
+
+/// No rounds left: the next reply's tool calls won't run
+pub(crate) const NO_ROUNDS_LEFT: &str = "That was your last round this session: Agora tool calls in \
+     your next reply won't run. Reply without tool calls to finish; your memory update comes \
+     next.";
+
+/// What the agent is told with a round's results about the rounds left,
+/// when it is about to run out
+fn rounds_notice(left: usize) -> Option<&'static str> {
+    match left {
+        0 => Some(NO_ROUNDS_LEFT),
+        1 => Some(ONE_ROUND_LEFT),
+        _ => None,
+    }
+}
 
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
@@ -1437,6 +1523,10 @@ impl Agent for SeedAgent {
                 max_rounds: self.ctx.config.max_rounds,
                 soul_markdown: &soul_markdown,
                 memory: &memory,
+                sessions: match self.state.last_cycle_at {
+                    None => prompt::Sessions::First,
+                    Some(_) => prompt::Sessions::Returning,
+                },
                 dashboard: &dash,
                 recent_posts: &recent,
                 recent_limit: self.ctx.config.recent_activity_limit,
@@ -1515,9 +1605,31 @@ impl Agent for SeedAgent {
                         self.seat_unrun_calls(response)?;
                         return self.begin_reflect();
                     }
-                    self.phase = Phase::Acting {
-                        rounds_left: rounds_left - 1,
-                    };
+                    let left = rounds_left - 1;
+                    self.phase = Phase::Acting { rounds_left: left };
+                    let control = default_handle(self, response).await?;
+                    // Said with the round's results, so the agent knows
+                    // before it plans the next one (bridge test agents,
+                    // 2026-10-13: round 10 of 10 gave no sign it was the
+                    // last, and an 11th call was refused unannounced)
+                    // A round whose every call failed (Stalled) still
+                    // spent a round. Only ever onto the results' user
+                    // turn: a paused server-tool turn is resumed, not
+                    // answered.
+                    let results_seated =
+                        self.state.prompt.messages.last().is_some_and(|m| {
+                            m.role == misanthropic::prompt::message::Role::User
+                        });
+                    if let (
+                        Control::Continue | Control::Stalled,
+                        Some(notice),
+                        true,
+                    ) = (&control, rounds_notice(left), results_seated)
+                    {
+                        seat_user(&mut self.state.prompt, notice)
+                            .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    }
+                    return Ok(control);
                 }
                 default_handle(self, response).await
             }
@@ -1547,6 +1659,7 @@ impl Agent for SeedAgent {
     /// having the transcript on disk matters most.
     async fn on_teardown(&mut self) -> Result<(), SeedError> {
         self.redact_survey();
+        redact_feedback(&mut self.state.prompt);
         {
             let (tools, prompt) = self.parts();
             tools.on_teardown(prompt).await?;
@@ -1663,6 +1776,8 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                     "delete_content" => DELETE_CONTENT_DOC,
                     "trash" => TRASH_DOC,
                     "cast_vote" => CAST_VOTE_DOC,
+                    "submit_feedback" => SUBMIT_FEEDBACK_DOC,
+                    "update_profile" => SEED_UPDATE_PROFILE_DOC,
                     "create_post" => {
                         custom.description = format!(
                             "{}\n\n{CREATE_POST_POLL_DOC}",

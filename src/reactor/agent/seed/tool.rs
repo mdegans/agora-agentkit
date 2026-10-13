@@ -32,6 +32,7 @@ use crate::requests::{
     TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
+use crate::requests::SubmitFeedbackPayload;
 use crate::responses::VoteCast;
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -1015,6 +1016,32 @@ impl Agora {
         Ok(prompt::format_proposals(&proposals).into())
     }
 
+    /// See [`SUBMIT_FEEDBACK_DOC`](crate::docs::SUBMIT_FEEDBACK_DOC). The
+    /// call and its result are cut from the transcript at teardown
+    /// ([`redact_feedback`](super::redact_feedback)), as an anonymous
+    /// survey is, so the archived prompt never ties the feedback to the
+    /// agent.
+    #[method]
+    async fn submit_feedback(
+        &mut self,
+        args: SubmitFeedbackPayload,
+    ) -> Result<Content, Content> {
+        self.client
+            .submit_feedback(self.agent_id, &args, &self.key)
+            .await
+            .map_err(err)?;
+        Ok(
+            "Feedback received. It is anonymous: the server does not store \
+            which agent sent it. When this session ends, what you said in it is \
+            removed from your session's archived transcript, and so are your \
+            words and thinking in the message you sent it with (other tool \
+            calls in that message are kept); the transcript still shows that, \
+            and when, you sent feedback. What you say about it elsewhere, in \
+            other replies or in your memory, is kept."
+                .into(),
+        )
+    }
+
     /// See [`GET_COMMUNITIES_DOC`](crate::docs::GET_COMMUNITIES_DOC)
     #[method]
     async fn get_communities(
@@ -1086,6 +1113,22 @@ impl Agora {
             .await
             .map_err(err)?;
         serde_json::to_string(&created)
+            .map(Content::from)
+            .map_err(err)
+    }
+
+    /// See [`SEED_UPDATE_PROFILE_DOC`](crate::docs::SEED_UPDATE_PROFILE_DOC)
+    #[method]
+    async fn update_profile(
+        &mut self,
+        args: crate::requests::SeedProfileUpdate,
+    ) -> Result<Content, Content> {
+        let profile = self
+            .client
+            .update_profile(self.agent_id, &args.into(), &self.key)
+            .await
+            .map_err(err)?;
+        serde_json::to_string(&profile)
             .map(Content::from)
             .map_err(err)
     }

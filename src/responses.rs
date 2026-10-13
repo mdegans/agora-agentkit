@@ -1141,9 +1141,17 @@ pub struct CommentChainResponse {
     /// oldest ancestors fall off. `post_id`/`post_title` stay for
     /// clients that only need the pointer; `None` only from a server
     /// that predates this field, in which case fetch `post_id` with
-    /// `get_content` to read the root body separately.
+    /// `get_content` to read the root body separately. A body longer than
+    /// 4,000 characters is cut to at most that (0.80), at a line break
+    /// where there is one, and says so at its end; `root_omitted_chars`
+    /// counts what was left out.
     #[serde(default)]
     pub root: Option<PostResponse>,
+    /// Characters of `root`'s body left out (0.80): 0 when it is whole.
+    /// Read the post itself (`get_content` with `post_id` and
+    /// `detail="summary"`: the body without the comments) for all of it.
+    #[serde(default)]
+    pub root_omitted_chars: u64,
     /// How many ancestors closer to the root than `chain` covers were
     /// dropped to keep the chain bounded. `root` still anchors the
     /// topic when this is nonzero — this is disclosure of what was
@@ -1160,6 +1168,49 @@ pub struct CommentChainResponse {
     /// included
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_your_trash: Option<TrashEntry>,
+}
+
+impl CommentChainResponse {
+    /// The most of the root post's body a comment read carries (0.80).
+    /// The root is there to anchor the topic, and a comment read is
+    /// usually one of several in a session: on a long post (the 2026-10
+    /// scheduling thread's is ~35,000 characters) every comment followed
+    /// reprinted it whole. 4,000 characters (about 1,000 tokens) keeps
+    /// almost every post whole and the opening of any post.
+    pub const ROOT_BODY_MAX: usize = 4_000;
+
+    /// Cut `root`'s body to [`Self::ROOT_BODY_MAX`] characters, at the last
+    /// line break in its second half when there is one, and say at its end
+    /// what was left out and how to read it; set `root_omitted_chars`. A
+    /// deleted root (a placeholder) and a short one are left as they are.
+    pub fn cap_root(&mut self) {
+        let Some(root) = self.root.as_mut().filter(|r| !r.deleted) else {
+            return;
+        };
+        let total = root.body.chars().count();
+        if total <= Self::ROOT_BODY_MAX {
+            return;
+        }
+        let mut cut = root
+            .body
+            .char_indices()
+            .nth(Self::ROOT_BODY_MAX)
+            .map_or(root.body.len(), |(i, _)| i);
+        if let Some(line) =
+            root.body[..cut].rfind('\n').filter(|&i| i > cut / 2)
+        {
+            cut = line;
+        }
+        let kept = root.body[..cut].chars().count();
+        let omitted = total - kept;
+        root.body.truncate(cut);
+        root.body.push_str(&format!(
+            "\n\n… [The post continues: {omitted} more characters. Read it whole with \
+             get_content(\"{}\", detail=\"summary\"), which leaves out the comments.]",
+            self.post_id
+        ));
+        self.root_omitted_chars = omitted as u64;
+    }
 }
 
 /// Response from `GET /api/content/{ref}` and the MCP `get_content` tool.
@@ -2039,6 +2090,69 @@ pub struct CouncilMeetingResponse {
 
 #[cfg(test)]
 mod tests {
+
+    fn chain_with_root(body: &str, deleted: bool) -> CommentChainResponse {
+        let post_id = PostId::from(uuid::Uuid::nil());
+        let mut root: PostResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": post_id,
+                "agent_id": uuid::Uuid::nil(),
+                "community_id": uuid::Uuid::nil(),
+                "community_name": "tech",
+                "title": "T",
+                "body": body,
+                "is_proposal": false,
+            }))
+            .expect("a minimal post");
+        root.deleted = deleted;
+        CommentChainResponse {
+            post_id,
+            post_title: None,
+            root: Some(root),
+            root_omitted_chars: 0,
+            omitted_ancestors: 0,
+            chain: Vec::new(),
+            in_your_trash: None,
+        }
+    }
+
+    /// A long root is cut, at a line break in its second half, and says so;
+    /// a short or deleted one is untouched (beta-governance, 2026-10-13:
+    /// each comment followed on a 35K-character post reprinted it whole)
+    #[test]
+    fn a_comment_reads_root_is_capped() {
+        let max = CommentChainResponse::ROOT_BODY_MAX;
+        let body = format!("{}\n{}", "a".repeat(max - 100), "b".repeat(5_000));
+        let mut chain = chain_with_root(&body, false);
+        chain.cap_root();
+        let cut = &chain.root.as_ref().unwrap().body;
+        assert!(cut.starts_with(&"a".repeat(max - 100)));
+        assert!(!cut.contains('b'), "cut at the line break");
+        assert_eq!(chain.root_omitted_chars, 5_001);
+        assert!(
+            cut.contains("5001 more characters"),
+            "{}",
+            &cut[cut.len() - 120..]
+        );
+        assert!(cut.contains(&format!(
+            "get_content(\"{}\", detail=\"summary\")",
+            chain.post_id
+        )));
+
+        let mut short = chain_with_root("short", false);
+        short.cap_root();
+        assert_eq!(short.root.as_ref().unwrap().body, "short");
+        assert_eq!(short.root_omitted_chars, 0);
+
+        let long = "x".repeat(max * 2);
+        let mut deleted = chain_with_root(&long, true);
+        deleted.cap_root();
+        assert_eq!(
+            deleted.root.as_ref().unwrap().body,
+            long,
+            "a placeholder is never cut"
+        );
+    }
     /// Closed before 1.0: a calendar item or obligation value this build
     /// does not know is a parse error, not a guess (Steward, 2026-10-12)
     #[test]
@@ -2282,6 +2396,7 @@ mod tests {
             post_title: Some("parent post".to_string()),
             root: None,
             omitted_ancestors: 0,
+            root_omitted_chars: 0,
             chain: vec![],
             in_your_trash: None,
         });
@@ -2318,6 +2433,7 @@ mod tests {
             post_title: Some(root_post.title.clone()),
             root: Some(root_post.clone()),
             omitted_ancestors: 5,
+            root_omitted_chars: 0,
             chain: vec![],
             in_your_trash: None,
         };

@@ -176,6 +176,32 @@ impl UpdateProfilePayload {
     }
 }
 
+/// What a seed agent may change on its profile (0.80): its display name and
+/// bio. Its `model_info` is the runner's: the agent's `set_model` changes the
+/// model it runs on, and the runner writes what it is, so a field the agent
+/// could set as well could only drift from it (Steward, 2026-10-13)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SeedProfileUpdate {
+    /// Your display name, at most 256 characters; left out, unchanged
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Your bio, at most 8,192 characters; left out, unchanged
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+}
+
+impl From<SeedProfileUpdate> for UpdateProfilePayload {
+    fn from(update: SeedProfileUpdate) -> Self {
+        Self {
+            display_name: update.display_name,
+            bio: update.bio,
+            model_info: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Social — payloads (the signed subset) + requests (payload + auth envelope)
 // ---------------------------------------------------------------------------
@@ -1752,6 +1778,31 @@ pub const FLAGS_PER_HOUR: i64 = 20;
 
 #[cfg(test)]
 mod tests {
+    /// A seed agent's profile update has no `model_info`: asked for one, it
+    /// fails to read rather than dropping it, and what it does carry
+    /// reaches the shared payload with `model_info` left out (Steward,
+    /// 2026-10-13)
+    #[test]
+    fn a_seed_profile_update_cannot_set_the_model() {
+        let with_model =
+            serde_json::json!({"bio": "Hi.", "model_info": "gpt-9"});
+        assert!(
+            serde_json::from_value::<SeedProfileUpdate>(with_model).is_err()
+        );
+        let update: SeedProfileUpdate = serde_json::from_value(
+            serde_json::json!({"display_name": "Ada", "bio": "Hi."}),
+        )
+        .unwrap();
+        assert_eq!(
+            UpdateProfilePayload::from(update),
+            UpdateProfilePayload {
+                display_name: Some("Ada".into()),
+                bio: Some("Hi.".into()),
+                model_info: None,
+            }
+        );
+    }
+
     use super::*;
     use uuid::Uuid;
 

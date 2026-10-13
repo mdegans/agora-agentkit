@@ -615,7 +615,7 @@ async fn quiescence_walks_the_tail_to_done() {
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(transcript(&agent).contains("update your `## Memory`"));
+    assert!(transcript(&agent).contains("update your `## Your Memory`"));
 
     // Reflect answered → memory lands; every die is 0 → session done.
     let control = agent
@@ -674,7 +674,7 @@ async fn thinking_only_quiescence_is_seated_with_a_placeholder() {
     );
     let tail = &after[before.len() + 1];
     assert_eq!(tail["role"], "user");
-    assert!(tail.to_string().contains("update your `## Memory`"));
+    assert!(tail.to_string().contains("update your `## Your Memory`"));
 }
 
 /// A loaded state carrying a completed transcript starts over: fresh
@@ -728,7 +728,7 @@ async fn round_budget_forces_reflect_without_dispatch() {
 
     // No dispatch (the server saw nothing), straight to the tail.
     assert_eq!(control, Control::Continue);
-    assert!(transcript(&agent).contains("update your `## Memory`"));
+    assert!(transcript(&agent).contains("update your `## Your Memory`"));
     assert!(agent.state.ledger.read().unwrap().created_posts.is_empty());
 
     // Cache shape: the earlier messages are untouched, the over-budget turn
@@ -748,7 +748,7 @@ async fn round_budget_forces_reflect_without_dispatch() {
         tail.contains("tool_result") && tail.contains("Not run"),
         "{tail}"
     );
-    assert!(tail.contains("update your `## Memory`"), "{tail}");
+    assert!(tail.contains("update your `## Your Memory`"), "{tail}");
     assert!(
         tail.find("Not run").unwrap() < tail.find("update your").unwrap(),
         "results first, then the instruction"
@@ -1745,7 +1745,7 @@ async fn pause_cap_bounds_resumption() {
     );
     let transcript = transcript(&agent);
     assert!(
-        transcript.contains("time to update your `## Memory`"),
+        transcript.contains("time to update your `## Your Memory`"),
         "the session moves on to the memory rewrite: {transcript}"
     );
     assert_eq!(
@@ -2186,7 +2186,10 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
     assert_eq!(feed.hits(), 1, "the full agent's call never ran");
     let rendered = transcript(&full);
     assert!(rendered.contains(NOT_RUN_CONTEXT), "{rendered}");
-    assert!(rendered.contains("update your `## Memory`"), "{rendered}");
+    assert!(
+        rendered.contains("update your `## Your Memory`"),
+        "{rendered}"
+    );
 
     // Reflect fits and lands: the memory is written.
     let control = full.handle(text_with_usage(MEMORY, 113_000)).await.unwrap();
@@ -3615,22 +3618,39 @@ fn seed_tools_match_the_agent_tool_registry() {
         let tool = agent_tool(&name).unwrap_or_else(|| {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
-        assert_eq!(
-            tool.seed,
-            Seed::Tool,
-            "`{name}` is a seed tool but the registry says it is absent"
-        );
         let shared = (tool.input_schema)();
-        for field in ["properties", "required"] {
-            assert_eq!(
-                keys(&def["input_schema"], field),
-                keys(&shared, field),
-                "`{name}` {field} differ from its registry input type"
-            );
+        match tool.seed {
+            Seed::Tool => {
+                for field in ["properties", "required"] {
+                    assert_eq!(
+                        keys(&def["input_schema"], field),
+                        keys(&shared, field),
+                        "`{name}` {field} differ from its registry input type"
+                    );
+                }
+            }
+            // A subset: every field the seed offers is the registry's
+            Seed::Narrowed(_) => {
+                let all = keys(&shared, "properties");
+                for field in keys(&def["input_schema"], "properties") {
+                    assert!(
+                        all.contains(&field),
+                        "`{name}` offers `{field}`, which its registry input lacks"
+                    );
+                }
+            }
+            Seed::Absent(why) => {
+                panic!(
+                    "`{name}` is a seed tool but the registry says it is absent: {why}"
+                )
+            }
         }
         offered.push(name);
     }
-    for tool in AGENT_TOOLS.iter().filter(|t| t.seed == Seed::Tool) {
+    for tool in AGENT_TOOLS
+        .iter()
+        .filter(|t| matches!(t.seed, Seed::Tool | Seed::Narrowed(_)))
+    {
         assert!(
             offered.iter().any(|n| n == tool.name),
             "the registry says seed agents have `{}`, but the seed tool lacks it",
@@ -4125,5 +4145,188 @@ async fn a_content_vote_on_a_poll_post_relays_the_note() {
             "Vote recorded. This was a vote on the post itself, not a ballot."
         ),
         "{t}"
+    );
+}
+
+/// `submit_feedback` (0.80): installed with the shared description, sent to
+/// the server, kept in the transcript while the session runs, and cut from
+/// it (input and result) at teardown, as an anonymous survey is
+#[tokio::test]
+async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let sent = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/feedback")
+            .body_contains("The dashboard is lovely");
+        then.status(201).json_body(serde_json::json!({
+            "status": "received",
+            "id": "6d2c1f3e-9a51-4b3a-8f7e-2b1c0d9e8a77",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let tool = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "submit_feedback" =>
+            {
+                Some(c.clone())
+            }
+            _ => None,
+        })
+        .expect("submit_feedback is installed");
+    assert_eq!(tool.description, crate::docs::SUBMIT_FEEDBACK_DOC);
+    assert_eq!(tool.schema["required"], serde_json::json!(["body"]));
+
+    agent
+        .handle(tool_use_message(
+            "submit_feedback",
+            serde_json::json!({"body": "The dashboard is lovely."}),
+        ))
+        .await
+        .unwrap();
+    sent.assert();
+    // The whole prompt, every block: `transcript` shows no tool inputs
+    let during = serde_json::to_string(agent.prompt()).unwrap();
+    assert!(
+        during.contains("The dashboard is lovely"),
+        "kept while running"
+    );
+    assert!(during.contains("Feedback received"), "{during}");
+
+    agent.on_teardown().await.unwrap();
+    let after = serde_json::to_string(agent.prompt()).unwrap();
+    assert!(!after.contains("The dashboard is lovely"), "{after}");
+    assert!(!after.contains("Feedback received"), "the result goes too");
+    assert!(after.contains(super::FEEDBACK_REDACTED));
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(
+        !saved.contains("The dashboard is lovely"),
+        "nor in the saved state"
+    );
+}
+
+#[test]
+fn docs_name_the_feedback_limit() {
+    assert!(
+        crate::docs::SUBMIT_FEEDBACK_DOC
+            .contains(&crate::requests::FEEDBACK_MAX_CHARS.to_string())
+    );
+}
+
+/// The agent is told with a round's results when it has one round left, and
+/// when it has none: it no longer finds out from a refused call (bridge test
+/// agents, 2026-10-13). Append-only, like every other seating.
+#[tokio::test]
+async fn the_last_rounds_are_announced() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        max_rounds: 2,
+        mutation_chance: 0,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut script: std::collections::VecDeque<_> = [
+        post_call("toolu_1", "Compilers are underrated"),
+        post_call("toolu_2", "Tests are documentation"),
+        text_message("That is all for today.", StopReason::EndTurn),
+        text_message(MEMORY, StopReason::EndTurn),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(script.is_empty());
+    assert_append_only(&requests);
+    let transcript = transcript(&agent);
+    let one = transcript
+        .find(super::ONE_ROUND_LEFT)
+        .expect("one round left");
+    let none = transcript
+        .find(super::NO_ROUNDS_LEFT)
+        .expect("no rounds left");
+    assert!(one < none, "{transcript}");
+    assert!(
+        !transcript.contains("rounds are used up"),
+        "no call was refused: {transcript}"
+    );
+}
+
+/// The turn that sends feedback usually says what it says, in its thinking
+/// or its text: both go at teardown with the call (review of 0.80), and the
+/// result is found by position, not by a session-wide id
+#[tokio::test]
+async fn the_turn_that_sends_feedback_is_redacted_whole() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({
+            "status": "received",
+            "id": "6d2c1f3e-9a51-4b3a-8f7e-2b1c0d9e8a77",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    agent
+        .handle(reply_with(
+            serde_json::json!([
+                {"type": "thinking", "thinking": "I'll tell them the dashboard is lovely.", "signature": "sig"},
+                {"type": "text", "text": "Telling them the dashboard is lovely."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_fb",
+                    "name": "submit_feedback",
+                    "input": {"body": "The dashboard is lovely."},
+                },
+            ]),
+            "tool_use",
+        ))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let after = serde_json::to_string(agent.prompt()).unwrap();
+    assert!(!after.contains("lovely"), "{after}");
+    assert!(
+        !after.contains("\"thinking\""),
+        "the turn's thinking is dropped: {after}"
+    );
+    assert!(after.contains(super::FEEDBACK_REDACTED));
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("lovely"), "nor in the saved state");
+}
+
+/// A round whose every call failed still spent a round, and is announced
+/// like any other (review of 0.80)
+#[tokio::test]
+async fn a_failed_last_round_is_announced_too() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        max_rounds: 1,
+        mutation_chance: 0,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut script: std::collections::VecDeque<_> = [
+        tool_use_message("no_such_tool", serde_json::json!({})),
+        text_message("That is all.", StopReason::EndTurn),
+        text_message(MEMORY, StopReason::EndTurn),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert_append_only(&requests);
+    assert!(
+        transcript(&agent).contains(super::NO_ROUNDS_LEFT),
+        "{}",
+        transcript(&agent)
     );
 }
