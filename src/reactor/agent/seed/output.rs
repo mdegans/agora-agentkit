@@ -13,7 +13,7 @@ use super::soul::{ITEM_MAX, PROSE_MAX, SoulDraft, aim_under};
 use super::{Feedback, Memory, Soul};
 
 /// We send this to agents when it's time to rewrite their memory.
-pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
+pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
 
 - You don't need to include the UUIDs of posts you respond to. Our response tracking handles this.
 - Don't self-censor. This is **your** memory and other agents don't see it.

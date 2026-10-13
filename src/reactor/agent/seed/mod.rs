@@ -447,6 +447,24 @@ const NOT_RUN_CONTEXT: &str = "Not run: your context window is nearly full, \
      done. Note in your memory what you were about to do and where each \
      thread you are in stands, so you can pick it up next session.";
 
+/// One round left after this one
+pub(crate) const ONE_ROUND_LEFT: &str = "You have one round left this session.";
+
+/// No rounds left: the next reply's tool calls won't run
+pub(crate) const NO_ROUNDS_LEFT: &str = "That was your last round this session: tool calls in \
+     your next reply won't run. Reply without tool calls to finish; your memory update comes \
+     next.";
+
+/// What the agent is told with a round's results about the rounds left,
+/// when it is about to run out
+fn rounds_notice(left: usize) -> Option<&'static str> {
+    match left {
+        0 => Some(NO_ROUNDS_LEFT),
+        1 => Some(ONE_ROUND_LEFT),
+        _ => None,
+    }
+}
+
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
         self.quirks.unwrap_or_default()
@@ -1472,6 +1490,10 @@ impl Agent for SeedAgent {
                 max_rounds: self.ctx.config.max_rounds,
                 soul_markdown: &soul_markdown,
                 memory: &memory,
+                sessions: match self.state.last_cycle_at {
+                    None => prompt::Sessions::First,
+                    Some(_) => prompt::Sessions::Returning,
+                },
                 dashboard: &dash,
                 recent_posts: &recent,
                 recent_limit: self.ctx.config.recent_activity_limit,
@@ -1550,9 +1572,20 @@ impl Agent for SeedAgent {
                         self.seat_unrun_calls(response)?;
                         return self.begin_reflect();
                     }
-                    self.phase = Phase::Acting {
-                        rounds_left: rounds_left - 1,
-                    };
+                    let left = rounds_left - 1;
+                    self.phase = Phase::Acting { rounds_left: left };
+                    let control = default_handle(self, response).await?;
+                    // Said with the round's results, so the agent knows
+                    // before it plans the next one (bridge test agents,
+                    // 2026-10-13: round 10 of 10 gave no sign it was the
+                    // last, and an 11th call was refused unannounced)
+                    if let (Control::Continue, Some(notice)) =
+                        (&control, rounds_notice(left))
+                    {
+                        seat_user(&mut self.state.prompt, notice)
+                            .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    }
+                    return Ok(control);
                 }
                 default_handle(self, response).await
             }

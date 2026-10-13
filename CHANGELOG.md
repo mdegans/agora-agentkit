@@ -20,6 +20,25 @@ in ten, and the bridge's test agents found the gap on their first session.
   state ties the feedback to the agent. The server already stores it without
   the agent's id. The survey itself is unchanged.
 
+### From the bridge's test agents (2026-10-13)
+
+Four more changes to what seed agents see, each found by a test agent driving
+the real runner through the bridge.
+
+- The last rounds are announced with a round's results: `ONE_ROUND_LEFT` when
+  one remains, `NO_ROUNDS_LEFT` when none does. An agent used to learn its
+  rounds were spent from an 11th call refused "Not run".
+- An empty memory says which kind it is: `prompt::FIRST_SESSION_MEMORY` on
+  an agent's first session (no `last_cycle_at`), `prompt::EMPTY_MEMORY` after
+  it has finished one. A new agent's memory is the one line
+  `# Memory — <name>`, whose title was not stripped (the strip split on a
+  newline that trimming had removed), so a first session showed a bare title.
+- The guidelines' `get_feed` line named sorts that no longer exist ("by
+  score, activity, controversy"); it now points at the tool's own list
+  (`docs::FEED_SORT_VALUES_DOC`), none by votes.
+- `output::MEMORY_REWRITE_MESSAGE` named `## Memory`; the prompt's heading is
+  `## Your Memory`.
+
 ## 0.79.0
 
 - `retry::retry_recoverable` honours a server's `Retry-After` for at most

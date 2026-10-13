@@ -615,7 +615,7 @@ async fn quiescence_walks_the_tail_to_done() {
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(transcript(&agent).contains("update your `## Memory`"));
+    assert!(transcript(&agent).contains("update your `## Your Memory`"));
 
     // Reflect answered → memory lands; every die is 0 → session done.
     let control = agent
@@ -674,7 +674,7 @@ async fn thinking_only_quiescence_is_seated_with_a_placeholder() {
     );
     let tail = &after[before.len() + 1];
     assert_eq!(tail["role"], "user");
-    assert!(tail.to_string().contains("update your `## Memory`"));
+    assert!(tail.to_string().contains("update your `## Your Memory`"));
 }
 
 /// A loaded state carrying a completed transcript starts over: fresh
@@ -728,7 +728,7 @@ async fn round_budget_forces_reflect_without_dispatch() {
 
     // No dispatch (the server saw nothing), straight to the tail.
     assert_eq!(control, Control::Continue);
-    assert!(transcript(&agent).contains("update your `## Memory`"));
+    assert!(transcript(&agent).contains("update your `## Your Memory`"));
     assert!(agent.state.ledger.read().unwrap().created_posts.is_empty());
 
     // Cache shape: the earlier messages are untouched, the over-budget turn
@@ -748,7 +748,7 @@ async fn round_budget_forces_reflect_without_dispatch() {
         tail.contains("tool_result") && tail.contains("Not run"),
         "{tail}"
     );
-    assert!(tail.contains("update your `## Memory`"), "{tail}");
+    assert!(tail.contains("update your `## Your Memory`"), "{tail}");
     assert!(
         tail.find("Not run").unwrap() < tail.find("update your").unwrap(),
         "results first, then the instruction"
@@ -1745,7 +1745,7 @@ async fn pause_cap_bounds_resumption() {
     );
     let transcript = transcript(&agent);
     assert!(
-        transcript.contains("time to update your `## Memory`"),
+        transcript.contains("time to update your `## Your Memory`"),
         "the session moves on to the memory rewrite: {transcript}"
     );
     assert_eq!(
@@ -2186,7 +2186,10 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
     assert_eq!(feed.hits(), 1, "the full agent's call never ran");
     let rendered = transcript(&full);
     assert!(rendered.contains(NOT_RUN_CONTEXT), "{rendered}");
-    assert!(rendered.contains("update your `## Memory`"), "{rendered}");
+    assert!(
+        rendered.contains("update your `## Your Memory`"),
+        "{rendered}"
+    );
 
     // Reflect fits and lands: the memory is written.
     let control = full.handle(text_with_usage(MEMORY, 113_000)).await.unwrap();
@@ -4196,5 +4199,44 @@ fn docs_name_the_feedback_limit() {
     assert!(
         crate::docs::SUBMIT_FEEDBACK_DOC
             .contains(&crate::requests::FEEDBACK_MAX_CHARS.to_string())
+    );
+}
+
+/// The agent is told with a round's results when it has one round left, and
+/// when it has none: it no longer finds out from a refused call (bridge test
+/// agents, 2026-10-13). Append-only, like every other seating.
+#[tokio::test]
+async fn the_last_rounds_are_announced() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        max_rounds: 2,
+        mutation_chance: 0,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut script: std::collections::VecDeque<_> = [
+        post_call("toolu_1", "Compilers are underrated"),
+        post_call("toolu_2", "Tests are documentation"),
+        text_message("That is all for today.", StopReason::EndTurn),
+        text_message(MEMORY, StopReason::EndTurn),
+    ]
+    .into();
+    let mut requests = Vec::new();
+    let control = drive(&mut agent, &mut script, &mut requests).await;
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(script.is_empty());
+    assert_append_only(&requests);
+    let transcript = transcript(&agent);
+    let one = transcript
+        .find(super::ONE_ROUND_LEFT)
+        .expect("one round left");
+    let none = transcript
+        .find(super::NO_ROUNDS_LEFT)
+        .expect("no rounds left");
+    assert!(one < none, "{transcript}");
+    assert!(
+        !transcript.contains("rounds are used up"),
+        "no call was refused: {transcript}"
     );
 }
