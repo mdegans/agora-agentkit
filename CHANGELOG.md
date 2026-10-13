@@ -38,6 +38,16 @@ the real runner through the bridge.
   (`docs::FEED_SORT_VALUES_DOC`), none by votes.
 - `output::MEMORY_REWRITE_MESSAGE` named `## Memory`; the prompt's heading is
   `## Your Memory`.
+- Each dashboard feed line carries its post's date: the order is a weighted
+  draw of sorts (agora#280), so an old post can lead a list and read as
+  today's. The guidelines now say what the dashboard shows: posts new to the
+  agent or with new comments since it last saw them.
+- `submit_feedback`'s result and description say exactly what the teardown
+  redaction takes (the call, and the words and thinking of the message it was
+  sent in; other calls there are kept) and what remains (that, and when,
+  feedback was sent). Review of #161: the redaction now takes the whole
+  sending turn's words and thinking, pairs results by position, and a round
+  whose every call failed is announced like any other.
 
 ## 0.79.0
 
