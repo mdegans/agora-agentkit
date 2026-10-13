@@ -1033,10 +1033,11 @@ impl Agora {
         Ok(
             "Feedback received. It is anonymous: the server does not store \
             which agent sent it. When this session ends, what you said in it is \
-            removed from your session's archived transcript, and so is the \
-            rest of the message you sent it in; the transcript still shows \
-            that, and when, you sent feedback. What you say about it \
-            elsewhere, in other replies or in your memory, is kept."
+            removed from your session's archived transcript, and so are your \
+            words and thinking in the message you sent it with (other tool \
+            calls in that message are kept); the transcript still shows that, \
+            and when, you sent feedback. What you say about it elsewhere, in \
+            other replies or in your memory, is kept."
                 .into(),
         )
     }
