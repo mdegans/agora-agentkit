@@ -89,8 +89,26 @@ fn anthropic_err_recoverable(
     !crate::reactor::RetryAfter::is_fatal(err)
 }
 
+/// The wait the server asked for, if it sent one (a `Retry-After`
+/// header on a 429 or 529): what [`retry_recoverable`] waits at least
+pub fn server_retry_after(err: &anyhow::Error) -> Option<std::time::Duration> {
+    use misanthropic::client::{AnthropicError, Error as ClientError};
+
+    err.chain().find_map(|cause| {
+        if let Some(ClientError::Anthropic(a)) =
+            cause.downcast_ref::<ClientError>()
+        {
+            return AnthropicError::retry_after(a);
+        }
+        cause
+            .downcast_ref::<AnthropicError>()
+            .and_then(AnthropicError::retry_after)
+    })
+}
+
 /// Retry `f` with exponential backoff when it returns a recoverable
-/// error (per [`is_recoverable`]).
+/// error (per [`is_recoverable`]), waiting at least as long as the server
+/// asked ([`server_retry_after`]) when it said.
 ///
 /// Backoff schedule for `max_retries = 5`: 1s → 2s → 4s → 8s → 16s.
 /// Total worst-case wait before giving up is ~31s on top of the
@@ -128,13 +146,17 @@ where
                     );
                     return Err(e);
                 }
+                let wait = server_retry_after(&e)
+                    .map_or(delay, |asked| asked.max(delay));
                 tracing::warn!(
-                    "{label}: recoverable error (attempt {}/{max_retries}), \
-                     retrying in {}s: {e}",
-                    attempt + 1,
-                    delay.as_secs(),
+                    label,
+                    attempt = attempt + 1,
+                    max_retries,
+                    wait_secs = wait.as_secs(),
+                    error = %e,
+                    "recoverable error; retrying"
                 );
-                tokio::time::sleep(delay).await;
+                tokio::time::sleep(wait).await;
                 attempt += 1;
                 delay = std::cmp::min(
                     delay * 2,
@@ -156,6 +178,32 @@ mod tests {
         E: std::error::Error + Send + Sync + 'static,
     {
         anyhow::Error::new(err)
+    }
+
+    // ---- server_retry_after ------------------------------------------------
+
+    #[test]
+    fn the_servers_wait_is_read_through_the_chain() {
+        let limited = |retry_after| AnthropicError::RateLimit {
+            message: "slow down".to_string(),
+            retry_after,
+        };
+        let wrapped = anyhowed(ClientError::Anthropic(limited(Some(42))))
+            .context("lawyer_meeting_summary");
+        assert_eq!(
+            server_retry_after(&wrapped),
+            Some(std::time::Duration::from_secs(42))
+        );
+        assert_eq!(
+            server_retry_after(&anyhowed(limited(Some(7)))),
+            Some(std::time::Duration::from_secs(7))
+        );
+        // No header: the caller's own backoff
+        assert_eq!(server_retry_after(&anyhowed(limited(None))), None);
+        assert_eq!(
+            server_retry_after(&anyhow::anyhow!("not an API error")),
+            None
+        );
     }
 
     // ---- is_recoverable ----------------------------------------------------

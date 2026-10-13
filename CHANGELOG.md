@@ -10,6 +10,9 @@ decides an item, moved here from the Council program (agora CLAUDE.md
 rule 8). No wire shape or signed byte changes. One schema text changes:
 the description of `CouncilDecisionRecord::abstentions`.
 
+- `retry::retry_recoverable` waits at least as long as the server asked
+  (`Retry-After` on a 429 or 529, read by the new `retry::server_retry_after`),
+  where it used its own backoff regardless; and logs with named fields.
 - `CouncilDecisionRecord::check`: a Steward veto carries its rationale and a
   rationale belongs to a veto (`RecordRuleError`), the same rule as
   `StewardVote::Veto` for a record built any other way. Every signed record
