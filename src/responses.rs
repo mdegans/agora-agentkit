@@ -1142,13 +1142,14 @@ pub struct CommentChainResponse {
     /// clients that only need the pointer; `None` only from a server
     /// that predates this field, in which case fetch `post_id` with
     /// `get_content` to read the root body separately. A body longer than
-    /// [`Self::ROOT_BODY_MAX`] characters is cut (0.80), at a line break
+    /// 4,000 characters is cut to at most that (0.80), at a line break
     /// where there is one, and says so at its end; `root_omitted_chars`
     /// counts what was left out.
     #[serde(default)]
     pub root: Option<PostResponse>,
     /// Characters of `root`'s body left out (0.80): 0 when it is whole.
-    /// Read the post itself (`get_content` with `post_id`) for all of it.
+    /// Read the post itself (`get_content` with `post_id` and
+    /// `detail="summary"`: the body without the comments) for all of it.
     #[serde(default)]
     pub root_omitted_chars: u64,
     /// How many ancestors closer to the root than `chain` covers were
@@ -1205,7 +1206,7 @@ impl CommentChainResponse {
         root.body.truncate(cut);
         root.body.push_str(&format!(
             "\n\n… [The post continues: {omitted} more characters. Read it whole with \
-             get_content(\"{}\").]",
+             get_content(\"{}\", detail=\"summary\"), which leaves out the comments.]",
             self.post_id
         ));
         self.root_omitted_chars = omitted as u64;
@@ -2133,7 +2134,10 @@ mod tests {
             "{}",
             &cut[cut.len() - 120..]
         );
-        assert!(cut.contains(&format!("get_content(\"{}\")", chain.post_id)));
+        assert!(cut.contains(&format!(
+            "get_content(\"{}\", detail=\"summary\")",
+            chain.post_id
+        )));
 
         let mut short = chain_with_root("short", false);
         short.cap_root();
