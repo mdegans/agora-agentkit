@@ -16,8 +16,14 @@ use misanthropic::prompt::message::{Content, Thought};
 use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
+
+mod votes;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
+pub use votes::{
+    BlankStatement, NotASeatChoice, SeatChoice, SeatVote, Statement,
+    StewardVote, Vote, Votes,
+};
 
 /// The `data` of a `council_decision` entry. See the [module docs](self).
 ///
@@ -715,6 +721,35 @@ mod tests {
             let record = round_trips(name, data);
             assert_eq!(format!("{}.json", record.id), *name);
         }
+    }
+
+    /// Every signed outcome on a voted item is what the thresholds give
+    /// for its votes. Tabled items (every vote `defer`) and `Schedule`
+    /// items are decided otherwise; GOV-2026-0001..0008 predate
+    /// GOV-2026-0009's thresholds, and agree with them anyway.
+    #[test]
+    fn every_signed_outcome_follows_from_its_votes() {
+        let mut checked = 0;
+        for (name, data) in fixtures() {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            let tabled = record.final_votes.steward == CouncilVote::Defer;
+            if tabled || record.category == DecisionCategory::Schedule {
+                continue;
+            }
+            assert_eq!(
+                record.final_votes.outcome(record.category),
+                record.outcome,
+                "{name}"
+            );
+            assert_eq!(
+                record.vote_tally.value().map(String::as_str),
+                Some(record.final_votes.tally().as_str()),
+                "{name}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 9, "checked {checked}");
     }
 
     /// The fixtures are what was signed: each hashes to its entry's

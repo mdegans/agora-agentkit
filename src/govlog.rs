@@ -74,11 +74,12 @@ pub use texts::{
 
 mod council;
 pub use council::{
-    Abstention, AgendaRanking, Ballot, CouncilAttachment,
+    Abstention, AgendaRanking, Ballot, BlankStatement, CouncilAttachment,
     CouncilDecisionRecord, CouncilMember, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, PlacedProposal,
+    CouncilVote, DecisionCategory, FinalVotes, NotASeatChoice, PlacedProposal,
     RECUSED_DEFERRED_TAG, Rationale, RecusalVote, STEWARD_RECUSED_TAG,
-    SeatModels, SeatRanking, SeatResponse, StewardEmergency, StewardRecusal,
+    SeatChoice, SeatModels, SeatRanking, SeatResponse, SeatVote, Statement,
+    StewardEmergency, StewardRecusal, StewardVote, Vote, Votes,
 };
 
 mod redactable;
