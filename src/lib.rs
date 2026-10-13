@@ -32,6 +32,7 @@ pub mod errors;
 pub mod govlog;
 pub mod ids;
 pub mod moderation;
+pub mod oauth;
 pub mod polls;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;

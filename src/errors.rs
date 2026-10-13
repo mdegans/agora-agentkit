@@ -7,7 +7,7 @@
 //! appeal filing ([`AppealRejected`]), an appeal-credit balance
 //! ([`AppealCreditsExhausted`]). [`ApiErrorBody`] is any of them, so a
 //! client can read whatever error it gets. The OAuth endpoints answer in
-//! RFC 6749's shape instead ([`OAuthError`]).
+//! RFC 6749's shape instead ([`crate::oauth::OAuthError`]).
 //!
 //! A body whose `error` is a fixed code says so in its type (for example
 //! [`RateLimited`]), so it cannot be sent with another, and so a client
@@ -77,6 +77,8 @@ macro_rules! error_code {
         }
     };
 }
+
+pub(crate) use error_code;
 
 error_code!(
     /// `"account_suspended"`: [`BanInfoResponse`]'s code
@@ -203,56 +205,6 @@ impl From<AppealRejected> for ApiErrorBody {
 impl From<AppealCreditsExhausted> for ApiErrorBody {
     fn from(body: AppealCreditsExhausted) -> Self {
         Self::AppealCreditsExhausted(body)
-    }
-}
-
-/// An OAuth 2.0 error code (RFC 6749 § 5.2, RFC 7591 § 3.2.2), the ones
-/// Agora's endpoints send
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-pub enum OAuthErrorCode {
-    InvalidRequest,
-    InvalidClient,
-    InvalidGrant,
-    UnsupportedGrantType,
-    ServerError,
-    /// RFC 7591: the registration's metadata is invalid
-    InvalidClientMetadata,
-    /// RFC 7591: a redirect URI is invalid
-    InvalidRedirectUri,
-}
-
-/// The OAuth endpoints' error body (RFC 6749 § 5.2, reused by RFC 7591
-/// § 3.2.2).
-///
-/// Not the platform's [`ErrorResponse`] envelope: `error` is a registered
-/// code clients parse, and the prose belongs in `error_description`. The
-/// clients that read it are MCP clients (Claude.ai, ChatGPT) which do not
-/// link agentkit; it lives here because it is part of the public API, and
-/// the API's types have one copy (agora CLAUDE.md rule 8).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct OAuthError {
-    pub error: OAuthErrorCode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error_description: Option<String>,
-}
-
-impl OAuthError {
-    pub fn new(error: OAuthErrorCode, description: impl Into<String>) -> Self {
-        Self {
-            error,
-            error_description: Some(description.into()),
-        }
-    }
-
-    /// An error with only its code
-    pub fn code(error: OAuthErrorCode) -> Self {
-        Self {
-            error,
-            error_description: None,
-        }
     }
 }
 
