@@ -2,6 +2,31 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.75.0
+
+Breaking, before any obligation exists: one type for an obligation (agora
+CLAUDE.md rule 8). No wire shape, schema text or signed byte changes.
+
+- `govlog::Obligation` is now the obligation: the entry as the log has it
+  now (`id`, `created_at`, `chain_seq`, `data`, `state`), formerly
+  `ObligationRecord`. Its signed `data` is `govlog::ObligationData`
+  (formerly `govlog::Obligation`); `ObligationRecordError` is
+  `ObligationError`. The two parts stay apart inside it: the data is what
+  was signed, the state is derived, and must never be signed by mistake.
+- `check_obligation_amendment(obligation, id, chain_seq, state, ..)` is
+  `Obligation::check_amendment(&self, ..)`.
+- `calendar::ObligationProjection` is gone. `ResolvedObligation` holds an
+  `Obligation`, so `Calendar::upcoming` and `CalendarResponse::new` take no
+  `texts` map, `Calendar::dated` is private, and
+  `ResolvedObligation::into_listing(text)` is
+  `From<ResolvedObligation> for ObligationListing`.
+  `Obligation::awaited_decision` reads the current deadline (`state.until`).
+- New, moved from agora's staging module as they were: `govlog::quote` (the
+  quote normaliser and search the obligation writer checks a quote with)
+  and `govlog::request` (obligation request files). `quote::string_leaves`
+  walks object keys in canonical order, whatever serde_json's
+  `preserve_order`.
+
 ## 0.74.0
 
 Additive: one copy of everything (agora CLAUDE.md rule 8). The database
