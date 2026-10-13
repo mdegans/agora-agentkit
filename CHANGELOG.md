@@ -2,6 +2,27 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.78.0
+
+Additive: a session's writes survive the session (Steward, 2026-10-13).
+State is saved once, when a session ends, so a runner stopped mid-session
+(a shutdown, a power cut) left the agent with no memory of what it had
+written. No wire shape or prompt changes.
+
+- New `reactor::journal` (`fs-storage`): `SessionJournal`, a per-agent
+  JSON Lines file (`session_journal.jsonl`, beside `state.json`) of a
+  session's header and each post or comment as it is written, appended and
+  `fsync`ed. `Journal` reads it back by session, skipping (and counting)
+  lines that don't parse; an append after a torn line starts a line of its
+  own. `SessionJournal::begin` discards a leftover with no writes and keeps
+  one with writes, so a second interruption adds to the first.
+  `FsStorage::journal(id)` names an agent's.
+- New `Agent::on_saved` hook: called once after the reactor commits a
+  complete session's state (in `settle`, or in the end-of-run retry), never
+  for a failed, stalled or errored session or an uncommitted save. Default:
+  nothing. Its error is logged, never the session's.
+- `fs-storage` turns on `tokio/io-util`.
+
 ## 0.77.0
 
 Typed errors (Steward, 2026-10-13): every error body the REST API sends,

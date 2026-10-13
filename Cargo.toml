@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.77.0"
+version = "0.78.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -21,7 +21,7 @@ misanthropic = ["dep:tokio", "dep:tracing"]
 # Because for the moment it prevents wasm build
 client = ["misanthropic/client"]
 # `FsStorage` (`reactor::storage`): the directory-per-agent disk backend.
-fs-storage = ["misanthropic", "tokio/fs"]
+fs-storage = ["misanthropic", "tokio/fs", "tokio/io-util"]
 # The Agora REST client (`crate::client`). Split from `seed` so non-seed
 # consumers (moderation bots, dashboards) get it without the agent.
 agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]

@@ -445,6 +445,20 @@ pub trait Agent: Sized + Send {
         Ok(())
     }
 
+    /// The session completed ([`Outcome::Complete`]) and the reactor has
+    /// committed [`state`](Agent::state) to [`Storage`](super::Storage).
+    /// Called at most once per session, after
+    /// [`on_teardown`](Agent::on_teardown) and the save; never for a session
+    /// that failed, stalled or errored, or whose save didn't commit. For
+    /// clean-up that must wait until the session's state is safe on disk,
+    /// like a journal of the session's writes kept against its loss
+    /// (`reactor::journal`, with `fs-storage`). An error is logged and changes
+    /// nothing: the session stays complete and saved. The default does
+    /// nothing.
+    async fn on_saved(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// The model and [`Capabilities`] this agent requires. The reactor negotiates
     /// it against what the endpoint offers ([`Inference::models`]) to route the
     /// agent to the batch or sequential path, or reject it.
