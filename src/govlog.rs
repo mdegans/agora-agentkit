@@ -76,10 +76,11 @@ mod council;
 pub use council::{
     Abstention, AgendaRanking, Ballot, BlankStatement, CouncilAttachment,
     CouncilDecisionRecord, CouncilMember, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, NotASeatChoice, PlacedProposal,
-    RECUSED_DEFERRED_TAG, Rationale, RecusalVote, STEWARD_RECUSED_TAG,
-    SeatChoice, SeatModels, SeatRanking, SeatResponse, SeatVote, Statement,
-    StewardEmergency, StewardRecusal, StewardVote, Vote, Votes,
+    CouncilVote, Decided, DecisionCategory, FinalRoundError, FinalVotes,
+    NotASeatChoice, PlacedProposal, RECUSED_DEFERRED_TAG, Rationale,
+    RecusalVote, STEWARD_RECUSED_TAG, SeatChoice, SeatModels, SeatRanking,
+    SeatResponse, SeatVote, Statement, StewardEmergency, StewardRecusal,
+    StewardVote, Vote, Votes,
 };
 
 mod redactable;

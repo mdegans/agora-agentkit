@@ -17,10 +17,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{Blind, Redactable};
 
+mod decided;
 mod ranking;
 mod votes;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
+pub use decided::{Decided, FinalRoundError};
 pub use votes::{
     BlankStatement, NotASeatChoice, SeatChoice, SeatVote, Statement,
     StewardVote, Vote, Votes,
@@ -787,6 +789,43 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 2, "GOV-2026-0008 and 0013");
+    }
+
+    /// What [`Decided`] writes is what the signed records say, for the
+    /// kinds the archive has: tabled (GOV-2026-0002) and ranked
+    /// (GOV-2026-0008, 0013). No voted record can be read back into
+    /// [`Votes`]: before GOV-2026-0013 the seats' words were in
+    /// `rationale` and `position` was empty, which is why there is no
+    /// conversion back.
+    #[test]
+    fn decided_writes_what_the_archive_says() {
+        let mut checked = 0;
+        for (name, data) in fixtures() {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data).unwrap();
+            let decided =
+                match (&record.agenda_ranking, record.final_votes.steward) {
+                    (Some(ranking), _) => Decided::Ranked(ranking.clone()),
+                    (None, CouncilVote::Defer) => Decided::Tabled,
+                    (None, _) => {
+                        let last = record.rounds.last().unwrap();
+                        let votes =
+                            Votes::from_final_round(last, StewardVote::Yes);
+                        assert!(
+                            matches!(
+                                votes,
+                                Err(FinalRoundError::NoStatement(_))
+                            ),
+                            "{name}: {votes:?}"
+                        );
+                        continue;
+                    }
+                };
+            let again = record.clone().decided(decided);
+            assert_eq!(again, record, "{name}");
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "GOV-2026-0002, 0008, 0013");
     }
 
     /// The fixtures are what was signed: each hashes to its entry's
