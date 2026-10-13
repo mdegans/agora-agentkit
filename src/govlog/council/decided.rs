@@ -10,12 +10,18 @@
 
 use super::{
     AgendaRanking, CouncilDecisionRecord, CouncilRound, CouncilSeat,
-    CouncilVote, DecisionCategory, FinalVotes, SeatChoice, SeatVote, Statement,
-    StewardVote, Votes,
+    CouncilVote, DecisionCategory, FinalVotes, SeatChoice, SeatVote, SeatVotes,
+    Statement, Votes,
 };
 use crate::enums::{DecisionOutcome, RoundType};
 
-/// How an item was decided
+/// How an item was decided.
+///
+/// Not every shape a record can hold is a `Decided`: a round tabled by a
+/// recused Steward over an API refusal (`tabled_by_recused_steward`) has
+/// none, because the Council program does not produce it (a refusal
+/// aborts the sitting, 2026-09-29). Should it again, it needs a variant
+/// here first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decided {
     /// Voted, under the category's threshold
@@ -148,12 +154,11 @@ pub enum FinalRoundError {
     NoStatement(CouncilSeat),
 }
 
-impl Votes {
+impl SeatVotes {
     /// The votes the seats cast in `round`, a `final_vote` round, each
-    /// with its statement (its `position`), and the Steward's `steward`
+    /// with its statement (its `position`)
     pub fn from_final_round(
         round: &CouncilRound,
-        steward: StewardVote,
     ) -> Result<Self, FinalRoundError> {
         if round.round_type != RoundType::FinalVote {
             return Err(FinalRoundError::NotFinal(round.number));
@@ -181,7 +186,6 @@ impl Votes {
             philosopher: seat(CouncilSeat::Philosopher)?,
             lawyer: seat(CouncilSeat::Lawyer)?,
             engineer: seat(CouncilSeat::Engineer)?,
-            steward,
         })
     }
 }

@@ -753,6 +753,32 @@ pub enum DecisionOutcome {
     Amended,
 }
 
+impl RoundType {
+    /// The round as prose names it, in the Council's records and prompts:
+    /// `"Final Vote"` (0.76). Its `Display` is the stored spelling,
+    /// `final_vote`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Independent => "Independent Analysis",
+            Self::Deliberation => "Deliberation",
+            Self::FinalVote => "Final Vote",
+        }
+    }
+}
+
+impl DecisionOutcome {
+    /// The outcome as prose names it: `"Approved"` (0.76). Its `Display` is
+    /// the stored spelling, `approved`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Approved => "Approved",
+            Self::Rejected => "Rejected",
+            Self::Deferred => "Deferred",
+            Self::Amended => "Amended",
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batch enums
 // ---------------------------------------------------------------------------

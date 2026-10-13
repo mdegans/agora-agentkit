@@ -1,4 +1,5 @@
 use super::*;
+use crate::govlog::StewardVote;
 use crate::govlog::{Rationale, Redactable, SeatResponse};
 
 fn statement(text: &str) -> Statement {
@@ -72,15 +73,17 @@ fn the_votes_are_the_final_rounds() {
         (Yes, "Yes."),
         (No, "No."),
     ]);
-    let votes = Votes::from_final_round(
-        &round,
-        StewardVote::Abstain {
+    let votes = Votes {
+        seats: SeatVotes::from_final_round(&round).unwrap(),
+        steward: StewardVote::Abstain {
             rationale: statement("I'll let the Council decide."),
         },
-    )
-    .unwrap();
-    assert_eq!(votes.philosopher.choice, SeatChoice::Abstain);
-    assert_eq!(&*votes.philosopher.statement, "I stand aside: I wrote it.");
+    };
+    assert_eq!(votes.seats.philosopher.choice, SeatChoice::Abstain);
+    assert_eq!(
+        &*votes.seats.philosopher.statement,
+        "I stand aside: I wrote it."
+    );
 
     let r = record().decided(Decided::Voted(votes));
     assert_eq!(
@@ -110,13 +113,12 @@ fn the_votes_are_the_final_rounds() {
 fn a_veto_is_recorded_with_its_rationale() {
     use CouncilVote::Yes;
     let round = four([(Yes, "a"), (Yes, "b"), (Yes, "c"), (Yes, "d")]);
-    let votes = Votes::from_final_round(
-        &round,
-        StewardVote::Veto {
+    let votes = Votes {
+        seats: SeatVotes::from_final_round(&round).unwrap(),
+        steward: StewardVote::Veto {
             rationale: statement("It limits the appeals court."),
         },
-    )
-    .unwrap();
+    };
     let r = record().decided(Decided::Voted(votes));
     assert_eq!(r.final_votes.steward, CouncilVote::Veto);
     assert_eq!(r.outcome, DecisionOutcome::Rejected);
@@ -133,26 +135,25 @@ fn a_veto_is_recorded_with_its_rationale() {
 #[test]
 fn a_final_round_that_is_not_four_seats_voting_is_refused() {
     use CouncilVote::{Abstain, Ranked, Yes};
-    let steward = || StewardVote::Yes;
     let mut round = four([(Yes, "a"), (Abstain, "  "), (Yes, "c"), (Yes, "d")]);
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::NoStatement(CouncilSeat::Philosopher))
     );
     round.responses[1].position =
         Redactable::Redacted("AMD-2026-0099".parse().unwrap());
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::NoStatement(CouncilSeat::Philosopher))
     );
     round.responses[1] = response(CouncilSeat::Philosopher, None, "Refused.");
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::NoVote(CouncilSeat::Philosopher))
     );
     round.responses[1] = response(CouncilSeat::Philosopher, Some(Ranked), "P1");
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::NotASeatChoice(
             CouncilSeat::Philosopher,
             Ranked
@@ -160,19 +161,19 @@ fn a_final_round_that_is_not_four_seats_voting_is_refused() {
     );
     round.responses.remove(1);
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::Missing(CouncilSeat::Philosopher))
     );
     round
         .responses
         .push(response(CouncilSeat::Artist, Some(Yes), "again"));
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::Twice(CouncilSeat::Artist))
     );
     round.round_type = RoundType::Deliberation;
     assert_eq!(
-        Votes::from_final_round(&round, steward()),
+        SeatVotes::from_final_round(&round),
         Err(FinalRoundError::NotFinal(3))
     );
 }

@@ -238,18 +238,17 @@ impl Vote<'_> {
     }
 }
 
-/// The five votes that decide a voted item, each with the words the
-/// Constitution requires of it. See the [module docs](self).
+/// The four seats' final votes, each with its statement: what the
+/// Steward is shown before voting, and the seats' part of [`Votes`]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Votes {
+pub struct SeatVotes {
     pub artist: SeatVote,
     pub philosopher: SeatVote,
     pub lawyer: SeatVote,
     pub engineer: SeatVote,
-    pub steward: StewardVote,
 }
 
-impl Votes {
+impl SeatVotes {
     /// One seat's vote
     pub fn seat(&self, seat: CouncilSeat) -> &SeatVote {
         match seat {
@@ -260,12 +259,49 @@ impl Votes {
         }
     }
 
+    /// Every seat's vote, in seating order
+    pub fn iter(&self) -> impl Iterator<Item = (CouncilSeat, &SeatVote)> {
+        CouncilSeat::ALL
+            .into_iter()
+            .map(|seat| (seat, self.seat(seat)))
+    }
+
+    /// Seats voting yes
+    pub fn yes_count(&self) -> usize {
+        self.iter()
+            .filter(|(_, v)| v.choice == SeatChoice::Yes)
+            .count()
+    }
+
+    /// Seats voting no
+    pub fn no_count(&self) -> usize {
+        self.iter()
+            .filter(|(_, v)| v.choice == SeatChoice::No)
+            .count()
+    }
+}
+
+/// The five votes that decide a voted item, each with the words the
+/// Constitution requires of it. See the [module docs](self).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Votes {
+    #[serde(flatten)]
+    pub seats: SeatVotes,
+    pub steward: StewardVote,
+}
+
+impl Votes {
+    /// One seat's vote
+    pub fn seat(&self, seat: CouncilSeat) -> &SeatVote {
+        self.seats.seat(seat)
+    }
+
     /// Every member's vote, the seats in seating order and the Steward
     /// last
     pub fn iter(&self) -> impl Iterator<Item = (CouncilMember, Vote<'_>)> {
-        CouncilSeat::ALL
-            .into_iter()
-            .map(|seat| (seat.into(), Vote::Seat(self.seat(seat))))
+        self.seats
+            .iter()
+            .map(|(seat, vote)| (seat.into(), Vote::Seat(vote)))
             .chain([(CouncilMember::Steward, Vote::Steward(&self.steward))])
     }
 
@@ -306,10 +342,10 @@ impl Votes {
 impl From<&Votes> for FinalVotes {
     fn from(votes: &Votes) -> Self {
         Self {
-            artist: votes.artist.choice.into(),
-            philosopher: votes.philosopher.choice.into(),
-            lawyer: votes.lawyer.choice.into(),
-            engineer: votes.engineer.choice.into(),
+            artist: votes.seats.artist.choice.into(),
+            philosopher: votes.seats.philosopher.choice.into(),
+            lawyer: votes.seats.lawyer.choice.into(),
+            engineer: votes.seats.engineer.choice.into(),
             steward: (&votes.steward).into(),
         }
     }

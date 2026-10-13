@@ -24,7 +24,7 @@ use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 pub use decided::{Decided, FinalRoundError};
 pub use votes::{
-    BlankStatement, NotASeatChoice, SeatChoice, SeatVote, Statement,
+    BlankStatement, NotASeatChoice, SeatChoice, SeatVote, SeatVotes, Statement,
     StewardVote, Vote, Votes,
 };
 
@@ -817,32 +817,45 @@ mod tests {
     }
 
     /// Every signed outcome on a voted item is what the thresholds give
-    /// for its votes. Tabled items (every vote `defer`) and `Schedule`
-    /// items are decided otherwise; GOV-2026-0001..0008 predate
-    /// GOV-2026-0009's thresholds, and agree with them anyway.
+    /// for its votes, as signed and as revised. Tabled items (every vote
+    /// `defer`, GOV-2026-0002) and `Schedule` items (0008, 0013) are
+    /// decided otherwise; 0001..0008 predate GOV-2026-0009's thresholds,
+    /// and agree with them anyway.
     #[test]
     fn every_signed_outcome_follows_from_its_votes() {
-        let mut checked = 0;
-        for (name, data) in fixtures() {
-            let record: CouncilDecisionRecord =
-                serde_json::from_value(data).unwrap();
-            let tabled = record.final_votes.steward == CouncilVote::Defer;
-            if tabled || record.category == DecisionCategory::Schedule {
-                continue;
+        let check = |fixtures: Vec<(String, serde_json::Value)>| {
+            let mut checked = 0;
+            for (name, data) in fixtures {
+                let record: CouncilDecisionRecord =
+                    serde_json::from_value(data).unwrap();
+                let tabled = record.final_votes.steward == CouncilVote::Defer;
+                if tabled || record.category == DecisionCategory::Schedule {
+                    continue;
+                }
+                assert_eq!(
+                    record.final_votes.outcome(record.category),
+                    record.outcome,
+                    "{name}"
+                );
+                assert_eq!(
+                    record.vote_tally.value().map(String::as_str),
+                    Some(record.final_votes.tally().as_str()),
+                    "{name}"
+                );
+                checked += 1;
             }
-            assert_eq!(
-                record.final_votes.outcome(record.category),
-                record.outcome,
-                "{name}"
-            );
-            assert_eq!(
-                record.vote_tally.value().map(String::as_str),
-                Some(record.final_votes.tally().as_str()),
-                "{name}"
-            );
-            checked += 1;
-        }
-        assert!(checked >= 9, "checked {checked}");
+            checked
+        };
+        assert_eq!(
+            check(fixtures()),
+            10,
+            "GOV-2026-0001, 0003..0007, 0009..0012"
+        );
+        assert_eq!(
+            check(revised_fixtures()),
+            5,
+            "GOV-2026-0003..0007, revised"
+        );
     }
 
     /// Aggregating a signed scheduling item's ballots again gives its
@@ -899,8 +912,7 @@ mod tests {
                     (None, CouncilVote::Defer) => Decided::Tabled,
                     (None, _) => {
                         let last = record.rounds.last().unwrap();
-                        let votes =
-                            Votes::from_final_round(last, StewardVote::Yes);
+                        let votes = SeatVotes::from_final_round(last);
                         assert!(
                             matches!(
                                 votes,

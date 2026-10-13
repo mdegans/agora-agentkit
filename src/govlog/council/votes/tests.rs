@@ -211,10 +211,15 @@ fn a_rationale_cannot_be_left_out() {
 
 fn decided(steward: StewardVote) -> Votes {
     Votes {
-        artist: seat(SeatChoice::Yes, "The Artist's statement."),
-        philosopher: seat(SeatChoice::Abstain, "I stand aside: I wrote it."),
-        lawyer: seat(SeatChoice::Yes, "The Lawyer's statement."),
-        engineer: seat(SeatChoice::Defer, "Not yet."),
+        seats: SeatVotes {
+            artist: seat(SeatChoice::Yes, "The Artist's statement."),
+            philosopher: seat(
+                SeatChoice::Abstain,
+                "I stand aside: I wrote it.",
+            ),
+            lawyer: seat(SeatChoice::Yes, "The Lawyer's statement."),
+            engineer: seat(SeatChoice::Defer, "Not yet."),
+        },
         steward,
     }
 }
@@ -270,6 +275,28 @@ fn iter_is_seating_order_then_the_steward() {
     let cast: Vec<CouncilVote> =
         v.iter().map(|(_, vote)| vote.cast()).collect();
     assert_eq!(cast, [Yes, Abstain, Yes, Defer, Recused]);
+}
+
+#[test]
+fn the_seats_alone_are_counted_before_the_steward_votes() {
+    let v = decided(StewardVote::Recused);
+    assert_eq!((v.seats.yes_count(), v.seats.no_count()), (2, 0));
+    let seats: Vec<CouncilSeat> = v.seats.iter().map(|(s, _)| s).collect();
+    assert_eq!(seats, CouncilSeat::ALL);
+}
+
+#[test]
+fn the_prose_names_of_rounds_and_outcomes() {
+    use crate::enums::RoundType;
+    assert_eq!(RoundType::FinalVote.name(), "Final Vote");
+    assert_eq!(RoundType::Independent.name(), "Independent Analysis");
+    assert_eq!(
+        RoundType::FinalVote.to_string(),
+        "final_vote",
+        "the stored spelling stands"
+    );
+    assert_eq!(DecisionOutcome::Approved.name(), "Approved");
+    assert_eq!(DecisionOutcome::Approved.to_string(), "approved");
 }
 
 #[test]
