@@ -574,12 +574,104 @@ pub struct PlacedProposal {
 mod tests {
     use super::*;
 
-    /// Every `council_decision` signed on production, as stored
+    /// Every `council_decision` signed on production, as signed
     fn fixtures() -> Vec<(String, serde_json::Value)> {
-        let dir = concat!(
+        fixtures_in(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/council_decisions"
-        );
+        ))
+    }
+
+    /// The latest version of each one a revision amended
+    fn revised_fixtures() -> Vec<(String, serde_json::Value)> {
+        fixtures_in(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/council_decisions/revised"
+        ))
+    }
+
+    /// Each signed entry's `data_hash`, and the `resulting_data_hash` of
+    /// its last revision when one revised it, as the production log has
+    /// them (2026-10-13): the fixtures are the signed bytes.
+    const SIGNED: [(&str, &str, Option<&str>); 13] = [
+        (
+            "GOV-2026-0001",
+            "fca67b28737d613e3a98cdb3b1ad686944b36f1654ad5c237da6ec0291ee4574",
+            None,
+        ),
+        (
+            "GOV-2026-0002",
+            "b1bb43d611d75e1d3b03df8ff64381781b3d75d934a1f9d7ec75fe2174716c47",
+            None,
+        ),
+        (
+            "GOV-2026-0003",
+            "7c75af86d9b3930b5d14cd9e1784c2ecb32483427ba7149dffb20d84510c1b09",
+            Some(
+                "e1db85357dbe3b865129a53836a16c33730c7ebb37a8412f84afe5fbac4aa64d",
+            ),
+        ),
+        (
+            "GOV-2026-0004",
+            "0004e84733236dca2ab4dfb16757236ad0d76e27efbf47bbec0e00c6d90a7ed0",
+            Some(
+                "b2a9ec584f49eebf0103a72986440a326fcb5f68c83a7f1eddba8228046c342f",
+            ),
+        ),
+        (
+            "GOV-2026-0005",
+            "8257faade7548f15c010f2a5bb7ff22e1e37f7034eac2c9726445002fa593f0e",
+            Some(
+                "514a020a95669da78dfadcee58729a99402f9b2c2f750a557a8b8ce8512f451d",
+            ),
+        ),
+        (
+            "GOV-2026-0006",
+            "6520bb4cba556c4ba251584d836d1efb8a33227b83573f74c34c32362762a6f7",
+            Some(
+                "58f3fafc031ca29c796ac08fa69bb9994bf40fef9114189d6f820d050c66eedc",
+            ),
+        ),
+        (
+            "GOV-2026-0007",
+            "39a273c711d3f5b4744bbfcb1a1b2978e26b5b48629fabd5d0f136241167f07c",
+            Some(
+                "56c1036a8ee1eb852d831082f36ef9c22bc2a103a9a0d56c778fa040f9c6917e",
+            ),
+        ),
+        (
+            "GOV-2026-0008",
+            "89ac0d32809a3baf07a28ab6a511c64aaf1a31741cb3c5630d23fde484cf5cf3",
+            None,
+        ),
+        (
+            "GOV-2026-0009",
+            "32a86a94646ed886085895ad92e76285acced67b76c1853bc0e8b04626b6487d",
+            None,
+        ),
+        (
+            "GOV-2026-0010",
+            "aa4031caaf9e2851f70ed83008954869388cacb03a8119a2996a281da9e4a0dd",
+            None,
+        ),
+        (
+            "GOV-2026-0011",
+            "590b29357ae1acd425f64abb8e2aeeee2eec71d36dbb9afc99ec33ce4e5791d7",
+            None,
+        ),
+        (
+            "GOV-2026-0012",
+            "625d7f8b7c504def1fa332db68b06518d34b247edd5f2225be370a392e1a0973",
+            None,
+        ),
+        (
+            "GOV-2026-0013",
+            "c3d0a7f2c157e15f73031621148c1f3ff543418e31684d12fc6048a6c657dcb7",
+            None,
+        ),
+    ];
+
+    fn fixtures_in(dir: &str) -> Vec<(String, serde_json::Value)> {
         let mut out: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -616,10 +708,39 @@ mod tests {
     #[test]
     fn every_signed_decision_is_described_whole() {
         let fixtures = fixtures();
-        assert_eq!(fixtures.len(), 7, "GOV-2026-0001..0007");
-        for (name, data) in &fixtures {
+        assert_eq!(fixtures.len(), 13, "GOV-2026-0001..0013");
+        let revised = revised_fixtures();
+        assert_eq!(revised.len(), 5, "GOV-2026-0003..0007, revised");
+        for (name, data) in fixtures.iter().chain(&revised) {
             let record = round_trips(name, data);
             assert_eq!(format!("{}.json", record.id), *name);
+        }
+    }
+
+    /// The fixtures are what was signed: each hashes to its entry's
+    /// `data_hash`, and each revised one to its last revision's
+    /// `resulting_data_hash`
+    #[test]
+    fn the_fixtures_are_the_signed_bytes() {
+        let hex = |data: &serde_json::Value| {
+            serde_json::to_value(super::super::data_hash(data))
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let fixtures = fixtures();
+        let revised = revised_fixtures();
+        for (id, signed, latest) in SIGNED {
+            let name = format!("{id}.json");
+            let (_, data) = fixtures.iter().find(|(n, _)| *n == name).unwrap();
+            assert_eq!(hex(data), signed, "{id} as signed");
+            let found = revised.iter().find(|(n, _)| *n == name);
+            assert_eq!(
+                found.map(|(_, d)| hex(d)).as_deref(),
+                latest,
+                "{id} as revised"
+            );
         }
     }
 
