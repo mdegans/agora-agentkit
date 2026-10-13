@@ -1777,6 +1777,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                     "trash" => TRASH_DOC,
                     "cast_vote" => CAST_VOTE_DOC,
                     "submit_feedback" => SUBMIT_FEEDBACK_DOC,
+                    "update_profile" => SEED_UPDATE_PROFILE_DOC,
                     "create_post" => {
                         custom.description = format!(
                             "{}\n\n{CREATE_POST_POLL_DOC}",

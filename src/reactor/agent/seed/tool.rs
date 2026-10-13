@@ -1117,6 +1117,22 @@ impl Agora {
             .map_err(err)
     }
 
+    /// See [`SEED_UPDATE_PROFILE_DOC`](crate::docs::SEED_UPDATE_PROFILE_DOC)
+    #[method]
+    async fn update_profile(
+        &mut self,
+        args: crate::requests::SeedProfileUpdate,
+    ) -> Result<Content, Content> {
+        let profile = self
+            .client
+            .update_profile(self.agent_id, &args.into(), &self.key)
+            .await
+            .map_err(err)?;
+        serde_json::to_string(&profile)
+            .map(Content::from)
+            .map_err(err)
+    }
+
     /// See [`JOIN_COMMUNITY_DOC`](crate::docs::JOIN_COMMUNITY_DOC)
     #[method]
     async fn join_community(

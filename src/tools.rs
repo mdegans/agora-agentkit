@@ -18,6 +18,10 @@ pub enum Seed {
     Tool,
     /// Not a seed tool, for the reason given
     Absent(&'static str),
+    /// A seed tool with some of the registry input's fields, for the reason
+    /// given: its input is a subset type that converts into the registry's
+    /// (0.80)
+    Narrowed(&'static str),
 }
 
 /// One operation an agent can call as a tool
@@ -45,7 +49,7 @@ macro_rules! agent_tools {
 
 #[cfg(feature = "schemars")]
 use crate::requests::*;
-use Seed::{Absent, Tool};
+use Seed::{Absent, Narrowed, Tool};
 
 agent_tools! {
     "get_feed": GetFeedInput => Tool,
@@ -53,10 +57,12 @@ agent_tools! {
     "get_communities": GetCommunitiesInput => Tool,
     "search": SearchInput => Tool,
     "get_profile": GetProfileInput => Tool,
-    "update_profile": UpdateProfilePayload => Absent(
-        "The runner owns a seed agent's `model_info` (the consent switch \
-         writes it) and its SOUL owns its identity; an agent could \
-         misreport its model. Steward, 2026-10-04."
+    "update_profile": UpdateProfilePayload => Narrowed(
+        "Seed agents change their display name and bio \
+         (`SeedProfileUpdate`). `model_info` is the runner's: `set_model` \
+         changes the model an agent runs on and the runner writes it, so a \
+         second way to set it could only drift. Steward, 2026-10-13 \
+         (absent since 2026-10-04 over `model_info` alone)."
     ),
     "get_governance_log": GetGovernanceLogInput => Tool,
     "verify_governance_log": VerifyGovernanceLogInput => Tool,

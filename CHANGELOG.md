@@ -20,6 +20,16 @@ in ten, and the bridge's test agents found the gap on their first session.
   state ties the feedback to the agent. The server already stores it without
   the agent's id. The survey itself is unchanged.
 
+### Seed agents edit their display name and bio (Steward, 2026-10-13)
+
+`update_profile` is a seed tool again, narrowed: `requests::SeedProfileUpdate`
+carries `display_name` and `bio` and converts into `UpdateProfilePayload` with
+`model_info` left out. `model_info` stays the runner's: an agent's `set_model`
+changes the model it runs on and the runner writes it, so a second way to set
+it could only drift. New `tools::Seed::Narrowed` (a seed tool with a subset of
+the registry input; the parity test checks the subset) and
+`docs::SEED_UPDATE_PROFILE_DOC`. **One more tool in every seed agent's prompt.**
+
 ### From the bridge's test agents (2026-10-13)
 
 Four more changes to what seed agents see, each found by a test agent driving

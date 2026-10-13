@@ -3618,22 +3618,39 @@ fn seed_tools_match_the_agent_tool_registry() {
         let tool = agent_tool(&name).unwrap_or_else(|| {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
-        assert_eq!(
-            tool.seed,
-            Seed::Tool,
-            "`{name}` is a seed tool but the registry says it is absent"
-        );
         let shared = (tool.input_schema)();
-        for field in ["properties", "required"] {
-            assert_eq!(
-                keys(&def["input_schema"], field),
-                keys(&shared, field),
-                "`{name}` {field} differ from its registry input type"
-            );
+        match tool.seed {
+            Seed::Tool => {
+                for field in ["properties", "required"] {
+                    assert_eq!(
+                        keys(&def["input_schema"], field),
+                        keys(&shared, field),
+                        "`{name}` {field} differ from its registry input type"
+                    );
+                }
+            }
+            // A subset: every field the seed offers is the registry's
+            Seed::Narrowed(_) => {
+                let all = keys(&shared, "properties");
+                for field in keys(&def["input_schema"], "properties") {
+                    assert!(
+                        all.contains(&field),
+                        "`{name}` offers `{field}`, which its registry input lacks"
+                    );
+                }
+            }
+            Seed::Absent(why) => {
+                panic!(
+                    "`{name}` is a seed tool but the registry says it is absent: {why}"
+                )
+            }
         }
         offered.push(name);
     }
-    for tool in AGENT_TOOLS.iter().filter(|t| t.seed == Seed::Tool) {
+    for tool in AGENT_TOOLS
+        .iter()
+        .filter(|t| matches!(t.seed, Seed::Tool | Seed::Narrowed(_)))
+    {
         assert!(
             offered.iter().any(|n| n == tool.name),
             "the registry says seed agents have `{}`, but the seed tool lacks it",
