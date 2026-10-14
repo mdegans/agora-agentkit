@@ -1115,8 +1115,17 @@ fn format_threaded_entry(
                 .created_at
                 .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
                 .unwrap_or_default();
+            let detached = te
+                .detached_from
+                .map(|parent| {
+                    format!(
+                        " (a reply to comment {parent}, which is not in this \
+                         thread)"
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "{indent}⋯ {author}{yours}{date} ({replies}): {} \
+                "{indent}⋯ {author}{yours}{date}{detached} ({replies}): {} \
                  [stub — get_content(comment_id: {}) for the full comment]",
                 truncate(&s.preview, max_preview),
                 s.id
@@ -1785,13 +1794,17 @@ fn format_obligations(
     // "match that filter" with no filter read as "something was excluded",
     // and an empty list as "nothing is owed" (bridge finding 82).
     if obligations.is_empty() {
-        return if filtered {
-            "No obligations match those filters. Leave out owed_by and status \
-             to list them all."
-        } else {
-            "No obligations have been recorded yet."
-        }
-        .to_string();
+        return match total {
+            // A page past the end is not an empty list.
+            Some(t) if t > 0 => format!(
+                "No obligations on this page: {t} match in all. Lower the offset \
+                 to see them."
+            ),
+            _ if filtered => "No obligations match those filters. Leave out \
+                 owed_by and status to list them all."
+                .to_string(),
+            _ => "No obligations have been recorded yet.".to_string(),
+        };
     }
     let mut out = format!(
         "## Obligations — {}{}\n\n",
@@ -3238,6 +3251,15 @@ mod tests {
             true,
         );
         assert!(narrowed.starts_with("No obligations match those filters."));
+        // Paged past the end: the total says they exist.
+        let past = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 3),
+            false,
+        );
+        assert!(
+            past.starts_with("No obligations on this page: 3 match in all."),
+            "{past}"
+        );
     }
 
     #[test]
@@ -3767,11 +3789,17 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 1, 22, 37, 0).unwrap());
         let mut under = full_comment("artist", false);
         under.parent_comment_id = Some(detached.id);
+        under.created_at =
+            Some(Utc.with_ymd_and_hms(2026, 4, 2, 8, 5, 0).unwrap());
+        let mut stubbed = stub("critic");
+        stubbed.parent_comment_id = Some(CommentId::new());
+        stubbed.created_at =
+            Some(Utc.with_ymd_and_hms(2026, 4, 3, 9, 0, 0).unwrap());
         let post = PostWithCommentsResponse {
             poll: None,
             post: base_post(),
             comments: vec![top, detached.clone(), under.clone()],
-            comment_stubs: vec![],
+            comment_stubs: vec![stubbed.clone()],
             omitted_comment_count: 0,
             thread_summary: None,
             in_your_trash: None,
@@ -3789,8 +3817,20 @@ mod tests {
             out.contains(&format!("[comment_id: {}]", under.id)),
             "{out}"
         );
-        assert!(out.contains("↳ artist → lawyer"), "{out}");
+        assert!(
+            out.contains("↳ artist, 2026-04-02 08:05Z → lawyer"),
+            "{out}"
+        );
         assert_eq!(out.matches("[comment_id:").count(), 3, "{out}");
+        // A detached stub is labelled and dated too.
+        assert!(
+            out.contains(&format!(
+                "⋯ critic, 2026-04-03 09:00Z (a reply to comment {}, which is \
+                 not in this thread)",
+                stubbed.parent_comment_id.unwrap()
+            )),
+            "{out}"
+        );
     }
 
     /// A full comment comes whole: the server's budget decides what is a

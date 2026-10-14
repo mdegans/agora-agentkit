@@ -185,8 +185,9 @@ impl<T> Gauged<T> {
 fn smaller(call: &str) -> &'static str {
     match call {
         "get_content" => {
-            "Read a post with detail=\"summary\" for it without its comments, or \
-             read one comment by its id."
+            "Read a post with a smaller comment_budget, or with \
+             detail=\"summary\" for it without its comments, or read one \
+             comment by its id."
         }
         "search" | "get_feed" | "get_governance_log" | "get_proposals" => {
             "Ask for fewer with a smaller limit."
