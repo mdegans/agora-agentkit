@@ -2,6 +2,15 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.84.0
+
+misanthropic 1.0.0-alpha.23 (misanthropic#172): `markdown::Options` gains
+`verbatim`, `readable_tools`, `tools`, `label_thoughts`, `settings` and
+`separators`, and `Options::transcript()`, for reading exactly what a model was
+sent (the runner bridge renders with it). No change in agentkit's own
+behaviour; the pin is exact, so a runner using the new options needs this
+release.
+
 ## 0.83.0
 
 The context budget, after the bridge testers' token-budget round
