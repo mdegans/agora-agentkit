@@ -2119,7 +2119,7 @@ fn tool_use_with_usage(
 #[tokio::test]
 async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     let server = MockServer::start();
-    // ~40 KB of prose: about 20k tokens at a byte for every two.
+    // ~40 KB of prose: about 13k tokens at a token for every three bytes.
     let rationale = "The Council deliberated. ".repeat(1_600);
     let record = serde_json::json!({
         "rounds": [{"number": 1, "responses": [{"role": "lawyer", "rationale": rationale}]}]
@@ -2131,12 +2131,13 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     });
     let read = serde_json::json!({"id": "GOV-2026-0006"});
 
-    // 106k in context + 20k + the 10.2k reserve (4096 + 4096 + 2000) > 128k,
-    // with room left for the round itself (MIN_ROUND_ROOM).
+    // 85k in context + 13k + the 32,768 reserve (CLOSING_RESERVE_MIN; a
+    // quarter of 128k is less) > 128k, with room left for the round itself
+    // (MIN_ROUND_ROOM).
     let mut reader = agent(&server, quiet_config());
     seat_start(&mut reader);
     reader
-        .handle(tool_use_with_usage("get_content", read.clone(), 106_000))
+        .handle(tool_use_with_usage("get_content", read.clone(), 85_000))
         .await
         .unwrap();
     let rendered = transcript(&reader);
@@ -2157,7 +2158,7 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
 
     // A smaller window, with room: the record, whole.
     let small = SeedConfig {
-        context_window: 40_000,
+        context_window: 80_000,
         ..quiet_config()
     };
     let mut reader = agent(&server, small);
@@ -2189,14 +2190,15 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
         when.method(GET).path("/agora/api/social/feed");
         then.status(200).json_body(serde_json::json!([]));
     });
-    // The default window (128k) less the reserve (4096 + 4096 + 2000) less
-    // MIN_ROUND_ROOM leaves 109,808 tokens of history before acting ends.
+    // The default window (128k) less the reserve (CLOSING_RESERVE_MIN,
+    // 32,768) less MIN_ROUND_ROOM leaves 87,232 tokens of history before
+    // acting ends.
     let input = serde_json::json!({});
 
     let mut roomy = agent(&server, quiet_config());
     seat_start(&mut roomy);
     roomy
-        .handle(tool_use_with_usage("get_feed", input.clone(), 100_000))
+        .handle(tool_use_with_usage("get_feed", input.clone(), 80_000))
         .await
         .unwrap();
     assert!(
@@ -2209,7 +2211,7 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
     let mut full = agent(&server, quiet_config());
     seat_start(&mut full);
     let control = full
-        .handle(tool_use_with_usage("get_feed", input, 112_000))
+        .handle(tool_use_with_usage("get_feed", input, 90_000))
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
@@ -2761,14 +2763,14 @@ async fn an_oversized_post_read_is_left_out_with_a_note() {
     let server = MockServer::start();
     let post_id = Uuid::new_v4();
     let mut body = post_content(post_id);
-    // ~60 KB: about 20k tokens at a byte for every three.
-    body["post"]["body"] = serde_json::json!("OVERSIZED ".repeat(6_000));
+    // ~150 KB: about 50k tokens at a token for every three bytes.
+    body["post"]["body"] = serde_json::json!("OVERSIZED ".repeat(15_000));
     server.mock(|when, then| {
         when.method(POST).path("/agora/api/content/read");
         then.status(200).json_body(body);
     });
     let small = SeedConfig {
-        context_window: 40_000,
+        context_window: 80_000,
         ..quiet_config()
     };
     let mut reader = agent(&server, small);
@@ -2783,7 +2785,7 @@ async fn an_oversized_post_read_is_left_out_with_a_note() {
         .unwrap();
     let rendered = transcript(&reader);
     assert!(
-        rendered.contains("would not fit in your 40000 token window"),
+        rendered.contains("would not fit in your 80000 token window"),
         "{rendered}"
     );
     assert!(rendered.contains("detail=\"summary\""), "{rendered}");

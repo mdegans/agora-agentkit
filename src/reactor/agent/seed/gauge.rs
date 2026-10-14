@@ -21,6 +21,15 @@ pub const CONTEXT_BUFFER_TOKENS: u64 = 16_000;
 /// "not run" answers seated before it, on top of the phase's `max_tokens`
 pub const PHASE_PROMPT_TOKENS: u64 = 2_000;
 
+/// The least a session keeps back for its end, whatever its window: the
+/// closing turn, reflect and the memory rewrite, and an interview if the
+/// agent asks to be contacted (Steward, 2026-10-14)
+pub const CLOSING_RESERVE_MIN: u64 = 32_768;
+
+/// The share of the window kept back for the end of a session: a quarter
+/// (Steward, 2026-10-14; agreed 2026-10-09, agentkit#148)
+pub const CLOSING_RESERVE_DIVISOR: u64 = 4;
+
 /// The least room an acting round needs for its tool results. With less,
 /// acting ends and the session goes on to reflect while there is still
 /// room to write memory (see [`ContextGauge::room`]).
@@ -38,7 +47,9 @@ pub struct ContextGauge(Arc<Inner>);
 struct Inner {
     held: AtomicU64,
     window: AtomicU64,
-    reserve: u64,
+    /// The least reserve, from the session's own budgets; see
+    /// [`ContextGauge::reserve`]
+    floor: u64,
 }
 
 impl Default for ContextGauge {
@@ -48,13 +59,13 @@ impl Default for ContextGauge {
 }
 
 impl ContextGauge {
-    /// A gauge for a `window`-token context, holding `reserve` tokens back
-    /// from every tool result
-    pub fn new(window: u64, reserve: u64) -> Self {
+    /// A gauge for a `window`-token context, holding at least `floor`
+    /// tokens back from every tool result (see [`ContextGauge::reserve`])
+    pub fn new(window: u64, floor: u64) -> Self {
         Self(Arc::new(Inner {
             held: AtomicU64::new(0),
             window: AtomicU64::new(window),
-            reserve,
+            floor,
         }))
     }
 
@@ -92,9 +103,14 @@ impl ContextGauge {
         self.0.window.store(window, Ordering::Relaxed);
     }
 
-    /// The tokens held back from every tool result
+    /// The tokens held back from every tool result for the end of the
+    /// session: a quarter of the window, at least [`CLOSING_RESERVE_MIN`],
+    /// and never less than the session's own budgets need. It follows the
+    /// window, which the admitted model can narrow mid-setup.
     pub fn reserve(&self) -> u64 {
-        self.0.reserve
+        (self.window() / CLOSING_RESERVE_DIVISOR)
+            .max(CLOSING_RESERVE_MIN)
+            .max(self.0.floor)
     }
 
     /// Whether `tokens` more, plus the reserve, fit in the window
@@ -128,14 +144,21 @@ impl ContextGauge {
     }
 }
 
-/// A rough token count for `text`: a byte for every two. Prose runs nearer
-/// four bytes a token, but Agora results are JSON thick with UUIDs, which
-/// local tokenizers split finely; this errs on the side of the window.
+/// Bytes per token in [`estimate_tokens`], and in the sizes shown before a
+/// read, so a size an agent is shown agrees with whether it will fit
+pub const BYTES_PER_TOKEN: u64 = 3;
+
+/// A rough token count for `text`: a token for every three bytes. Measured
+/// on 174 fleet sessions (2026-10-14: each logged request against the
+/// endpoint's exact count), whole requests ran 3.2 to 5.3 bytes a token
+/// (median 3.7 for Qwen, 4.4 for gpt-oss), so three still errs on the side
+/// of the window. Until 0.83 it was two, which over-counted results 1.6 to
+/// 2.2 times and refused reads that would have fit.
 // TODO: count with the endpoint (`BatchBackend::count_tokens` /
 // misanthropic `Client::count_tokens`), which needs the inference backend
 // plumbed into the tools.
 pub(super) fn estimate_tokens(text: &str) -> u64 {
-    text.len() as u64 / 2
+    text.len() as u64 / BYTES_PER_TOKEN
 }
 
 /// A [`Tool`] whose every result is counted into a [`ContextGauge`], and
@@ -168,10 +191,12 @@ impl<T> Gauged<T> {
         );
         let note = format!(
             "This result is about {tokens} tokens ({} KB); with about {held} \
-             already in your context it would not fit in your {} token \
-             window, so it was left out. {}",
+             already in your context (this turn's other results included), \
+             it would not fit in your {} token window less the {} kept for \
+             the end of your session, so it was left out. {}",
             text.len() / 1024,
             self.context.window(),
+            self.context.reserve(),
             smaller(call),
         );
         self.context.add(estimate_tokens(&note));
@@ -310,23 +335,40 @@ mod tests {
     /// in the same turn sees it; one that doesn't is a note, counted too
     #[tokio::test]
     async fn every_result_is_counted_and_an_oversized_one_left_out() {
-        let gauge = ContextGauge::new(40_000, CONTEXT_BUFFER_TOKENS);
+        let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
         gauge.set(10_000);
-        // 20 KB is 10k tokens: 10k + 10k + 16k fits in 40k, twice does not.
-        let mut tool = Gauged::new(Echo { len: 20_000 }, gauge.clone());
+        // 30 KB is 10k tokens; the reserve is CLOSING_RESERVE_MIN (a
+        // quarter of 60k is less): 10k + 10k + 32,768 fits in 60k, twice
+        // does not.
+        let mut tool = Gauged::new(Echo { len: 30_000 }, gauge.clone());
 
         let first = tool.call(call("search")).await;
         assert!(!first.is_error);
-        assert_eq!(first.content.to_string().len(), 20_000);
+        assert_eq!(first.content.to_string().len(), 30_000);
         assert_eq!(gauge.get(), 20_000);
 
         let second = tool.call(call("search")).await;
         assert!(second.is_error);
         assert_eq!(second.tool_use_id, "toolu_1", "still answers the call");
         let note = second.content.to_string();
-        assert!(note.contains("about 10000 tokens (19 KB)"), "{note}");
+        assert!(note.contains("about 10000 tokens (29 KB)"), "{note}");
         assert!(note.contains("about 20000 already"), "{note}");
+        assert!(note.contains("less the 32768 kept for the end"), "{note}");
         assert!(note.contains("smaller limit"), "{note}");
         assert!(gauge.get() > 20_000 && gauge.get() < 20_200, "the note");
+    }
+
+    /// A quarter of the window, at least CLOSING_RESERVE_MIN, at least the
+    /// budgets; and it follows the window
+    #[test]
+    fn the_reserve_is_a_quarter_of_the_window_with_a_floor() {
+        let gauge = ContextGauge::new(262_144, 10_000);
+        assert_eq!(gauge.reserve(), 65_536);
+        gauge.set_window(131_072);
+        assert_eq!(gauge.reserve(), 32_768);
+        gauge.set_window(64_000);
+        assert_eq!(gauge.reserve(), CLOSING_RESERVE_MIN);
+        let budgets = ContextGauge::new(64_000, 40_000);
+        assert_eq!(budgets.reserve(), 40_000);
     }
 }
