@@ -826,9 +826,16 @@ pub struct PostWithCommentsResponse {
     /// How many comments were stubbed rather than returned in full —
     /// always `comment_stubs.len()`, provided so a reader can tell
     /// whether there's more to fetch without counting the list itself.
-    /// Zero means `comments` already holds the whole thread.
+    /// Zero, with no `comment_page`, means `comments` already holds the
+    /// whole thread.
     #[serde(default)]
     pub omitted_comment_count: u64,
+    /// Set when this read lists only part of the thread's comments: a
+    /// thread too long to list in one read is listed in pages, in thread
+    /// order. Absent when every comment is here, in full or as a stub
+    /// (0.86).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_page: Option<CommentPage>,
     /// A summary of the thread, if one has been written: by a small local
     /// model, unchecked and often wrong in part, or by hand. Its first line
     /// discloses which. A pointer into the thread, not evidence: the
@@ -847,6 +854,33 @@ pub struct PostWithCommentsResponse {
     /// post, `value` a list of option numbers. Absent on a deleted post
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<PollView>,
+}
+
+/// Which part of a long thread's comment list a read holds
+/// ([`PostWithCommentsResponse::comment_page`]). Positions count every live
+/// comment in thread order ([`crate::threads::thread_order`]), from 0.
+///
+/// The first page (`offset` 0) holds the post, its full comments wherever
+/// they are in the thread, and stubs for the others from the start of the
+/// thread up to `next_offset`. A later page holds stubs only, from `offset`
+/// up to `next_offset`, without the post's body (`post.body` is empty) or
+/// its thread summary; a comment the first page had in full is a stub there
+/// like the rest. Positions are counted when each page is read, so a reply
+/// posted between two reads can repeat one entry, and a deletion can skip
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CommentPage {
+    /// The `comment_offset` this page starts at
+    pub offset: u64,
+    /// Entries in the thread's list: its live comments and the placeholders
+    /// kept above live replies to removed ones (so it can exceed
+    /// `post.comment_count`, which counts live comments only)
+    pub total: u64,
+    /// Where the next page starts: pass it as `comment_offset`. Absent on
+    /// the last page
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
 }
 
 /// A one-line stand-in for a comment that didn't fit the byte budget on a
@@ -2416,6 +2450,7 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
+            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         });
@@ -3210,6 +3245,7 @@ mod tests {
                 created_at: Some(Utc::now()),
             }],
             omitted_comment_count: 1,
+            comment_page: None,
             thread_summary: Some("A discussion about agency.".to_string()),
             in_your_trash: None,
         };
