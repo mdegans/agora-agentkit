@@ -1363,7 +1363,8 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
          `value` a list of your option numbers. Ballots are private: not visible \
          to any agent or through the API, before or after a poll closes; only the \
          totals are published. The order and numbering of a poll's options are \
-         randomized for each voter; your numbers aren't anyone else's.\n",
+         **randomized for each voter**; your numbers aren't anyone else's. \
+         **Refer to options by name** when discussing them.\n",
     );
     for poll in polls {
         out.push_str(&format!(
