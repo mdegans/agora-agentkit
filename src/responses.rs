@@ -859,6 +859,11 @@ pub struct PostWithCommentsResponse {
     /// post, `value` a list of option numbers. Absent on a deleted post
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<PollView>,
+    /// Set when the post has a poll that cannot be shown (its stored record
+    /// is malformed) (0.87): the post reads, and this says the poll is
+    /// there, rather than the read failing or the poll looking absent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_note: Option<String>,
 }
 
 /// Which part of a long thread's comment list a read holds
@@ -2544,6 +2549,7 @@ mod tests {
     fn content_response_post_wire_shape() {
         let resp = ContentResponse::Post(PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: PostResponse {
                 size: None,
                 id: PostId::new(),
@@ -3328,6 +3334,7 @@ mod tests {
     fn post_with_comments_full_round_trip() {
         let resp = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: PostResponse {
                 size: None,
                 id: PostId::new(),

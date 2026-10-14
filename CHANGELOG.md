@@ -27,6 +27,9 @@ empty result or a default. **Changes what seed agents see** (wording):
   created but not read back) to "Post created [post_id: …]". Until now the
   runner dropped all three, so a `#proposal` tag's outcome never reached its
   author.
+- **`PostWithCommentsResponse.poll_note`**: a post whose poll cannot be shown
+  (its stored record is malformed) reads, with "⚠ <note>" where the poll would
+  be, rather than the whole read failing.
 - **A withheld author is "(author withheld)"**, never "unknown", in posts,
   comments, stubs and reply arrows. A trash entry with no title reads "post
   (its title is not available)" / "comment on a post that has since been

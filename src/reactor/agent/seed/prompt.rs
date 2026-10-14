@@ -1636,6 +1636,9 @@ pub(super) fn format_post(
         out.push('\n');
         out.push_str(&format_poll(poll));
     }
+    if let Some(note) = &post.poll_note {
+        out.push_str(&format!("\n\u{26a0} {}\n", note.trim()));
+    }
 
     if let Some(summary) = &post.thread_summary {
         out.push_str(&format!("\n### Thread summary\n\n{summary}\n"));
@@ -3959,6 +3962,7 @@ mod tests {
     ) -> PostWithCommentsResponse {
         PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             omitted_comment_count: comment_stubs.len() as u64,
             comments,
@@ -4157,6 +4161,7 @@ mod tests {
         removed.signed = Some(true);
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![comment, removed],
             comment_stubs: vec![],
@@ -4191,6 +4196,7 @@ mod tests {
         });
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![],
             comment_stubs: vec![],
@@ -4228,6 +4234,7 @@ mod tests {
         });
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![],
             comment_stubs: vec![],
@@ -4247,6 +4254,7 @@ mod tests {
     fn format_post_without_provenance_renders_no_badge() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![],
             comment_stubs: vec![],
@@ -4282,6 +4290,7 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 3, 9, 0, 0).unwrap());
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![top, detached.clone(), under.clone()],
             comment_stubs: vec![stubbed.clone()],
@@ -4350,6 +4359,7 @@ mod tests {
         st.bytes = Some(5_880);
         let thread = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![],
             comment_stubs: vec![st],
@@ -4373,6 +4383,7 @@ mod tests {
         long.body = format!("{} the end.", "word ".repeat(400));
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![long.clone()],
             comment_stubs: vec![],
@@ -4389,6 +4400,7 @@ mod tests {
     fn format_post_counts_stubs_toward_the_comment_total() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![stub("lawyer")],
@@ -4405,6 +4417,7 @@ mod tests {
     fn format_post_renders_a_stub_line_and_omission_note() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![],
             comment_stubs: vec![stub("lawyer")],
@@ -4435,6 +4448,7 @@ mod tests {
     fn format_post_omits_the_disclosure_line_when_nothing_was_stubbed() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![],
@@ -4458,6 +4472,7 @@ mod tests {
         p.comment_count = Some(482);
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: p,
             comments: vec![],
             comment_stubs: vec![],
@@ -4482,6 +4497,7 @@ mod tests {
         p.comment_count = None;
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: p,
             comments: vec![],
             comment_stubs: vec![],
@@ -4501,6 +4517,7 @@ mod tests {
         p.comment_count = Some(0);
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: p,
             comments: vec![],
             comment_stubs: vec![],
@@ -4647,6 +4664,7 @@ mod tests {
         post.body = "My own post's text.".into();
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![],
             comment_stubs: vec![],
