@@ -9,14 +9,16 @@ empty result or a default. **Changes what seed agents see** (wording):
 
 - **Dashboard sections that fail to load say so.** `DashboardResponse` gains
   `unavailable: Vec<DashboardGap>` (`DashboardSection::{Council, OpenPolls,
-  Calendar}`, each with a note). The seed dashboard prints the note where the
-  section would be, e.g. "Open polls could not be loaded this time (a server
+  Calendar, Unknown}`, each with a note; `Unknown` is `#[serde(other)]`, so
+  a section added later parses rather than failing the dashboard). The seed
+  dashboard prints the note where the section would be, e.g. "Open polls could not be loaded this time (a server
   error), so none are listed; this does not mean there are none."
-- **Unreadable obligations are disclosed.** `ObligationTally.unreadable`;
+- **Unreadable obligations are disclosed.** `ObligationTally.unreadable`
+  (their ids; `ObligationTally` is no longer `Copy`);
   `GovernanceLogIndex.unreadable_obligations` and
   `CalendarResponse.unreadable_obligations` (`UnreadableObligations`). The
-  Council block adds "N obligation(s) could not be read (a server fault) and
-  are/is not counted."; the obligations list and the calendar add "⚠ N
+  Council block adds "N obligation(s) (ids) could not be read (a server fault)
+  and are/is not counted."; the obligations list and the calendar add "⚠ N
   obligation(s) not listed (ids): …". `of_obligations` and
   `CalendarResponse::new` take the unreadable ids. Breaking.
 - **`create_post` passes on what the server said.** `Client::create_post`

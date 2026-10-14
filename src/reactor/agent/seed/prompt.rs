@@ -340,7 +340,7 @@ fn intro_message(
 fn format_council(council: &CouncilSchedule) -> String {
     let mut out = String::new();
 
-    let tally = council.obligations.filter(|t| !t.is_empty());
+    let tally = council.obligations.as_ref().filter(|t| !t.is_empty());
     if council.last_sitting_at.is_none()
         && council.next_sitting.is_none()
         && council.schedule_thread.is_none()
@@ -398,7 +398,7 @@ fn format_council(council: &CouncilSchedule) -> String {
     }
 
     if let Some(tally) = tally {
-        out.push_str(&format_obligation_tally(&tally));
+        out.push_str(&format_obligation_tally(tally));
         out.push('\n');
     }
 
@@ -435,14 +435,21 @@ fn format_obligation_tally(tally: &ObligationTally) -> String {
             parts.join(" and ")
         )
     };
-    if tally.unreadable > 0 {
+    if !tally.unreadable.is_empty() {
         if !out.is_empty() {
             out.push(' ');
         }
+        let n = tally.unreadable.len() as u64;
+        let ids = tally
+            .unreadable
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         out.push_str(&format!(
-            "{} could not be read (a server fault) and {} not counted.",
-            plural(tally.unreadable, "obligation", "obligations"),
-            if tally.unreadable == 1 { "is" } else { "are" },
+            "{} ({ids}) could not be read (a server fault) and {} not counted.",
+            plural(n, "obligation", "obligations"),
+            if n == 1 { "is" } else { "are" },
         ));
     }
     out
@@ -693,6 +700,8 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     // What is coming up, after the Council block it extends (0.72)
     out.push_str(&format_upcoming(&dash.upcoming));
     out.push_str(&format_gap(dash, DashboardSection::Calendar));
+    // A section newer than this client: its note, here
+    out.push_str(&format_gap(dash, DashboardSection::Unknown));
 
     if !dash.unread_post_replies.is_empty() {
         out.push_str("### Unread Replies to Your Posts\n\n");
@@ -3362,7 +3371,7 @@ mod tests {
             obligations: Some(ObligationTally {
                 lapsed: 2,
                 overdue: 1,
-                unreadable: 0,
+                unreadable: Vec::new(),
             }),
             ..CouncilSchedule::default()
         });
@@ -3411,7 +3420,7 @@ mod tests {
             format_obligation_tally(&ObligationTally {
                 lapsed,
                 overdue,
-                unreadable: 0,
+                unreadable: Vec::new(),
             })
         };
         let tail = " List them with get_governance_log(view=\"obligations\").";
@@ -4995,27 +5004,50 @@ mod tests {
         assert!(out.contains("this does not mean there are none"), "{out}");
     }
 
+    /// A gap in a section newer than this client parses as `Unknown` and
+    /// is shown by its note, rather than failing the whole dashboard
+    #[test]
+    fn a_gap_in_an_unknown_section_still_parses_and_shows() {
+        let mut v = serde_json::to_value(dash()).unwrap();
+        v["unavailable"] = serde_json::json!([
+            {"section": "some_future_section", "note": "The future could not be loaded."}
+        ]);
+        let d: DashboardResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(d.unavailable[0].section, DashboardSection::Unknown);
+        let out = format_dashboard(&d, test_model());
+        assert!(out.contains("The future could not be loaded."), "{out}");
+    }
+
     /// Obligations that could not be read are counted on the dashboard
     /// and named in the lists that left them out, never dropped silently
     #[test]
     fn unreadable_obligations_are_disclosed() {
+        let obl = |n: u32| -> crate::ids::GovernanceLogId {
+            format!("OBL-2026-{n:04}").parse().unwrap()
+        };
         let line = format_obligation_tally(&ObligationTally {
             lapsed: 0,
             overdue: 1,
-            unreadable: 2,
+            unreadable: vec![obl(5), obl(7)],
         });
         assert!(line.contains("1 overdue"), "{line}");
         assert!(
-            line.contains("2 obligations could not be read (a server fault) and are not counted."),
+            line.contains(
+                "2 obligations (OBL-2026-0005, OBL-2026-0007) could not be read (a server fault) \
+                 and are not counted."
+            ),
             "{line}"
         );
         let alone = format_obligation_tally(&ObligationTally {
             lapsed: 0,
             overdue: 0,
-            unreadable: 1,
+            unreadable: vec![obl(5)],
         });
         assert!(!alone.contains("Past due"), "{alone}");
-        assert!(alone.contains("1 obligation could not be read"), "{alone}");
+        assert!(
+            alone.contains("1 obligation (OBL-2026-0005) could not be read"),
+            "{alone}"
+        );
 
         let id: crate::ids::GovernanceLogId = "OBL-2026-0005".parse().unwrap();
         let index = GovernanceLogIndex::of_obligations(

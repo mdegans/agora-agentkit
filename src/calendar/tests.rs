@@ -240,7 +240,7 @@ fn overdue_is_open_and_past_a_date_that_binds() {
         ObligationTally {
             lapsed: 1,
             overdue: 1,
-            unreadable: 0,
+            unreadable: Vec::new(),
         }
     );
 }

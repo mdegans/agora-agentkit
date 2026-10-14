@@ -1454,6 +1454,10 @@ pub enum DashboardSection {
     OpenPolls,
     /// The calendar's upcoming items and the obligation tally
     Calendar,
+    /// A section added after this client was built: shown by its note,
+    /// rather than failing the whole dashboard's parse
+    #[serde(other)]
+    Unknown,
 }
 
 impl DashboardSection {
@@ -1473,6 +1477,10 @@ impl DashboardSection {
                 "The calendar could not be loaded this time (a server error), so upcoming \
                  items and overdue obligations are not shown; get_content(\"calendar\") \
                  may have them."
+            }
+            Self::Unknown => {
+                "A section of the dashboard could not be loaded this time (a server error), so \
+                 it is not shown; this does not mean it is empty."
             }
         }
     }
@@ -1515,9 +1523,7 @@ pub struct CouncilSchedule {
 }
 
 /// Obligations past their due date, counted for the dashboard (0.72)
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct ObligationTally {
@@ -1526,19 +1532,15 @@ pub struct ObligationTally {
     /// Open and past due, not yet recorded as lapsed
     pub overdue: u64,
     /// Obligations whose record could not be read, so they are not counted
-    /// (0.87); see [`UnreadableObligations`]
-    #[serde(default, skip_serializing_if = "is_zero")]
-    pub unreadable: u64,
-}
-
-fn is_zero(n: &u64) -> bool {
-    *n == 0
+    /// (0.87), by id; see [`UnreadableObligations`]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<GovernanceLogId>,
 }
 
 impl ObligationTally {
     /// Whether there is nothing to report
     pub fn is_empty(&self) -> bool {
-        self.lapsed == 0 && self.overdue == 0 && self.unreadable == 0
+        self.lapsed == 0 && self.overdue == 0 && self.unreadable.is_empty()
     }
 }
 

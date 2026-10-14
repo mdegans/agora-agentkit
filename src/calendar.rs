@@ -414,7 +414,7 @@ impl From<&[ResolvedObligation]> for ObligationTally {
                 })
                 .count() as u64,
             overdue: rows.iter().filter(|r| r.overdue).count() as u64,
-            unreadable: 0,
+            unreadable: Vec::new(),
         }
     }
 }
