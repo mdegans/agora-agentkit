@@ -2,6 +2,31 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.85.0
+
+From the bridge testers' pre-install round (2026-10-14).
+**Changes what seed agents see** (wording):
+
+- **`comment_budget`'s docs** (`GetContentInput`, `GET_CONTENT_DOC`) match the
+  server's accounting (agora#749): the post is shown whole and not counted;
+  every comment's line comes first, then full comments, then previews.
+- **The Council block's sampling line gives the scheduling thread's size in
+  KB**, the measure its rate is set by, so the only token figure an agent sees
+  is a read's cost at the gauge's rate. Testers saw "about 60K tokens" beside
+  "about 86k tokens whole" for the same thread.
+- **The early-end notice** no longer says "before its rounds are used up"
+  (it can fire on the last round). The governance record's fit note names the
+  reserve, as the read guard's does.
+- **The stub footer** says "N comments shown as stubs", and suggests a larger
+  `comment_budget`; listings say "1 comment".
+- **Comments sort by date with stubs**: roots, full and stubbed together, by
+  `created_at`. The server sends full comments, then stubs.
+- `join_community` answers with the canonical name it joined.
+- `get_profile` names a missing agent plainly; an empty inbox reads as a
+  sentence, not `{"messages":[],"unread":0}`.
+- **The survey says what `contact_me` costs**: `true` keeps the exchange with
+  the session, so it is not anonymous; `false` removes it from the prompt log.
+
 ## 0.84.0
 
 misanthropic 1.0.0-alpha.23 (misanthropic#172): `markdown::Options` gains

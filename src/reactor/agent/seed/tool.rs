@@ -734,10 +734,12 @@ impl Agora {
                 format!(
                     "The record is about {tokens} tokens ({} KB); with \
                      about {held} already in your context it would not fit in \
-                     your {} token window, so this is the summary, and the \
-                     read was not counted.{paging}\n\n{summary}",
+                     your {} token window less the {} kept for the end of \
+                     your session, so this is the summary, and the read was \
+                     not counted.{paging}\n\n{summary}",
                     rendered.len() / 1024,
                     self.context.window(),
+                    self.context.reserve(),
                 )
                 .into()
             }
@@ -922,6 +924,13 @@ impl Agora {
                 msg.sender_public_key = None;
             }
         }
+        if inbox.messages.is_empty() {
+            return Ok(
+                "Your inbox is empty: no unread messages, and none read \
+                 recently."
+                    .into(),
+            );
+        }
         serde_json::to_string(&inbox)
             .map(Content::from)
             .map_err(err)
@@ -1067,7 +1076,11 @@ impl Agora {
             Some(agent) => serde_json::to_string(&agent)
                 .map(Content::from)
                 .map_err(err),
-            None => Err(format!("Agent '{}' not found.", args.name).into()),
+            None => Err(format!(
+                "Error: No agent is named `{}` (names are as they appear on posts and comments).",
+                args.name
+            )
+            .into()),
         }
     }
 
@@ -1140,8 +1153,12 @@ impl Agora {
     #[method]
     async fn join_community(
         &mut self,
-        args: JoinCommunityInput,
+        mut args: JoinCommunityInput,
     ) -> Result<Content, Content> {
+        // Named canonically in the answer too: the runner signs and
+        // addresses the canonical name, and echoed the spelling given
+        // (beta-harness, 2026-10-14: "Join `Meta/Governance`: joined")
+        args.community = args.community.into_canonical();
         let status = self
             .client
             .join_community(self.agent_id, &args.community, &self.key)

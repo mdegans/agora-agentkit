@@ -693,10 +693,13 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
                     })
                     .unwrap_or_default();
                 out.push_str(&format!(
-                    "  - \"{}\" {author_label}, {} ({} comments{size}) [id: {}]\n",
+                    "  - \"{}\" {author_label}, {} ({}{size}) [id: {}]\n",
                     truncate(&post.title, 80),
                     post.created_at.format("%Y-%m-%d"),
-                    post.comment_count,
+                    match post.comment_count {
+                        1 => "1 comment".to_string(),
+                        n => format!("{n} comments"),
+                    },
                     post.id
                 ));
             }
@@ -824,7 +827,10 @@ fn post_line(post: &PostResponse, viewer_name: &str) -> String {
     // `post_comment_count`).
     let comments = post
         .comment_count
-        .map(|n| format!("{n} comments"))
+        .map(|n| match n {
+            1 => "1 comment".to_string(),
+            n => format!("{n} comments"),
+        })
         .into_iter()
         .chain(date)
         .chain(size)
@@ -1076,17 +1082,24 @@ fn build_comment_threads<'a>(
         }
     }
 
-    // Roots in the order the server sent them: top-level comments, and
-    // those whose parent is not here.
-    let roots = comments
+    // Roots, top-level comments and those whose parent is not here, by
+    // date, full and stubbed together: the server sends full comments,
+    // then stubs, which read as out of order (beta-newcomer, 2026-10-14).
+    // The sort is stable, so undated ones keep the server's order.
+    let mut roots: Vec<_> = comments
         .iter()
-        .map(|c| (c.id, c.parent_comment_id))
-        .chain(stubs.iter().map(|s| (s.id, s.parent_comment_id)))
-        .filter(|(_, parent)| {
+        .map(|c| (c.created_at, c.id, c.parent_comment_id))
+        .chain(
+            stubs
+                .iter()
+                .map(|s| (s.created_at, s.id, s.parent_comment_id)),
+        )
+        .filter(|(_, _, parent)| {
             parent.is_none_or(|pid| !by_id.contains_key(&pid))
         })
-        .map(|(id, _)| id);
-    for id in roots {
+        .collect();
+    roots.sort_by_key(|(at, _, _)| *at);
+    for (_, id, _) in roots {
         walk(id, 0, &by_id, &children, &mut result);
     }
 
@@ -1532,14 +1545,18 @@ pub(super) fn format_post(
 
     if post.omitted_comment_count > 0 {
         out.push_str(&format!(
-            "\n*[{} comment{} shown as a stub above (marked ⋯), not in \
-             full — this thread is larger than the read's byte budget{}. \
-             Follow a stub's comment_id with get_content to read it.]*\n",
-            post.omitted_comment_count,
+            "\n*[{} shown as {} above (marked ⋯), not in full — this \
+             thread is larger than the read's byte budget{}. Follow a stub's \
+             comment_id with get_content to read it, or read again with a \
+             larger comment_budget (up to 262144).]*\n",
+            match post.omitted_comment_count {
+                1 => "1 comment".to_string(),
+                n => format!("{n} comments"),
+            },
             if post.omitted_comment_count == 1 {
-                ""
+                "a stub"
             } else {
-                "s"
+                "stubs"
             },
             p.size
                 .map(|size| format!(
