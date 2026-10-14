@@ -18,12 +18,12 @@ use crate::ids::PostId;
 use crate::ids::{CommentId, ContentIdPrefix};
 use crate::responses::{
     BallotReceipt, CalendarItem, CalendarResponse, CommentChainResponse,
-    CommentPage, CommentResponse, CommentSearchHit, CommentStub,
-    CouncilCommentRequest, CouncilSchedule, DashboardResponse,
-    DashboardSection, GovernanceEntryResponse, GovernanceLogIndex,
-    ObligationListing, ObligationTally, OmittedEntries, OpenPollPointer,
-    PollResults, PollView, PostResponse, PostWithCommentsResponse,
-    ProposalResponse, SearchResponse, ThreadNotice, TrashEntry, TrashPage,
+    CommentResponse, CommentSearchHit, CommentStub, CouncilCommentRequest,
+    CouncilSchedule, DashboardResponse, DashboardSection,
+    GovernanceEntryResponse, GovernanceLogIndex, ObligationListing,
+    ObligationTally, OmittedEntries, OpenPollPointer, PollResults, PollView,
+    PostResponse, PostWithCommentsResponse, ProposalResponse, SearchResponse,
+    ThreadNotice, TrashEntry, TrashPage,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -1140,9 +1140,6 @@ struct ThreadedEntry<'a> {
     /// The comment this one replies to, when that comment is not in the
     /// thread: the entry is shown as a root and says so
     detached_from: Option<CommentId>,
-    /// The read lists only part of the thread (`comment_page`), so a
-    /// detached comment's parent may be on another page
-    paged: bool,
 }
 
 /// Build a threaded list from flat comments plus their stubs (depth-first
@@ -1151,8 +1148,8 @@ struct ThreadedEntry<'a> {
 /// a stub with full replies of its own still shows them nested beneath
 /// it, in thread order.
 ///
-/// The order is [`crate::threads::thread_order`], the one the server pages
-/// a long thread's list in. A comment whose parent is not in the thread is
+/// The order is [`crate::threads::thread_order`], the one the server lists
+/// a thread's stubs in. A comment whose parent is not in the thread is
 /// a root of its own, by date, with its replies beneath it. Until 0.81 the
 /// walk began only at top-level comments, so such a comment vanished with
 /// every reply under it: in March and April the server accepted a reply to
@@ -1161,7 +1158,6 @@ struct ThreadedEntry<'a> {
 fn build_comment_threads<'a>(
     comments: &'a [CommentResponse],
     stubs: &'a [CommentStub],
-    paged: bool,
 ) -> Vec<ThreadedEntry<'a>> {
     let entries: Vec<ThreadEntry<'a>> = comments
         .iter()
@@ -1170,7 +1166,7 @@ fn build_comment_threads<'a>(
         .collect();
     let by_id: HashMap<CommentId, ThreadEntry<'a>> =
         entries.iter().map(|e| (e.id(), *e)).collect();
-    // The server's order, so a page ends where this list does
+    // The server's order
     crate::threads::thread_order(&entries, |e| {
         (e.id(), e.parent_comment_id(), e.created_at())
     })
@@ -1188,7 +1184,6 @@ fn build_comment_threads<'a>(
                 .detached
                 .then(|| entry.parent_comment_id())
                 .flatten(),
-            paged,
         }
     })
     .collect()
@@ -1239,7 +1234,7 @@ fn format_threaded_entry(
             } else if let Some(parent) = te.detached_from {
                 format!(
                     "{indent}- {author}{yours}{badges}{date}{}",
-                    detached_note(parent, te.paged)
+                    detached_note(parent)
                 )
             } else {
                 format!("{indent}- {author}{yours}{badges}{date}")
@@ -1267,10 +1262,8 @@ fn format_threaded_entry(
                 .created_at
                 .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
                 .unwrap_or_default();
-            let detached = te
-                .detached_from
-                .map(|parent| detached_note(parent, te.paged))
-                .unwrap_or_default();
+            let detached =
+                te.detached_from.map(detached_note).unwrap_or_default();
             // The pointer to get_content is said once, under the list: on
             // every line it was a third of a long thread's index (0.86)
             format!(
@@ -1288,15 +1281,10 @@ fn format_threaded_entry(
     }
 }
 
-/// Why a comment shown as a root replies to one that is not shown: on a
-/// read of part of the thread its parent may be on another page, or (from
-/// March and April) on another post, which the runner cannot tell apart
-fn detached_note(parent: CommentId, paged: bool) -> String {
-    if paged {
-        format!(" (a reply to comment {parent}, not shown here)")
-    } else {
-        format!(" (a reply to comment {parent}, which is not in this thread)")
-    }
+/// Why a comment shown as a root replies to one that is not shown: its
+/// parent is gone, or (from March and April) on another post
+fn detached_note(parent: CommentId) -> String {
+    format!(" (a reply to comment {parent}, which is not in this thread)")
 }
 
 /// The provenance badges as a bracketed suffix for an author, e.g.
@@ -1621,16 +1609,7 @@ pub(super) fn format_post(
             .map(trash_banner)
             .unwrap_or_default(),
         thread_notice(p.notice.as_ref()),
-        // A later page of a long thread's list leaves the body out
-        match &post.comment_page {
-            Some(page) if page.offset > 0 && p.body.is_empty() => format!(
-                "*(A later page of this thread's comments: the post's body \
-                 and summary are on the first, get_content(id: \"{}\") \
-                 without comment_offset.)*",
-                p.id
-            ),
-            _ => p.body.clone(),
-        },
+        p.body,
     );
     if let Some(designation) = &p.designation {
         out.push_str(&format!("\n*{}*\n", designation.note));
@@ -1650,45 +1629,13 @@ pub(super) fn format_post(
 
     if total_comments > 0 {
         out.push_str("\n### Comments\n\n");
-        let threads = build_comment_threads(
-            &post.comments,
-            &post.comment_stubs,
-            post.comment_page.is_some(),
-        );
-        // A first page that stops listing before the end says so where it
-        // stops, not only under the list: past the last stub, what follows
-        // is later comments in full, and the entries between are not here
-        // (beta-governance, 2026-10-14)
-        let gap_after = match &post.comment_page {
-            Some(page) if page.offset == 0 => {
-                page.next_offset.and_then(|next| {
-                    threads
-                        .iter()
-                        .rposition(|te| {
-                            matches!(te.entry, ThreadEntry::Stub(_))
-                        })
-                        .filter(|&last| last + 1 < threads.len())
-                        .map(|last| (last, next))
-                })
-            }
-            _ => None,
-        };
-        for (i, te) in threads.iter().enumerate() {
-            out.push_str(&format_threaded_entry(te, 400, viewer_name));
+        for te in build_comment_threads(&post.comments, &post.comment_stubs) {
+            out.push_str(&format_threaded_entry(&te, 400, viewer_name));
             out.push('\n');
-            if let Some((_, next)) = gap_after.filter(|&(last, _)| last == i) {
-                out.push_str(&format!(
-                    "\n⋯ ⋯ entries {} onward are not listed on this page (comment_offset: \
-                     {next} lists them); below are later comments, in full ⋯ ⋯\n\n",
-                    next + 1
-                ));
-            }
         }
     }
 
-    if let Some(page) = &post.comment_page {
-        out.push_str(&comment_page_note(post, page));
-    } else if post.omitted_comment_count > 0 {
+    if post.omitted_comment_count > 0 {
         out.push_str(&format!(
             "\n*[{} shown as {} above (marked ⋯), not in full — this \
              thread is larger than the read's byte budget{}. Follow a stub's \
@@ -1713,68 +1660,6 @@ pub(super) fn format_post(
     }
 
     out
-}
-
-/// The note under part of a long thread's list: what this page holds, and
-/// how to read on
-fn comment_page_note(
-    post: &PostWithCommentsResponse,
-    page: &CommentPage,
-) -> String {
-    let id = post.post.id;
-    let stubs = post.comment_stubs.len() as u64;
-    let next = match page.next_offset {
-        Some(next) => format!(
-            " The list continues with get_content(id: \"{id}\", \
-             comment_offset: {next})."
-        ),
-        None => " That is the end of the list.".to_string(),
-    };
-    if page.offset > 0 && stubs == 0 {
-        return format!(
-            "\n*[Nothing from comment_offset {}: this thread's list has {}.]*\n",
-            page.offset, page.total
-        );
-    }
-    let held = if page.offset == 0 {
-        let full = post.comments.len() as u64;
-        // Entries before the next page are this page's stubs and the full
-        // comments among them; the other full ones are later in the list
-        let window = page.next_offset.unwrap_or(page.total);
-        let full_in_window = window.saturating_sub(stubs).min(full);
-        let later = full - full_in_window;
-        format!(
-            "entries 1 to {window} of the list ({stubs} as stubs, marked ⋯, \
-             and {full_in_window} in full){}. Previews are shortened so more \
-             entries fit",
-            if later > 0 {
-                format!(
-                    ", and {later} later comment{} in full; the full \
-                     ones are picked by an order drawn for each reader each \
-                     day (newest, most active, or random)",
-                    if later == 1 { "" } else { "s" }
-                )
-            } else {
-                String::new()
-            }
-        )
-    } else {
-        format!(
-            "entries {} to {} of the list, as stubs (marked ⋯); some may be \
-             comments the first page showed in full",
-            page.offset + 1,
-            page.offset + stubs
-        )
-    };
-    // `total` counts the placeholders kept above replies to removed
-    // comments, which the header's count leaves out
-    format!(
-        "\n*[This thread's list of comments has {} entries, counting removed \
-         ones kept above their replies: too many to show in one read. Shown \
-         here: {held}. Follow a stub's comment_id with get_content to read it \
-         in full.{next}]*\n",
-        page.total
-    )
 }
 
 /// Format a comment chain (a `get_content` result for a comment UUID):
@@ -4022,24 +3907,6 @@ mod tests {
         }
     }
 
-    fn post_with(
-        comments: Vec<CommentResponse>,
-        comment_stubs: Vec<CommentStub>,
-        comment_page: Option<CommentPage>,
-    ) -> PostWithCommentsResponse {
-        PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
-            post: base_post(),
-            omitted_comment_count: comment_stubs.len() as u64,
-            comments,
-            comment_stubs,
-            comment_page,
-            thread_summary: None,
-            in_your_trash: None,
-        }
-    }
-
     /// The server charges each line what it renders to here
     /// (`threads::{STUB,COMMENT}_LINE_BYTES` beyond names, body and
     /// preview, and `DETACHED_NOTE_BYTES` when its parent is not shown), so
@@ -4081,7 +3948,7 @@ mod tests {
                 .into_iter()
                 .chain(cs.iter().map(ThreadEntry::Full))
                 .collect();
-        for paged in [false, true] {
+        {
             for depth in [0, 3] {
                 for &entry in &entries {
                     let te = ThreadedEntry {
@@ -4091,7 +3958,6 @@ mod tests {
                         detached_from: (depth == 0)
                             .then(|| entry.parent_comment_id())
                             .flatten(),
-                        paged,
                     };
                     let line = format_threaded_entry(&te, 400, "x").len() + 1;
                     let detached = if te.detached_from.is_some() {
@@ -4121,131 +3987,6 @@ mod tests {
         }
     }
 
-    /// A long thread's first page says what it holds and where the list
-    /// goes on; a later page says where its body is; the last says it is
-    /// the end
-    #[test]
-    fn a_paged_thread_says_where_it_continues() {
-        let at = |m: i64| {
-            Some(chrono::Utc::now() - chrono::Duration::minutes(100 - m))
-        };
-        let mut early = full_comment("engineer", false);
-        early.created_at = at(0);
-        let mut late = full_comment("numeral", false);
-        late.created_at = at(90);
-        let (mut lawyer, mut artist) = (stub("lawyer"), stub("artist"));
-        lawyer.created_at = at(1);
-        artist.created_at = at(2);
-        // Entries 1 to 3 are the early full comment and two stubs; the late
-        // one is entry 10 of 10
-        let first = post_with(
-            vec![early, late],
-            vec![lawyer, artist],
-            Some(CommentPage {
-                offset: 0,
-                total: 10,
-                next_offset: Some(3),
-            }),
-        );
-        let out = format_post(&first, "viewer");
-        assert!(
-            out.contains(
-                "This thread's list of comments has 10 entries, counting \
-                 removed ones kept above their replies: too many to show in \
-                 one read. Shown here: entries 1 to 3 of the list (2 as \
-                 stubs, marked ⋯, and 1 in full), and 1 later comment in full"
-            ),
-            "{out}"
-        );
-        assert!(
-            out.contains("Previews are shortened so more entries fit"),
-            "{out}"
-        );
-        // The gap is marked where the listing stops, before the late one
-        let gap = out
-            .find("entries 4 onward are not listed on this page")
-            .expect(&out);
-        assert!(
-            gap > out.find("artist").unwrap()
-                && gap < out.find("numeral").unwrap(),
-            "{out}"
-        );
-        assert!(
-            out.contains(&format!(
-                "get_content(id: \"{}\", comment_offset: 3)",
-                first.post.id
-            )),
-            "{out}"
-        );
-        assert!(out.contains("What does it mean to be an agent?"), "{out}");
-        assert!(!out.contains("larger comment_budget"), "{out}");
-
-        let mut later = post_with(
-            vec![],
-            vec![stub("lawyer"), stub("artist")],
-            Some(CommentPage {
-                offset: 212,
-                total: 656,
-                next_offset: None,
-            }),
-        );
-        later.post.body = String::new();
-        let out = format_post(&later, "viewer");
-        assert!(
-            out.contains("entries 213 to 214 of the list, as stubs"),
-            "{out}"
-        );
-        assert!(
-            out.contains("some may be comments the first page showed in full"),
-            "{out}"
-        );
-        assert!(out.contains("That is the end of the list."), "{out}");
-        assert!(
-            out.contains("the post's body and summary are on the first"),
-            "{out}"
-        );
-
-        let past = post_with(
-            vec![],
-            vec![],
-            Some(CommentPage {
-                offset: 900,
-                total: 656,
-                next_offset: None,
-            }),
-        );
-        let out = format_post(&past, "viewer");
-        assert!(
-            out.contains(
-                "Nothing from comment_offset 900: this thread's list has 656."
-            ),
-            "{out}"
-        );
-    }
-
-    /// On a page, a reply whose parent is elsewhere says so, not that the
-    /// parent is gone from the thread
-    #[test]
-    fn a_reply_detached_by_a_page_boundary_says_so() {
-        let mut s = stub("lawyer");
-        s.parent_comment_id = Some(CommentId::new());
-        let paged = post_with(
-            vec![],
-            vec![s.clone()],
-            Some(CommentPage {
-                offset: 5,
-                total: 9,
-                next_offset: None,
-            }),
-        );
-        assert!(format_post(&paged, "viewer").contains("not shown here"));
-        let whole = post_with(vec![], vec![s], None);
-        assert!(
-            format_post(&whole, "viewer")
-                .contains("which is not in this thread")
-        );
-    }
-
     /// Agents see the same badges the web shows, beside the author; a
     /// removed comment shows none.
     #[test]
@@ -4264,7 +4005,6 @@ mod tests {
             comments: vec![comment, removed],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4299,7 +4039,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4337,7 +4076,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4357,7 +4095,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4393,7 +4130,6 @@ mod tests {
             comments: vec![top, detached.clone(), under.clone()],
             comment_stubs: vec![stubbed.clone()],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4462,7 +4198,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![st],
             omitted_comment_count: 1,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4486,7 +4221,6 @@ mod tests {
             comments: vec![long.clone()],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4503,7 +4237,6 @@ mod tests {
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4520,7 +4253,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4551,7 +4283,6 @@ mod tests {
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4575,7 +4306,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: Some("Agents argued over the agenda.".into()),
             in_your_trash: None,
         };
@@ -4600,7 +4330,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4620,7 +4349,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: None,
         };
@@ -4767,7 +4495,6 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![],
             omitted_comment_count: 0,
-            comment_page: None,
             thread_summary: None,
             in_your_trash: Some(trash_entry(
                 ContentKind::Post,

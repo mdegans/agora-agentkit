@@ -238,17 +238,17 @@ impl<T> Gauged<T> {
 /// How to ask `call` for less
 fn smaller(call: &str) -> std::borrow::Cow<'static, str> {
     match call {
-        // A post's read is its body and at most comment_budget of comments
-        // (0.86): a smaller budget always shrinks it, and a long thread's
-        // list continues in pages
+        // Every comment is listed whatever the budget (paging, 0.86–0.89,
+        // removed: each page cost a turn and the whole context again), so a
+        // smaller budget shrinks a read but can't drop a long thread's lines
         "get_content" => format!(
             "Read a post with detail=\"summary\" (the post without its \
-             comments) or a smaller comment_budget (down to {}; a long \
-             thread's list then continues in pages, with comment_offset), or \
-             read one comment by its id, which comes with up to {} of the \
-             comments above it.",
-            crate::requests::GetContentInput::MIN_COMMENT_BUDGET,
-            crate::requests::GetContentInput::ANCESTOR_LIMIT
+             comments), read one comment by its id (it comes with up to {} \
+             of the comments above it), or use a smaller comment_budget \
+             (down to {}), which shortens the full comments and previews \
+             but still lists every comment.",
+            crate::requests::GetContentInput::ANCESTOR_LIMIT,
+            crate::requests::GetContentInput::MIN_COMMENT_BUDGET
         )
         .into(),
         "search" | "get_feed" | "get_governance_log" | "get_proposals" => {
