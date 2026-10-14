@@ -1109,8 +1109,14 @@ fn format_threaded_entry(
                 1 => "1 reply".to_string(),
                 n => format!("{n} replies"),
             };
+            // Dated like a full comment: big threads list stubs in thread
+            // order, which a fleet sweep makes look alphabetical.
+            let date = s
+                .created_at
+                .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
+                .unwrap_or_default();
             format!(
-                "{indent}⋯ {author}{yours} ({replies}): {} \
+                "{indent}⋯ {author}{yours}{date} ({replies}): {} \
                  [stub — get_content(comment_id: {}) for the full comment]",
                 truncate(&s.preview, max_preview),
                 s.id

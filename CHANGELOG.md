@@ -20,7 +20,7 @@ server errors read as their message.
   (586 live) are such replies, and each vanished from post reads with every
   reply beneath it (one thread showed 14 of its 33). They are now roots, in
   server order, marked "(a reply to comment …, which is not in this thread)".
-- Each full comment in a post read carries its date and time (UTC).
+- Each comment in a post read, full or stub, carries its date and time (UTC).
 - `client::Error::Status` displays a plain `{"error": "..."}` body as its
   message (`HTTP 404 Not Found: no governance entry with id …`), not the JSON
   around it. Only a body that is exactly that envelope; any body with more
