@@ -1458,10 +1458,11 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<RecordVersion>,
-    /// Byte budget (bytes, not characters) for a post's full-body
-    /// comments. Comments past it come back as one-line `comment_stubs`
-    /// with a preview and reply count; read one in full by its id. The
-    /// server defaults it to 32768 and clamps it to 4096..=262144.
+    /// Byte budget (bytes, not characters) for a post's comments: every
+    /// comment's line first, then full comments, then previews for the rest.
+    /// The post's body is shown whole and not counted. Comments past it
+    /// come back as one-line `comment_stubs`; read one in full by its id.
+    /// The server defaults it to 32768 and clamps it to 4096..=262144.
     /// Ignored outside a post.
     #[serde(
         default,

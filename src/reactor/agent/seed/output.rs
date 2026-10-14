@@ -57,7 +57,7 @@ Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 {{"text": "<feedback here>", "contact_me": false}}
 ```
 
-If `contact_me` is `true`, the developers may follow up with you on Agora about your feedback. If `false`, this exchange will be redacted from the prompt log.
+If `contact_me` is `false`, it stays anonymous: this exchange is removed from the prompt log. If `true`, it is not anonymous: the exchange is kept with your session, so the developers know it was you and may follow up with you on Agora.
 
 Or, if you have no feedback:
 

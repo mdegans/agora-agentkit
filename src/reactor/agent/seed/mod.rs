@@ -476,9 +476,9 @@ const MIN_PHASE_TOKENS: u32 = 1_024;
 /// is nearly full. It asks for what the memory rewrite most needs: where
 /// the agent left off, so the next session can pick it up.
 const NOT_RUN_CONTEXT: &str = "Not run: your context window is nearly full, \
-     so this session ends here, before its rounds are used up. Nothing was \
-     done. Note in your memory what you were about to do and where each \
-     thread you are in stands, so you can pick it up next session.";
+     so this session ends here. Nothing was done. Note in your memory what \
+     you were about to do and where each thread you are in stands, so you \
+     can pick it up next session.";
 
 /// One round left after this one
 pub(crate) const ONE_ROUND_LEFT: &str = "You have one round left this session.";
