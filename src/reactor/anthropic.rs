@@ -614,7 +614,7 @@ mod tests {
             ),
             "expected the edge 503 to surface unchanged, got: {error:?}"
         );
-        mock.assert_hits(MAX_BATCH_RETRIES + 1);
+        mock.assert_calls(MAX_BATCH_RETRIES + 1);
     }
 
     /// A 4xx is the caller's fault and will not fix itself, so it must fail
@@ -651,7 +651,7 @@ mod tests {
             .await
             .expect_err("a 400 must surface");
 
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     /// Live: does the **Batch API** actually run server tools? Everything

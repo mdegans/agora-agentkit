@@ -1535,7 +1535,7 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/agora/api/social/posts")
-                .json_body_partial(
+                .json_body_includes(
                     serde_json::json!({
                         "community": "tech",
                         "title": "Strong types",
@@ -1584,7 +1584,7 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method(POST)
                 .path("/agora/api/social/dash")
-                .json_body_partial(
+                .json_body_includes(
                     serde_json::json!({
                         "agent_id": agent_id,
                         "sort": "date",
@@ -1657,8 +1657,7 @@ mod tests {
     /// Whether `req`'s body is signed over `action` by [`trash_key`]
     fn signed_over(req: &HttpMockRequest, action: SignedAction<'_>) -> bool {
         let body: serde_json::Value =
-            serde_json::from_slice(req.body.as_deref().unwrap_or_default())
-                .unwrap();
+            serde_json::from_slice(req.body().as_ref()).unwrap();
         let sig: [u8; 64] = hex::decode(body["signature"].as_str().unwrap())
             .unwrap()
             .try_into()
@@ -1684,10 +1683,10 @@ mod tests {
         let delete = server.mock(|when, then| {
             when.method(POST)
                 .path("/agora/api/social/delete-content")
-                .json_body_partial(
+                .json_body_includes(
                     serde_json::json!({"target": target}).to_string(),
                 )
-                .matches(|req| {
+                .is_true(|req| {
                     signed_over(
                         req,
                         SignedAction::from(&DeleteContentPayload {
@@ -1708,7 +1707,7 @@ mod tests {
         let restore = server.mock(|when, then| {
             when.method(POST)
                 .path("/agora/api/social/trash/restore")
-                .matches(|req| {
+                .is_true(|req| {
                     signed_over(
                         req,
                         SignedAction::TrashRestore {
@@ -1722,7 +1721,7 @@ mod tests {
         let erase = server.mock(|when, then| {
             when.method(POST)
                 .path("/agora/api/social/trash/delete-permanently")
-                .matches(|req| {
+                .is_true(|req| {
                     signed_over(
                         req,
                         SignedAction::TrashDeletePermanently {
@@ -1737,8 +1736,8 @@ mod tests {
         let list = server.mock(|when, then| {
             when.method(POST)
                 .path("/agora/api/social/trash/list")
-                .json_body_partial(r#"{"limit": 5}"#)
-                .matches(|req| {
+                .json_body_includes(r#"{"limit": 5}"#)
+                .is_true(|req| {
                     signed_over(req, SignedAction::TrashList { target: None })
                 });
             then.status(200).json_body(serde_json::json!({
@@ -1748,10 +1747,10 @@ mod tests {
         let read = server.mock(|when, then| {
             when.method(POST)
                     .path("/agora/api/content/read")
-                    .json_body_partial(
+                    .json_body_includes(
                         serde_json::json!({"id": target}).to_string(),
                     )
-                    .matches(|req| {
+                    .is_true(|req| {
                         signed_over(
                             req,
                             SignedAction::GetContent {
@@ -1854,7 +1853,7 @@ mod tests {
             matches!(err, Error::Status { status, .. } if status == 503),
             "{err:?}"
         );
-        assert_eq!(m.hits(), SEND_ATTEMPTS as usize);
+        assert_eq!(m.calls(), SEND_ATTEMPTS as usize);
     }
 
     #[tokio::test]
