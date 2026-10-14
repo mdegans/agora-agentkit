@@ -63,7 +63,7 @@ hkdf = "0.12"
 chacha20poly1305 = "0.10"
 
 [dev-dependencies]
-httpmock = "0.7"
+httpmock = "0.8"
 tempfile = "3"
 # `test-util` (not part of `full`) provides `#[tokio::test(start_paused)]`, so
 # the batch retry tests fast-forward their backoff instead of sleeping ~31s.

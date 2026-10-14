@@ -236,7 +236,7 @@ fn mock_perception_serving(server: &MockServer, constitution: &str) {
         }));
     });
     server.mock(|when, then| {
-        when.method(GET).path_contains("/posts");
+        when.method(GET).path_includes("/posts");
         then.status(200).json_body(serde_json::json!([]));
     });
 }
@@ -763,7 +763,7 @@ async fn create_post_signs_the_canonical_community_name() {
     let created = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/posts")
-            .body_contains(r#""community":"meta-governance""#);
+            .body_includes(r#""community":"meta-governance""#);
         then.status(201).json_body(serde_json::json!({
             "id": Uuid::new_v4(),
             "status": "created",
@@ -828,7 +828,7 @@ async fn acting_dispatches_flat_and_dedups_titles() {
     let control = agent.handle(call()).await.unwrap();
     assert_eq!(control, Control::Stalled);
     assert!(transcript(&agent).contains("too similar"));
-    assert_eq!(created.hits(), 1, "the duplicate never reached the wire");
+    assert_eq!(created.calls(), 1, "the duplicate never reached the wire");
 }
 
 #[tokio::test]
@@ -1428,7 +1428,7 @@ async fn contact_me_files_a_contact_request_naming_the_logged_transcript() {
     // Nothing is redacted, so this is the prompt teardown logs
     let sha = prompt_sha256(agent.prompt()).unwrap();
     let contact = server.mock(|when, then| {
-        when.method(POST).path(CONTACT_PATH).json_body_partial(
+        when.method(POST).path(CONTACT_PATH).json_body_includes(
             serde_json::json!({
                 "feedback_id": feedback_id,
                 "transcript_sha256": sha,
@@ -1457,10 +1457,9 @@ async fn contact_me_without_a_prompt_log_sends_no_hash() {
     let feedback_id = FeedbackId::new();
     mock_feedback(&server, feedback_id);
     let contact = server.mock(|when, then| {
-        when.method(POST).path(CONTACT_PATH).matches(|req| {
+        when.method(POST).path(CONTACT_PATH).is_true(|req| {
             let body: serde_json::Value =
-                serde_json::from_slice(req.body.as_deref().unwrap_or(b""))
-                    .unwrap_or_default();
+                serde_json::from_slice(req.body().as_ref()).unwrap_or_default();
             body.get("feedback_id").is_some()
                 && body.get("transcript_sha256").is_none()
         });
@@ -1516,7 +1515,7 @@ async fn anonymous_feedback_files_no_contact_request() {
     agent.on_teardown().await.unwrap();
 
     feedback.assert();
-    contact.assert_hits(0);
+    contact.assert_calls(0);
     assert_eq!(agent.contact_request(), None);
     assert!(!transcript(&agent).contains("cat pictures"));
     let dumped = dumped(dir.path());
@@ -1559,7 +1558,7 @@ async fn no_feedback_id_files_no_contact_request() {
     agent.on_teardown().await.unwrap();
 
     feedback.assert();
-    contact.assert_hits(0);
+    contact.assert_calls(0);
     assert_eq!(agent.contact_request(), None);
     assert!(dumped(dir.path()).contains("Please reach out."));
 }
@@ -1607,9 +1606,9 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
     let feedback = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/feedback")
-            .matches(|req| {
+            .is_true(|req| {
                 let body: serde_json::Value =
-                    serde_json::from_slice(req.body.as_deref().unwrap_or(b""))
+                    serde_json::from_slice(req.body().as_ref())
                         .unwrap_or_default();
                 body["body"].as_str().is_some_and(|b| {
                     b.chars().count() <= crate::requests::FEEDBACK_MAX_CHARS
@@ -1639,7 +1638,7 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
             .unwrap();
         assert_eq!(control, Control::Stalled);
     }
-    feedback.assert_hits(0);
+    feedback.assert_calls(0);
     let control = agent
         .handle(text_message(&over, StopReason::EndTurn))
         .await
@@ -1884,9 +1883,7 @@ fn two_round_record() -> serde_json::Value {
 
 /// Whether `req` carries query parameter `key`
 fn has_param(req: &httpmock::prelude::HttpMockRequest, key: &str) -> bool {
-    req.query_params
-        .as_ref()
-        .is_some_and(|q| q.iter().any(|(k, _)| k == key))
+    req.query_params().iter().any(|(k, _)| k == key)
 }
 
 /// A bare `GOV-` id goes to `api/content/{ref}` with no `detail` and no
@@ -1899,7 +1896,7 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     let record = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
-            .matches(|req| {
+            .is_true(|req| {
                 !has_param(req, "detail") && !has_param(req, "round")
             });
         then.status(200).json_body(governance_content(
@@ -1945,12 +1942,12 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     assert!(!rendered.contains("round=N"), "no paging hint: {rendered}");
 
     agent.handle(call()).await.unwrap();
-    assert_eq!(record.hits(), 2);
-    assert_eq!(summary.hits(), 0);
+    assert_eq!(record.calls(), 2);
+    assert_eq!(summary.calls(), 0);
 
     // Both full reads spent: the summary, said plainly, at no cost.
     agent.handle(call()).await.unwrap();
-    assert_eq!(record.hits(), 2, "the third record read never went out");
+    assert_eq!(record.calls(), 2, "the third record read never went out");
     summary.assert();
     let rendered = transcript(&agent);
     assert!(
@@ -1992,7 +1989,7 @@ async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
         ))
         .await
         .unwrap();
-    assert_eq!(read.hits(), 1, "the malformed call never went out");
+    assert_eq!(read.calls(), 1, "the malformed call never went out");
     let rendered = transcript(&agent);
     assert!(rendered.contains("unknown field `depth`"), "{rendered}");
 }
@@ -2006,7 +2003,7 @@ async fn get_content_passes_version_and_attachment() {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
             .query_param("version", "original")
-            .matches(|req| {
+            .is_true(|req| {
                 !has_param(req, "round") && !has_param(req, "detail")
             });
         let mut body = governance_content(
@@ -2206,7 +2203,7 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
         "{:?}",
         roomy.phase
     );
-    assert_eq!(feed.hits(), 1, "the round ran");
+    assert_eq!(feed.calls(), 1, "the round ran");
 
     let mut full = agent(&server, quiet_config());
     seat_start(&mut full);
@@ -2216,7 +2213,7 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
         .unwrap();
     assert_eq!(control, Control::Continue);
     assert!(matches!(full.phase, Phase::Reflect), "{:?}", full.phase);
-    assert_eq!(feed.hits(), 1, "the full agent's call never ran");
+    assert_eq!(feed.calls(), 1, "the full agent's call never ran");
     let rendered = transcript(&full);
     assert!(rendered.contains(NOT_RUN_CONTEXT), "{rendered}");
     assert!(
@@ -2440,7 +2437,7 @@ async fn index_proposals_summaries_and_failures_are_free() {
     let record = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
-            .matches(|req| !has_param(req, "detail"));
+            .is_true(|req| !has_param(req, "detail"));
         then.status(200).json_body(governance_content(
             "GOV-2026-0006",
             Some(two_round_record()),
@@ -2453,7 +2450,7 @@ async fn index_proposals_summaries_and_failures_are_free() {
     let post = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/content/read")
-            .json_body_partial(serde_json::json!({"id": post_id}).to_string());
+            .json_body_includes(serde_json::json!({"id": post_id}).to_string());
         then.status(200).json_body(post_content(post_id));
     });
 
@@ -2480,11 +2477,11 @@ async fn index_proposals_summaries_and_failures_are_free() {
             agent.handle(call).await.unwrap();
         }
     }
-    assert_eq!(index.hits(), 3);
-    assert_eq!(proposals.hits(), 3);
-    assert_eq!(summary.hits(), 3);
-    assert_eq!(missing.hits(), 3);
-    assert_eq!(post.hits(), 3);
+    assert_eq!(index.calls(), 3);
+    assert_eq!(proposals.calls(), 3);
+    assert_eq!(summary.calls(), 3);
+    assert_eq!(missing.calls(), 3);
+    assert_eq!(post.calls(), 3);
     let rendered = transcript(&agent);
     assert!(!rendered.contains("full governance reads"), "{rendered}");
     assert!(
@@ -2506,7 +2503,7 @@ async fn index_proposals_summaries_and_failures_are_free() {
             .await
             .unwrap();
     }
-    assert_eq!(record.hits(), 2);
+    assert_eq!(record.calls(), 2);
     assert!(!transcript(&agent).contains("full governance reads"));
 }
 
@@ -2592,7 +2589,7 @@ async fn get_content_pages_rounds_and_allows_one_verbatim_read() {
     let record = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0007")
-            .matches(|req| !has_param(req, "detail"));
+            .is_true(|req| !has_param(req, "detail"));
         then.status(200).json_body(governance_content(
             "GOV-2026-0007",
             Some(two_round_record()),
@@ -2622,8 +2619,8 @@ async fn get_content_pages_rounds_and_allows_one_verbatim_read() {
             .await
             .unwrap();
     }
-    verbatim.assert_hits(1);
-    record.assert_hits(1);
+    verbatim.assert_calls(1);
+    record.assert_calls(1);
     let rendered = transcript(&reader);
     assert_eq!(
         rendered
@@ -2693,10 +2690,8 @@ async fn get_governance_log_renders_an_index_and_sends_no_detail_param() {
             .path("/agora/api/governance/log")
             .query_param("entry_type", "council_decision")
             .query_param("limit", "20")
-            .matches(|req| {
-                req.query_params
-                    .as_ref()
-                    .is_none_or(|q| q.iter().all(|(k, _)| k != "detail"))
+            .is_true(|req| {
+                req.query_params().iter().all(|(k, _)| k != "detail")
             });
         then.status(200).json_body(serde_json::json!({"entries": [
             {
@@ -3000,7 +2995,7 @@ async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment
     let created = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/comments")
-            .json_body_partial(format!(r#"{{"reply_to": "{post_id}"}}"#));
+            .json_body_includes(format!(r#"{{"reply_to": "{post_id}"}}"#));
         then.status(201).json_body_obj(&crate::responses::WriteAck {
             id: comment_id,
             status: "created".to_owned(),
@@ -3033,10 +3028,10 @@ async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment
     };
     agent.handle(comment()).await.unwrap();
     created.assert();
-    assert_eq!(lookup.hits(), 0, "resolved from what was shown");
+    assert_eq!(lookup.calls(), 0, "resolved from what was shown");
 
     agent.handle(comment()).await.unwrap();
-    assert_eq!(created.hits(), 1, "the second never reached the wire");
+    assert_eq!(created.calls(), 1, "the second never reached the wire");
     let rendered = transcript(&agent);
     assert!(
         rendered.contains(&format!(
@@ -3062,7 +3057,7 @@ async fn cast_vote_looks_up_an_unseen_short_id() {
     let vote = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/votes")
-            .json_body_partial(format!(
+            .json_body_includes(format!(
                 r#"{{"target": "{post_id}", "value": -1}}"#
             ));
         then.status(200).json_body(serde_json::json!({
@@ -3127,7 +3122,7 @@ async fn an_ambiguous_or_malformed_short_id_explains_itself() {
         ))
         .await
         .unwrap();
-    assert_eq!(vote.hits(), 0);
+    assert_eq!(vote.calls(), 0);
     let rendered = transcript(&agent);
     assert!(rendered.contains("is ambiguous"), "{rendered}");
     assert!(
@@ -3771,7 +3766,7 @@ async fn delete_content_signs_the_full_id_and_keeps_the_ledger() {
     let deleted = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/delete-content")
-            .json_body_partial(format!(r#"{{"target": "{comment_id}"}}"#));
+            .json_body_includes(format!(r#"{{"target": "{comment_id}"}}"#));
         then.status(200)
             .json_body_obj(&crate::responses::ContentDeleted::new(
                 crate::ids::TrashEntryId::new(),
@@ -3806,7 +3801,7 @@ async fn delete_content_signs_the_full_id_and_keeps_the_ledger() {
         .await
         .unwrap();
     deleted.assert();
-    assert_eq!(lookup.hits(), 0, "resolved from what was shown");
+    assert_eq!(lookup.calls(), 0, "resolved from what was shown");
     let ledger = agent.state.ledger.read().unwrap();
     assert!(ledger.created_comments.contains(&comment_id.into()));
     assert_eq!(
@@ -3838,19 +3833,19 @@ async fn trash_list_then_restore_by_short_id() {
     let targeted = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/list")
-            .json_body_partial(format!(r#"{{"target": "{}"}}"#, short(item)));
+            .json_body_includes(format!(r#"{{"target": "{}"}}"#, short(item)));
         then.status(500);
     });
     let list = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/list")
-            .json_body_partial(r#"{"limit": 25}"#);
+            .json_body_includes(r#"{"limit": 25}"#);
         then.status(200).json_body(trash_page(item, None));
     });
     let restore = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/restore")
-            .json_body_partial(format!(r#"{{"target": "{item}"}}"#));
+            .json_body_includes(format!(r#"{{"target": "{item}"}}"#));
         then.status(200)
             .json_body(serde_json::json!({"restored": item}));
     });
@@ -3870,7 +3865,7 @@ async fn trash_list_then_restore_by_short_id() {
         .unwrap();
     list.assert();
     restore.assert();
-    assert_eq!(targeted.hits(), 0);
+    assert_eq!(targeted.calls(), 0);
     let rendered = transcript(&agent);
     assert!(rendered.contains("Your trash: 1 item"), "{rendered}");
     assert!(rendered.contains("March 2026 seed cleanup"), "{rendered}");
@@ -3890,14 +3885,14 @@ async fn trash_resolves_an_unseen_short_id_from_the_trash() {
     let found = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/list")
-            .json_body_partial(format!(r#"{{"target": "{}"}}"#, short(item)));
+            .json_body_includes(format!(r#"{{"target": "{}"}}"#, short(item)));
         then.status(200)
             .json_body(trash_page(item, Some("The whole text.")));
     });
     let not_found = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/list")
-            .json_body_partial(format!(
+            .json_body_includes(format!(
                 r#"{{"target": "{}"}}"#,
                 short(unknown)
             ));
@@ -3908,7 +3903,7 @@ async fn trash_resolves_an_unseen_short_id_from_the_trash() {
     let erase = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/delete-permanently")
-            .json_body_partial(format!(r#"{{"target": "{item}"}}"#));
+            .json_body_includes(format!(r#"{{"target": "{item}"}}"#));
         then.status(200).json_body(serde_json::json!({
             "erased": item, "at": "2026-10-09T12:00:00Z",
         }));
@@ -3951,14 +3946,14 @@ async fn trash_writes_are_capped_per_session() {
     let restore = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/restore")
-            .json_body_partial(format!(r#"{{"target": "{item}"}}"#));
+            .json_body_includes(format!(r#"{{"target": "{item}"}}"#));
         then.status(200)
             .json_body(serde_json::json!({"restored": item}));
     });
     let refusal = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/trash/restore")
-            .json_body_partial(format!(r#"{{"target": "{refused}"}}"#));
+            .json_body_includes(format!(r#"{{"target": "{refused}"}}"#));
         then.status(409)
             .json_body(serde_json::json!({"error": "not in your trash"}));
     });
@@ -3979,8 +3974,8 @@ async fn trash_writes_are_capped_per_session() {
             .await
             .unwrap();
     }
-    assert_eq!(refusal.hits(), 3, "refusals spend nothing");
-    assert_eq!(restore.hits(), tool::MAX_TRASH_WRITES);
+    assert_eq!(refusal.calls(), 3, "refusals spend nothing");
+    assert_eq!(restore.calls(), tool::MAX_TRASH_WRITES);
     assert!(
         transcript(&agent).contains("deletions, restores and erasures"),
         "the refusal says why"
@@ -3997,7 +3992,7 @@ async fn get_content_falls_back_when_the_signed_route_is_missing() {
     let signed_old = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/content/read")
-            .json_body_partial(serde_json::json!({"id": post_id}).to_string());
+            .json_body_includes(serde_json::json!({"id": post_id}).to_string());
         then.status(404);
     });
     let unsigned = server.mock(|when, then| {
@@ -4008,7 +4003,7 @@ async fn get_content_falls_back_when_the_signed_route_is_missing() {
     let signed_missing = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/content/read")
-            .json_body_partial(serde_json::json!({"id": missing}).to_string());
+            .json_body_includes(serde_json::json!({"id": missing}).to_string());
         then.status(404)
             .json_body(serde_json::json!({"error": "no such post or comment"}));
     });
@@ -4034,7 +4029,7 @@ async fn get_content_falls_back_when_the_signed_route_is_missing() {
     unsigned.assert();
     signed_missing.assert();
     assert_eq!(
-        unsigned_missing.hits(),
+        unsigned_missing.calls(),
         0,
         "a real not-found is not retried"
     );
@@ -4121,7 +4116,7 @@ async fn a_ballot_goes_out_as_a_list_and_comes_back_as_its_receipt() {
     let vote = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/votes")
-            .json_body_partial(format!(
+            .json_body_includes(format!(
                 r#"{{"target": "{post_id}", "value": [2, 5]}}"#
             ));
         then.status(200).json_body_obj(&receipt);
@@ -4192,7 +4187,7 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
     let sent = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/feedback")
-            .body_contains("The dashboard is lovely");
+            .body_includes("The dashboard is lovely");
         then.status(201).json_body(serde_json::json!({
             "status": "received",
             "id": "6d2c1f3e-9a51-4b3a-8f7e-2b1c0d9e8a77",
