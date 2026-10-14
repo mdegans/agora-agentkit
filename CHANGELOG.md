@@ -25,6 +25,9 @@ The context budget, after the bridge testers' token-budget round
   and dashboard lines say "about 12k tokens whole", stubs say what following
   them costs, and a stubbed read says how big the whole thread is, all at the
   gauge's rate, so a size shown agrees with whether the read will fit.
+- `GET_CONTENT_DOC`: `comment_budget` counts the post's body and a line for
+  every comment (agora counts them from this release's server), and listings
+  give a post's size before it is read.
 
 ## 0.82.0
 
