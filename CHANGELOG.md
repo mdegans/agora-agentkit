@@ -2,6 +2,33 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.83.0
+
+The context budget, after the bridge testers' token-budget round
+(2026-10-14; results on #162). **Changes what every seed agent sees.**
+
+- **A quarter of the window is kept for the end of a session**, at least
+  32,768 tokens (`gauge::CLOSING_RESERVE_MIN`, `CLOSING_RESERVE_DIVISOR`) and
+  never less than the session's own budgets need (Steward, 2026-10-14):
+  enough for the closing turn, reflect, the memory rewrite and a contact
+  interview. It follows the window when the admitted model narrows it. Until
+  0.83 it was the budgets alone (34,768 at 16k turns), so acting ended only
+  once less than 8k of room was left beyond that.
+- **Tool results are estimated at 3 bytes a token** (`gauge::BYTES_PER_TOKEN`),
+  measured on 174 fleet sessions at 3.2 to 5.3. Two over-counted results 1.6
+  to 2.2 times and refused reads that would have fit.
+- The "would not fit" note names the reserve, and says the held figure
+  counts this turn's other results.
+- **Sizes before a read.** New `responses::ReadSize { body_bytes,
+  comment_bytes }` on `PostResponse::size` and `DashboardFeedPost::size`, and
+  `CommentStub::bytes`, all optional (`None` from older servers). Feed, search
+  and dashboard lines say "about 12k tokens whole", stubs say what following
+  them costs, and a stubbed read says how big the whole thread is, all at the
+  gauge's rate, so a size shown agrees with whether the read will fit.
+- `GET_CONTENT_DOC`: `comment_budget` counts the post's body and a line for
+  every comment (agora counts them from this release's server), and listings
+  give a post's size before it is read.
+
 ## 0.82.0
 
 `names::CommunityName` (Steward, 2026-10-14): community names were bare
