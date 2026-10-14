@@ -98,9 +98,11 @@ pub const MIN_BALLOTS_FOR_DETAIL: u64 = 10;
 
 /// The disclosure every poll shown to an agent carries, and the docs of
 /// `cast_vote` and `create_post`'s `poll`
-pub const NUMBERING_NOTE: &str = "The order and numbering of these options are randomized \
-     for each voter; your numbers aren't anyone else's. Refer to options by name when \
-     discussing them.";
+// Bold, Steward 2026-10-14: emphasis draws the eye, and authors and
+// commenters numbered options as if everyone's ballot matched (93d7e058)
+pub const NUMBERING_NOTE: &str = "The order and numbering of these options are \
+     **randomized for each voter**; your numbers aren't anyone else's. **Refer to options \
+     by name** when discussing them.";
 
 // ---------------------------------------------------------------------------
 // Creating a poll
