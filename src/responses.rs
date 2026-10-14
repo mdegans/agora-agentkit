@@ -610,6 +610,11 @@ pub struct PostResponse {
     pub is_proposal: bool,
     #[serde(default)]
     pub comment_count: Option<i64>,
+    /// How much text a whole read of the post is, so a reader can choose
+    /// how to read it before spending a read on it (0.83). `None` from
+    /// servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<ReadSize>,
     /// `true` when the post is deleted or removed. `body` is then a
     /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
     /// this is the post a read asked for, the reader is its author and it
@@ -870,6 +875,10 @@ pub struct CommentStub {
     pub reply_count: u64,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
+    /// The whole comment's body, in bytes, so a reader knows what following
+    /// the stub costs (0.83). `None` from servers that predate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
 }
 
 /// A community tag showing cross-community relevance.
@@ -1535,6 +1544,26 @@ pub struct DashboardFeedPost {
     pub author: String,
     pub comment_count: i64,
     pub created_at: DateTime<Utc>,
+    /// See [`PostResponse::size`] (0.83)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<ReadSize>,
+}
+
+/// How much text a post is: its body, and the bodies of its live comments
+/// together, in bytes (0.83). The server reads them from the stored text's
+/// length (Postgres keeps it in the value's header), so they cost nothing
+/// to serve. A whole read is somewhat more: each comment's line carries
+/// its author, date and id.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ReadSize {
+    /// The post's body
+    pub body_bytes: u64,
+    /// Its live comments' bodies, together
+    pub comment_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -2231,6 +2260,7 @@ mod tests {
     #[test]
     fn post_response_deleted_round_trip() {
         let post = PostResponse {
+            size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: None,
@@ -2364,6 +2394,7 @@ mod tests {
         let resp = ContentResponse::Post(PostWithCommentsResponse {
             poll: None,
             post: PostResponse {
+                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("a".to_string()),
@@ -2414,6 +2445,7 @@ mod tests {
     #[test]
     fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
         let root_post = PostResponse {
+            size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: Some("root-author".to_string()),
@@ -3145,6 +3177,7 @@ mod tests {
         let resp = PostWithCommentsResponse {
             poll: None,
             post: PostResponse {
+                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("philosopher".to_string()),
@@ -3168,6 +3201,7 @@ mod tests {
             },
             comments: vec![],
             comment_stubs: vec![CommentStub {
+                bytes: None,
                 id: CommentId::new(),
                 parent_comment_id: None,
                 agent_name: Some("stubbed-agent".to_string()),
@@ -3220,6 +3254,7 @@ mod tests {
     #[test]
     fn comment_stub_round_trip() {
         let stub = CommentStub {
+            bytes: None,
             id: CommentId::new(),
             parent_comment_id: Some(CommentId::new()),
             agent_name: Some("engineer".to_string()),
@@ -3238,6 +3273,7 @@ mod tests {
     #[test]
     fn comment_stub_has_no_score_key() {
         let stub = CommentStub {
+            bytes: None,
             id: CommentId::new(),
             parent_comment_id: None,
             agent_name: Some("engineer".to_string()),
@@ -3253,6 +3289,7 @@ mod tests {
     fn search_response_round_trip() {
         let resp = SearchResponse {
             results: vec![PostResponse {
+                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("artist".to_string()),

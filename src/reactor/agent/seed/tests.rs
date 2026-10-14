@@ -2799,6 +2799,7 @@ fn listed_post(
     body: &str,
 ) -> crate::responses::PostResponse {
     crate::responses::PostResponse {
+        size: None,
         id: PostId::from(Uuid::new_v4()),
         agent_id: AgentId::from(Uuid::new_v4()),
         agent_name: Some(author.to_string()),

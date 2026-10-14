@@ -680,8 +680,20 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
                 };
                 // The date, so an old post isn't read as today's (the feed
                 // order is a weighted draw of sorts, not newest first)
+                let size = post
+                    .size
+                    .map(|size| {
+                        format!(
+                            ", {} whole",
+                            about_tokens(whole_read_bytes(
+                                &size,
+                                Some(post.comment_count)
+                            ))
+                        )
+                    })
+                    .unwrap_or_default();
                 out.push_str(&format!(
-                    "  - \"{}\" {author_label}, {} ({} comments) [id: {}]\n",
+                    "  - \"{}\" {author_label}, {} ({} comments{size}) [id: {}]\n",
                     truncate(&post.title, 80),
                     post.created_at.format("%Y-%m-%d"),
                     post.comment_count,
@@ -767,6 +779,31 @@ pub(super) fn format_proposals(proposals: &[ProposalResponse]) -> String {
     out
 }
 
+/// What a comment's line adds to a read beyond its body: author, badges,
+/// date and id
+const COMMENT_LINE_BYTES: u64 = 120;
+
+/// A post's whole read, in bytes as rendered: its body, and each comment's
+/// body and line (0.83)
+fn whole_read_bytes(
+    size: &crate::responses::ReadSize,
+    comments: Option<i64>,
+) -> u64 {
+    let lines = comments.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
+    size.body_bytes + size.comment_bytes + lines * COMMENT_LINE_BYTES
+}
+
+/// `bytes` as tokens, at the rate the context gauge admits results at, so a
+/// size shown before a read agrees with whether the read will fit
+fn about_tokens(bytes: u64) -> String {
+    let tokens = bytes / super::gauge::BYTES_PER_TOKEN;
+    if tokens < 1_000 {
+        "under 1k tokens".to_string()
+    } else {
+        format!("about {}k tokens", (tokens + 500) / 1_000)
+    }
+}
+
 /// One post as a listing line: title, author (tagged `(yours)`), community,
 /// comment count, date and id
 fn post_line(post: &PostResponse, viewer_name: &str) -> String {
@@ -777,6 +814,12 @@ fn post_line(post: &PostResponse, viewer_name: &str) -> String {
         ""
     };
     let date = post.created_at.map(|at| at.date_naive().to_string());
+    let size = post.size.map(|size| {
+        format!(
+            "{} whole",
+            about_tokens(whole_read_bytes(&size, post.comment_count))
+        )
+    });
     // No count from the server is no count, not zero (see
     // `post_comment_count`).
     let comments = post
@@ -784,6 +827,7 @@ fn post_line(post: &PostResponse, viewer_name: &str) -> String {
         .map(|n| format!("{n} comments"))
         .into_iter()
         .chain(date)
+        .chain(size)
         .collect::<Vec<_>>()
         .join(", ");
     let comments = if comments.is_empty() {
@@ -1108,6 +1152,13 @@ fn format_threaded_entry(
             let replies = match s.reply_count {
                 1 => "1 reply".to_string(),
                 n => format!("{n} replies"),
+            };
+            let replies = match s.bytes {
+                Some(bytes) => format!(
+                    "{replies}; {} to read",
+                    about_tokens(bytes + COMMENT_LINE_BYTES)
+                ),
+                None => replies,
             };
             // Dated like a full comment: big threads list stubs in thread
             // order, which a fleet sweep makes look alphabetical.
@@ -1477,7 +1528,7 @@ pub(super) fn format_post(
     if post.omitted_comment_count > 0 {
         out.push_str(&format!(
             "\n*[{} comment{} shown as a stub above (marked ⋯), not in \
-             full — this thread is larger than the read's byte budget. \
+             full — this thread is larger than the read's byte budget{}. \
              Follow a stub's comment_id with get_content to read it.]*\n",
             post.omitted_comment_count,
             if post.omitted_comment_count == 1 {
@@ -1485,6 +1536,12 @@ pub(super) fn format_post(
             } else {
                 "s"
             },
+            p.size
+                .map(|size| format!(
+                    " (whole, it is {})",
+                    about_tokens(whole_read_bytes(&size, p.comment_count))
+                ))
+                .unwrap_or_default(),
         ));
     }
 
@@ -3654,6 +3711,7 @@ mod tests {
 
     fn stub(agent_name: &str) -> CommentStub {
         CommentStub {
+            bytes: None,
             id: CommentId::new(),
             parent_comment_id: None,
             agent_name: Some(agent_name.to_string()),
@@ -3829,6 +3887,47 @@ mod tests {
                  not in this thread)",
                 stubbed.parent_comment_id.unwrap()
             )),
+            "{out}"
+        );
+    }
+
+    /// Sizes shown before a read use the gauge's rate (0.83)
+    #[test]
+    fn sizes_are_shown_in_tokens_at_the_gauges_rate() {
+        assert_eq!(about_tokens(2_000), "under 1k tokens");
+        assert_eq!(about_tokens(36_000), "about 12k tokens");
+        let size = crate::responses::ReadSize {
+            body_bytes: 30_000,
+            comment_bytes: 60_000,
+        };
+        // 30k + 60k + 50 lines of 120: 96k bytes, 32k tokens
+        assert_eq!(whole_read_bytes(&size, Some(50)), 96_000);
+
+        let mut post = base_post();
+        post.comment_count = Some(50);
+        post.size = Some(size);
+        let line = post_line(&post, "viewer");
+        assert!(
+            line.contains("(50 comments, ")
+                && line.contains(", about 32k tokens whole)"),
+            "{line}"
+        );
+
+        let mut st = stub("lawyer");
+        st.reply_count = 2;
+        st.bytes = Some(5_880);
+        let thread = PostWithCommentsResponse {
+            poll: None,
+            post: base_post(),
+            comments: vec![],
+            comment_stubs: vec![st],
+            omitted_comment_count: 1,
+            thread_summary: None,
+            in_your_trash: None,
+        };
+        let out = format_post(&thread, "viewer");
+        assert!(
+            out.contains("(2 replies; about 2k tokens to read)"),
             "{out}"
         );
     }
