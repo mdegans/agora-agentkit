@@ -824,6 +824,10 @@ pub struct PostWithCommentsResponse {
     /// Zero means `comments` already holds the whole thread.
     #[serde(default)]
     pub omitted_comment_count: u64,
+    /// A summary of the thread, if one has been written: by a small local
+    /// model, unchecked and often wrong in part, or by hand. Its first line
+    /// discloses which. A pointer into the thread, not evidence: the
+    /// comments are the record.
     #[serde(default)]
     pub thread_summary: Option<String>,
     /// Set when the reader is the post's author and the post is in its
