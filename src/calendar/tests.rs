@@ -239,7 +239,8 @@ fn overdue_is_open_and_past_a_date_that_binds() {
         ObligationTally::from(rows.as_slice()),
         ObligationTally {
             lapsed: 1,
-            overdue: 1
+            overdue: 1,
+            unreadable: Vec::new(),
         }
     );
 }
@@ -340,7 +341,7 @@ fn upcoming_lists_sittings_and_dated_obligations_by_text() {
         matches!(&dash[2], CalendarItem::Sitting { event, .. } if *event == event_id(2))
     );
 
-    let response = CalendarResponse::new(&calendar, &rows);
+    let response = CalendarResponse::new(&calendar, &rows, vec![]);
     assert_eq!(response.items, all);
     assert_eq!(response.how_to_read, CALENDAR_HOW_TO_READ);
 }

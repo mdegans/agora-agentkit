@@ -20,10 +20,10 @@ use crate::responses::{
     BallotReceipt, CalendarItem, CalendarResponse, CommentChainResponse,
     CommentPage, CommentResponse, CommentSearchHit, CommentStub,
     CouncilCommentRequest, CouncilSchedule, DashboardResponse,
-    GovernanceEntryResponse, GovernanceLogIndex, ObligationListing,
-    ObligationTally, OmittedEntries, OpenPollPointer, PollResults, PollView,
-    PostResponse, PostWithCommentsResponse, ProposalResponse, SearchResponse,
-    ThreadNotice, TrashEntry, TrashPage,
+    DashboardSection, GovernanceEntryResponse, GovernanceLogIndex,
+    ObligationListing, ObligationTally, OmittedEntries, OpenPollPointer,
+    PollResults, PollView, PostResponse, PostWithCommentsResponse,
+    ProposalResponse, SearchResponse, ThreadNotice, TrashEntry, TrashPage,
 };
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
@@ -37,7 +37,10 @@ pub(super) struct Perception<'a> {
     pub soul_markdown: &'a str,
     pub memory: &'a str,
     pub dashboard: &'a DashboardResponse,
-    pub recent_posts: &'a [PostResponse],
+    /// The agent's own recent posts; `None` when they could not be loaded,
+    /// which the intro says rather than leaving the section out as if the
+    /// agent had posted nothing
+    pub recent_posts: Option<&'a [PostResponse]>,
     pub recent_limit: usize,
     /// Whether this session carries the web server tools, so the guidelines
     /// warn about open-web content only when the agent can actually reach it.
@@ -156,7 +159,10 @@ pub(super) fn assemble(
         sessions,
         &format_dashboard(dashboard, model),
         max_rounds,
-        &format_recent_activity(recent_posts, recent_limit),
+        &match recent_posts {
+            Some(posts) => format_recent_activity(posts, recent_limit),
+            None => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
+        },
     );
     let mut prompt = prompt
         .system(system)
@@ -334,7 +340,7 @@ fn intro_message(
 fn format_council(council: &CouncilSchedule) -> String {
     let mut out = String::new();
 
-    let tally = council.obligations.filter(|t| !t.is_empty());
+    let tally = council.obligations.as_ref().filter(|t| !t.is_empty());
     if council.last_sitting_at.is_none()
         && council.next_sitting.is_none()
         && council.schedule_thread.is_none()
@@ -392,7 +398,7 @@ fn format_council(council: &CouncilSchedule) -> String {
     }
 
     if let Some(tally) = tally {
-        out.push_str(&format_obligation_tally(&tally));
+        out.push_str(&format_obligation_tally(tally));
         out.push('\n');
     }
 
@@ -420,10 +426,57 @@ fn format_obligation_tally(tally: &ObligationTally) -> String {
         1 => "obligation",
         _ => "obligations",
     };
+    let mut out = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Past due, and on the Steward to bring forward: {} {noun}. List \
+             them with get_governance_log(view=\"obligations\").",
+            parts.join(" and ")
+        )
+    };
+    if !tally.unreadable.is_empty() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let n = tally.unreadable.len() as u64;
+        let ids = tally
+            .unreadable
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "{} ({ids}) could not be read (a server fault) and {} not counted.",
+            plural(n, "obligation", "obligations"),
+            if n == 1 { "is" } else { "are" },
+        ));
+    }
+    out
+}
+
+/// `n` and the noun that agrees with it
+fn plural(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The lines saying which obligations a list could not read and left out
+fn format_unreadable_obligations(
+    u: Option<&crate::responses::UnreadableObligations>,
+) -> String {
+    let Some(u) = u else {
+        return String::new();
+    };
+    let ids = u
+        .ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "Past due, and on the Steward to bring forward: {} {noun}. List \
-         them with get_governance_log(view=\"obligations\").",
-        parts.join(" and ")
+        "\n\u{26a0} {} not listed ({ids}): {}\n",
+        plural(u.ids.len() as u64, "obligation", "obligations"),
+        u.why
     )
 }
 
@@ -504,8 +557,11 @@ pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
     let mut out = String::from("# The Agora calendar\n\n");
     out.push_str(calendar.how_to_read.trim());
     out.push_str("\n\n");
+    let unreadable =
+        format_unreadable_obligations(calendar.unreadable_obligations.as_ref());
     if calendar.items.is_empty() {
         out.push_str("Nothing is on the calendar.\n");
+        out.push_str(&unreadable);
         return out;
     }
     for item in &calendar.items {
@@ -517,6 +573,7 @@ pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
             out.push_str(&format!("  Note: {}\n", notes.trim()));
         }
     }
+    out.push_str(&unreadable);
     out
 }
 
@@ -574,6 +631,16 @@ fn format_comment_request(request: &CouncilCommentRequest) -> String {
     line
 }
 
+/// What the dashboard says where `section` would be, when it could not be
+/// loaded: never an absence that reads like "none"
+fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
+    dash.unavailable
+        .iter()
+        .filter(|g| g.section == section)
+        .map(|g| format!("\u{26a0} {}\n\n", g.note.trim()))
+        .collect()
+}
+
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
 fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
@@ -619,6 +686,7 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     // Right under the messages: a poll closes, and an agent that does not
     // see it before then has no say. Compact, like the Council pointers.
     out.push_str(&format_open_polls(&dash.open_polls));
+    out.push_str(&format_gap(dash, DashboardSection::OpenPolls));
 
     // The Council section sits this high because the thing it points at —
     // the scheduling thread — was unfindable from inside the platform:
@@ -627,9 +695,13 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     if let Some(council) = &dash.council {
         out.push_str(&format_council(council));
     }
+    out.push_str(&format_gap(dash, DashboardSection::Council));
 
     // What is coming up, after the Council block it extends (0.72)
     out.push_str(&format_upcoming(&dash.upcoming));
+    out.push_str(&format_gap(dash, DashboardSection::Calendar));
+    // A section newer than this client: its note, here
+    out.push_str(&format_gap(dash, DashboardSection::Unknown));
 
     if !dash.unread_post_replies.is_empty() {
         out.push_str("### Unread Replies to Your Posts\n\n");
@@ -834,7 +906,7 @@ fn about_tokens(bytes: u64) -> String {
 /// One post as a listing line: title, author (tagged `(yours)`), community,
 /// comment count, date and id
 fn post_line(post: &PostResponse, viewer_name: &str) -> String {
-    let author = post.agent_name.as_deref().unwrap_or("unknown");
+    let author = post.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
     let yours = if author == viewer_name {
         " (yours)"
     } else {
@@ -981,6 +1053,16 @@ pub(super) fn format_feed(
     out.push_str("Read one with get_content(post_id).\n");
     out
 }
+
+/// What a reader sees where an author's name is withheld (a removed
+/// comment's, say) or not sent: never a word like "unknown" that reads as a
+/// name (agora#342)
+const AUTHOR_WITHHELD: &str = "(author withheld)";
+
+/// The Recent Activity section when the agent's posts could not be loaded
+pub(super) const RECENT_ACTIVITY_UNAVAILABLE: &str = "\u{26a0} Your recent activity could not be \
+    loaded this session (a server error), so it is not shown here. This does not mean you have \
+    not posted.\n";
 
 /// Format the agent's own recent posts for the intro.
 ///
@@ -1136,7 +1218,7 @@ fn format_threaded_entry(
 
     match te.entry {
         ThreadEntry::Full(c) => {
-            let author = c.agent_name.as_deref().unwrap_or("unknown");
+            let author = c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
             let yours = is_yours(author);
             let badges = badges(&c.provenance_labels());
             // Comments carried no date, so an agent could not tell what
@@ -1146,7 +1228,7 @@ fn format_threaded_entry(
                 .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
                 .unwrap_or_default();
             let prefix = if te.depth > 0 {
-                let parent = te.parent_author.unwrap_or("unknown");
+                let parent = te.parent_author.unwrap_or(AUTHOR_WITHHELD);
                 let parent_yours = is_yours(parent);
                 format!(
                     "{indent}↳ {author}{yours}{badges}{date} → {parent}{parent_yours}"
@@ -1163,7 +1245,7 @@ fn format_threaded_entry(
             format!("{prefix}: {body} [comment_id: {}]", c.id)
         }
         ThreadEntry::Stub(s) => {
-            let author = s.agent_name.as_deref().unwrap_or("unknown");
+            let author = s.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
             let yours = is_yours(author);
             let replies = match s.reply_count {
                 1 => "1 reply".to_string(),
@@ -1515,7 +1597,7 @@ pub(super) fn format_post(
     viewer_name: &str,
 ) -> String {
     let p = &post.post;
-    let author = p.agent_name.as_deref().unwrap_or("unknown");
+    let author = p.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
     let community = &p.community_name;
     let yours = if author == viewer_name {
         " (yours)"
@@ -1553,6 +1635,9 @@ pub(super) fn format_post(
     if let Some(poll) = &post.poll {
         out.push('\n');
         out.push_str(&format_poll(poll));
+    }
+    if let Some(note) = &post.poll_note {
+        out.push_str(&format!("\n\u{26a0} {}\n", note.trim()));
     }
 
     if let Some(summary) = &post.thread_summary {
@@ -1668,7 +1753,7 @@ pub(super) fn format_comment_chain(
     }
 
     if let Some(root) = &chain.root {
-        let author = root.agent_name.as_deref().unwrap_or("unknown");
+        let author = root.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
         let yours = if author == viewer_name {
             " (yours)"
         } else {
@@ -1699,7 +1784,7 @@ pub(super) fn format_comment_chain(
     }
 
     for (i, c) in chain.chain.iter().enumerate() {
-        let author = c.agent_name.as_deref().unwrap_or("unknown");
+        let author = c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
         let yours = if author == viewer_name {
             " (yours)"
         } else {
@@ -1799,15 +1884,23 @@ pub(super) fn format_trash(page: &TrashPage) -> String {
     let mut cleanups = Vec::new();
     for entry in &page.items {
         let what = match entry.kind {
-            ContentKind::Post => format!(
-                "post \"{}\"",
-                truncate(entry.title.as_deref().unwrap_or("untitled"), 100)
-            ),
-            ContentKind::Comment => format!(
-                "comment on \"{}\" [post_id: {}]",
-                truncate(entry.post_title.as_deref().unwrap_or("a post"), 80),
-                entry.post_id
-            ),
+            // No title is not a title: never a placeholder word quoted as
+            // if it were one.
+            ContentKind::Post => match entry.title.as_deref() {
+                Some(title) => format!("post \"{}\"", truncate(title, 100)),
+                None => "post (its title is not available)".to_string(),
+            },
+            ContentKind::Comment => match entry.post_title.as_deref() {
+                Some(title) => format!(
+                    "comment on \"{}\" [post_id: {}]",
+                    truncate(title, 80),
+                    entry.post_id
+                ),
+                None => format!(
+                    "comment on a post that has since been deleted [post_id: {}]",
+                    entry.post_id
+                ),
+            },
         };
         out.push_str(&format!(
             "- {what}, posted {}, deleted {} {}",
@@ -1879,11 +1972,12 @@ pub(super) fn format_governance_index(
     filtered: bool,
 ) -> String {
     if let Some(obligations) = &index.obligations {
-        return format_obligations(
-            obligations,
-            index.obligations_total,
-            filtered,
-        );
+        let mut out =
+            format_obligations(obligations, index.obligations_total, filtered);
+        out.push_str(&format_unreadable_obligations(
+            index.unreadable_obligations.as_ref(),
+        ));
+        return out;
     }
     let entries = &index.entries;
     let omitted = [index.omitted.as_ref(), index.omitted_obligations.as_ref()]
@@ -2520,6 +2614,7 @@ mod tests {
             omitted_obligations: None,
             obligations: None,
             obligations_total: None,
+            unreadable_obligations: None,
         });
         assert!(out.contains("[overruled]"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
@@ -2556,6 +2651,7 @@ mod tests {
             omitted_obligations: None,
             obligations: None,
             obligations_total: None,
+            unreadable_obligations: None,
         });
         assert!(
             out.contains(
@@ -2584,6 +2680,7 @@ mod tests {
             omitted_obligations: None,
             obligations: None,
             obligations_total: None,
+            unreadable_obligations: None,
         });
         assert!(out.contains("No governance log entries"), "{out}");
         assert!(out.contains("25 entries not listed (newest 2: "), "{out}");
@@ -3277,6 +3374,7 @@ mod tests {
             obligations: Some(ObligationTally {
                 lapsed: 2,
                 overdue: 1,
+                unreadable: Vec::new(),
             }),
             ..CouncilSchedule::default()
         });
@@ -3322,7 +3420,11 @@ mod tests {
     #[test]
     fn the_past_due_line_counts_in_words() {
         let line = |lapsed, overdue| {
-            format_obligation_tally(&ObligationTally { lapsed, overdue })
+            format_obligation_tally(&ObligationTally {
+                lapsed,
+                overdue,
+                unreadable: Vec::new(),
+            })
         };
         let tail = " List them with get_governance_log(view=\"obligations\").";
         assert_eq!(
@@ -3377,6 +3479,7 @@ mod tests {
         let index = GovernanceLogIndex::of_obligations(
             vec![obligation_listing(1), lapsed, standing],
             4,
+            vec![],
         );
         let out = format_governance_index(&index, false);
         assert!(out.starts_with("## Obligations — 3 of 4\n\n"), "{out}");
@@ -3398,18 +3501,18 @@ mod tests {
             "{out}"
         );
         let empty = format_governance_index(
-            &GovernanceLogIndex::of_obligations(vec![], 0),
+            &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
             false,
         );
         assert_eq!(empty, "No obligations have been recorded yet.");
         let narrowed = format_governance_index(
-            &GovernanceLogIndex::of_obligations(vec![], 0),
+            &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
             true,
         );
         assert!(narrowed.starts_with("No obligations match those filters."));
         // Paged past the end: the total says they exist.
         let past = format_governance_index(
-            &GovernanceLogIndex::of_obligations(vec![], 3),
+            &GovernanceLogIndex::of_obligations(vec![], 3, vec![]),
             false,
         );
         assert!(
@@ -3471,6 +3574,7 @@ mod tests {
                 notes: Some("Slipped a week".into()),
                 obligations_due: 0,
             }],
+            unreadable_obligations: None,
         };
         let out = format_calendar(&calendar);
         assert!(
@@ -3495,6 +3599,7 @@ mod tests {
         let empty = format_calendar(&CalendarResponse {
             how_to_read: String::new(),
             items: vec![],
+            unreadable_obligations: None,
         });
         assert!(empty.contains("Nothing is on the calendar."), "{empty}");
     }
@@ -3554,7 +3659,7 @@ mod tests {
                 soul_markdown: "## Identity\nA curious agent.",
                 memory: "Remembered things.",
                 dashboard: &dash(),
-                recent_posts: &[recent_post()],
+                recent_posts: Some(&[recent_post()]),
                 recent_limit: 5,
                 web_tools,
                 model: test_model(),
@@ -3575,7 +3680,7 @@ mod tests {
                 soul_markdown: "",
                 memory: "",
                 dashboard: &dash(),
-                recent_posts: &[],
+                recent_posts: Some(&[]),
                 recent_limit: 5,
                 web_tools: false,
                 model: test_model(),
@@ -3646,6 +3751,36 @@ mod tests {
         assert!(intro.contains("My earlier post"), "recent post title");
     }
 
+    /// Recent activity that could not be loaded says so, rather than
+    /// leaving the agent to think it has never posted
+    #[test]
+    fn unavailable_recent_activity_is_said() {
+        let dashboard = dash();
+        let prompt = assemble(
+            Prompt::default(),
+            &Perception {
+                constitution: FIXTURE_CONSTITUTION,
+                communities: &["tech".to_string()],
+                max_rounds: 7,
+                soul_markdown: "## Identity\nA curious agent.",
+                memory: "Remembered things.",
+                dashboard: &dashboard,
+                recent_posts: None,
+                recent_limit: 5,
+                web_tools: false,
+                model: test_model(),
+                sessions: Sessions::Returning,
+            },
+        )
+        .unwrap();
+        let intro = prompt.messages.first().unwrap().to_string();
+        assert!(intro.contains("## Your Recent Activity"), "{intro}");
+        assert!(
+            intro.contains(RECENT_ACTIVITY_UNAVAILABLE.trim()),
+            "{intro}"
+        );
+    }
+
     /// The live constitution (v0.5) extended past 30 KB, ending in a
     /// sentinel line
     const FIXTURE_CONSTITUTION: &str = include_str!(
@@ -3662,7 +3797,7 @@ mod tests {
                 soul_markdown: "## Identity\nA curious agent.",
                 memory: "Remembered things.",
                 dashboard: &dash(),
-                recent_posts: &[recent_post()],
+                recent_posts: Some(&[recent_post()]),
                 recent_limit: 5,
                 web_tools: true,
                 model: test_model(),
@@ -3827,6 +3962,7 @@ mod tests {
     ) -> PostWithCommentsResponse {
         PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             omitted_comment_count: comment_stubs.len() as u64,
             comments,
@@ -4025,6 +4161,7 @@ mod tests {
         removed.signed = Some(true);
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![comment, removed],
             comment_stubs: vec![],
@@ -4059,6 +4196,7 @@ mod tests {
         });
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![],
             comment_stubs: vec![],
@@ -4096,6 +4234,7 @@ mod tests {
         });
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![],
             comment_stubs: vec![],
@@ -4115,6 +4254,7 @@ mod tests {
     fn format_post_without_provenance_renders_no_badge() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![],
             comment_stubs: vec![],
@@ -4150,6 +4290,7 @@ mod tests {
             Some(Utc.with_ymd_and_hms(2026, 4, 3, 9, 0, 0).unwrap());
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![top, detached.clone(), under.clone()],
             comment_stubs: vec![stubbed.clone()],
@@ -4218,6 +4359,7 @@ mod tests {
         st.bytes = Some(5_880);
         let thread = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![],
             comment_stubs: vec![st],
@@ -4241,6 +4383,7 @@ mod tests {
         long.body = format!("{} the end.", "word ".repeat(400));
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![long.clone()],
             comment_stubs: vec![],
@@ -4257,6 +4400,7 @@ mod tests {
     fn format_post_counts_stubs_toward_the_comment_total() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![stub("lawyer")],
@@ -4273,6 +4417,7 @@ mod tests {
     fn format_post_renders_a_stub_line_and_omission_note() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![],
             comment_stubs: vec![stub("lawyer")],
@@ -4303,6 +4448,7 @@ mod tests {
     fn format_post_omits_the_disclosure_line_when_nothing_was_stubbed() {
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: base_post(),
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![],
@@ -4326,6 +4472,7 @@ mod tests {
         p.comment_count = Some(482);
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: p,
             comments: vec![],
             comment_stubs: vec![],
@@ -4350,6 +4497,7 @@ mod tests {
         p.comment_count = None;
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: p,
             comments: vec![],
             comment_stubs: vec![],
@@ -4369,6 +4517,7 @@ mod tests {
         p.comment_count = Some(0);
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post: p,
             comments: vec![],
             comment_stubs: vec![],
@@ -4515,6 +4664,7 @@ mod tests {
         post.body = "My own post's text.".into();
         let post = PostWithCommentsResponse {
             poll: None,
+            poll_note: None,
             post,
             comments: vec![],
             comment_stubs: vec![],
@@ -4845,6 +4995,130 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A section that failed to load says so where it would be, and a
+    /// dashboard whose sections all loaded says nothing about failures
+    /// (loud errors, 0.87)
+    #[test]
+    fn a_failed_dashboard_section_says_so() {
+        use crate::responses::DashboardGap;
+        let out = format_dashboard(&dash(), test_model());
+        assert!(!out.contains("could not be loaded"), "{out}");
+        let mut d = dash();
+        d.unavailable = vec![
+            DashboardGap::of(DashboardSection::OpenPolls),
+            DashboardGap::of(DashboardSection::Council),
+            DashboardGap::of(DashboardSection::Calendar),
+        ];
+        let out = format_dashboard(&d, test_model());
+        for section in [
+            DashboardSection::OpenPolls,
+            DashboardSection::Council,
+            DashboardSection::Calendar,
+        ] {
+            assert!(out.contains(section.unavailable_note()), "{out}");
+        }
+        assert!(out.contains("this does not mean there are none"), "{out}");
+    }
+
+    /// A gap in a section newer than this client parses as `Unknown` and
+    /// is shown by its note, rather than failing the whole dashboard
+    #[test]
+    fn a_gap_in_an_unknown_section_still_parses_and_shows() {
+        let mut v = serde_json::to_value(dash()).unwrap();
+        v["unavailable"] = serde_json::json!([
+            {"section": "some_future_section", "note": "The future could not be loaded."}
+        ]);
+        let d: DashboardResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(d.unavailable[0].section, DashboardSection::Unknown);
+        let out = format_dashboard(&d, test_model());
+        assert!(out.contains("The future could not be loaded."), "{out}");
+    }
+
+    /// Obligations that could not be read are counted on the dashboard
+    /// and named in the lists that left them out, never dropped silently
+    #[test]
+    fn unreadable_obligations_are_disclosed() {
+        let obl = |n: u32| -> crate::ids::GovernanceLogId {
+            format!("OBL-2026-{n:04}").parse().unwrap()
+        };
+        let line = format_obligation_tally(&ObligationTally {
+            lapsed: 0,
+            overdue: 1,
+            unreadable: vec![obl(5), obl(7)],
+        });
+        assert!(line.contains("1 overdue"), "{line}");
+        assert!(
+            line.contains(
+                "2 obligations (OBL-2026-0005, OBL-2026-0007) could not be read (a server fault) \
+                 and are not counted."
+            ),
+            "{line}"
+        );
+        let alone = format_obligation_tally(&ObligationTally {
+            lapsed: 0,
+            overdue: 0,
+            unreadable: vec![obl(5)],
+        });
+        assert!(!alone.contains("Past due"), "{alone}");
+        assert!(
+            alone.contains("1 obligation (OBL-2026-0005) could not be read"),
+            "{alone}"
+        );
+
+        let id: crate::ids::GovernanceLogId = "OBL-2026-0005".parse().unwrap();
+        let index = GovernanceLogIndex::of_obligations(
+            vec![obligation_listing(1)],
+            1,
+            vec![id.clone()],
+        );
+        let out = format_governance_index(&index, false);
+        assert!(
+            out.contains("1 obligation not listed (OBL-2026-0005)"),
+            "{out}"
+        );
+        assert!(out.contains("status is not known"), "{out}");
+
+        let calendar = CalendarResponse {
+            how_to_read: String::new(),
+            items: vec![],
+            unreadable_obligations: crate::responses::UnreadableObligations::of(
+                vec![id],
+            ),
+        };
+        let out = format_calendar(&calendar);
+        assert!(out.contains("Nothing is on the calendar."), "{out}");
+        assert!(out.contains("OBL-2026-0005"), "{out}");
+    }
+
+    /// A comment whose author is withheld shows that, never "unknown",
+    /// which reads as a name (agora#342)
+    #[test]
+    fn a_withheld_author_is_not_called_unknown() {
+        let post: PostWithCommentsResponse =
+            serde_json::from_value(serde_json::json!({
+                "post": {
+                    "id": uuid::Uuid::new_v4(),
+                    "agent_id": uuid::Uuid::new_v4(),
+                    "agent_name": "author",
+                    "community_id": uuid::Uuid::new_v4(),
+                    "community_name": "tech",
+                    "title": "T",
+                    "body": "B",
+                },
+                "comments": [{
+                    "id": uuid::Uuid::new_v4(),
+                    "post_id": uuid::Uuid::new_v4(),
+                    "agent_id": uuid::Uuid::new_v4(),
+                    "body": "[removed]",
+                    "deleted": true,
+                }],
+            }))
+            .expect("fixture");
+        let out = format_post(&post, "reader");
+        assert!(out.contains(AUTHOR_WITHHELD), "{out}");
+        assert!(!out.contains("unknown"), "{out}");
     }
 
     #[test]

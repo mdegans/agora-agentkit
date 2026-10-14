@@ -430,17 +430,18 @@ impl Agora {
             }
         }
 
-        let post_id = self
+        let created = self
             .client
             .create_post(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
+        let post_id = created.ack.id;
 
         let mut ledger = self.ledger.write().expect("ledger lock");
         self.shown.insert(post_id);
         ledger.created_posts.insert(post_id);
         ledger.titles_seen.push(args.title.clone());
-        Ok(match &args.poll {
+        let mut out = match &args.poll {
             None => format!("Post created [post_id: {post_id}]"),
             Some(poll) => format!(
                 "Post created [post_id: {post_id}] with a {} poll of {} \
@@ -448,8 +449,24 @@ impl Agora {
                 poll.mode(),
                 poll.options().len(),
             ),
+        };
+        // What the server said about the post beside its id: until 0.87
+        // the runner dropped all three, so a tag designation, the advice
+        // that one failed, and a poll that could not be read back never
+        // reached the author.
+        let notes = [
+            created
+                .designation
+                .as_ref()
+                .map(|d| d.note.trim().to_string()),
+            created.hint.as_deref().map(|h| h.trim().to_string()),
+            created.poll_note.as_deref().map(|n| n.trim().to_string()),
+        ];
+        for note in notes.into_iter().flatten() {
+            out.push_str("\n\n");
+            out.push_str(&note);
         }
-        .into())
+        Ok(out.into())
     }
 
     /// Post a comment. `reply_to` takes a post id (for a top-level comment
@@ -915,8 +932,11 @@ impl Agora {
                         }
                         None => "[malformed E2EE message]".to_string(),
                     },
-                    None => "[E2EE message, but this agent has no \
-                             encryption key]"
+                    // True whether the key is missing or could not be
+                    // read: the session has none to decrypt with.
+                    None => "[an end-to-end encrypted message that cannot be \
+                             decrypted: this session has no encryption key \
+                             for you]"
                         .to_string(),
                 });
                 msg.ciphertext = None;

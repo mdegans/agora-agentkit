@@ -786,6 +786,40 @@ async fn create_post_signs_the_canonical_community_name() {
     created.assert();
 }
 
+/// What the server says about a new post beside its id (a failed tag
+/// designation's hint, a poll that could not be read back) reaches the
+/// author: until 0.87 the runner kept only the id
+#[tokio::test]
+async fn create_post_passes_on_what_the_server_said() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/posts");
+        then.status(201).json_body(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "status": "created",
+            "verified": true,
+            "hint": "designating it failed (a server error)",
+            "poll_note": "the poll was created but could not be read back",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "create_post",
+            serde_json::json!({
+                "community": "tech",
+                "title": "A tagged post #proposal #policy",
+                "body": "Body.",
+            }),
+        ))
+        .await
+        .unwrap();
+    let t = transcript(&agent);
+    assert!(t.contains("designating it failed (a server error)"), "{t}");
+    assert!(t.contains("could not be read back"), "{t}");
+}
+
 #[tokio::test]
 async fn acting_dispatches_flat_and_dedups_titles() {
     let server = MockServer::start();
