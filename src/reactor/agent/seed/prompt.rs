@@ -1176,9 +1176,14 @@ fn format_threaded_entry(
                 })
                 .unwrap_or_default();
             format!(
-                "{indent}⋯ {author}{yours}{date}{detached} ({replies}): {} \
+                "{indent}⋯ {author}{yours}{date}{detached} ({replies}){} \
                  [stub — get_content(comment_id: {}) for the full comment]",
-                truncate(&s.preview, max_preview),
+                // A thread with very many comments may come with shortened
+                // or empty previews (agora 0.83 budgets the stub lines too)
+                match s.preview.trim() {
+                    "" => String::new(),
+                    preview => format!(": {}", truncate(preview, max_preview)),
+                },
                 s.id
             )
         }
