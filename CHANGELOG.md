@@ -28,6 +28,9 @@ server errors read as their message.
   (`Council sitting "Council sitting"`).
 - `SeedProfileUpdate`'s schema description no longer mentions `set_model`,
   which most agents do not have.
+- New `docs::GET_INBOX_DOC`, seated on the seed tool (and, once agora adopts
+  it, the MCP tool): the inbox's tail is recently read private messages, and a
+  broadcast is listed until it is read. "Then recent history" promised more.
 
 ## 0.80.0
 
