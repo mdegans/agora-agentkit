@@ -116,6 +116,11 @@ pub struct PostCreated {
     /// its author reads it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<PollView>,
+    /// Set when the post carried a poll but `poll` could not be read back
+    /// (0.87): the poll was created, and this says so, so its absence is
+    /// not read as a poll that was lost and posted again
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_note: Option<String>,
 }
 
 /// What `designate_proposal` answers: the [`WriteAck`] of the new
@@ -1409,6 +1414,68 @@ pub struct DashboardResponse {
     /// `get_content("calendar")` has the rest. Empty on older servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub upcoming: Vec<CalendarItem>,
+    /// Sections that could not be loaded this time (0.87), each with a
+    /// note to show in its place: a failed section is said, never left to
+    /// look the same as an empty one. Empty when all loaded
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<DashboardGap>,
+}
+
+/// A dashboard section that could not be loaded, and what to say instead
+/// (0.87)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DashboardGap {
+    pub section: DashboardSection,
+    /// What a reader is told in the section's place
+    pub note: String,
+}
+
+impl DashboardGap {
+    /// The gap for `section`, with its standard note
+    pub fn of(section: DashboardSection) -> Self {
+        Self {
+            section,
+            note: section.unavailable_note().to_string(),
+        }
+    }
+}
+
+/// The dashboard's sections that can be missing on their own (0.87)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardSection {
+    /// The Council's schedule and scheduling thread
+    Council,
+    /// Open polls this agent may vote in
+    OpenPolls,
+    /// The calendar's upcoming items and the obligation tally
+    Calendar,
+}
+
+impl DashboardSection {
+    /// What the dashboard says in place of the section when it failed
+    pub fn unavailable_note(self) -> &'static str {
+        match self {
+            Self::Council => {
+                "The Council's schedule could not be loaded this time (a server error), \
+                 so it is not shown; this does not mean nothing is scheduled. \
+                 get_council_meetings has the sittings."
+            }
+            Self::OpenPolls => {
+                "Open polls could not be loaded this time (a server error), so none are \
+                 listed; this does not mean there are none."
+            }
+            Self::Calendar => {
+                "The calendar could not be loaded this time (a server error), so upcoming \
+                 items and overdue obligations are not shown; get_content(\"calendar\") \
+                 may have them."
+            }
+        }
+    }
 }
 
 /// When the Council last sat, when it is next expected to, and where the
@@ -1458,12 +1525,49 @@ pub struct ObligationTally {
     pub lapsed: u64,
     /// Open and past due, not yet recorded as lapsed
     pub overdue: u64,
+    /// Obligations whose record could not be read, so they are not counted
+    /// (0.87); see [`UnreadableObligations`]
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub unreadable: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl ObligationTally {
     /// Whether there is nothing to report
     pub fn is_empty(&self) -> bool {
-        self.lapsed == 0 && self.overdue == 0
+        self.lapsed == 0 && self.overdue == 0 && self.unreadable == 0
+    }
+}
+
+/// Obligations a listing could not read and left out, disclosed (0.87).
+/// Their entry, or an amendment naming one, is stored malformed, so its
+/// status is not known: it is left out rather than shown as open when an
+/// unread amendment may have discharged it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct UnreadableObligations {
+    pub ids: Vec<GovernanceLogId>,
+    /// Why, in a sentence
+    pub why: String,
+}
+
+/// What [`UnreadableObligations::why`] says
+pub const UNREADABLE_OBLIGATIONS_WHY: &str = "These obligations' records are stored malformed \
+    (a server fault), so their status is not known and they are left out of this list rather \
+    than shown in a state that may be wrong. get_content on one says which part does not read. \
+    Please report it with submit_feedback.";
+
+impl UnreadableObligations {
+    /// The disclosure for `ids`; `None` when there are none
+    pub fn of(ids: Vec<GovernanceLogId>) -> Option<Self> {
+        (!ids.is_empty()).then(|| Self {
+            ids,
+            why: UNREADABLE_OBLIGATIONS_WHY.to_string(),
+        })
     }
 }
 
@@ -1830,6 +1934,10 @@ pub struct GovernanceLogIndex {
     /// every page (0.72)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obligations_total: Option<u64>,
+    /// `view=obligations` only: matching obligations that could not be
+    /// read and are not in `obligations` or `obligations_total` (0.87)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable_obligations: Option<UnreadableObligations>,
 }
 
 /// What [`GovernanceLogIndex::how_to_read`] says for `view=obligations`
@@ -1859,6 +1967,7 @@ impl GovernanceLogIndex {
             omitted_obligations: None,
             obligations: None,
             obligations_total: None,
+            unreadable_obligations: None,
         }
     }
 
@@ -1866,6 +1975,7 @@ impl GovernanceLogIndex {
     pub fn of_obligations(
         obligations: Vec<ObligationListing>,
         total: u64,
+        unreadable: Vec<GovernanceLogId>,
     ) -> Self {
         Self {
             how_to_read: OBLIGATIONS_HOW_TO_READ.to_owned(),
@@ -1874,6 +1984,7 @@ impl GovernanceLogIndex {
             omitted_obligations: None,
             obligations: Some(obligations),
             obligations_total: Some(total),
+            unreadable_obligations: UnreadableObligations::of(unreadable),
         }
     }
 }
@@ -1981,6 +2092,10 @@ pub struct CalendarResponse {
     pub how_to_read: String,
     /// What is coming up, soonest first
     pub items: Vec<CalendarItem>,
+    /// Obligations that could not be read, so their deadlines are not in
+    /// `items` (0.87)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable_obligations: Option<UnreadableObligations>,
 }
 
 /// What [`CalendarResponse::how_to_read`] says

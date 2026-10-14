@@ -283,10 +283,14 @@ impl CalendarResponse {
     pub fn new(
         calendar: &Calendar,
         obligations: &[ResolvedObligation],
+        unreadable: Vec<GovernanceLogId>,
     ) -> Self {
         Self {
             how_to_read: CALENDAR_HOW_TO_READ.to_string(),
             items: calendar.upcoming(obligations, false, CALENDAR_LIMIT),
+            unreadable_obligations: crate::responses::UnreadableObligations::of(
+                unreadable,
+            ),
         }
     }
 }
@@ -410,6 +414,7 @@ impl From<&[ResolvedObligation]> for ObligationTally {
                 })
                 .count() as u64,
             overdue: rows.iter().filter(|r| r.overdue).count() as u64,
+            unreadable: 0,
         }
     }
 }

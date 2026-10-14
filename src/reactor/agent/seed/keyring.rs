@@ -168,28 +168,43 @@ impl Keyring for FsKeyring {
         let secrets: zeroize::Zeroizing<Secrets> = zeroize::Zeroizing::new(
             serde_json::from_str(&raw)
                 .map_err(|e| {
-                    tracing::warn!("unparseable secrets for {id}: {e}");
+                    tracing::error!(agent_id = %id, error = %e, "unparseable secrets");
                 })
                 .ok()?,
         );
         crate::crypto::signing_key_from_hex(&secrets.signing_key)
             .map_err(|e| {
-                tracing::warn!("bad signing key for {id}: {e}");
+                tracing::error!(agent_id = %id, error = %e, "bad signing key");
             })
             .ok()
     }
 
     fn encryption_key(&self, id: AgentId) -> Option<EncryptionSecretKey> {
-        let raw = zeroize::Zeroizing::new(
-            std::fs::read_to_string(self.secrets_path(id)).ok()?,
-        );
-        let secrets: zeroize::Zeroizing<Secrets> =
-            zeroize::Zeroizing::new(serde_json::from_str(&raw).ok()?);
+        // A missing file or key is "no key" (a pre-E2EE agent); a file that
+        // cannot be read or parsed is a fault, logged as one, not passed
+        // off as an agent that never had a key.
+        let raw = match std::fs::read_to_string(self.secrets_path(id)) {
+            Ok(raw) => zeroize::Zeroizing::new(raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                tracing::error!(agent_id = %id, error = %e, "secrets file unreadable; no encryption key this session");
+                return None;
+            }
+        };
+        let secrets: zeroize::Zeroizing<Secrets> = match serde_json::from_str(
+            &raw,
+        ) {
+            Ok(s) => zeroize::Zeroizing::new(s),
+            Err(e) => {
+                tracing::error!(agent_id = %id, error = %e, "secrets file unparseable; no encryption key this session");
+                return None;
+            }
+        };
         crate::envelope::encryption_secret_from_hex(
             secrets.encryption_key.as_deref()?,
         )
         .map_err(|e| {
-            tracing::warn!("bad encryption key for {id}: {e}");
+            tracing::error!(agent_id = %id, error = %e, "bad encryption key");
         })
         .ok()
     }

@@ -1501,16 +1501,20 @@ impl Agent for SeedAgent {
                 .collect();
         }
 
+        // Perception survives without it (the dashboard is the meal), but
+        // the intro says it is missing rather than showing no posts.
         let recent = match self.ctx.client.get_agent_posts(self.id).await {
-            Ok(posts) => posts,
-            // Perception survives without it — the dashboard is the meal.
+            Ok(posts) => Some(posts),
             Err(e) => {
-                tracing::warn!("recent activity unavailable: {e}");
-                Vec::new()
+                tracing::warn!(agent_id = %self.id, error = %e, "recent activity unavailable");
+                None
             }
         };
 
-        self.shown.extend(tool::ids_on_dashboard(&dash, &recent));
+        self.shown.extend(tool::ids_on_dashboard(
+            &dash,
+            recent.as_deref().unwrap_or_default(),
+        ));
 
         let soul_markdown = self.state.soul.markdown();
         let memory = self.state.memory.render_for_prompt();
@@ -1531,7 +1535,7 @@ impl Agent for SeedAgent {
                     Some(_) => prompt::Sessions::Returning,
                 },
                 dashboard: &dash,
-                recent_posts: &recent,
+                recent_posts: recent.as_deref(),
                 recent_limit: self.ctx.config.recent_activity_limit,
                 // What was actually installed, not what was configured: an
                 // endpoint that can't run them gets no guidance about them.

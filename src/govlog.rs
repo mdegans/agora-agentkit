@@ -1642,15 +1642,27 @@ pub struct GovernanceCitation {
     pub created_at: DateTime<Utc>,
 }
 
+/// A citing field that does not parse: which relation it would have been
+/// (0.87). Until 0.87 it named nothing, so the cited entry's `cited_by`
+/// left the citing entry out without a word
+#[derive(Debug, thiserror::Error)]
+#[error("the record's {relation:?} field does not parse: {error}")]
+pub struct MalformedCitation {
+    /// The relation the field carries, for the caller that knows from
+    /// elsewhere (a database match) that the entry does cite
+    pub relation: CitationRelation,
+    #[source]
+    pub error: serde_json::Error,
+}
+
 /// The entries `data` names, and how: the links a later entry of
 /// `entry_type` makes to earlier ones, read from its record's own fields.
 /// An amendment's `target` is left out (see [`CitationRelation`]). A field
-/// that doesn't parse names nothing, rather than failing the read it sits
-/// beside. (0.68)
+/// that doesn't parse is a [`MalformedCitation`]. (0.68)
 pub fn citations_in(
     entry_type: GovernanceLogEntryType,
     data: &serde_json::Value,
-) -> Vec<(GovernanceLogId, CitationRelation)> {
+) -> Result<Vec<(GovernanceLogId, CitationRelation)>, MalformedCitation> {
     #[derive(Deserialize)]
     struct Concerns {
         #[serde(default)]
@@ -1672,22 +1684,26 @@ pub fn citations_in(
     ) -> Vec<(GovernanceLogId, CitationRelation)> {
         ids.into_iter().map(|id| (id, relation)).collect()
     }
+    let malformed =
+        |relation| move |error| MalformedCitation { relation, error };
     match entry_type {
         GovernanceLogEntryType::StewardRecord => {
             serde_json::from_value::<Concerns>(data.clone())
                 .map(|c| each(c.concerns, CitationRelation::Concerns))
+                .map_err(malformed(CitationRelation::Concerns))
         }
         GovernanceLogEntryType::Amendment => {
             serde_json::from_value::<Authority>(data.clone())
                 .map(|a| each(a.authority, CitationRelation::Authority))
+                .map_err(malformed(CitationRelation::Authority))
         }
         GovernanceLogEntryType::CouncilDecision => {
             serde_json::from_value::<Overrules>(data.clone())
                 .map(|o| each(o.overrules, CitationRelation::Overrules))
+                .map_err(malformed(CitationRelation::Overrules))
         }
         _ => Ok(Vec::new()),
     }
-    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -3183,8 +3199,9 @@ mod tests {
         assert!(pointer_tokens("").is_empty());
     }
 
-    /// Each kind of record names what it cites in its own field; a
-    /// malformed field, or an entry type that cites nothing, names nothing.
+    /// Each kind of record names what it cites in its own field; an entry
+    /// type that cites nothing names nothing, and a malformed field is an
+    /// error.
     #[test]
     fn citations_are_read_from_each_records_own_field() {
         use serde_json::json;
@@ -3193,7 +3210,8 @@ mod tests {
             citations_in(
                 GovernanceLogEntryType::StewardRecord,
                 &json!({"title": "t", "concerns": ["GOV-2026-0011", "AMD-2026-0004"]}),
-            ),
+            )
+            .unwrap(),
             vec![
                 (id("GOV-2026-0011"), CitationRelation::Concerns),
                 (id("AMD-2026-0004"), CitationRelation::Concerns),
@@ -3203,7 +3221,8 @@ mod tests {
             citations_in(
                 GovernanceLogEntryType::Amendment,
                 &json!({"target": "APP-2026-0001", "authority": "GOV-2026-0005"}),
-            ),
+            )
+            .unwrap(),
             vec![(id("GOV-2026-0005"), CitationRelation::Authority)],
             "the target is not a citation: it is listed under `amendments`"
         );
@@ -3211,7 +3230,8 @@ mod tests {
             citations_in(
                 GovernanceLogEntryType::CouncilDecision,
                 &json!({"overrules": ["APP-2026-0002"]}),
-            ),
+            )
+            .unwrap(),
             vec![(id("APP-2026-0002"), CitationRelation::Overrules)]
         );
         assert!(
@@ -3219,20 +3239,27 @@ mod tests {
                 GovernanceLogEntryType::Amendment,
                 &json!({"authority": null})
             )
+            .unwrap()
             .is_empty()
         );
-        assert!(
+        // A malformed field is an error that says which relation it was,
+        // never a silent "cites nothing"
+        assert!(matches!(
             citations_in(
                 GovernanceLogEntryType::StewardRecord,
                 &json!({"concerns": "GOV-2026-0011"})
-            )
-            .is_empty()
-        );
+            ),
+            Err(MalformedCitation {
+                relation: CitationRelation::Concerns,
+                ..
+            })
+        ));
         assert!(
             citations_in(
                 GovernanceLogEntryType::AppealsCourtDecision,
                 &json!({"concerns": ["GOV-2026-0011"]}),
             )
+            .unwrap()
             .is_empty()
         );
     }

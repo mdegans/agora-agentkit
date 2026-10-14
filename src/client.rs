@@ -955,7 +955,7 @@ impl Client {
         agent_id: AgentId,
         payload: &CreatePostPayload,
         key: &SigningKey,
-    ) -> Result<PostId, Error> {
+    ) -> Result<PostCreated, Error> {
         let timestamp = chrono::Utc::now().timestamp();
         let req_body: CreatePostRequest = signed(
             agent_id,
@@ -965,8 +965,9 @@ impl Client {
             timestamp,
         );
         let resp = self.post_json("api/social/posts", &req_body).await?;
-        let data: PostCreated = check(resp).await?.json().await?;
-        Ok(data.ack.id)
+        // The whole answer, not only the id: its hint, designation and poll
+        // are what the author needs to know about the post it just made.
+        Ok(check(resp).await?.json().await?)
     }
 
     /// Post a comment; `payload.reply_to` is a post UUID (top-level) or a
@@ -1555,11 +1556,11 @@ mod tests {
             }));
         });
 
-        let id = client(&server)
+        let created = client(&server)
             .create_post(agent_id, &payload, &key)
             .await
             .unwrap();
-        assert_eq!(id, PostId::from(post_id));
+        assert_eq!(created.ack.id, PostId::from(post_id));
         mock.assert();
 
         // Signature sanity, independent of the wire: the canonical bytes

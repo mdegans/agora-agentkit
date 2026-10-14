@@ -9,6 +9,28 @@
 
 use serde::{Deserialize, Deserializer};
 
+/// Report a coercion: a value that was not what the schema asks for, read
+/// as if it were (a `"null"` string as `None`, `"10"` as `10`).
+///
+/// A no-op unless the `forgiving_coercion` feature is on. With it, each
+/// coercion is a `warn` on the `forgiving_coercion` target, naming the raw
+/// value and the type it was read as. Grammar-constrained decoders
+/// (blallama) never emit these shapes, so with the feature on, any warning
+/// is a bug to find (Steward, 2026-10-14). serde does not tell a
+/// `deserialize_with` function which field it is reading; the enclosing
+/// span (the tool call) says where.
+#[inline]
+#[allow(unused_variables)]
+fn coerced(raw: &serde_json::Value, into: &'static str) {
+    #[cfg(feature = "forgiving_coercion")]
+    tracing::warn!(
+        target: "forgiving_coercion",
+        raw = %raw,
+        into,
+        "forgiving deserializer coerced a value"
+    );
+}
+
 /// Deserialize an [`Option<T>`] while tolerating the string `"null"` and the
 /// empty string as synonyms for `None`.
 ///
@@ -29,7 +51,10 @@ where
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) if s == "null" || s.is_empty() => {
+        Some(raw @ serde_json::Value::String(_))
+            if raw.as_str().is_some_and(|s| s == "null" || s.is_empty()) =>
+        {
+            coerced(&raw, "None");
             Ok(None)
         }
         Some(other) => T::deserialize(other)
@@ -66,11 +91,14 @@ where
         Some(serde_json::Value::String(s)) => {
             let trimmed = s.trim();
             if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                coerced(&serde_json::Value::String(s), "None");
                 return Ok(None);
             }
-            trimmed.parse::<u64>().map(Some).map_err(|e| {
+            let n = trimmed.parse::<u64>().map_err(|e| {
                 D::Error::custom(format!("expected u64, got string {s:?}: {e}"))
-            })
+            })?;
+            coerced(&serde_json::Value::String(s), "u64");
+            Ok(Some(n))
         }
         Some(serde_json::Value::Number(n)) => {
             if let Some(u) = n.as_u64() {
@@ -81,6 +109,7 @@ where
                     && f.fract() == 0.0
                     && f <= u64::MAX as f64
                 {
+                    coerced(&serde_json::Value::Number(n), "u64");
                     Ok(Some(f as u64))
                 } else {
                     Err(D::Error::custom(format!(
@@ -140,14 +169,23 @@ where
     match Option::<serde_json::Value>::deserialize(deserializer)? {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Bool(b)) => Ok(Some(b)),
-        Some(serde_json::Value::String(s)) => match s.trim() {
-            "" | "null" => Ok(None),
-            "true" => Ok(Some(true)),
-            "false" => Ok(Some(false)),
-            _ => Err(D::Error::custom(format!(
-                "expected a boolean, got string {s:?}"
-            ))),
-        },
+        Some(serde_json::Value::String(s)) => {
+            let read = match s.trim() {
+                "" | "null" => None,
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => {
+                    return Err(D::Error::custom(format!(
+                        "expected a boolean, got string {s:?}"
+                    )));
+                }
+            };
+            coerced(
+                &serde_json::Value::String(s),
+                if read.is_some() { "bool" } else { "None" },
+            );
+            Ok(read)
+        }
         Some(other) => {
             Err(D::Error::custom(format!("expected a boolean, got {other}")))
         }
@@ -343,5 +381,76 @@ mod tests {
         assert_eq!(read(r#"{}"#).unwrap(), None);
         assert!(read(r#"{"flag": "yes"}"#).is_err());
         assert!(read(r#"{"flag": 1}"#).is_err());
+    }
+
+    /// With `forgiving_coercion` on, every coercion is a warning on its
+    /// target, and a value that needed none is not
+    #[cfg(feature = "forgiving_coercion")]
+    #[test]
+    fn coercions_warn_when_the_feature_is_on() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Counts events on the `forgiving_coercion` target
+        struct Count(Arc<AtomicUsize>);
+        impl tracing::Subscriber for Count {
+            fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(
+                &self,
+                _: &tracing::span::Attributes<'_>,
+            ) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(
+                &self,
+                _: &tracing::span::Id,
+                _: &tracing::span::Record<'_>,
+            ) {
+            }
+            fn record_follows_from(
+                &self,
+                _: &tracing::span::Id,
+                _: &tracing::span::Id,
+            ) {
+            }
+            fn event(&self, event: &tracing::Event<'_>) {
+                if event.metadata().target() == "forgiving_coercion" {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        #[derive(Deserialize)]
+        struct W {
+            #[serde(default, deserialize_with = "forgiving_option")]
+            s: Option<String>,
+            #[serde(default, deserialize_with = "forgiving_option_u64")]
+            n: Option<u64>,
+            #[serde(default, deserialize_with = "forgiving_option_bool")]
+            b: Option<bool>,
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let read = |json: &str| {
+            tracing::subscriber::with_default(Count(count.clone()), || {
+                serde_json::from_str::<W>(json).unwrap()
+            })
+        };
+        read(r#"{"s": "x", "n": 3, "b": true}"#);
+        read(r#"{}"#);
+        read(r#"{"s": null, "n": null, "b": null}"#);
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "native values coerce nothing"
+        );
+        let w = read(r#"{"s": "null", "n": "10", "b": "false"}"#);
+        assert_eq!((w.s, w.n, w.b), (None, Some(10), Some(false)));
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+        read(r#"{"s": "", "n": 4.0, "b": ""}"#);
+        assert_eq!(count.load(Ordering::SeqCst), 6);
     }
 }
