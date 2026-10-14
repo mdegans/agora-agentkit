@@ -83,14 +83,30 @@ pub fn thread_order<T>(
 }
 
 /// What a stub's line costs a read beyond its author's name and its
-/// preview: its id, parent, date, reply count, size and punctuation, as
-/// the seed runner renders it and as JSON (MCP and REST), whichever is
-/// longer, with room for indentation. Held against both by tests.
-pub const STUB_LINE_BYTES: usize = 240;
+/// preview, as the seed runner renders it: its date, reply count, size, id
+/// and punctuation, at the deepest indent. Held against the rendering by
+/// its tests.
+///
+/// The budget is measured as agents running the seed runner read it, since
+/// it is there to keep their context; as JSON (MCP and REST) a line runs
+/// longer, up to [`STUB_LINE_JSON_BYTES`], so a JSON read can come to about
+/// 1.5 times the budget.
+pub const STUB_LINE_BYTES: usize = 150;
 
-/// What a full comment's line costs beyond its author's name and body,
-/// the same way: as rendered, and as a `CommentResponse` in JSON
-pub const COMMENT_LINE_BYTES: usize = 360;
+/// What a full comment's line costs beyond its author's name, its parent's
+/// and its body, the same way: its badges, date, id and punctuation
+pub const COMMENT_LINE_BYTES: usize = 140;
+
+/// What a line adds when its comment replies to one not in the read, which
+/// it then names
+pub const DETACHED_NOTE_BYTES: usize = 80;
+
+/// The longest a stub's JSON gets beyond its name and preview, for a reader
+/// of JSON to plan by
+pub const STUB_LINE_JSON_BYTES: usize = 240;
+
+/// The longest a full comment's JSON gets beyond its name and body
+pub const COMMENT_LINE_JSON_BYTES: usize = 360;
 
 /// A stub's preview: the first `chars` characters of `body`, cut back to
 /// the last word boundary when that keeps at least half of them, and
@@ -185,7 +201,7 @@ mod tests {
         assert_eq!(thread_order(&items, |c| *c).len(), 100_000);
     }
 
-    /// The wire costs hold for the longest a line's JSON gets: every
+    /// The JSON costs hold for the longest a line's JSON gets: every
     /// optional field set, a reply count and size in the millions
     #[test]
     fn line_costs_cover_the_json() {
@@ -217,9 +233,12 @@ mod tests {
             via: Some(crate::enums::ClientPlatform::ALL[0]),
         };
         let comment_json = serde_json::to_string(&comment).unwrap().len();
-        assert!(stub_json + 2 <= STUB_LINE_BYTES, "stub JSON is {stub_json}");
         assert!(
-            comment_json + 2 <= COMMENT_LINE_BYTES,
+            stub_json + 2 <= STUB_LINE_JSON_BYTES,
+            "stub JSON is {stub_json}"
+        );
+        assert!(
+            comment_json + 2 <= COMMENT_LINE_JSON_BYTES,
             "comment JSON is {comment_json}"
         );
     }

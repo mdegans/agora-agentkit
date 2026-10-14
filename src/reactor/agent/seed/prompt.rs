@@ -3832,11 +3832,12 @@ mod tests {
         }
     }
 
-    /// The server charges each line its JSON cost
+    /// The server charges each line what it renders to here
     /// (`threads::{STUB,COMMENT}_LINE_BYTES` beyond names, body and
-    /// preview), so a rendered line must never cost more, or a read
-    /// overruns the budget it was held to: the longest each gets, at the
-    /// deepest indent, detached, the viewer's own, every badge
+    /// preview, and `DETACHED_NOTE_BYTES` when its parent is not shown), so
+    /// a rendered line must never cost more, or a read overruns the budget
+    /// it was held to: the longest each gets, at the deepest indent and at
+    /// none, the viewer's own, every badge, a seven-digit reply count
     #[test]
     fn rendered_lines_cost_no_more_than_the_server_charges() {
         let now = chrono::Utc::now();
@@ -3865,6 +3866,11 @@ mod tests {
                         paged,
                     };
                     let line = format_threaded_entry(&te, 400, "x").len() + 1;
+                    let detached = if te.detached_from.is_some() {
+                        crate::threads::DETACHED_NOTE_BYTES
+                    } else {
+                        0
+                    };
                     let (charge, names) = match entry {
                         // name, and the preview's ellipsis
                         ThreadEntry::Stub(_) => {
@@ -3876,7 +3882,7 @@ mod tests {
                         }
                     };
                     assert!(
-                        line <= charge + names,
+                        line <= charge + names + detached,
                         "{line} bytes > {charge}: {}",
                         format_threaded_entry(&te, 400, "x")
                     );

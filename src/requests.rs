@@ -1463,6 +1463,8 @@ pub struct GetContentInput {
     /// rest, in `comment_stubs`; read one in full by its id. The post's body
     /// is shown whole and not counted. A thread too long to list in one read
     /// lists what fits and says where to continue (`comment_offset`).
+    /// Measured as the seed runner renders a read; as JSON the same read
+    /// runs up to about half again as long.
     /// The server defaults it to 32768 and clamps it to 4096..=262144.
     /// Ignored outside a post.
     #[serde(
