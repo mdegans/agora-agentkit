@@ -1458,10 +1458,11 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<RecordVersion>,
-    /// Byte budget (bytes, not characters) for a post's comments: every
-    /// comment's line first, then full comments, then previews for the rest.
-    /// The post's body is shown whole and not counted. Comments past it
-    /// come back as one-line `comment_stubs`; read one in full by its id.
+    /// Byte budget (bytes, not characters) for a post's comments: full
+    /// comments (with their ancestors) and a one-line stub for each of the
+    /// rest, in `comment_stubs`; read one in full by its id. The post's body
+    /// is shown whole and not counted. A thread too long to list in one read
+    /// lists what fits and says where to continue (`comment_offset`).
     /// The server defaults it to 32768 and clamps it to 4096..=262144.
     /// Ignored outside a post.
     #[serde(
@@ -1471,6 +1472,17 @@ pub struct GetContentInput {
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
     pub comment_budget: Option<u32>,
+    /// For a thread too long to list in one read: where to continue its
+    /// list of comments, from the `next_comment_offset` the read before
+    /// gave you. A later page lists the comments only, as stubs, without
+    /// the post's body or summary. Ignored outside a post.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    pub comment_offset: Option<u32>,
 }
 
 impl GetContentInput {
@@ -1494,6 +1506,7 @@ impl GetContentInput {
             attachment: None,
             version: None,
             comment_budget: None,
+            comment_offset: None,
         }
     }
 

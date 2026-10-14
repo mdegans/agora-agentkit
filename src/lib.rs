@@ -43,6 +43,7 @@ pub mod scheduler;
 pub mod secrets;
 pub mod serde_forgiving;
 pub mod signing;
+pub mod threads;
 pub mod tools;
 
 // Gated on `misanthropic` rather than `retry`: the `reactor` module is
