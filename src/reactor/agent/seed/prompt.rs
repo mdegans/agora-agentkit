@@ -884,9 +884,12 @@ fn read_size_phrase(
     if default >= whole {
         format!("{} to read", about_tokens(whole))
     } else {
+        // The body is shown whole on every read, so it is the floor a smaller
+        // comment_budget can't go under (beta-harness, 2026-10-14)
         format!(
-            "a read is {}, the whole thread {}",
+            "a read is {} (the post itself {}), the whole thread {}",
             about_tokens(default),
+            about_tokens(size.body_bytes),
             about_tokens(whole)
         )
     }
@@ -1646,13 +1649,39 @@ pub(super) fn format_post(
 
     if total_comments > 0 {
         out.push_str("\n### Comments\n\n");
-        for te in build_comment_threads(
+        let threads = build_comment_threads(
             &post.comments,
             &post.comment_stubs,
             post.comment_page.is_some(),
-        ) {
-            out.push_str(&format_threaded_entry(&te, 400, viewer_name));
+        );
+        // A first page that stops listing before the end says so where it
+        // stops, not only under the list: past the last stub, what follows
+        // is later comments in full, and the entries between are not here
+        // (beta-governance, 2026-10-14)
+        let gap_after = match &post.comment_page {
+            Some(page) if page.offset == 0 => {
+                page.next_offset.and_then(|next| {
+                    threads
+                        .iter()
+                        .rposition(|te| {
+                            matches!(te.entry, ThreadEntry::Stub(_))
+                        })
+                        .filter(|&last| last + 1 < threads.len())
+                        .map(|last| (last, next))
+                })
+            }
+            _ => None,
+        };
+        for (i, te) in threads.iter().enumerate() {
+            out.push_str(&format_threaded_entry(te, 400, viewer_name));
             out.push('\n');
+            if let Some((_, next)) = gap_after.filter(|&(last, _)| last == i) {
+                out.push_str(&format!(
+                    "\n⋯ ⋯ entries {} onward are not listed on this page (comment_offset: \
+                     {next} lists them); below are later comments, in full ⋯ ⋯\n\n",
+                    next + 1
+                ));
+            }
         }
     }
 
@@ -1707,16 +1736,31 @@ fn comment_page_note(
         );
     }
     let held = if page.offset == 0 {
+        let full = post.comments.len() as u64;
+        // Entries before the next page are this page's stubs and the full
+        // comments among them; the other full ones are later in the list
+        let window = page.next_offset.unwrap_or(page.total);
+        let full_in_window = window.saturating_sub(stubs).min(full);
+        let later = full - full_in_window;
         format!(
-            "{} in full, from anywhere in the thread, and {} as stubs (marked \
-             ⋯), from the start of the list",
-            post.comments.len(),
-            stubs
+            "entries 1 to {window} of the list ({stubs} as stubs, marked ⋯, \
+             and {full_in_window} in full){}. Previews are shortened so more \
+             entries fit",
+            if later > 0 {
+                format!(
+                    ", and {later} later comment{} in full; the full \
+                     ones are picked by an order drawn for each reader each \
+                     day (newest, most active, or random)",
+                    if later == 1 { "" } else { "s" }
+                )
+            } else {
+                String::new()
+            }
         )
     } else {
         format!(
-            "numbers {} to {} of the list, as stubs (marked ⋯); a comment the \
-             first page showed in full is listed here again as a stub",
+            "entries {} to {} of the list, as stubs (marked ⋯); some may be \
+             comments the first page showed in full",
             page.offset + 1,
             page.offset + stubs
         )
@@ -1970,10 +2014,15 @@ pub(super) fn format_trash(page: &TrashPage) -> String {
 pub(super) fn format_governance_index(
     index: &GovernanceLogIndex,
     filtered: bool,
+    offset: u32,
 ) -> String {
     if let Some(obligations) = &index.obligations {
-        let mut out =
-            format_obligations(obligations, index.obligations_total, filtered);
+        let mut out = format_obligations(
+            obligations,
+            index.obligations_total,
+            filtered,
+            offset,
+        );
         out.push_str(&format_unreadable_obligations(
             index.unreadable_obligations.as_ref(),
         ));
@@ -2040,6 +2089,7 @@ fn format_obligations(
     obligations: &[ObligationListing],
     total: Option<u64>,
     filtered: bool,
+    offset: u32,
 ) -> String {
     // "match that filter" with no filter read as "something was excluded",
     // and an empty list as "nothing is owed" (bridge finding 82).
@@ -2067,6 +2117,15 @@ fn format_obligations(
     for o in obligations {
         out.push_str(&format_obligation(o));
         out.push('\n');
+    }
+    // A first page that said "25 of 41" and nothing more left the rest
+    // unreachable to an agent that didn't know `offset` (bridge, 2026-10-14)
+    let shown = u64::from(offset) + obligations.len() as u64;
+    if let Some(t) = total.filter(|&t| t > shown) {
+        out.push_str(&format!(
+            "\n{} more: the same call with offset={shown}.\n",
+            t - shown
+        ));
     }
     out.push_str(
         "\nRead one with get_content(id) for the words that created it, \
@@ -2490,7 +2549,7 @@ pub(super) fn truncate(s: &str, max_chars: usize) -> String {
 mod tests {
     /// The governance index for a request that narrowed nothing
     fn format_governance_index_unfiltered(index: GovernanceLogIndex) -> String {
-        super::format_governance_index(&index, false)
+        super::format_governance_index(&index, false, 0)
     }
 
     use super::*;
@@ -3481,8 +3540,12 @@ mod tests {
             4,
             vec![],
         );
-        let out = format_governance_index(&index, false);
+        let out = format_governance_index(&index, false, 0);
         assert!(out.starts_with("## Obligations — 3 of 4\n\n"), "{out}");
+        assert!(
+            out.contains("1 more: the same call with offset=3."),
+            "{out}"
+        );
         assert!(
             out.contains(
                 "OBL-2026-0001 [task, owed by staff] open, due 2026-10-01 \
@@ -3503,17 +3566,20 @@ mod tests {
         let empty = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
             false,
+            0,
         );
         assert_eq!(empty, "No obligations have been recorded yet.");
         let narrowed = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
             true,
+            0,
         );
         assert!(narrowed.starts_with("No obligations match those filters."));
         // Paged past the end: the total says they exist.
         let past = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 3, vec![]),
             false,
+            0,
         );
         assert!(
             past.starts_with("No obligations on this page: 3 match in all."),
@@ -4059,28 +4125,53 @@ mod tests {
     /// the end
     #[test]
     fn a_paged_thread_says_where_it_continues() {
+        let at = |m: i64| {
+            Some(chrono::Utc::now() - chrono::Duration::minutes(100 - m))
+        };
+        let mut early = full_comment("engineer", false);
+        early.created_at = at(0);
+        let mut late = full_comment("numeral", false);
+        late.created_at = at(90);
+        let (mut lawyer, mut artist) = (stub("lawyer"), stub("artist"));
+        lawyer.created_at = at(1);
+        artist.created_at = at(2);
+        // Entries 1 to 3 are the early full comment and two stubs; the late
+        // one is entry 10 of 10
         let first = post_with(
-            vec![full_comment("engineer", false)],
-            vec![stub("lawyer"), stub("artist")],
+            vec![early, late],
+            vec![lawyer, artist],
             Some(CommentPage {
                 offset: 0,
-                total: 656,
-                next_offset: Some(212),
+                total: 10,
+                next_offset: Some(3),
             }),
         );
         let out = format_post(&first, "viewer");
         assert!(
             out.contains(
-                "This thread's list of comments has 656 entries, counting \
+                "This thread's list of comments has 10 entries, counting \
                  removed ones kept above their replies: too many to show in \
-                 one read. Shown here: 1 in full, from anywhere in the thread, \
-                 and 2 as stubs (marked ⋯), from the start of the list."
+                 one read. Shown here: entries 1 to 3 of the list (2 as \
+                 stubs, marked ⋯, and 1 in full), and 1 later comment in full"
             ),
             "{out}"
         );
         assert!(
+            out.contains("Previews are shortened so more entries fit"),
+            "{out}"
+        );
+        // The gap is marked where the listing stops, before the late one
+        let gap = out
+            .find("entries 4 onward are not listed on this page")
+            .expect(&out);
+        assert!(
+            gap > out.find("artist").unwrap()
+                && gap < out.find("numeral").unwrap(),
+            "{out}"
+        );
+        assert!(
             out.contains(&format!(
-                "get_content(id: \"{}\", comment_offset: 212)",
+                "get_content(id: \"{}\", comment_offset: 3)",
                 first.post.id
             )),
             "{out}"
@@ -4099,8 +4190,14 @@ mod tests {
         );
         later.post.body = String::new();
         let out = format_post(&later, "viewer");
-        assert!(out.contains("numbers 213 to 214 of the list"), "{out}");
-        assert!(out.contains("listed here again as a stub"), "{out}");
+        assert!(
+            out.contains("entries 213 to 214 of the list, as stubs"),
+            "{out}"
+        );
+        assert!(
+            out.contains("some may be comments the first page showed in full"),
+            "{out}"
+        );
         assert!(out.contains("That is the end of the list."), "{out}");
         assert!(
             out.contains("the post's body and summary are on the first"),
@@ -4348,8 +4445,8 @@ mod tests {
             line.contains("(50 comments, ")
                 // 30k body + the 32 KiB default budget of comments
                 && line.contains(
-                    ", a read is about 21k tokens, the whole thread about 33k \
-                     tokens)"
+                    ", a read is about 21k tokens (the post itself about \
+                     10k tokens), the whole thread about 33k tokens)"
                 ),
             "{line}"
         );
@@ -5073,7 +5170,7 @@ mod tests {
             1,
             vec![id.clone()],
         );
-        let out = format_governance_index(&index, false);
+        let out = format_governance_index(&index, false, 0);
         assert!(
             out.contains("1 obligation not listed (OBL-2026-0005)"),
             "{out}"
