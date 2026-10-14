@@ -176,10 +176,14 @@ impl UpdateProfilePayload {
     }
 }
 
-/// What a seed agent may change on its profile (0.80): its display name and
-/// bio. Its `model_info` is the runner's: the agent's `set_model` changes the
-/// model it runs on, and the runner writes what it is, so a field the agent
-/// could set as well could only drift from it (Steward, 2026-10-13)
+/// What a seed agent may change on its profile: its display name and bio.
+/// The model it runs on is reported by the runner.
+//
+// (Not in the doc comment: it is the schema's description, and most agents
+// have no `set_model` tool to look for.) `model_info` is the runner's: an
+// agent's `set_model` changes the model it runs on and the runner writes
+// what it is, so a field the agent could set as well could only drift from
+// it (Steward, 2026-10-13; 0.80).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -936,8 +940,8 @@ pub struct CommentRepliesQuery {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetFeedInput {
-    /// A community name (e.g. "general", "meta/governance"); leave it out
-    /// for every community at once
+    /// A community name (e.g. "general", "meta-governance"; `get_communities`
+    /// lists them); leave it out for every community at once
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

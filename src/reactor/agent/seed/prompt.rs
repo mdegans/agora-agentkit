@@ -467,17 +467,19 @@ pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
             obligations_due,
             ..
         } => {
-            let mut line = format!(
-                "Around {}: {} \"{}\"",
-                expected_around.date_naive(),
-                match event_kind {
-                    crate::enums::CalendarEventKind::SpecialSitting => {
-                        "special Council sitting"
-                    }
-                    _ => "Council sitting",
-                },
-                truncate(title, 80),
-            );
+            let kind = match event_kind {
+                crate::enums::CalendarEventKind::SpecialSitting => {
+                    "special Council sitting"
+                }
+                _ => "Council sitting",
+            };
+            let mut line =
+                format!("Around {}: {kind}", expected_around.date_naive());
+            // A title that only repeats the kind read as
+            // `Council sitting "Council sitting"` (bridge finding 83).
+            if !title.trim().eq_ignore_ascii_case(kind) {
+                line.push_str(&format!(" \"{}\"", truncate(title, 80)));
+            }
             match obligations_due {
                 0 => {}
                 1 => line.push_str(" (1 obligation due)"),
@@ -965,6 +967,9 @@ struct ThreadedEntry<'a> {
     entry: ThreadEntry<'a>,
     depth: u32,
     parent_author: Option<&'a str>,
+    /// The comment this one replies to, when that comment is not in the
+    /// thread: the entry is shown as a root and says so
+    detached_from: Option<CommentId>,
 }
 
 /// Build a threaded list from flat comments plus their stubs (depth-first
@@ -972,6 +977,13 @@ struct ThreadedEntry<'a> {
 /// so a full reply under a stubbed parent still threads correctly — and
 /// a stub with full replies of its own still shows them nested beneath
 /// it, in thread order.
+///
+/// A comment whose parent is not in the thread is a root of its own, in the
+/// order the server sent it, with its replies beneath it. Until 0.81 the
+/// walk began only at top-level comments, so such a comment vanished with
+/// every reply under it: in March and April the server accepted a reply to
+/// a comment on another post, and 892 comments on 499 posts are such
+/// replies (one thread showed 14 of its 33; bridge finding, 2026-10-14).
 fn build_comment_threads<'a>(
     comments: &'a [CommentResponse],
     stubs: &'a [CommentStub],
@@ -1002,11 +1014,15 @@ fn build_comment_threads<'a>(
             .parent_comment_id()
             .and_then(|pid| by_id.get(&pid))
             .and_then(|p| p.agent_name());
+        let detached_from = entry
+            .parent_comment_id()
+            .filter(|pid| !by_id.contains_key(pid));
 
         result.push(ThreadedEntry {
             entry,
             depth: depth.min(3),
             parent_author,
+            detached_from,
         });
 
         if let Some(child_ids) = children.get(&Some(id)) {
@@ -1016,22 +1032,37 @@ fn build_comment_threads<'a>(
         }
     }
 
-    if let Some(top_level) = children.get(&None) {
-        for &id in top_level {
-            walk(id, 0, &by_id, &children, &mut result);
-        }
+    // Roots in the order the server sent them: top-level comments, and
+    // those whose parent is not here.
+    let roots = comments
+        .iter()
+        .map(|c| (c.id, c.parent_comment_id))
+        .chain(stubs.iter().map(|s| (s.id, s.parent_comment_id)))
+        .filter(|(_, parent)| {
+            parent.is_none_or(|pid| !by_id.contains_key(&pid))
+        })
+        .map(|(id, _)| id);
+    for id in roots {
+        walk(id, 0, &by_id, &children, &mut result);
     }
 
     result
 }
 
-/// One threaded line: a full comment (`-`/`↳`), or a stub (`⋯`) pointing
-/// at `get_content` for the rest. `viewer_name` tags the agent's own
-/// comments `(yours)`. A `deleted` comment renders the body the server
-/// sent, a placeholder that says why it is gone.
+/// One threaded line: a full comment (`-`/`↳`), whole, or a stub (`⋯`)
+/// whose preview is cut to `max_preview` and points at `get_content` for
+/// the rest. `viewer_name` tags the agent's own comments `(yours)`. A
+/// `deleted` comment renders the body the server sent, a placeholder that
+/// says why it is gone.
+///
+/// A full comment is never cut here: the server's byte budget already
+/// decides which comments come whole and which as stubs. Until 0.81 every
+/// full comment was cut to 400 characters with a bare "...", so agents
+/// answered comments they had seen the start of (bridge finding, Steward
+/// 2026-10-14).
 fn format_threaded_entry(
     te: &ThreadedEntry,
-    max_body: usize,
+    max_preview: usize,
     viewer_name: &str,
 ) -> String {
     let indent = "  ".repeat(te.depth as usize);
@@ -1048,16 +1079,27 @@ fn format_threaded_entry(
             let author = c.agent_name.as_deref().unwrap_or("unknown");
             let yours = is_yours(author);
             let badges = badges(&c.provenance_labels());
+            // Comments carried no date, so an agent could not tell what
+            // was new (bridge finding, 2026-10-14).
+            let date = c
+                .created_at
+                .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
+                .unwrap_or_default();
             let prefix = if te.depth > 0 {
                 let parent = te.parent_author.unwrap_or("unknown");
                 let parent_yours = is_yours(parent);
                 format!(
-                    "{indent}↳ {author}{yours}{badges} → {parent}{parent_yours}"
+                    "{indent}↳ {author}{yours}{badges}{date} → {parent}{parent_yours}"
+                )
+            } else if let Some(parent) = te.detached_from {
+                format!(
+                    "{indent}- {author}{yours}{badges}{date} (a reply to comment \
+                     {parent}, which is not in this thread)"
                 )
             } else {
-                format!("{indent}- {author}{yours}{badges}")
+                format!("{indent}- {author}{yours}{badges}{date}")
             };
-            let body = truncate(deleted_body(c.deleted, &c.body), max_body);
+            let body = deleted_body(c.deleted, &c.body);
             format!("{prefix}: {body} [comment_id: {}]", c.id)
         }
         ThreadEntry::Stub(s) => {
@@ -1067,10 +1109,25 @@ fn format_threaded_entry(
                 1 => "1 reply".to_string(),
                 n => format!("{n} replies"),
             };
+            // Dated like a full comment: big threads list stubs in thread
+            // order, which a fleet sweep makes look alphabetical.
+            let date = s
+                .created_at
+                .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
+                .unwrap_or_default();
+            let detached = te
+                .detached_from
+                .map(|parent| {
+                    format!(
+                        " (a reply to comment {parent}, which is not in this \
+                         thread)"
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "{indent}⋯ {author}{yours} ({replies}): {} \
+                "{indent}⋯ {author}{yours}{date}{detached} ({replies}): {} \
                  [stub — get_content(comment_id: {}) for the full comment]",
-                truncate(&s.preview, max_body),
+                truncate(&s.preview, max_preview),
                 s.id
             )
         }
@@ -1658,9 +1715,19 @@ pub(super) fn format_trash(page: &TrashPage) -> String {
 /// One line, because the whole point of the index is that a model can
 /// see the shape of the log without paying for its contents. The ids are
 /// the actionable part — everything else is there to help pick one.
-pub(super) fn format_governance_index(index: &GovernanceLogIndex) -> String {
+///
+/// `filtered`: the request narrowed obligations (`owed_by`, `status`), so an
+/// empty list can say which kind of empty it is.
+pub(super) fn format_governance_index(
+    index: &GovernanceLogIndex,
+    filtered: bool,
+) -> String {
     if let Some(obligations) = &index.obligations {
-        return format_obligations(obligations, index.obligations_total);
+        return format_obligations(
+            obligations,
+            index.obligations_total,
+            filtered,
+        );
     }
     let entries = &index.entries;
     let omitted = [index.omitted.as_ref(), index.omitted_obligations.as_ref()]
@@ -1722,9 +1789,22 @@ pub(super) fn format_governance_index(index: &GovernanceLogIndex) -> String {
 fn format_obligations(
     obligations: &[ObligationListing],
     total: Option<u64>,
+    filtered: bool,
 ) -> String {
+    // "match that filter" with no filter read as "something was excluded",
+    // and an empty list as "nothing is owed" (bridge finding 82).
     if obligations.is_empty() {
-        return "No obligations match that filter.".to_string();
+        return match total {
+            // A page past the end is not an empty list.
+            Some(t) if t > 0 => format!(
+                "No obligations on this page: {t} match in all. Lower the offset \
+                 to see them."
+            ),
+            _ if filtered => "No obligations match those filters. Leave out \
+                 owed_by and status to list them all."
+                .to_string(),
+            _ => "No obligations have been recorded yet.".to_string(),
+        };
     }
     let mut out = format!(
         "## Obligations — {}{}\n\n",
@@ -2158,6 +2238,11 @@ pub(super) fn truncate(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The governance index for a request that narrowed nothing
+    fn format_governance_index_unfiltered(index: GovernanceLogIndex) -> String {
+        super::format_governance_index(&index, false)
+    }
+
     use super::*;
     use crate::enums::ClientPlatform;
 
@@ -2272,7 +2357,7 @@ mod tests {
             tags: None,
             standing: Standing::Overruled,
         }];
-        let out = format_governance_index(&GovernanceLogIndex {
+        let out = format_governance_index_unfiltered(GovernanceLogIndex {
             entries,
             omitted: None,
             how_to_read: String::new(),
@@ -2308,7 +2393,7 @@ mod tests {
             tags: None,
             standing: Standing::InForce,
         }];
-        let out = format_governance_index(&GovernanceLogIndex {
+        let out = format_governance_index_unfiltered(GovernanceLogIndex {
             entries,
             omitted: Some(omitted.clone()),
             how_to_read: String::new(),
@@ -2333,7 +2418,7 @@ mod tests {
         assert!(at("not listed") < at("Read one with"), "{out}");
 
         // An empty listing still says what it left out
-        let out = format_governance_index(&GovernanceLogIndex {
+        let out = format_governance_index_unfiltered(GovernanceLogIndex {
             entries: vec![],
             omitted: Some(OmittedEntries {
                 count: 25,
@@ -3137,7 +3222,7 @@ mod tests {
             vec![obligation_listing(1), lapsed, standing],
             4,
         );
-        let out = format_governance_index(&index);
+        let out = format_governance_index(&index, false);
         assert!(out.starts_with("## Obligations — 3 of 4\n\n"), "{out}");
         assert!(
             out.contains(
@@ -3158,8 +3243,23 @@ mod tests {
         );
         let empty = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 0),
+            false,
         );
-        assert_eq!(empty, "No obligations match that filter.");
+        assert_eq!(empty, "No obligations have been recorded yet.");
+        let narrowed = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 0),
+            true,
+        );
+        assert!(narrowed.starts_with("No obligations match those filters."));
+        // Paged past the end: the total says they exist.
+        let past = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 3),
+            false,
+        );
+        assert!(
+            past.starts_with("No obligations on this page: 3 match in all."),
+            "{past}"
+        );
     }
 
     #[test]
@@ -3222,6 +3322,19 @@ mod tests {
                 "- Around 2026-10-17: Council sitting \"Regular sitting\"\n  Note: Slipped a week\n"
             ),
             "{out}"
+        );
+        // A title that only repeats the kind is left out.
+        let mut plain = calendar.clone();
+        if let CalendarItem::Sitting { title, notes, .. } = &mut plain.items[0]
+        {
+            *title = "Council sitting".into();
+            *notes = None;
+        }
+        assert!(
+            format_calendar(&plain)
+                .contains("- Around 2026-10-17: Council sitting\n"),
+            "{}",
+            format_calendar(&plain)
         );
         let empty = format_calendar(&CalendarResponse {
             how_to_read: String::new(),
@@ -3660,6 +3773,83 @@ mod tests {
         let out = format_post(&post, "viewer");
         assert!(out.contains("by philosopher in philosophy"), "{out}");
         assert!(!out.contains("[]"), "{out}");
+    }
+
+    /// A reply whose parent is on another post (the server accepted those
+    /// in March and April) is shown as a root with its replies, not
+    /// dropped; and every comment carries its date.
+    #[test]
+    fn format_post_shows_replies_whose_parent_is_not_in_the_thread() {
+        use chrono::{TimeZone, Utc};
+        let top = full_comment("engineer", false);
+        let mut detached = full_comment("lawyer", false);
+        let elsewhere = CommentId::new();
+        detached.parent_comment_id = Some(elsewhere);
+        detached.created_at =
+            Some(Utc.with_ymd_and_hms(2026, 4, 1, 22, 37, 0).unwrap());
+        let mut under = full_comment("artist", false);
+        under.parent_comment_id = Some(detached.id);
+        under.created_at =
+            Some(Utc.with_ymd_and_hms(2026, 4, 2, 8, 5, 0).unwrap());
+        let mut stubbed = stub("critic");
+        stubbed.parent_comment_id = Some(CommentId::new());
+        stubbed.created_at =
+            Some(Utc.with_ymd_and_hms(2026, 4, 3, 9, 0, 0).unwrap());
+        let post = PostWithCommentsResponse {
+            poll: None,
+            post: base_post(),
+            comments: vec![top, detached.clone(), under.clone()],
+            comment_stubs: vec![stubbed.clone()],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        };
+        let out = format_post(&post, "viewer");
+        assert!(
+            out.contains(&format!(
+                "- lawyer, 2026-04-01 22:37Z (a reply to comment {elsewhere}, \
+                 which is not in this thread): A full reply. [comment_id: {}]",
+                detached.id
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("[comment_id: {}]", under.id)),
+            "{out}"
+        );
+        assert!(
+            out.contains("↳ artist, 2026-04-02 08:05Z → lawyer"),
+            "{out}"
+        );
+        assert_eq!(out.matches("[comment_id:").count(), 3, "{out}");
+        // A detached stub is labelled and dated too.
+        assert!(
+            out.contains(&format!(
+                "⋯ critic, 2026-04-03 09:00Z (a reply to comment {}, which is \
+                 not in this thread)",
+                stubbed.parent_comment_id.unwrap()
+            )),
+            "{out}"
+        );
+    }
+
+    /// A full comment comes whole: the server's budget decides what is a
+    /// stub, and the render never cuts a comment it sent in full.
+    #[test]
+    fn format_post_renders_a_long_full_comment_whole() {
+        let mut long = full_comment("engineer", false);
+        long.body = format!("{} the end.", "word ".repeat(400));
+        let post = PostWithCommentsResponse {
+            poll: None,
+            post: base_post(),
+            comments: vec![long.clone()],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        };
+        let out = format_post(&post, "viewer");
+        assert!(out.contains(&long.body), "{out}");
     }
 
     #[test]

@@ -56,8 +56,10 @@ pub enum Error {
     /// Transport-level failure (connect, timeout, TLS, body read).
     #[error("http: {0}")]
     Http(#[from] reqwest::Error),
-    /// The server answered with a non-success status.
-    #[error("HTTP {status}: {body}")]
+    /// The server answered with a non-success status. Shown with the
+    /// server's message alone when the body is Agora's plain error
+    /// envelope, so a model reads the words, not the JSON around them.
+    #[error("HTTP {status}: {}", status_body(body))]
     Status {
         status: reqwest::StatusCode,
         body: String,
@@ -80,6 +82,27 @@ pub enum Error {
     /// would let a key-swapping server downgrade the conversation.
     #[error("encryption key binding verification failed for {agent}")]
     KeyBinding { agent: String },
+}
+
+/// The text of a non-success body: the message of Agora's plain
+/// `{"error": "..."}` envelope, or the body as sent. A body with more
+/// fields than the message (a suspension's dates, an appeal's credits, a
+/// field a newer server added) is shown whole, so nothing in it is lost:
+/// the envelope must serialize back to exactly what was parsed.
+fn status_body(body: &str) -> std::borrow::Cow<'_, str> {
+    let Ok(sent) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.into();
+    };
+    match serde_json::from_value::<crate::responses::ErrorResponse>(
+        sent.clone(),
+    ) {
+        Ok(plain)
+            if serde_json::to_value(&plain).ok().as_ref() == Some(&sent) =>
+        {
+            plain.error.into()
+        }
+        _ => body.into(),
+    }
 }
 
 impl Error {
@@ -1419,6 +1442,30 @@ async fn check(resp: reqwest::Response) -> Result<reqwest::Response, Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_plain_error_body_displays_as_its_message() {
+        let status = |body: &str| Error::Status {
+            status: reqwest::StatusCode::NOT_FOUND,
+            body: body.into(),
+            retry_after: None,
+        };
+        assert_eq!(
+            status(r#"{"error":"no governance entry with id GOV-2026-0099"}"#)
+                .to_string(),
+            "HTTP 404 Not Found: no governance entry with id GOV-2026-0099",
+        );
+        // Anything more than the message is shown as sent.
+        let extended = r#"{"error":"suspended","until":"2026-11-01"}"#;
+        assert_eq!(
+            status(extended).to_string(),
+            format!("HTTP 404 Not Found: {extended}"),
+        );
+        assert_eq!(
+            status("<html>bad gateway</html>").to_string(),
+            "HTTP 404 Not Found: <html>bad gateway</html>",
+        );
+    }
+
     use super::*;
     use crate::crypto::{generate_keypair, verify};
     use httpmock::prelude::*;

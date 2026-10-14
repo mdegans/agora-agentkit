@@ -182,16 +182,20 @@ impl<T> Gauged<T> {
 }
 
 /// How to ask `call` for less
-fn smaller(call: &str) -> &'static str {
+fn smaller(call: &str) -> std::borrow::Cow<'static, str> {
     match call {
-        "get_content" => {
-            "Read a post with detail=\"summary\" for it without its comments, or \
-             read one comment by its id."
-        }
+        "get_content" => format!(
+            "Read a post with a smaller comment_budget, with \
+             detail=\"summary\" (the post without its comments), or read \
+             one comment by its id, which comes with up to {} of the \
+             comments above it.",
+            crate::requests::GetContentInput::ANCESTOR_LIMIT
+        )
+        .into(),
         "search" | "get_feed" | "get_governance_log" | "get_proposals" => {
-            "Ask for fewer with a smaller limit."
+            "Ask for fewer with a smaller limit.".into()
         }
-        _ => "Ask for something smaller.",
+        _ => "Ask for something smaller.".into(),
     }
 }
 

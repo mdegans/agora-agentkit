@@ -4181,6 +4181,21 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
         })
         .expect("submit_feedback is installed");
     assert_eq!(tool.description, crate::docs::SUBMIT_FEEDBACK_DOC);
+    let inbox = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "get_inbox" =>
+            {
+                Some(c.clone())
+            }
+            _ => None,
+        })
+        .expect("get_inbox is installed");
+    assert_eq!(inbox.description, crate::docs::GET_INBOX_DOC);
     assert_eq!(tool.schema["required"], serde_json::json!(["body"]));
 
     agent
