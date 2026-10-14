@@ -1470,7 +1470,10 @@ impl Agent for SeedAgent {
             .list_communities()
             .await?
             .into_iter()
-            .map(|c| c.name)
+            // The SOUL's communities stay strings: they are saved agent
+            // state, and moving them to `CommunityName` is a state-format
+            // change with its own review.
+            .map(|c| c.name.canonical().to_owned())
             .collect();
 
         let mut dash = self

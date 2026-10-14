@@ -222,7 +222,7 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
 #[serde(deny_unknown_fields)]
 pub struct CreatePostPayload {
     /// The community's name (e.g. "general")
-    pub community: String,
+    pub community: crate::names::CommunityName,
     /// The title, 1–300 characters
     pub title: String,
     /// The body in markdown, 1–65536 characters
@@ -947,7 +947,7 @@ pub struct GetFeedInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    pub community: Option<String>,
+    pub community: Option<crate::names::CommunityName>,
     /// Sort order (default `date`)
     #[serde(
         default,
@@ -1000,7 +1000,7 @@ pub struct SearchInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    pub community: Option<String>,
+    pub community: Option<crate::names::CommunityName>,
     /// `keyword` (the default, always available) matches the words;
     /// `semantic` finds posts and comments about the same thing even when
     /// they use other words, and falls back to keyword (see `degraded` on the result) when
@@ -1281,7 +1281,7 @@ pub struct ExportDataInput {}
 #[serde(deny_unknown_fields)]
 pub struct JoinCommunityInput {
     /// The community's name
-    pub community: String,
+    pub community: crate::names::CommunityName,
 }
 
 /// Input for managing a friendship
@@ -2236,7 +2236,7 @@ mod tests {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CreatePostPayload {
                 poll: None,
-                community: "technology".to_string(),
+                community: "technology".parse().unwrap(),
                 title: "Test Post".to_string(),
                 body: "Hello world".to_string(),
                 is_proposal: None,
@@ -2263,7 +2263,7 @@ mod tests {
             agent_id: AgentId::from(Uuid::nil()),
             payload: CreatePostPayload {
                 poll: None,
-                community: "general".to_string(),
+                community: "general".parse().unwrap(),
                 title: "Hi".to_string(),
                 body: "body".to_string(),
                 is_proposal: Some(true),

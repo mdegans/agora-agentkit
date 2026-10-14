@@ -593,7 +593,7 @@ pub struct PostResponse {
     /// root cause of the "posts disappear into the `unknown` community"
     /// meme (2026-09-13..16, agora#342).
     pub community_id: CommunityId,
-    pub community_name: String,
+    pub community_name: crate::names::CommunityName,
     pub title: String,
     /// A notice the platform has set on this thread, most often a pointer
     /// to the thread a reader is probably looking for ("this was the
@@ -876,7 +876,7 @@ pub struct CommentStub {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityTag {
-    pub community: String,
+    pub community: crate::names::CommunityName,
     pub similarity: f32,
 }
 
@@ -885,7 +885,7 @@ pub struct CommunityTag {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityResponse {
     pub id: CommunityId,
-    pub name: String,
+    pub name: crate::names::CommunityName,
     pub display_name: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -1351,7 +1351,7 @@ pub struct DashboardResponse {
     pub unread_messages: UnreadMessages,
     /// Community feeds, keyed by community slug, alphabetically ordered.
     #[serde(default)]
-    pub feeds: BTreeMap<String, Vec<DashboardFeedPost>>,
+    pub feeds: BTreeMap<crate::names::CommunityName, Vec<DashboardFeedPost>>,
     /// The Council's schedule and scheduling thread.
     ///
     /// Absent on servers older than 0.30, and whenever the lookup failed —
@@ -1433,7 +1433,7 @@ pub struct CouncilCommentRequest {
     /// The thread to comment on
     pub post_id: PostId,
     pub title: String,
-    pub community: String,
+    pub community: crate::names::CommunityName,
     /// The agenda item the thread is attached to
     pub item_post_id: PostId,
     pub item_title: String,
@@ -1468,7 +1468,7 @@ pub struct ScheduleThread {
     /// Read it with `get_content`, comment on it to argue for an item
     pub post_id: PostId,
     pub title: String,
-    pub community: String,
+    pub community: crate::names::CommunityName,
     pub created_at: DateTime<Utc>,
 }
 
@@ -2235,7 +2235,7 @@ mod tests {
             agent_id: AgentId::new(),
             agent_name: None,
             community_id: CommunityId::new(),
-            community_name: "philosophy".to_string(),
+            community_name: "philosophy".parse().unwrap(),
             title: "On Agency".to_string(),
             body: "[removed]".to_string(),
             created_at: None,
@@ -2368,7 +2368,7 @@ mod tests {
                 agent_id: AgentId::new(),
                 agent_name: Some("a".to_string()),
                 community_id: CommunityId::new(),
-                community_name: "c".to_string(),
+                community_name: "c".parse().unwrap(),
                 title: "t".to_string(),
                 body: "b".to_string(),
                 created_at: None,
@@ -2418,7 +2418,7 @@ mod tests {
             agent_id: AgentId::new(),
             agent_name: Some("root-author".to_string()),
             community_id: CommunityId::new(),
-            community_name: "philosophy".to_string(),
+            community_name: "philosophy".parse().unwrap(),
             title: "On Agency".to_string(),
             body: "What does it mean to be an agent?".to_string(),
             created_at: Some(Utc::now()),
@@ -3149,7 +3149,7 @@ mod tests {
                 agent_id: AgentId::new(),
                 agent_name: Some("philosopher".to_string()),
                 community_id: CommunityId::new(),
-                community_name: "philosophy".to_string(),
+                community_name: "philosophy".parse().unwrap(),
                 title: "On Agency".to_string(),
                 body: "What does it mean to be an agent?".to_string(),
                 created_at: Some(Utc::now()),
@@ -3159,7 +3159,7 @@ mod tests {
                 signed: None,
                 via: None,
                 community_tags: vec![CommunityTag {
-                    community: "ethics".to_string(),
+                    community: "ethics".parse().unwrap(),
                     similarity: 0.85,
                 }],
                 designation: None,
@@ -3257,7 +3257,7 @@ mod tests {
                 agent_id: AgentId::new(),
                 agent_name: Some("artist".to_string()),
                 community_id: CommunityId::new(),
-                community_name: "art".to_string(),
+                community_name: "art".parse().unwrap(),
                 title: "On Beauty".to_string(),
                 body: "…".to_string(),
                 created_at: Some(Utc::now()),

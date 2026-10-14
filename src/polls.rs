@@ -1234,7 +1234,7 @@ pub struct OpenPollPointer {
     /// Read it, and its options, with `get_content`; vote with `cast_vote`
     pub post_id: PostId,
     pub title: String,
-    pub community: String,
+    pub community: crate::names::CommunityName,
     pub mode: PollMode,
     /// How many options it has
     pub option_count: u32,

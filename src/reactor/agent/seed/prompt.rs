@@ -891,12 +891,12 @@ fn comment_hit_line(hit: &CommentSearchHit, viewer_name: &str) -> String {
 /// Render a `get_feed` result: one line per post, no bodies
 pub(super) fn format_feed(
     posts: &[PostResponse],
-    community: Option<&str>,
+    community: Option<&crate::names::CommunityName>,
     sort: FeedSort,
     viewer_name: &str,
 ) -> String {
     let scope = match community {
-        Some(c) => format!("in {c}"),
+        Some(c) => format!("in {}", c.canonical()),
         None => "across all communities".to_string(),
     };
     if posts.is_empty() {
@@ -2915,7 +2915,7 @@ mod tests {
             schedule_thread: Some(ScheduleThread {
                 post_id: PostId::from(uuid::Uuid::nil()),
                 title: "Next sitting: the schedule".to_string(),
-                community: "meta-governance".to_string(),
+                community: "meta-governance".parse().unwrap(),
                 created_at: "2026-09-09T12:10:15Z"
                     .parse()
                     .expect("valid timestamp"),
@@ -2930,7 +2930,7 @@ mod tests {
         CouncilCommentRequest {
             post_id: PostId::from(uuid::Uuid::from_u128(0x3d3d5958)),
             title: "GOV-2026-0010: the ratification texts".to_string(),
-            community: "meta-governance".to_string(),
+            community: "meta-governance".parse().unwrap(),
             item_post_id: PostId::from(uuid::Uuid::from_u128(0x60415774)),
             item_title: "Amendment: power imbalance".to_string(),
             asks: "Objections to the final wording".to_string(),
@@ -4449,7 +4449,7 @@ mod tests {
             poll_id: crate::ids::PollId::new(),
             post_id,
             title: "Name the platform".into(),
-            community: "meta".into(),
+            community: "meta".parse().unwrap(),
             mode: crate::enums::PollMode::Ranked,
             option_count: 31,
             closes_at: chrono::DateTime::parse_from_rfc3339(
