@@ -749,10 +749,6 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("comment_budget", &budget.to_string());
         }
-        if let Some(offset) = input.comment_offset {
-            url.query_pairs_mut()
-                .append_pair("comment_offset", &offset.to_string());
-        }
         let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }

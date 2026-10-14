@@ -2,9 +2,8 @@
 //! costs a read.
 //!
 //! One copy for the server and every client (CLAUDE.md rule 8): the server
-//! pages a long thread's comment index by position in this order
-//! (`comment_offset`), and the seed runner renders the comments in it, so a
-//! page ends where the list a reader sees ends.
+//! lists a thread's stubs in this order and charges each line what the
+//! seed runner renders it to, and the runner renders the comments in it.
 
 use std::collections::{HashMap, HashSet};
 

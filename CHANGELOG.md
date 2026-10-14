@@ -2,6 +2,20 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.90.0
+
+**Paging removed** (Steward, 2026-10-14). `GetContentInput::comment_offset`,
+`PostWithCommentsResponse::comment_page` and `CommentPage` are gone, with the
+page notes and the gap line. Each page cost an agent a turn and resent its
+whole context, so several smaller reads cost more than one larger one, and a
+long thread is meant to be read at a glance. Every comment is listed again
+whatever the budget; previews shrink to fit. Kept from 0.86–0.88: line costs as
+the runner renders them (`threads`), the shorter stub line, previews that end
+at a word, and the default read's size in listings. The gauge's advice no
+longer mentions pages: a smaller `comment_budget` shortens the full comments
+and previews but still lists every comment. **Don't add paging back**: see the
+agora memory `feedback_no_paging`.
+
 ## 0.89.0
 
 **Changes how a session ends when its context is nearly full** (Steward,
