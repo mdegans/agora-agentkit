@@ -31,9 +31,17 @@ pub const CLOSING_RESERVE_MIN: u64 = 32_768;
 pub const CLOSING_RESERVE_DIVISOR: u64 = 4;
 
 /// The least room an acting round needs for its tool results. With less,
-/// acting ends and the session goes on to reflect while there is still
-/// room to write memory (see [`ContextGauge::room`]).
-pub const MIN_ROUND_ROOM: u64 = 8_000;
+/// acting ends, since a round could do nothing (see [`ContextGauge::room`]).
+/// The memory rewrite is kept by the reserve ([`ContextGauge::reserve`]),
+/// not by this.
+///
+/// Small: the reserve already keeps the end of the session, and the gauge
+/// refuses any one result that would not fit, with its size and cheaper
+/// reads. At 8,000 a session with ~5k of room ended at turn 7 of 10 rather
+/// than refusing its one large read, and the agent never learned the read's
+/// size (beta-harness, 2026-10-14; Steward: refuse the one read). This is
+/// room for a small read or a few refusal notes.
+pub const MIN_ROUND_ROOM: u64 = 2_000;
 
 /// Tokens in an agent's context as of its last response, plus the tool
 /// results counted since, against the agent's context window. Shared
@@ -47,6 +55,9 @@ pub struct ContextGauge(Arc<Inner>);
 struct Inner {
     held: AtomicU64,
     window: AtomicU64,
+    /// Results left out since the last response: after the first, a
+    /// refusal's note is one line (see [`Gauged::admit`])
+    refused: AtomicU64,
     /// The least reserve, from the session's own budgets; see
     /// [`ContextGauge::reserve`]
     floor: u64,
@@ -65,6 +76,7 @@ impl ContextGauge {
         Self(Arc::new(Inner {
             held: AtomicU64::new(0),
             window: AtomicU64::new(window),
+            refused: AtomicU64::new(0),
             floor,
         }))
     }
@@ -141,6 +153,12 @@ impl ContextGauge {
             + usage.cache_read_input_tokens.unwrap_or(0)
             + usage.cache_creation_input_tokens.unwrap_or(0);
         self.set(input + usage.output_tokens);
+        self.0.refused.store(0, Ordering::Relaxed);
+    }
+
+    /// Count a result left out this turn; how many were before it
+    fn refuse(&self) -> u64 {
+        self.0.refused.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -189,16 +207,27 @@ impl<T> Gauged<T> {
             window = self.context.window(),
             "tool result would not fit in context; replaced by a note"
         );
-        let note = format!(
-            "This result is about {tokens} tokens ({} KB); with about {held} \
-             already in your context (this turn's other results included), \
-             it would not fit in your {} token window less the {} kept for \
-             the end of your session, so it was left out. {}",
-            text.len() / 1024,
-            self.context.window(),
-            self.context.reserve(),
-            smaller(call),
-        );
+        // Notes are counted but not refused, and a turn's calls have no cap:
+        // after the first, a note is one line, so a wide turn of refusals
+        // cannot crowd out the session's end (review of 0.89)
+        let note = if self.context.refuse() == 0 {
+            format!(
+                "This result is about {tokens} tokens ({} KB); with about {held} \
+                 already in your context (this turn's other results included), \
+                 it would not fit in your {} token window less the {} kept for \
+                 the end of your session, so it was left out. {}",
+                text.len() / 1024,
+                self.context.window(),
+                self.context.reserve(),
+                smaller(call),
+            )
+        } else {
+            format!(
+                "Left out too: about {tokens} tokens ({} KB), which would not \
+                 fit either (see the first note this turn).",
+                text.len() / 1024
+            )
+        };
         self.context.add(estimate_tokens(&note));
         result.content = note.into();
         result.is_error = true;
@@ -361,6 +390,48 @@ mod tests {
         assert!(note.contains("less the 32768 kept for the end"), "{note}");
         assert!(note.contains("smaller limit"), "{note}");
         assert!(gauge.get() > 20_000 && gauge.get() < 20_200, "the note");
+    }
+
+    /// The fleet's settings (131k window, act and phase 16,384, so the
+    /// reserve is its floor, 34,768) at the least room a round runs with: a
+    /// wide turn of refused reads still leaves the next acting request and
+    /// reflect inside the window, because after the first the notes are one
+    /// line (review of 0.89: 90 full notes would have overrun it)
+    #[tokio::test]
+    async fn a_wide_turn_of_refusals_leaves_the_session_its_end() {
+        let (act, phase) = (16_384u32, 16_384u32);
+        let gauge =
+            ContextGauge::new(131_072, ContextGauge::reserve_for(act, phase));
+        assert_eq!(gauge.reserve(), 34_768);
+        gauge.set(131_072 - 34_768 - MIN_ROUND_ROOM);
+        assert_eq!(gauge.room(), MIN_ROUND_ROOM);
+        let mut tool = Gauged::new(Echo { len: 60_000 }, gauge.clone());
+        let mut notes = Vec::new();
+        for _ in 0..100 {
+            let r = tool.call(call("get_content")).await;
+            assert!(r.is_error);
+            notes.push(r.content.to_string());
+        }
+        assert!(notes[0].contains("would not fit in your 131072 token window"));
+        assert!(
+            notes[1].starts_with("Left out too: about 20000 tokens"),
+            "{}",
+            notes[1]
+        );
+        // The next acting request fits, and reflect keeps most of its budget
+        assert!(
+            gauge.get() + u64::from(act) <= gauge.window(),
+            "{}",
+            gauge.get()
+        );
+        let reflect =
+            gauge.window() - gauge.get() - u64::from(act) - PHASE_PROMPT_TOKENS;
+        assert!(reflect >= 12_000, "reflect keeps {reflect} of {phase}");
+        // A new response resets the count: its first refusal is whole again
+        gauge.record(&misanthropic::response::Usage::default());
+        gauge.set(131_072 - 34_768 - MIN_ROUND_ROOM);
+        let r = tool.call(call("get_content")).await;
+        assert!(r.content.to_string().starts_with("This result is about"));
     }
 
     /// A quarter of the window, at least CLOSING_RESERVE_MIN, at least the
