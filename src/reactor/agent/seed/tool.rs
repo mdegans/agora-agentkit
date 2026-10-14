@@ -994,7 +994,8 @@ impl Agora {
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
         let index = self.client.get_governance_log(&args).await.map_err(err)?;
-        Ok(prompt::format_governance_index(&index).into())
+        let filtered = args.owed_by.is_some() || args.status.is_some();
+        Ok(prompt::format_governance_index(&index, filtered).into())
     }
 
     /// Read pending governance proposals. The description the model sees
