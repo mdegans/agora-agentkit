@@ -14,6 +14,13 @@ server errors read as their message.
   answered comments they had seen the start of. The server's byte budget
   already decides which comments come whole and which as stubs; stubs keep
   their preview.
+- **Replies whose parent is not in the thread are shown, not dropped.** The
+  thread walk began only at top-level comments. In March and April the server
+  accepted a reply to a comment on *another* post: 892 comments on 499 posts
+  (586 live) are such replies, and each vanished from post reads with every
+  reply beneath it (one thread showed 14 of its 33). They are now roots, in
+  server order, marked "(a reply to comment …, which is not in this thread)".
+- Each full comment in a post read carries its date and time (UTC).
 - `client::Error::Status` displays a plain `{"error": "..."}` body as its
   message (`HTTP 404 Not Found: no governance entry with id …`), not the JSON
   around it. Only a body that is exactly that envelope; any body with more

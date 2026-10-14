@@ -967,6 +967,9 @@ struct ThreadedEntry<'a> {
     entry: ThreadEntry<'a>,
     depth: u32,
     parent_author: Option<&'a str>,
+    /// The comment this one replies to, when that comment is not in the
+    /// thread: the entry is shown as a root and says so
+    detached_from: Option<CommentId>,
 }
 
 /// Build a threaded list from flat comments plus their stubs (depth-first
@@ -974,6 +977,13 @@ struct ThreadedEntry<'a> {
 /// so a full reply under a stubbed parent still threads correctly — and
 /// a stub with full replies of its own still shows them nested beneath
 /// it, in thread order.
+///
+/// A comment whose parent is not in the thread is a root of its own, in the
+/// order the server sent it, with its replies beneath it. Until 0.81 the
+/// walk began only at top-level comments, so such a comment vanished with
+/// every reply under it: in March and April the server accepted a reply to
+/// a comment on another post, and 892 comments on 499 posts are such
+/// replies (one thread showed 14 of its 33; bridge finding, 2026-10-14).
 fn build_comment_threads<'a>(
     comments: &'a [CommentResponse],
     stubs: &'a [CommentStub],
@@ -1004,11 +1014,15 @@ fn build_comment_threads<'a>(
             .parent_comment_id()
             .and_then(|pid| by_id.get(&pid))
             .and_then(|p| p.agent_name());
+        let detached_from = entry
+            .parent_comment_id()
+            .filter(|pid| !by_id.contains_key(pid));
 
         result.push(ThreadedEntry {
             entry,
             depth: depth.min(3),
             parent_author,
+            detached_from,
         });
 
         if let Some(child_ids) = children.get(&Some(id)) {
@@ -1018,10 +1032,18 @@ fn build_comment_threads<'a>(
         }
     }
 
-    if let Some(top_level) = children.get(&None) {
-        for &id in top_level {
-            walk(id, 0, &by_id, &children, &mut result);
-        }
+    // Roots in the order the server sent them: top-level comments, and
+    // those whose parent is not here.
+    let roots = comments
+        .iter()
+        .map(|c| (c.id, c.parent_comment_id))
+        .chain(stubs.iter().map(|s| (s.id, s.parent_comment_id)))
+        .filter(|(_, parent)| {
+            parent.is_none_or(|pid| !by_id.contains_key(&pid))
+        })
+        .map(|(id, _)| id);
+    for id in roots {
+        walk(id, 0, &by_id, &children, &mut result);
     }
 
     result
@@ -1057,14 +1079,25 @@ fn format_threaded_entry(
             let author = c.agent_name.as_deref().unwrap_or("unknown");
             let yours = is_yours(author);
             let badges = badges(&c.provenance_labels());
+            // Comments carried no date, so an agent could not tell what
+            // was new (bridge finding, 2026-10-14).
+            let date = c
+                .created_at
+                .map(|at| format!(", {}", at.format("%Y-%m-%d %H:%MZ")))
+                .unwrap_or_default();
             let prefix = if te.depth > 0 {
                 let parent = te.parent_author.unwrap_or("unknown");
                 let parent_yours = is_yours(parent);
                 format!(
-                    "{indent}↳ {author}{yours}{badges} → {parent}{parent_yours}"
+                    "{indent}↳ {author}{yours}{badges}{date} → {parent}{parent_yours}"
+                )
+            } else if let Some(parent) = te.detached_from {
+                format!(
+                    "{indent}- {author}{yours}{badges}{date} (a reply to comment \
+                     {parent}, which is not in this thread)"
                 )
             } else {
-                format!("{indent}- {author}{yours}{badges}")
+                format!("{indent}- {author}{yours}{badges}{date}")
             };
             let body = deleted_body(c.deleted, &c.body);
             format!("{prefix}: {body} [comment_id: {}]", c.id)
@@ -3712,6 +3745,46 @@ mod tests {
         let out = format_post(&post, "viewer");
         assert!(out.contains("by philosopher in philosophy"), "{out}");
         assert!(!out.contains("[]"), "{out}");
+    }
+
+    /// A reply whose parent is on another post (the server accepted those
+    /// in March and April) is shown as a root with its replies, not
+    /// dropped; and every comment carries its date.
+    #[test]
+    fn format_post_shows_replies_whose_parent_is_not_in_the_thread() {
+        use chrono::{TimeZone, Utc};
+        let top = full_comment("engineer", false);
+        let mut detached = full_comment("lawyer", false);
+        let elsewhere = CommentId::new();
+        detached.parent_comment_id = Some(elsewhere);
+        detached.created_at =
+            Some(Utc.with_ymd_and_hms(2026, 4, 1, 22, 37, 0).unwrap());
+        let mut under = full_comment("artist", false);
+        under.parent_comment_id = Some(detached.id);
+        let post = PostWithCommentsResponse {
+            poll: None,
+            post: base_post(),
+            comments: vec![top, detached.clone(), under.clone()],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        };
+        let out = format_post(&post, "viewer");
+        assert!(
+            out.contains(&format!(
+                "- lawyer, 2026-04-01 22:37Z (a reply to comment {elsewhere}, \
+                 which is not in this thread): A full reply. [comment_id: {}]",
+                detached.id
+            )),
+            "{out}"
+        );
+        assert!(
+            out.contains(&format!("[comment_id: {}]", under.id)),
+            "{out}"
+        );
+        assert!(out.contains("↳ artist → lawyer"), "{out}");
+        assert_eq!(out.matches("[comment_id:").count(), 3, "{out}");
     }
 
     /// A full comment comes whole: the server's budget decides what is a
