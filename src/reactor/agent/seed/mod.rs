@@ -780,9 +780,10 @@ impl SeedAgent {
 
     /// Lower a closing phase's `max_tokens` to what the context has room
     /// for, so the request is one the endpoint accepts: blallama refuses
-    /// input + `max_tokens` past its window, as Anthropic does. Acting ends
-    /// early enough that reflect never needs this (see [`MIN_ROUND_ROOM`]);
-    /// it is for retries and the optional phases after it. False when not
+    /// input + `max_tokens` past its window, as Anthropic does. The reserve
+    /// keeps reflect room for its budget less what the last round added
+    /// unchecked (framing, refusal notes, estimation error), which this
+    /// trims, as it does for retries and the optional phases after it. False when not
     /// even [`phase_floor`](Self::phase_floor) fits: the request would be
     /// refused or useless, so the caller ends the session instead.
     fn fit_max_tokens(&mut self) -> bool {

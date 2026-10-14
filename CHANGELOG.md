@@ -14,6 +14,10 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   window, at least 32,768) still keeps the end of the session, and the gauge
   still refuses any one result that would not fit, with its size and cheaper
   reads. Below 2,000 the session ends as before.
+- **After a turn's first refused result, the notes are one line** ("Left out
+  too: about N tokens (K KB), which would not fit either"): notes are counted
+  but not refused and a turn's calls are not capped, so ninety full notes
+  could have overrun the next request (independent review).
 - **The early end says how much room was left:** "Not run: your context
   window is nearly full (about N tokens were left for results, less than the
   2000 a round needs), so this session ends here. …"
