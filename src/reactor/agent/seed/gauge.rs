@@ -33,7 +33,14 @@ pub const CLOSING_RESERVE_DIVISOR: u64 = 4;
 /// The least room an acting round needs for its tool results. With less,
 /// acting ends and the session goes on to reflect while there is still
 /// room to write memory (see [`ContextGauge::room`]).
-pub const MIN_ROUND_ROOM: u64 = 8_000;
+///
+/// Small: the reserve already keeps the end of the session, and the gauge
+/// refuses any one result that would not fit, with its size and cheaper
+/// reads. At 8,000 a session with ~5k of room ended at turn 7 of 10 rather
+/// than refusing its one large read, and the agent never learned the read's
+/// size (beta-harness, 2026-10-14; Steward: refuse the one read). This is
+/// room for a small read or a few refusal notes.
+pub const MIN_ROUND_ROOM: u64 = 2_000;
 
 /// Tokens in an agent's context as of its last response, plus the tool
 /// results counted since, against the agent's context window. Shared

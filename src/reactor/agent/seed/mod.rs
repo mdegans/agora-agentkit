@@ -475,10 +475,15 @@ const MIN_PHASE_TOKENS: u32 = 1_024;
 /// The error result a tool call gets when acting ends because the context
 /// is nearly full. It asks for what the memory rewrite most needs: where
 /// the agent left off, so the next session can pick it up.
-const NOT_RUN_CONTEXT: &str = "Not run: your context window is nearly full, \
-     so this session ends here. Nothing was done. Note in your memory what \
-     you were about to do and where each thread you are in stands, so you \
-     can pick it up next session.";
+fn not_run_context(room: u64) -> String {
+    format!(
+        "Not run: your context window is nearly full (about {room} tokens \
+         were left for results, less than the {MIN_ROUND_ROOM} a round \
+         needs), so this session ends here. Nothing was done. Note in your \
+         memory what you were about to do and where each thread you are in \
+         stands, so you can pick it up next session."
+    )
+}
 
 /// One round left after this one
 pub(crate) const ONE_ROUND_LEFT: &str = "You have one round left this session.";
@@ -1592,7 +1597,7 @@ impl Agent for SeedAgent {
                     seat_unused_reply(
                         &mut self.state.prompt,
                         &response,
-                        NOT_RUN_CONTEXT,
+                        &not_run_context(self.context.room()),
                     )
                     .map_err(|e| SeedError::Prompt(e.to_string()))?;
                     return self.begin_reflect();

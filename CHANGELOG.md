@@ -2,6 +2,22 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.89.0
+
+**Changes how a session ends when its context is nearly full** (Steward,
+2026-10-14: refuse the one read).
+
+- **`MIN_ROUND_ROOM` 8,000 → 2,000.** Acting ended when fewer than 8,000
+  tokens were left for a round's results, so beta-harness's session ended at
+  turn 7 of 10 with about 5k of room instead of refusing its one large read,
+  and never learned the read's size. The closing reserve (a quarter of the
+  window, at least 32,768) still keeps the end of the session, and the gauge
+  still refuses any one result that would not fit, with its size and cheaper
+  reads. Below 2,000 the session ends as before.
+- **The early end says how much room was left:** "Not run: your context
+  window is nearly full (about N tokens were left for results, less than the
+  2000 a round needs), so this session ends here. …"
+
 ## 0.88.0
 
 The paging round's wording fixes (bridge testers, 2026-10-14: harness,

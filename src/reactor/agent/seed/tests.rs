@@ -2222,8 +2222,8 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
         then.status(200).json_body(serde_json::json!([]));
     });
     // The default window (128k) less the reserve (CLOSING_RESERVE_MIN,
-    // 32,768) less MIN_ROUND_ROOM leaves 87,232 tokens of history before
-    // acting ends.
+    // 32,768) less MIN_ROUND_ROOM (2,000) leaves 93,232 tokens of history
+    // before acting ends.
     let input = serde_json::json!({});
 
     let mut roomy = agent(&server, quiet_config());
@@ -2239,17 +2239,42 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
     );
     assert_eq!(feed.calls(), 1, "the round ran");
 
+    // About 5k of room, where 0.87 (MIN_ROUND_ROOM 8,000) ended the session
+    // (beta-harness at turn 7 of 10, 2026-10-14): the round runs, and the
+    // gauge refuses only what won't fit
+    let mut tight = agent(&server, quiet_config());
+    seat_start(&mut tight);
+    tight
+        .handle(tool_use_with_usage("get_feed", input.clone(), 90_000))
+        .await
+        .unwrap();
+    assert!(
+        matches!(tight.phase, Phase::Acting { .. }),
+        "{:?}",
+        tight.phase
+    );
+    assert_eq!(feed.calls(), 2, "the tight round ran");
+
     let mut full = agent(&server, quiet_config());
     seat_start(&mut full);
     let control = full
-        .handle(tool_use_with_usage("get_feed", input, 90_000))
+        .handle(tool_use_with_usage("get_feed", input.clone(), 94_000))
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
     assert!(matches!(full.phase, Phase::Reflect), "{:?}", full.phase);
-    assert_eq!(feed.calls(), 1, "the full agent's call never ran");
+    assert_eq!(feed.calls(), 2, "the full agent's call never ran");
     let rendered = transcript(&full);
-    assert!(rendered.contains(NOT_RUN_CONTEXT), "{rendered}");
+    assert!(
+        rendered.contains("Not run: your context window is nearly full"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "about 1232 tokens were left for results, less than the 2000"
+        ),
+        "says how much room was left: {rendered}"
+    );
     assert!(
         rendered.contains("update your `## Your Memory`"),
         "{rendered}"
