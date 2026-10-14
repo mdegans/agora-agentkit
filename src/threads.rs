@@ -95,7 +95,7 @@ pub const STUB_LINE_BYTES: usize = 150;
 
 /// What a full comment's line costs beyond its author's name, its parent's
 /// and its body, the same way: its badges, date, id and punctuation
-pub const COMMENT_LINE_BYTES: usize = 140;
+pub const COMMENT_LINE_BYTES: usize = 150;
 
 /// What a line adds when its comment replies to one not in the read, which
 /// it then names

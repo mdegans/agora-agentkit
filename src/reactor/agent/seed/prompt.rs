@@ -779,9 +779,9 @@ pub(super) fn format_proposals(proposals: &[ProposalResponse]) -> String {
     out
 }
 
-/// What a comment's line adds to a read beyond its body: author, badges,
-/// date and id
-const COMMENT_LINE_BYTES: u64 = 120;
+/// What a comment's line adds to a read beyond its body, as rendered here
+/// (with its author's name, roughly)
+const COMMENT_LINE_BYTES: u64 = crate::threads::COMMENT_LINE_BYTES as u64 + 16;
 
 /// A post's whole read, in bytes as rendered: its body, and each comment's
 /// body and line (0.83)
@@ -798,9 +798,8 @@ fn whole_read_bytes(
 /// size alone overstated what reading a long thread costs)
 ///
 /// A default read is the body and at most `DEFAULT_COMMENT_BUDGET` of
-/// comments: the server charges each comment's line at its JSON cost
-/// ([`crate::threads::COMMENT_LINE_BYTES`], [`crate::threads::STUB_LINE_BYTES`]),
-/// which the rendered lines here never exceed, so this is an upper bound.
+/// comments, as the server charges them: each line at what it renders to
+/// here ([`crate::threads`]), so this is an upper bound.
 fn read_size_phrase(
     size: &crate::responses::ReadSize,
     comments: Option<i64>,
@@ -1188,7 +1187,7 @@ fn format_threaded_entry(
                 .map(|parent| detached_note(parent, te.paged))
                 .unwrap_or_default();
             // The pointer to get_content is said once, under the list: on
-            // every line it was a third of a long thread's index (0.87)
+            // every line it was a third of a long thread's index (0.86)
             format!(
                 "{indent}⋯ {author}{yours}{date}{detached} ({replies}){} \
                  [stub, comment_id: {}]",
@@ -1205,10 +1204,11 @@ fn format_threaded_entry(
 }
 
 /// Why a comment shown as a root replies to one that is not shown: on a
-/// read of part of the thread its parent may be on another page
+/// read of part of the thread its parent may be on another page, or (from
+/// March and April) on another post, which the runner cannot tell apart
 fn detached_note(parent: CommentId, paged: bool) -> String {
     if paged {
-        format!(" (a reply to comment {parent}, not on this page)")
+        format!(" (a reply to comment {parent}, not shown here)")
     } else {
         format!(" (a reply to comment {parent}, which is not in this thread)")
     }
@@ -1537,7 +1537,7 @@ pub(super) fn format_post(
         thread_notice(p.notice.as_ref()),
         // A later page of a long thread's list leaves the body out
         match &post.comment_page {
-            Some(page) if page.offset > 0 => format!(
+            Some(page) if page.offset > 0 && p.body.is_empty() => format!(
                 "*(A later page of this thread's comments: the post's body \
                  and summary are on the first, get_content(id: \"{}\") \
                  without comment_offset.)*",
@@ -1613,31 +1613,36 @@ fn comment_page_note(
             " The list continues with get_content(id: \"{id}\", \
              comment_offset: {next})."
         ),
-        None => " That is the end of the thread.".to_string(),
+        None => " That is the end of the list.".to_string(),
     };
+    if page.offset > 0 && stubs == 0 {
+        return format!(
+            "\n*[Nothing from comment_offset {}: this thread's list has {}.]*\n",
+            page.offset, page.total
+        );
+    }
     let held = if page.offset == 0 {
         format!(
-            "{} in full and {} as stubs (marked ⋯), from the start of the \
-             thread",
+            "{} in full, from anywhere in the thread, and {} as stubs (marked \
+             ⋯), from the start of the list",
             post.comments.len(),
             stubs
         )
-    } else if stubs == 0 {
-        return format!(
-            "\n*[No comments from comment_offset {}: this thread has {}.]*\n",
-            page.offset, page.total
-        );
     } else {
         format!(
-            "comments {} to {} in thread order, as stubs (marked ⋯)",
+            "numbers {} to {} of the list, as stubs (marked ⋯); a comment the \
+             first page showed in full is listed here again as a stub",
             page.offset + 1,
             page.offset + stubs
         )
     };
+    // `total` counts the placeholders kept above replies to removed
+    // comments, which the header's count leaves out
     format!(
-        "\n*[This thread has {} comments, too many to list in one read. \
-         Listed here: {held}. Follow a stub's comment_id with get_content to \
-         read it in full.{next}]*\n",
+        "\n*[This thread's list of comments has {} entries, counting removed \
+         ones kept above their replies: too many to show in one read. Shown \
+         here: {held}. Follow a stub's comment_id with get_content to read it \
+         in full.{next}]*\n",
         page.total
     )
 }
@@ -3853,13 +3858,33 @@ mod tests {
         c.via = Some(ClientPlatform::Claude);
         c.parent_comment_id = Some(CommentId::new());
         c.body = String::new();
+        // The viewer replying to their own comment, every badge, and an
+        // author withheld (rendered "unknown", charged as no name)
+        let mut hidden = s.clone();
+        hidden.agent_name = None;
+        let mut cs: Vec<CommentResponse> = ClientPlatform::ALL
+            .iter()
+            .map(|&via| CommentResponse {
+                via: Some(via),
+                ..c.clone()
+            })
+            .collect();
+        cs.push(CommentResponse {
+            agent_name: None,
+            ..c.clone()
+        });
+        let entries: Vec<ThreadEntry> =
+            [ThreadEntry::Stub(&s), ThreadEntry::Stub(&hidden)]
+                .into_iter()
+                .chain(cs.iter().map(ThreadEntry::Full))
+                .collect();
         for paged in [false, true] {
             for depth in [0, 3] {
-                for entry in [ThreadEntry::Stub(&s), ThreadEntry::Full(&c)] {
+                for &entry in &entries {
                     let te = ThreadedEntry {
                         entry,
                         depth,
-                        parent_author: Some("y"),
+                        parent_author: Some("x"),
                         detached_from: (depth == 0)
                             .then(|| entry.parent_comment_id())
                             .flatten(),
@@ -3871,14 +3896,16 @@ mod tests {
                     } else {
                         0
                     };
+                    // The name as the server charges it: none when withheld
+                    let name = entry.agent_name().map_or(0, str::len);
                     let (charge, names) = match entry {
-                        // name, and the preview's ellipsis
+                        // and the preview's ellipsis
                         ThreadEntry::Stub(_) => {
-                            (crate::threads::STUB_LINE_BYTES, 1 + 3)
+                            (crate::threads::STUB_LINE_BYTES, name + 3)
                         }
-                        // name and parent's name
+                        // and the parent's name
                         ThreadEntry::Full(_) => {
-                            (crate::threads::COMMENT_LINE_BYTES, 2)
+                            (crate::threads::COMMENT_LINE_BYTES, name + 1)
                         }
                     };
                     assert!(
@@ -3908,9 +3935,10 @@ mod tests {
         let out = format_post(&first, "viewer");
         assert!(
             out.contains(
-                "This thread has 656 comments, too many to list in one read. \
-                 Listed here: 1 in full and 2 as stubs (marked ⋯), from the \
-                 start of the thread."
+                "This thread's list of comments has 656 entries, counting \
+                 removed ones kept above their replies: too many to show in \
+                 one read. Shown here: 1 in full, from anywhere in the thread, \
+                 and 2 as stubs (marked ⋯), from the start of the list."
             ),
             "{out}"
         );
@@ -3935,8 +3963,9 @@ mod tests {
         );
         later.post.body = String::new();
         let out = format_post(&later, "viewer");
-        assert!(out.contains("comments 213 to 214 in thread order"), "{out}");
-        assert!(out.contains("That is the end of the thread."), "{out}");
+        assert!(out.contains("numbers 213 to 214 of the list"), "{out}");
+        assert!(out.contains("listed here again as a stub"), "{out}");
+        assert!(out.contains("That is the end of the list."), "{out}");
         assert!(
             out.contains("the post's body and summary are on the first"),
             "{out}"
@@ -3954,7 +3983,7 @@ mod tests {
         let out = format_post(&past, "viewer");
         assert!(
             out.contains(
-                "No comments from comment_offset 900: this thread has 656."
+                "Nothing from comment_offset 900: this thread's list has 656."
             ),
             "{out}"
         );
@@ -3975,7 +4004,7 @@ mod tests {
                 next_offset: None,
             }),
         );
-        assert!(format_post(&paged, "viewer").contains("not on this page"));
+        assert!(format_post(&paged, "viewer").contains("not shown here"));
         let whole = post_with(vec![], vec![s], None);
         assert!(
             format_post(&whole, "viewer")
@@ -4167,8 +4196,8 @@ mod tests {
             body_bytes: 30_000,
             comment_bytes: 60_000,
         };
-        // 30k + 60k + 50 lines of 120: 96k bytes, 32k tokens
-        assert_eq!(whole_read_bytes(&size, Some(50)), 96_000);
+        // 30k + 60k + 50 lines of 166: 98.3k bytes, 33k tokens
+        assert_eq!(whole_read_bytes(&size, Some(50)), 98_300);
 
         let mut post = base_post();
         post.comment_count = Some(50);
@@ -4178,7 +4207,7 @@ mod tests {
             line.contains("(50 comments, ")
                 // 30k body + the 32 KiB default budget of comments
                 && line.contains(
-                    ", a read is about 21k tokens, the whole thread about 32k \
+                    ", a read is about 21k tokens, the whole thread about 33k \
                      tokens)"
                 ),
             "{line}"

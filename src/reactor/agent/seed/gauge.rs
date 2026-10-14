@@ -210,7 +210,7 @@ impl<T> Gauged<T> {
 fn smaller(call: &str) -> std::borrow::Cow<'static, str> {
     match call {
         // A post's read is its body and at most comment_budget of comments
-        // (0.87): a smaller budget always shrinks it, and a long thread's
+        // (0.86): a smaller budget always shrinks it, and a long thread's
         // list continues in pages
         "get_content" => format!(
             "Read a post with detail=\"summary\" (the post without its \

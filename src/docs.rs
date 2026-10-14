@@ -185,7 +185,7 @@ pub fn council_sampling_disclosure(
                 // which listings give in tokens (testers saw "about 60K
                 // tokens" here beside "about 86k tokens whole", 2026-10-14)
                 // The thread's total, not a read: a default read of it is
-                // far smaller (0.87)
+                // far smaller (0.86)
                 " The scheduling thread's post and comments total about {} KB \
                  now, so its rate is {}.",
                 (size.0 * ThreadTokens::BYTES_PER_TOKEN + 512) / 1024,

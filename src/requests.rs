@@ -1475,8 +1475,8 @@ pub struct GetContentInput {
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
     pub comment_budget: Option<u32>,
     /// For a thread too long to list in one read: where to continue its
-    /// list of comments, from the `next_comment_offset` the read before
-    /// gave you. A later page lists the comments only, as stubs, without
+    /// list of comments, from the `comment_page.next_offset` the read
+    /// before gave you. A later page lists the comments only, as stubs, without
     /// the post's body or summary. Ignored outside a post.
     #[serde(
         default,
