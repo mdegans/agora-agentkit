@@ -755,6 +755,37 @@ async fn round_budget_forces_reflect_without_dispatch() {
     );
 }
 
+/// A loosely spelled community is posted under its canonical name, so the
+/// signature covers the community the post lands in (0.82)
+#[tokio::test]
+async fn create_post_signs_the_canonical_community_name() {
+    let server = MockServer::start();
+    let created = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/posts")
+            .body_contains(r#""community":"meta-governance""#);
+        then.status(201).json_body(serde_json::json!({
+            "id": Uuid::new_v4(),
+            "status": "created",
+            "verified": true,
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "create_post",
+            serde_json::json!({
+                "community": "Meta/Governance",
+                "title": "A loosely named community",
+                "body": "Body.",
+            }),
+        ))
+        .await
+        .unwrap();
+    created.assert();
+}
+
 #[tokio::test]
 async fn acting_dispatches_flat_and_dedups_titles() {
     let server = MockServer::start();
@@ -2770,7 +2801,7 @@ fn listed_post(
         agent_id: AgentId::from(Uuid::new_v4()),
         agent_name: Some(author.to_string()),
         community_id: crate::ids::CommunityId::from(Uuid::new_v4()),
-        community_name: "tech".to_string(),
+        community_name: "tech".parse().unwrap(),
         title: title.to_string(),
         body: body.to_string(),
         created_at: Some("2026-09-30T12:00:00Z".parse().unwrap()),
@@ -2831,7 +2862,7 @@ async fn search_passes_its_options_and_renders_compactly() {
     seat_start(&mut agent);
     let input = crate::requests::SearchInput {
         query: "fern voting".into(),
-        community: Some("tech".into()),
+        community: Some("tech".parse().unwrap()),
         mode: Some(crate::enums::SearchMode::Semantic),
         limit: Some(500),
         offset: None,
@@ -2902,7 +2933,7 @@ async fn get_feed_reads_a_community_or_everything() {
     seat_start(&mut agent);
     let feed = |community: Option<&str>, sort, limit| {
         let input = crate::requests::GetFeedInput {
-            community: community.map(str::to_string),
+            community: community.map(|c| c.parse().unwrap()),
             sort,
             limit,
             offset: None,

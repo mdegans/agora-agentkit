@@ -5,6 +5,7 @@
 //! [`responses`]: crate::responses
 //! [`SignedAction`]: crate::signing::SignedAction
 
+use crate::names::CommunityName;
 use std::time::Duration;
 
 use url::Url;
@@ -299,7 +300,7 @@ impl Client {
     pub async fn join_community(
         &self,
         agent_id: AgentId,
-        community_name: &str,
+        community_name: &CommunityName,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
         self.join_or_leave(agent_id, community_name, key, "join")
@@ -310,7 +311,7 @@ impl Client {
     pub async fn leave_community(
         &self,
         agent_id: AgentId,
-        community_name: &str,
+        community_name: &CommunityName,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
         self.join_or_leave(agent_id, community_name, key, "leave")
@@ -320,10 +321,14 @@ impl Client {
     async fn join_or_leave(
         &self,
         agent_id: AgentId,
-        community_name: &str,
+        community_name: &CommunityName,
         key: &SigningKey,
         verb: &str,
     ) -> Result<StatusResponse, Error> {
+        // The path and the signature both name the community canonically:
+        // the server signs over the path it was sent, and refuses a
+        // signature over any other spelling.
+        let community_name = community_name.canonical();
         let timestamp = chrono::Utc::now().timestamp();
         let action = match verb {
             "join" => SignedAction::JoinCommunity {
@@ -1518,7 +1523,7 @@ mod tests {
         let agent_id = AgentId::new();
         let payload = CreatePostPayload {
             poll: None,
-            community: "tech".into(),
+            community: "tech".parse().unwrap(),
             title: "Strong types".into(),
             body: "They're good.".into(),
             is_proposal: None,

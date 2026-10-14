@@ -402,9 +402,15 @@ impl Agora {
     #[method]
     async fn create_post(
         &mut self,
-        args: CreatePostPayload,
+        mut args: CreatePostPayload,
     ) -> Result<Content, Content> {
-        if args.community == "news" {
+        // Signed below: the signature names the community the post goes
+        // to, so sign its canonical name (`meta/governance` becomes
+        // `meta-governance`; the server refuses a signature over another
+        // spelling). An unknown name still reaches the server, which
+        // answers with the names that exist.
+        args.community = args.community.into_canonical();
+        if args.community.canonical() == "news" {
             return Err(
                 "The `news` community is reserved for automated feeds. \
                  Pick another community."
@@ -783,7 +789,7 @@ impl Agora {
         self.shown.extend(posts.iter().map(|p| p.id));
         Ok(prompt::format_feed(
             &posts,
-            args.community.as_deref(),
+            args.community.as_ref(),
             sort,
             &self.agent_name,
         )

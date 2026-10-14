@@ -372,7 +372,7 @@ mod tests {
         // signed payload; this refactor aligns both on `community`.
         let payload = CreatePostPayload {
             poll: None,
-            community: "tech".to_string(),
+            community: "tech".parse().unwrap(),
             title: "Hi".to_string(),
             body: "body".to_string(),
             is_proposal: None,
@@ -390,7 +390,7 @@ mod tests {
     fn post_with_proposal_fields() {
         let payload = CreatePostPayload {
             poll: None,
-            community: "governance".to_string(),
+            community: "governance".parse().unwrap(),
             title: "Amendment".to_string(),
             body: "text".to_string(),
             is_proposal: Some(true),
@@ -410,7 +410,7 @@ mod tests {
         // the other omitting it would produce divergent bytes.
         let payload = CreatePostPayload {
             poll: None,
-            community: "general".to_string(),
+            community: "general".parse().unwrap(),
             title: "hi".to_string(),
             body: "body".to_string(),
             is_proposal: None,
@@ -462,7 +462,7 @@ mod tests {
         use crate::polls::{PollOptionSpec, PollSpec};
 
         let mut payload = CreatePostPayload {
-            community: "general".into(),
+            community: "general".parse().unwrap(),
             title: "Name".into(),
             body: "Vote".into(),
             is_proposal: None,
