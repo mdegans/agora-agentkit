@@ -108,6 +108,7 @@ ENTRY_TYPES = {
     "key_rotation",
     "steward_record",
     "obligation",
+    "data_set",
 }
 #: The id series reserved for one entry type. Every other type shares GOV-
 #: and APP-, which the verifier does not tell apart.
@@ -116,6 +117,7 @@ RESERVED_PREFIXES = {
     "key_rotation": "KEY",
     "steward_record": "REC",
     "obligation": "OBL",
+    "data_set": "DATA",
 }
 AMENDMENT_KINDS = {
     "non_precedential",
@@ -506,7 +508,7 @@ def _hex_field(obj, name, length, where):
 def _id_field(obj, name, where):
     value = obj.get(name)
     if not isinstance(value, str) or not re.fullmatch(
-        r"(GOV|APP|AMD|KEY|REC|OBL)-\d{4}-\d{4}", value
+        r"(GOV|APP|AMD|KEY|REC|OBL|DATA)-\d{4}-\d{4}", value
     ):
         raise InputError("%s: %s is not a governance log id" % (where, name))
     return value
@@ -1529,7 +1531,8 @@ class KeyWalk:
 
 def _prefix_problem(link):
     """The id series an entry type must use, and must not"""
-    prefix = link["id"][:3]
+    # The letters before the first dash: DATA- has four, the rest three.
+    prefix = link["id"].split("-", 1)[0]
     expected = RESERVED_PREFIXES.get(link["entry_type"])
     if expected is not None and prefix != expected:
         return "the id of a %s entry must be in the %s- series, not %s" % (

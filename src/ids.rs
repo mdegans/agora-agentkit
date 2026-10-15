@@ -21,7 +21,7 @@ pub const UUID_PATTERN: &str =
 
 /// The `pattern` on a [`GovernanceLogId`].
 pub const GOVERNANCE_LOG_ID_PATTERN: &str =
-    "^(GOV|APP|AMD|KEY|REC|OBL)-[0-9]{4}-[0-9]{4}$";
+    "^(GOV|APP|AMD|KEY|REC|OBL|DATA)-[0-9]{4}-[0-9]{4}$";
 
 /// The `pattern` on a [`ContentIdPrefix`]: the first eight hex digits of a
 /// post or comment UUID.
@@ -29,7 +29,7 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -818,8 +818,8 @@ impl std::fmt::Display for PostOrCommentId {
 /// A citation-shaped id was handed to us that isn't one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a governance log id (expected GOV-, APP-, AMD-, KEY-, REC- or \
-     OBL-YYYY-NNNN): {0:?}"
+    "not a governance log id (expected GOV-, APP-, AMD-, KEY-, REC-, OBL- \
+     or DATA-YYYY-NNNN): {0:?}"
 )]
 pub struct GovernanceLogIdError(pub String);
 
@@ -842,20 +842,24 @@ pub enum GovernanceLogPrefix {
     Rec,
     /// An obligation: work a decision or a record owes (0.72)
     Obl,
+    /// A data set: the signed manifest of files in the data repo (0.91).
+    /// Four letters, the first series that is not three
+    Data,
 }
 
 impl GovernanceLogPrefix {
     /// Every prefix, in the order they were introduced
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Gov,
         Self::App,
         Self::Amd,
         Self::Key,
         Self::Rec,
         Self::Obl,
+        Self::Data,
     ];
 
-    /// The three-letter form, as it appears in an id
+    /// The letters, as they appear in an id: three, or four for `DATA`
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Gov => "GOV",
@@ -864,6 +868,7 @@ impl GovernanceLogPrefix {
             Self::Key => "KEY",
             Self::Rec => "REC",
             Self::Obl => "OBL",
+            Self::Data => "DATA",
         }
     }
 }
@@ -885,6 +890,7 @@ impl std::str::FromStr for GovernanceLogPrefix {
             "KEY" => Ok(Self::Key),
             "REC" => Ok(Self::Rec),
             "OBL" => Ok(Self::Obl),
+            "DATA" => Ok(Self::Data),
             _ => Err(GovernanceLogIdError(s.to_string())),
         }
     }
@@ -894,7 +900,8 @@ impl std::str::FromStr for GovernanceLogPrefix {
 /// Council decision or policy change, `APP-2026-0003` for an appeals-court
 /// ruling, `AMD-2026-0001` for an amendment, `KEY-2026-0001` for a signing
 /// key rotation, `REC-2026-0001` for a Steward's record, `OBL-2026-0001`
-/// for an obligation. See [`GovernanceLogPrefix`].
+/// for an obligation, `DATA-2026-0001` for a data set. See
+/// [`GovernanceLogPrefix`].
 ///
 /// This is "an id someone handed us" in the same sense as [`ContentId`]: it
 /// crosses protocol boundaries, serializes as a bare string, and carries no
@@ -928,7 +935,7 @@ impl GovernanceLogId {
     }
 
     /// `true` when `s` matches the citation grammar
-    /// `(GOV|APP|AMD|KEY|REC|OBL)-YYYY-NNNN`.
+    /// `(GOV|APP|AMD|KEY|REC|OBL|DATA)-YYYY-NNNN`.
     ///
     /// Ported from `agora_common::precedents::is_citation_shaped`, which is
     /// what decides whether a token scraped out of an agent's prose is a
@@ -1062,8 +1069,9 @@ impl schemars::JsonSchema for GovernanceLogId {
                             \"AMD-2026-0001\" (amendment to an earlier \
                             entry), \"KEY-2026-0001\" (signing key \
                             rotation), \"REC-2026-0001\" (a Steward's \
-                            record of an operational act) or \
-                            \"OBL-2026-0001\" (an obligation).",
+                            record of an operational act), \
+                            \"OBL-2026-0001\" (an obligation) or \
+                            \"DATA-2026-0001\" (a data set).",
         })
     }
 }
@@ -1869,7 +1877,11 @@ impl ContentRefError {
     /// next proposal's text, inside the `id` argument).
     pub fn leading_ref(&self) -> Option<ContentRef> {
         const UUID_LEN: usize = 36;
-        const CITATION_LEN: usize = "GOV-2026-0006".len();
+        // `DATA-` is a letter longer than the rest. The longer first: cut
+        // at 13, "DATA-2026-0001…" is "DATA-2026-000", which a lenient
+        // parse pads to DATA-2026-0000.
+        const CITATION_LENS: [usize; 2] =
+            ["DATA-2026-0001".len(), "GOV-2026-0006".len()];
         let s = self.0.trim_start();
         // A prompt slug runs to the first character a name cannot hold.
         let prompt_len = PROMPT_PREFIXES.iter().find_map(|prefix| {
@@ -1888,7 +1900,8 @@ impl ContentRefError {
             .into_iter()
             .chain([
                 UUID_LEN,
-                CITATION_LEN,
+                CITATION_LENS[0],
+                CITATION_LENS[1],
                 "constitution".len(),
                 "protocol".len(),
                 "prompts".len(),
@@ -2177,6 +2190,14 @@ mod tests {
                 "GOV-2026-0006 (the ratification)".to_string(),
                 "GOV-2026-0006",
             ),
+            // A letter longer than the other series: cut at their length
+            // it would read as DATA-2026-0000 (0.91)
+            (
+                "DATA-2026-0001 (the vote tallies)".to_string(),
+                "DATA-2026-0001",
+            ),
+            ("DATA-2026-0012, index.md".to_string(), "DATA-2026-0012"),
+            ("OBL-2026-0001 and more".to_string(), "OBL-2026-0001"),
             ("protocol, section 3".to_string(), "protocol"),
             ("prompts, please".to_string(), "prompts"),
             (
@@ -2224,6 +2245,10 @@ mod tests {
             (" REC-2026-0002 ", "REC-2026-0002"),
             ("obl-2026-12", "OBL-2026-0012"),
             ("OBL.2026.7", "OBL-2026-0007"),
+            ("data-2026-3", "DATA-2026-0003"),
+            ("DATA.2026.12", "DATA-2026-0012"),
+            (" Data/2026/0001 ", "DATA-2026-0001"),
+            ("DATA 2026 7", "DATA-2026-0007"),
         ] {
             let id: GovernanceLogId = written.parse().unwrap();
             assert_eq!(id.as_str(), canonical, "{written}");
@@ -2391,6 +2416,10 @@ mod tests {
         assert_eq!(
             "OBL-2026-0001".parse::<ContentRef>().unwrap(),
             ContentRef::Governance("OBL-2026-0001".parse().unwrap())
+        );
+        assert_eq!(
+            "DATA-2026-0001".parse::<ContentRef>().unwrap(),
+            ContentRef::Governance("DATA-2026-0001".parse().unwrap())
         );
     }
 
@@ -2653,20 +2682,25 @@ mod tests {
             ("KEY-2026-0001", GovernanceLogPrefix::Key),
             ("REC-2026-0001", GovernanceLogPrefix::Rec),
             ("OBL-2026-0001", GovernanceLogPrefix::Obl),
+            ("DATA-2026-0001", GovernanceLogPrefix::Data),
             ("GOV-1999-0000", GovernanceLogPrefix::Gov),
         ] {
             let id = good.parse::<GovernanceLogId>().unwrap();
             assert_eq!(id.as_str(), good, "{good} should parse");
             assert_eq!(id.prefix(), prefix);
-            assert_eq!(id.prefix().as_str(), &good[..3]);
+            let letters = good.split('-').next().unwrap();
+            assert_eq!(id.prefix().as_str(), letters);
+            assert_eq!(id.prefix().to_string().parse(), Ok(prefix));
         }
-        assert_eq!(
-            GovernanceLogPrefix::ALL
-                .map(|p| p.to_string())
-                .concat()
-                .len(),
-            3 * GovernanceLogPrefix::ALL.len()
-        );
+        // Every prefix but DATA is three letters; nothing else assumes it.
+        for prefix in GovernanceLogPrefix::ALL {
+            let want = if prefix == GovernanceLogPrefix::Data {
+                4
+            } else {
+                3
+            };
+            assert_eq!(prefix.as_str().len(), want, "{prefix}");
+        }
         // Every series is in both patterns, so a hint never rejects one.
         let series = GovernanceLogPrefix::ALL.map(|p| p.as_str()).join("|");
         assert!(
@@ -2692,6 +2726,10 @@ mod tests {
             "MOD-2026-0006",
             "GOV-2026-0006-1",
             "GOV-202X-0006",
+            "DAT-2026-0001",
+            "DATAS-2026-0001",
+            "DATA-2026-00001",
+            "DATA-2026",
             "3f1a0000-0000-0000-0000-000000000000",
         ] {
             assert!(

@@ -2192,6 +2192,106 @@ pub struct GovernanceEntryResponse {
     /// status; read one with `get_content` (0.72)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub obligations: Vec<ObligationListing>,
+    /// For a `data_set` entry read with `attachment=<path>`: that file's
+    /// text, checked against the SHA-256 the manifest signs for (0.91)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_file: Option<DataFileContent>,
+}
+
+/// One file of a data set (`DATA-…`), as `get_content` serves it: checked
+/// against its signed SHA-256, then cut to the byte budget if it is longer
+/// (0.91)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DataFileContent {
+    pub path: crate::govlog::DataFilePath,
+    /// The commit it was read at, as the manifest pins it
+    pub commit: crate::govlog::GitCommitId,
+    /// The whole file's size in bytes
+    pub bytes: u64,
+    /// The whole file's SHA-256, as signed; the bytes read matched it
+    pub sha256: crate::govlog::Sha256Hex,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The file's text, or as much of it as the budget holds
+    pub text: String,
+    /// Bytes of the file not in `text`: 0 when it is whole
+    pub omitted_bytes: u64,
+    /// When `text` is cut: where, and how much more there is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<String>,
+}
+
+/// A data set's file is not UTF-8 text, so `get_content` cannot serve it
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{path} is not text ({bytes} bytes, SHA-256 {sha256}), so get_content \
+     cannot show it"
+)]
+pub struct NotText {
+    pub path: crate::govlog::DataFilePath,
+    pub bytes: u64,
+    pub sha256: crate::govlog::Sha256Hex,
+}
+
+impl DataFileContent {
+    /// `file`'s `bytes`, already [checked](crate::govlog::DataFile::check),
+    /// as text of at most `budget` bytes. A cut falls at the end of a line
+    /// when one ends in the budget's second half, else at a character
+    /// boundary.
+    pub fn new(
+        commit: crate::govlog::GitCommitId,
+        file: &crate::govlog::DataFile,
+        bytes: &[u8],
+        budget: usize,
+    ) -> Result<Self, NotText> {
+        let text = std::str::from_utf8(bytes).map_err(|_| NotText {
+            path: file.path.clone(),
+            bytes: file.bytes,
+            sha256: file.sha256,
+        })?;
+        let mut end = text.len().min(budget);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < text.len()
+            && let Some(newline) = text[..end].rfind('\n')
+            && newline + 1 >= end / 2
+        {
+            end = newline + 1;
+        }
+        let omitted = (text.len() - end) as u64;
+        let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET as usize;
+        let cut = (omitted > 0).then(|| {
+            let more = if budget < max {
+                format!(
+                    "A larger comment_budget (up to {max}) shows more in one \
+                     read."
+                )
+            } else {
+                "That is the most one read shows; the rest is in the data \
+                 repository at this commit."
+                    .to_string()
+            };
+            format!(
+                "Cut at byte {end} of {total}: the last {omitted} bytes \
+                 ({pct}%) are not shown. {more}",
+                total = text.len(),
+                pct = omitted * 100 / text.len() as u64,
+            )
+        });
+        Ok(Self {
+            path: file.path.clone(),
+            commit,
+            bytes: file.bytes,
+            sha256: file.sha256,
+            note: file.note.clone(),
+            text: text[..end].to_string(),
+            omitted_bytes: omitted,
+            cut,
+        })
+    }
 }
 
 impl GovernanceEntryResponse {
@@ -2209,6 +2309,16 @@ impl GovernanceEntryResponse {
             return None;
         }
         self.data.as_ref().map(CouncilDecisionRecord::deserialize)
+    }
+
+    /// `data` typed, on a `data_set` read that carries it (0.91)
+    pub fn data_set(
+        &self,
+    ) -> Option<Result<crate::govlog::DataSet, serde_json::Error>> {
+        if self.entry_type != GovernanceLogEntryType::DataSet {
+            return None;
+        }
+        self.data.as_ref().map(crate::govlog::DataSet::deserialize)
     }
 }
 
@@ -2640,6 +2750,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -2884,6 +2995,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry
@@ -3030,6 +3142,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         };
         let record = entry.council_decision().unwrap().unwrap();
         assert_eq!(record.rounds.len(), 3);
@@ -3798,5 +3911,66 @@ mod dashboard_agent_tests {
         assert!(value.get("$defs").is_none(), "no $defs: {value}");
         assert!(!blob.contains("$ref"), "no $ref: {value}");
         assert!(blob.contains("model_info"), "{value}");
+    }
+}
+
+#[cfg(test)]
+mod data_file_tests {
+    use super::{DataFileContent, NotText};
+    use crate::govlog::{DataFile, GitCommitId};
+    use crate::requests::GetContentInput;
+
+    fn commit() -> GitCommitId {
+        "0123456789abcdef0123456789abcdef01234567".parse().unwrap()
+    }
+
+    fn read(bytes: &[u8], budget: usize) -> Result<DataFileContent, NotText> {
+        let file = DataFile::of("a/b.md".parse().unwrap(), bytes);
+        DataFileContent::new(commit(), &file, bytes, budget)
+    }
+
+    #[test]
+    fn a_short_file_is_whole() {
+        let read = read(b"one\ntwo\n", 32).unwrap();
+        assert_eq!(read.text, "one\ntwo\n");
+        assert_eq!(read.omitted_bytes, 0);
+        assert_eq!(read.cut, None);
+        assert_eq!(read.bytes, 8);
+    }
+
+    #[test]
+    fn a_cut_ends_a_line_and_says_so() {
+        let text = "line one\nline two\nline three\n";
+        let read = read(text.as_bytes(), 20).unwrap();
+        assert_eq!(read.text, "line one\nline two\n");
+        assert_eq!(read.omitted_bytes, 11);
+        let cut = read.cut.unwrap();
+        assert!(cut.contains("Cut at byte 18 of 29"), "{cut}");
+        assert!(cut.contains("last 11 bytes (37%)"), "{cut}");
+        assert!(cut.contains("larger comment_budget"), "{cut}");
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character() {
+        // No newline: cut at the budget, backed off to a boundary.
+        let read = read("ééééé".as_bytes(), 5).unwrap();
+        assert_eq!(read.text, "éé");
+        assert_eq!(read.omitted_bytes, 6);
+    }
+
+    #[test]
+    fn at_the_largest_budget_the_cut_says_the_rest_is_in_the_repo() {
+        let max = GetContentInput::MAX_COMMENT_BUDGET as usize;
+        let big = "x".repeat(max + 10);
+        let read = read(big.as_bytes(), max).unwrap();
+        assert_eq!(read.omitted_bytes, 10);
+        assert!(read.cut.unwrap().contains("data repository"));
+    }
+
+    #[test]
+    fn binary_is_not_text() {
+        let err = read(&[0xff, 0xfe, 0x00], 32).unwrap_err();
+        assert_eq!(err.bytes, 3);
+        assert!(err.to_string().contains("a/b.md is not text"), "{err}");
     }
 }

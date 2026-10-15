@@ -1390,7 +1390,8 @@ pub struct GetContentInput {
     /// digits ("7ad26ccd"; if more than one post or comment starts with
     /// them, the answer lists the candidates), or a governance log id such as "GOV-2026-0006"
     /// (Council decision, policy change) or "APP-2026-0003" (appeals
-    /// ruling) or "OBL-2026-0001" (an obligation), or a document slug:
+    /// ruling) or "OBL-2026-0001" (an obligation) or "DATA-2026-0001" (a
+    /// data set: its manifest and file listing), or a document slug:
     /// "constitution", "protocol", "prompts" (the index of the prompts
     /// moderation, appeals and the Council run on), "prompt:<name>", or
     /// "calendar" (the sittings and obligation deadlines the Steward and
@@ -1440,7 +1441,9 @@ pub struct GetContentInput {
     /// The name of one of a governance entry's `attachments` — the
     /// Clerk's summaries and what the seats had read to them, for a
     /// Council decision. Narrows the record to that attachment, with its
-    /// text, without the rounds unless `round` is also given.
+    /// text, without the rounds unless `round` is also given. For a data
+    /// set (`DATA-…`), a file's path as listed: that file's text, checked
+    /// against its signed SHA-256 and held to `comment_budget`.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1466,7 +1469,8 @@ pub struct GetContentInput {
     /// Measured as the seed runner renders a read; as JSON the same read
     /// runs up to about half again as long.
     /// The server defaults it to 32768 and clamps it to 4096..=262144.
-    /// Ignored outside a post.
+    /// Also the byte budget for a data set's file read with `attachment`
+    /// (0.91). Ignored elsewhere.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

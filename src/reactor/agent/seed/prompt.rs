@@ -2160,7 +2160,14 @@ pub(super) fn format_governance_entry(
     }
 
     if !entry.attachments.is_empty() && entry.attachment.is_none() {
-        out.push_str("\nAttachments (read one with attachment=\"<name>\"):\n");
+        out.push_str(
+            if entry.entry_type == crate::enums::GovernanceLogEntryType::DataSet
+            {
+                "\nFiles (read one with attachment=\"<path>\"):\n"
+            } else {
+                "\nAttachments (read one with attachment=\"<name>\"):\n"
+            },
+        );
         for a in &entry.attachments {
             out.push_str(&format!(
                 "- {} — {} ({} bytes)\n",
@@ -2184,7 +2191,23 @@ pub(super) fn format_governance_entry(
             .map(|content| (name, content))
     });
     let has_record = entry.data.is_some();
-    if let Some((name, content)) = attachment {
+    // A data set's file: text as it is, after the server checked its hash.
+    if let Some(file) = &entry.data_file {
+        out.push_str(&format!(
+            "\n### File: {path} ({bytes} bytes at commit {commit}, SHA-256 \
+             checked against the signed manifest)\n\n{text}",
+            path = file.path,
+            bytes = file.bytes,
+            commit = file.commit,
+            text = file.text,
+        ));
+        if !file.text.ends_with('\n') {
+            out.push('\n');
+        }
+        if let Some(cut) = &file.cut {
+            out.push_str(&format!("\n[{cut}]\n"));
+        }
+    } else if let Some((name, content)) = attachment {
         out.push_str(&format!("\n### Attachment: {name}\n\n{content}\n"));
     } else if let Some(data) = &entry.data {
         out.push_str("\n### Record\n\n");
@@ -2479,6 +2502,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         };
 
         let out = format_governance_entry(&entry);
@@ -2534,6 +2558,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         };
 
         let out = format_governance_entry(&entry);
@@ -2769,6 +2794,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -2820,6 +2846,7 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
         };
         let out = format_governance_entry(&entry);
         assert!(out.contains("attachment=\"<name>\""), "{out}");
@@ -2843,6 +2870,72 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("### Record"), "{out}");
+    }
+
+    /// A data set lists its files, and one read by path comes back as its
+    /// text, with the cut said when there is one (0.91)
+    #[test]
+    fn data_set_files_are_listed_and_read_as_text() {
+        use crate::govlog::{DataFile, GitCommitId};
+        use crate::responses::{AttachmentListing, DataFileContent};
+        use chrono::Utc;
+
+        let commit: GitCommitId =
+            "0123456789abcdef0123456789abcdef01234567".parse().unwrap();
+        let file = DataFile::of(
+            "votes/README.md".parse().unwrap(),
+            b"# Votes\nline 2\n",
+        );
+        let mut entry = GovernanceEntryResponse {
+            id: "DATA-2026-0001".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::DataSet,
+            title: "Ratification votes".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("A data set.".into()),
+            total_rounds: None,
+            data: None,
+            round: None,
+            attachments: vec![AttachmentListing {
+                name: "votes/README.md".into(),
+                note: "Read me first".into(),
+                bytes: file.bytes,
+            }],
+            attachment: None,
+            version: None,
+            revisions: Vec::new(),
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            cited_by: Vec::new(),
+            texts: None,
+            obligation: None,
+            obligations: Vec::new(),
+            data_file: None,
+        };
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains("Files (read one with attachment=\"<path>\")"),
+            "{out}"
+        );
+        assert!(
+            out.contains("- votes/README.md — Read me first (15 bytes)"),
+            "{out}"
+        );
+
+        entry.attachment = Some("votes/README.md".into());
+        entry.data_file = Some(
+            DataFileContent::new(commit, &file, b"# Votes\nline 2\n", 9)
+                .unwrap(),
+        );
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains("### File: votes/README.md (15 bytes at commit 0123456789abcdef0123456789abcdef01234567"),
+            "{out}"
+        );
+        assert!(out.contains("\n\n# Votes\n\n[Cut at byte 8 of 15"), "{out}");
+        assert!(!out.contains("line 2"), "{out}");
+        assert!(!out.contains("Files (read one"), "{out}");
     }
 
     #[test]
@@ -3497,6 +3590,7 @@ mod tests {
             texts: None,
             obligation: Some(obligation_listing(9)),
             obligations: vec![obligation_listing(1)],
+            data_file: None,
         };
         let out = format_governance_entry(&entry);
         assert!(

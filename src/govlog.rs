@@ -53,6 +53,10 @@
 //! [obligation kinds](AmendmentKind::OBLIGATION) name an `obligation` and
 //! nothing else, and carry an [`ObligationUpdate`].
 //!
+//! A fifth, a [`DataSet`] (`DATA-`), is the signed manifest of a data set
+//! in a git repository: a commit, and every file's size and SHA-256. No
+//! verifier reads it; a server checks each file against it before serving.
+//!
 //! The envelope itself is unchanged by any of this: `ENVELOPE_VERSION` is
 //! still 1 and what it does and does not cover is exactly as above.
 
@@ -99,6 +103,12 @@ pub use obligation::{
     Evidence, KnownEntry, OBLIGATION_VERSION, Obligation, ObligationData,
     ObligationError, ObligationRuleError, ObligationState, ObligationUpdate,
     Until,
+};
+
+mod data_set;
+pub use data_set::{
+    DATA_SET_VERSION, DataFile, DataFileMismatch, DataFilePath,
+    DataFilePathError, DataSet,
 };
 
 mod record;
@@ -277,6 +287,13 @@ hex_bytes!(
     /// An Ed25519 public key, hex on the wire
     PublicKeyHex,
     32
+);
+
+hex_bytes!(
+    /// A git commit id (SHA-1), hex on the wire: what a [`DataSet`] is
+    /// pinned to (0.91)
+    GitCommitId,
+    20
 );
 
 hex_bytes!(
@@ -2556,6 +2573,7 @@ fn reserved_prefix(
         GovernanceLogEntryType::KeyRotation => Some(GovernanceLogPrefix::Key),
         GovernanceLogEntryType::StewardRecord => Some(GovernanceLogPrefix::Rec),
         GovernanceLogEntryType::Obligation => Some(GovernanceLogPrefix::Obl),
+        GovernanceLogEntryType::DataSet => Some(GovernanceLogPrefix::Data),
         GovernanceLogEntryType::CouncilDecision
         | GovernanceLogEntryType::AppealsCourtDecision
         | GovernanceLogEntryType::EmergencyAction
@@ -2571,6 +2589,7 @@ fn reserved_for(prefix: GovernanceLogPrefix) -> Option<GovernanceLogEntryType> {
         GovernanceLogPrefix::Key => Some(GovernanceLogEntryType::KeyRotation),
         GovernanceLogPrefix::Rec => Some(GovernanceLogEntryType::StewardRecord),
         GovernanceLogPrefix::Obl => Some(GovernanceLogEntryType::Obligation),
+        GovernanceLogPrefix::Data => Some(GovernanceLogEntryType::DataSet),
         GovernanceLogPrefix::Gov | GovernanceLogPrefix::App => None,
     }
 }
@@ -3284,6 +3303,10 @@ mod tests {
 
     pub(super) fn obl(n: u32) -> GovernanceLogId {
         format!("OBL-2026-{n:04}").parse().unwrap()
+    }
+
+    pub(super) fn data_id(n: u32) -> GovernanceLogId {
+        format!("DATA-2026-{n:04}").parse().unwrap()
     }
 
     pub(super) fn at(secs: i64) -> DateTime<Utc> {

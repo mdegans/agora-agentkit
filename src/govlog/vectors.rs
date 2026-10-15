@@ -9,8 +9,8 @@
 //! byte-stable. Regenerate with `just vectors`.
 
 use super::tests::{
-    Chain, at, certify, chain, gov, key_id, link, obl, rec, resalted, root,
-    roots, v1,
+    Chain, at, certify, chain, data_id, gov, key_id, link, obl, rec, resalted,
+    root, roots, v1,
 };
 use super::*;
 use crate::enums::{ObligationKind, OwedBy};
@@ -756,6 +756,55 @@ fn cases() -> Vec<Case> {
         "obligation_series_mismatch",
         "An obligation outside the OBL- series, and a council decision \
          inside it.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    // -- a data set (0.91) --
+
+    let data_set =
+        serde_json::to_value(super::data_set::tests::manifest()).unwrap();
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        data_id(1),
+        GovernanceLogEntryType::DataSet,
+        data_set.clone(),
+        false,
+    );
+    c.decision(&steward);
+    out.push(Case::new(
+        "data_set",
+        "A data set's manifest between two decisions, in the DATA- series, \
+         the first with four letters. No verifier reads what it says.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        rec(1),
+        GovernanceLogEntryType::DataSet,
+        data_set.clone(),
+        false,
+    );
+    c.push(
+        &steward,
+        data_id(1),
+        CouncilDecision,
+        json!({"title": "a decision wearing a DATA- id"}),
+        false,
+    );
+    out.push(Case::new(
+        "data_set_series_mismatch",
+        "A data set outside the DATA- series, and a council decision inside \
+         it.",
         &steward_pk,
         pinned.clone(),
         c.links,
