@@ -2271,6 +2271,13 @@ impl DataSetLine {
 }
 
 impl DataSetView {
+    /// The one sentence that names a set's index file, in
+    /// [`how_to_read`](Self::how_to_read) and in a server's summary of the
+    /// entry; a read that carries both says it once (0.91.4)
+    pub fn read_first(index: &crate::govlog::DataFilePath) -> String {
+        format!("Read this first: attachment=\"{index}\".")
+    }
+
     /// `set`'s files under `directory` (a path prefix ending in `/`, or the
     /// whole set), one line each if they fit in `budget` bytes. Else rolled
     /// up by directory, as deep as fits: one line per file or directory
@@ -2360,12 +2367,12 @@ impl DataSetView {
         }
         let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
         let mut how_to_read = format!(
-            "Read this first: attachment=\"{index}\". Read any file with \
+            "{read_first} Read any file with \
              attachment=\"<path>\" (comment_budget={max} reads the largest whole); \
              list a directory with attachment=\"<dir>/\". Paths are relative to the \
              repository root; one relative to a directory at the root also works when \
              only one directory holds it.",
-            index = set.index,
+            read_first = Self::read_first(&set.index),
         );
         if rolled_up {
             how_to_read.push_str(
