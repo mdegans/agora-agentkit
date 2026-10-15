@@ -313,6 +313,20 @@ mod sqlx_impls {
     serde::Serialize,
     serde::Deserialize,
 )]
+// The schema is derived: schemars follows serde's `try_from`/`into` to
+// `String`, and `inline` keeps it out of `$defs`, so a tool field comes out
+// as `{"type": "string", "description": …}` with no `$ref` and no `pattern`
+// (CLAUDE.md, "Never ship a `$ref` schema"; asserted in the tests).
+// `schemars(transparent)` is refused here: schemars reads it as serde's
+// `transparent`, which serde forbids beside `try_from`/`into`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    schemars(
+        inline,
+        description = "An agent's name, exactly as registered: 3 to 64 ASCII letters, digits, hyphens or underscores (case matters)"
+    )
+)]
 #[serde(try_from = "String", into = "String")]
 pub struct AgentName(String);
 
@@ -469,28 +483,6 @@ impl fmt::Debug for AgentName {
 impl fmt::Display for AgentName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
-    }
-}
-
-// A plain string, inline: never a `$ref` in a tool schema (CLAUDE.md, "Never
-// ship a `$ref` schema"), and no `pattern` (strict schemas must not carry
-// one; the rule is checked on parse, with an error that says what to do).
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for AgentName {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> Cow<'static, str> {
-        Cow::Borrowed("AgentName")
-    }
-
-    fn schema_id() -> Cow<'static, str> {
-        Cow::Borrowed(concat!(module_path!(), "::AgentName"))
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "string" })
     }
 }
 
@@ -670,6 +662,41 @@ mod tests {
             let back: AgentName = serde_json::from_str(&json).unwrap();
             assert_eq!(back, agent(given));
         }
+    }
+
+    /// Inside a tool input, as the tools use it: no `$ref`, no `$defs`, no
+    /// `pattern`, the field a plain string
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn agent_name_field_schema_is_an_inline_string() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Input {
+            /// The field's own words
+            agent: AgentName,
+            maybe: Option<AgentName>,
+            many: Vec<AgentName>,
+        }
+        let v = serde_json::to_value(schemars::schema_for!(Input)).unwrap();
+        let text = v.to_string();
+        assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
+        assert!(!text.contains("pattern"), "{text}");
+        assert_eq!(v["properties"]["agent"]["type"], "string", "{text}");
+        // A field's own doc wins; a bare field gets the type's
+        assert_eq!(
+            v["properties"]["agent"]["description"], "The field's own words",
+            "{text}"
+        );
+        assert!(
+            v["properties"]["many"]["items"]["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("3 to 64")),
+            "{text}"
+        );
+        assert_eq!(
+            v["properties"]["many"]["items"]["type"], "string",
+            "{text}"
+        );
     }
 
     #[cfg(feature = "schemars")]

@@ -15,8 +15,10 @@ an `AgentName` instead of a `String` (CLAUDE.md rule 7; the Steward's design,
   hashing and ordering are **byte-exact**, as the database's `UNIQUE (name)`
   is: `Oracle` and `oracle` are two agents. `eq_ignore_case` answers the
   uniqueness question for a new name. Serde is a plain string
-  (`try_from`/`into`), the schema an inline `{"type": "string"}` (no `$ref`,
-  no `pattern`), and sqlx binds `TEXT` behind the `sqlx` feature.
+  (`try_from`/`into`); the schema is derived with `#[schemars(inline)]`
+  (schemars follows the serde `try_from`/`into` to a string), so a tool field
+  is an inline `{"type": "string", "description": …}`, no `$ref`, `$defs` or
+  `pattern`; sqlx binds `TEXT` behind the `sqlx` feature.
 - `RegisterAgentRequest::check_name` parses an `AgentName` (one rule);
   `NAME_MIN_LEN`/`NAME_MAX_LEN` are `AgentName::MIN_LEN`/`MAX_LEN`, and
   `AgentNameError` moved to `names` (re-exported from `requests`).
