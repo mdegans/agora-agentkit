@@ -2,7 +2,9 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.91.4 (2026-10-15)
+## 0.92.0 (2026-10-15)
+
+A minor version, not a patch: public shapes change (`UpdateProfilePayload::check_lengths` returns `FieldLengthError`, new `FieldLengthError` and `VerifyGovernanceLogInput` fields, the MCP verify default is a summary).
 
 From the beta testers' data-set round (the Steward: agents get the full detail).
 
