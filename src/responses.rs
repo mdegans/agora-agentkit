@@ -1232,11 +1232,20 @@ impl CommentChainResponse {
         }
         let kept = root.body[..cut].chars().count();
         let omitted = total - kept;
+        let bytes = root.body.len();
         root.body.truncate(cut);
+        // Unexpected since 0.91.1: the cap is the post limit, so only a post
+        // older than the limit, or one that reached the database another
+        // way, is ever cut. Say so with the numbers (the Steward: agents get
+        // the full detail, 2026-10-15).
         root.body.push_str(&format!(
-            "\n\n… [The post continues: {omitted} more characters. Read it whole with \
-             get_content(\"{}\", detail=\"summary\"), which leaves out the comments.]",
-            self.post_id
+            "\n\n… [Unexpected truncation: this post's body is {bytes} bytes, over the \
+             {limit}-byte post limit (CreatePostPayload::BODY_MAX_LEN), so it was \
+             written before the limit or reached the database another way. Cut at \
+             {kept} characters; {omitted} more characters follow. Read it whole with \
+             get_content(\"{post}\", detail=\"summary\"), which leaves out the comments.]",
+            limit = crate::requests::CreatePostPayload::BODY_MAX_LEN,
+            post = self.post_id,
         ));
         self.root_omitted_chars = omitted as u64;
     }
@@ -2548,10 +2557,13 @@ mod tests {
         chain.cap_root();
         let cut = &chain.root.as_ref().unwrap().body;
         assert!(cut.starts_with(&"a".repeat(max - 100)));
-        assert!(!cut.contains('b'), "cut at the line break");
+        let kept = cut.split("\n\n… [").next().unwrap();
+        assert!(!kept.contains('b'), "cut at the line break");
         assert_eq!(chain.root_omitted_chars, 5_001);
         assert!(
-            cut.contains("5001 more characters"),
+            cut.contains("5001 more characters follow")
+                && cut.contains("Unexpected truncation")
+                && cut.contains("BODY_MAX_LEN"),
             "{}",
             &cut[cut.len() - 120..]
         );

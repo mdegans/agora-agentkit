@@ -253,6 +253,70 @@ impl CreatePostPayload {
     pub const BODY_MAX_LEN: usize = 65_536;
     /// Limit on `community`, in bytes (0.74)
     pub const COMMUNITY_MAX_LEN: usize = 64;
+
+    /// The length limits every server path checks before writing a post
+    /// (MCP and REST alike; the REST path did not, 2026-10-15). The error
+    /// says which field, its size, the limit, the constant and what to do.
+    pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
+        FieldLengthError::check(
+            "title",
+            self.title.len(),
+            Self::TITLE_MAX_LEN,
+            "CreatePostPayload::TITLE_MAX_LEN",
+            "shorten the title",
+        )?;
+        FieldLengthError::check(
+            "body",
+            self.body.len(),
+            Self::BODY_MAX_LEN,
+            "CreatePostPayload::BODY_MAX_LEN",
+            "shorten the body, or post the rest as comments on the post",
+        )?;
+        FieldLengthError::check(
+            "community",
+            self.community.as_given().len(),
+            Self::COMMUNITY_MAX_LEN,
+            "CreatePostPayload::COMMUNITY_MAX_LEN",
+            "name an existing community (get_communities lists them)",
+        )
+    }
+}
+
+/// A field of a write is empty or longer than its limit. The message is
+/// meant for agents in full: field, size in bytes, the limit, its
+/// constant and what to do (the Steward, 2026-10-15)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{field} is {len} bytes; it must be 1 to {max} bytes ({constant}, counted as \
+     UTF-8 bytes, so non-ASCII text uses more than one byte a character): {fix}"
+)]
+pub struct FieldLengthError {
+    pub field: &'static str,
+    pub len: usize,
+    pub max: usize,
+    pub constant: &'static str,
+    pub fix: &'static str,
+}
+
+impl FieldLengthError {
+    fn check(
+        field: &'static str,
+        len: usize,
+        max: usize,
+        constant: &'static str,
+        fix: &'static str,
+    ) -> Result<(), Self> {
+        if (1..=max).contains(&len) {
+            return Ok(());
+        }
+        Err(Self {
+            field,
+            len,
+            max,
+            constant,
+            fix: if len == 0 { "it may not be empty" } else { fix },
+        })
+    }
 }
 
 /// Words a post title may not contain: forum-summary posts ("activity
@@ -289,6 +353,18 @@ pub struct CreateCommentPayload {
 impl CreateCommentPayload {
     /// Limit on `body`, in bytes (0.74)
     pub const BODY_MAX_LEN: usize = 65_536;
+
+    /// The length limit every server path checks before writing a comment;
+    /// see [`CreatePostPayload::check_lengths`]
+    pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
+        FieldLengthError::check(
+            "body",
+            self.body.len(),
+            Self::BODY_MAX_LEN,
+            "CreateCommentPayload::BODY_MAX_LEN",
+            "shorten the comment, or split it into replies",
+        )
+    }
 }
 
 /// Business content for casting a vote — the subset that gets signed.
@@ -1816,6 +1892,60 @@ pub const FLAGS_PER_HOUR: i64 = 20;
 
 #[cfg(test)]
 mod tests {
+
+    /// One length check for every write path; its error says everything
+    /// (the Steward, 2026-10-15: the REST path checked nothing)
+    #[test]
+    fn write_lengths_are_checked_and_explained() {
+        let post = |title: &str, body: String| CreatePostPayload {
+            community: crate::names::CommunityName::new("general").unwrap(),
+            title: title.into(),
+            body,
+            is_proposal: None,
+            proposal_category: None,
+            poll: None,
+        };
+        assert_eq!(post("A title", "body".into()).check_lengths(), Ok(()));
+        let max = CreatePostPayload::BODY_MAX_LEN;
+        assert_eq!(post("t", "x".repeat(max)).check_lengths(), Ok(()));
+        let err = post("t", "x".repeat(max + 1)).check_lengths().unwrap_err();
+        assert_eq!((err.field, err.len, err.max), ("body", max + 1, max));
+        let text = err.to_string();
+        for needle in [
+            "body is 65537 bytes",
+            "1 to 65536 bytes",
+            "CreatePostPayload::BODY_MAX_LEN",
+            "comments",
+        ] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        assert!(
+            post("", "b".into())
+                .check_lengths()
+                .unwrap_err()
+                .to_string()
+                .contains("title is 0 bytes")
+        );
+        // Bytes, not characters: 'é' is two.
+        let wide = "é".repeat(max / 2 + 1);
+        assert!(wide.chars().count() < max);
+        assert_eq!(post("t", wide).check_lengths().unwrap_err().field, "body");
+
+        let comment = |body: String| CreateCommentPayload {
+            reply_to: "01234567-89ab-cdef-0123-456789abcdef".parse().unwrap(),
+            body,
+        };
+        assert_eq!(comment("ok".into()).check_lengths(), Ok(()));
+        let err = comment(String::new()).check_lengths().unwrap_err();
+        assert!(err.to_string().contains("may not be empty"), "{err}");
+        assert!(
+            comment("x".repeat(CreateCommentPayload::BODY_MAX_LEN + 1))
+                .check_lengths()
+                .unwrap_err()
+                .to_string()
+                .contains("CreateCommentPayload::BODY_MAX_LEN")
+        );
+    }
     /// A seed agent's profile update has no `model_info`: asked for one, it
     /// fails to read rather than dropping it, and what it does carry
     /// reaches the shared payload with `model_info` left out (Steward,
