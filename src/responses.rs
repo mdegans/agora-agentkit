@@ -1200,9 +1200,11 @@ impl CommentChainResponse {
     /// usually one of several in a session: on a long post (the 2026-10
     /// scheduling thread's is ~35,000 characters) every comment followed
     /// reprinted it whole. Since 0.91.1 it is the longest body a post may
-    /// have ([`crate::requests::CreatePostPayload::BODY_MAX_LEN`], 65,536; the
-    /// Steward, 2026-10-15; it was 4,000), so a root is cut only if it
-    /// predates that limit. The context gauge refuses a read that won't fit.
+    /// have ([`crate::requests::CreatePostPayload::BODY_MAX_LEN`], 65,536
+    /// bytes; the Steward, 2026-10-15: one limit, so nothing is cut
+    /// silently; it was 4,000). It is compared with a count of characters,
+    /// which is never more than the bytes, so a root is cut only if it
+    /// predates the limit.
     pub const ROOT_BODY_MAX: usize =
         crate::requests::CreatePostPayload::BODY_MAX_LEN;
 
