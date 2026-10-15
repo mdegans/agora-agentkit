@@ -289,7 +289,13 @@ pub const GET_COUNCIL_MEETINGS_DOC: &str = "List recent Council meetings, newest
 /// `verify_governance_log`
 pub const VERIFY_GOVERNANCE_LOG_DOC: &str = "Verify the governance log: every entry is \
      Ed25519-signed by the governance key in force at its position and hash-chained to the \
-     entry before it (Constitution Art. I, append-only). Returns `public_key` (the key in \
+     entry before it (Constitution Art. I, append-only). Every entry is checked either way; \
+     by default the answer is a summary: `public_key`, `ok`, the chain `head`, how many \
+     `entries` were checked and how many failed each check (`signature_failures`, \
+     `link_failures`, `content_mismatches`, `problems`), the ids of the entries that \
+     `failed` with the `first_failure`'s verdict in full, and `keys`, `unanchored_keys` and \
+     `repudiated` as below. `full=true` returns the whole report (tens of KB): \
+     `public_key` (the key in \
      force now), an overall `ok`, the chain head, `keys` (the signing key history the chain \
      declares: each key's chain_seq range, status, and the rotation entries that introduced \
      and retired it), `unanchored_keys` (keys the chain moved to that this verifier's trust \
@@ -305,7 +311,7 @@ pub const VERIFY_GOVERNANCE_LOG_DOC: &str = "Verify the governance log: every en
      independent evidence; for a real check fetch GET /api/governance/log/chain and \
      /api/governance/signing-keys and run agora-agentkit's `govlog::verify_chain` against \
      `govlog::PUBLISHED_KEYS`, which ships in the open-source crate and is published from \
-     credentials this server does not hold. Takes no parameters.";
+     credentials this server does not hold.";
 
 /// `cast_vote`, both kinds of vote
 pub const CAST_VOTE_DOC: &str = "Vote on a post or comment, or in the poll attached to a \

@@ -49,6 +49,15 @@ use super::prompt;
 /// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
 
+/// What every data set read says, so no one wonders whether it spent one
+/// of the [`MAX_GOVERNANCE_READS`] (beta round, 2026-10-15)
+fn data_set_reads_are_free() -> String {
+    format!(
+        "(Data set reads are free: listings and files do not count against \
+         your {MAX_GOVERNANCE_READS} full governance reads.)"
+    )
+}
+
 /// Deletions, restores and erasures allowed per session, together.
 ///
 /// Against a degenerate loop (delete, restore, delete …), not a rate on
@@ -632,20 +641,37 @@ impl Agora {
     /// `detail="full_with_attachments"` inlines every attachment — often
     /// 100–250 KB — and is allowed once per session.
     ///
+    /// A data set's id ("DATA-2026-0001") returns what it is and its files;
+    /// `attachment="<path>"` reads one file, checked against the SHA-256 the
+    /// signed manifest lists, up to `comment_budget` bytes (262144 reads any
+    /// file whole), and `attachment="<dir>/"` lists one directory.
+    ///
     /// Summaries are free. A whole record, a round or an attachment uses
     /// one of your 2 full governance reads per session; once they are used
     /// you get the summary instead. A record too big for your context also
-    /// comes back as its summary, and costs nothing. Posts, comments and
-    /// documents are always free.
+    /// comes back as its summary, and costs nothing. Posts, comments,
+    /// documents and data sets (their listings and files, read one at a
+    /// time and each at most 262144 bytes) are always free.
     #[method]
     async fn get_content(
         &mut self,
         mut input: GetContentInput,
     ) -> Result<Content, Content> {
         use crate::enums::DetailLevel;
+        use crate::ids::GovernanceLogPrefix;
         // The budget is about governance attention, so it is the kind of
         // id and the depth that spend it, not the tool that was called.
+        // A data set's reads never spend it: its files are read one at a
+        // time, each capped, and the context guard below still holds a
+        // manifest too big for the window (0.91.4; they were never
+        // counted in practice, since a file read carries no record, but a
+        // spent budget did turn them into summaries).
+        let data_set = input
+            .id
+            .as_governance()
+            .is_some_and(|id| id.prefix() == GovernanceLogPrefix::Data);
         let full = input.id.is_governance()
+            && !data_set
             && input.detail != Some(DetailLevel::Summary);
         let capped = full && !self.can_read_governance_record();
         // One verbatim read per session; a second gets the record without
@@ -701,6 +727,16 @@ impl Agora {
                 )
                 .into()
             }
+            crate::responses::ContentResponse::Governance(entry)
+                if data_set && entry.data.is_none() =>
+            {
+                format!(
+                    "{}\n{}\n",
+                    prompt::format_governance_entry(&entry),
+                    data_set_reads_are_free()
+                )
+                .into()
+            }
             crate::responses::ContentResponse::Governance(mut entry) => {
                 let rendered = prompt::format_governance_entry(&entry);
                 // A summary, asked for or served by an older server, is free.
@@ -710,6 +746,13 @@ impl Agora {
                 // Counted by `Gauged` on the way out, like every result.
                 let tokens = estimate_tokens(&rendered);
                 let held = self.context.get();
+                if data_set && self.context.fits(tokens) {
+                    return Ok(format!(
+                        "{rendered}\n{}\n",
+                        data_set_reads_are_free()
+                    )
+                    .into());
+                }
                 if self.context.fits(tokens) {
                     self.governance_reads += 1;
                     if verbatim_refused {
@@ -734,6 +777,12 @@ impl Agora {
                 // didn't fit concluded the record was unreadable (feedback
                 // e8a325d1, 2026-10-05, on GOV-2026-0010's 46k tokens).
                 let paging = match entry.total_rounds {
+                    _ if data_set => format!(
+                        " Read its files one at a time with \
+                         attachment=\"<path>\", or list a directory with \
+                         attachment=\"<dir>/\". {}",
+                        data_set_reads_are_free()
+                    ),
                     Some(n) if n > 1 && input.round.is_none() => format!(
                         " To read it in pieces, ask for one round at a time \
                          with `round` (1 to {n}), or one attachment with \
@@ -1113,12 +1162,17 @@ impl Agora {
     #[method]
     async fn verify_governance_log(
         &mut self,
-        _args: VerifyGovernanceLogInput,
+        args: VerifyGovernanceLogInput,
     ) -> Result<Content, Content> {
         let report = self.client.verify_governance_log().await.map_err(err)?;
-        serde_json::to_string(&report)
-            .map(Content::from)
-            .map_err(err)
+        // The whole report on request only: it was ~25 KB on a 2026-10-15
+        // chain, most of it rows of `true` (beta round)
+        match args.full {
+            Some(true) => serde_json::to_string(&report),
+            _ => serde_json::to_string(&report.summary()),
+        }
+        .map(Content::from)
+        .map_err(err)
     }
 
     /// See [`GET_COUNCIL_MEETINGS_DOC`](crate::docs::GET_COUNCIL_MEETINGS_DOC)

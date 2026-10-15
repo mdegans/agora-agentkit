@@ -108,7 +108,8 @@ pub use obligation::{
 mod data_set;
 pub use data_set::{
     DATA_SET_VERSION, DataFile, DataFileMismatch, DataFilePath,
-    DataFilePathError, DataSet, MAX_DATA_FILE_BYTES,
+    DataFilePathError, DataSet, DataSetLookupError, DataSetLookupFailure,
+    DataSetTarget, MAX_DATA_FILE_BYTES,
 };
 
 mod record;
@@ -2362,15 +2363,103 @@ pub struct GovernanceVerification {
     pub repudiated: Vec<GovernanceLogId>,
 }
 
+/// A [`GovernanceVerification`] without one verdict per entry: what
+/// `verify_governance_log` returns unless asked for `full` (0.91.4). The
+/// check behind it is the whole one; only the report is shorter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GovernanceVerificationSummary {
+    /// See [`GovernanceVerification::public_key`]
+    pub public_key: PublicKeyHex,
+    /// See [`GovernanceVerification::ok`]
+    pub ok: bool,
+    /// The last entry in the chain
+    #[serde(default)]
+    pub head: Option<GovernanceLogId>,
+    /// Entries checked
+    pub entries: u64,
+    /// Entries whose signature did not verify
+    pub signature_failures: u64,
+    /// Entries whose hash link did not verify
+    pub link_failures: u64,
+    /// Entries whose content no longer hashes to what was attested
+    pub content_mismatches: u64,
+    /// Entries with a `problem`
+    pub problems: u64,
+    /// Entries signed well after they were recorded
+    pub retroactive: u64,
+    /// Entries a redaction names
+    pub redacted: u64,
+    /// Every entry that failed a check or has a `problem`, in chain order
+    #[serde(default)]
+    pub failed: Vec<GovernanceLogId>,
+    /// The first of them, verdict in full
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_failure: Option<EntryVerdict>,
+    /// See [`GovernanceVerification::keys`]
+    #[serde(default)]
+    pub keys: Vec<GovernanceKeyRecord>,
+    /// See [`GovernanceVerification::unanchored_keys`]
+    #[serde(default)]
+    pub unanchored_keys: Vec<PublicKeyHex>,
+    /// See [`GovernanceVerification::repudiated`]
+    #[serde(default)]
+    pub repudiated: Vec<GovernanceLogId>,
+    pub how_to_read: String,
+}
+
+impl EntryVerdict {
+    /// Whether this entry fails what [`GovernanceVerification::settle`]
+    /// requires of every entry
+    pub fn failed(&self) -> bool {
+        !self.signature_valid
+            || !self.link_valid
+            || self.content_matches == Some(false)
+            || self.problem.is_some()
+    }
+}
+
 impl GovernanceVerification {
+    /// The report without one verdict per entry (0.91.4)
+    pub fn summary(&self) -> GovernanceVerificationSummary {
+        let count = |f: &dyn Fn(&EntryVerdict) -> bool| -> u64 {
+            self.entries.iter().filter(|e| f(e)).count() as u64
+        };
+        let failed: Vec<&EntryVerdict> =
+            self.entries.iter().filter(|e| e.failed()).collect();
+        GovernanceVerificationSummary {
+            public_key: self.public_key,
+            ok: self.ok,
+            head: self.head.clone(),
+            entries: self.entries.len() as u64,
+            signature_failures: count(&|e| !e.signature_valid),
+            link_failures: count(&|e| !e.link_valid),
+            content_mismatches: count(&|e| e.content_matches == Some(false)),
+            problems: count(&|e| e.problem.is_some()),
+            retroactive: count(&|e| e.retroactive),
+            redacted: count(&|e| e.redacted),
+            failed: failed.iter().map(|e| e.id.clone()).collect(),
+            first_failure: failed.first().map(|e| (*e).clone()),
+            keys: self.keys.clone(),
+            unanchored_keys: self.unanchored_keys.clone(),
+            repudiated: self.repudiated.clone(),
+            how_to_read: format!(
+                "A summary of the whole check of {n} entries: verify_governance_log \
+                 with full=true returns one verdict per entry (signature, link, \
+                 content, redaction, revisions, signing key), about {kb} KB. \
+                 Either way this is the server checking itself, not independent \
+                 evidence; agora-agentkit's govlog::verify_chain is the \
+                 independent check.",
+                n = self.entries.len(),
+                kb = serde_json::to_string(self).map_or(0, |s| s.len() / 1024),
+            ),
+        }
+    }
+
     /// Recompute `ok` from the entries
     pub fn settle(mut self) -> Self {
-        self.ok = self.entries.iter().all(|e| {
-            e.signature_valid
-                && e.link_valid
-                && e.content_matches != Some(false)
-                && e.problem.is_none()
-        });
+        self.ok = self.entries.iter().all(|e| !e.failed());
         self
     }
 
@@ -3912,6 +4001,32 @@ mod tests {
         let p = v.entries[1].problem.as_deref().unwrap();
         assert!(p.contains("chain_seq 3 where 2 was expected"), "{p}");
         assert!(p.contains("prev_hash"), "{p}");
+    }
+
+    /// `verify_governance_log`'s default: counts, the failures by id and
+    /// the first in full, never one row per entry (beta round, 2026-10-15)
+    #[test]
+    fn a_summary_counts_and_names_the_failures() {
+        let (key, pk) = generate_keypair();
+        let clean =
+            verify_chain(&chain(&key, 3), &pk, &anchored(&pk), &roots());
+        let summary = clean.summary();
+        assert!(summary.ok);
+        assert_eq!((summary.entries, summary.failed.len()), (3, 0));
+        assert_eq!(summary.head, clean.head);
+        assert!(summary.first_failure.is_none());
+        assert!(summary.how_to_read.contains("full=true"));
+
+        let mut c = chain(&key, 3);
+        c.remove(1);
+        let v = verify_chain(&c, &pk, &anchored(&pk), &roots());
+        let summary = v.summary();
+        assert!(!summary.ok);
+        assert_eq!(summary.link_failures, 1);
+        assert_eq!(summary.failed, vec![v.entries[1].id.clone()]);
+        assert_eq!(summary.first_failure.as_ref(), Some(&v.entries[1]));
+        let json = serde_json::to_value(&summary).unwrap();
+        assert!(json["entries"].is_u64(), "a count, not the rows: {json}");
     }
 
     #[test]

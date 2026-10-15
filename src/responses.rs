@@ -2242,6 +2242,10 @@ pub struct DataSetView {
     /// Files under `directory` on no line: the listing ran past the budget
     #[serde(default)]
     pub unlisted: u64,
+    /// The `attachment=` asked for, when it is not `directory`: a path
+    /// relative to a directory at the repository root, resolved (0.91.4)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<String>,
     pub how_to_read: String,
 }
 
@@ -2268,25 +2272,22 @@ impl DataSetLine {
 
 impl DataSetView {
     /// `set`'s files under `directory` (a path prefix ending in `/`, or the
-    /// whole set), one line each if they fit in `budget` bytes, else one
-    /// line per file or directory just below `directory`, else as many of
-    /// those as fit. `None` when no file is under `directory`.
+    /// whole set), one line each if they fit in `budget` bytes. Else rolled
+    /// up by directory, as deep as fits: one line per file or directory
+    /// just below `directory`, then a level further down while that still
+    /// fits, so a set whose files sit under one directory shows what is in
+    /// it rather than one line (0.91.4). Else as many of the top lines as
+    /// fit. `None` when no file is under `directory`.
     pub fn of(
         set: &crate::govlog::DataSet,
         directory: Option<&str>,
         budget: usize,
     ) -> Option<Self> {
         let prefix = directory.unwrap_or("");
-        let under: Vec<&crate::govlog::DataFile> = set
+        let files: Vec<DataSetLine> = set
             .files
             .iter()
             .filter(|f| f.path.as_str().starts_with(prefix))
-            .collect();
-        if under.is_empty() {
-            return None;
-        }
-        let files: Vec<DataSetLine> = under
-            .iter()
             .map(|f| DataSetLine {
                 path: f.path.to_string(),
                 files: 1,
@@ -2294,24 +2295,28 @@ impl DataSetView {
                 note: f.note.clone(),
             })
             .collect();
+        if files.is_empty() {
+            return None;
+        }
         let fits = |lines: &[DataSetLine]| {
             lines.iter().map(DataSetLine::cost).sum::<usize>() <= budget
         };
-        let rolled_up = !fits(&files);
-        let mut lines = if rolled_up {
-            let mut dirs: Vec<DataSetLine> = Vec::new();
+        // One line per file `depth` or fewer levels below `prefix`, one per
+        // directory `depth` levels below it standing for the rest
+        let roll_up = |depth: usize| {
+            let mut lines: Vec<DataSetLine> = Vec::new();
             for f in &files {
                 let rest = &f.path[prefix.len()..];
-                let line = match rest.split_once('/') {
+                let line = match rest.match_indices('/').nth(depth - 1) {
                     None => f.clone(),
-                    Some((dir, _)) => DataSetLine {
-                        path: format!("{prefix}{dir}/"),
+                    Some((at, _)) => DataSetLine {
+                        path: format!("{prefix}{}", &rest[..=at]),
                         files: 1,
                         bytes: f.bytes,
                         note: None,
                     },
                 };
-                match dirs.last_mut() {
+                match lines.last_mut() {
                     Some(last)
                         if last.path == line.path
                             && line.path.ends_with('/') =>
@@ -2319,10 +2324,24 @@ impl DataSetView {
                         last.files += 1;
                         last.bytes += line.bytes;
                     }
-                    _ => dirs.push(line),
+                    _ => lines.push(line),
                 }
             }
-            dirs
+            lines
+        };
+        let rolled_up = !fits(&files);
+        let mut lines = if rolled_up {
+            let mut lines = roll_up(1);
+            let mut depth = 1;
+            while fits(&lines) {
+                depth += 1;
+                let deeper = roll_up(depth);
+                if deeper == lines || !fits(&deeper) {
+                    break;
+                }
+                lines = deeper;
+            }
+            lines
         } else {
             files
         };
@@ -2341,9 +2360,11 @@ impl DataSetView {
         }
         let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
         let mut how_to_read = format!(
-            "Read the index first: attachment=\"{index}\". Read any file with \
-             attachment=\"<path>\" (comment_budget={max} reads the largest whole); list \
-             a directory with attachment=\"<dir>/\".",
+            "Read this first: attachment=\"{index}\". Read any file with \
+             attachment=\"<path>\" (comment_budget={max} reads the largest whole); \
+             list a directory with attachment=\"<dir>/\". Paths are relative to the \
+             repository root; one relative to a directory at the root also works when \
+             only one directory holds it.",
             index = set.index,
         );
         if rolled_up {
@@ -2367,6 +2388,7 @@ impl DataSetView {
             directory: directory.map(str::to_string),
             listing: lines,
             unlisted,
+            asked: None,
             how_to_read,
         })
     }
@@ -2395,6 +2417,10 @@ pub struct DataFileContent {
     /// When `text` is cut: where, and how much more there is
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cut: Option<String>,
+    /// The `attachment=` asked for, when it is not `path`: a path relative
+    /// to a directory at the repository root, resolved (0.91.4)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked: Option<String>,
 }
 
 /// A data set's file is not UTF-8 text, so `get_content` cannot serve it
@@ -2429,22 +2455,32 @@ impl DataFileContent {
         while !text.is_char_boundary(end) {
             end -= 1;
         }
+        let mut at_line = false;
         if end < text.len()
             && let Some(newline) = text[..end].rfind('\n')
             && newline + 1 >= end / 2
         {
+            at_line = newline + 1 < end;
             end = newline + 1;
         }
         let omitted = (text.len() - end) as u64;
         let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
         let cut = (omitted > 0).then(|| {
-            format!(
-                "Cut at byte {end} of {total}: the last {omitted} bytes ({pct}%) \
-                 are not shown. comment_budget={max} reads the whole file \
-                 (no file in a data set is larger).",
-                total = text.len(),
-                pct = omitted * 100 / text.len() as u64,
-            )
+            let total = text.len();
+            let pct = omitted * 100 / total as u64;
+            let rest = format!(
+                "the last {omitted} bytes ({pct}%) are not shown. \
+                 comment_budget={max} reads the whole file (no file in a data \
+                 set is larger)."
+            );
+            if at_line {
+                format!(
+                    "Cut at the last line break before byte {budget} (the \
+                     comment_budget), at byte {end} of {total}: {rest}"
+                )
+            } else {
+                format!("Cut at byte {end} of {total}: {rest}")
+            }
         });
         Ok(Self {
             path: file.path.clone(),
@@ -2455,6 +2491,7 @@ impl DataFileContent {
             text: text[..end].to_string(),
             omitted_bytes: omitted,
             cut,
+            asked: None,
         })
     }
 }
@@ -4116,7 +4153,13 @@ mod data_file_tests {
         assert_eq!(read.text, "line one\nline two\n");
         assert_eq!(read.omitted_bytes, 11);
         let cut = read.cut.unwrap();
-        assert!(cut.contains("Cut at byte 18 of 29"), "{cut}");
+        assert!(
+            cut.contains(
+                "Cut at the last line break before byte 20 (the \
+                 comment_budget), at byte 18 of 29"
+            ),
+            "{cut}"
+        );
         assert!(cut.contains("last 11 bytes (37%)"), "{cut}");
         assert!(
             cut.contains("comment_budget=262144 reads the whole file"),
@@ -4130,6 +4173,8 @@ mod data_file_tests {
         let read = read("ééééé".as_bytes(), 5).unwrap();
         assert_eq!(read.text, "éé");
         assert_eq!(read.omitted_bytes, 6);
+        // Not at a line: it says only the byte
+        assert!(read.cut.unwrap().starts_with("Cut at byte 4 of 10:"));
     }
 
     #[test]
@@ -4194,12 +4239,27 @@ mod data_set_view_tests {
     fn a_thousand_files_roll_up_by_directory_and_a_directory_lists_its_own() {
         let big = set(1_038, 12);
         let view = DataSetView::of(&big, None, 32_768).unwrap();
-        // One directory, votes/: rolled up to one line under the root.
+        // One directory, votes/: the listing descends into it rather than
+        // showing one line (beta round, 2026-10-15; 0.91.4)
         assert_eq!(view.files, 1_039);
-        assert_eq!(view.listing.len(), 1);
-        assert_eq!(view.listing[0].path, "votes/");
-        assert_eq!(view.listing[0].files, 1_039);
+        let paths: Vec<&str> =
+            view.listing.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(paths.len(), 13, "{paths:?}");
+        assert!(paths.contains(&"votes/README.md"), "{paths:?}");
+        assert!(paths.contains(&"votes/d11/"), "{paths:?}");
+        assert_eq!(view.listing.iter().map(|l| l.files).sum::<u64>(), 1_039);
         assert!(view.how_to_read.contains("counted, not named"));
+        assert!(
+            view.how_to_read.starts_with(
+                "Read this first: attachment=\"votes/README.md\"."
+            )
+        );
+
+        // A budget the next level does not fit keeps the roll-up
+        let tight = DataSetView::of(&big, None, 300).unwrap();
+        assert_eq!(tight.listing.len(), 1);
+        assert_eq!(tight.listing[0].path, "votes/");
+        assert_eq!(tight.listing[0].files, 1_039);
 
         let votes = DataSetView::of(&big, Some("votes/"), 32_768).unwrap();
         let paths: Vec<&str> =

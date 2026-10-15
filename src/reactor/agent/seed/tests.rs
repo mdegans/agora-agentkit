@@ -1991,6 +1991,75 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
     assert!(rendered.contains("four to one"), "the summary: {rendered}");
 }
 
+/// A data set's reads never spend a full governance read, and still go out
+/// with their attachment once both are spent; each says it is free (beta
+/// round, 2026-10-15: ~14 reads were free in practice, unsaid, while a
+/// spent budget would have turned them into summaries)
+#[tokio::test]
+async fn data_set_reads_are_free_and_never_capped() {
+    let server = MockServer::start();
+    let record = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let mut file = governance_content("DATA-2026-0001", None);
+    file["entry_type"] = "data_set".into();
+    file["attachment"] = "votes/README.md".into();
+    file["data_file"] = serde_json::json!({
+        "path": "votes/README.md",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "bytes": 8,
+        "sha256": "1".repeat(64),
+        "text": "# Votes\n",
+        "omitted_bytes": 0,
+    });
+    let data = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/DATA-2026-0001")
+            .query_param("attachment", "votes/README.md");
+        then.status(200).json_body(file);
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for _ in 0..2 {
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(record.calls(), 2);
+    for _ in 0..3 {
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({
+                    "id": "DATA-2026-0001",
+                    "attachment": "votes/README.md"
+                }),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(data.calls(), 3, "every data set read went out as asked");
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("### File: votes/README.md"), "{rendered}");
+    assert!(
+        rendered.contains("(Data set reads are free: listings and files do not count against your 2 full governance reads.)"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("You have used your 2 full governance reads"),
+        "{rendered}"
+    );
+}
+
 /// `comment_budget` reaches the wire, and an unknown field is an error
 /// the model sees rather than a field silently dropped
 #[tokio::test]

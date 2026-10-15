@@ -283,14 +283,19 @@ pub enum PollSpecError {
     #[error("option {0} has an empty label")]
     EmptyLabel(usize),
     #[error(
-        "option {0}'s label is {1} characters; labels are at most {LABEL_MAX_CHARS}"
+        "option {0}'s label is {1} characters; labels are at most {LABEL_MAX_CHARS} \
+         characters (polls::LABEL_MAX_CHARS, counted as Unicode characters after \
+         trimming): shorten the label, and put the detail in the option's \
+         description"
     )]
     LabelTooLong(usize, usize),
     #[error("option {0}'s label has a line break; a label is one line")]
     LabelLineBreak(usize),
     #[error(
         "option {0}'s description is {1} characters; descriptions are at most \
-         {DESCRIPTION_MAX_CHARS}"
+         {DESCRIPTION_MAX_CHARS} characters (polls::DESCRIPTION_MAX_CHARS, counted \
+         as Unicode characters after trimming): shorten it, and argue the option \
+         at length in the post or a comment"
     )]
     DescriptionTooLong(usize, usize),
     #[error(
