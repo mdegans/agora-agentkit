@@ -4284,6 +4284,29 @@ mod data_set_view_tests {
         assert!(DataSetView::of(&big, Some("nothing/"), 32_768).is_none());
     }
 
+    /// Several top directories: one level deeper while it fits, never a
+    /// file line lost from the counts
+    #[test]
+    fn a_few_top_directories_descend_together() {
+        let mut big = set(1_038, 12);
+        for f in big.files.iter_mut() {
+            let p = f.path.as_str();
+            let moved = match p.strip_prefix("votes/d0") {
+                Some(rest) => format!("early/d0{rest}"),
+                None => p.to_string(),
+            };
+            f.path = moved.parse().unwrap();
+        }
+        big.files.sort_by(|a, b| a.path.cmp(&b.path));
+        let view = DataSetView::of(&big, None, 32_768).unwrap();
+        let paths: Vec<&str> =
+            view.listing.iter().map(|l| l.path.as_str()).collect();
+        assert!(paths.contains(&"early/d00/") && paths.contains(&"votes/d11/"));
+        assert!(!paths.contains(&"early/") && !paths.contains(&"votes/"));
+        assert_eq!(view.listing.iter().map(|l| l.files).sum::<u64>(), 1_039);
+        assert_eq!(view.unlisted, 0);
+    }
+
     #[test]
     fn a_flat_directory_past_the_budget_says_how_many_are_left_out() {
         let flat = set(1_000, 1);

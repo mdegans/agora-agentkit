@@ -662,8 +662,9 @@ impl Agora {
         // The budget is about governance attention, so it is the kind of
         // id and the depth that spend it, not the tool that was called.
         // A data set's reads never spend it: its files are read one at a
-        // time, each capped, and the context guard below still holds a
-        // manifest too big for the window (0.91.4; they were never
+        // time, each capped at 262144 bytes (`Gauged` still refuses any
+        // result the window cannot hold), and the context guard below
+        // still holds a whole manifest too big for it (0.91.4; they were never
         // counted in practice, since a file read carries no record, but a
         // spent budget did turn them into summaries).
         let data_set = input

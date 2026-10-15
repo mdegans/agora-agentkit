@@ -441,7 +441,11 @@ impl FieldLengthError {
             max,
             unit,
             constant,
-            fix: if len == 0 { "it may not be empty" } else { fix },
+            fix: if len == 0 {
+                "it may not be empty or only whitespace"
+            } else {
+                fix
+            },
         })
     }
 }
@@ -2477,7 +2481,10 @@ mod tests {
         assert!(FlagContentPayload::check_fields("why", Some("")).is_ok());
         // Whitespace alone is empty where a minimum applies
         let blank = FlagContentPayload::check_fields("  \n", None).unwrap_err();
-        assert_eq!((blank.len, blank.fix), (0, "it may not be empty"));
+        assert_eq!(
+            (blank.len, blank.fix),
+            (0, "it may not be empty or only whitespace")
+        );
         let feedback =
             SubmitFeedbackPayload::check_body(&"\u{e9}".repeat(4001))
                 .unwrap_err()

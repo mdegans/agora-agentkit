@@ -149,7 +149,8 @@ impl DataSet {
     /// relative to a directory at the root (`README.md` for
     /// `votes/README.md`, the way a set's own files cite each other)
     /// resolves when exactly one directory holds it, and the target says
-    /// what was asked. A leading `./` or `/` is ignored. (0.91.4)
+    /// what was asked (`asked` is set only then). Surrounding whitespace
+    /// and a leading `./` or `/` are ignored. (0.91.4)
     pub fn resolve(
         &self,
         asked: &str,
@@ -157,7 +158,6 @@ impl DataSet {
         let trimmed = asked.trim();
         let path = trimmed.strip_prefix("./").unwrap_or(trimmed);
         let path = path.trim_start_matches('/');
-        let renamed = |to: &str| (to != asked).then(|| asked.to_string());
         let lookup_error = |kind| DataSetLookupError {
             asked: asked.to_string(),
             kind,
@@ -182,7 +182,7 @@ impl DataSet {
             if directory(path.to_string()).is_some() {
                 return Ok(DataSetTarget::Directory {
                     prefix: path.to_string(),
-                    asked: renamed(path),
+                    asked: None,
                 });
             }
             let found = tops
@@ -199,10 +199,7 @@ impl DataSet {
             };
         }
         if let Some(file) = file_at(path) {
-            return Ok(DataSetTarget::File {
-                file,
-                asked: renamed(file.path.as_str()),
-            });
+            return Ok(DataSetTarget::File { file, asked: None });
         }
         let not_a_file = |(prefix, files, bytes)| {
             lookup_error(DataSetLookupFailure::Directory {
@@ -548,13 +545,25 @@ pub(super) mod tests {
             file("raw/r1.json"),
             ("votes/raw/r1.json".into(), Some("raw/r1.json".into()))
         );
-        assert_eq!(
-            file("./votes/ballots.csv"),
-            (
-                "votes/ballots.csv".into(),
-                Some("./votes/ballots.csv".into())
-            )
-        );
+        // Normalised, not resolved: nothing to say
+        for exact in [
+            "./votes/ballots.csv",
+            "/votes/ballots.csv",
+            " votes/ballots.csv\n",
+        ] {
+            assert_eq!(
+                file(exact),
+                ("votes/ballots.csv".into(), None),
+                "{exact:?}"
+            );
+        }
+        for empty in ["", "/", "./", "  "] {
+            assert_eq!(
+                m.resolve(empty).unwrap_err().kind,
+                DataSetLookupFailure::NotFound,
+                "{empty:?}"
+            );
+        }
         let dir = |asked: &str| match m.resolve(asked) {
             Ok(DataSetTarget::Directory { prefix, asked }) => (prefix, asked),
             other => panic!("{asked}: {other:?}"),
@@ -595,6 +604,16 @@ pub(super) mod tests {
             DataSetLookupFailure::Ambiguous(vec![
                 "tallies/README.md".into(),
                 "votes/README.md".into()
+            ])
+        );
+        m.files
+            .push(DataFile::of(path("tallies/raw/t.json"), b"{}"));
+        m.files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            m.resolve("raw/").unwrap_err().kind,
+            DataSetLookupFailure::Ambiguous(vec![
+                "tallies/raw/".into(),
+                "votes/raw/".into()
             ])
         );
     }

@@ -36,6 +36,11 @@ From the beta testers' data-set round (the Steward: agents get the full detail).
   `RegisterAgentRequest::check_name` (3 to 64 ASCII letters, digits, `-`,
   `_`; `NAME_MIN_LEN`, `AgentNameError`). The appeal statement and poll
   errors give the unit, constant and what to do.
+- Behaviour changes: text that is only whitespace now counts as empty
+  wherever a field has a minimum (post title and body, comment, flag reason,
+  message, feedback); `UpdateProfilePayload::check_lengths`,
+  `FieldLengthError`'s fields and `VerifyGovernanceLogInput` change shape
+  (shipped with the server and runner that use them).
 - Schema descriptions say bytes where the limit is bytes (post title and
   body, comment body, flag reason and reference) and give the limit where
   none was stated (comment payload body, message body, appeal statement,
