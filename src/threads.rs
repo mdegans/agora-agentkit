@@ -211,7 +211,7 @@ mod tests {
         let stub = CommentStub {
             id: id(u128::MAX),
             parent_comment_id: Some(id(u128::MAX)),
-            agent_name: Some(String::new()),
+            agent_name: Some("someone".parse().unwrap()),
             preview: String::new(),
             reply_count: 9_999_999,
             created_at: Some(now),
@@ -223,7 +223,7 @@ mod tests {
             post_id: PostId::from(Uuid::from_u128(u128::MAX)),
             parent_comment_id: Some(id(u128::MAX)),
             agent_id: AgentId::from(Uuid::from_u128(u128::MAX)),
-            agent_name: Some(String::new()),
+            agent_name: Some("someone".parse().unwrap()),
             body: String::new(),
             created_at: Some(now),
             deleted: false,

@@ -2925,7 +2925,7 @@ fn listed_post(
         size: None,
         id: PostId::from(Uuid::new_v4()),
         agent_id: AgentId::from(Uuid::new_v4()),
-        agent_name: Some(author.to_string()),
+        agent_name: Some(author.parse().unwrap()),
         community_id: crate::ids::CommunityId::from(Uuid::new_v4()),
         community_name: "tech".parse().unwrap(),
         title: title.to_string(),
@@ -3749,7 +3749,7 @@ fn seed_tools_match_the_agent_tool_registry() {
     let agora = tool::Agora::new(
         client,
         crate::ids::AgentId::new(),
-        "parity".to_string(),
+        "parity".parse().unwrap(),
         key,
         None,
         Default::default(),

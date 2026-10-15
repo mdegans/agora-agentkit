@@ -83,32 +83,32 @@ pub enum SignedAction<'a> {
     /// when verifying. Same for every friendship/block variant below.
     FriendRequest {
         /// Name of the agent being sent a friend request.
-        agent: &'a str,
+        agent: &'a crate::names::AgentName,
     },
     /// Signed payload for `POST /api/social/friends/{name}/accept`.
     FriendAccept {
         /// Name of the agent whose pending request is being accepted.
-        agent: &'a str,
+        agent: &'a crate::names::AgentName,
     },
     /// Signed payload for `POST /api/social/friends/{name}/decline`.
     FriendDecline {
         /// Name of the agent whose pending request is being declined.
-        agent: &'a str,
+        agent: &'a crate::names::AgentName,
     },
     /// Signed payload for `POST /api/social/friends/{name}/remove`.
     Unfriend {
         /// Name of the agent being unfriended.
-        agent: &'a str,
+        agent: &'a crate::names::AgentName,
     },
     /// Signed payload for `POST /api/social/blocks/{name}`.
     BlockAgent {
         /// Name of the agent being blocked.
-        agent: &'a str,
+        agent: &'a crate::names::AgentName,
     },
     /// Signed payload for `POST /api/social/blocks/{name}/remove`.
     UnblockAgent {
         /// Name of the agent being unblocked.
-        agent: &'a str,
+        agent: &'a crate::names::AgentName,
     },
     /// Signed payload for `POST /api/social/friends/list`.
     ///
@@ -736,19 +736,20 @@ mod tests {
 
     #[test]
     fn friendship_and_block_canonical_shapes() {
+        let ada: crate::names::AgentName = "ada".parse().unwrap();
         let cases: [(SignedAction, &str); 6] = [
             (
-                SignedAction::FriendRequest { agent: "ada" },
+                SignedAction::FriendRequest { agent: &ada },
                 "friend_request",
             ),
-            (SignedAction::FriendAccept { agent: "ada" }, "friend_accept"),
+            (SignedAction::FriendAccept { agent: &ada }, "friend_accept"),
             (
-                SignedAction::FriendDecline { agent: "ada" },
+                SignedAction::FriendDecline { agent: &ada },
                 "friend_decline",
             ),
-            (SignedAction::Unfriend { agent: "ada" }, "unfriend"),
-            (SignedAction::BlockAgent { agent: "ada" }, "block_agent"),
-            (SignedAction::UnblockAgent { agent: "ada" }, "unblock_agent"),
+            (SignedAction::Unfriend { agent: &ada }, "unfriend"),
+            (SignedAction::BlockAgent { agent: &ada }, "block_agent"),
+            (SignedAction::UnblockAgent { agent: &ada }, "unblock_agent"),
         ];
         for (action, tag) in cases {
             let v = parse(&action.canonical_bytes());
@@ -779,7 +780,7 @@ mod tests {
             Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
         let payload = crate::requests::SendMessagePayload {
             message_id: MessageId::from(id),
-            agent: "ada".into(),
+            agent: "ada".parse().unwrap(),
             body: Some("hello".into()),
             ciphertext: None,
             wrapped_key_recipient: None,
@@ -805,7 +806,7 @@ mod tests {
             Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
         let payload = crate::requests::SendMessagePayload {
             message_id: MessageId::from(id),
-            agent: "ada".into(),
+            agent: "ada".parse().unwrap(),
             body: None,
             ciphertext: Some("01aa".into()),
             wrapped_key_recipient: Some("01bb".into()),
@@ -988,5 +989,116 @@ mod tests {
         let _bytes = SignedAction::from(&payload).canonical_bytes();
         // payload must still be usable here — proves we borrowed, not moved
         assert_eq!(payload.body, "borrowable");
+    }
+}
+
+/// Signatures made when agent names were `String` (0.92.0) still verify
+/// with [`AgentName`](crate::names::AgentName) (0.93): the fixture was
+/// written by 0.92.0's own code, and every byte of the request and of the
+/// canonical payload comes back the same.
+#[cfg(test)]
+mod agent_name_wire_compat {
+    use super::*;
+    use crate::names::AgentName;
+    use crate::requests::SendMessageRequest;
+
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        public_key: String,
+        timestamp: i64,
+        send_message: Vec<Sent>,
+        actions: Vec<Act>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Sent {
+        request: String,
+        canonical: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Act {
+        canonical: String,
+        signature: String,
+    }
+
+    /// What an action's canonical bytes say, read back as typed values
+    #[derive(serde::Deserialize)]
+    struct ActionShape {
+        action: String,
+        agent: AgentName,
+    }
+
+    fn fixture() -> (Fixture, crate::crypto::VerifyingKey) {
+        let f: Fixture = serde_json::from_str(include_str!(
+            "../tests/fixtures/signed_agent_names_0_92.json"
+        ))
+        .unwrap();
+        let pk: [u8; 32] =
+            hex::decode(&f.public_key).unwrap().try_into().unwrap();
+        let vk = crate::crypto::VerifyingKey::from_bytes(&pk).unwrap();
+        (f, vk)
+    }
+
+    fn signature(hex_sig: &str) -> crate::crypto::Signature {
+        let b: [u8; 64] = hex::decode(hex_sig).unwrap().try_into().unwrap();
+        crate::crypto::Signature::from_bytes(&b)
+    }
+
+    #[test]
+    fn signed_messages_reserialize_byte_for_byte() {
+        let (f, vk) = fixture();
+        assert_eq!(f.send_message.len(), 2);
+        for sent in &f.send_message {
+            let req: SendMessageRequest =
+                serde_json::from_str(&sent.request).unwrap();
+            // The whole request, as the client sent it
+            assert_eq!(serde_json::to_string(&req).unwrap(), sent.request);
+            // The bytes the server rebuilds and checks the signature over
+            let bytes = SignedAction::from(&req.payload).canonical_bytes();
+            assert_eq!(
+                String::from_utf8(bytes.clone()).unwrap(),
+                sent.canonical
+            );
+            assert!(crate::crypto::verify(
+                &vk,
+                &bytes,
+                req.timestamp,
+                &signature(&req.signature),
+            ));
+        }
+    }
+
+    /// The friendship and block actions, whose name the server takes from
+    /// the URL path and puts back into the signed bytes
+    #[test]
+    fn signed_social_actions_rebuild_byte_for_byte() {
+        let (f, vk) = fixture();
+        assert_eq!(f.actions.len(), 6);
+        for act in &f.actions {
+            let shape: ActionShape =
+                serde_json::from_str(&act.canonical).unwrap();
+            let agent = &shape.agent;
+            let rebuilt = match shape.action.as_str() {
+                "friend_request" => SignedAction::FriendRequest { agent },
+                "friend_accept" => SignedAction::FriendAccept { agent },
+                "friend_decline" => SignedAction::FriendDecline { agent },
+                "unfriend" => SignedAction::Unfriend { agent },
+                "block_agent" => SignedAction::BlockAgent { agent },
+                "unblock_agent" => SignedAction::UnblockAgent { agent },
+                other => panic!("unexpected action {other}"),
+            };
+            let bytes = rebuilt.canonical_bytes();
+            assert_eq!(
+                String::from_utf8(bytes.clone()).unwrap(),
+                act.canonical
+            );
+            assert!(crate::crypto::verify(
+                &vk,
+                &bytes,
+                f.timestamp,
+                &signature(&act.signature),
+            ));
+        }
     }
 }

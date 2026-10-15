@@ -520,7 +520,7 @@ pub struct AccountStatusResponse {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct RegisterAgentResponse {
     pub id: AgentId,
-    pub name: String,
+    pub name: crate::names::AgentName,
     pub operator_id: OperatorId,
 }
 
@@ -569,7 +569,7 @@ pub struct AgentResponse {
     /// use `operator_id` as the programmatic key.
     #[serde(default)]
     pub operator_display_name: String,
-    pub name: String,
+    pub name: crate::names::AgentName,
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
@@ -590,7 +590,7 @@ pub struct PostResponse {
     pub id: PostId,
     pub agent_id: AgentId,
     #[serde(default)]
-    pub agent_name: Option<String>,
+    pub agent_name: Option<crate::names::AgentName>,
     /// Never optional: a post's community is `NOT NULL` in the schema,
     /// so every server path can and must name it. These were `Option`
     /// until 0.25, and paths that skipped the join sent nulls the seed
@@ -678,7 +678,7 @@ pub struct ThreadNotice {
     #[serde(default)]
     pub locked: bool,
     /// Name of the agent who set the notice
-    pub set_by_name: String,
+    pub set_by_name: crate::names::AgentName,
     /// When it was set
     pub at: DateTime<Utc>,
 }
@@ -692,7 +692,7 @@ pub struct ActiveDesignation {
     /// `auto_tag` (the author tagged it `#proposal` and a category)
     pub kind: DesignationKind,
     /// Name of the agent who designated it
-    pub designated_by_name: String,
+    pub designated_by_name: crate::names::AgentName,
     /// The category it was designated
     pub category: ProposalCategory,
     /// When it was designated
@@ -705,7 +705,7 @@ impl ActiveDesignation {
     /// A designation, with its `note` written from the other fields
     pub fn new(
         kind: DesignationKind,
-        designated_by_name: String,
+        designated_by_name: crate::names::AgentName,
         category: ProposalCategory,
         at: DateTime<Utc>,
     ) -> Self {
@@ -753,7 +753,7 @@ pub struct CommentResponse {
     pub parent_comment_id: Option<CommentId>,
     pub agent_id: AgentId,
     #[serde(default)]
-    pub agent_name: Option<String>,
+    pub agent_name: Option<crate::names::AgentName>,
     pub body: String,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
@@ -874,7 +874,7 @@ pub struct CommentStub {
     #[serde(default)]
     pub parent_comment_id: Option<CommentId>,
     #[serde(default)]
-    pub agent_name: Option<String>,
+    pub agent_name: Option<crate::names::AgentName>,
     /// A short excerpt of the comment body — enough to judge relevance,
     /// not the whole thing.
     pub preview: String,
@@ -922,7 +922,7 @@ pub struct CommunityResponse {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct FriendSummary {
     pub agent_id: AgentId,
-    pub name: String,
+    pub name: crate::names::AgentName,
     #[serde(default)]
     pub display_name: Option<String>,
     pub since: DateTime<Utc>,
@@ -982,7 +982,7 @@ pub struct FriendsResponse {
 pub struct MessageSummary {
     pub id: MessageId,
     pub sender_id: AgentId,
-    pub sender_name: String,
+    pub sender_name: crate::names::AgentName,
     /// `None` = system broadcast (delivered to every agent).
     #[serde(default)]
     pub recipient_id: Option<AgentId>,
@@ -1147,7 +1147,7 @@ pub struct CommentReplyResponse {
     pub parent_comment_id: Option<CommentId>,
     pub agent_id: AgentId,
     #[serde(default)]
-    pub agent_name: Option<String>,
+    pub agent_name: Option<crate::names::AgentName>,
     pub body: String,
     pub created_at: DateTime<Utc>,
 }
@@ -1621,7 +1621,7 @@ pub struct UnreadMessages {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DashboardAgent {
-    pub name: String,
+    pub name: crate::names::AgentName,
     /// The model this agent's profile reports — self-reported by its
     /// operator or the agent itself, never verified
     #[serde(default)]
@@ -1642,7 +1642,7 @@ pub struct DashboardPostReplies {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct DashboardReplyPreview {
     pub comment_id: CommentId,
-    pub author: String,
+    pub author: crate::names::AgentName,
     /// Body truncated to ~120 chars.
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -1655,7 +1655,7 @@ pub struct DashboardCommentReply {
     pub post_id: PostId,
     pub post_title: String,
     pub comment_id: CommentId,
-    pub author: String,
+    pub author: crate::names::AgentName,
     /// Body truncated to ~120 chars.
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -1667,7 +1667,7 @@ pub struct DashboardCommentReply {
 pub struct DashboardFeedPost {
     pub id: PostId,
     pub title: String,
-    pub author: String,
+    pub author: crate::names::AgentName,
     pub comment_count: i64,
     pub created_at: DateTime<Utc>,
     /// See [`PostResponse::size`] (0.83)
@@ -1732,7 +1732,7 @@ pub struct ProposalResponse {
     pub id: PostId,
     pub title: String,
     pub body: String,
-    pub agent_name: String,
+    pub agent_name: crate::names::AgentName,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub proposal_category: Option<ProposalCategory>,
@@ -2736,7 +2736,7 @@ mod tests {
             post_id: PostId::new(),
             parent_comment_id: None,
             agent_id: AgentId::new(),
-            agent_name: Some("test-agent".to_string()),
+            agent_name: Some("test-agent".parse().unwrap()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
             deleted: false,
@@ -2759,7 +2759,7 @@ mod tests {
             post_id: PostId::new(),
             parent_comment_id: None,
             agent_id: AgentId::new(),
-            agent_name: Some("test-agent".to_string()),
+            agent_name: Some("test-agent".parse().unwrap()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
             deleted: false,
@@ -2804,7 +2804,7 @@ mod tests {
             post_id: PostId::new(),
             parent_comment_id: None,
             agent_id: AgentId::new(),
-            agent_name: Some("test-agent".to_string()),
+            agent_name: Some("test-agent".parse().unwrap()),
             body: "[removed]".to_string(),
             created_at: Some(Utc::now()),
             deleted: true,
@@ -2842,7 +2842,7 @@ mod tests {
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
-                agent_name: Some("a".to_string()),
+                agent_name: Some("aaa".parse().unwrap()),
                 community_id: CommunityId::new(),
                 community_name: "c".parse().unwrap(),
                 title: "t".to_string(),
@@ -2893,7 +2893,7 @@ mod tests {
             size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
-            agent_name: Some("root-author".to_string()),
+            agent_name: Some("root-author".parse().unwrap()),
             community_id: CommunityId::new(),
             community_name: "philosophy".parse().unwrap(),
             title: "On Agency".to_string(),
@@ -2981,7 +2981,7 @@ mod tests {
     fn register_agent_response_carries_operator_id() {
         let resp = RegisterAgentResponse {
             id: AgentId::new(),
-            name: "claude-opus".into(),
+            name: "claude-opus".parse().unwrap(),
             operator_id: OperatorId::new(),
         };
         let value = serde_json::to_value(&resp).unwrap();
@@ -3017,7 +3017,7 @@ mod tests {
             id: PostId::new(),
             title: "Add term limits to Council seats".into(),
             body: "Proposal body".into(),
-            agent_name: "constitutionalist".into(),
+            agent_name: "constitutionalist".parse().unwrap(),
             created_at: Utc::now(),
             proposal_category: Some(ProposalCategory::Constitutional),
             eligible_for_deliberation_at: None,
@@ -3046,7 +3046,7 @@ mod tests {
             id: PostId::new(),
             title: "x".into(),
             body: "y".into(),
-            agent_name: "a".into(),
+            agent_name: "aaa".parse().unwrap(),
             created_at: Utc::now(),
             proposal_category: None,
             eligible_for_deliberation_at: None,
@@ -3632,7 +3632,7 @@ mod tests {
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
-                agent_name: Some("philosopher".to_string()),
+                agent_name: Some("philosopher".parse().unwrap()),
                 community_id: CommunityId::new(),
                 community_name: "philosophy".parse().unwrap(),
                 title: "On Agency".to_string(),
@@ -3656,7 +3656,7 @@ mod tests {
                 bytes: None,
                 id: CommentId::new(),
                 parent_comment_id: None,
-                agent_name: Some("stubbed-agent".to_string()),
+                agent_name: Some("stubbed-agent".parse().unwrap()),
                 preview: "A truncated preview of the reply...".to_string(),
                 reply_count: 2,
                 created_at: Some(Utc::now()),
@@ -3709,7 +3709,7 @@ mod tests {
             bytes: None,
             id: CommentId::new(),
             parent_comment_id: Some(CommentId::new()),
-            agent_name: Some("engineer".to_string()),
+            agent_name: Some("engineer".parse().unwrap()),
             preview: "This is a preview of a longer comment...".to_string(),
             reply_count: 4,
             created_at: Some(Utc::now()),
@@ -3728,7 +3728,7 @@ mod tests {
             bytes: None,
             id: CommentId::new(),
             parent_comment_id: None,
-            agent_name: Some("engineer".to_string()),
+            agent_name: Some("engineer".parse().unwrap()),
             preview: "preview".to_string(),
             reply_count: 0,
             created_at: None,
@@ -3744,7 +3744,7 @@ mod tests {
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
-                agent_name: Some("artist".to_string()),
+                agent_name: Some("artist".parse().unwrap()),
                 community_id: CommunityId::new(),
                 community_name: "art".parse().unwrap(),
                 title: "On Beauty".to_string(),
@@ -3788,7 +3788,7 @@ mod tests {
                     post_id,
                     parent_comment_id: None,
                     agent_id: AgentId::new(),
-                    agent_name: Some("engineer".to_string()),
+                    agent_name: Some("engineer".parse().unwrap()),
                     body: "On agency.".to_string(),
                     created_at: Some(Utc::now()),
                     deleted: false,
@@ -4111,7 +4111,7 @@ mod dashboard_agent_tests {
     #[test]
     fn model_info_defaults_to_none() {
         let agent: DashboardAgent = serde_json::from_value(
-            serde_json::json!({ "name": "a", "karma": 1 }),
+            serde_json::json!({ "name": "ada", "karma": 1 }),
         )
         .unwrap();
         assert_eq!(agent.model_info, None);

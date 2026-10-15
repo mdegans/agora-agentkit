@@ -1,0 +1,41 @@
+{
+  "note": "Signed with agentkit 0.92.0, when agent names were String (key [7u8; 32], timestamp 1760000000). AgentName (0.93) must reproduce every byte.",
+  "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "timestamp": 1760000000,
+  "send_message": [
+    {
+      "request": "{\"agent_id\":\"7ad26ccd-0000-4000-8000-000000000001\",\"message_id\":\"11111111-2222-3333-4444-555555555555\",\"agent\":\"Oracle\",\"body\":\"hello, Oracle\",\"signature\":\"efe5b5662f8c193371e5bb20dc5f76a6178bd59fda2b8d24029c3fee486965c4486d3bb4a3862511ce4ad0954088e4415df5e6cca4f2b49b04a5852def87aa0f\",\"timestamp\":1760000000}",
+      "canonical": "{\"action\":\"send_message\",\"message_id\":\"11111111-2222-3333-4444-555555555555\",\"agent\":\"Oracle\",\"body\":\"hello, Oracle\"}"
+    },
+    {
+      "request": "{\"agent_id\":\"7ad26ccd-0000-4000-8000-000000000001\",\"message_id\":\"11111111-2222-3333-4444-555555555555\",\"agent\":\"oracle\",\"ciphertext\":\"01aa\",\"wrapped_key_recipient\":\"01bb\",\"wrapped_key_sender\":\"01cc\",\"signature\":\"0dea6df9df97fd253f62a970f82a70119d4cb9260d03e4c2c5298c3cba8330006379896332dc7417c87142c3f148ce9539e91be6ebf7deb68614706e414cec0d\",\"timestamp\":1760000000}",
+      "canonical": "{\"action\":\"send_message\",\"message_id\":\"11111111-2222-3333-4444-555555555555\",\"agent\":\"oracle\",\"ciphertext\":\"01aa\",\"wrapped_key_recipient\":\"01bb\",\"wrapped_key_sender\":\"01cc\"}"
+    }
+  ],
+  "actions": [
+    {
+      "canonical": "{\"action\":\"friend_request\",\"agent\":\"Oracle\"}",
+      "signature": "e75b8876d339eadbf9f7880f7ac16933c2eda773d6f3a196d66f38f9141f8e9abb3258b6ec75fee88ef5675418a6b7737ec70bc3c9a2c66949116631590b0e00"
+    },
+    {
+      "canonical": "{\"action\":\"friend_accept\",\"agent\":\"oracle\"}",
+      "signature": "46f170f2ac85c20484cc4af6b42d50c02048afc8ffc03f5c335c026ce2781700e4677fede02eb2213fc805f23a25e05bd4df4cce056256f8d6de1785f1828c05"
+    },
+    {
+      "canonical": "{\"action\":\"friend_decline\",\"agent\":\"claude-opus\"}",
+      "signature": "96830e872fe79693caabc4507c953e2efa5ffc11fcf78750a2e8948ddb19c65048eeeaca0f91345076aed5745c4b83b4a0f0aa8cff1112f07feea08ac529c901"
+    },
+    {
+      "canonical": "{\"action\":\"unfriend\",\"agent\":\"a_b-9\"}",
+      "signature": "a79ef8c431f19e05e77978a5cd728ca0d6588eae99fcd128f5fa6e0e8ffd952d6fb7de8cef710e72bf3ea7d9a32e832ef064e38b4d49fd8b39a54bc040622105"
+    },
+    {
+      "canonical": "{\"action\":\"block_agent\",\"agent\":\"Oracle\"}",
+      "signature": "d8890a894a8f6f0c7de8bbaa62654c271295f711001d20380c22c364ea6310a3a1aaf544c32ee33a577d7f910ab43064fedaed7943c42dda6df94997f2b0b60c"
+    },
+    {
+      "canonical": "{\"action\":\"unblock_agent\",\"agent\":\"oracle\"}",
+      "signature": "3455d7e8394337ced5234fc93c232c14b4d438926a7494e73d098a359d01c05b426599952bbfb9b63e7652f298514b4bd8478b65793de75134aa418f10cd8c0c"
+    }
+  ]
+}

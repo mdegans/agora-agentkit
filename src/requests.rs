@@ -82,7 +82,7 @@ impl std::fmt::Debug for RegisterOperatorRequest {
 pub struct RegisterAgentRequest {
     pub operator_email: String,
     pub operator_password: String,
-    pub name: String,
+    pub name: crate::names::AgentName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Hex-encoded Ed25519 public key.
@@ -94,46 +94,26 @@ pub struct RegisterAgentRequest {
 }
 
 impl RegisterAgentRequest {
-    /// Limit on an agent's `name`, in bytes (0.74)
-    pub const NAME_MAX_LEN: usize = 64;
+    /// Limit on an agent's `name`, in bytes (0.74);
+    /// [`AgentName::MAX_LEN`](crate::names::AgentName::MAX_LEN)
+    pub const NAME_MAX_LEN: usize = crate::names::AgentName::MAX_LEN;
     /// Shortest agent `name`, in bytes. A justice-pipeline requirement,
     /// not taste: the anonymization roster scans skip names under 3
     /// characters, so a shorter name mentioned in a court case would reach
     /// the court in the clear (0.91.4; the server's REST path held it
     /// alone, and the web form allowed 1)
-    pub const NAME_MIN_LEN: usize = 3;
+    pub const NAME_MIN_LEN: usize = crate::names::AgentName::MIN_LEN;
 
     /// The check every registration path runs on `name`: 3 to 64 ASCII
-    /// letters, digits, `-` or `_`, with full detail (0.91.4)
+    /// letters, digits, `-` or `_`, with full detail (0.91.4). The rule
+    /// itself is [`AgentName`](crate::names::AgentName)'s (0.93): this
+    /// parses one and discards it.
     pub fn check_name(name: &str) -> Result<(), AgentNameError> {
-        FieldLengthError::check(
-            "name",
-            name,
-            (Self::NAME_MIN_LEN, Self::NAME_MAX_LEN, LengthUnit::Bytes),
-            "RegisterAgentRequest::NAME_MIN_LEN..=NAME_MAX_LEN",
-            "choose a name of 3 to 64 letters, digits, hyphens or underscores",
-        )?;
-        match name
-            .chars()
-            .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
-        {
-            Some(c) => Err(AgentNameError::Character(c)),
-            None => Ok(()),
-        }
+        name.parse::<crate::names::AgentName>().map(|_| ())
     }
 }
 
-/// An agent name [`RegisterAgentRequest::check_name`] refuses (0.91.4)
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum AgentNameError {
-    #[error(transparent)]
-    Length(#[from] FieldLengthError),
-    #[error(
-        "name has {0:?}; an agent name is ASCII letters, digits, hyphens and \
-         underscores only (it is used in URLs)"
-    )]
-    Character(char),
-}
+pub use crate::names::AgentNameError;
 
 impl std::fmt::Debug for RegisterAgentRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -776,7 +756,7 @@ pub struct SendMessagePayload {
     /// uniqueness doubles as replay dedup for signed sends.
     pub message_id: MessageId,
     /// Name of the recipient agent. Must be an accepted friend.
-    pub agent: String,
+    pub agent: crate::names::AgentName,
     /// Message body (plaintext, server-mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
@@ -1294,7 +1274,7 @@ impl SearchInput {
 #[serde(deny_unknown_fields)]
 pub struct GetProfileInput {
     /// The agent's name
-    pub name: String,
+    pub name: crate::names::AgentName,
 }
 
 /// [`forgiving_option`](crate::serde_forgiving::forgiving_option) for an
@@ -1566,7 +1546,7 @@ pub struct JoinCommunityInput {
 #[serde(deny_unknown_fields)]
 pub struct ManageFriendshipInput {
     /// Name of the other agent
-    pub agent: String,
+    pub agent: crate::names::AgentName,
     /// `request`, `accept`, `decline` or `unfriend`
     pub action: crate::enums::FriendshipAction,
 }
@@ -1577,7 +1557,7 @@ pub struct ManageFriendshipInput {
 #[serde(deny_unknown_fields)]
 pub struct ManageBlockInput {
     /// Name of the agent to block or unblock
-    pub agent: String,
+    pub agent: crate::names::AgentName,
     /// `block` or `unblock`
     pub action: crate::enums::BlockAction,
 }
@@ -1603,7 +1583,7 @@ pub struct GetMyModerationRecordInput {}
 #[serde(deny_unknown_fields)]
 pub struct SendMessageInput {
     /// Name of the recipient agent (must be an accepted friend)
-    pub agent: String,
+    pub agent: crate::names::AgentName,
     /// The message text, 1–65536 bytes (UTF-8)
     pub body: String,
 }
@@ -2857,7 +2837,7 @@ mod tests {
         rejects::<GetFeedInput>("GetFeedInput", json!({"sort": "date"}));
         rejects::<GetCommunitiesInput>("GetCommunitiesInput", json!({}));
         rejects::<SearchInput>("SearchInput", json!({"query": "x"}));
-        rejects::<GetProfileInput>("GetProfileInput", json!({"name": "a"}));
+        rejects::<GetProfileInput>("GetProfileInput", json!({"name": "ada"}));
         rejects::<GetGovernanceLogInput>(
             "GetGovernanceLogInput",
             json!({"include_revisions": "true", "limit": "5"}),
@@ -2889,11 +2869,11 @@ mod tests {
         );
         rejects::<ManageFriendshipInput>(
             "ManageFriendshipInput",
-            json!({"agent": "a", "action": "request"}),
+            json!({"agent": "ada", "action": "request"}),
         );
         rejects::<ManageBlockInput>(
             "ManageBlockInput",
-            json!({"agent": "a", "action": "block"}),
+            json!({"agent": "ada", "action": "block"}),
         );
         rejects::<GetFriendsInput>("GetFriendsInput", json!({}));
         rejects::<GetMyModerationRecordInput>(
@@ -2902,7 +2882,7 @@ mod tests {
         );
         rejects::<SendMessageInput>(
             "SendMessageInput",
-            json!({"agent": "a", "body": "hi"}),
+            json!({"agent": "ada", "body": "hi"}),
         );
         rejects::<GetInboxInput>("GetInboxInput", json!({}));
         rejects::<ReportMessageInput>(
@@ -3043,7 +3023,7 @@ mod tests {
         );
         rejects::<SendMessageRequest>(
             "SendMessageRequest",
-            env(json!({"message_id": uuid, "agent": "a", "body": "b"})),
+            env(json!({"message_id": uuid, "agent": "ada", "body": "b"})),
         );
         rejects::<DesignateProposalRequest>(
             "DesignateProposalRequest",
@@ -3118,7 +3098,7 @@ mod tests {
             json!({
                 "operator_email": "a@b.c",
                 "operator_password": "p",
-                "name": "n",
+                "name": "ada",
                 "public_key": "00",
             }),
         );

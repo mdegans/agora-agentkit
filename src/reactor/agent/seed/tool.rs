@@ -127,7 +127,7 @@ pub struct Agora {
     client: Client,
     agent_id: AgentId,
     /// For `(yours)` tagging in read results.
-    agent_name: String,
+    agent_name: crate::names::AgentName,
     key: SigningKey,
     /// X25519 key for E2EE messaging. `None` ⇒ this agent sends and
     /// receives server-mode only.
@@ -154,7 +154,7 @@ impl Agora {
     pub fn new(
         client: Client,
         agent_id: AgentId,
-        agent_name: String,
+        agent_name: crate::names::AgentName,
         key: SigningKey,
         enc_key: Option<crate::envelope::EncryptionSecretKey>,
         ledger: SharedLedger,

@@ -82,7 +82,10 @@ pub enum Error {
     /// This is a fail-closed condition: falling back to server-mode here
     /// would let a key-swapping server downgrade the conversation.
     #[error("encryption key binding verification failed for {agent}")]
-    KeyBinding { agent: String },
+    KeyBinding { agent: crate::names::AgentName },
+    /// A name that is not an agent name, refused before any request (0.93)
+    #[error(transparent)]
+    Name(#[from] crate::names::AgentNameError),
 }
 
 /// The text of a non-success body: the message of Agora's plain
@@ -171,7 +174,8 @@ impl crate::reactor::RetryAfter for Error {
             Error::Url(_)
             | Error::UnexpectedContent { .. }
             | Error::Envelope(_)
-            | Error::KeyBinding { .. } => None,
+            | Error::KeyBinding { .. }
+            | Error::Name(_) => None,
         }
     }
 }
@@ -239,7 +243,7 @@ impl Client {
         &self,
         operator_email: &str,
         operator_password: &str,
-        name: &str,
+        name: &crate::names::AgentName,
         public_key_hex: &str,
         display_name: Option<&str>,
         bio: Option<&str>,
@@ -248,7 +252,7 @@ impl Client {
         let body = RegisterAgentRequest {
             operator_email: operator_email.to_string(),
             operator_password: operator_password.to_string(),
-            name: name.to_string(),
+            name: name.clone(),
             public_key: public_key_hex.to_string(),
             display_name: display_name.map(String::from),
             bio: bio.map(String::from),
@@ -264,9 +268,10 @@ impl Client {
     /// Look up an agent by name. `Ok(None)` on 404
     pub async fn get_agent(
         &self,
-        name: &str,
+        name: &crate::names::AgentName,
     ) -> Result<Option<AgentResponse>, Error> {
-        let url = self.url_with_segments("api/identity/agents/", &[name])?;
+        let url =
+            self.url_with_segments("api/identity/agents/", &[name.as_str()])?;
         let resp = self.get(url).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -357,7 +362,7 @@ impl Client {
         input: &ManageFriendshipInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
-        let (target_name, kind) = (input.agent.as_str(), input.action);
+        let (target_name, kind) = (&input.agent, input.action);
         let timestamp = chrono::Utc::now().timestamp();
         let action = match kind {
             FriendshipAction::Request => {
@@ -380,8 +385,10 @@ impl Client {
             FriendshipAction::Unfriend => "remove",
         };
         let body = signed(agent_id, NoParams {}, &action, key, timestamp);
-        let url = self
-            .url_with_segments("api/social/friends/", &[target_name, verb])?;
+        let url = self.url_with_segments(
+            "api/social/friends/",
+            &[target_name.as_str(), verb],
+        )?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -394,7 +401,7 @@ impl Client {
         input: &ManageBlockInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
-        let (target_name, kind) = (input.agent.as_str(), input.action);
+        let (target_name, kind) = (&input.agent, input.action);
         let timestamp = chrono::Utc::now().timestamp();
         let action = match kind {
             BlockAction::Block => {
@@ -406,12 +413,13 @@ impl Client {
         };
         let body = signed(agent_id, NoParams {}, &action, key, timestamp);
         let url = match kind {
-            BlockAction::Block => {
-                self.url_with_segments("api/social/blocks/", &[target_name])?
-            }
+            BlockAction::Block => self.url_with_segments(
+                "api/social/blocks/",
+                &[target_name.as_str()],
+            )?,
             BlockAction::Unblock => self.url_with_segments(
                 "api/social/blocks/",
-                &[target_name, "remove"],
+                &[target_name.as_str(), "remove"],
             )?,
         };
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
@@ -495,7 +503,7 @@ impl Client {
     ) -> Result<SendMessageResponse, Error> {
         use crate::envelope;
 
-        let (target_name, body_text) = (input.agent.as_str(), &input.body);
+        let (target_name, body_text) = (&input.agent, &input.body);
         let Some(recipient_key) = self.get_encryption_key(target_name).await?
         else {
             return self.send_message(agent_id, input, key).await;
@@ -517,7 +525,7 @@ impl Client {
             .unwrap_or(false);
         if !binding_ok {
             return Err(Error::KeyBinding {
-                agent: target_name.to_string(),
+                agent: target_name.clone(),
             });
         }
 
@@ -537,7 +545,7 @@ impl Client {
         )?;
         let payload = SendMessagePayload {
             message_id: ctx.message_id,
-            agent: target_name.to_string(),
+            agent: target_name.clone(),
             body: None,
             ciphertext: Some(hex::encode(&sealed.ciphertext)),
             wrapped_key_recipient: Some(hex::encode(
@@ -565,11 +573,11 @@ impl Client {
     /// [`Client::send_message_e2ee`] does this for you.
     pub async fn get_encryption_key(
         &self,
-        agent_name: &str,
+        agent_name: &crate::names::AgentName,
     ) -> Result<Option<EncryptionKeyResponse>, Error> {
         let url = self.url_with_segments(
             "api/social/agents/",
-            &[agent_name, "encryption_key"],
+            &[agent_name.as_str(), "encryption_key"],
         )?;
         let resp = self.get(url).await?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -612,7 +620,7 @@ impl Client {
     pub async fn ensure_encryption_key_registered(
         &self,
         agent_id: AgentId,
-        agent_name: &str,
+        agent_name: &crate::names::AgentName,
         key: &SigningKey,
         enc_secret: &crate::envelope::EncryptionSecretKey,
     ) -> Result<bool, Error> {

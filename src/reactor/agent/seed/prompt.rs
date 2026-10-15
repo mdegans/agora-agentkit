@@ -908,7 +908,10 @@ fn about_tokens(bytes: u64) -> String {
 
 /// One post as a listing line: title, author (tagged `(yours)`), community,
 /// comment count, date and id
-fn post_line(post: &PostResponse, viewer_name: &str) -> String {
+fn post_line(
+    post: &PostResponse,
+    viewer_name: &crate::names::AgentName,
+) -> String {
     let author = post.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
     let yours = if author == viewer_name {
         " (yours)"
@@ -951,7 +954,7 @@ fn post_line(post: &PostResponse, viewer_name: &str) -> String {
 pub(super) fn format_search(
     search: &SearchResponse,
     query: &str,
-    viewer_name: &str,
+    viewer_name: &crate::names::AgentName,
 ) -> String {
     let mut out = String::new();
     if search.degraded {
@@ -1015,7 +1018,10 @@ fn push_preview(out: &mut String, body: &str) {
 
 /// One comment search hit as a listing line: author (tagged `(yours)`),
 /// the post it is under, date and ids
-fn comment_hit_line(hit: &CommentSearchHit, viewer_name: &str) -> String {
+fn comment_hit_line(
+    hit: &CommentSearchHit,
+    viewer_name: &crate::names::AgentName,
+) -> String {
     let c = &hit.comment;
     let author = match c.agent_name.as_deref() {
         Some(name) if name == viewer_name => format!(" by {name} (yours)"),
@@ -1039,7 +1045,7 @@ pub(super) fn format_feed(
     posts: &[PostResponse],
     community: Option<&crate::names::CommunityName>,
     sort: FeedSort,
-    viewer_name: &str,
+    viewer_name: &crate::names::AgentName,
 ) -> String {
     let scope = match community {
         Some(c) => format!("in {}", c.canonical()),
@@ -1203,7 +1209,7 @@ fn build_comment_threads<'a>(
 fn format_threaded_entry(
     te: &ThreadedEntry,
     max_preview: usize,
-    viewer_name: &str,
+    viewer_name: &crate::names::AgentName,
 ) -> String {
     let indent = "  ".repeat(te.depth as usize);
     let is_yours = |author: &str| -> &'static str {
@@ -1586,7 +1592,7 @@ pub(super) fn format_ballot_receipt(receipt: &BallotReceipt) -> String {
 /// own posts otherwise engage with themselves.
 pub(super) fn format_post(
     post: &PostWithCommentsResponse,
-    viewer_name: &str,
+    viewer_name: &crate::names::AgentName,
 ) -> String {
     let p = &post.post;
     let author = p.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
@@ -1669,7 +1675,7 @@ pub(super) fn format_post(
 /// placeholder for its body, rather than being silently dropped.
 pub(super) fn format_comment_chain(
     chain: &CommentChainResponse,
-    viewer_name: &str,
+    viewer_name: &crate::names::AgentName,
 ) -> String {
     let mut out = String::new();
     let post_title = chain.post_title.as_deref().unwrap_or("unknown post");
@@ -4053,7 +4059,7 @@ mod tests {
             post_id: PostId::new(),
             parent_comment_id: None,
             agent_id: uuid::Uuid::new_v4().into(),
-            agent_name: Some(agent_name.to_string()),
+            agent_name: Some(agent_name.parse().unwrap()),
             body: if deleted {
                 RemovedBy::Author.placeholder().to_string()
             } else {
@@ -4072,7 +4078,7 @@ mod tests {
             bytes: None,
             id: CommentId::new(),
             parent_comment_id: None,
-            agent_name: Some(agent_name.to_string()),
+            agent_name: Some(agent_name.parse().unwrap()),
             preview: "A truncated preview of the stubbed reply".to_string(),
             reply_count: 2,
             created_at: None,
@@ -4088,13 +4094,13 @@ mod tests {
     #[test]
     fn rendered_lines_cost_no_more_than_the_server_charges() {
         let now = chrono::Utc::now();
-        let mut s = stub("x");
+        let mut s = stub("xxx");
         s.reply_count = 9_999_999;
         s.bytes = Some(99_999_999);
         s.created_at = Some(now);
         s.parent_comment_id = Some(CommentId::new());
         s.preview = String::new();
-        let mut c = full_comment("x", false);
+        let mut c = full_comment("xxx", false);
         c.created_at = Some(now);
         c.signed = Some(true);
         c.via = Some(ClientPlatform::Claude);
@@ -4131,7 +4137,13 @@ mod tests {
                             .then(|| entry.parent_comment_id())
                             .flatten(),
                     };
-                    let line = format_threaded_entry(&te, 400, "x").len() + 1;
+                    let line = format_threaded_entry(
+                        &te,
+                        400,
+                        &"viewer".parse().unwrap(),
+                    )
+                    .len()
+                        + 1;
                     let detached = if te.detached_from.is_some() {
                         crate::threads::DETACHED_NOTE_BYTES
                     } else {
@@ -4152,7 +4164,11 @@ mod tests {
                     assert!(
                         line <= charge + names + detached,
                         "{line} bytes > {charge}: {}",
-                        format_threaded_entry(&te, 400, "x")
+                        format_threaded_entry(
+                            &te,
+                            400,
+                            &"viewer".parse().unwrap()
+                        )
                     );
                 }
             }
@@ -4180,7 +4196,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(
             out.contains(
                 "by philosopher [signed · via Claude (Anthropic)] in philosophy"
@@ -4201,7 +4217,7 @@ mod tests {
             text: "This was the schedule for the 09-26 sitting.".into(),
             see_instead: Some(successor),
             locked: false,
-            set_by_name: "claude-opus".into(),
+            set_by_name: "claude-opus".parse().unwrap(),
             at: chrono::Utc::now(),
         });
         let post = PostWithCommentsResponse {
@@ -4214,7 +4230,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         let notice = out
             .find("**Notice from claude-opus:** This was the schedule")
             .expect("notice rendered");
@@ -4238,7 +4254,7 @@ mod tests {
             text: "Closed.".into(),
             see_instead: None,
             locked: true,
-            set_by_name: "steward".into(),
+            set_by_name: "steward".parse().unwrap(),
             at: chrono::Utc::now(),
         });
         let post = PostWithCommentsResponse {
@@ -4251,7 +4267,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("new comments on it are refused"), "{out}");
         assert!(!out.contains("probably looking for"), "{out}");
     }
@@ -4270,7 +4286,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("by philosopher in philosophy"), "{out}");
         assert!(!out.contains("[]"), "{out}");
     }
@@ -4305,7 +4321,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(
             out.contains(&format!(
                 "- lawyer, 2026-04-01 22:37Z (a reply to comment {elsewhere}, \
@@ -4349,7 +4365,7 @@ mod tests {
         let mut post = base_post();
         post.comment_count = Some(50);
         post.size = Some(size);
-        let line = post_line(&post, "viewer");
+        let line = post_line(&post, &"viewer".parse().unwrap());
         assert!(
             line.contains("(50 comments, ")
                 // 30k body + the 32 KiB default budget of comments
@@ -4373,7 +4389,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&thread, "viewer");
+        let out = format_post(&thread, &"viewer".parse().unwrap());
         assert!(
             out.contains("(2 replies; about 2k tokens to read)"),
             "{out}"
@@ -4396,7 +4412,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains(&long.body), "{out}");
     }
 
@@ -4412,7 +4428,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("(2 comments)"), "{out}");
     }
 
@@ -4428,7 +4444,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains('⋯'), "stub marker: {out}");
         assert!(out.contains("lawyer"), "stub author: {out}");
         assert!(
@@ -4458,7 +4474,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(!out.contains("shown as a stub"), "{out}");
         assert!(out.contains("(1 comment)"), "{out}");
     }
@@ -4481,7 +4497,7 @@ mod tests {
             thread_summary: Some("Agents argued over the agenda.".into()),
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(!out.contains("(0 comments)"), "{out}");
         assert!(
             out.contains("(482 comments, not included in this read"),
@@ -4505,7 +4521,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(!out.contains("comments)"), "{out}");
     }
 
@@ -4524,7 +4540,7 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("(0 comments)"), "{out}");
     }
 
@@ -4532,10 +4548,10 @@ mod tests {
     fn post_line_without_a_count_claims_none() {
         let mut p = base_post();
         p.comment_count = None;
-        let out = post_line(&p, "viewer");
+        let out = post_line(&p, &"viewer".parse().unwrap());
         assert!(!out.contains("comments"), "{out}");
         p.comment_count = Some(3);
-        let out = post_line(&p, "viewer");
+        let out = post_line(&p, &"viewer".parse().unwrap());
         assert!(out.contains("(3 comments"), "{out}");
     }
 
@@ -4554,7 +4570,7 @@ mod tests {
             chain: vec![full_comment("engineer", false)],
             in_your_trash: None,
         };
-        let out = format_comment_chain(&chain, "viewer");
+        let out = format_comment_chain(&chain, &"viewer".parse().unwrap());
         assert!(out.contains("What does it mean to be an agent?"), "{out}");
         assert!(
             out.contains("5 older comments in this thread omitted"),
@@ -4578,7 +4594,7 @@ mod tests {
             chain: vec![old_server, full_comment("someone", true)],
             in_your_trash: None,
         };
-        let out = format_comment_chain(&chain, "viewer");
+        let out = format_comment_chain(&chain, &"viewer".parse().unwrap());
         assert!(out.contains("other: [removed]"), "{out}");
         assert!(out.contains("someone: [deleted by its author]"), "{out}");
         assert!(!out.contains("In your trash"), "{out}");
@@ -4639,7 +4655,7 @@ mod tests {
                 DeletedBy::Operator,
             )),
         };
-        let out = format_comment_chain(&chain, "viewer");
+        let out = format_comment_chain(&chain, &"viewer".parse().unwrap());
         assert!(
             out.contains(
                 "**In your trash** (deleted 2026-03-12 by the platform's \
@@ -4673,7 +4689,7 @@ mod tests {
                 DeletedBy::Author,
             )),
         };
-        let out = format_post(&post, "viewer");
+        let out = format_post(&post, &"viewer".parse().unwrap());
         let banner = out.find("**In your trash** (deleted 2026-03-12 by you)");
         let body = out.find("My own post's text.");
         assert!(banner.is_some() && banner < body, "{out}");
@@ -4722,7 +4738,7 @@ mod tests {
             chain: vec![full_comment("engineer", false)],
             in_your_trash: None,
         };
-        let out = format_comment_chain(&chain, "viewer");
+        let out = format_comment_chain(&chain, &"viewer".parse().unwrap());
         assert!(!out.contains("older comment"), "{out}");
     }
 
@@ -4755,7 +4771,7 @@ mod tests {
             mode_used: SearchMode::Semantic,
             degraded: false,
         };
-        let out = format_search(&search, "agency", "viewer");
+        let out = format_search(&search, "agency", &"viewer".parse().unwrap());
         assert!(
             out.contains(
                 "1 post(s) and 2 comment(s) for \"agency\" (semantic search):"
@@ -4788,7 +4804,7 @@ mod tests {
             degraded: false,
         };
         assert_eq!(
-            format_search(&empty, "x", "viewer"),
+            format_search(&empty, "x", &"viewer".parse().unwrap()),
             "No posts or comments match \"x\" (semantic search)."
         );
     }
@@ -4800,16 +4816,21 @@ mod tests {
         let mut post = recent_post();
         post.title = "T".repeat(300);
         post.body = "B".repeat(20_000);
-        post.agent_name = Some("someone-else".into());
+        post.agent_name = Some("someone-else".parse().unwrap());
         let search = SearchResponse {
             results: vec![post; 25],
             comment_results: vec![],
             mode_used: crate::enums::SearchMode::Keyword,
             degraded: false,
         };
-        let out = format_search(&search, "q", "test-agent");
+        let out = format_search(&search, "q", &"test-agent".parse().unwrap());
         assert!(out.len() < 12_000, "{} bytes", out.len());
-        let feed = format_feed(&search.results, None, FeedSort::Date, "me");
+        let feed = format_feed(
+            &search.results,
+            None,
+            FeedSort::Date,
+            &"viewer".parse().unwrap(),
+        );
         assert!(feed.len() < 8_000, "{} bytes", feed.len());
     }
 
@@ -5113,7 +5134,7 @@ mod tests {
                 }],
             }))
             .expect("fixture");
-        let out = format_post(&post, "reader");
+        let out = format_post(&post, &"reader".parse().unwrap());
         assert!(out.contains(AUTHOR_WITHHELD), "{out}");
         assert!(!out.contains("unknown"), "{out}");
     }
