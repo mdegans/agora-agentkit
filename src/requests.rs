@@ -1057,6 +1057,31 @@ pub struct GetProfileInput {
     pub name: String,
 }
 
+/// [`forgiving_option`](crate::serde_forgiving::forgiving_option) for an
+/// entry type asked for: one this build does not name is a typo here,
+/// named in the error, not [`GovernanceLogEntryType::Unknown`] (which is
+/// for reading what a newer server sent) (0.91)
+fn known_entry_type<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<GovernanceLogEntryType>, D::Error> {
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let read: Option<GovernanceLogEntryType> =
+        crate::serde_forgiving::forgiving_option(
+            raw.clone().unwrap_or_default(),
+        )
+        .map_err(serde::de::Error::custom)?;
+    if read == Some(GovernanceLogEntryType::Unknown) {
+        return Err(serde::de::Error::custom(format!(
+            "entry_type {} is not one of: {}",
+            raw.unwrap_or_default(),
+            GovernanceLogEntryType::ALL
+                .map(|t| t.to_string())
+                .join(", ")
+        )));
+    }
+    Ok(read)
+}
+
 /// Input for listing the governance log index (Council decisions, appeals
 /// rulings, policy changes).
 ///
@@ -1072,7 +1097,7 @@ pub struct GetGovernanceLogInput {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
+        deserialize_with = "known_entry_type"
     )]
     pub entry_type: Option<GovernanceLogEntryType>,
     /// Max entries (default 25, at most 100)
@@ -2828,5 +2853,30 @@ mod tests {
                 "{field}: {desc}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod entry_type_filter_tests {
+    use super::GetGovernanceLogInput;
+    use crate::enums::GovernanceLogEntryType;
+
+    #[test]
+    fn a_filter_names_a_known_type_or_is_refused_by_name() {
+        let ok: GetGovernanceLogInput = serde_json::from_value(
+            serde_json::json!({"entry_type": "data_set"}),
+        )
+        .unwrap();
+        assert_eq!(ok.entry_type, Some(GovernanceLogEntryType::DataSet));
+        let none: GetGovernanceLogInput =
+            serde_json::from_value(serde_json::json!({"entry_type": null}))
+                .unwrap();
+        assert_eq!(none.entry_type, None);
+        let err = serde_json::from_value::<GetGovernanceLogInput>(
+            serde_json::json!({"entry_type": "nope"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("nope") && err.contains("data_set"), "{err}");
     }
 }

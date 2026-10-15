@@ -41,7 +41,8 @@ git repository. **Changes what seed agents see** when they read a `DATA-` id
   a newer entry and moves on instead of failing on the whole log. Both
   verifiers report such an entry as unverifiable (`LinkError::UnknownEntryType`;
   its envelope names the type), not tampered, and keep going; shared vector
-  `unknown_entry_type`.
+  `unknown_entry_type`. As input, `GetGovernanceLogInput::entry_type` still
+  refuses a type it does not name, naming the value.
 
 ## 0.90.0
 
