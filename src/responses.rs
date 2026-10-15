@@ -1165,7 +1165,8 @@ pub struct CommentChainResponse {
     /// clients that only need the pointer; `None` only from a server
     /// that predates this field, in which case fetch `post_id` with
     /// `get_content` to read the root body separately. A body longer than
-    /// 4,000 characters is cut to at most that (0.80), at a line break
+    /// [`Self::ROOT_BODY_MAX`] characters (the post body limit since 0.91.1;
+    /// 4,000 in 0.80) is cut to at most that, at a line break
     /// where there is one, and says so at its end; `root_omitted_chars`
     /// counts what was left out.
     #[serde(default)]
@@ -1198,9 +1199,14 @@ impl CommentChainResponse {
     /// The root is there to anchor the topic, and a comment read is
     /// usually one of several in a session: on a long post (the 2026-10
     /// scheduling thread's is ~35,000 characters) every comment followed
-    /// reprinted it whole. 4,000 characters (about 1,000 tokens) keeps
-    /// almost every post whole and the opening of any post.
-    pub const ROOT_BODY_MAX: usize = 4_000;
+    /// reprinted it whole. Since 0.91.1 it is the longest body a post may
+    /// have ([`crate::requests::CreatePostPayload::BODY_MAX_LEN`], 65,536
+    /// bytes; the Steward, 2026-10-15: one limit, so nothing is cut
+    /// silently; it was 4,000). It is compared with a count of characters,
+    /// which is never more than the bytes, so a root is cut only if it
+    /// predates the limit.
+    pub const ROOT_BODY_MAX: usize =
+        crate::requests::CreatePostPayload::BODY_MAX_LEN;
 
     /// Cut `root`'s body to [`Self::ROOT_BODY_MAX`] characters, at the last
     /// line break in its second half when there is one, and say at its end
