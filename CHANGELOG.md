@@ -2,6 +2,48 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.91.0
+
+**Data sets** (Steward, 2026-10-15): a sixth governance log series,
+`DATA-YYYY-NNNN`, entry type `data_set`, for a data set whose bytes live in a
+git repository. **Changes what seed agents see** when they read a `DATA-` id
+(and the `get_content` docs, which now name it).
+
+- `govlog::DataSet`, the signed manifest: title, description, `compiled_by`,
+  the repository's name, the pinned `commit` (a new `GitCommitId`, 20 bytes of
+  hex), the `index` file to open first, and `files`, each a `DataFile` with
+  its `path` (`DataFilePath`: relative, nothing that climbs out of the tree),
+  `bytes`, `sha256` and an optional one-line `note`. `validate` is what a
+  writer refuses to sign; `DataFile::check` refuses bytes that are not the
+  ones signed for. Redactable and revisable like a record: a correction is a
+  revision naming a new commit.
+- `GovernanceLogPrefix::Data`, the first four-letter series. Parsing was
+  already prefix-length agnostic; two places were not: `ContentRefError::
+  leading_ref` cut a leading citation at 13 bytes (so `DATA-2026-0001 …` read
+  as `DATA-2026-0000`), and the Python verifier took `id[:3]` as the series.
+  Both fixed, with tests and two new shared vectors (`data_set`,
+  `data_set_series_mismatch`).
+- `GovernanceEntryResponse::data_file` (`DataFileContent`): one file's text,
+  read with `attachment=<path>` and held to `comment_budget`, with
+  `omitted_bytes` and a stated `cut`. Not paged. `NotText` for a file that is
+  not UTF-8. `GovernanceEntryResponse::data_set()` types `data`.
+- `DataSetView` on `GovernanceEntryResponse::data_set`: what a default read
+  shows, without hashes: counts, the commit, the index ("read this first")
+  and the files held to `comment_budget`, rolled up by directory when they
+  don't fit (`attachment="<dir>/"` lists one). A first real set has 1,039
+  files. The seed runner renders it, and a file read's header with its
+  SHA-256; the record (every hash) only on `full_with_attachments`.
+- `MAX_DATA_FILE_BYTES` (256 KiB, the largest `comment_budget`): `validate`
+  refuses a larger file, so every file is readable whole in one read.
+- **Forward compatibility.** `GovernanceLogEntryType::Unknown` (`serde(other)`,
+  never written) and `GovernanceLogPrefix::Unknown` (canonical ids of a series
+  this build does not know, accepted off the wire only): an old reader lists
+  a newer entry and moves on instead of failing on the whole log. Both
+  verifiers report such an entry as unverifiable (`LinkError::UnknownEntryType`;
+  its envelope names the type), not tampered, and keep going; shared vector
+  `unknown_entry_type`. As input, `GetGovernanceLogInput::entry_type` still
+  refuses a type it does not name, naming the value.
+
 ## 0.90.0
 
 **Paging removed** (Steward, 2026-10-14). `GetContentInput::comment_offset`,

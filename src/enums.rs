@@ -428,6 +428,17 @@ pub enum GovernanceLogEntryType {
     // Redactable, since its quote may hold an agent's words. Its `data` is
     // a `govlog::Obligation`. (0.72)
     Obligation,
+    // A `DATA-` entry: the signed manifest of a data set whose bytes live
+    // in a git repository, pinned by commit, every file by its SHA-256.
+    // Its `data` is a `govlog::DataSet`. Redactable and revisable like a
+    // record; a correction names a new commit. (0.91)
+    DataSet,
+    // A type this build does not know, from a newer server. Never stored
+    // or sent by the server; exists so an old reader lists the entry and
+    // moves on, and a verifier says it cannot check it. (0.91)
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 /// What an amendment does to the entry it names
@@ -1515,7 +1526,7 @@ closed_variants!(ModelRole [
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
 closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
-closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation]);
+closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet] never_written [Unknown]);
 closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn]);
 closed_variants!(Standing [InForce, NonPrecedential, Overruled, Superseded]);
 closed_variants!(KeyStatus [Active, Retired, Compromised]);
@@ -1802,6 +1813,23 @@ mod tests {
         assert_eq!(
             GovernanceLogEntryType::Obligation.to_string(),
             "obligation"
+        );
+        assert_eq!(GovernanceLogEntryType::DataSet.to_string(), "data_set");
+        assert_eq!(
+            "data_set".parse::<GovernanceLogEntryType>().unwrap(),
+            GovernanceLogEntryType::DataSet
+        );
+        // A newer server's type: read, not refused (0.91).
+        assert_eq!(
+            serde_json::from_value::<GovernanceLogEntryType>(
+                serde_json::json!("something_newer")
+            )
+            .unwrap(),
+            GovernanceLogEntryType::Unknown
+        );
+        assert!(
+            !GovernanceLogEntryType::ALL
+                .contains(&GovernanceLogEntryType::Unknown)
         );
         let kinds: Vec<String> =
             AmendmentKind::OBLIGATION.map(|k| k.to_string()).to_vec();

@@ -2159,6 +2159,9 @@ pub(super) fn format_governance_entry(
         ),
     }
 
+    if let Some(view) = &entry.data_set {
+        out.push_str(&format_data_set_view(view));
+    }
     if !entry.attachments.is_empty() && entry.attachment.is_none() {
         out.push_str("\nAttachments (read one with attachment=\"<name>\"):\n");
         for a in &entry.attachments {
@@ -2184,7 +2187,25 @@ pub(super) fn format_governance_entry(
             .map(|content| (name, content))
     });
     let has_record = entry.data.is_some();
-    if let Some((name, content)) = attachment {
+    // A data set's file: text as it is, after the server checked its hash.
+    if let Some(file) = &entry.data_file {
+        out.push_str(&format!(
+            "\n### File: {path}\n{bytes} bytes at commit {commit}, SHA-256 {sha256}, \
+             checked against the manifest on record (verify_governance_log checks \
+             its signature)\n\n{text}",
+            path = file.path,
+            bytes = file.bytes,
+            commit = file.commit,
+            sha256 = file.sha256,
+            text = file.text,
+        ));
+        if !file.text.ends_with('\n') {
+            out.push('\n');
+        }
+        if let Some(cut) = &file.cut {
+            out.push_str(&format!("\n[{cut}]\n"));
+        }
+    } else if let Some((name, content)) = attachment {
         out.push_str(&format!("\n### Attachment: {name}\n\n{content}\n"));
     } else if let Some(data) = &entry.data {
         out.push_str("\n### Record\n\n");
@@ -2207,6 +2228,40 @@ pub(super) fn format_governance_entry(
             )
         });
     }
+    out
+}
+
+/// A data set's files as [`format_governance_entry`] shows them: the
+/// index first, then the listing, never the hashes
+fn format_data_set_view(view: &crate::responses::DataSetView) -> String {
+    let mut out = format!(
+        "\n**Data set**: {files} files, {bytes} bytes, in the repository {repo} at \
+         commit {commit}.\n**Read this first**: attachment=\"{index}\"\n",
+        files = view.files,
+        bytes = view.bytes,
+        repo = view.repo,
+        commit = view.commit,
+        index = view.index,
+    );
+    out.push_str(&match &view.directory {
+        Some(dir) => format!("\nFiles under {dir}:\n"),
+        None => "\nFiles:\n".to_string(),
+    });
+    for line in &view.listing {
+        out.push_str(&match (&line.note, line.path.ends_with('/')) {
+            (_, true) => format!(
+                "- {} — {} files ({} bytes)\n",
+                line.path, line.files, line.bytes
+            ),
+            (Some(note), false) => {
+                format!("- {} — {note} ({} bytes)\n", line.path, line.bytes)
+            }
+            (None, false) => {
+                format!("- {} ({} bytes)\n", line.path, line.bytes)
+            }
+        });
+    }
+    out.push_str(&format!("{}\n", view.how_to_read));
     out
 }
 
@@ -2479,6 +2534,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         };
 
         let out = format_governance_entry(&entry);
@@ -2534,6 +2591,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         };
 
         let out = format_governance_entry(&entry);
@@ -2769,6 +2828,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -2820,6 +2881,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         };
         let out = format_governance_entry(&entry);
         assert!(out.contains("attachment=\"<name>\""), "{out}");
@@ -2843,6 +2906,80 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("### Record"), "{out}");
+    }
+
+    /// A data set shows its index and its files without hashes, and one
+    /// file read by path comes back as its text, with the cut said (0.91)
+    #[test]
+    fn data_set_files_are_listed_and_read_as_text() {
+        use crate::govlog::{DATA_SET_VERSION, DataFile, DataSet};
+        use crate::responses::{DataFileContent, DataSetView};
+        use chrono::Utc;
+
+        let file = DataFile::of(
+            "votes/README.md".parse().unwrap(),
+            b"# Votes\nline 2\n",
+        );
+        let mut noted = file.clone();
+        noted.note = Some("Read me first".into());
+        let set = DataSet {
+            agora_data_set: DATA_SET_VERSION,
+            title: "Ratification votes".into(),
+            description: "d".into(),
+            compiled_by: "c".into(),
+            repo: "agora-data".into(),
+            commit: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
+            index: file.path.clone(),
+            files: vec![noted],
+        };
+        let mut entry = GovernanceEntryResponse {
+            id: "DATA-2026-0001".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::DataSet,
+            title: "Ratification votes".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("A data set.".into()),
+            total_rounds: None,
+            data: None,
+            round: None,
+            attachments: Vec::new(),
+            attachment: None,
+            version: None,
+            revisions: Vec::new(),
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            cited_by: Vec::new(),
+            texts: None,
+            obligation: None,
+            obligations: Vec::new(),
+            data_file: None,
+            data_set: DataSetView::of(&set, None, 32_768),
+        };
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains("**Read this first**: attachment=\"votes/README.md\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("- votes/README.md — Read me first (15 bytes)"),
+            "{out}"
+        );
+        assert!(!out.contains(&file.sha256.to_string()), "{out}");
+        assert!(!out.contains("### Record"), "{out}");
+
+        entry.data_set = None;
+        entry.attachment = Some("votes/README.md".into());
+        entry.data_file = Some(
+            DataFileContent::new(set.commit, &file, b"# Votes\nline 2\n", 9)
+                .unwrap(),
+        );
+        let out = format_governance_entry(&entry);
+        assert!(out.contains("### File: votes/README.md\n15 bytes at commit 0123456789abcdef0123456789abcdef01234567"), "{out}");
+        assert!(out.contains(&file.sha256.to_string()), "{out}");
+        assert!(out.contains("manifest on record"), "{out}");
+        assert!(out.contains("\n\n# Votes\n\n[Cut at byte 8 of 15"), "{out}");
+        assert!(!out.contains("line 2"), "{out}");
     }
 
     #[test]
@@ -3497,6 +3634,8 @@ mod tests {
             texts: None,
             obligation: Some(obligation_listing(9)),
             obligations: vec![obligation_listing(1)],
+            data_file: None,
+            data_set: None,
         };
         let out = format_governance_entry(&entry);
         assert!(

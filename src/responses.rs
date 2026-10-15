@@ -2192,6 +2192,256 @@ pub struct GovernanceEntryResponse {
     /// status; read one with `get_content` (0.72)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub obligations: Vec<ObligationListing>,
+    /// For a `data_set` entry read with `attachment=<path>`: that file's
+    /// text, checked against the SHA-256 the manifest signs for (0.91)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_file: Option<DataFileContent>,
+    /// For a `data_set` entry: its files, held to the read's budget and
+    /// rolled up by directory when they do not fit; or one directory's,
+    /// read with `attachment="<dir>/"` (0.91)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_set: Option<DataSetView>,
+}
+
+/// A data set's files as a read shows them: no hashes (those are in the
+/// record, `detail="full_with_attachments"`, and each file read's header),
+/// rolled up by directory when one line per file would not fit (0.91)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DataSetView {
+    /// The data repository's name
+    pub repo: String,
+    pub commit: crate::govlog::GitCommitId,
+    /// Files in the whole set
+    pub files: u64,
+    /// Their bytes, added up
+    pub bytes: u64,
+    /// The file to read first
+    pub index: crate::govlog::DataFilePath,
+    /// The directory listed, ending in `/`; absent for the whole set
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// A file, or a directory (ending in `/`) standing for every file under it
+    pub listing: Vec<DataSetLine>,
+    /// Files under `directory` on no line: the listing ran past the budget
+    #[serde(default)]
+    pub unlisted: u64,
+    pub how_to_read: String,
+}
+
+/// One line of a [`DataSetView`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DataSetLine {
+    /// A file's path, or a directory's ending in `/`
+    pub path: String,
+    /// 1 for a file
+    pub files: u64,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl DataSetLine {
+    /// About what the line costs a reader, in bytes
+    fn cost(&self) -> usize {
+        self.path.len() + self.note.as_ref().map_or(0, String::len) + 32
+    }
+}
+
+impl DataSetView {
+    /// `set`'s files under `directory` (a path prefix ending in `/`, or the
+    /// whole set), one line each if they fit in `budget` bytes, else one
+    /// line per file or directory just below `directory`, else as many of
+    /// those as fit. `None` when no file is under `directory`.
+    pub fn of(
+        set: &crate::govlog::DataSet,
+        directory: Option<&str>,
+        budget: usize,
+    ) -> Option<Self> {
+        let prefix = directory.unwrap_or("");
+        let under: Vec<&crate::govlog::DataFile> = set
+            .files
+            .iter()
+            .filter(|f| f.path.as_str().starts_with(prefix))
+            .collect();
+        if under.is_empty() {
+            return None;
+        }
+        let files: Vec<DataSetLine> = under
+            .iter()
+            .map(|f| DataSetLine {
+                path: f.path.to_string(),
+                files: 1,
+                bytes: f.bytes,
+                note: f.note.clone(),
+            })
+            .collect();
+        let fits = |lines: &[DataSetLine]| {
+            lines.iter().map(DataSetLine::cost).sum::<usize>() <= budget
+        };
+        let rolled_up = !fits(&files);
+        let mut lines = if rolled_up {
+            let mut dirs: Vec<DataSetLine> = Vec::new();
+            for f in &files {
+                let rest = &f.path[prefix.len()..];
+                let line = match rest.split_once('/') {
+                    None => f.clone(),
+                    Some((dir, _)) => DataSetLine {
+                        path: format!("{prefix}{dir}/"),
+                        files: 1,
+                        bytes: f.bytes,
+                        note: None,
+                    },
+                };
+                match dirs.last_mut() {
+                    Some(last)
+                        if last.path == line.path
+                            && line.path.ends_with('/') =>
+                    {
+                        last.files += 1;
+                        last.bytes += line.bytes;
+                    }
+                    _ => dirs.push(line),
+                }
+            }
+            dirs
+        } else {
+            files
+        };
+        let mut unlisted = 0;
+        if !fits(&lines) {
+            let mut spent = 0;
+            let keep = lines
+                .iter()
+                .take_while(|l| {
+                    spent += l.cost();
+                    spent <= budget
+                })
+                .count();
+            unlisted = lines[keep..].iter().map(|l| l.files).sum();
+            lines.truncate(keep);
+        }
+        let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
+        let mut how_to_read = format!(
+            "Read the index first: attachment=\"{index}\". Read any file with \
+             attachment=\"<path>\" (comment_budget={max} reads the largest whole); list \
+             a directory with attachment=\"<dir>/\".",
+            index = set.index,
+        );
+        if rolled_up {
+            how_to_read.push_str(
+                " One line per file did not fit this read's budget, so files below \
+                 the listed directories are counted, not named.",
+            );
+        }
+        if unlisted > 0 {
+            how_to_read.push_str(&format!(
+                " {unlisted} more file(s) did not fit at all: list a directory, or \
+                 raise comment_budget."
+            ));
+        }
+        Some(Self {
+            repo: set.repo.clone(),
+            commit: set.commit,
+            files: set.files.len() as u64,
+            bytes: set.total_bytes(),
+            index: set.index.clone(),
+            directory: directory.map(str::to_string),
+            listing: lines,
+            unlisted,
+            how_to_read,
+        })
+    }
+}
+
+/// One file of a data set (`DATA-…`), as `get_content` serves it: checked
+/// against its signed SHA-256, then cut to the byte budget if it is longer
+/// (0.91)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DataFileContent {
+    pub path: crate::govlog::DataFilePath,
+    /// The commit it was read at, as the manifest pins it
+    pub commit: crate::govlog::GitCommitId,
+    /// The whole file's size in bytes
+    pub bytes: u64,
+    /// The whole file's SHA-256, as signed; the bytes read matched it
+    pub sha256: crate::govlog::Sha256Hex,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The file's text, or as much of it as the budget holds
+    pub text: String,
+    /// Bytes of the file not in `text`: 0 when it is whole
+    pub omitted_bytes: u64,
+    /// When `text` is cut: where, and how much more there is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<String>,
+}
+
+/// A data set's file is not UTF-8 text, so `get_content` cannot serve it
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{path} is not text ({bytes} bytes, SHA-256 {sha256}), so get_content \
+     cannot show it"
+)]
+pub struct NotText {
+    pub path: crate::govlog::DataFilePath,
+    pub bytes: u64,
+    pub sha256: crate::govlog::Sha256Hex,
+}
+
+impl DataFileContent {
+    /// `file`'s `bytes`, already [checked](crate::govlog::DataFile::check),
+    /// as text of at most `budget` bytes. A cut falls at the end of a line
+    /// when one ends in the budget's second half, else at a character
+    /// boundary.
+    pub fn new(
+        commit: crate::govlog::GitCommitId,
+        file: &crate::govlog::DataFile,
+        bytes: &[u8],
+        budget: usize,
+    ) -> Result<Self, NotText> {
+        let text = std::str::from_utf8(bytes).map_err(|_| NotText {
+            path: file.path.clone(),
+            bytes: file.bytes,
+            sha256: file.sha256,
+        })?;
+        let mut end = text.len().min(budget);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end < text.len()
+            && let Some(newline) = text[..end].rfind('\n')
+            && newline + 1 >= end / 2
+        {
+            end = newline + 1;
+        }
+        let omitted = (text.len() - end) as u64;
+        let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
+        let cut = (omitted > 0).then(|| {
+            format!(
+                "Cut at byte {end} of {total}: the last {omitted} bytes ({pct}%) \
+                 are not shown. comment_budget={max} reads the whole file \
+                 (no file in a data set is larger).",
+                total = text.len(),
+                pct = omitted * 100 / text.len() as u64,
+            )
+        });
+        Ok(Self {
+            path: file.path.clone(),
+            commit,
+            bytes: file.bytes,
+            sha256: file.sha256,
+            note: file.note.clone(),
+            text: text[..end].to_string(),
+            omitted_bytes: omitted,
+            cut,
+        })
+    }
 }
 
 impl GovernanceEntryResponse {
@@ -2209,6 +2459,16 @@ impl GovernanceEntryResponse {
             return None;
         }
         self.data.as_ref().map(CouncilDecisionRecord::deserialize)
+    }
+
+    /// `data` typed, on a `data_set` read that carries it (0.91)
+    pub fn data_set(
+        &self,
+    ) -> Option<Result<crate::govlog::DataSet, serde_json::Error>> {
+        if self.entry_type != GovernanceLogEntryType::DataSet {
+            return None;
+        }
+        self.data.as_ref().map(crate::govlog::DataSet::deserialize)
     }
 }
 
@@ -2640,6 +2900,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -2884,6 +3146,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry
@@ -3030,6 +3294,8 @@ mod tests {
             texts: None,
             obligation: None,
             obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
         };
         let record = entry.council_decision().unwrap().unwrap();
         assert_eq!(record.rounds.len(), 3);
@@ -3798,5 +4064,150 @@ mod dashboard_agent_tests {
         assert!(value.get("$defs").is_none(), "no $defs: {value}");
         assert!(!blob.contains("$ref"), "no $ref: {value}");
         assert!(blob.contains("model_info"), "{value}");
+    }
+}
+
+#[cfg(test)]
+mod data_file_tests {
+    use super::{DataFileContent, NotText};
+    use crate::govlog::{DataFile, GitCommitId};
+    use crate::requests::GetContentInput;
+
+    fn commit() -> GitCommitId {
+        "0123456789abcdef0123456789abcdef01234567".parse().unwrap()
+    }
+
+    fn read(bytes: &[u8], budget: usize) -> Result<DataFileContent, NotText> {
+        let file = DataFile::of("a/b.md".parse().unwrap(), bytes);
+        DataFileContent::new(commit(), &file, bytes, budget)
+    }
+
+    #[test]
+    fn a_short_file_is_whole() {
+        let read = read(b"one\ntwo\n", 32).unwrap();
+        assert_eq!(read.text, "one\ntwo\n");
+        assert_eq!(read.omitted_bytes, 0);
+        assert_eq!(read.cut, None);
+        assert_eq!(read.bytes, 8);
+    }
+
+    #[test]
+    fn a_cut_ends_a_line_and_says_so() {
+        let text = "line one\nline two\nline three\n";
+        let read = read(text.as_bytes(), 20).unwrap();
+        assert_eq!(read.text, "line one\nline two\n");
+        assert_eq!(read.omitted_bytes, 11);
+        let cut = read.cut.unwrap();
+        assert!(cut.contains("Cut at byte 18 of 29"), "{cut}");
+        assert!(cut.contains("last 11 bytes (37%)"), "{cut}");
+        assert!(
+            cut.contains("comment_budget=262144 reads the whole file"),
+            "{cut}"
+        );
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character() {
+        // No newline: cut at the budget, backed off to a boundary.
+        let read = read("ééééé".as_bytes(), 5).unwrap();
+        assert_eq!(read.text, "éé");
+        assert_eq!(read.omitted_bytes, 6);
+    }
+
+    #[test]
+    fn the_largest_budget_reads_the_largest_file_whole() {
+        let max = GetContentInput::MAX_COMMENT_BUDGET as usize;
+        assert_eq!(max as u64, crate::govlog::MAX_DATA_FILE_BYTES);
+        let big = "x".repeat(max);
+        let read = read(big.as_bytes(), max).unwrap();
+        assert_eq!((read.omitted_bytes, read.cut), (0, None));
+    }
+
+    #[test]
+    fn binary_is_not_text() {
+        let err = read(&[0xff, 0xfe, 0x00], 32).unwrap_err();
+        assert_eq!(err.bytes, 3);
+        assert!(err.to_string().contains("a/b.md is not text"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod data_set_view_tests {
+    use super::DataSetView;
+    use crate::govlog::{DATA_SET_VERSION, DataFile, DataSet};
+
+    /// `n` files over `dirs` directories, plus a README, sorted
+    fn set(n: usize, dirs: usize) -> DataSet {
+        let mut files: Vec<DataFile> = (0..n)
+            .map(|i| {
+                DataFile::of(
+                    format!("votes/d{:02}/f{i:04}.csv", i % dirs)
+                        .parse()
+                        .unwrap(),
+                    b"x\n",
+                )
+            })
+            .collect();
+        files.push(DataFile::of("votes/README.md".parse().unwrap(), b"# r\n"));
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        DataSet {
+            agora_data_set: DATA_SET_VERSION,
+            title: "t".into(),
+            description: "d".into(),
+            compiled_by: "c".into(),
+            repo: "agora-data".into(),
+            commit: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
+            index: "votes/README.md".parse().unwrap(),
+            files,
+        }
+    }
+
+    #[test]
+    fn a_small_set_lists_every_file() {
+        let view = DataSetView::of(&set(4, 2), None, 32_768).unwrap();
+        assert_eq!(view.listing.len(), 5);
+        assert!(view.listing.iter().all(|l| l.files == 1));
+        assert_eq!((view.files, view.unlisted), (5, 0));
+        assert!(view.how_to_read.contains("attachment=\"votes/README.md\""));
+        assert!(!view.how_to_read.contains("counted, not named"));
+    }
+
+    #[test]
+    fn a_thousand_files_roll_up_by_directory_and_a_directory_lists_its_own() {
+        let big = set(1_038, 12);
+        let view = DataSetView::of(&big, None, 32_768).unwrap();
+        // One directory, votes/: rolled up to one line under the root.
+        assert_eq!(view.files, 1_039);
+        assert_eq!(view.listing.len(), 1);
+        assert_eq!(view.listing[0].path, "votes/");
+        assert_eq!(view.listing[0].files, 1_039);
+        assert!(view.how_to_read.contains("counted, not named"));
+
+        let votes = DataSetView::of(&big, Some("votes/"), 32_768).unwrap();
+        let paths: Vec<&str> =
+            votes.listing.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(paths.len(), 13, "{paths:?}");
+        assert!(
+            paths.contains(&"votes/README.md") && paths.contains(&"votes/d00/")
+        );
+        assert_eq!(votes.listing.iter().map(|l| l.files).sum::<u64>(), 1_039);
+        assert_eq!(votes.unlisted, 0);
+
+        // One directory's 87 files fit; listed by name.
+        let d00 = DataSetView::of(&big, Some("votes/d00/"), 32_768).unwrap();
+        assert!(d00.listing.iter().all(|l| l.files == 1));
+        assert!(DataSetView::of(&big, Some("nothing/"), 32_768).is_none());
+    }
+
+    #[test]
+    fn a_flat_directory_past_the_budget_says_how_many_are_left_out() {
+        let flat = set(1_000, 1);
+        let view = DataSetView::of(&flat, Some("votes/d00/"), 4_096).unwrap();
+        assert!(view.unlisted > 0);
+        assert_eq!(view.listing.len() as u64 + view.unlisted, 1_000);
+        assert!(view.how_to_read.contains("did not fit at all"));
+        // No hashes anywhere in what a reader sees by default.
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("sha256"), "{json}");
     }
 }
