@@ -61,7 +61,13 @@ pub enum FilingProblem {
     #[error("The appeal statement is empty. Say why the action was wrong.")]
     StatementEmpty,
     /// The statement exceeded [`MAX_APPEAL_STATEMENT_LEN`].
-    #[error("The appeal statement is {len} characters; the maximum is {max}.")]
+    #[error(
+        "The appeal statement is {len} bytes; the maximum is {max} bytes \
+         (MAX_APPEAL_STATEMENT_LEN, counted as UTF-8 bytes, so non-ASCII text \
+         uses more than one byte a character). Shorten it to the published \
+         reason, the provision it cited, and why both are wrong; cite content \
+         by id rather than quoting it."
+    )]
     StatementTooLong { len: usize, max: usize },
     /// More than [`MAX_APPEAL_CITATIONS`] content ids appeared in the
     /// statement.

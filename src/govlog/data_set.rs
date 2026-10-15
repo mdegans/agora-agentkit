@@ -121,6 +121,177 @@ impl DataSet {
     pub fn total_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.bytes).sum()
     }
+
+    /// The files under `prefix` (a directory ending in `/`): how many, and
+    /// their bytes added up
+    pub fn under(&self, prefix: &str) -> (u64, u64) {
+        self.files
+            .iter()
+            .filter(|f| f.path.as_str().starts_with(prefix))
+            .fold((0, 0), |(n, b), f| (n + 1, b + f.bytes))
+    }
+
+    /// The directories at the repository root that hold files, in order
+    fn top_directories(&self) -> Vec<&str> {
+        let mut dirs: Vec<&str> = Vec::new();
+        for f in &self.files {
+            if let Some((dir, _)) = f.path.as_str().split_once('/')
+                && !dirs.contains(&dir)
+            {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+
+    /// What `attachment=<asked>` names: a listed file, or a directory
+    /// (ending in `/`). Paths are relative to the repository root; one
+    /// relative to a directory at the root (`README.md` for
+    /// `votes/README.md`, the way a set's own files cite each other)
+    /// resolves when exactly one directory holds it, and the target says
+    /// what was asked (`asked` is set only then). Surrounding whitespace
+    /// and a leading `./` or `/` are ignored. (0.91.4)
+    pub fn resolve(
+        &self,
+        asked: &str,
+    ) -> Result<DataSetTarget<'_>, DataSetLookupError> {
+        let trimmed = asked.trim();
+        let path = trimmed.strip_prefix("./").unwrap_or(trimmed);
+        let path = path.trim_start_matches('/');
+        let lookup_error = |kind| DataSetLookupError {
+            asked: asked.to_string(),
+            kind,
+        };
+        if path.is_empty() {
+            return Err(lookup_error(DataSetLookupFailure::NotFound));
+        }
+        let tops = self.top_directories();
+        let file_at =
+            |p: &str| p.parse().ok().and_then(|p: DataFilePath| self.file(&p));
+        let directory = |prefix: String| {
+            let (files, bytes) = self.under(&prefix);
+            (files > 0).then_some((prefix, files, bytes))
+        };
+        // One match, or the error for none or several
+        let one = |mut found: Vec<String>| match found.len() {
+            1 => Ok(found.pop()),
+            0 => Ok(None),
+            _ => Err(lookup_error(DataSetLookupFailure::Ambiguous(found))),
+        };
+        if path.ends_with('/') {
+            if directory(path.to_string()).is_some() {
+                return Ok(DataSetTarget::Directory {
+                    prefix: path.to_string(),
+                    asked: None,
+                });
+            }
+            let found = tops
+                .iter()
+                .filter_map(|top| directory(format!("{top}/{path}")))
+                .map(|(prefix, ..)| prefix)
+                .collect();
+            return match one(found)? {
+                Some(prefix) => Ok(DataSetTarget::Directory {
+                    asked: Some(asked.to_string()),
+                    prefix,
+                }),
+                None => Err(lookup_error(DataSetLookupFailure::NotFound)),
+            };
+        }
+        if let Some(file) = file_at(path) {
+            return Ok(DataSetTarget::File { file, asked: None });
+        }
+        let not_a_file = |(prefix, files, bytes)| {
+            lookup_error(DataSetLookupFailure::Directory {
+                prefix,
+                files,
+                bytes,
+            })
+        };
+        if let Some(dir) = directory(format!("{path}/")) {
+            return Err(not_a_file(dir));
+        }
+        let found = tops
+            .iter()
+            .map(|top| format!("{top}/{path}"))
+            .filter(|p| file_at(p).is_some())
+            .collect();
+        if let Some(full) = one(found)?
+            && let Some(file) = file_at(&full)
+        {
+            return Ok(DataSetTarget::File {
+                file,
+                asked: Some(asked.to_string()),
+            });
+        }
+        let dirs: Vec<_> = tops
+            .iter()
+            .filter_map(|top| directory(format!("{top}/{path}/")))
+            .collect();
+        match dirs.len() {
+            0 => Err(lookup_error(DataSetLookupFailure::NotFound)),
+            1 => Err(not_a_file(dirs.into_iter().next().expect("one"))),
+            _ => Err(lookup_error(DataSetLookupFailure::Ambiguous(
+                dirs.into_iter().map(|(prefix, ..)| prefix).collect(),
+            ))),
+        }
+    }
+}
+
+/// What a data set's `attachment=` named (0.91.4)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DataSetTarget<'a> {
+    /// A listed file
+    File {
+        file: &'a DataFile,
+        /// What was asked, when it is not the file's path
+        asked: Option<String>,
+    },
+    /// The files under a directory: `prefix` ends in `/`
+    Directory {
+        prefix: String,
+        /// What was asked, when it is not `prefix`
+        asked: Option<String>,
+    },
+}
+
+/// `attachment=` names no file or directory of a data set: the message says
+/// what it was and what to ask for instead, in full (0.91.4)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("attachment={asked:?}: {kind}")]
+pub struct DataSetLookupError {
+    pub asked: String,
+    pub kind: DataSetLookupFailure,
+}
+
+/// Why a [`DataSetLookupError`]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DataSetLookupFailure {
+    /// A directory, asked for without its trailing `/`
+    #[error(
+        "{prefix} is a directory of this data set ({files} files, {bytes} \
+         bytes), not a file. List it with attachment=\"{prefix}\" (a directory \
+         ends in `/`), or read one of its files by its path."
+    )]
+    Directory {
+        prefix: String,
+        files: u64,
+        bytes: u64,
+    },
+    /// A path relative to a top directory that more than one holds
+    #[error(
+        "that path is under more than one of this data set's top directories: \
+         {}. Ask for one of them by its full path.",
+        .0.join(", ")
+    )]
+    Ambiguous(Vec<String>),
+    #[error(
+        "no file or directory of this data set is at that path. Paths are \
+         relative to the data repository's root (a path relative to a \
+         directory at the root also works when only one directory holds it); \
+         a directory ends in `/`."
+    )]
+    NotFound,
 }
 
 impl DataFile {
@@ -348,6 +519,103 @@ pub(super) mod tests {
         assert_ne!(err.got_sha256, err.expected_sha256);
         assert!(err.to_string().contains("votes/ballots.csv"), "{err}");
         assert!(m.file(&path("votes/other.csv")).is_none());
+    }
+
+    /// What `attachment=` resolves to: exact paths, directories, a path
+    /// relative to a top directory, and errors that say what to ask for
+    /// (beta round, 2026-10-15; 0.91.4)
+    #[test]
+    fn attachments_resolve_or_say_why_not() {
+        let mut m = manifest();
+        m.files.push(DataFile::of(path("votes/raw/r1.json"), b"{}"));
+        m.files.sort_by(|a, b| a.path.cmp(&b.path));
+        let file = |asked: &str| match m.resolve(asked) {
+            Ok(DataSetTarget::File { file, asked }) => {
+                (file.path.to_string(), asked)
+            }
+            other => panic!("{asked}: {other:?}"),
+        };
+        assert_eq!(file("votes/README.md"), ("votes/README.md".into(), None));
+        // Relative to the one top directory, as the set's files cite it
+        assert_eq!(
+            file("README.md"),
+            ("votes/README.md".into(), Some("README.md".into()))
+        );
+        assert_eq!(
+            file("raw/r1.json"),
+            ("votes/raw/r1.json".into(), Some("raw/r1.json".into()))
+        );
+        // Normalised, not resolved: nothing to say
+        for exact in [
+            "./votes/ballots.csv",
+            "/votes/ballots.csv",
+            " votes/ballots.csv\n",
+        ] {
+            assert_eq!(
+                file(exact),
+                ("votes/ballots.csv".into(), None),
+                "{exact:?}"
+            );
+        }
+        for empty in ["", "/", "./", "  "] {
+            assert_eq!(
+                m.resolve(empty).unwrap_err().kind,
+                DataSetLookupFailure::NotFound,
+                "{empty:?}"
+            );
+        }
+        let dir = |asked: &str| match m.resolve(asked) {
+            Ok(DataSetTarget::Directory { prefix, asked }) => (prefix, asked),
+            other => panic!("{asked}: {other:?}"),
+        };
+        assert_eq!(dir("votes/"), ("votes/".into(), None));
+        assert_eq!(dir("raw/"), ("votes/raw/".into(), Some("raw/".into())));
+        // A directory without its `/`: says so, with what is in it
+        let err = m.resolve("votes/raw").unwrap_err();
+        assert_eq!(
+            err.kind,
+            DataSetLookupFailure::Directory {
+                prefix: "votes/raw/".into(),
+                files: 1,
+                bytes: 2
+            }
+        );
+        let text = err.to_string();
+        assert!(text.contains("votes/raw/ is a directory"), "{text}");
+        assert!(text.contains("attachment=\"votes/raw/\""), "{text}");
+        assert!(matches!(
+            m.resolve("raw").unwrap_err().kind,
+            DataSetLookupFailure::Directory { .. }
+        ));
+        assert_eq!(
+            m.resolve("votes/missing.csv").unwrap_err().kind,
+            DataSetLookupFailure::NotFound
+        );
+        assert_eq!(
+            m.resolve("../x").unwrap_err().kind,
+            DataSetLookupFailure::NotFound
+        );
+        // Under two top directories: ambiguous, never a guess
+        m.files.push(DataFile::of(path("tallies/README.md"), b"t"));
+        m.files.sort_by(|a, b| a.path.cmp(&b.path));
+        let err = m.resolve("README.md").unwrap_err();
+        assert_eq!(
+            err.kind,
+            DataSetLookupFailure::Ambiguous(vec![
+                "tallies/README.md".into(),
+                "votes/README.md".into()
+            ])
+        );
+        m.files
+            .push(DataFile::of(path("tallies/raw/t.json"), b"{}"));
+        m.files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            m.resolve("raw/").unwrap_err().kind,
+            DataSetLookupFailure::Ambiguous(vec![
+                "tallies/raw/".into(),
+                "votes/raw/".into()
+            ])
+        );
     }
 
     #[test]

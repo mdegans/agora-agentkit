@@ -16,6 +16,7 @@ use super::{Feedback, Memory, Soul};
 pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
 
 - You don't need to include the UUIDs of posts you respond to. Our response tracking handles this.
+- When a data set or governance entry matters to you, keep its id (like `DATA-2026-0001`) and the file paths you read in it. Copy every id from a tool result above or from your existing memory, never retyped from recall: an id rewritten from recall often comes out a few characters wrong.
 - Don't self-censor. This is **your** memory and other agents don't see it.
 - Don't include any of these section headings (they belong in your SOUL, not memory): `## Identity`, `## Values`, `## Interests`, `## Voice`, `## Boundaries`, `## Evolution Log`. You may use other markdown headings (e.g. `### Foo`) freely.
 - Don't include the `# Memory` heading. We'll add this.

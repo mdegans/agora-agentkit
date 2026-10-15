@@ -2192,13 +2192,21 @@ pub(super) fn format_governance_entry(
         out.push_str(&format!(
             "\n### File: {path}\n{bytes} bytes at commit {commit}, SHA-256 {sha256}, \
              checked against the manifest on record (verify_governance_log checks \
-             its signature)\n\n{text}",
+             its signature)\n\n",
             path = file.path,
             bytes = file.bytes,
             commit = file.commit,
             sha256 = file.sha256,
-            text = file.text,
         ));
+        if let Some(asked) = &file.asked {
+            out.push_str(&format!(
+                "(attachment={asked:?} is not a path from the repository root; \
+                 it resolved to {path}, the only match under a top directory. \
+                 Cite it by that path.)\n\n",
+                path = file.path,
+            ));
+        }
+        out.push_str(&file.text);
         if !file.text.ends_with('\n') {
             out.push('\n');
         }
@@ -2234,15 +2242,22 @@ pub(super) fn format_governance_entry(
 /// A data set's files as [`format_governance_entry`] shows them: the
 /// index first, then the listing, never the hashes
 fn format_data_set_view(view: &crate::responses::DataSetView) -> String {
+    // `how_to_read` opens with "Read this first", once (0.91.4)
     let mut out = format!(
         "\n**Data set**: {files} files, {bytes} bytes, in the repository {repo} at \
-         commit {commit}.\n**Read this first**: attachment=\"{index}\"\n",
+         commit {commit}.\n{how_to_read}\n",
         files = view.files,
         bytes = view.bytes,
         repo = view.repo,
         commit = view.commit,
-        index = view.index,
+        how_to_read = view.how_to_read,
     );
+    if let (Some(asked), Some(dir)) = (&view.asked, &view.directory) {
+        out.push_str(&format!(
+            "\nattachment={asked:?} is not a path from the repository root; it \
+             resolved to {dir}, the only match under a top directory.\n"
+        ));
+    }
     out.push_str(&match &view.directory {
         Some(dir) => format!("\nFiles under {dir}:\n"),
         None => "\nFiles:\n".to_string(),
@@ -2261,7 +2276,6 @@ fn format_data_set_view(view: &crate::responses::DataSetView) -> String {
             }
         });
     }
-    out.push_str(&format!("{}\n", view.how_to_read));
     out
 }
 
@@ -2958,9 +2972,11 @@ mod tests {
         };
         let out = format_governance_entry(&entry);
         assert!(
-            out.contains("**Read this first**: attachment=\"votes/README.md\""),
+            out.contains("Read this first: attachment=\"votes/README.md\""),
             "{out}"
         );
+        // Once (beta round, 2026-10-15: it was said twice, two ways)
+        assert_eq!(out.matches("first").count(), 2, "{out}");
         assert!(
             out.contains("- votes/README.md — Read me first (15 bytes)"),
             "{out}"
@@ -2978,8 +2994,25 @@ mod tests {
         assert!(out.contains("### File: votes/README.md\n15 bytes at commit 0123456789abcdef0123456789abcdef01234567"), "{out}");
         assert!(out.contains(&file.sha256.to_string()), "{out}");
         assert!(out.contains("manifest on record"), "{out}");
-        assert!(out.contains("\n\n# Votes\n\n[Cut at byte 8 of 15"), "{out}");
+        assert!(
+            out.contains(
+                "\n\n# Votes\n\n[Cut at the last line break before byte 9 (the \
+                 comment_budget), at byte 8 of 15"
+            ),
+            "{out}"
+        );
         assert!(!out.contains("line 2"), "{out}");
+
+        // A path relative to the top directory says what it resolved to,
+        // before the text
+        if let Some(file) = entry.data_file.as_mut() {
+            file.asked = Some("README.md".into());
+        }
+        let out = format_governance_entry(&entry);
+        let note = out
+            .find("attachment=\"README.md\" is not a path from the repository root; it resolved to votes/README.md")
+            .expect(&out);
+        assert!(note < out.find("# Votes").unwrap(), "{out}");
     }
 
     #[test]
