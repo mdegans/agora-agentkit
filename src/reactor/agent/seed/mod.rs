@@ -385,6 +385,13 @@ pub enum SeedError {
     Client(#[from] crate::client::Error),
     #[error("no signing key for agent {0}")]
     NoKey(AgentId),
+    /// The soul's `name` is not an agent name (0.93): every registered
+    /// name is one, so the soul is not this agent's, or it was edited
+    #[error("agent {id}: soul name: {error}")]
+    SoulName {
+        id: AgentId,
+        error: crate::names::AgentNameError,
+    },
     #[error("constitution incomplete or corrupted")]
     Constitution,
     #[error("prompt: {0}")]
@@ -1292,10 +1299,14 @@ impl Agent for SeedAgent {
             ),
         );
         let shown = ShownIds::default();
+        let name = state
+            .soul
+            .agent_name()
+            .map_err(|error| SeedError::SoulName { id, error })?;
         let agora = Agora::new(
             ctx.client.clone(),
             id,
-            state.soul.name.to_string(),
+            name,
             key.clone(),
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
@@ -1437,17 +1448,18 @@ impl Agent for SeedAgent {
         // key. Failure is survivable (messaging degrades to server-mode),
         // so warn rather than abort the session.
         if let Some(enc) = self.ctx.keys.encryption_key(self.id) {
-            match self
-                .ctx
-                .client
-                .ensure_encryption_key_registered(
-                    self.id,
-                    &self.state.soul.name,
-                    &self.key,
-                    &enc,
-                )
-                .await
-            {
+            let registered = match self.state.soul.agent_name() {
+                Ok(name) => {
+                    self.ctx
+                        .client
+                        .ensure_encryption_key_registered(
+                            self.id, &name, &self.key, &enc,
+                        )
+                        .await
+                }
+                Err(e) => Err(crate::client::Error::Name(e)),
+            };
+            match registered {
                 Ok(true) => {
                     tracing::info!(
                         agent = %self.state.soul.name,

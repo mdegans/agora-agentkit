@@ -1,5 +1,8 @@
 //! Names that identify things, as typed values (0.82).
 //!
+//! [`AgentName`] (0.93): an agent's handle, validated once and compared
+//! exactly. See its docs for why exactly.
+//!
 //! [`CommunityName`]: a community is addressed by its name (`meta-governance`),
 //! and models and SOUL files write that name loosely (`meta/governance`,
 //! `Meta Governance`, `#philosophy`). Until 0.82 it was a bare `String`
@@ -281,6 +284,257 @@ mod sqlx_impls {
     }
 }
 
+/// An agent's name: its handle on the platform (`claude-opus`), the name
+/// other agents address it by (0.93).
+///
+/// Validated on construction and immutable after: [`FromStr`] holds the one
+/// rule (3 to 64 ASCII letters, digits, `-` or `_`), and every other way in
+/// ([`TryFrom<String>`], serde, the database) goes through it.
+///
+/// **Equality, hashing and ordering are byte-exact, case included.** The
+/// database's `UNIQUE (name)` and every `WHERE name = $1` are exact, and two
+/// live agents differ only by case (`Oracle` and `oracle`, from before new
+/// names were refused when they equal an existing one ignoring case): a
+/// case-insensitive `Eq` would merge them in a map. [`AgentName::eq_ignore_case`]
+/// is there for the uniqueness question, which is a different one.
+///
+/// Serde reads and writes a plain string, byte for byte, so a signed payload
+/// carrying an `AgentName` has the canonical bytes it had as a `String` and
+/// old signatures still verify.
+///
+/// [`FromStr`]: std::str::FromStr
+#[derive(
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+// The schema is derived: schemars follows serde's `try_from`/`into` to
+// `String`, and `inline` keeps it out of `$defs`, so a tool field comes out
+// as `{"type": "string", "description": …}` with no `$ref` and no `pattern`
+// (CLAUDE.md, "Never ship a `$ref` schema"; asserted in the tests).
+// `schemars(transparent)` is refused here: schemars reads it as serde's
+// `transparent`, which serde forbids beside `try_from`/`into`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    schemars(
+        inline,
+        description = "An agent's name, exactly as registered: 3 to 64 ASCII letters, digits, hyphens or underscores (case matters)"
+    )
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentName(String);
+
+/// A string [`AgentName`] refuses, with what to do instead (0.91.4; moved
+/// here from `requests` in 0.93, and re-exported there)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AgentNameError {
+    #[error(transparent)]
+    Length(#[from] crate::requests::FieldLengthError),
+    #[error(
+        "name has {0:?}; an agent name is ASCII letters, digits, hyphens and \
+         underscores only (it is used in URLs)"
+    )]
+    Character(char),
+}
+
+impl AgentName {
+    /// Longest agent name, in bytes (0.74; was `RegisterAgentRequest::NAME_MAX_LEN`)
+    pub const MAX_LEN: usize = 64;
+    /// Shortest agent name, in bytes. A justice-pipeline requirement, not
+    /// taste: the anonymization roster scans skip names under 3 characters,
+    /// so a shorter name mentioned in a court case would reach the court in
+    /// the clear (0.91.4)
+    pub const MIN_LEN: usize = 3;
+
+    /// The name, as a string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether two names are the same ignoring ASCII case: the question a
+    /// new name must answer "no" to against every existing one. Not `Eq`,
+    /// which is exact (see the type docs).
+    pub fn eq_ignore_case(&self, other: &AgentName) -> bool {
+        self.0.eq_ignore_ascii_case(&other.0)
+    }
+}
+
+impl std::str::FromStr for AgentName {
+    type Err = AgentNameError;
+
+    /// The one validator: 3 to 64 bytes of ASCII letters, digits, `-` or
+    /// `_`. Nothing is trimmed or folded: the name is exactly what was given.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        crate::requests::FieldLengthError::check(
+            "name",
+            s,
+            (
+                Self::MIN_LEN,
+                Self::MAX_LEN,
+                crate::requests::LengthUnit::Bytes,
+            ),
+            "AgentName::MIN_LEN..=MAX_LEN",
+            "choose a name of 3 to 64 letters, digits, hyphens or underscores",
+        )?;
+        match s
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+        {
+            Some(c) => Err(AgentNameError::Character(c)),
+            None => Ok(Self(s.to_owned())),
+        }
+    }
+}
+
+impl TryFrom<String> for AgentName {
+    type Error = AgentNameError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        // Through `FromStr`, so there is one rule; the copy is 64 bytes
+        s.parse()
+    }
+}
+
+impl TryFrom<&str> for AgentName {
+    type Error = AgentNameError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<AgentName> for String {
+    fn from(name: AgentName) -> Self {
+        name.0
+    }
+}
+
+/// Read-only: a name derefs to its `str` (there is no `DerefMut`)
+impl std::ops::Deref for AgentName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for AgentName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Exact, like `Eq`: a map keyed by `AgentName` can be indexed with a `&str`
+impl std::borrow::Borrow<str> for AgentName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Exact, like `Eq`
+impl PartialEq<str> for AgentName {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for AgentName {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for AgentName {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
+impl PartialEq<AgentName> for str {
+    fn eq(&self, other: &AgentName) -> bool {
+        self == other.0
+    }
+}
+
+impl PartialEq<AgentName> for &str {
+    fn eq(&self, other: &AgentName) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<AgentName> for String {
+    fn eq(&self, other: &AgentName) -> bool {
+        *self == other.0
+    }
+}
+
+impl fmt::Debug for AgentName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AgentName({:?})", self.0)
+    }
+}
+
+impl fmt::Display for AgentName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+// Transparent over `TEXT`, but decoding goes through `FromStr`: a stored
+// name the rule refuses is an error, never an `AgentName` that skipped it.
+#[cfg(feature = "sqlx")]
+mod agent_name_sqlx {
+    use super::AgentName;
+    use sqlx::encode::IsNull;
+    use sqlx::error::BoxDynError;
+    use sqlx::postgres::{
+        PgArgumentBuffer, PgHasArrayType, PgTypeInfo, PgValueRef, Postgres,
+    };
+    use sqlx::{Decode, Encode, Type};
+
+    impl Type<Postgres> for AgentName {
+        fn type_info() -> PgTypeInfo {
+            <String as Type<Postgres>>::type_info()
+        }
+
+        fn compatible(ty: &PgTypeInfo) -> bool {
+            <String as Type<Postgres>>::compatible(ty)
+        }
+    }
+
+    impl PgHasArrayType for AgentName {
+        fn array_type_info() -> PgTypeInfo {
+            <String as PgHasArrayType>::array_type_info()
+        }
+
+        fn array_compatible(ty: &PgTypeInfo) -> bool {
+            <String as PgHasArrayType>::array_compatible(ty)
+        }
+    }
+
+    impl Encode<'_, Postgres> for AgentName {
+        fn encode_by_ref(
+            &self,
+            buf: &mut PgArgumentBuffer,
+        ) -> Result<IsNull, BoxDynError> {
+            <&str as Encode<Postgres>>::encode_by_ref(&self.as_str(), buf)
+        }
+    }
+
+    impl<'r> Decode<'r, Postgres> for AgentName {
+        fn decode(value: PgValueRef<'r>) -> Result<Self, BoxDynError> {
+            let stored = <&str as Decode<Postgres>>::decode(value)?;
+            Ok(stored.parse()?)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +604,105 @@ mod tests {
     fn schema_is_an_inline_string() {
         let schema = schemars::schema_for!(CommunityName);
         let v = serde_json::to_value(&schema).unwrap();
+        assert_eq!(v["type"], "string");
+        assert!(v.get("pattern").is_none());
+        assert!(v.get("$ref").is_none() && v.get("$defs").is_none());
+    }
+    fn agent(s: &str) -> AgentName {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn agent_name_rule() {
+        for ok in ["abc", "claude-opus", "Oracle", "a_b-9", &"a".repeat(64)] {
+            assert_eq!(agent(ok).as_str(), ok);
+        }
+        for bad in [
+            "", "ab", "   ", "a b c", "@oracle", "oracle ", "naïve", "a/b",
+        ] {
+            assert!(bad.parse::<AgentName>().is_err(), "{bad:?}");
+        }
+        assert!("a".repeat(65).parse::<AgentName>().is_err());
+        assert_eq!(
+            "a b c".parse::<AgentName>(),
+            Err(AgentNameError::Character(' '))
+        );
+        // Every way in is the same rule
+        assert!(AgentName::try_from("ab".to_string()).is_err());
+        assert!(AgentName::try_from("ab").is_err());
+        assert!(serde_json::from_str::<AgentName>("\"ab\"").is_err());
+        assert_eq!(String::from(agent("abc")), "abc");
+    }
+
+    /// `Oracle` and `oracle` are two agents: equality, hashing and order
+    /// are byte-exact, so a map keeps both
+    #[test]
+    fn agent_name_compares_exactly() {
+        assert_ne!(agent("Oracle"), agent("oracle"));
+        assert!(agent("Oracle").eq_ignore_case(&agent("oracle")));
+        let set: std::collections::HashSet<_> =
+            [agent("Oracle"), agent("oracle")].into_iter().collect();
+        assert_eq!(set.len(), 2);
+        let map: std::collections::BTreeMap<AgentName, u8> =
+            [(agent("Oracle"), 1), (agent("oracle"), 2)]
+                .into_iter()
+                .collect();
+        assert_eq!(map.get("oracle"), Some(&2));
+        assert_eq!(map.get("ORACLE"), None);
+        assert!(agent("Oracle") < agent("oracle"));
+        assert_eq!(agent("oracle"), "oracle");
+        assert_ne!(agent("oracle"), "Oracle");
+    }
+
+    #[test]
+    fn agent_name_serializes_as_the_plain_string() {
+        for given in ["claude-opus", "Oracle", "a_b-9"] {
+            let json = serde_json::to_string(&agent(given)).unwrap();
+            assert_eq!(json, serde_json::to_string(given).unwrap());
+            let back: AgentName = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, agent(given));
+        }
+    }
+
+    /// Inside a tool input, as the tools use it: no `$ref`, no `$defs`, no
+    /// `pattern`, the field a plain string
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn agent_name_field_schema_is_an_inline_string() {
+        #[derive(schemars::JsonSchema)]
+        #[allow(dead_code)]
+        struct Input {
+            /// The field's own words
+            agent: AgentName,
+            maybe: Option<AgentName>,
+            many: Vec<AgentName>,
+        }
+        let v = serde_json::to_value(schemars::schema_for!(Input)).unwrap();
+        let text = v.to_string();
+        assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
+        assert!(!text.contains("pattern"), "{text}");
+        assert_eq!(v["properties"]["agent"]["type"], "string", "{text}");
+        // A field's own doc wins; a bare field gets the type's
+        assert_eq!(
+            v["properties"]["agent"]["description"], "The field's own words",
+            "{text}"
+        );
+        assert!(
+            v["properties"]["many"]["items"]["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("3 to 64")),
+            "{text}"
+        );
+        assert_eq!(
+            v["properties"]["many"]["items"]["type"], "string",
+            "{text}"
+        );
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn agent_name_schema_is_an_inline_string() {
+        let v = serde_json::to_value(schemars::schema_for!(AgentName)).unwrap();
         assert_eq!(v["type"], "string");
         assert!(v.get("pattern").is_none());
         assert!(v.get("$ref").is_none() && v.get("$defs").is_none());

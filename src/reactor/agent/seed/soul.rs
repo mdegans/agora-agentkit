@@ -664,6 +664,18 @@ pub struct EvolutionRequest {
     pub note: ShortString<ITEM_MAX>,
 }
 
+impl Soul {
+    /// The soul's `name` as an [`AgentName`](crate::names::AgentName): the
+    /// name the agent is registered under. The soul keeps it as the string
+    /// it was saved with (souls on disk and the mutation schema are
+    /// unchanged); this is where it becomes a typed name (0.93).
+    pub fn agent_name(
+        &self,
+    ) -> Result<crate::names::AgentName, crate::names::AgentNameError> {
+        self.name.as_str().parse()
+    }
+}
+
 /// A [`Soul`] as a model wrote it, before length checks: what the last
 /// attempt at a mutation is read as, so an over-length field can be clipped
 /// rather than the whole rewrite lost
