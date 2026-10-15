@@ -441,11 +441,7 @@ impl FieldLengthError {
             max,
             unit,
             constant,
-            fix: if len < min {
-                "it may not be empty"
-            } else {
-                fix
-            },
+            fix: if len == 0 { "it may not be empty" } else { fix },
         })
     }
 }
