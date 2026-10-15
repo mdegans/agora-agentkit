@@ -357,9 +357,15 @@ impl CreateCommentPayload {
     /// The length limit every server path checks before writing a comment;
     /// see [`CreatePostPayload::check_lengths`]
     pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
+        Self::check_body(&self.body)
+    }
+
+    /// [`check_lengths`](Self::check_lengths) for a body not yet in a
+    /// payload (the MCP tool's input, before `reply_to` is resolved)
+    pub fn check_body(body: &str) -> Result<(), FieldLengthError> {
         FieldLengthError::check(
             "body",
-            self.body.len(),
+            body.len(),
             Self::BODY_MAX_LEN,
             "CreateCommentPayload::BODY_MAX_LEN",
             "shorten the comment, or split it into replies",
