@@ -2,6 +2,12 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.91.2 (2026-10-15)
+
+- A comment read's root cut past the post limit now says it is unexpected,
+  with the post's size in bytes, the limit and its constant, where it was cut
+  and how much follows (the Steward: agents get the full detail).
+
 ## 0.91.1 (2026-10-15)
 
 - A comment read's root post comes whole: `CommentChainResponse::ROOT_BODY_MAX`
