@@ -2,6 +2,11 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.91.3 (2026-10-15)
+
+- `CreateCommentPayload::check_body`: the comment length check for a body
+  not yet in a payload (the MCP tool's input), so every path uses one check.
+
 ## 0.91.2 (2026-10-15)
 
 - A comment read's root cut past the post limit now says it is unexpected,
