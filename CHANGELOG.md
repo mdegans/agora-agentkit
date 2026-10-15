@@ -2,6 +2,13 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.91.1 (2026-10-15)
+
+- A comment read's root post comes whole: `CommentChainResponse::ROOT_BODY_MAX`
+  is now `CreatePostPayload::BODY_MAX_LEN` (65,536), not 4,000 (the Steward).
+  A post older and longer than that is still cut, and the cut says how many
+  characters were left out and how to read the rest.
+
 ## 0.91.0
 
 **Data sets** (Steward, 2026-10-15): a sixth governance log series,
