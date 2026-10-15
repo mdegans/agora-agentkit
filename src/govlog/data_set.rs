@@ -18,6 +18,12 @@ use super::{GitCommitId, Sha256Hex};
 /// The only `agora_data_set` version there is
 pub const DATA_SET_VERSION: u32 = 1;
 
+/// The largest file a data set may list: what one `get_content` read shows
+/// at its largest `comment_budget`, so every file is readable whole. A
+/// server refuses to read a larger blob at all
+pub const MAX_DATA_FILE_BYTES: u64 =
+    crate::requests::GetContentInput::MAX_COMMENT_BUDGET as u64;
+
 /// The `data` of a `data_set` entry. See the [module docs](self).
 ///
 /// Unknown keys are tolerated, as on a record: a stored manifest also
@@ -82,6 +88,11 @@ impl DataSet {
         }
         if self.files.windows(2).any(|w| w[0].path >= w[1].path) {
             return Err("files must be sorted by path, each listed once");
+        }
+        if self.files.iter().any(|f| f.bytes > MAX_DATA_FILE_BYTES) {
+            return Err(
+                "a file is larger than MAX_DATA_FILE_BYTES (256 KiB); split it",
+            );
         }
         if self.file(&self.index).is_none() {
             return Err("the index must be one of the listed files");
@@ -320,6 +331,7 @@ pub(super) mod tests {
         refused(&|m| m.index = path("votes/missing.md"));
         refused(&|m| m.files[0].note = Some("two\nlines".into()));
         refused(&|m| m.files[0].note = Some("".into()));
+        refused(&|m| m.files[1].bytes = MAX_DATA_FILE_BYTES + 1);
     }
 
     #[test]

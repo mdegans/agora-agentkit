@@ -108,7 +108,7 @@ pub use obligation::{
 mod data_set;
 pub use data_set::{
     DATA_SET_VERSION, DataFile, DataFileMismatch, DataFilePath,
-    DataFilePathError, DataSet,
+    DataFilePathError, DataSet, MAX_DATA_FILE_BYTES,
 };
 
 mod record;
@@ -2446,6 +2446,14 @@ pub enum LinkError {
     HashMismatch,
     #[error("signature does not verify under the published key")]
     BadSignature,
+    /// The entry's type is newer than this verifier: its envelope cannot
+    /// be recomputed (the type's name is part of it), so the entry is
+    /// unverifiable here rather than tampered with. Upgrade agentkit (0.91)
+    #[error(
+        "this entry's type is newer than this verifier, which cannot check it; \
+         upgrade agora-agentkit"
+    )]
+    UnknownEntryType,
 }
 
 /// Recompute a link's `entry_hash` from its fields
@@ -2468,6 +2476,9 @@ pub fn verify_link(
     let a = &link.attestation;
     if a.envelope_version != ENVELOPE_VERSION {
         return Err(LinkError::UnsupportedVersion(a.envelope_version));
+    }
+    if link.entry_type == GovernanceLogEntryType::Unknown {
+        return Err(LinkError::UnknownEntryType);
     }
     if recompute_entry_hash(link) != a.entry_hash {
         return Err(LinkError::HashMismatch);
@@ -2578,7 +2589,8 @@ fn reserved_prefix(
         | GovernanceLogEntryType::AppealsCourtDecision
         | GovernanceLogEntryType::EmergencyAction
         | GovernanceLogEntryType::PolicyChange
-        | GovernanceLogEntryType::StewardVeto => None,
+        | GovernanceLogEntryType::StewardVeto
+        | GovernanceLogEntryType::Unknown => None,
     }
 }
 
@@ -2590,7 +2602,9 @@ fn reserved_for(prefix: GovernanceLogPrefix) -> Option<GovernanceLogEntryType> {
         GovernanceLogPrefix::Rec => Some(GovernanceLogEntryType::StewardRecord),
         GovernanceLogPrefix::Obl => Some(GovernanceLogEntryType::Obligation),
         GovernanceLogPrefix::Data => Some(GovernanceLogEntryType::DataSet),
-        GovernanceLogPrefix::Gov | GovernanceLogPrefix::App => None,
+        GovernanceLogPrefix::Gov
+        | GovernanceLogPrefix::App
+        | GovernanceLogPrefix::Unknown => None,
     }
 }
 

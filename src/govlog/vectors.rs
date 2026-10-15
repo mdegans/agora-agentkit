@@ -761,6 +761,28 @@ fn cases() -> Vec<Case> {
         c.links,
     ));
 
+    // -- a type from a newer server (0.91) --
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        "ZZZ-2026-0001".to_string().try_into().unwrap(),
+        GovernanceLogEntryType::Unknown,
+        json!({"title": "something a newer server writes"}),
+        false,
+    );
+    c.decision(&steward);
+    out.push(Case::new(
+        "unknown_entry_type",
+        "An entry of a type, and in a series, this verifier does not know. \
+         It is read, not refused: the entry is reported as unverifiable \
+         here (its envelope names the type), and the chain is not ok.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
     // -- a data set (0.91) --
 
     let data_set =

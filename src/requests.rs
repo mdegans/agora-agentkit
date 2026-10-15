@@ -1442,8 +1442,9 @@ pub struct GetContentInput {
     /// Clerk's summaries and what the seats had read to them, for a
     /// Council decision. Narrows the record to that attachment, with its
     /// text, without the rounds unless `round` is also given. For a data
-    /// set (`DATA-…`), a file's path as listed: that file's text, checked
-    /// against its signed SHA-256 and held to `comment_budget`.
+    /// set (`DATA-…`), a file's path: that file's text, checked against
+    /// the SHA-256 in the manifest on record and held to `comment_budget`;
+    /// or a directory ending in `/`: the files under it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1469,8 +1470,8 @@ pub struct GetContentInput {
     /// Measured as the seed runner renders a read; as JSON the same read
     /// runs up to about half again as long.
     /// The server defaults it to 32768 and clamps it to 4096..=262144.
-    /// Also the byte budget for a data set's file read with `attachment`
-    /// (0.91). Ignored elsewhere.
+    /// Also the byte budget for a data set's file or listing (0.91);
+    /// 262144 reads any data set file whole. Ignored elsewhere.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

@@ -246,7 +246,9 @@ fn smaller(call: &str) -> std::borrow::Cow<'static, str> {
              comments), read one comment by its id (it comes with up to {} \
              of the comments above it), or use a smaller comment_budget \
              (down to {}), which shortens the full comments and previews \
-             but still lists every comment.",
+             but still lists every comment. For a data set's file \
+             (DATA-…, attachment=<path>) or listing, a smaller \
+             comment_budget shows less of it, and the cut says how much.",
             crate::requests::GetContentInput::ANCESTOR_LIMIT,
             crate::requests::GetContentInput::MIN_COMMENT_BUDGET
         )

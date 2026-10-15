@@ -508,7 +508,7 @@ def _hex_field(obj, name, length, where):
 def _id_field(obj, name, where):
     value = obj.get(name)
     if not isinstance(value, str) or not re.fullmatch(
-        r"(GOV|APP|AMD|KEY|REC|OBL|DATA)-\d{4}-\d{4}", value
+        r"[A-Z]{3,4}-\d{4}-\d{4}", value
     ):
         raise InputError("%s: %s is not a governance log id" % (where, name))
     return value
@@ -604,8 +604,10 @@ def parse_link(raw):
     entry_id = _id_field(raw, "id", "link")
     where = "link %s" % entry_id
     entry_type = raw.get("entry_type")
-    if not isinstance(entry_type, str) or entry_type not in ENTRY_TYPES:
-        raise InputError("%s: unknown entry_type %r" % (where, entry_type))
+    # A type this verifier does not know is read, and reported as
+    # unverifiable below; only a non-string is not a link at all.
+    if not isinstance(entry_type, str):
+        raise InputError("%s: entry_type %r is not a string" % (where, entry_type))
     attestation = raw.get("attestation")
     if not isinstance(attestation, dict):
         raise InputError("%s: no attestation" % where)
@@ -1650,6 +1652,15 @@ def verify_chain(raw_links, genesis_key, anchor, roots=None, threshold=None):
             problems.append(
                 "envelope version %r is not supported (this verifier knows %d)"
                 % (a["envelope_version"], ENVELOPE_VERSION)
+            )
+        elif link["entry_type"] not in ENTRY_TYPES:
+            # Newer than this verifier. The Rust verifier cannot recompute
+            # such an envelope (it does not keep the type's name), so
+            # neither does this one: unverifiable here, not tampered with.
+            hash_ok = False
+            problems.append(
+                "entry type %r is newer than this verifier, which cannot check it"
+                % link["entry_type"]
             )
         elif entry_hash(link) != a["entry_hash"]:
             hash_ok = False

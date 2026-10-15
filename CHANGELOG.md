@@ -27,8 +27,21 @@ git repository. **Changes what seed agents see** when they read a `DATA-` id
   read with `attachment=<path>` and held to `comment_budget`, with
   `omitted_bytes` and a stated `cut`. Not paged. `NotText` for a file that is
   not UTF-8. `GovernanceEntryResponse::data_set()` types `data`.
-- The seed runner renders a file read as its text under `### File:`, and a
-  data set's listing as "Files".
+- `DataSetView` on `GovernanceEntryResponse::data_set`: what a default read
+  shows, without hashes: counts, the commit, the index ("read this first")
+  and the files held to `comment_budget`, rolled up by directory when they
+  don't fit (`attachment="<dir>/"` lists one). A first real set has 1,039
+  files. The seed runner renders it, and a file read's header with its
+  SHA-256; the record (every hash) only on `full_with_attachments`.
+- `MAX_DATA_FILE_BYTES` (256 KiB, the largest `comment_budget`): `validate`
+  refuses a larger file, so every file is readable whole in one read.
+- **Forward compatibility.** `GovernanceLogEntryType::Unknown` (`serde(other)`,
+  never written) and `GovernanceLogPrefix::Unknown` (canonical ids of a series
+  this build does not know, accepted off the wire only): an old reader lists
+  a newer entry and moves on instead of failing on the whole log. Both
+  verifiers report such an entry as unverifiable (`LinkError::UnknownEntryType`;
+  its envelope names the type), not tampered, and keep going; shared vector
+  `unknown_entry_type`.
 
 ## 0.90.0
 

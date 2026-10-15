@@ -845,6 +845,10 @@ pub enum GovernanceLogPrefix {
     /// A data set: the signed manifest of files in the data repo (0.91).
     /// Four letters, the first series that is not three
     Data,
+    /// A series this build does not know, on an id a newer server sent
+    /// (0.91). Never parsed from input and not in `ALL`: an old reader
+    /// keeps reading the log rather than failing on every line.
+    Unknown,
 }
 
 impl GovernanceLogPrefix {
@@ -869,6 +873,7 @@ impl GovernanceLogPrefix {
             Self::Rec => "REC",
             Self::Obl => "OBL",
             Self::Data => "DATA",
+            Self::Unknown => "?",
         }
     }
 }
@@ -947,9 +952,21 @@ impl GovernanceLogId {
 
     /// Which series this id belongs to
     pub fn prefix(&self) -> GovernanceLogPrefix {
-        Self::parts(&self.0)
-            .expect("a GovernanceLogId is citation-shaped by construction")
-            .0
+        Self::parts(&self.0).map_or(GovernanceLogPrefix::Unknown, |p| p.0)
+    }
+
+    /// `true` for the canonical shape of a series this build does not
+    /// know: three or four capital letters, a four-digit year and serial.
+    /// Accepted only as a newer server writes it (0.91)
+    fn is_canonical_unknown(s: &str) -> bool {
+        let parts: Vec<&str> = s.split('-').collect();
+        let digits =
+            |p: &str| p.len() == 4 && p.chars().all(|c| c.is_ascii_digit());
+        matches!(parts.as_slice(), [letters, year, serial]
+            if (3..=4).contains(&letters.len())
+                && letters.chars().all(|c| c.is_ascii_uppercase())
+                && digits(year)
+                && digits(serial))
     }
 
     /// The canonical form of a citation as agents and people write it:
@@ -981,8 +998,10 @@ impl GovernanceLogId {
         year: i32,
         serial: u32,
     ) -> Option<Self> {
-        ((1000..=9999).contains(&year) && (1..=9999).contains(&serial))
-            .then(|| Self(format!("{prefix}-{year}-{serial:04}")))
+        (prefix != GovernanceLogPrefix::Unknown
+            && (1000..=9999).contains(&year)
+            && (1..=9999).contains(&serial))
+        .then(|| Self(format!("{prefix}-{year}-{serial:04}")))
     }
 
     fn parts(s: &str) -> Option<(GovernanceLogPrefix, &str, &str)> {
@@ -1026,8 +1045,10 @@ impl std::str::FromStr for GovernanceLogId {
 impl TryFrom<String> for GovernanceLogId {
     type Error = GovernanceLogIdError;
 
+    /// What the wire carries: a known series, read leniently, or the
+    /// canonical id of a series a newer server added ([`GovernanceLogPrefix::Unknown`])
     fn try_from(s: String) -> Result<Self, Self::Error> {
-        if Self::is_citation_shaped(&s) {
+        if Self::is_citation_shaped(&s) || Self::is_canonical_unknown(&s) {
             return Ok(Self(s));
         }
         s.parse()
@@ -2692,6 +2713,31 @@ mod tests {
             assert_eq!(id.prefix().as_str(), letters);
             assert_eq!(id.prefix().to_string().parse(), Ok(prefix));
         }
+        // A newer server's series: read off the wire, never from input.
+        let newer: GovernanceLogId =
+            serde_json::from_value(serde_json::json!("ZZZ-2026-0001")).unwrap();
+        assert_eq!(newer.prefix(), GovernanceLogPrefix::Unknown);
+        assert_eq!(newer.as_str(), "ZZZ-2026-0001");
+        assert!("ZZZ-2026-0001".parse::<GovernanceLogId>().is_err());
+        assert!(!GovernanceLogId::is_citation_shaped("ZZZ-2026-0001"));
+        for junk in [
+            "zzz-2026-0001",
+            "ZZZZZ-2026-0001",
+            "ZZ-2026-0001",
+            "ZZZ-2026-1",
+        ] {
+            assert!(
+                serde_json::from_value::<GovernanceLogId>(serde_json::json!(
+                    junk
+                ))
+                .is_err(),
+                "{junk}"
+            );
+        }
+        assert_eq!(
+            GovernanceLogId::from_parts(GovernanceLogPrefix::Unknown, 2026, 1),
+            None
+        );
         // Every prefix but DATA is three letters; nothing else assumes it.
         for prefix in GovernanceLogPrefix::ALL {
             let want = if prefix == GovernanceLogPrefix::Data {
