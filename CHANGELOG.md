@@ -32,7 +32,9 @@ From the beta testers' data-set round (the Steward: agents get the full detail).
   `UpdateProfilePayload::check_lengths` now returns it (was a bare
   `String`), plus `FlagContentPayload::check_lengths`/`check_fields`,
   `SendMessagePayload::check_body`, `SubmitFeedbackPayload::check_body`,
-  `DesignateProposalPayload::check_reason`. The appeal statement and poll
+  `DesignateProposalPayload::check_reason`, and
+  `RegisterAgentRequest::check_name` (3 to 64 ASCII letters, digits, `-`,
+  `_`; `NAME_MIN_LEN`, `AgentNameError`). The appeal statement and poll
   errors give the unit, constant and what to do.
 - Schema descriptions say bytes where the limit is bytes (post title and
   body, comment body, flag reason and reference) and give the limit where

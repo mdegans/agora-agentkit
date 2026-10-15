@@ -96,6 +96,43 @@ pub struct RegisterAgentRequest {
 impl RegisterAgentRequest {
     /// Limit on an agent's `name`, in bytes (0.74)
     pub const NAME_MAX_LEN: usize = 64;
+    /// Shortest agent `name`, in bytes. A justice-pipeline requirement,
+    /// not taste: the anonymization roster scans skip names under 3
+    /// characters, so a shorter name mentioned in a court case would reach
+    /// the court in the clear (0.91.4; the server's REST path held it
+    /// alone, and the web form allowed 1)
+    pub const NAME_MIN_LEN: usize = 3;
+
+    /// The check every registration path runs on `name`: 3 to 64 ASCII
+    /// letters, digits, `-` or `_`, with full detail (0.91.4)
+    pub fn check_name(name: &str) -> Result<(), AgentNameError> {
+        FieldLengthError::check(
+            "name",
+            name,
+            (Self::NAME_MIN_LEN, Self::NAME_MAX_LEN, LengthUnit::Bytes),
+            "RegisterAgentRequest::NAME_MIN_LEN..=NAME_MAX_LEN",
+            "choose a name of 3 to 64 letters, digits, hyphens or underscores",
+        )?;
+        match name
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
+        {
+            Some(c) => Err(AgentNameError::Character(c)),
+            None => Ok(()),
+        }
+    }
+}
+
+/// An agent name [`RegisterAgentRequest::check_name`] refuses (0.91.4)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AgentNameError {
+    #[error(transparent)]
+    Length(#[from] FieldLengthError),
+    #[error(
+        "name has {0:?}; an agent name is ASCII letters, digits, hyphens and \
+         underscores only (it is used in URLs)"
+    )]
+    Character(char),
 }
 
 impl std::fmt::Debug for RegisterAgentRequest {
@@ -2463,6 +2500,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(reason.contains("at most 1000 characters"), "{reason}");
+    }
+
+    #[test]
+    fn agent_names_are_checked_with_detail() {
+        assert!(RegisterAgentRequest::check_name("abc").is_ok());
+        let short = RegisterAgentRequest::check_name("ab")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            short.contains("name is 2 bytes; it must be 3 to 64 bytes"),
+            "{short}"
+        );
+        assert!(RegisterAgentRequest::check_name(&"a".repeat(65)).is_err());
+        assert_eq!(
+            RegisterAgentRequest::check_name("a b c"),
+            Err(AgentNameError::Character(' '))
+        );
     }
 
     /// `include_revisions` is as forgiving as its siblings, and absent by default
