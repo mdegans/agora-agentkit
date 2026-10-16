@@ -11,6 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use misanthropic::prompt::Prompt;
 use misanthropic::tool::{self, MethodDef, Notifications, Tool, Use};
 
+use crate::ids::{AgentId, ContentRef};
+use crate::requests::GetContentInput;
+
 /// Tokens held back from the context window when deciding whether a tool
 /// result fits, on a gauge built with [`ContextGauge::default`]. A
 /// [`SeedAgent`](super::SeedAgent) sizes its reserve from its own budgets
@@ -184,15 +187,35 @@ pub(super) fn estimate_tokens(text: &str) -> u64 {
 pub struct Gauged<T> {
     inner: T,
     context: ContextGauge,
+    /// Whose session this is, for the log when a result is left out
+    agent_id: Option<AgentId>,
 }
 
 impl<T> Gauged<T> {
     pub fn new(inner: T, context: ContextGauge) -> Self {
-        Self { inner, context }
+        Self {
+            inner,
+            context,
+            agent_id: None,
+        }
     }
 
-    /// Count `result`, or stand a note in for it when it would not fit
-    fn admit(&self, call: &str, mut result: tool::Result) -> tool::Result {
+    /// Name the agent in the log when a result is left out (0.94: the
+    /// WARN said only the tool and the sizes, so a morning of refused
+    /// reads could not be traced to who read what)
+    pub fn for_agent(mut self, agent_id: AgentId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    /// Count `result`, or stand a note in for it when it would not fit.
+    /// `input` is the call's, for the log.
+    fn admit(
+        &self,
+        call: &str,
+        input: &serde_json::Value,
+        mut result: tool::Result,
+    ) -> tool::Result {
         let text = result.content.to_string();
         let tokens = estimate_tokens(&text);
         if self.context.fits(tokens) {
@@ -200,10 +223,16 @@ impl<T> Gauged<T> {
             return result;
         }
         let held = self.context.get();
+        let room = self.context.room();
+        let requested = Requested::of(call, input);
         tracing::warn!(
+            agent_id = self.agent_id.as_ref().map(tracing::field::display),
             tool = call,
+            target = requested.target.as_ref().map(tracing::field::display),
+            comment_budget = requested.comment_budget,
             tokens,
             held,
+            room,
             window = self.context.window(),
             "tool result would not fit in context; replaced by a note"
         );
@@ -215,10 +244,12 @@ impl<T> Gauged<T> {
                 "This result is about {tokens} tokens ({} KB); with about {held} \
                  already in your context (this turn's other results included), \
                  it would not fit in your {} token window less the {} kept for \
-                 the end of your session, so it was left out. {}",
+                 the end of your session, so it was left out. About {room} \
+                 tokens are left for results this turn.{} {}",
                 text.len() / 1024,
                 self.context.window(),
                 self.context.reserve(),
+                budget_that_fits(call, room),
                 smaller(call),
             )
         } else {
@@ -232,6 +263,53 @@ impl<T> Gauged<T> {
         result.content = note.into();
         result.is_error = true;
         result
+    }
+}
+
+/// What a left-out call asked for, for the log: `get_content`'s id (or
+/// slug) and `comment_budget`. Nothing for other tools, or for an input
+/// that does not parse (the call already answered, so it rarely won't).
+#[derive(Debug, Default)]
+struct Requested {
+    target: Option<ContentRef>,
+    comment_budget: Option<u32>,
+}
+
+impl Requested {
+    fn of(call: &str, input: &serde_json::Value) -> Self {
+        if call != "get_content" {
+            return Self::default();
+        }
+        serde_json::from_value::<GetContentInput>(input.clone())
+            .map(|i| Self {
+                target: Some(i.id),
+                comment_budget: i.comment_budget,
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// For a `get_content` refusal, the largest `comment_budget` the `room`
+/// left would hold, at [`BYTES_PER_TOKEN`] and within the server's clamp,
+/// or that none would (0.94). Empty for other tools.
+fn budget_that_fits(call: &str, room: u64) -> String {
+    if call != "get_content" {
+        return String::new();
+    }
+    let min = u64::from(GetContentInput::MIN_COMMENT_BUDGET);
+    let max = u64::from(GetContentInput::MAX_COMMENT_BUDGET);
+    let bytes = room.saturating_mul(BYTES_PER_TOKEN);
+    if bytes < min {
+        format!(
+            " That is less than the smallest comment_budget ({min}) holds, \
+             so no read of a post with its comments fits this turn."
+        )
+    } else {
+        format!(
+            " For a post that is a comment_budget of at most {}, though the \
+             post itself and the line listing each comment come on top of it.",
+            bytes.min(max)
+        )
     }
 }
 
@@ -272,8 +350,9 @@ impl<T: Tool> Tool for Gauged<T> {
 
     async fn call(&mut self, call: Use) -> tool::Result {
         let name = call.name.clone();
+        let input = call.input.clone();
         let result = self.inner.call(call).await;
-        self.admit(&name, result)
+        self.admit(&name, &input, result)
     }
 
     async fn save_json(&mut self) -> serde_json::Value {
@@ -434,6 +513,76 @@ mod tests {
         gauge.set(131_072 - 34_768 - MIN_ROUND_ROOM);
         let r = tool.call(call("get_content")).await;
         assert!(r.content.to_string().starts_with("This result is about"));
+    }
+
+    /// A refused read says how much room is left this turn, and for
+    /// get_content the largest comment_budget that holds: tokens × 3,
+    /// within 4096..=262144, or that none does below 4096 (0.94)
+    #[tokio::test]
+    async fn a_refusal_says_what_is_left_and_the_budget_that_fits() {
+        // 60k window, reserve 32,768: 20k held leaves 7,232 tokens of room,
+        // 21,696 bytes of comment_budget
+        let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        gauge.set(20_000);
+        let mut tool = Gauged::new(Echo { len: 60_000 }, gauge.clone());
+        let note = tool.call(call("get_content")).await.content.to_string();
+        assert!(
+            note.contains("About 7232 tokens are left for results this turn."),
+            "{note}"
+        );
+        assert!(
+            note.contains("a comment_budget of at most 21696,"),
+            "{note}"
+        );
+
+        // Room past the clamp: the most the server takes
+        let roomy = ContextGauge::new(1_000_000, CONTEXT_BUFFER_TOKENS);
+        roomy.set(1_000_000 - 250_000 - 150_000);
+        let mut tool = Gauged::new(Echo { len: 600_000 }, roomy.clone());
+        let note = tool.call(call("get_content")).await.content.to_string();
+        assert!(note.contains("About 150000 tokens are left"), "{note}");
+        assert!(note.contains("comment_budget of at most 262144,"), "{note}");
+
+        // Under the floor: says none fits
+        let tight = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        tight.set(60_000 - 32_768 - 1_000);
+        let mut tool = Gauged::new(Echo { len: 60_000 }, tight.clone());
+        let note = tool.call(call("get_content")).await.content.to_string();
+        assert!(note.contains("About 1000 tokens are left"), "{note}");
+        assert!(
+            note.contains(
+                "less than the smallest comment_budget (4096) holds, so no \
+                 read of a post with its comments fits this turn."
+            ),
+            "{note}"
+        );
+
+        // Other tools get the room, not a budget
+        let other = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        other.set(20_000);
+        let mut tool = Gauged::new(Echo { len: 60_000 }, other.clone());
+        let note = tool.call(call("search")).await.content.to_string();
+        assert!(note.contains("About 7232 tokens are left"), "{note}");
+        assert!(!note.contains("comment_budget"), "{note}");
+    }
+
+    /// The log names what a refused get_content asked for
+    #[test]
+    fn a_refused_reads_target_and_budget_are_parsed_for_the_log() {
+        let r = Requested::of(
+            "get_content",
+            &serde_json::json!({"id": "05676b9d", "comment_budget": "262144"}),
+        );
+        assert_eq!(r.target.unwrap().to_string(), "05676b9d");
+        assert_eq!(r.comment_budget, Some(262_144));
+        let r = Requested::of(
+            "get_content",
+            &serde_json::json!({"id": "protocol"}),
+        );
+        assert_eq!(r.target.unwrap().to_string(), "protocol");
+        assert_eq!(r.comment_budget, None);
+        let r = Requested::of("search", &serde_json::json!({"query": "x"}));
+        assert!(r.target.is_none() && r.comment_budget.is_none());
     }
 
     /// A quarter of the window, at least CLOSING_RESERVE_MIN, at least the

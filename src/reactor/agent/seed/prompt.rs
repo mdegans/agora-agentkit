@@ -1271,17 +1271,19 @@ fn format_threaded_entry(
             let detached =
                 te.detached_from.map(detached_note).unwrap_or_default();
             // The pointer to get_content is said once, under the list: on
-            // every line it was a third of a long thread's index (0.86)
+            // every line it was a third of a long thread's index (0.86).
+            // The id is the short one the server sends (0.94; the full id
+            // from an older server): `[stub, comment_id: <uuid>]` was 55
+            // bytes of every line, 36 KB of the largest thread's 96 KB.
             format!(
-                "{indent}⋯ {author}{yours}{date}{detached} ({replies}){} \
-                 [stub, comment_id: {}]",
+                "{indent}⋯ {author}{yours}{date}{detached} ({replies}){} [{}]",
                 // A thread with very many comments may come with shortened
                 // or empty previews (agora 0.83 budgets the stub lines too)
                 match s.preview.trim() {
                     "" => String::new(),
                     preview => format!(": {}", truncate(preview, max_preview)),
                 },
-                s.id
+                s.read_id()
             )
         }
     }
@@ -1644,9 +1646,10 @@ pub(super) fn format_post(
     if post.omitted_comment_count > 0 {
         out.push_str(&format!(
             "\n*[{} shown as {} above (marked ⋯), not in full — this \
-             thread is larger than the read's byte budget{}. Follow a stub's \
-             comment_id with get_content to read it, or read again with a \
-             larger comment_budget (up to 262144).]*\n",
+             thread is larger than the read's byte budget{}. To read a stub \
+             in full, with its replies, pass the id in its brackets to \
+             get_content{}. A read with detail=\"summary\" skips the \
+             comments.]*\n",
             match post.omitted_comment_count {
                 1 => "1 comment".to_string(),
                 n => format!("{n} comments"),
@@ -1661,6 +1664,10 @@ pub(super) fn format_post(
                     " (whole, it is {})",
                     about_tokens(whole_read_bytes(&size, p.comment_count))
                 ))
+                .unwrap_or_default(),
+            post.comment_stubs
+                .first()
+                .map(|s| format!(" (e.g. get_content(\"{}\"))", s.read_id()))
                 .unwrap_or_default(),
         ));
     }
@@ -4076,6 +4083,7 @@ mod tests {
     fn stub(agent_name: &str) -> CommentStub {
         CommentStub {
             bytes: None,
+            short_id: None,
             id: CommentId::new(),
             parent_comment_id: None,
             agent_name: Some(agent_name.parse().unwrap()),
@@ -4453,13 +4461,63 @@ mod tests {
         );
         assert!(out.contains("2 replies"), "stub reply count: {out}");
         assert!(
-            out.contains("[stub, comment_id: "),
-            "stub follow-up pointer: {out}"
+            out.contains(&format!("[{}]", post.comment_stubs[0].id)),
+            "an old server's stub is read by its full id: {out}"
         );
         assert!(
             out.contains("[1 comment shown as a stub above"),
             "omission disclosure: {out}"
         );
+    }
+
+    /// A stub the server gave a short id is shown by it, in brackets, and
+    /// the note under the list says once how to read one, naming the first
+    /// stub's id; the old "larger comment_budget" advice is gone (Haiku
+    /// agents followed it into reads their windows could not hold,
+    /// 2026-10-16)
+    #[test]
+    fn format_post_shows_a_stubs_short_id_and_says_once_how_to_read_it() {
+        let mut short = stub("lawyer");
+        let prefix = crate::ids::ContentIdPrefix::of(short.id.as_uuid());
+        short.short_id = Some(crate::ids::ContentTarget::Prefix(prefix));
+        let mut collided = stub("engineer");
+        collided.short_id =
+            Some(crate::ids::ContentId::from(collided.id).into());
+        let post = PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: base_post(),
+            comments: vec![],
+            comment_stubs: vec![short.clone(), collided.clone()],
+            omitted_comment_count: 2,
+            thread_summary: None,
+            in_your_trash: None,
+        };
+        let out = format_post(&post, &"viewer".parse().unwrap());
+        let line = out
+            .lines()
+            .find(|l| l.contains("⋯ lawyer"))
+            .expect("the stub's line");
+        assert!(
+            line.ends_with(&format!(
+                ": A truncated preview of the stubbed reply [{prefix}]"
+            )),
+            "{line}"
+        );
+        assert!(!line.contains(&short.id.to_string()), "{line}");
+        assert!(!out.contains("comment_id: "), "{out}");
+        // A colliding prefix comes as the full id, shown as it came
+        assert!(out.contains(&format!("[{}]", collided.id)), "{out}");
+        assert!(
+            out.contains(&format!(
+                "To read a stub in full, with its replies, pass the id in its \
+                 brackets to get_content (e.g. get_content(\"{prefix}\")). A \
+                 read with detail=\"summary\" skips the comments.]*"
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("larger comment_budget"), "{out}");
+        assert!(!out.contains("262144"), "{out}");
     }
 
     #[test]
