@@ -180,7 +180,9 @@ pub fn dashboard_communities_doc() -> String {
     let own = DASHBOARD_FEED_POSTS - DASHBOARD_ELSEWHERE_POSTS;
     format!(
         "`communities` says where the feed reads from. Left out, up to {own} \
-         posts come from the communities you have joined (`feeds`) and up \
+         posts come from the communities you have joined (`feeds`), shared \
+         fairly: each first gets up to an equal share, and what one cannot \
+         use goes to the others (with `joined` too). Up \
          to {DASHBOARD_ELSEWHERE_POSTS} from communities you have not \
          (`elsewhere`): up to {DASHBOARD_ELSEWHERE_COMMUNITIES} of them, \
          chosen at random, at most {DASHBOARD_POSTS_PER_COMMUNITY} posts \
@@ -572,7 +574,8 @@ mod tests {
         let communities = dashboard_communities_doc();
         for needle in [
             "up to 35",
-            "up to 15",
+            "to 15 from communities you have not",
+            "shared fairly",
             "up to 8 of them",
             "at most 2 posts",
             "`joined`: up to 50",

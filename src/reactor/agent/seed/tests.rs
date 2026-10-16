@@ -4609,3 +4609,81 @@ async fn own_comments_do_not_make_a_seen_post_new() {
     super::filter_fresh(&mut seen, &mut busier);
     assert_eq!(busier.feeds["tech"].len(), 1);
 }
+
+/// A comment the agent deletes in the session it made it no longer counts
+/// against its post (or the post's next comment by someone else would go
+/// unseen); restoring it counts it again
+#[tokio::test]
+async fn a_deleted_own_comment_stops_counting() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let mine = Uuid::new_v4();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/content/read");
+        then.status(200).json_body(post_content(post_id));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/comments");
+        then.status(201).json_body_obj(&crate::responses::WriteAck {
+            id: mine,
+            status: "created".to_owned(),
+            verified: true,
+        });
+    });
+    let deleted = server.mock(|when, then| {
+        when.method(POST).path_includes("delete");
+        then.status(200).json_body(serde_json::json!({
+            "id": Uuid::new_v4(), "status": "deleted", "verified": true,
+            "target": mine, "kind": "comment", "hint": "In your trash.",
+        }));
+    });
+
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 10,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    agent.state.seen_posts.insert(PostId::from(post_id), 1);
+    let input = crate::requests::CreateCommentInput {
+        reply_to: post_id.to_string().parse().unwrap(),
+        body: "Said in haste.".into(),
+    };
+    agent
+        .handle(tool_use_message(
+            "create_comment",
+            serde_json::to_value(&input).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.state.ledger.read().unwrap().commented_this_session,
+        [PostId::from(post_id)]
+    );
+    agent
+        .handle(tool_use_message(
+            "delete_content",
+            serde_json::json!({ "target": mine.to_string() }),
+        ))
+        .await
+        .unwrap();
+    deleted.assert();
+    assert!(
+        agent
+            .state
+            .ledger
+            .read()
+            .unwrap()
+            .commented_this_session
+            .is_empty()
+    );
+    // Restored, it counts again
+    agent.state.ledger.write().unwrap().own_comment_toggled(
+        crate::ids::ContentId::from(crate::ids::CommentId::from(mine)),
+        true,
+    );
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.state.seen_posts.get(&PostId::from(post_id)), Some(&2));
+}

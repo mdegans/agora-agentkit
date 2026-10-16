@@ -1606,16 +1606,15 @@ impl DashboardFeedPolicy {
     /// communities (or, with `communities=all`, from all of them)
     pub fn summary(&self, own: FeedCount) -> String {
         use crate::docs::{sort_in_words, sort_odds_text};
-        let phrase = sort_in_words(self.sort);
+        // The API's value first, so the agent can ask for it again
+        let phrase = format!("`{}`, {}", self.sort, sort_in_words(self.sort));
         let sort = if self.sort_drawn {
             format!(
                 "This time's order is {phrase} (drawn by lot; odds: {})",
                 sort_odds_text(&self.weights)
             )
         } else {
-            let mut chars = phrase.chars();
-            let first = chars.next().map(|c| c.to_uppercase().to_string());
-            format!("{}{}, as asked", first.unwrap_or_default(), chars.as_str())
+            format!("{phrase}, as asked")
         };
         let split = self.communities.is_none()
             && !self.joined_none
@@ -1642,7 +1641,8 @@ impl DashboardFeedPolicy {
             None => format!(
                 "From your communities: {own}. From communities you have not \
                  joined: up to {} posts from up to {}, chosen at random, at \
-                 most {} from each; if they have fewer, yours fill the rest.",
+                 most {} from each; if they have fewer, your communities get their \
+                 slots.",
                 self.sampled_posts,
                 self.sampled_communities,
                 self.per_community
@@ -1667,8 +1667,10 @@ impl std::fmt::Display for FeedCount {
             Self::NewToYou(0) => {
                 f.write_str("nothing new since you last looked")
             }
-            Self::NewToYou(1) => f.write_str("1 post new to you"),
-            Self::NewToYou(n) => write!(f, "{n} posts new to you"),
+            // What was shown: the server picked more, and the runner
+            // dropped what the agent had seen
+            Self::NewToYou(1) => f.write_str("1 shown, new to you"),
+            Self::NewToYou(n) => write!(f, "{n} shown, all new to you"),
             Self::Shown(1) => f.write_str("1 post"),
             Self::Shown(n) => write!(f, "{n} posts"),
         }
@@ -2860,18 +2862,18 @@ mod tests {
         use super::FeedCount::{NewToYou, Shown};
         assert_eq!(
             split.summary(NewToYou(4)),
-            "Newest first, as asked; posts within each community follow this \
-             order. From your communities: 4 posts new to you. From \
-             communities you have not joined: up to 15 posts from up to 8, \
-             chosen at random, at most 2 from each; if they have fewer, yours \
-             fill the rest."
+            "`date`, newest first, as asked; posts within each community \
+             follow this order. From your communities: 4 shown, all new to \
+             you. From communities you have not joined: up to 15 posts from up \
+             to 8, chosen at random, at most 2 from each; if they have fewer, \
+             your communities get their slots."
         );
         let mut drawn = split.clone();
         drawn.sort = FeedSort::Active;
         drawn.sort_drawn = true;
         assert!(
             drawn.summary(NewToYou(0)).starts_with(
-                "This time's order is recent activity first (drawn by lot; \
+                "This time's order is `active`, recent activity first (drawn by lot; \
                  odds: `random` 5/18, `active` 5/18, `date` 4/18, `diverse` \
                  4/18); posts within each community follow this order. From \
                  your communities: nothing new since you last looked. From"
@@ -2879,7 +2881,11 @@ mod tests {
             "{}",
             drawn.summary(NewToYou(0))
         );
-        assert!(split.summary(NewToYou(1)).contains(": 1 post new to you."));
+        assert!(
+            split
+                .summary(NewToYou(1))
+                .contains(": 1 shown, new to you.")
+        );
 
         let all_joined = p(None, true, false);
         assert_eq!(
@@ -2888,7 +2894,7 @@ mod tests {
         );
         assert_eq!(
             all_joined.summary(Shown(50)),
-            "Newest first, as asked; posts within each community follow this \
+            "`date`, newest first, as asked; posts within each community follow this \
              order. From your communities: 50 posts. \
              No community you have not joined has posts yet."
         );
@@ -2905,9 +2911,9 @@ mod tests {
         let joined = p(Some(DashboardCommunities::Joined), true, true);
         assert_eq!((joined.joined_posts, joined.sampled_posts), (50, 0));
         assert!(
-            joined
-                .summary(NewToYou(7))
-                .ends_with("From your communities only: 7 posts new to you.")
+            joined.summary(NewToYou(7)).ends_with(
+                "From your communities only: 7 shown, all new to you."
+            )
         );
 
         for joined_any in [true, false] {

@@ -90,14 +90,40 @@ pub struct Ledger {
     #[serde(skip)]
     pub comment_posts: HashMap<CommentId, PostId>,
     /// The post of each comment this agent made this session, once per
-    /// comment (0.95): at teardown each bumps the post's count in
+    /// live comment (0.95): at teardown each bumps the post's count in
     /// `seen_posts`, so the agent's own comment does not bring a post it
-    /// has seen back to its feed as new. Never persisted.
+    /// has seen back to its feed as new. A comment it deletes this session
+    /// is taken off again, and put back if it restores it. Never persisted.
+    ///
+    /// The limit: a comment of the agent's that moderation removes after
+    /// the session still counted, so the post's count is one lower than
+    /// recorded and one new comment by someone else on it goes unnoticed
+    /// until another arrives. The count cannot see who wrote a comment.
     #[serde(skip)]
     pub commented_this_session: Vec<PostId>,
 }
 
 impl Ledger {
+    /// The agent's own comment `id` left (`live: false`) or came back
+    /// (`true`) this session: take it off, or put it back on, the posts its
+    /// comments count against. Anything else is left alone.
+    pub(super) fn own_comment_toggled(&mut self, id: ContentId, live: bool) {
+        let comment = CommentId::from(*id.as_uuid());
+        if !self.created_comments.contains(&comment) {
+            return;
+        }
+        let Some(post) = self.comment_posts.get(&comment).copied() else {
+            return;
+        };
+        if live {
+            self.commented_this_session.push(post);
+        } else if let Some(i) =
+            self.commented_this_session.iter().position(|p| *p == post)
+        {
+            self.commented_this_session.swap_remove(i);
+        }
+    }
+
     /// Record which post each of `comments` is on
     pub(super) fn note_comment_posts(
         &mut self,
@@ -1319,9 +1345,14 @@ impl Agora {
             .await
             .map_err(err)?;
         self.spent_trash_write();
-        // The ledger is left alone: a deleted comment still holds its
-        // post's one top-level slot, or delete-and-restore would get round
-        // the rule. The refusal already says to reply instead.
+        // The dedup ledger is left alone: a deleted comment still holds
+        // its post's one top-level slot, or delete-and-restore would get
+        // round the rule. The refusal already says to reply instead. Its
+        // post's count drops, though, so it no longer counts against it.
+        self.ledger
+            .write()
+            .expect("ledger lock")
+            .own_comment_toggled(target, false);
         Ok(deleted.hint.into())
     }
 
@@ -1361,6 +1392,10 @@ impl Agora {
                 .await
                 .map_err(err)?;
             self.spent_trash_write();
+            self.ledger
+                .write()
+                .expect("ledger lock")
+                .own_comment_toggled(restored.restored, true);
             self.shown.insert(restored.restored);
             self.shown.extend(restored.also_restored.iter().copied());
             let mut out = format!(

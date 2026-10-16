@@ -3540,11 +3540,12 @@ mod tests {
         );
         let line = format!(
             "### Community Feeds\n\n\
-             This time's order is spread across topics (drawn by lot; odds: \
-             {}); posts within each community follow this order. From your \
-             communities: 1 post new to you. From communities you have not joined: up to \
-             15 posts from up to 8, chosen at random, at most 2 from each; if \
-             they have fewer, yours fill the rest. \
+             This time's order is `diverse`, spread across topics (drawn by \
+             lot; odds: {}); posts within each community follow this order. \
+             From your communities: 1 shown, new to you. From communities you \
+             have not joined: up to 15 posts from up to 8, chosen at random, \
+             at most 2 from each; if they have fewer, your communities get \
+             their slots. \
              get_feed lets you choose a sort or a community.",
             crate::docs::sort_odds_text(&crate::responses::SortWeight::table())
         );
@@ -3607,7 +3608,7 @@ mod tests {
                 "From your communities: nothing new since you last looked. \
                  From communities you have not joined: up to 15 posts from up \
                  to 8, chosen at random, at most 2 from each; if they have \
-                 fewer, yours fill the rest. {NOTHING_NEW_ELSEWHERE} \
+                 fewer, your communities get their slots. {NOTHING_NEW_ELSEWHERE} \
                  {RUNNER_HOW_TO_CHOOSE}"
             )),
             "{out}"
