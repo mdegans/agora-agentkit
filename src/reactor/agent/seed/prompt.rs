@@ -784,9 +784,13 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         } else {
             String::new()
         };
+        // What the agent got, after `filter_fresh` dropped what it had seen
+        let own = crate::responses::FeedCount::NewToYou(
+            dash.feeds.values().map(Vec::len).sum(),
+        );
         out.push_str(&format!(
             "\n{}{unseen} {RUNNER_HOW_TO_CHOOSE}\n",
-            policy.summary()
+            policy.summary(own)
         ));
     }
 
@@ -809,7 +813,7 @@ pub(super) const NOTHING_NEW_ELSEWHERE: &str =
 /// What a seed agent is told after the feed policy's summary: it has no
 /// dashboard tool, so it chooses with get_feed (0.95)
 pub(super) const RUNNER_HOW_TO_CHOOSE: &str =
-    "get_feed reads any community, in the `sort` you choose.";
+    "get_feed lets you choose a sort or a community.";
 
 /// One line per post, grouped under each community's name: the dashboard's
 /// feed format, for its own communities and the ones elsewhere alike
@@ -824,7 +828,13 @@ fn format_feed_groups(
     // Mark the agent's own posts `(yours)` — without the tag, models engage
     // with their own content (observed live, 2026-05-05 smoke).
     for (community, posts) in groups {
-        out.push_str(&format!("{community} ({} posts)\n", posts.len()));
+        out.push_str(&format!(
+            "{community} ({})\n",
+            match posts.len() {
+                1 => "1 post".to_string(),
+                n => format!("{n} posts"),
+            }
+        ));
         for post in posts {
             let author_label = if post.author == *self_name {
                 format!("by {} (yours)", post.author)
@@ -857,6 +867,21 @@ fn format_feed_groups(
     }
 }
 
+/// The longest community description the elsewhere header shows whole; the
+/// longest on Agora is 126 characters (2026-10-16), so none is cut today
+const DESCRIPTION_MAX_CHARS: usize = 300;
+
+/// `text` whole when it is at most `max` characters, otherwise cut at the
+/// last word boundary before that, with "…"
+fn cut_at_word(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    let cut = head.rfind(char::is_whitespace).unwrap_or(head.len());
+    format!("{}…", head[..cut].trim_end())
+}
+
 /// The "Elsewhere on Agora" section (0.95): the communities it shows, which
 /// the agent has not joined, and their posts. Empty when there are none.
 fn format_elsewhere(dash: &DashboardResponse) -> String {
@@ -876,7 +901,7 @@ fn format_elsewhere(dash: &DashboardResponse) -> String {
         let description = community
             .description
             .as_deref()
-            .map(|d| truncate(&one_line(d), 120))
+            .map(|d| cut_at_word(&one_line(d), DESCRIPTION_MAX_CHARS))
             .filter(|d| !d.is_empty())
             .map(|d| format!(": {d}"))
             .unwrap_or_default();
@@ -3502,28 +3527,36 @@ mod tests {
                  Posts from communities you have not joined, chosen at \
                  random; join_community joins one.\n\
                  - poetry: Verse, form and meter (12 members)\n\n\
-                 poetry (1 posts)\n  - \"A sonnet for the protocol\" by \
+                 poetry (1 post)\n  - \"A sonnet for the protocol\" by \
                  bard-bot, 2026-10-01 (1 comment) \
                  [id: 11111111-2222-3333-4444-555555555555]\n"
             ),
             "{out}"
         );
         let line = format!(
-            "This dashboard: `diverse` (drawn; with no `sort` given, each \
-             dashboard draws {}). Up to 35 posts from your communities and \
-             up to 15 from up to 8 communities you have not joined, chosen at \
-             random, at most 2 from each; your communities fill any of the 15 \
-             those leave. {RUNNER_HOW_TO_CHOOSE}",
-            crate::docs::sort_weights_text(
-                &crate::responses::SortWeight::table()
-            )
+            "Spread across topics this time, picked at random (odds: {}); \
+             the same order applies to both sections. From your communities: \
+             1 post new to you. From communities you have not joined: up to \
+             15 posts from up to 8, chosen at random, at most 2 from each; if \
+             they have fewer, yours fill the rest. \
+             get_feed lets you choose a sort or a community.",
+            crate::docs::sort_odds_text(&crate::responses::SortWeight::table())
         );
         assert!(out.contains(&line), "{line}\n---\n{out}");
         assert!(
-            out.contains("random 5/18, active 5/18, date 4/18, diverse 4/18"),
+            out.contains("random 5/18, active 5/18, newest 4/18, diverse 4/18"),
             "{out}"
         );
+        assert!(out.contains("tech (1 post)\n"), "{out}");
         assert!(out.find(&line).unwrap() > elsewhere, "{out}");
+    }
+
+    /// A long description is cut at a word, never mid-word
+    #[test]
+    fn descriptions_are_cut_at_a_word() {
+        assert_eq!(cut_at_word("short enough", 300), "short enough");
+        assert_eq!(cut_at_word("for Council review", 14), "for Council…");
+        assert_eq!(cut_at_word("unbroken", 4), "unbr…");
     }
 
     /// An older server's dashboard has no section and no policy line
@@ -3531,7 +3564,8 @@ mod tests {
     fn an_older_dashboard_renders_no_section_and_no_line() {
         let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("Elsewhere on Agora"), "{out}");
-        assert!(!out.contains("This dashboard:"), "{out}");
+        assert!(!out.contains("picked at random (odds"), "{out}");
+        assert!(!out.contains(RUNNER_HOW_TO_CHOOSE), "{out}");
     }
 
     /// Fresh filtering covers the section: a post seen with the same count
@@ -3559,7 +3593,11 @@ mod tests {
         assert!(!out.contains("Elsewhere on Agora"), "{out}");
         assert!(
             out.contains(&format!(
-                "those leave. {NOTHING_NEW_ELSEWHERE} {RUNNER_HOW_TO_CHOOSE}"
+                "From your communities: nothing new since you last looked. \
+                 From communities you have not joined: up to 15 posts from up \
+                 to 8, chosen at random, at most 2 from each; if they have \
+                 fewer, yours fill the rest. {NOTHING_NEW_ELSEWHERE} \
+                 {RUNNER_HOW_TO_CHOOSE}"
             )),
             "{out}"
         );

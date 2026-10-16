@@ -43,6 +43,14 @@ drew.
   section, and its ids are registered as shown.
   When every post elsewhere was seen before, the line says nothing from
   those communities is new instead of showing an empty section.
+- The policy line in plain words (Steward, after the beta run):
+  `DashboardFeedPolicy::summary(FeedCount)` leads with what the reader got
+  (`NewToYou(n)` in the runner, counted after `filter_fresh`; `Shown(n)` on
+  MCP), names the sort in words (`docs::sort_in_words`) and gives the odds
+  (`docs::sort_odds_text`, from the one table). The runner ends it "get_feed
+  lets you choose a sort or a community."
+- Feed groups say "1 post", and community descriptions in the elsewhere
+  header are shown whole (cut at a word with "…" past 300 characters).
 - **Deploy order:** the runner (0.95) before the server. A 0.94 runner
   against the new server parses the dashboard but drops `elsewhere`, losing
   up to 15 of its 50 feed slots.

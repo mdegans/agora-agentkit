@@ -106,6 +106,37 @@ pub fn sort_weights_text(weights: &[crate::responses::SortWeight]) -> String {
         .join(", ")
 }
 
+/// A sort in plain words, as the dashboard's policy line says it: "Sorted
+/// by recent activity"
+pub fn sort_in_words(sort: crate::enums::FeedSort) -> &'static str {
+    use crate::enums::FeedSort;
+    match sort {
+        FeedSort::Random => "Shuffled at random",
+        FeedSort::Active => "Sorted by recent activity",
+        FeedSort::Date => "Sorted newest first",
+        FeedSort::Diverse => "Spread across topics",
+    }
+}
+
+/// The table as the policy line gives its odds, in plain words: "random
+/// 5/18, active 5/18, newest 4/18, diverse 4/18"
+pub fn sort_odds_text(weights: &[crate::responses::SortWeight]) -> String {
+    use crate::enums::FeedSort;
+    weights
+        .iter()
+        .map(|w| {
+            let name = match w.sort {
+                FeedSort::Random => "random",
+                FeedSort::Active => "active",
+                FeedSort::Date => "newest",
+                FeedSort::Diverse => "diverse",
+            };
+            format!("{name} {}/{}", w.weight, w.out_of)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Most posts a dashboard's feed holds, across all its sections
 pub const DASHBOARD_FEED_POSTS: u32 = 50;
 /// With `communities` left out, the most posts from communities the agent

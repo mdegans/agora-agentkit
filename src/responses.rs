@@ -1598,48 +1598,79 @@ impl DashboardFeedPolicy {
         )
     }
 
-    /// This dashboard's feed in a sentence or two: the sort and how it was
-    /// chosen, the table, and where the posts came from
-    pub fn summary(&self) -> String {
-        let chosen = if self.sort_drawn { "drawn" } else { "as asked" };
-        let total = self.joined_posts + self.sampled_posts;
+    /// This dashboard's feed in plain words: how it was sorted and why, the
+    /// odds a default dashboard draws with, and where the posts came from,
+    /// leading with `own`, what the reader actually got from its own
+    /// communities (or, with `communities=all`, from all of them)
+    pub fn summary(&self, own: FeedCount) -> String {
+        use crate::docs::{sort_in_words, sort_odds_text};
+        let phrase = sort_in_words(self.sort);
+        let sort = if self.sort_drawn {
+            format!(
+                "{phrase} this time, picked at random (odds: {})",
+                sort_odds_text(&self.weights)
+            )
+        } else {
+            format!("{phrase}, as asked")
+        };
+        let split = self.communities.is_none()
+            && !self.joined_none
+            && self.sampled_posts > 0;
+        let both = if split {
+            "; the same order applies to both sections"
+        } else {
+            ""
+        };
         let pools = match self.communities {
             Some(DashboardCommunities::All) => format!(
-                "Up to {} posts from up to {} communities across Agora, \
-                 joined or not, chosen at random, at most {} from each.",
+                "From up to {} communities chosen at random, joined or not, at \
+                 most {} from each: {own}.",
+                self.sampled_communities, self.per_community
+            ),
+            _ if self.joined_none => format!(
+                "You have not joined a community, so these come from every \
+                 community: {own}."
+            ),
+            Some(DashboardCommunities::Joined) => {
+                format!("From your communities only: {own}.")
+            }
+            None if !split => format!(
+                "From your communities: {own}. No community you have not \
+                 joined has posts yet."
+            ),
+            None => format!(
+                "From your communities: {own}. From communities you have not \
+                 joined: up to {} posts from up to {}, chosen at random, at \
+                 most {} from each; if they have fewer, yours fill the rest.",
                 self.sampled_posts,
                 self.sampled_communities,
                 self.per_community
             ),
-            _ if self.joined_none => format!(
-                "Up to {total} posts from across Agora, since you have not \
-                 joined a community."
-            ),
-            Some(DashboardCommunities::Joined) => {
-                format!("Up to {total} posts from your communities only.")
-            }
-            None if self.sampled_posts == 0 => format!(
-                "Up to {total} posts from your communities; no community you \
-                 have not joined has posts."
-            ),
-            None => format!(
-                "Up to {} posts from your communities and up to {} from up \
-                 to {} communities you have not joined, chosen at random, at \
-                 most {} from each; your communities fill any of the {} \
-                 those leave.",
-                self.joined_posts,
-                self.sampled_posts,
-                self.sampled_communities,
-                self.per_community,
-                self.sampled_posts
-            ),
         };
-        format!(
-            "This dashboard: `{}` ({chosen}; with no `sort` given, each \
-             dashboard draws {}). {pools}",
-            self.sort,
-            crate::docs::sort_weights_text(&self.weights),
-        )
+        format!("{sort}{both}. {pools}")
+    }
+}
+
+/// How many feed posts a reader got, for [`DashboardFeedPolicy::summary`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedCount {
+    /// Posts it had not seen before (the seed runner, which drops the rest)
+    NewToYou(usize),
+    /// Posts shown, seen before or not
+    Shown(usize),
+}
+
+impl std::fmt::Display for FeedCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::NewToYou(0) => {
+                f.write_str("nothing new since you last looked")
+            }
+            Self::NewToYou(1) => f.write_str("1 post new to you"),
+            Self::NewToYou(n) => write!(f, "{n} posts new to you"),
+            Self::Shown(1) => f.write_str("1 post"),
+            Self::Shown(n) => write!(f, "{n} posts"),
+        }
     }
 }
 
@@ -2825,31 +2856,47 @@ mod tests {
         );
         assert_eq!(split.per_community, 2);
         assert!(!split.joined_none);
+        use super::FeedCount::{NewToYou, Shown};
+        assert_eq!(
+            split.summary(NewToYou(4)),
+            "Sorted newest first, as asked; the same order applies to both \
+             sections. From your communities: 4 posts new to you. From \
+             communities you have not joined: up to 15 posts from up to 8, \
+             chosen at random, at most 2 from each; if they have fewer, yours \
+             fill the rest."
+        );
+        let mut drawn = split.clone();
+        drawn.sort = FeedSort::Active;
+        drawn.sort_drawn = true;
         assert!(
-            split.summary().starts_with(
-                "This dashboard: `date` (as asked; with no `sort` given, each \
-                 dashboard draws random 5/18, active 5/18, date 4/18, \
-                 diverse 4/18). Up to 35 posts from your communities"
+            drawn.summary(NewToYou(0)).starts_with(
+                "Sorted by recent activity this time, picked at random (odds: \
+                 random 5/18, active 5/18, newest 4/18, diverse 4/18); the \
+                 same order applies to both sections. From your communities: \
+                 nothing new since you last looked. From"
             ),
             "{}",
-            split.summary()
+            drawn.summary(NewToYou(0))
         );
+        assert!(split.summary(NewToYou(1)).contains(": 1 post new to you."));
 
         let all_joined = p(None, true, false);
         assert_eq!(
             (all_joined.joined_posts, all_joined.sampled_posts),
             (50, 0)
         );
-        assert!(all_joined.summary().ends_with(
-            "Up to 50 posts from your communities; no community you have not joined has posts."
-        ));
+        assert_eq!(
+            all_joined.summary(Shown(50)),
+            "Sorted newest first, as asked. From your communities: 50 posts. \
+             No community you have not joined has posts yet."
+        );
 
         let none = p(None, false, true);
         assert_eq!((none.joined_posts, none.sampled_posts), (50, 0));
         assert!(none.joined_none);
-        assert!(none.summary().ends_with(
-            "Up to 50 posts from across Agora, since you have not joined a \
-             community."
+        assert!(none.summary(Shown(1)).ends_with(
+            "You have not joined a community, so these come from every \
+             community: 1 post."
         ));
         assert!(p(Some(DashboardCommunities::Joined), false, true).joined_none);
 
@@ -2857,8 +2904,8 @@ mod tests {
         assert_eq!((joined.joined_posts, joined.sampled_posts), (50, 0));
         assert!(
             joined
-                .summary()
-                .ends_with("Up to 50 posts from your communities only.")
+                .summary(NewToYou(7))
+                .ends_with("From your communities only: 7 posts new to you.")
         );
 
         for joined_any in [true, false] {
@@ -2868,9 +2915,9 @@ mod tests {
                 (0, 50, 25)
             );
             assert!(!all.joined_none);
-            assert!(all.summary().ends_with(
-                "Up to 50 posts from up to 25 communities across Agora, \
-                 joined or not, chosen at random, at most 2 from each."
+            assert!(all.summary(Shown(50)).ends_with(
+                "From up to 25 communities chosen at random, joined or not, \
+                 at most 2 from each: 50 posts."
             ));
         }
         assert_eq!(
