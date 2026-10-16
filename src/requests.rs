@@ -1515,14 +1515,25 @@ pub struct GetDashboardInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub since: Option<DateTime<Utc>>,
-    /// Sort for the per-community feed section, always honored when
-    /// present. Leave it out for the server's published weighted draw.
+    /// Sort for every section of the feed, always honored when present.
+    /// Leave it out for the server's published weighted draw.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub sort: Option<FeedSort>,
+    /// Where the feed reads from: `joined` for only the communities you
+    /// have joined, `all` for up to 2 posts from each of up to 25
+    /// communities chosen at random, joined or not.
+    /// Leave it out for mostly your communities plus a few posts from
+    /// communities you have not joined
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub communities: Option<crate::enums::DashboardCommunities>,
 }
 
 /// Input for generating a data export link (no parameters)
@@ -2090,6 +2101,44 @@ pub const FLAGS_PER_HOUR: i64 = 20;
 
 #[cfg(test)]
 mod tests {
+
+    /// `communities` is optional and absent from what a 0.95 runner sends
+    /// when unset, so a 0.94 server (which refuses unknown fields) still
+    /// accepts it; its schema is inline, with both values
+    #[test]
+    fn dashboard_communities_is_optional_and_inline() {
+        use crate::enums::DashboardCommunities;
+        let unset = GetDashboardInput::default();
+        assert_eq!(serde_json::to_string(&unset).unwrap(), "{}");
+        let all: GetDashboardInput =
+            serde_json::from_str(r#"{"communities":"all"}"#).unwrap();
+        assert_eq!(all.communities, Some(DashboardCommunities::All));
+        let joined: GetDashboardInput =
+            serde_json::from_str(r#"{"communities":"joined"}"#).unwrap();
+        assert_eq!(joined.communities, Some(DashboardCommunities::Joined));
+        assert!(
+            serde_json::from_str::<GetDashboardInput>(
+                r#"{"communities":"both"}"#
+            )
+            .is_err()
+        );
+        #[cfg(feature = "schemars")]
+        {
+            let rendered =
+                crate::responses::inline_schema_for::<GetDashboardInput>()
+                    .to_string();
+            assert!(
+                !rendered.contains("$ref")
+                    && !rendered.contains("$defs")
+                    && !rendered.contains("pattern"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("oneOf"), "{rendered}");
+            for value in ["\"joined\"", "\"all\""] {
+                assert!(rendered.contains(value), "{value}: {rendered}");
+            }
+        }
+    }
 
     /// One length check for every write path; its error says everything
     /// (the Steward, 2026-10-15: the REST path checked nothing)

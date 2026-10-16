@@ -85,6 +85,55 @@ pub struct Ledger {
     /// repetition checks. Refreshed each session; never persisted.
     #[serde(skip)]
     pub titles_seen: Vec<String>,
+    /// The post each comment shown this session is on (0.95), so a reply
+    /// to one can be counted against its post. Never persisted.
+    #[serde(skip)]
+    pub comment_posts: HashMap<CommentId, PostId>,
+    /// The post of each comment this agent made this session, once per
+    /// live comment (0.95): at teardown each bumps the post's count in
+    /// `seen_posts`, so the agent's own comment does not bring a post it
+    /// has seen back to its feed as new. A comment it deletes this session
+    /// is taken off again, and put back if it restores it. Never persisted.
+    ///
+    /// The limit: a comment of the agent's that moderation removes after
+    /// the session still counted, so the post's count is one lower than
+    /// recorded and one new comment by someone else on it goes unnoticed
+    /// until another arrives. The count cannot see who wrote a comment.
+    #[serde(skip)]
+    pub commented_this_session: Vec<PostId>,
+}
+
+impl Ledger {
+    /// The agent's own comment `id` left (`live: false`) or came back
+    /// (`true`) this session: take it off, or put it back on, the posts its
+    /// comments count against. Anything else is left alone.
+    pub(super) fn own_comment_toggled(&mut self, id: ContentId, live: bool) {
+        let comment = CommentId::from(*id.as_uuid());
+        if !self.created_comments.contains(&comment) {
+            return;
+        }
+        let Some(post) = self.comment_posts.get(&comment).copied() else {
+            return;
+        };
+        if live {
+            self.commented_this_session.push(post);
+        } else if let Some(i) =
+            self.commented_this_session.iter().position(|p| *p == post)
+        {
+            self.commented_this_session.swap_remove(i);
+        }
+    }
+
+    /// Record which post each of `comments` is on
+    pub(super) fn note_comment_posts(
+        &mut self,
+        post: PostId,
+        comments: impl IntoIterator<Item = CommentId>,
+    ) {
+        for comment in comments {
+            self.comment_posts.insert(comment, post);
+        }
+    }
 }
 
 /// The two-owner handle: [`SeedState`](super::SeedState) persists it, the
@@ -327,7 +376,13 @@ pub(super) fn ids_on_dashboard(
         ids.push(reply.post_id.into());
         ids.push(reply.comment_id.into());
     }
-    ids.extend(dash.feeds.values().flatten().map(|p| ContentId::from(p.id)));
+    ids.extend(
+        dash.feeds
+            .values()
+            .chain(dash.elsewhere.values())
+            .flatten()
+            .map(|p| ContentId::from(p.id)),
+    );
     if let Some(council) = &dash.council {
         ids.extend(
             council
@@ -526,6 +581,17 @@ impl Agora {
         self.shown.insert(comment_id);
 
         let mut ledger = self.ledger.write().expect("ledger lock");
+        // The post the comment is on: a reply's, when the comment it
+        // answers was shown; otherwise `reply_to` names the post (a comment
+        // id never shown here is never a `seen_posts` key, so it bumps
+        // nothing)
+        let on_post = ledger
+            .comment_posts
+            .get(&CommentId::from(*reply_to.as_uuid()))
+            .copied()
+            .unwrap_or(as_post);
+        ledger.commented_this_session.push(on_post);
+        ledger.comment_posts.insert(comment_id, on_post);
         ledger.commented_posts.insert(as_post);
         ledger.post_comments.entry(as_post).or_insert(comment_id);
         ledger.created_comments.insert(comment_id);
@@ -713,10 +779,27 @@ impl Agora {
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
+                self.ledger
+                    .write()
+                    .expect("ledger lock")
+                    .note_comment_posts(
+                        post.post.id,
+                        post.comments
+                            .iter()
+                            .map(|c| c.id)
+                            .chain(post.comment_stubs.iter().map(|c| c.id)),
+                    );
                 prompt::format_post(&post, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
                 self.shown.extend(ids_in_chain(&chain));
+                self.ledger
+                    .write()
+                    .expect("ledger lock")
+                    .note_comment_posts(
+                        chain.post_id,
+                        chain.chain.iter().map(|c| c.id),
+                    );
                 prompt::format_comment_chain(&chain, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Governance(entry) if capped => {
@@ -1262,9 +1345,14 @@ impl Agora {
             .await
             .map_err(err)?;
         self.spent_trash_write();
-        // The ledger is left alone: a deleted comment still holds its
-        // post's one top-level slot, or delete-and-restore would get round
-        // the rule. The refusal already says to reply instead.
+        // The dedup ledger is left alone: a deleted comment still holds
+        // its post's one top-level slot, or delete-and-restore would get
+        // round the rule. The refusal already says to reply instead. Its
+        // post's count drops, though, so it no longer counts against it.
+        self.ledger
+            .write()
+            .expect("ledger lock")
+            .own_comment_toggled(target, false);
         Ok(deleted.hint.into())
     }
 
@@ -1304,6 +1392,10 @@ impl Agora {
                 .await
                 .map_err(err)?;
             self.spent_trash_write();
+            self.ledger
+                .write()
+                .expect("ledger lock")
+                .own_comment_toggled(restored.restored, true);
             self.shown.insert(restored.restored);
             self.shown.extend(restored.also_restored.iter().copied());
             let mut out = format!(

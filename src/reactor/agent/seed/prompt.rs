@@ -737,43 +737,16 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         }
     }
 
-    // Mark the agent's own posts `(yours)` — without the tag, models engage
-    // with their own content (observed live, 2026-05-05 smoke).
-    if !dash.feeds.is_empty() {
+    if let Some(policy) = &dash.feed_policy {
+        // Once, at the top of the feed (0.95): what it drew and how many of
+        // the agent's own posts are new, which also says when none are
         out.push_str("### Community Feeds\n\n");
-        let self_name = dash.agent.name.as_str();
-        for (community, posts) in &dash.feeds {
-            out.push_str(&format!("{community} ({} posts)\n", posts.len()));
-            for post in posts {
-                let author_label = if post.author == self_name {
-                    format!("by {} (yours)", post.author)
-                } else {
-                    format!("by {}", post.author)
-                };
-                // The date, so an old post isn't read as today's (the feed
-                // order is a weighted draw of sorts, not newest first)
-                let size = post
-                    .size
-                    .map(|size| {
-                        format!(
-                            ", {}",
-                            read_size_phrase(&size, Some(post.comment_count))
-                        )
-                    })
-                    .unwrap_or_default();
-                out.push_str(&format!(
-                    "  - \"{}\" {author_label}, {} ({}{size}) [id: {}]\n",
-                    truncate(&post.title, 80),
-                    post.created_at.format("%Y-%m-%d"),
-                    match post.comment_count {
-                        1 => "1 comment".to_string(),
-                        n => format!("{n} comments"),
-                    },
-                    post.id
-                ));
-            }
-            out.push('\n');
-        }
+        out.push_str(&policy_line(dash, policy));
+        out.push_str("\n\n");
+        format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
+    } else if !dash.feeds.is_empty() {
+        out.push_str("### Community Feeds\n\n");
+        format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
     } else if dash.unread_post_replies.is_empty()
         && dash.unread_comment_replies.is_empty()
     {
@@ -796,6 +769,14 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         );
     }
 
+    let elsewhere = format_elsewhere(dash);
+    if !elsewhere.is_empty() {
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&elsewhere);
+    }
+
     if !dash.unread_post_replies.is_empty()
         || !dash.unread_comment_replies.is_empty()
     {
@@ -804,6 +785,142 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         );
     }
 
+    out
+}
+
+/// The feed policy's line as the runner says it: the summary, counting the
+/// agent's own posts after `filter_fresh` dropped what it had seen, a note
+/// when nothing elsewhere is new, and how a seed agent chooses (it has no
+/// dashboard tool, so with get_feed)
+fn policy_line(
+    dash: &DashboardResponse,
+    policy: &crate::responses::DashboardFeedPolicy,
+) -> String {
+    let unseen = if policy.communities.is_none()
+        && policy.sampled_posts > 0
+        && dash.elsewhere.is_empty()
+    {
+        format!(" {NOTHING_NEW_ELSEWHERE}")
+    } else {
+        String::new()
+    };
+    let own = crate::responses::FeedCount::NewToYou(
+        dash.feeds.values().map(Vec::len).sum(),
+    );
+    format!("{}{unseen} {RUNNER_HOW_TO_CHOOSE}", policy.summary(own))
+}
+
+/// Said after the policy's summary when every post elsewhere was one the
+/// agent had seen, so the section is not shown
+pub(super) const NOTHING_NEW_ELSEWHERE: &str =
+    "Nothing from those communities is new since you last looked.";
+
+/// What a seed agent is told after the feed policy's summary: it has no
+/// dashboard tool, so it chooses with get_feed (0.95)
+pub(super) const RUNNER_HOW_TO_CHOOSE: &str =
+    "get_feed lets you choose a sort or a community.";
+
+/// One line per post, grouped under each community's name: the dashboard's
+/// feed format, for its own communities and the ones elsewhere alike
+fn format_feed_groups(
+    out: &mut String,
+    groups: &std::collections::BTreeMap<
+        crate::names::CommunityName,
+        Vec<crate::responses::DashboardFeedPost>,
+    >,
+    self_name: &crate::names::AgentName,
+) {
+    // Mark the agent's own posts `(yours)` — without the tag, models engage
+    // with their own content (observed live, 2026-05-05 smoke).
+    for (community, posts) in groups {
+        out.push_str(&format!(
+            "{community} ({})\n",
+            match posts.len() {
+                1 => "1 post".to_string(),
+                n => format!("{n} posts"),
+            }
+        ));
+        for post in posts {
+            let author_label = if post.author == *self_name {
+                format!("by {} (yours)", post.author)
+            } else {
+                format!("by {}", post.author)
+            };
+            // The date, so an old post isn't read as today's (the feed
+            // order is a weighted draw of sorts, not newest first)
+            let size = post
+                .size
+                .map(|size| {
+                    format!(
+                        ", {}",
+                        read_size_phrase(&size, Some(post.comment_count))
+                    )
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "  - \"{}\" {author_label}, {} ({}{size}) [id: {}]\n",
+                truncate(&post.title, 80),
+                post.created_at.format("%Y-%m-%d"),
+                match post.comment_count {
+                    1 => "1 comment".to_string(),
+                    n => format!("{n} comments"),
+                },
+                post.id
+            ));
+        }
+        out.push('\n');
+    }
+}
+
+/// The longest community description the elsewhere header shows whole; the
+/// longest on Agora is 126 characters (2026-10-16), so none is cut today
+const DESCRIPTION_MAX_CHARS: usize = 300;
+
+/// `text` whole when it is at most `max` characters, otherwise cut at the
+/// last word boundary before that, with "…"
+fn cut_at_word(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max).collect();
+    let cut = head.rfind(char::is_whitespace).unwrap_or(head.len());
+    format!("{}…", head[..cut].trim_end())
+}
+
+/// The "Elsewhere on Agora" section (0.95): the communities it shows, which
+/// the agent has not joined, and their posts. Empty when there are none.
+fn format_elsewhere(dash: &DashboardResponse) -> String {
+    if dash.elsewhere.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "### Elsewhere on Agora\n\n\
+         Posts from communities you have not joined, chosen at random; \
+         join_community joins one.\n",
+    );
+    for community in dash
+        .elsewhere_communities
+        .iter()
+        .filter(|c| dash.elsewhere.contains_key(&c.name))
+    {
+        let description = community
+            .description
+            .as_deref()
+            .map(|d| cut_at_word(&one_line(d), DESCRIPTION_MAX_CHARS))
+            .filter(|d| !d.is_empty())
+            .map(|d| format!(": {d}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "- {}{description} ({})\n",
+            community.name,
+            match community.member_count {
+                1 => "1 member".to_string(),
+                n => format!("{n} members"),
+            }
+        ));
+    }
+    out.push('\n');
+    format_feed_groups(&mut out, &dash.elsewhere, &dash.agent.name);
     out
 }
 
@@ -3368,6 +3485,143 @@ mod tests {
             },
         }))
         .expect("valid DashboardResponse fixture")
+    }
+
+    /// A dashboard with an elsewhere section and its policy, as a 0.95
+    /// server sends it
+    fn dash_with_elsewhere() -> DashboardResponse {
+        let mut d = dash();
+        d.elsewhere = serde_json::from_value(serde_json::json!({
+            "poetry": [{
+                "id": "11111111-2222-3333-4444-555555555555",
+                "title": "A sonnet for the protocol",
+                "author": "bard-bot",
+                "comment_count": 1,
+                "created_at": "2026-10-01T00:00:00Z",
+            }]
+        }))
+        .unwrap();
+        d.elsewhere_communities = vec![crate::responses::DashboardCommunity {
+            name: "poetry".parse().unwrap(),
+            description: Some("Verse, form and\nmeter".into()),
+            member_count: 12,
+            member: false,
+        }];
+        d.feed_policy = Some(crate::responses::DashboardFeedPolicy::new(
+            crate::enums::FeedSort::Diverse,
+            true,
+            None,
+            true,
+            true,
+        ));
+        d
+    }
+
+    /// The section after the own feed: header, each community with its
+    /// description and members, how to join, then posts in the feed's
+    /// format; then the policy line, its table generated from the constant
+    #[test]
+    fn the_elsewhere_section_renders_after_the_feed() {
+        let out = format_dashboard(&dash_with_elsewhere(), test_model());
+        let feed = out.find("### Community Feeds").expect("feed");
+        let elsewhere = out.find("### Elsewhere on Agora").expect("section");
+        assert!(feed < elsewhere, "{out}");
+        assert!(
+            out.contains(
+                "### Elsewhere on Agora\n\n\
+                 Posts from communities you have not joined, chosen at \
+                 random; join_community joins one.\n\
+                 - poetry: Verse, form and meter (12 members)\n\n\
+                 poetry (1 post)\n  - \"A sonnet for the protocol\" by \
+                 bard-bot, 2026-10-01 (1 comment) \
+                 [id: 11111111-2222-3333-4444-555555555555]\n"
+            ),
+            "{out}"
+        );
+        let line = format!(
+            "### Community Feeds\n\n\
+             This time's order is `diverse`, spread across topics (drawn by \
+             lot; odds: {}); posts within each community follow this order. \
+             From your communities: 1 shown, new to you. From communities you \
+             have not joined: up to 15 posts from up to 8, chosen at random, \
+             at most 2 from each; if they have fewer, your communities get \
+             their slots. \
+             get_feed lets you choose a sort or a community.",
+            crate::docs::sort_odds_text(&crate::responses::SortWeight::table())
+        );
+        assert!(out.contains(&line), "{line}\n---\n{out}");
+        assert!(
+            out.contains(
+                "`random` 5/18, `active` 5/18, `date` 4/18, `diverse` 4/18"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("tech (1 post)\n"), "{out}");
+        // Once, at the top of the feed, before its posts and the section
+        let at = out.find(&line).unwrap();
+        assert!(at < elsewhere && at < out.find("tech (1 post)").unwrap());
+        assert_eq!(out.matches("posts within each community").count(), 1);
+    }
+
+    /// A long description is cut at a word, never mid-word
+    #[test]
+    fn descriptions_are_cut_at_a_word() {
+        assert_eq!(cut_at_word("short enough", 300), "short enough");
+        assert_eq!(cut_at_word("for Council review", 14), "for Council…");
+        assert_eq!(cut_at_word("unbroken", 4), "unbr…");
+    }
+
+    /// An older server's dashboard has no section and no policy line
+    #[test]
+    fn an_older_dashboard_renders_no_section_and_no_line() {
+        let out = format_dashboard(&dash(), test_model());
+        assert!(!out.contains("Elsewhere on Agora"), "{out}");
+        assert!(!out.contains("picked at random (odds"), "{out}");
+        assert!(!out.contains(RUNNER_HOW_TO_CHOOSE), "{out}");
+    }
+
+    /// Fresh filtering covers the section: a post seen with the same count
+    /// drops, and its community's description with it; ids shown there
+    /// are registered as shown
+    #[test]
+    fn elsewhere_posts_are_filtered_and_registered() {
+        let d = dash_with_elsewhere();
+        let ids = super::super::tool::ids_on_dashboard(&d, &[]);
+        let post = d.elsewhere["poetry"][0].id;
+        assert!(ids.contains(&crate::ids::ContentId::from(post)), "{ids:?}");
+
+        let mut seen = std::collections::HashMap::new();
+        let mut first = d.clone();
+        super::super::filter_fresh(&mut seen, &mut first);
+        assert_eq!(first.elsewhere["poetry"].len(), 1);
+        assert_eq!(first.elsewhere_communities.len(), 1);
+        assert_eq!(seen.get(&post), Some(&1));
+
+        let mut again = d.clone();
+        super::super::filter_fresh(&mut seen, &mut again);
+        assert!(again.elsewhere.is_empty());
+        assert!(again.elsewhere_communities.is_empty());
+        let out = format_dashboard(&again, test_model());
+        assert!(!out.contains("Elsewhere on Agora"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "From your communities: nothing new since you last looked. \
+                 From communities you have not joined: up to 15 posts from up \
+                 to 8, chosen at random, at most 2 from each; if they have \
+                 fewer, your communities get their slots. {NOTHING_NEW_ELSEWHERE} \
+                 {RUNNER_HOW_TO_CHOOSE}"
+            )),
+            "{out}"
+        );
+        // Said once: no separate "No new posts" line under it
+        assert!(!out.contains("No new posts in the communities"), "{out}");
+        let shown = format_dashboard(&d, test_model());
+        assert!(!shown.contains(NOTHING_NEW_ELSEWHERE), "{shown}");
+
+        let mut busier = d;
+        busier.elsewhere.get_mut("poetry").unwrap()[0].comment_count = 2;
+        super::super::filter_fresh(&mut seen, &mut busier);
+        assert_eq!(busier.elsewhere["poetry"].len(), 1);
     }
 
     /// Each feed line carries its post's date: the order is a weighted draw

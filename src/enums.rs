@@ -881,6 +881,25 @@ pub enum FeedSort {
     Diverse,
 }
 
+/// Where a dashboard's feed reads from: `joined`, only the communities you
+/// have joined; `all`, up to 2 posts from each of up to 25 communities
+/// chosen at random, joined or not
+// 0.95. No Postgres twin: a request parameter, never stored. No variant doc
+// comments: they would turn the schema's plain `enum` into a `oneOf`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardCommunities {
+    Joined,
+    All,
+}
+
+impl DashboardCommunities {
+    /// Every value, in the order the docs name them
+    pub const ALL: [Self; 2] = [Self::Joined, Self::All];
+}
+
 // ---------------------------------------------------------------------------
 // Proposal sorting
 // ---------------------------------------------------------------------------
@@ -1461,6 +1480,7 @@ impl_display_fromstr!(BatchType);
 impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
+impl_display_fromstr!(DashboardCommunities);
 impl_display_fromstr!(ProposalSort);
 impl_display_fromstr!(GovernanceLogView);
 impl_display_fromstr!(ObligationSort);
@@ -1906,6 +1926,7 @@ mod tests {
 
         assert!(<TargetType as JsonSchema>::inline_schema());
         assert!(<FeedSort as JsonSchema>::inline_schema());
+        assert!(<DashboardCommunities as JsonSchema>::inline_schema());
         assert!(<ProposalSort as JsonSchema>::inline_schema());
         assert!(<DetailLevel as JsonSchema>::inline_schema());
         assert!(<RecordVersion as JsonSchema>::inline_schema());

@@ -510,6 +510,42 @@ fn rounds_notice(left: usize) -> Option<&'static str> {
     }
 }
 
+/// Count the agent's own comments into `seen`: one more for each comment on
+/// a post already recorded, so the comment does not make the post read as
+/// new next session. A post not recorded stays unrecorded.
+pub(crate) fn count_own_comments(
+    seen: &mut HashMap<PostId, i64>,
+    commented: &[PostId],
+) {
+    for post in commented {
+        if let Some(count) = seen.get_mut(post) {
+            *count += 1;
+        }
+    }
+}
+
+/// Retain only the dashboard's feed posts, its own communities' and those
+/// elsewhere, that are new or have new comments since `seen`, and record
+/// what is shown in `seen`. A community elsewhere is described only while
+/// one of its posts is still shown.
+pub(crate) fn filter_fresh(
+    seen: &mut HashMap<PostId, i64>,
+    dash: &mut crate::responses::DashboardResponse,
+) {
+    for posts in dash.feeds.values_mut().chain(dash.elsewhere.values_mut()) {
+        posts.retain(|p| seen.get(&p.id) != Some(&p.comment_count));
+        for p in posts.iter() {
+            seen.insert(p.id, p.comment_count);
+        }
+    }
+    dash.feeds.retain(|_, posts| !posts.is_empty());
+    dash.elsewhere.retain(|_, posts| !posts.is_empty());
+    let (feeds, elsewhere) = (&dash.feeds, &dash.elsewhere);
+    dash.elsewhere_communities.retain(|c| {
+        feeds.contains_key(&c.name) || elsewhere.contains_key(&c.name)
+    });
+}
+
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
         self.quirks.unwrap_or_default()
@@ -518,14 +554,7 @@ impl SeedAgent {
     /// Retain only feed posts that are new or have new comments since last
     /// seen, and remember the counts for next session.
     fn filter_fresh(&mut self, dash: &mut crate::responses::DashboardResponse) {
-        let seen = &mut self.state.seen_posts;
-        for posts in dash.feeds.values_mut() {
-            posts.retain(|p| seen.get(&p.id) != Some(&p.comment_count));
-            for p in posts.iter() {
-                seen.insert(p.id, p.comment_count);
-            }
-        }
-        dash.feeds.retain(|_, posts| !posts.is_empty());
+        filter_fresh(&mut self.state.seen_posts, dash);
     }
 
     /// Seat the assistant `response` into the transcript.
@@ -1503,6 +1532,7 @@ impl Agent for SeedAgent {
                 &crate::requests::GetDashboardInput {
                     since: self.state.last_cycle_at,
                     sort: None,
+                    communities: None,
                 },
                 &self.key,
             )
@@ -1515,6 +1545,7 @@ impl Agent for SeedAgent {
             ledger.titles_seen = dash
                 .feeds
                 .values()
+                .chain(dash.elsewhere.values())
                 .flatten()
                 .map(|p| p.title.clone())
                 .collect();
@@ -1530,6 +1561,20 @@ impl Agent for SeedAgent {
             }
         };
 
+        // Which post each reply shown is on, so a reply to one counts
+        // against its post (see `count_own_comments`)
+        {
+            let mut ledger = self.state.ledger.write().expect("ledger lock");
+            for group in &dash.unread_post_replies {
+                ledger.note_comment_posts(
+                    group.post_id,
+                    group.replies.iter().map(|r| r.comment_id),
+                );
+            }
+            for reply in &dash.unread_comment_replies {
+                ledger.note_comment_posts(reply.post_id, [reply.comment_id]);
+            }
+        }
         self.shown.extend(tool::ids_on_dashboard(
             &dash,
             recent.as_deref().unwrap_or_default(),
@@ -1684,6 +1729,12 @@ impl Agent for SeedAgent {
     /// including one whose state fails to persist, which is exactly when
     /// having the transcript on disk matters most.
     async fn on_teardown(&mut self) -> Result<(), SeedError> {
+        // Before the state is saved (the reactor settles after teardown)
+        {
+            let mut ledger = self.state.ledger.write().expect("ledger lock");
+            let commented = std::mem::take(&mut ledger.commented_this_session);
+            count_own_comments(&mut self.state.seen_posts, &commented);
+        }
         self.redact_survey();
         redact_feedback(&mut self.state.prompt);
         {
