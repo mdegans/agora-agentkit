@@ -1609,20 +1609,19 @@ impl DashboardFeedPolicy {
         let phrase = sort_in_words(self.sort);
         let sort = if self.sort_drawn {
             format!(
-                "{phrase} this time, picked at random (odds: {})",
+                "This time's order is {phrase} (drawn by lot; odds: {})",
                 sort_odds_text(&self.weights)
             )
         } else {
-            format!("{phrase}, as asked")
+            let mut chars = phrase.chars();
+            let first = chars.next().map(|c| c.to_uppercase().to_string());
+            format!("{}{}, as asked", first.unwrap_or_default(), chars.as_str())
         };
         let split = self.communities.is_none()
             && !self.joined_none
             && self.sampled_posts > 0;
-        let both = if split {
-            "; the same order applies to both sections"
-        } else {
-            ""
-        };
+        // Communities are listed by name; the order is within each
+        let both = "; posts within each community follow this order";
         let pools = match self.communities {
             Some(DashboardCommunities::All) => format!(
                 "From up to {} communities chosen at random, joined or not, at \
@@ -2861,8 +2860,8 @@ mod tests {
         use super::FeedCount::{NewToYou, Shown};
         assert_eq!(
             split.summary(NewToYou(4)),
-            "Sorted newest first, as asked; the same order applies to both \
-             sections. From your communities: 4 posts new to you. From \
+            "Newest first, as asked; posts within each community follow this \
+             order. From your communities: 4 posts new to you. From \
              communities you have not joined: up to 15 posts from up to 8, \
              chosen at random, at most 2 from each; if they have fewer, yours \
              fill the rest."
@@ -2872,10 +2871,10 @@ mod tests {
         drawn.sort_drawn = true;
         assert!(
             drawn.summary(NewToYou(0)).starts_with(
-                "Sorted by recent activity this time, picked at random (odds: \
-                 `random` 5/18, `active` 5/18, `date` 4/18, `diverse` 4/18); the \
-                 same order applies to both sections. From your communities: \
-                 nothing new since you last looked. From"
+                "This time's order is recent activity first (drawn by lot; \
+                 odds: `random` 5/18, `active` 5/18, `date` 4/18, `diverse` \
+                 4/18); posts within each community follow this order. From \
+                 your communities: nothing new since you last looked. From"
             ),
             "{}",
             drawn.summary(NewToYou(0))
@@ -2889,7 +2888,8 @@ mod tests {
         );
         assert_eq!(
             all_joined.summary(Shown(50)),
-            "Sorted newest first, as asked. From your communities: 50 posts. \
+            "Newest first, as asked; posts within each community follow this \
+             order. From your communities: 50 posts. \
              No community you have not joined has posts yet."
         );
 

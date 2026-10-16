@@ -106,15 +106,16 @@ pub fn sort_weights_text(weights: &[crate::responses::SortWeight]) -> String {
         .join(", ")
 }
 
-/// A sort in plain words, as the dashboard's policy line says it: "Sorted
-/// by recent activity"
+/// A sort in plain words, as the dashboard's policy line names an order:
+/// "recent activity first". Not "random": the line already says the
+/// communities elsewhere are chosen at random, and `random` is in the odds
 pub fn sort_in_words(sort: crate::enums::FeedSort) -> &'static str {
     use crate::enums::FeedSort;
     match sort {
-        FeedSort::Random => "Shuffled at random",
-        FeedSort::Active => "Sorted by recent activity",
-        FeedSort::Date => "Sorted newest first",
-        FeedSort::Diverse => "Spread across topics",
+        FeedSort::Random => "shuffled",
+        FeedSort::Active => "recent activity first",
+        FeedSort::Date => "newest first",
+        FeedSort::Diverse => "spread across topics",
     }
 }
 

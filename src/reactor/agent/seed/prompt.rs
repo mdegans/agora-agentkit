@@ -737,7 +737,14 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         }
     }
 
-    if !dash.feeds.is_empty() {
+    if let Some(policy) = &dash.feed_policy {
+        // Once, at the top of the feed (0.95): what it drew and how many of
+        // the agent's own posts are new, which also says when none are
+        out.push_str("### Community Feeds\n\n");
+        out.push_str(&policy_line(dash, policy));
+        out.push_str("\n\n");
+        format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
+    } else if !dash.feeds.is_empty() {
         out.push_str("### Community Feeds\n\n");
         format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
     } else if dash.unread_post_replies.is_empty()
@@ -770,30 +777,6 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         out.push_str(&elsewhere);
     }
 
-    // What this dashboard drew, and how to read otherwise (0.95). The
-    // runner fetches the dashboard itself, so the way to choose is get_feed,
-    // not the dashboard's own parameters.
-    if let Some(policy) = &dash.feed_policy {
-        // Everything elsewhere was seen before: say so, rather than describe
-        // a section that is not there
-        let unseen = if policy.communities.is_none()
-            && policy.sampled_posts > 0
-            && dash.elsewhere.is_empty()
-        {
-            format!(" {NOTHING_NEW_ELSEWHERE}")
-        } else {
-            String::new()
-        };
-        // What the agent got, after `filter_fresh` dropped what it had seen
-        let own = crate::responses::FeedCount::NewToYou(
-            dash.feeds.values().map(Vec::len).sum(),
-        );
-        out.push_str(&format!(
-            "\n{}{unseen} {RUNNER_HOW_TO_CHOOSE}\n",
-            policy.summary(own)
-        ));
-    }
-
     if !dash.unread_post_replies.is_empty()
         || !dash.unread_comment_replies.is_empty()
     {
@@ -803,6 +786,28 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     }
 
     out
+}
+
+/// The feed policy's line as the runner says it: the summary, counting the
+/// agent's own posts after `filter_fresh` dropped what it had seen, a note
+/// when nothing elsewhere is new, and how a seed agent chooses (it has no
+/// dashboard tool, so with get_feed)
+fn policy_line(
+    dash: &DashboardResponse,
+    policy: &crate::responses::DashboardFeedPolicy,
+) -> String {
+    let unseen = if policy.communities.is_none()
+        && policy.sampled_posts > 0
+        && dash.elsewhere.is_empty()
+    {
+        format!(" {NOTHING_NEW_ELSEWHERE}")
+    } else {
+        String::new()
+    };
+    let own = crate::responses::FeedCount::NewToYou(
+        dash.feeds.values().map(Vec::len).sum(),
+    );
+    format!("{}{unseen} {RUNNER_HOW_TO_CHOOSE}", policy.summary(own))
 }
 
 /// Said after the policy's summary when every post elsewhere was one the
@@ -3534,9 +3539,10 @@ mod tests {
             "{out}"
         );
         let line = format!(
-            "Spread across topics this time, picked at random (odds: {}); \
-             the same order applies to both sections. From your communities: \
-             1 post new to you. From communities you have not joined: up to \
+            "### Community Feeds\n\n\
+             This time's order is spread across topics (drawn by lot; odds: \
+             {}); posts within each community follow this order. From your \
+             communities: 1 post new to you. From communities you have not joined: up to \
              15 posts from up to 8, chosen at random, at most 2 from each; if \
              they have fewer, yours fill the rest. \
              get_feed lets you choose a sort or a community.",
@@ -3550,7 +3556,10 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("tech (1 post)\n"), "{out}");
-        assert!(out.find(&line).unwrap() > elsewhere, "{out}");
+        // Once, at the top of the feed, before its posts and the section
+        let at = out.find(&line).unwrap();
+        assert!(at < elsewhere && at < out.find("tech (1 post)").unwrap());
+        assert_eq!(out.matches("posts within each community").count(), 1);
     }
 
     /// A long description is cut at a word, never mid-word
@@ -3603,6 +3612,8 @@ mod tests {
             )),
             "{out}"
         );
+        // Said once: no separate "No new posts" line under it
+        assert!(!out.contains("No new posts in the communities"), "{out}");
         let shown = format_dashboard(&d, test_model());
         assert!(!shown.contains(NOTHING_NEW_ELSEWHERE), "{shown}");
 

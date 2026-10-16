@@ -4502,3 +4502,110 @@ async fn a_failed_last_round_is_announced_too() {
         transcript(&agent)
     );
 }
+
+/// The agent's own comments do not bring a post it has seen back as new
+/// (beta round 2, 2026-10-16): each comment it makes on a recorded post, at
+/// the top level or in reply to a comment shown on it, adds one to the
+/// post's recorded count at teardown; a post never recorded stays so
+#[tokio::test]
+async fn own_comments_do_not_make_a_seen_post_new() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let other_post = Uuid::new_v4();
+    let theirs = Uuid::new_v4();
+    let mut content = post_content(post_id);
+    content["comments"] = serde_json::json!([{
+        "id": theirs,
+        "post_id": post_id,
+        "agent_id": Uuid::new_v4(),
+        "agent_name": "someone-else",
+        "body": "A point worth answering.",
+        "created_at": "2026-10-01T00:00:00Z",
+    }]);
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/content/read");
+        then.status(200).json_body(content.clone());
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/comments");
+        then.status(201).json_body_obj(&crate::responses::WriteAck {
+            id: Uuid::new_v4(),
+            status: "created".to_owned(),
+            verified: true,
+        });
+    });
+
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 10,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    agent.state.seen_posts.insert(PostId::from(post_id), 1);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({ "id": post_id }),
+        ))
+        .await
+        .unwrap();
+    for (reply_to, body) in [
+        (post_id, "My own top-level view."),
+        (theirs, "And an answer to that point."),
+        (other_post, "A post never on my feed."),
+    ] {
+        let input = crate::requests::CreateCommentInput {
+            reply_to: reply_to.to_string().parse().unwrap(),
+            body: body.into(),
+        };
+        agent
+            .handle(tool_use_message(
+                "create_comment",
+                serde_json::to_value(&input).unwrap(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.state.seen_posts.get(&PostId::from(post_id)), Some(&3));
+    assert!(
+        !agent
+            .state
+            .seen_posts
+            .contains_key(&PostId::from(other_post))
+    );
+    assert!(
+        agent
+            .state
+            .ledger
+            .read()
+            .unwrap()
+            .commented_this_session
+            .is_empty()
+    );
+
+    // The feed's next look: the post with the agent's two comments on it
+    // is not new; one more from someone else makes it new
+    let mut seen = agent.state.seen_posts.clone();
+    let mut dash: crate::responses::DashboardResponse =
+        serde_json::from_value(serde_json::json!({
+            "agent": { "name": "marker-agent" },
+            "feeds": { "tech": [{
+                "id": post_id,
+                "title": "Compilers are underrated",
+                "author": "someone-else",
+                "comment_count": 3,
+                "created_at": "2026-10-01T00:00:00Z",
+            }] },
+        }))
+        .unwrap();
+    let mut busier = dash.clone();
+    super::filter_fresh(&mut seen, &mut dash);
+    assert!(dash.feeds.is_empty());
+    busier.feeds.get_mut("tech").unwrap()[0].comment_count = 4;
+    super::filter_fresh(&mut seen, &mut busier);
+    assert_eq!(busier.feeds["tech"].len(), 1);
+}

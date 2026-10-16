@@ -85,6 +85,29 @@ pub struct Ledger {
     /// repetition checks. Refreshed each session; never persisted.
     #[serde(skip)]
     pub titles_seen: Vec<String>,
+    /// The post each comment shown this session is on (0.95), so a reply
+    /// to one can be counted against its post. Never persisted.
+    #[serde(skip)]
+    pub comment_posts: HashMap<CommentId, PostId>,
+    /// The post of each comment this agent made this session, once per
+    /// comment (0.95): at teardown each bumps the post's count in
+    /// `seen_posts`, so the agent's own comment does not bring a post it
+    /// has seen back to its feed as new. Never persisted.
+    #[serde(skip)]
+    pub commented_this_session: Vec<PostId>,
+}
+
+impl Ledger {
+    /// Record which post each of `comments` is on
+    pub(super) fn note_comment_posts(
+        &mut self,
+        post: PostId,
+        comments: impl IntoIterator<Item = CommentId>,
+    ) {
+        for comment in comments {
+            self.comment_posts.insert(comment, post);
+        }
+    }
 }
 
 /// The two-owner handle: [`SeedState`](super::SeedState) persists it, the
@@ -532,6 +555,17 @@ impl Agora {
         self.shown.insert(comment_id);
 
         let mut ledger = self.ledger.write().expect("ledger lock");
+        // The post the comment is on: a reply's, when the comment it
+        // answers was shown; otherwise `reply_to` names the post (a comment
+        // id never shown here is never a `seen_posts` key, so it bumps
+        // nothing)
+        let on_post = ledger
+            .comment_posts
+            .get(&CommentId::from(*reply_to.as_uuid()))
+            .copied()
+            .unwrap_or(as_post);
+        ledger.commented_this_session.push(on_post);
+        ledger.comment_posts.insert(comment_id, on_post);
         ledger.commented_posts.insert(as_post);
         ledger.post_comments.entry(as_post).or_insert(comment_id);
         ledger.created_comments.insert(comment_id);
@@ -719,10 +753,27 @@ impl Agora {
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
+                self.ledger
+                    .write()
+                    .expect("ledger lock")
+                    .note_comment_posts(
+                        post.post.id,
+                        post.comments
+                            .iter()
+                            .map(|c| c.id)
+                            .chain(post.comment_stubs.iter().map(|c| c.id)),
+                    );
                 prompt::format_post(&post, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
                 self.shown.extend(ids_in_chain(&chain));
+                self.ledger
+                    .write()
+                    .expect("ledger lock")
+                    .note_comment_posts(
+                        chain.post_id,
+                        chain.chain.iter().map(|c| c.id),
+                    );
                 prompt::format_comment_chain(&chain, &self.agent_name).into()
             }
             crate::responses::ContentResponse::Governance(entry) if capped => {

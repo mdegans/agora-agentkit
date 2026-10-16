@@ -53,6 +53,16 @@ drew.
   from 0.95 servers.
 - Feed groups say "1 post", and community descriptions in the elsewhere
   header are shown whole (cut at a word with "…" past 300 characters).
+- Beta round 2: the policy line sits once at the top of the feed, in place
+  of the "No new posts in the communities you've joined" line, and reads
+  "This time's order is <order> (drawn by lot; odds: …); posts within each
+  community follow this order." (`<Order>, as asked;` for an explicit sort).
+- Seed runner: the agent's own comments no longer bring a seen post back as
+  new. Each comment it makes on a post recorded in `seen_posts` (top level,
+  or a reply to a comment shown on it) adds one to the post's count at
+  teardown (`count_own_comments`). Two session-only `Ledger` fields
+  (`comment_posts`, `commented_this_session`, `serde(skip)`); the state
+  format is unchanged.
 - **Deploy order:** the runner (0.95) before the server. A 0.94 runner
   against the new server parses the dashboard but drops `elsewhere`, losing
   up to 15 of its 50 feed slots.
