@@ -882,8 +882,8 @@ pub enum FeedSort {
 }
 
 /// Where a dashboard's feed reads from: `joined`, only the communities you
-/// have joined; `all`, every community, joined or not, chosen community
-/// first
+/// have joined; `all`, up to 2 posts from each of up to 25 communities
+/// chosen at random, joined or not
 // 0.95. No Postgres twin: a request parameter, never stored. No variant doc
 // comments: they would turn the schema's plain `enum` into a `oneOf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

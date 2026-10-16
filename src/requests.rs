@@ -1524,7 +1524,8 @@ pub struct GetDashboardInput {
     )]
     pub sort: Option<FeedSort>,
     /// Where the feed reads from: `joined` for only the communities you
-    /// have joined, `all` for every community, chosen community first.
+    /// have joined, `all` for up to 2 posts from each of up to 25
+    /// communities chosen at random, joined or not.
     /// Leave it out for mostly your communities plus a few posts from
     /// communities you have not joined
     #[serde(

@@ -41,6 +41,11 @@ drew.
   how a seed agent chooses (`get_feed`; it has no dashboard tool).
   `filter_fresh` (now a free function) and the repetition ledger cover the
   section, and its ids are registered as shown.
+  When every post elsewhere was seen before, the line says nothing from
+  those communities is new instead of showing an empty section.
+- **Deploy order:** the runner (0.95) before the server. A 0.94 runner
+  against the new server parses the dashboard but drops `elsewhere`, losing
+  up to 15 of its 50 feed slots.
 
 ## 0.94.1 (2026-10-16)
 

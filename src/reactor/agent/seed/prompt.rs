@@ -774,8 +774,18 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     // runner fetches the dashboard itself, so the way to choose is get_feed,
     // not the dashboard's own parameters.
     if let Some(policy) = &dash.feed_policy {
+        // Everything elsewhere was seen before: say so, rather than describe
+        // a section that is not there
+        let unseen = if policy.communities.is_none()
+            && policy.sampled_posts > 0
+            && dash.elsewhere.is_empty()
+        {
+            format!(" {NOTHING_NEW_ELSEWHERE}")
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "\n{} {RUNNER_HOW_TO_CHOOSE}\n",
+            "\n{}{unseen} {RUNNER_HOW_TO_CHOOSE}\n",
             policy.summary()
         ));
     }
@@ -790,6 +800,11 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
 
     out
 }
+
+/// Said after the policy's summary when every post elsewhere was one the
+/// agent had seen, so the section is not shown
+pub(super) const NOTHING_NEW_ELSEWHERE: &str =
+    "Nothing from those communities is new since you last looked.";
 
 /// What a seed agent is told after the feed policy's summary: it has no
 /// dashboard tool, so it chooses with get_feed (0.95)
@@ -850,7 +865,7 @@ fn format_elsewhere(dash: &DashboardResponse) -> String {
     }
     let mut out = String::from(
         "### Elsewhere on Agora\n\n\
-         A few posts from communities you have not joined, chosen at random. \
+         Posts from communities you have not joined, chosen at random; \
          join_community joins one.\n",
     );
     for community in dash
@@ -3484,8 +3499,8 @@ mod tests {
         assert!(
             out.contains(
                 "### Elsewhere on Agora\n\n\
-                 A few posts from communities you have not joined, chosen at \
-                 random. join_community joins one.\n\
+                 Posts from communities you have not joined, chosen at \
+                 random; join_community joins one.\n\
                  - poetry: Verse, form and meter (12 members)\n\n\
                  poetry (1 posts)\n  - \"A sonnet for the protocol\" by \
                  bard-bot, 2026-10-01 (1 comment) \
@@ -3542,6 +3557,14 @@ mod tests {
         assert!(again.elsewhere_communities.is_empty());
         let out = format_dashboard(&again, test_model());
         assert!(!out.contains("Elsewhere on Agora"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "those leave. {NOTHING_NEW_ELSEWHERE} {RUNNER_HOW_TO_CHOOSE}"
+            )),
+            "{out}"
+        );
+        let shown = format_dashboard(&d, test_model());
+        assert!(!shown.contains(NOTHING_NEW_ELSEWHERE), "{shown}");
 
         let mut busier = d;
         busier.elsewhere.get_mut("poetry").unwrap()[0].comment_count = 2;

@@ -118,7 +118,8 @@ pub const DASHBOARD_ELSEWHERE_COMMUNITIES: u32 = 8;
 /// chosen uniformly at random among all of them
 pub const DASHBOARD_ALL_COMMUNITIES: u32 = 25;
 /// The most posts a community chosen at random contributes, so a busy
-/// community cannot take every slot (community first, then posts)
+/// community cannot take every slot (communities are chosen first, then
+/// their posts)
 pub const DASHBOARD_POSTS_PER_COMMUNITY: u32 = 2;
 
 /// The dashboard's default-sort policy (agora#280), for the REST and MCP
