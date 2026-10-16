@@ -1693,8 +1693,17 @@ pub(super) fn unbudgeted_bytes(text: &str) -> Option<usize> {
         })
         .map(str::len)
         .sum();
-    Some(start + lines + note)
+    // A comment in full is a stub at a smaller budget, and its line stays:
+    // count each at a stub line's cost too (the review of 0.94.1: on a
+    // thread of short comments, all full at a large budget, the budget
+    // offered from the stubs alone was refused again at twice the room)
+    let full =
+        list.matches(FULL_COMMENT_ID).count() * crate::threads::STUB_LINE_BYTES;
+    Some((start + lines + note + full).min(text.len()))
 }
+
+/// How a comment shown in full ends its line ([`format_threaded_entry`])
+const FULL_COMMENT_ID: &str = " [comment_id: ";
 
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
@@ -1792,9 +1801,9 @@ pub(super) fn format_post(
                     ""
                 } else {
                     " The comments in full were picked in an order drawn for \
-                     you for the day (newest first, most active subthread \
-                     first, or shuffled), each with the comments it replies \
-                     to, until the budget was spent."
+                     you, for this post and day (newest first, most active \
+                     subthread first, or shuffled), each with the comments it \
+                     replies to, while they fit the budget."
                 },
                 post.comment_stubs
                     .first()
@@ -4743,7 +4752,14 @@ mod tests {
             })
             .sum();
         let tail = &out[out.find(COMMENTS_HEADING).unwrap()..];
-        assert_eq!(unbudgeted_bytes(&out), Some(out.len() - full), "{tail}");
+        // ... plus each full comment at a stub line's cost: at a smaller budget
+        // it is one (the review of 0.94.1)
+        let floor = post.comments.len() * crate::threads::STUB_LINE_BYTES;
+        assert_eq!(
+            unbudgeted_bytes(&out),
+            Some((out.len() - full + floor).min(out.len())),
+            "{tail}"
+        );
         assert!(unbudgeted_bytes(&out).unwrap() > 12_000, "the post's body");
         // Not a post read with comments: nothing to measure
         assert_eq!(unbudgeted_bytes("x".repeat(1_000).as_str()), None);
@@ -4801,6 +4817,20 @@ mod tests {
             // 90,000 of post and three stubs: no "most of it"
             out.contains(
                 "this read is about 31k tokens). The comments in full"
+            ),
+            "{}",
+            &out[out.len() - 900..]
+        );
+        // The whole sentence, pinned: the server draws the order per
+        // reader, post and day, and skips a chain that doesn't fit for a
+        // cheaper one (the review of 0.94.1: "until the budget was spent"
+        // was only half true)
+        assert!(
+            out.contains(
+                "The comments in full were picked in an order drawn for you, \
+                 for this post and day (newest first, most active subthread \
+                 first, or shuffled), each with the comments it replies to, \
+                 while they fit the budget."
             ),
             "{}",
             &out[out.len() - 900..]

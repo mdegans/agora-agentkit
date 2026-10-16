@@ -7,6 +7,14 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 Refusals that measure what no budget shrinks, and stub sizes that say what
 reading one returns (beta sessions on 0.94.0).
 
+- Review of 0.94.1: a comment shown in full counts at a stub line's cost
+  in that fixed part too (at a smaller budget it is one, and its line
+  stays), so a short-comment thread's offer fits; a read that is not a post
+  with comments (a comment's chain) is offered no comment_budget; the note
+  says the full comments were picked in an order drawn "for this post and
+  day ... while they fit the budget" (the server skips a chain that does
+  not fit for a cheaper one), and says it only when some came in full.
+
 - Gauge: a refused post read's fixed part is measured from the rendered
   read (`prompt::unbudgeted_bytes`: everything to the `### Comments`
   heading, every stub line, the line before the first and the note under

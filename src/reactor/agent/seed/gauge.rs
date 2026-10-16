@@ -345,16 +345,15 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
             fallbacks(false)
         );
     }
-    let asked = u64::from(
-        requested
-            .comment_budget
-            .unwrap_or(GetContentInput::DEFAULT_COMMENT_BUDGET),
-    )
-    .clamp(min, max);
-    let fixed = match super::prompt::unbudgeted_bytes(text) {
-        Some(bytes) => bytes as u64 / BYTES_PER_TOKEN,
-        None => estimate_tokens(text).saturating_sub(asked / BYTES_PER_TOKEN),
+    // Not a post read with comments (a comment's chain, a post with none):
+    // no budget shrinks it, so none is offered (the review of 0.94.1)
+    let Some(fixed) = super::prompt::unbudgeted_bytes(text) else {
+        return format!(
+            "A comment_budget does not shrink this read. {}",
+            fallbacks(false)
+        );
     };
+    let fixed = fixed as u64 / BYTES_PER_TOKEN;
     let usable = room.saturating_sub(fixed).saturating_mul(9) / 10;
     let bytes = usable.saturating_mul(BYTES_PER_TOKEN).min(max);
     if bytes < min {
@@ -573,8 +572,8 @@ mod tests {
         let post =
             || call_with("get_content", serde_json::json!({"id": "05676b9d"}));
 
-        // 10k held: 17,232 of room, 8,154 after the fixed part, 7,338 with
-        // a tenth held back, so a budget of 22,014 bytes
+        // Not a rendered post read (a comment's chain, a post without
+        // comments): no budget shrinks it, so none is offered
         let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
         gauge.set(10_000);
         let mut tool = Gauged::new(Echo { len: 60_000 }, gauge.clone());
@@ -584,23 +583,22 @@ mod tests {
             "{note}"
         );
         assert!(
-            note.contains(
-                "A comment_budget of at most 22014 would fit: about 9078 tokens"
-            ),
+            note.contains("A comment_budget does not shrink this read."),
             "{note}"
         );
-        assert!(
-            note.contains("or use the smaller comment_budget above"),
-            "{note}"
-        );
+        assert!(!note.contains("would fit:"), "{note}");
+        assert!(!note.contains("use the smaller comment_budget"), "{note}");
 
-        // 20k held: 7,232 of room, less than the fixed part, so no budget
-        // is offered and nothing suggests a smaller one
-        let tight = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
-        tight.set(20_000);
-        let mut tool = Gauged::new(Echo { len: 60_000 }, tight.clone());
+        // A post read whose post and lines alone overfill the room: no
+        // budget is offered and nothing suggests a smaller one
+        let text = post_read(2, 40);
+        let fixed = super::super::prompt::unbudgeted_bytes(&text).unwrap()
+            as u64
+            / BYTES_PER_TOKEN;
+        let tight = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
+        tight.set(tight.window() - tight.reserve() - (fixed - 1_000));
+        let mut tool = Gauged::new(Fixed { text }, tight.clone());
         let note = tool.call(post()).await.content.to_string();
-        assert!(note.contains("About 7232 tokens are left"), "{note}");
         assert!(
             note.contains("Even the smallest comment_budget (4096) would not make this read fit"),
             "{note}"
@@ -716,9 +714,12 @@ mod tests {
         let fixed = super::super::prompt::unbudgeted_bytes(&text).unwrap()
             as u64
             / BYTES_PER_TOKEN;
-        // 36,000 of body, 40 stub lines and the note: not the read less its
+        // 36,000 of body, 40 stub lines, the note, and 30 full comments' worth
+        // of stub lines: not the read less its
         // budget (a 262144 budget's 87k tokens is more than the read)
-        assert!((12_000..16_000).contains(&fixed), "{fixed}");
+        // and each of the 30 full comments at a stub line's cost, since at a
+        // smaller budget it is one (the review of 0.94.1)
+        assert!((12_000..18_000).contains(&fixed), "{fixed}");
         assert_eq!(estimate_tokens(&text).saturating_sub(262_144 / 3), 0);
 
         let gauge = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
