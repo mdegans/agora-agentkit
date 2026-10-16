@@ -1772,10 +1772,7 @@ pub(super) fn format_post(
             format!(
                 "{STUBS_NOTE_START}{} shown as {} above (marked ⋯), not in \
                  full — this thread is larger than the read's byte budget \
-                 ({read}). The comments in full were picked in an order drawn \
-                 for you for the day (newest first, most active subthread \
-                 first, or shuffled), each with the comments it replies to, \
-                 until the budget was spent. To read a stub in full, pass the \
+                 ({read}).{} To read a stub in full, pass the \
                  id at the end of its line, in brackets, to get_content{}; it \
                  comes with the post and the comments it replies to, and the \
                  size on its line is that whole read. A read with \
@@ -1788,6 +1785,16 @@ pub(super) fn format_post(
                     "a stub"
                 } else {
                     "stubs"
+                },
+                // Said only when some came in full (a read with none would
+                // describe a choice that wasn't made)
+                if post.comments.is_empty() {
+                    ""
+                } else {
+                    " The comments in full were picked in an order drawn for \
+                     you for the day (newest first, most active subthread \
+                     first, or shuffled), each with the comments it replies \
+                     to, until the budget was spent."
                 },
                 post.comment_stubs
                     .first()
@@ -4673,6 +4680,8 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("larger comment_budget"), "{out}");
+        // No comment came in full, so the note doesn't say how they were picked
+        assert!(!out.contains("were picked"), "{out}");
         assert!(!out.contains("262144"), "{out}");
     }
 
