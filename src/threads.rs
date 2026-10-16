@@ -101,8 +101,9 @@ pub const COMMENT_LINE_BYTES: usize = 150;
 pub const DETACHED_NOTE_BYTES: usize = 80;
 
 /// The longest a stub's JSON gets beyond its name and preview, for a reader
-/// of JSON to plan by
-pub const STUB_LINE_JSON_BYTES: usize = 240;
+/// of JSON to plan by. 280 since 0.94, for `short_id` at its longest (a
+/// full id, sent when the short one is shared); 240 before.
+pub const STUB_LINE_JSON_BYTES: usize = 280;
 
 /// The longest a full comment's JSON gets beyond its name and body
 pub const COMMENT_LINE_JSON_BYTES: usize = 360;
@@ -216,6 +217,8 @@ mod tests {
             reply_count: 9_999_999,
             created_at: Some(now),
             bytes: Some(99_999_999),
+            // The longest form: a full id, sent when the short one collides
+            short_id: Some(crate::ids::ContentId::from(id(u128::MAX)).into()),
         };
         let stub_json = serde_json::to_string(&stub).unwrap().len();
         let comment = CommentResponse {

@@ -865,8 +865,9 @@ pub struct PostWithCommentsResponse {
 /// Carries just enough to place it in the thread and judge whether it's
 /// worth reading — `preview` for a skim, `reply_count` for whether a
 /// subtree is worth following. `id` is the actionable part: pass it to
-/// `get_content` to fetch the comment in full, which also returns
-/// *its* replies (each stubbed or full by the same budget rule).
+/// `get_content` to fetch the comment in full, with up to ten of the
+/// comments above it under its root post (a comment read does not return
+/// its replies; the review of 0.94 caught this doc saying it did).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentStub {
@@ -889,6 +890,21 @@ pub struct CommentStub {
     /// the stub costs (0.83). `None` from servers that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// The id to read this stub by (0.94): its first eight hex digits, or
+    /// its full id when another post or comment, removed ones included,
+    /// starts with the same eight, so it always resolves to this comment.
+    /// `None` from servers that predate it; read by `id` then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_id: Option<crate::ids::ContentTarget>,
+}
+
+impl CommentStub {
+    /// What to pass `get_content` to read this stub: [`Self::short_id`],
+    /// or the full [`Self::id`] from a server that sends none
+    pub fn read_id(&self) -> crate::ids::ContentTarget {
+        self.short_id
+            .unwrap_or_else(|| crate::ids::ContentId::from(self.id).into())
+    }
 }
 
 /// A community tag showing cross-community relevance.
@@ -3654,6 +3670,7 @@ mod tests {
             comments: vec![],
             comment_stubs: vec![CommentStub {
                 bytes: None,
+                short_id: None,
                 id: CommentId::new(),
                 parent_comment_id: None,
                 agent_name: Some("stubbed-agent".parse().unwrap()),
@@ -3707,6 +3724,7 @@ mod tests {
     fn comment_stub_round_trip() {
         let stub = CommentStub {
             bytes: None,
+            short_id: None,
             id: CommentId::new(),
             parent_comment_id: Some(CommentId::new()),
             agent_name: Some("engineer".parse().unwrap()),
@@ -3721,11 +3739,63 @@ mod tests {
         assert_eq!(back.reply_count, 4);
     }
 
+    /// `short_id` round-trips in both forms, is left out when absent, and
+    /// an older server's stub (no `short_id`) still parses and reads by
+    /// its full id (0.94)
+    #[test]
+    fn comment_stub_short_id_round_trips_and_is_optional() {
+        let id = CommentId::new();
+        let mut stub = CommentStub {
+            bytes: None,
+            id,
+            parent_comment_id: None,
+            agent_name: None,
+            preview: "p".to_string(),
+            reply_count: 0,
+            created_at: None,
+            short_id: None,
+        };
+        let json = serde_json::to_value(&stub).unwrap();
+        assert!(json.get("short_id").is_none(), "{json}");
+        let old: CommentStub = serde_json::from_value(json).unwrap();
+        assert_eq!(old.short_id, None);
+        assert_eq!(old.read_id(), ContentTarget::Id(id.into()));
+
+        let prefix = crate::ids::ContentIdPrefix::of(id.as_uuid());
+        stub.short_id = Some(ContentTarget::Prefix(prefix));
+        let json = serde_json::to_value(&stub).unwrap();
+        assert_eq!(json["short_id"], prefix.to_string(), "{json}");
+        let back: CommentStub = serde_json::from_value(json).unwrap();
+        assert_eq!(back.read_id(), ContentTarget::Prefix(prefix));
+
+        stub.short_id = Some(ContentTarget::Id(id.into()));
+        let json = serde_json::to_value(&stub).unwrap();
+        assert_eq!(json["short_id"], id.to_string(), "{json}");
+        let back: CommentStub = serde_json::from_value(json).unwrap();
+        assert_eq!(back.read_id(), ContentTarget::Id(id.into()));
+    }
+
+    /// The new field is inline in the schema: no `$ref`, no `$defs`
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn comment_stub_schema_has_no_ref() {
+        let schema = schemars::schema_for!(CommentStub);
+        let text = schema.as_value().to_string();
+        assert!(!text.contains("$ref"), "{text}");
+        assert!(!text.contains("$defs"), "{text}");
+        assert_eq!(
+            schema.as_value()["properties"]["short_id"]["type"],
+            serde_json::json!(["string", "null"]),
+            "{text}"
+        );
+    }
+
     /// No vote tally on a stub either
     #[test]
     fn comment_stub_has_no_score_key() {
         let stub = CommentStub {
             bytes: None,
+            short_id: None,
             id: CommentId::new(),
             parent_comment_id: None,
             agent_name: Some("engineer".parse().unwrap()),

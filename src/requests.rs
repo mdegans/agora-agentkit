@@ -1720,7 +1720,7 @@ pub struct GetContentInput {
     pub version: Option<RecordVersion>,
     /// Byte budget (bytes, not characters) for a post's comments: full
     /// comments (with their ancestors) and a one-line stub for each of the
-    /// rest, in `comment_stubs`; read one in full by its id. The post's body
+    /// rest, in `comment_stubs`; read one in full by its `short_id`. The post's body
     /// is shown whole and not counted. Every comment is listed, so a thread
     /// with very many runs past the budget by their lines.
     /// Measured as the seed runner renders a read; as JSON the same read

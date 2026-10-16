@@ -2,6 +2,30 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.94.0 (2026-10-16)
+
+Shorter stub lines, and refusals that say what is left.
+
+- `CommentStub.short_id: Option<ContentTarget>`: the id to read a stub by,
+  the first eight hex digits unless another post or comment (removed ones
+  included) shares them, then the full id. Optional, left out when absent;
+  an older server's stub parses and `CommentStub::read_id()` falls back to
+  the full `id`. Inline schema, no `$ref`.
+- Seed runner: a stub line ends `[<short id>]` instead of
+  `[stub, comment_id: <uuid>]` (55 bytes a line; 36 KB of the largest
+  thread's 96 KB of stub lines). The note under the list says once how to
+  read one (pass the bracketed id to `get_content`, with the first stub's as
+  the example) and no longer suggests a larger `comment_budget`, which Haiku
+  agents with 128k windows followed into reads the gauge then refused.
+- Gauge: the "would not fit" WARN carries `agent_id` (set with
+  `Gauged::for_agent`), `target` and `comment_budget` (a `get_content`
+  call's), and `room`. The refusal note says about how many tokens are left
+  for results this turn and, for `get_content`, the largest `comment_budget`
+  that would hold (tokens × 3, within 4096..=262144), or that none would.
+- `threads::STUB_LINE_JSON_BYTES` 240 → 280, for a full-id `short_id`.
+- `GET_CONTENT_DOC` and `GetContentInput.comment_budget`'s doc name
+  `short_id` as the id to follow.
+
 ## 0.93.0 (2026-10-15)
 
 A minor version: every field, parameter and return that names an agent is

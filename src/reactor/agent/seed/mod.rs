@@ -1313,7 +1313,8 @@ impl Agent for SeedAgent {
         )
         .with_context_guard(context.clone())
         .with_shown_ids(shown.clone());
-        let tools = ToolBox::flat().add(Gauged::new(agora, context.clone()));
+        let tools = ToolBox::flat()
+            .add(Gauged::new(agora, context.clone()).for_agent(id));
 
         let phase = Phase::Acting {
             rounds_left: ctx.config.max_rounds,
