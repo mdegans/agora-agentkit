@@ -249,7 +249,7 @@ impl<T> Gauged<T> {
                 text.len() / 1024,
                 self.context.window(),
                 self.context.reserve(),
-                instead(call, room, tokens, &requested),
+                instead(call, room, &text, &requested),
             )
         } else {
             format!(
@@ -289,31 +289,31 @@ impl Requested {
 }
 
 /// What a refused `get_content` should try instead, as one sentence or
-/// two (0.94). `tokens` is the refused result's estimate and `asked` the
-/// call's `comment_budget` (the server's default when absent).
+/// two (0.94). `text` is the refused result and `asked` the call's
+/// `comment_budget` (the server's default when absent).
 ///
 /// A post read is its body, one line per comment, and full comments up to
 /// the budget, so a smaller budget shrinks only the last part. The part it
-/// can't shrink is at least `tokens` less the budget's own tokens; the
-/// largest budget that fits is what is left of `room` after that, with a
-/// tenth held back for the estimate. When nothing is left, a smaller budget
+/// can't shrink is measured from the rendered read
+/// ([`super::prompt::unbudgeted_bytes`]: the post, the stub lines and the
+/// note under them); for anything else it is at least the result less the
+/// budget's own tokens (0.94.0 took that bound for a post read too, and
+/// undercounted it whenever the full comments did not fill the budget:
+/// "about 1091 tokens" for a read with a 12k-token post). The largest
+/// budget that fits is what is left of `room` after that, with a tenth
+/// held back for the estimate. When nothing is left, a smaller budget
 /// can't help this post and the note says so instead of offering one (the
 /// review of 0.94: offering `room × 3` sent an agent straight into a second
 /// refusal whenever a long thread's comment lines filled the room). Only a
 /// post or comment id gets the arithmetic; a governance entry, a data set
 /// or a document gets the general advice, since the budget means something
 /// else there or nothing.
-fn instead(
-    call: &str,
-    room: u64,
-    tokens: u64,
-    requested: &Requested,
-) -> String {
+fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
     let fallbacks = |budget: bool| {
         format!(
             "Read the post with detail=\"summary\" (without its comments), or \
-             read one comment by its id (it comes with up to {} of the \
-             comments above it){}. For a data set's file (DATA-…, \
+             read one comment by its id (it comes with the post and up to {} \
+             of the comments it replies to){}. For a data set's file (DATA-…, \
              attachment=<path>) or listing, a smaller comment_budget shows \
              less of it, and the cut says how much.",
             GetContentInput::ANCESTOR_LIMIT,
@@ -345,27 +345,29 @@ fn instead(
             fallbacks(false)
         );
     }
-    let asked = u64::from(
-        requested
-            .comment_budget
-            .unwrap_or(GetContentInput::DEFAULT_COMMENT_BUDGET),
-    )
-    .clamp(min, max);
-    let fixed = tokens.saturating_sub(asked / BYTES_PER_TOKEN);
+    // Not a post read with comments (a comment's chain, a post with none):
+    // no budget shrinks it, so none is offered (the review of 0.94.1)
+    let Some(fixed) = super::prompt::unbudgeted_bytes(text) else {
+        return format!(
+            "A comment_budget does not shrink this read. {}",
+            fallbacks(false)
+        );
+    };
+    let fixed = fixed as u64 / BYTES_PER_TOKEN;
     let usable = room.saturating_sub(fixed).saturating_mul(9) / 10;
     let bytes = usable.saturating_mul(BYTES_PER_TOKEN).min(max);
     if bytes < min {
         format!(
             "Even the smallest comment_budget ({min}) would not make this read \
-             fit: about {fixed} tokens of it (the post and the line listing \
-             each comment) come with any budget. {}",
+             fit: about {fixed} tokens of it (the post and each stub's line) \
+             come with any budget. {}",
             fallbacks(false)
         )
     } else {
         format!(
             "A comment_budget of at most {bytes} would fit: about {fixed} \
-             tokens of this read (the post and the line listing each comment) \
-             come with any budget. {}",
+             tokens of this read (the post and each stub's line) come with any \
+             budget. {}",
             fallbacks(true)
         )
     }
@@ -564,13 +566,14 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_says_what_is_left_and_only_a_budget_that_fits() {
         // 60k window, reserve 32,768. A 60,000-byte read is 20,000 tokens;
-        // at the default budget (32,768 bytes, 10,922 tokens) 9,078 of
-        // them come with any budget.
+        // not a rendered post read, so the fixed part is the bound: at the
+        // default budget (32,768 bytes, 10,922 tokens) 9,078 of them come
+        // with any budget.
         let post =
             || call_with("get_content", serde_json::json!({"id": "05676b9d"}));
 
-        // 10k held: 17,232 of room, 8,154 after the fixed part, 7,338 with
-        // a tenth held back, so a budget of 22,014 bytes
+        // Not a rendered post read (a comment's chain, a post without
+        // comments): no budget shrinks it, so none is offered
         let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
         gauge.set(10_000);
         let mut tool = Gauged::new(Echo { len: 60_000 }, gauge.clone());
@@ -580,23 +583,22 @@ mod tests {
             "{note}"
         );
         assert!(
-            note.contains(
-                "A comment_budget of at most 22014 would fit: about 9078 tokens"
-            ),
+            note.contains("A comment_budget does not shrink this read."),
             "{note}"
         );
-        assert!(
-            note.contains("or use the smaller comment_budget above"),
-            "{note}"
-        );
+        assert!(!note.contains("would fit:"), "{note}");
+        assert!(!note.contains("use the smaller comment_budget"), "{note}");
 
-        // 20k held: 7,232 of room, less than the fixed part, so no budget
-        // is offered and nothing suggests a smaller one
-        let tight = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
-        tight.set(20_000);
-        let mut tool = Gauged::new(Echo { len: 60_000 }, tight.clone());
+        // A post read whose post and lines alone overfill the room: no
+        // budget is offered and nothing suggests a smaller one
+        let text = post_read(2, 40);
+        let fixed = super::super::prompt::unbudgeted_bytes(&text).unwrap()
+            as u64
+            / BYTES_PER_TOKEN;
+        let tight = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
+        tight.set(tight.window() - tight.reserve() - (fixed - 1_000));
+        let mut tool = Gauged::new(Fixed { text }, tight.clone());
         let note = tool.call(post()).await.content.to_string();
-        assert!(note.contains("About 7232 tokens are left"), "{note}");
         assert!(
             note.contains("Even the smallest comment_budget (4096) would not make this read fit"),
             "{note}"
@@ -630,6 +632,129 @@ mod tests {
             "{note}"
         );
         assert!(!note.contains("comment_budget"), "{note}");
+    }
+
+    /// A rendered post read: a 36,000-byte body, `full` comments of 3,000
+    /// bytes and `stubs` stubs, all top-level
+    fn post_read(full: usize, stubs: usize) -> String {
+        let at =
+            |i: usize| format!("2026-10-16T{:02}:{:02}:00Z", i / 60, i % 60);
+        let comments: Vec<_> = (0..full)
+            .map(|i| {
+                serde_json::json!({
+                    "id": uuid::Uuid::new_v4(),
+                    "post_id": uuid::Uuid::new_v4(),
+                    "agent_id": uuid::Uuid::new_v4(),
+                    "agent_name": "engineer",
+                    "body": "y".repeat(3_000),
+                    "created_at": at(i),
+                })
+            })
+            .collect();
+        let comment_stubs: Vec<_> = (0..stubs)
+            .map(|i| {
+                serde_json::json!({
+                    "id": uuid::Uuid::new_v4(),
+                    "agent_name": "lawyer",
+                    "preview": "z".repeat(100),
+                    "reply_count": 0,
+                    "bytes": 2_000,
+                    "created_at": at(600 + i),
+                })
+            })
+            .collect();
+        let post: crate::responses::PostWithCommentsResponse =
+            serde_json::from_value(serde_json::json!({
+                "post": {
+                    "id": uuid::Uuid::new_v4(),
+                    "agent_id": uuid::Uuid::new_v4(),
+                    "agent_name": "author",
+                    "community_id": uuid::Uuid::new_v4(),
+                    "community_name": "tech",
+                    "title": "A long thread",
+                    "body": "x".repeat(36_000),
+                    "comment_count": full + stubs,
+                },
+                "comments": comments,
+                "comment_stubs": comment_stubs,
+                "omitted_comment_count": stubs,
+            }))
+            .expect("fixture");
+        super::super::prompt::format_post(&post, &"reader".parse().unwrap())
+    }
+
+    /// A tool that answers every call with `text`
+    struct Fixed {
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for Fixed {
+        fn name(&self) -> &str {
+            "get_content"
+        }
+
+        fn definitions(&self) -> Vec<MethodDef> {
+            Vec::new()
+        }
+
+        async fn call(&mut self, call: Use) -> tool::Result {
+            tool::Result::new(call.id, self.text.clone())
+        }
+    }
+
+    /// A refused post read measures the part no budget shrinks from the
+    /// read itself (the post, the stub lines, the note), not the read less
+    /// its budget: 0.94.0 said ~1k of a read whose post alone was 12k,
+    /// because the full comments had not filled the 262144 asked for. The
+    /// budget it offers, read again, fits the room.
+    #[tokio::test]
+    async fn a_refused_post_read_measures_what_no_budget_shrinks() {
+        let text = post_read(30, 40);
+        let fixed = super::super::prompt::unbudgeted_bytes(&text).unwrap()
+            as u64
+            / BYTES_PER_TOKEN;
+        // 36,000 of body, 40 stub lines, the note, and 30 full comments' worth
+        // of stub lines: not the read less its
+        // budget (a 262144 budget's 87k tokens is more than the read)
+        // and each of the 30 full comments at a stub line's cost, since at a
+        // smaller budget it is one (the review of 0.94.1)
+        assert!((12_000..18_000).contains(&fixed), "{fixed}");
+        assert_eq!(estimate_tokens(&text).saturating_sub(262_144 / 3), 0);
+
+        let gauge = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
+        let room = fixed + 20_000;
+        gauge.set(gauge.window() - gauge.reserve() - room);
+        assert!(!gauge.fits(estimate_tokens(&text)), "refused");
+        let mut tool = Gauged::new(Fixed { text }, gauge.clone());
+        let note = tool
+            .call(call_with(
+                "get_content",
+                serde_json::json!({"id": "05676b9d", "comment_budget": "262144"}),
+            ))
+            .await
+            .content
+            .to_string();
+        let budget = 20_000 * 9 / 10 * BYTES_PER_TOKEN;
+        assert!(
+            note.contains(&format!(
+                "A comment_budget of at most {budget} would fit: about {fixed} \
+                 tokens of this read (the post and each stub's line) come \
+                 with any budget."
+            )),
+            "{note}"
+        );
+
+        // At that budget the server admits as many 3,000-byte comments as
+        // it holds, each charged its line too, and stubs the rest
+        let admitted = budget as usize
+            / (3_000 + crate::threads::COMMENT_LINE_BYTES + "engineer".len());
+        let again = post_read(admitted, 40 + 30 - admitted);
+        assert!(
+            estimate_tokens(&again) <= room,
+            "{} > {room}",
+            estimate_tokens(&again)
+        );
     }
 
     /// The log names what a refused get_content asked for

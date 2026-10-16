@@ -1146,6 +1146,60 @@ struct ThreadedEntry<'a> {
     /// The comment this one replies to, when that comment is not in the
     /// thread: the entry is shown as a root and says so
     detached_from: Option<CommentId>,
+    /// About what reading this entry by its id returns, in bytes: the root
+    /// post and up to [`GetContentInput::ANCESTOR_LIMIT`] of the comments
+    /// it replies to, with it (see [`chain_read_bytes`]). `None` when a
+    /// comment in that chain came without its size (an older server).
+    ///
+    /// [`GetContentInput::ANCESTOR_LIMIT`]: crate::requests::GetContentInput::ANCESTOR_LIMIT
+    read_bytes: Option<u64>,
+}
+
+impl ThreadEntry<'_> {
+    /// The comment's whole body, in bytes, when known
+    fn body_bytes(self) -> Option<u64> {
+        match self {
+            ThreadEntry::Full(c) => Some(c.body.len() as u64),
+            ThreadEntry::Stub(s) => s.bytes,
+        }
+    }
+}
+
+/// About what reading `entry` by its id returns, in bytes, as
+/// [`format_comment_chain`] renders it: the root post (`post_bytes`, its
+/// title and body as a chain read shows it) and the comment with up to
+/// [`GetContentInput::ANCESTOR_LIMIT`] of its nearest ancestors in the
+/// thread, each at its body and a line. A stub's line once said only the
+/// comment's own size, so "under 1k tokens to read" came back as 1.5k to 5k
+/// (beta sessions, 2026-10-16).
+///
+/// [`GetContentInput::ANCESTOR_LIMIT`]: crate::requests::GetContentInput::ANCESTOR_LIMIT
+fn chain_read_bytes(
+    entry: ThreadEntry<'_>,
+    by_id: &HashMap<CommentId, ThreadEntry<'_>>,
+    post_bytes: u64,
+) -> Option<u64> {
+    let mut bytes = post_bytes + COMMENT_LINE_BYTES + entry.body_bytes()?;
+    let mut parent = entry.parent_comment_id();
+    for _ in 0..crate::requests::GetContentInput::ANCESTOR_LIMIT {
+        let Some(p) = parent.and_then(|id| by_id.get(&id)) else {
+            break;
+        };
+        bytes += COMMENT_LINE_BYTES + p.body_bytes()?;
+        parent = p.parent_comment_id();
+    }
+    Some(bytes + COMMENT_LINE_BYTES)
+}
+
+/// A post's title and body as a comment chain read shows it: the body cut
+/// at [`CommentChainResponse::ROOT_BODY_MAX`] characters
+fn chain_post_bytes(post: &PostResponse) -> u64 {
+    let body = post
+        .body
+        .char_indices()
+        .nth(CommentChainResponse::ROOT_BODY_MAX)
+        .map_or(post.body.len(), |(at, _)| at);
+    (post.title.len() + body) as u64
 }
 
 /// Build a threaded list from flat comments plus their stubs (depth-first
@@ -1161,9 +1215,13 @@ struct ThreadedEntry<'a> {
 /// every reply under it: in March and April the server accepted a reply to
 /// a comment on another post, and 892 comments on 499 posts are such
 /// replies (one thread showed 14 of its 33; bridge finding, 2026-10-14).
+///
+/// `post_bytes` is the post as a chain read shows it ([`chain_post_bytes`]),
+/// for each entry's [`ThreadedEntry::read_bytes`].
 fn build_comment_threads<'a>(
     comments: &'a [CommentResponse],
     stubs: &'a [CommentStub],
+    post_bytes: u64,
 ) -> Vec<ThreadedEntry<'a>> {
     let entries: Vec<ThreadEntry<'a>> = comments
         .iter()
@@ -1190,6 +1248,7 @@ fn build_comment_threads<'a>(
                 .detached
                 .then(|| entry.parent_comment_id())
                 .flatten(),
+            read_bytes: chain_read_bytes(entry, &by_id, post_bytes),
         }
     })
     .collect()
@@ -1255,11 +1314,12 @@ fn format_threaded_entry(
                 1 => "1 reply".to_string(),
                 n => format!("{n} replies"),
             };
-            let replies = match s.bytes {
-                Some(bytes) => format!(
-                    "{replies}; {} to read",
-                    about_tokens(bytes + COMMENT_LINE_BYTES)
-                ),
+            // What reading it returns, the post and the comments it replies
+            // to included, as the note under the list says
+            let replies = match te.read_bytes {
+                Some(bytes) => {
+                    format!("{replies}; {} to read", about_tokens(bytes))
+                }
                 None => replies,
             };
             // Dated like a full comment: big threads list stubs in thread
@@ -1276,7 +1336,7 @@ fn format_threaded_entry(
             // from an older server): `[stub, comment_id: <uuid>]` was 55
             // bytes of every line, 36 KB of the largest thread's 96 KB.
             format!(
-                "{indent}⋯ {author}{yours}{date}{detached} ({replies}){} [{}]",
+                "{indent}{STUB_MARK}{author}{yours}{date}{detached} ({replies}){} [{}]",
                 // A thread with very many comments may come with shortened
                 // or empty previews (agora 0.83 budgets the stub lines too)
                 match s.preview.trim() {
@@ -1589,6 +1649,62 @@ pub(super) fn format_ballot_receipt(receipt: &BallotReceipt) -> String {
     )
 }
 
+/// The heading a post read's comments are listed under
+const COMMENTS_HEADING: &str = "\n### Comments\n\n";
+
+/// What a stub's line starts with, after its indent
+const STUB_MARK: &str = "⋯ ";
+
+/// The line before a post read's first stub: the note saying how to read
+/// one is under the list, which on a long thread is 120 KB further on
+/// (beta sessions, 2026-10-16)
+const STUBS_PREAMBLE: &str = "*(Comments marked ⋯ are stubs: one line each. \
+     The note at the end of the list says how to read one.)*\n";
+
+/// Where the note under a post read's stubs starts
+const STUBS_NOTE_START: &str = "\n*[";
+
+/// The bytes of a rendered post read ([`format_post`]) that no
+/// `comment_budget` shrinks: everything to the comments' heading (the post,
+/// its poll and its thread summary), every stub's line, the line before
+/// the first, and the note under them. `None` when `text` is not a post
+/// read with comments.
+///
+/// The budget holds the full comments; a stub's line is shown whatever it
+/// is (the server lists every comment), so a refusal that took the read
+/// less its budget for this undercounted it whenever the full comments did
+/// not fill the budget: 24cc8bd6, refused at 88k tokens at a budget of
+/// 262144, was said to have about 1k that came with any budget, under a
+/// 12k post (beta sessions, 2026-10-16). Where the format is ambiguous (a
+/// comment's body with a line that starts like a stub's) this counts more,
+/// so a budget offered from it errs small.
+pub(super) fn unbudgeted_bytes(text: &str) -> Option<usize> {
+    let start = text.rfind(COMMENTS_HEADING)? + COMMENTS_HEADING.len();
+    let list = &text[start..];
+    let (list, note) = match list.rfind(STUBS_NOTE_START) {
+        Some(at) => (&list[..at], list.len() - at),
+        None => (list, 0),
+    };
+    let lines: usize = list
+        .split_inclusive('\n')
+        .filter(|line| {
+            line.trim_start_matches(' ').starts_with(STUB_MARK)
+                || *line == STUBS_PREAMBLE
+        })
+        .map(str::len)
+        .sum();
+    // A comment in full is a stub at a smaller budget, and its line stays:
+    // count each at a stub line's cost too (the review of 0.94.1: on a
+    // thread of short comments, all full at a large budget, the budget
+    // offered from the stubs alone was refused again at twice the room)
+    let full =
+        list.matches(FULL_COMMENT_ID).count() * crate::threads::STUB_LINE_BYTES;
+    Some((start + lines + note + full).min(text.len()))
+}
+
+/// How a comment shown in full ends its line ([`format_threaded_entry`])
+const FULL_COMMENT_ID: &str = " [comment_id: ";
+
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
 /// own posts otherwise engage with themselves.
@@ -1635,41 +1751,92 @@ pub(super) fn format_post(
         out.push_str(&format!("\n### Thread summary\n\n{summary}\n"));
     }
 
+    let mut stub_lines = 0;
     if total_comments > 0 {
-        out.push_str("\n### Comments\n\n");
-        for te in build_comment_threads(&post.comments, &post.comment_stubs) {
-            out.push_str(&format_threaded_entry(&te, 400, viewer_name));
+        out.push_str(COMMENTS_HEADING);
+        let threads = build_comment_threads(
+            &post.comments,
+            &post.comment_stubs,
+            chain_post_bytes(p),
+        );
+        let mut first_stub = true;
+        for te in threads {
+            let line = format_threaded_entry(&te, 400, viewer_name);
+            if matches!(te.entry, ThreadEntry::Stub(_)) {
+                // The note is under the list, which runs to 120 KB on a long
+                // thread, so a line says before the first stub what ⋯ means
+                if std::mem::take(&mut first_stub) {
+                    out.push_str(STUBS_PREAMBLE);
+                    stub_lines += STUBS_PREAMBLE.len();
+                }
+                stub_lines += line.len() + 1;
+            }
+            out.push_str(&line);
             out.push('\n');
         }
     }
 
     if post.omitted_comment_count > 0 {
-        out.push_str(&format!(
-            "\n*[{} shown as {} above (marked ⋯), not in full — this \
-             thread is larger than the read's byte budget{}. To read a stub \
-             in full, pass the id at the end of its line, in brackets, to \
-             get_content{}; it comes with the comments above it. A read with detail=\"summary\" skips the \
-             comments.]*\n",
-            match post.omitted_comment_count {
-                1 => "1 comment".to_string(),
-                n => format!("{n} comments"),
-            },
-            if post.omitted_comment_count == 1 {
-                "a stub"
-            } else {
-                "stubs"
-            },
-            p.size
-                .map(|size| format!(
-                    " (whole, it is {})",
-                    about_tokens(whole_read_bytes(&size, p.comment_count))
-                ))
-                .unwrap_or_default(),
-            post.comment_stubs
-                .first()
-                .map(|s| format!(" (e.g. get_content(\"{}\"))", s.read_id()))
-                .unwrap_or_default(),
+        let note = |read: &str| {
+            format!(
+                "{STUBS_NOTE_START}{} shown as {} above (marked ⋯), not in \
+                 full — this thread is larger than the read's byte budget \
+                 ({read}).{} To read a stub in full, pass the \
+                 id at the end of its line, in brackets, to get_content{}; it \
+                 comes with the post and the comments it replies to, and the \
+                 size on its line is that whole read. A read with \
+                 detail=\"summary\" skips the comments.]*\n",
+                match post.omitted_comment_count {
+                    1 => "1 comment".to_string(),
+                    n => format!("{n} comments"),
+                },
+                if post.omitted_comment_count == 1 {
+                    "a stub"
+                } else {
+                    "stubs"
+                },
+                // Said only when some came in full (a read with none would
+                // describe a choice that wasn't made)
+                if post.comments.is_empty() {
+                    ""
+                } else {
+                    " The comments in full were picked in an order drawn for \
+                     you, for this post and day (newest first, most active \
+                     subthread first, or shuffled), each with the comments it \
+                     replies to, while they fit the budget."
+                },
+                post.comment_stubs
+                    .first()
+                    .map(|s| format!(
+                        " (e.g. get_content(\"{}\"))",
+                        s.read_id()
+                    ))
+                    .unwrap_or_default(),
+            )
+        };
+        // This read's own size includes the note saying it: measured with
+        // the longest the size can be, so the estimate errs high
+        let whole = p.size.map(|size| {
+            format!(
+                "whole, it is {}; ",
+                about_tokens(whole_read_bytes(&size, p.comment_count))
+            )
+        });
+        let draft = note(&format!(
+            "{}this read is about 999999k tokens, most of it the stub lines",
+            whole.as_deref().unwrap_or_default()
         ));
+        let read = (out.len() + draft.len()) as u64;
+        let most = if stub_lines as u64 * 2 > read {
+            ", most of it the stub lines"
+        } else {
+            ""
+        };
+        out.push_str(&note(&format!(
+            "{}this read is {}{most}",
+            whole.as_deref().unwrap_or_default(),
+            about_tokens(read)
+        )));
     }
 
     out
@@ -4144,6 +4311,9 @@ mod tests {
                         detached_from: (depth == 0)
                             .then(|| entry.parent_comment_id())
                             .flatten(),
+                        // The longest a stub's size gets: a read of up to
+                        // 64 KiB of post and eleven comments of 9,999,999
+                        read_bytes: Some(99_999_999),
                     };
                     let line = format_threaded_entry(
                         &te,
@@ -4512,13 +4682,226 @@ mod tests {
             out.contains(&format!(
                 "To read a stub in full, pass the id at the end of its line, \
                  in brackets, to get_content (e.g. get_content(\"{prefix}\")); \
-                 it comes with the comments above it. A read with \
+                 it comes with the post and the comments it replies to, and \
+                 the size on its line is that whole read. A read with \
                  detail=\"summary\" skips the comments.]*"
             )),
             "{out}"
         );
         assert!(!out.contains("larger comment_budget"), "{out}");
+        // No comment came in full, so the note doesn't say how they were picked
+        assert!(!out.contains("were picked"), "{out}");
         assert!(!out.contains("262144"), "{out}");
+    }
+
+    /// A post read of full comments and stubs, the stubs replying to the
+    /// first full comment, with a body of `body` bytes
+    fn mixed_read(body: usize, stubs: usize) -> PostWithCommentsResponse {
+        let mut p = base_post();
+        p.body = "x".repeat(body);
+        p.comment_count = Some(2 + stubs as i64);
+        p.size = Some(crate::responses::ReadSize {
+            body_bytes: body as u64,
+            comment_bytes: 900_000,
+        });
+        let now = chrono::Utc::now();
+        let mut first = full_comment("engineer", false);
+        first.created_at = Some(now - chrono::Duration::hours(2));
+        let mut second = full_comment("artist", false);
+        second.body = "A second full reply,\nover two lines.".into();
+        second.created_at = Some(now);
+        let comment_stubs = (0..stubs)
+            .map(|i| {
+                let mut s = stub("lawyer");
+                s.parent_comment_id = Some(first.id);
+                s.bytes = Some(2_000);
+                s.created_at =
+                    Some(now - chrono::Duration::minutes(60 - i as i64));
+                s
+            })
+            .collect();
+        PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: p,
+            comments: vec![first, second],
+            comment_stubs,
+            omitted_comment_count: stubs as u64,
+            thread_summary: None,
+            in_your_trash: None,
+        }
+    }
+
+    /// What no budget shrinks is the read less its full comments' lines:
+    /// the post to the heading, the line before the first stub, every stub
+    /// line and the note under them (0.94.1: a refusal took the read less
+    /// its budget, ~1k of a read whose post alone was 12k)
+    #[test]
+    fn the_part_no_budget_shrinks_is_the_post_the_stubs_and_the_note() {
+        let post = mixed_read(12_000, 3);
+        let out = format_post(&post, &"viewer".parse().unwrap());
+        let full: usize = post
+            .comments
+            .iter()
+            .map(|c| {
+                let at = out.find(c.body.as_str()).expect("the comment");
+                let start = out[..at].rfind('\n').unwrap() + 1;
+                let after = at + c.body.len();
+                let end = after + out[after..].find('\n').unwrap() + 1;
+                end - start
+            })
+            .sum();
+        let tail = &out[out.find(COMMENTS_HEADING).unwrap()..];
+        // ... plus each full comment at a stub line's cost: at a smaller budget
+        // it is one (the review of 0.94.1)
+        let floor = post.comments.len() * crate::threads::STUB_LINE_BYTES;
+        assert_eq!(
+            unbudgeted_bytes(&out),
+            Some((out.len() - full + floor).min(out.len())),
+            "{tail}"
+        );
+        assert!(unbudgeted_bytes(&out).unwrap() > 12_000, "the post's body");
+        // Not a post read with comments: nothing to measure
+        assert_eq!(unbudgeted_bytes("x".repeat(1_000).as_str()), None);
+        let mut bare = mixed_read(100, 0);
+        bare.comments.clear();
+        let out = format_post(&bare, &"viewer".parse().unwrap());
+        assert_eq!(unbudgeted_bytes(&out), None, "{out}");
+    }
+
+    /// One line before the first stub says what ⋯ is and where the note
+    /// is, and the note stays under the list
+    #[test]
+    fn a_line_before_the_first_stub_points_at_the_note() {
+        let post = mixed_read(100, 3);
+        let out = format_post(&post, &"viewer".parse().unwrap());
+        let lines: Vec<&str> = out.lines().collect();
+        let first = lines.iter().position(|l| l.contains("⋯ lawyer")).unwrap();
+        assert_eq!(format!("{}\n", lines[first - 1]), STUBS_PREAMBLE, "{out}");
+        assert_eq!(out.matches("Comments marked ⋯ are stubs").count(), 1);
+        // The full comment the stubs reply to comes first, and the note last
+        assert!(
+            out.find("A full reply.").unwrap()
+                < out.find(STUBS_PREAMBLE).unwrap()
+        );
+        assert!(out.trim_end().ends_with("skips the comments.]*"), "{out}");
+        // No stubs, no line
+        let mut whole = mixed_read(100, 0);
+        whole.omitted_comment_count = 0;
+        let out = format_post(&whole, &"viewer".parse().unwrap());
+        assert!(!out.contains("Comments marked"), "{out}");
+    }
+
+    /// The note says this read's size, and that the stub lines are most
+    /// of it when they are, beside the whole thread's
+    #[test]
+    fn the_note_says_how_large_this_read_is() {
+        let post = mixed_read(100, 300);
+        let out = format_post(&post, &"viewer".parse().unwrap());
+        let tokens = out.len() / 3;
+        assert!((10_000..30_000).contains(&tokens), "{tokens}");
+        let whole = whole_read_bytes(&post.post.size.unwrap(), Some(302));
+        assert!(
+            out.contains(&format!(
+                "(whole, it is {}; this read is about {}k tokens, most of it \
+                 the stub lines)",
+                about_tokens(whole),
+                (tokens + 500) / 1_000
+            )),
+            "{}",
+            &out[out.len() - 900..]
+        );
+        let post = mixed_read(90_000, 3);
+        let out = format_post(&post, &"viewer".parse().unwrap());
+        assert!(
+            // 90,000 of post and three stubs: no "most of it"
+            out.contains(
+                "this read is about 31k tokens). The comments in full"
+            ),
+            "{}",
+            &out[out.len() - 900..]
+        );
+        // The whole sentence, pinned: the server draws the order per
+        // reader, post and day, and skips a chain that doesn't fit for a
+        // cheaper one (the review of 0.94.1: "until the budget was spent"
+        // was only half true)
+        assert!(
+            out.contains(
+                "The comments in full were picked in an order drawn for you, \
+                 for this post and day (newest first, most active subthread \
+                 first, or shuffled), each with the comments it replies to, \
+                 while they fit the budget."
+            ),
+            "{}",
+            &out[out.len() - 900..]
+        );
+    }
+
+    /// A stub's size is what reading it returns: the post as a chain read
+    /// shows it, the comment, and up to ANCESTOR_LIMIT of the comments it
+    /// replies to (0.94.0 said the comment's own, so "under 1k" read 1.5k
+    /// to 5k)
+    #[test]
+    fn a_stubs_size_is_the_whole_read_it_returns() {
+        // 9,000 of post and title, a 3,000-byte parent, a 300-byte stub, and
+        // three lines: 12,807 bytes, 4,269 tokens
+        let mut p = base_post();
+        p.title = "t".into();
+        p.body = "x".repeat(8_999);
+        let mut parent = full_comment("engineer", false);
+        parent.body = "y".repeat(3_000);
+        let mut st = stub("lawyer");
+        st.parent_comment_id = Some(parent.id);
+        st.bytes = Some(300);
+        let mut read = PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: p,
+            comments: vec![parent],
+            comment_stubs: vec![st],
+            omitted_comment_count: 1,
+            thread_summary: None,
+            in_your_trash: None,
+        };
+        let out = format_post(&read, &"viewer".parse().unwrap());
+        assert!(
+            out.contains("(2 replies; about 4k tokens to read)"),
+            "{out}"
+        );
+
+        // Twelve stubs deep: the deepest counts itself and ten above it
+        let mut chain: Vec<CommentStub> = Vec::new();
+        for _ in 0..12 {
+            let mut s = stub("critic");
+            s.bytes = Some(3_000);
+            s.parent_comment_id = chain.last().map(|p: &CommentStub| p.id);
+            chain.push(s);
+        }
+        let deepest = chain.last().unwrap().id;
+        read.comments.clear();
+        read.post.body = "x".repeat(65_536 * 2);
+        let entries: Vec<ThreadEntry> =
+            chain.iter().map(ThreadEntry::Stub).collect();
+        let by_id: HashMap<CommentId, ThreadEntry> =
+            entries.iter().map(|e| (e.id(), *e)).collect();
+        let post_bytes = chain_post_bytes(&read.post);
+        assert_eq!(post_bytes, 65_536 + 1, "the body as a chain read cuts it");
+        assert_eq!(
+            chain_read_bytes(by_id[&deepest], &by_id, post_bytes),
+            Some(
+                post_bytes
+                    + 11 * (3_000 + COMMENT_LINE_BYTES)
+                    + COMMENT_LINE_BYTES
+            )
+        );
+        // A size missing from the chain (an older server): none shown
+        let mut old = chain.clone();
+        old[5].bytes = None;
+        let entries: Vec<ThreadEntry> =
+            old.iter().map(ThreadEntry::Stub).collect();
+        let by_id: HashMap<CommentId, ThreadEntry> =
+            entries.iter().map(|e| (e.id(), *e)).collect();
+        assert_eq!(chain_read_bytes(by_id[&deepest], &by_id, post_bytes), None);
     }
 
     #[test]
