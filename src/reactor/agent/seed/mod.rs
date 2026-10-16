@@ -510,6 +510,28 @@ fn rounds_notice(left: usize) -> Option<&'static str> {
     }
 }
 
+/// Retain only the dashboard's feed posts, its own communities' and those
+/// elsewhere, that are new or have new comments since `seen`, and record
+/// what is shown in `seen`. A community elsewhere is described only while
+/// one of its posts is still shown.
+pub(crate) fn filter_fresh(
+    seen: &mut HashMap<PostId, i64>,
+    dash: &mut crate::responses::DashboardResponse,
+) {
+    for posts in dash.feeds.values_mut().chain(dash.elsewhere.values_mut()) {
+        posts.retain(|p| seen.get(&p.id) != Some(&p.comment_count));
+        for p in posts.iter() {
+            seen.insert(p.id, p.comment_count);
+        }
+    }
+    dash.feeds.retain(|_, posts| !posts.is_empty());
+    dash.elsewhere.retain(|_, posts| !posts.is_empty());
+    let (feeds, elsewhere) = (&dash.feeds, &dash.elsewhere);
+    dash.elsewhere_communities.retain(|c| {
+        feeds.contains_key(&c.name) || elsewhere.contains_key(&c.name)
+    });
+}
+
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
         self.quirks.unwrap_or_default()
@@ -518,14 +540,7 @@ impl SeedAgent {
     /// Retain only feed posts that are new or have new comments since last
     /// seen, and remember the counts for next session.
     fn filter_fresh(&mut self, dash: &mut crate::responses::DashboardResponse) {
-        let seen = &mut self.state.seen_posts;
-        for posts in dash.feeds.values_mut() {
-            posts.retain(|p| seen.get(&p.id) != Some(&p.comment_count));
-            for p in posts.iter() {
-                seen.insert(p.id, p.comment_count);
-            }
-        }
-        dash.feeds.retain(|_, posts| !posts.is_empty());
+        filter_fresh(&mut self.state.seen_posts, dash);
     }
 
     /// Seat the assistant `response` into the transcript.
@@ -1503,6 +1518,7 @@ impl Agent for SeedAgent {
                 &crate::requests::GetDashboardInput {
                     since: self.state.last_cycle_at,
                     sort: None,
+                    communities: None,
                 },
                 &self.key,
             )
@@ -1515,6 +1531,7 @@ impl Agent for SeedAgent {
             ledger.titles_seen = dash
                 .feeds
                 .values()
+                .chain(dash.elsewhere.values())
                 .flatten()
                 .map(|p| p.title.clone())
                 .collect();

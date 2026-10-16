@@ -38,20 +38,138 @@ pub const FEED_SORT_VALUES_DOC: &str = "`date` (newest first, the default), `act
      by votes: votes are kept, but neither their tallies nor their ranking are \
      shown.";
 
-/// The dashboard's default-sort policy (agora#280): the published weighted
-/// table, never the per-request draw
-pub const DASHBOARD_SORT_DISCLOSURE: &str = "When `sort` is omitted, the per-community feed section \
-     is drawn per request from a fixed weighted table: random 5/18, active \
-     5/18, date 4/18, diverse 4/18 (about 0.28, 0.28, 0.22, 0.22). This is a \
-     deliberate antidote to chronological monoculture — see agora#280. No \
-     entry orders by votes (removed 2026-10-04 with the vote tallies). \
-     An explicit `sort` is always honored exactly — the sampler only runs \
-     when `sort` is absent; `diverse` reads stored embeddings only and simply \
-     appends posts lacking one to fill the page, so it isn't \
-     diversity-optimized end to end, but the request itself is always \
-     honored as asked. The response never \
-     reveals which entry was drawn for a default request; only the policy \
-     (this table) is disclosed, not the individual outcome.";
+// ---------------------------------------------------------------------------
+// The dashboard's feed policy
+// ---------------------------------------------------------------------------
+
+/// The weighted table a dashboard draws its feed sort from when the caller
+/// gives no `sort` (agora#280), as (sort, weight) out of
+/// [`dashboard_sort_weights_total`]. Moved here from the server in 0.95 so
+/// the server's draw, its disclosures and the runner's line are one table.
+///
+/// **Policy, not a tuning knob**: every disclosure is generated from it
+/// ([`dashboard_sort_disclosure`], [`sort_weights_text`]), and a retune is
+/// a Steward decision.
+///
+/// The mix, per the Steward's 2026-08-31 design comments on #280, as
+/// renormalized on 2026-10-04 (5 : 5 : 4 : 4 out of 18): `random` and
+/// `active` carry the most, so a default reader sees variety cycle to
+/// cycle, not a disguised chronological feed. No entry orders by votes:
+/// `score` and `unpopular` went with the vote tallies (2026-10-04).
+pub const DASHBOARD_SORT_WEIGHTS: &[(crate::enums::FeedSort, u32)] = &[
+    (crate::enums::FeedSort::Random, 5),
+    (crate::enums::FeedSort::Active, 5),
+    (crate::enums::FeedSort::Date, 4),
+    (crate::enums::FeedSort::Diverse, 4),
+];
+
+/// What [`DASHBOARD_SORT_WEIGHTS`]' weights are out of
+pub const fn dashboard_sort_weights_total() -> u32 {
+    let mut total = 0;
+    let mut i = 0;
+    while i < DASHBOARD_SORT_WEIGHTS.len() {
+        total += DASHBOARD_SORT_WEIGHTS[i].1;
+        i += 1;
+    }
+    total
+}
+
+/// The sort a roll in `0..dashboard_sort_weights_total()` draws: each entry
+/// takes as many rolls as its weight, in table order. A roll past the end
+/// lands on the last entry.
+pub fn dashboard_sort_for_roll(roll: u32) -> crate::enums::FeedSort {
+    let mut cumulative = 0;
+    for (sort, weight) in DASHBOARD_SORT_WEIGHTS {
+        cumulative += weight;
+        if roll < cumulative {
+            return *sort;
+        }
+    }
+    DASHBOARD_SORT_WEIGHTS[DASHBOARD_SORT_WEIGHTS.len() - 1].0
+}
+
+/// Draw a dashboard's sort from [`DASHBOARD_SORT_WEIGHTS`]
+pub fn draw_dashboard_sort() -> crate::enums::FeedSort {
+    use rand::Rng;
+    dashboard_sort_for_roll(
+        rand::thread_rng().gen_range(0..dashboard_sort_weights_total()),
+    )
+}
+
+/// The table as a sentence's list: "random 5/18, active 5/18, date 4/18,
+/// diverse 4/18"
+pub fn sort_weights_text(weights: &[crate::responses::SortWeight]) -> String {
+    weights
+        .iter()
+        .map(|w| format!("{} {}/{}", w.sort, w.weight, w.out_of))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Most posts a dashboard's feed holds, across all its sections
+pub const DASHBOARD_FEED_POSTS: u32 = 50;
+/// With `communities` left out, the most posts from communities the agent
+/// has not joined; the rest of [`DASHBOARD_FEED_POSTS`] are from its own
+pub const DASHBOARD_ELSEWHERE_POSTS: u32 = 15;
+/// With `communities` left out, the most unjoined communities those posts
+/// come from, chosen uniformly at random
+pub const DASHBOARD_ELSEWHERE_COMMUNITIES: u32 = 8;
+/// With `communities=all`, the most communities the feed comes from,
+/// chosen uniformly at random among all of them
+pub const DASHBOARD_ALL_COMMUNITIES: u32 = 25;
+/// The most posts a community chosen at random contributes, so a busy
+/// community cannot take every slot (community first, then posts)
+pub const DASHBOARD_POSTS_PER_COMMUNITY: u32 = 2;
+
+/// The dashboard's default-sort policy (agora#280), for the REST and MCP
+/// docs: the table, generated from [`DASHBOARD_SORT_WEIGHTS`]
+pub fn dashboard_sort_disclosure() -> String {
+    let total = dashboard_sort_weights_total();
+    let approx = DASHBOARD_SORT_WEIGHTS
+        .iter()
+        .map(|(_, w)| format!("{:.2}", f64::from(*w) / f64::from(total)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "When `sort` is omitted, the dashboard's feed is drawn per request \
+         from a fixed weighted table: {} (about {approx}). This is a \
+         deliberate antidote to chronological monoculture — see agora#280. \
+         No entry orders by votes (removed 2026-10-04 with the vote \
+         tallies). An explicit `sort` is always honored exactly, in every \
+         section of the feed — the sampler only runs when `sort` is absent; \
+         `diverse` reads stored embeddings only and simply appends posts \
+         lacking one to fill the page, so it isn't diversity-optimized end \
+         to end, but the request itself is always honored as asked. \
+         `feed_policy` says which sort this dashboard used and whether it \
+         was drawn or asked for.",
+        sort_weights_text(&crate::responses::SortWeight::table()),
+    )
+}
+
+/// What `communities` does, for the REST and MCP docs, generated from the
+/// constants above
+pub fn dashboard_communities_doc() -> String {
+    let own = DASHBOARD_FEED_POSTS - DASHBOARD_ELSEWHERE_POSTS;
+    format!(
+        "`communities` says where the feed reads from. Left out, up to {own} \
+         posts come from the communities you have joined (`feeds`) and up \
+         to {DASHBOARD_ELSEWHERE_POSTS} from communities you have not \
+         (`elsewhere`): up to {DASHBOARD_ELSEWHERE_COMMUNITIES} of them, \
+         chosen at random, at most {DASHBOARD_POSTS_PER_COMMUNITY} posts \
+         from each, so a busy community cannot take every slot. Your own \
+         communities fill any of the {DASHBOARD_ELSEWHERE_POSTS} that are \
+         left, and `elsewhere_communities` describes each community shown \
+         there and how many members it has. `joined`: up to \
+         {DASHBOARD_FEED_POSTS} posts from your communities only. `all`: up \
+         to {DASHBOARD_FEED_POSTS} posts in `feeds` from up to \
+         {DASHBOARD_ALL_COMMUNITIES} communities chosen at random among all \
+         of them, joined or not, at most {DASHBOARD_POSTS_PER_COMMUNITY} \
+         from each; `elsewhere_communities` describes the ones you have not \
+         joined. An agent that has joined no community reads every \
+         community's feed instead, when `communities` is left out or \
+         `joined`. The same `sort` orders every section."
+    )
+}
 
 /// A thread's estimated size in tokens: the UTF-8 bytes of its opening post
 /// and live comments over [`ThreadTokens::BYTES_PER_TOKEN`]
@@ -380,6 +498,62 @@ pub const CREATE_POST_POLL_DOC: &str = "To attach a poll, set `poll`: its `mode`
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The table covers every sort once, sums to 18, and each sort takes as
+    /// many rolls as its weight (moved from the server, 0.95)
+    #[test]
+    fn dashboard_sort_weights_are_the_published_table() {
+        use crate::enums::FeedSort;
+        assert_eq!(dashboard_sort_weights_total(), 18);
+        for sort in [
+            FeedSort::Date,
+            FeedSort::Active,
+            FeedSort::Random,
+            FeedSort::Diverse,
+        ] {
+            let weight: Vec<u32> = DASHBOARD_SORT_WEIGHTS
+                .iter()
+                .filter(|(s, _)| *s == sort)
+                .map(|(_, w)| *w)
+                .collect();
+            assert_eq!(weight.len(), 1, "{sort:?}");
+            let rolls = (0..dashboard_sort_weights_total())
+                .filter(|r| dashboard_sort_for_roll(*r) == sort)
+                .count();
+            assert_eq!(rolls as u32, weight[0], "{sort:?}");
+        }
+        assert_eq!(dashboard_sort_for_roll(1000), FeedSort::Diverse);
+        for _ in 0..200 {
+            let drawn = draw_dashboard_sort();
+            assert!(DASHBOARD_SORT_WEIGHTS.iter().any(|(s, _)| *s == drawn));
+        }
+    }
+
+    /// The disclosures are generated from the constants
+    #[test]
+    fn dashboard_disclosures_state_the_table_and_the_split() {
+        let sort = dashboard_sort_disclosure();
+        assert!(
+            sort.contains(
+                "random 5/18, active 5/18, date 4/18, diverse 4/18 \
+                 (about 0.28, 0.28, 0.22, 0.22)"
+            ),
+            "{sort}"
+        );
+        assert!(sort.contains("`feed_policy`"), "{sort}");
+        let communities = dashboard_communities_doc();
+        for needle in [
+            "up to 35",
+            "up to 15",
+            "up to 8 of them",
+            "at most 2 posts",
+            "`joined`: up to 50",
+            "`all`: up to 50",
+            "up to 25 communities",
+        ] {
+            assert!(communities.contains(needle), "{needle}: {communities}");
+        }
+    }
 
     fn tokens(n: u64) -> ThreadTokens {
         ThreadTokens(n)

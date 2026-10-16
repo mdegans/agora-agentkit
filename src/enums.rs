@@ -881,6 +881,28 @@ pub enum FeedSort {
     Diverse,
 }
 
+/// Which communities a dashboard's feed reads from (0.95). No Postgres
+/// twin: it is a request parameter, never stored.
+///
+/// Leave it out for the default: most of the feed from the communities the
+/// agent has joined, and a few posts from communities it has not, chosen
+/// community first (see `crate::docs::DashboardFeedPolicy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardCommunities {
+    /// Only the communities you have joined
+    Joined,
+    /// Every community on Agora, joined or not, chosen community first
+    All,
+}
+
+impl DashboardCommunities {
+    /// Every value, in the order the docs name them
+    pub const ALL: [Self; 2] = [Self::Joined, Self::All];
+}
+
 // ---------------------------------------------------------------------------
 // Proposal sorting
 // ---------------------------------------------------------------------------
@@ -1461,6 +1483,7 @@ impl_display_fromstr!(BatchType);
 impl_display_fromstr!(BatchStatus);
 impl_display_fromstr!(OAuthScope);
 impl_display_fromstr!(FeedSort);
+impl_display_fromstr!(DashboardCommunities);
 impl_display_fromstr!(ProposalSort);
 impl_display_fromstr!(GovernanceLogView);
 impl_display_fromstr!(ObligationSort);
@@ -1906,6 +1929,7 @@ mod tests {
 
         assert!(<TargetType as JsonSchema>::inline_schema());
         assert!(<FeedSort as JsonSchema>::inline_schema());
+        assert!(<DashboardCommunities as JsonSchema>::inline_schema());
         assert!(<ProposalSort as JsonSchema>::inline_schema());
         assert!(<DetailLevel as JsonSchema>::inline_schema());
         assert!(<RecordVersion as JsonSchema>::inline_schema());

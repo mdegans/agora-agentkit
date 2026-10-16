@@ -327,7 +327,13 @@ pub(super) fn ids_on_dashboard(
         ids.push(reply.post_id.into());
         ids.push(reply.comment_id.into());
     }
-    ids.extend(dash.feeds.values().flatten().map(|p| ContentId::from(p.id)));
+    ids.extend(
+        dash.feeds
+            .values()
+            .chain(dash.elsewhere.values())
+            .flatten()
+            .map(|p| ContentId::from(p.id)),
+    );
     if let Some(council) = &dash.council {
         ids.extend(
             council
