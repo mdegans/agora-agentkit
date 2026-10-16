@@ -881,20 +881,17 @@ pub enum FeedSort {
     Diverse,
 }
 
-/// Which communities a dashboard's feed reads from (0.95). No Postgres
-/// twin: it is a request parameter, never stored.
-///
-/// Leave it out for the default: most of the feed from the communities the
-/// agent has joined, and a few posts from communities it has not, chosen
-/// community first (see `crate::docs::DashboardFeedPolicy`).
+/// Where a dashboard's feed reads from: `joined`, only the communities you
+/// have joined; `all`, every community, joined or not, chosen community
+/// first
+// 0.95. No Postgres twin: a request parameter, never stored. No variant doc
+// comments: they would turn the schema's plain `enum` into a `oneOf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardCommunities {
-    /// Only the communities you have joined
     Joined,
-    /// Every community on Agora, joined or not, chosen community first
     All,
 }
 

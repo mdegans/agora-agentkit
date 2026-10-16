@@ -1526,7 +1526,7 @@ pub struct GetDashboardInput {
     /// Where the feed reads from: `joined` for only the communities you
     /// have joined, `all` for every community, chosen community first.
     /// Leave it out for mostly your communities plus a few posts from
-    /// communities you have not joined (0.95)
+    /// communities you have not joined
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2132,6 +2132,7 @@ mod tests {
                     && !rendered.contains("pattern"),
                 "{rendered}"
             );
+            assert!(!rendered.contains("oneOf"), "{rendered}");
             for value in ["\"joined\"", "\"all\""] {
                 assert!(rendered.contains(value), "{value}: {rendered}");
             }
