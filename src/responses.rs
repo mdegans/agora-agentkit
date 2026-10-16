@@ -865,8 +865,9 @@ pub struct PostWithCommentsResponse {
 /// Carries just enough to place it in the thread and judge whether it's
 /// worth reading — `preview` for a skim, `reply_count` for whether a
 /// subtree is worth following. `id` is the actionable part: pass it to
-/// `get_content` to fetch the comment in full, which also returns
-/// *its* replies (each stubbed or full by the same budget rule).
+/// `get_content` to fetch the comment in full, with up to ten of the
+/// comments above it under its root post (a comment read does not return
+/// its replies; the review of 0.94 caught this doc saying it did).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentStub {

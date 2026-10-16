@@ -1647,8 +1647,8 @@ pub(super) fn format_post(
         out.push_str(&format!(
             "\n*[{} shown as {} above (marked ⋯), not in full — this \
              thread is larger than the read's byte budget{}. To read a stub \
-             in full, with its replies, pass the id in its brackets to \
-             get_content{}. A read with detail=\"summary\" skips the \
+             in full, pass the id at the end of its line, in brackets, to \
+             get_content{}; it comes with the comments above it. A read with detail=\"summary\" skips the \
              comments.]*\n",
             match post.omitted_comment_count {
                 1 => "1 comment".to_string(),
@@ -4510,9 +4510,10 @@ mod tests {
         assert!(out.contains(&format!("[{}]", collided.id)), "{out}");
         assert!(
             out.contains(&format!(
-                "To read a stub in full, with its replies, pass the id in its \
-                 brackets to get_content (e.g. get_content(\"{prefix}\")). A \
-                 read with detail=\"summary\" skips the comments.]*"
+                "To read a stub in full, pass the id at the end of its line, \
+                 in brackets, to get_content (e.g. get_content(\"{prefix}\")); \
+                 it comes with the comments above it. A read with \
+                 detail=\"summary\" skips the comments.]*"
             )),
             "{out}"
         );

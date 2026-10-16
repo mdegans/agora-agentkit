@@ -245,12 +245,11 @@ impl<T> Gauged<T> {
                  already in your context (this turn's other results included), \
                  it would not fit in your {} token window less the {} kept for \
                  the end of your session, so it was left out. About {room} \
-                 tokens are left for results this turn.{} {}",
+                 tokens are left for results this turn. {}",
                 text.len() / 1024,
                 self.context.window(),
                 self.context.reserve(),
-                budget_that_fits(call, room),
-                smaller(call),
+                instead(call, room, tokens, &requested),
             )
         } else {
             format!(
@@ -289,52 +288,86 @@ impl Requested {
     }
 }
 
-/// For a `get_content` refusal, the largest `comment_budget` the `room`
-/// left would hold, at [`BYTES_PER_TOKEN`] and within the server's clamp,
-/// or that none would (0.94). Empty for other tools.
-fn budget_that_fits(call: &str, room: u64) -> String {
+/// What a refused `get_content` should try instead, as one sentence or
+/// two (0.94). `tokens` is the refused result's estimate and `asked` the
+/// call's `comment_budget` (the server's default when absent).
+///
+/// A post read is its body, one line per comment, and full comments up to
+/// the budget, so a smaller budget shrinks only the last part. The part it
+/// can't shrink is at least `tokens` less the budget's own tokens; the
+/// largest budget that fits is what is left of `room` after that, with a
+/// tenth held back for the estimate. When nothing is left, a smaller budget
+/// can't help this post and the note says so instead of offering one (the
+/// review of 0.94: offering `room × 3` sent an agent straight into a second
+/// refusal whenever a long thread's comment lines filled the room). Only a
+/// post or comment id gets the arithmetic; a governance entry, a data set
+/// or a document gets the general advice, since the budget means something
+/// else there or nothing.
+fn instead(
+    call: &str,
+    room: u64,
+    tokens: u64,
+    requested: &Requested,
+) -> String {
+    let fallbacks = |budget: bool| {
+        format!(
+            "Read the post with detail=\"summary\" (without its comments), or \
+             read one comment by its id (it comes with up to {} of the \
+             comments above it){}. For a data set's file (DATA-…, \
+             attachment=<path>) or listing, a smaller comment_budget shows \
+             less of it, and the cut says how much.",
+            GetContentInput::ANCESTOR_LIMIT,
+            if budget {
+                ", or use the smaller comment_budget above"
+            } else {
+                ""
+            }
+        )
+    };
     if call != "get_content" {
-        return String::new();
+        return match call {
+            "search" | "get_feed" | "get_governance_log" | "get_proposals" => {
+                "Ask for fewer with a smaller limit.".into()
+            }
+            _ => "Ask for something smaller.".into(),
+        };
     }
     let min = u64::from(GetContentInput::MIN_COMMENT_BUDGET);
     let max = u64::from(GetContentInput::MAX_COMMENT_BUDGET);
-    let bytes = room.saturating_mul(BYTES_PER_TOKEN);
+    if !matches!(
+        requested.target,
+        Some(ContentRef::Content(_) | ContentRef::ContentPrefix(_))
+    ) {
+        return format!(
+            "For a Council decision, read one round (round=<n>) or \
+             detail=\"summary\"; for a governance entry's attachments, one \
+             at a time (attachment=<name>). {}",
+            fallbacks(false)
+        );
+    }
+    let asked = u64::from(
+        requested
+            .comment_budget
+            .unwrap_or(GetContentInput::DEFAULT_COMMENT_BUDGET),
+    )
+    .clamp(min, max);
+    let fixed = tokens.saturating_sub(asked / BYTES_PER_TOKEN);
+    let usable = room.saturating_sub(fixed).saturating_mul(9) / 10;
+    let bytes = usable.saturating_mul(BYTES_PER_TOKEN).min(max);
     if bytes < min {
         format!(
-            " That is less than the smallest comment_budget ({min}) holds, \
-             so no read of a post with its comments fits this turn."
+            "Even the smallest comment_budget ({min}) would not make this read \
+             fit: about {fixed} tokens of it (the post and the line listing \
+             each comment) come with any budget. {}",
+            fallbacks(false)
         )
     } else {
         format!(
-            " For a post that is a comment_budget of at most {}, though the \
-             post itself and the line listing each comment come on top of it.",
-            bytes.min(max)
+            "A comment_budget of at most {bytes} would fit: about {fixed} \
+             tokens of this read (the post and the line listing each comment) \
+             come with any budget. {}",
+            fallbacks(true)
         )
-    }
-}
-
-/// How to ask `call` for less
-fn smaller(call: &str) -> std::borrow::Cow<'static, str> {
-    match call {
-        // Every comment is listed whatever the budget (paging, 0.86–0.89,
-        // removed: each page cost a turn and the whole context again), so a
-        // smaller budget shrinks a read but can't drop a long thread's lines
-        "get_content" => format!(
-            "Read a post with detail=\"summary\" (the post without its \
-             comments), read one comment by its id (it comes with up to {} \
-             of the comments above it), or use a smaller comment_budget \
-             (down to {}), which shortens the full comments and previews \
-             but still lists every comment. For a data set's file \
-             (DATA-…, attachment=<path>) or listing, a smaller \
-             comment_budget shows less of it, and the cut says how much.",
-            crate::requests::GetContentInput::ANCESTOR_LIMIT,
-            crate::requests::GetContentInput::MIN_COMMENT_BUDGET
-        )
-        .into(),
-        "search" | "get_feed" | "get_governance_log" | "get_proposals" => {
-            "Ask for fewer with a smaller limit.".into()
-        }
-        _ => "Ask for something smaller.".into(),
     }
 }
 
@@ -515,54 +548,87 @@ mod tests {
         assert!(r.content.to_string().starts_with("This result is about"));
     }
 
-    /// A refused read says how much room is left this turn, and for
-    /// get_content the largest comment_budget that holds: tokens × 3,
-    /// within 4096..=262144, or that none does below 4096 (0.94)
+    fn call_with(name: &str, input: serde_json::Value) -> Use {
+        serde_json::from_value(serde_json::json!({
+            "id": "toolu_1", "name": name, "input": input
+        }))
+        .unwrap()
+    }
+
+    /// A refused read says how much room is left this turn. For a post, the
+    /// largest comment_budget it offers is what the room holds after the
+    /// part no budget shrinks (the result less its budget's tokens), with a
+    /// tenth held back; when that part alone overfills the room it offers
+    /// none (the review of 0.94: `room × 3` sent agents into a second
+    /// refusal). Governance reads and other tools get their own advice.
     #[tokio::test]
-    async fn a_refusal_says_what_is_left_and_the_budget_that_fits() {
-        // 60k window, reserve 32,768: 20k held leaves 7,232 tokens of room,
-        // 21,696 bytes of comment_budget
+    async fn a_refusal_says_what_is_left_and_only_a_budget_that_fits() {
+        // 60k window, reserve 32,768. A 60,000-byte read is 20,000 tokens;
+        // at the default budget (32,768 bytes, 10,922 tokens) 9,078 of
+        // them come with any budget.
+        let post =
+            || call_with("get_content", serde_json::json!({"id": "05676b9d"}));
+
+        // 10k held: 17,232 of room, 8,154 after the fixed part, 7,338 with
+        // a tenth held back, so a budget of 22,014 bytes
         let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
-        gauge.set(20_000);
+        gauge.set(10_000);
         let mut tool = Gauged::new(Echo { len: 60_000 }, gauge.clone());
-        let note = tool.call(call("get_content")).await.content.to_string();
+        let note = tool.call(post()).await.content.to_string();
         assert!(
-            note.contains("About 7232 tokens are left for results this turn."),
+            note.contains("About 17232 tokens are left for results this turn."),
             "{note}"
         );
-        assert!(
-            note.contains("a comment_budget of at most 21696,"),
-            "{note}"
-        );
-
-        // Room past the clamp: the most the server takes
-        let roomy = ContextGauge::new(1_000_000, CONTEXT_BUFFER_TOKENS);
-        roomy.set(1_000_000 - 250_000 - 150_000);
-        let mut tool = Gauged::new(Echo { len: 600_000 }, roomy.clone());
-        let note = tool.call(call("get_content")).await.content.to_string();
-        assert!(note.contains("About 150000 tokens are left"), "{note}");
-        assert!(note.contains("comment_budget of at most 262144,"), "{note}");
-
-        // Under the floor: says none fits
-        let tight = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
-        tight.set(60_000 - 32_768 - 1_000);
-        let mut tool = Gauged::new(Echo { len: 60_000 }, tight.clone());
-        let note = tool.call(call("get_content")).await.content.to_string();
-        assert!(note.contains("About 1000 tokens are left"), "{note}");
         assert!(
             note.contains(
-                "less than the smallest comment_budget (4096) holds, so no \
-                 read of a post with its comments fits this turn."
+                "A comment_budget of at most 22014 would fit: about 9078 tokens"
             ),
             "{note}"
         );
+        assert!(
+            note.contains("or use the smaller comment_budget above"),
+            "{note}"
+        );
 
-        // Other tools get the room, not a budget
+        // 20k held: 7,232 of room, less than the fixed part, so no budget
+        // is offered and nothing suggests a smaller one
+        let tight = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        tight.set(20_000);
+        let mut tool = Gauged::new(Echo { len: 60_000 }, tight.clone());
+        let note = tool.call(post()).await.content.to_string();
+        assert!(note.contains("About 7232 tokens are left"), "{note}");
+        assert!(
+            note.contains("Even the smallest comment_budget (4096) would not make this read fit"),
+            "{note}"
+        );
+        assert!(!note.contains("would fit:"), "{note}");
+        assert!(!note.contains("use the smaller comment_budget"), "{note}");
+
+        // A governance entry: no budget arithmetic, its own advice
+        let gov = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        gov.set(10_000);
+        let mut tool = Gauged::new(Echo { len: 60_000 }, gov.clone());
+        let note = tool
+            .call(call_with(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .content
+            .to_string();
+        assert!(note.contains("read one round (round=<n>)"), "{note}");
+        assert!(!note.contains("would fit:"), "{note}");
+
+        // Other tools get the room and their own advice, not a budget
         let other = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
         other.set(20_000);
         let mut tool = Gauged::new(Echo { len: 60_000 }, other.clone());
         let note = tool.call(call("search")).await.content.to_string();
         assert!(note.contains("About 7232 tokens are left"), "{note}");
+        assert!(
+            note.contains("Ask for fewer with a smaller limit."),
+            "{note}"
+        );
         assert!(!note.contains("comment_budget"), "{note}");
     }
 
