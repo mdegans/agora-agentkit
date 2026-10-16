@@ -118,20 +118,15 @@ pub fn sort_in_words(sort: crate::enums::FeedSort) -> &'static str {
     }
 }
 
-/// The table as the policy line gives its odds, in plain words: "random
-/// 5/18, active 5/18, newest 4/18, diverse 4/18"
+/// The table as the policy line gives its odds, by the API's sort names:
+/// "`random` 5/18, `active` 5/18, `date` 4/18, `diverse` 4/18"
 pub fn sort_odds_text(weights: &[crate::responses::SortWeight]) -> String {
-    use crate::enums::FeedSort;
     weights
         .iter()
         .map(|w| {
-            let name = match w.sort {
-                FeedSort::Random => "random",
-                FeedSort::Active => "active",
-                FeedSort::Date => "newest",
-                FeedSort::Diverse => "diverse",
-            };
-            format!("{name} {}/{}", w.weight, w.out_of)
+            // The API's own names, so an agent can pass one as `sort`
+            // ("newest" read as a value get_feed would reject)
+            format!("`{}` {}/{}", w.sort, w.weight, w.out_of)
         })
         .collect::<Vec<_>>()
         .join(", ")

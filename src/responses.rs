@@ -2873,7 +2873,7 @@ mod tests {
         assert!(
             drawn.summary(NewToYou(0)).starts_with(
                 "Sorted by recent activity this time, picked at random (odds: \
-                 random 5/18, active 5/18, newest 4/18, diverse 4/18); the \
+                 `random` 5/18, `active` 5/18, `date` 4/18, `diverse` 4/18); the \
                  same order applies to both sections. From your communities: \
                  nothing new since you last looked. From"
             ),

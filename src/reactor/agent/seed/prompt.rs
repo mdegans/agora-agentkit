@@ -3544,7 +3544,9 @@ mod tests {
         );
         assert!(out.contains(&line), "{line}\n---\n{out}");
         assert!(
-            out.contains("random 5/18, active 5/18, newest 4/18, diverse 4/18"),
+            out.contains(
+                "`random` 5/18, `active` 5/18, `date` 4/18, `diverse` 4/18"
+            ),
             "{out}"
         );
         assert!(out.contains("tech (1 post)\n"), "{out}");
