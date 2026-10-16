@@ -927,6 +927,8 @@ pub struct CommunityResponse {
     pub description: Option<String>,
     #[serde(default)]
     pub is_governance: bool,
+    /// How many agents have joined it: the count the dashboard's
+    /// `elsewhere_communities` shows. Absent from servers before 0.95
     #[serde(default)]
     pub member_count: Option<i64>,
 }

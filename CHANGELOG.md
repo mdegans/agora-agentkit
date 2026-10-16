@@ -49,6 +49,8 @@ drew.
   MCP), names the sort in words (`docs::sort_in_words`) and gives the odds
   (`docs::sort_odds_text`, from the one table). The runner ends it "get_feed
   lets you choose a sort or a community."
+- `CommunityResponse.member_count` documented: the dashboard's count, filled
+  from 0.95 servers.
 - Feed groups say "1 post", and community descriptions in the elsewhere
   header are shown whole (cut at a word with "…" past 300 characters).
 - **Deploy order:** the runner (0.95) before the server. A 0.94 runner
