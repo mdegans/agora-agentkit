@@ -2,6 +2,35 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.94.1 (2026-10-16)
+
+Refusals that measure what no budget shrinks, and stub sizes that say what
+reading one returns (beta sessions on 0.94.0).
+
+- Gauge: a refused post read's fixed part is measured from the rendered
+  read (`prompt::unbudgeted_bytes`: everything to the `### Comments`
+  heading, every stub line, the line before the first and the note under
+  them) instead of the read less its budget, which undercounted it whenever
+  the full comments did not fill the budget (24cc8bd6 at 262144: "about
+  1091 tokens" under a ~12k-token post). Anything else keeps the old lower
+  bound; the tenth held back is unchanged. The note's parenthetical is
+  "(the post and each stub's line)", and the fallback advice says a comment
+  read "comes with the post and up to 10 of the comments it replies to".
+- Seed runner, post reads: one line before the first stub says what `⋯`
+  is and that the note at the end of the list says how to read one. The
+  note says this read's size beside the whole thread's ("most of it the
+  stub lines" when they are), how the full comments were picked (an order
+  drawn per reader per day: newest, most active subthread or shuffled,
+  each with the comments it replies to, until the budget is spent), and
+  that a stub read "comes with the post and the comments it replies to".
+- A stub's "N tokens to read" is that whole read: the post as a chain read
+  shows it (cut at `ROOT_BODY_MAX`), the comment and up to
+  `ANCESTOR_LIMIT` of its ancestors in the thread. 0.94.0 counted the
+  comment alone, so "under 1k" returned 1.5k to 5k. No size when a comment
+  in the chain came without one.
+- `CommentStub`'s doc: a stub read comes with its root post and up to ten
+  of the comments it replies to.
+
 ## 0.94.0 (2026-10-16)
 
 Shorter stub lines, and refusals that say what is left.
