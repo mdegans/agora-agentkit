@@ -2,6 +2,25 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.97.0 (2026-10-17)
+
+The Council can defer at the final vote (Steward, 2026-10-17): in a
+rehearsal every seat abstained on procedural grounds, each saying it would
+vote yes on a later text, and the item was recorded rejected.
+
+- `FinalVotes::outcome`: after a veto (absolute, Art. IV § 2),
+  `DEFERRING_SEATS` (2) or more seats voting `defer` give
+  `DecisionOutcome::Deferred` on a Routine, Policy or Constitutional item,
+  the Steward seated or recused. Emergency items are the Steward's alone
+  and unaffected; Schedule items are ranked. No limit on repeated
+  deferrals: that is the Council's question. Through `Votes::outcome` and
+  `Decided::Voted`, so a voted record with two `defer` seats is deferred.
+- `FinalVotes::tally` notes the deferring seats from two on: `"0-0, 2 defer
+  (Steward recused)"`. `FinalVotes::defer_count`.
+- Every signed record keeps its outcome and tally (asserted over every
+  fixture: none has two seats `defer` on a voted item; GOV-2026-0002 is
+  tabled).
+
 ## 0.96.0 (2026-10-17)
 
 A Council decision's summary is part of its signed record (Steward,

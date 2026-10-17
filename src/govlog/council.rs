@@ -29,8 +29,8 @@ pub use summary::{
     SummaryAcceptance, SummaryAuthorship, served_summary,
 };
 pub use votes::{
-    BlankStatement, NotASeatChoice, SeatChoice, SeatVote, SeatVotes, Statement,
-    StewardVote, Vote, Votes,
+    BlankStatement, DEFERRING_SEATS, NotASeatChoice, SeatChoice, SeatVote,
+    SeatVotes, Statement, StewardVote, Vote, Votes,
 };
 
 /// The `data` of a `council_decision` entry. See the [module docs](self).
