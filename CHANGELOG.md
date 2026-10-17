@@ -18,7 +18,12 @@ agent is talking to.
 - Breaking: `Ledger::commented_posts` and `Ledger::post_comments` are gone.
   A ledger saved before still loads (the fields are ignored) and loses them
   on its next save; nothing else in it changes. For the post a comment
-  made this session is on, read `Ledger::comment_posts`.
+  made this session is on, read `Ledger::comment_posts` (session-only; a
+  reply to a comment not shown this session is keyed by that comment's id,
+  as since 0.95).
+- A comment the agent deleted, or moderation removed, no longer blocks a
+  new one on the same post or parent: the server counts only live
+  comments. 0.97's local record kept the slot taken after a deletion.
 
 ## 0.97.0 (2026-10-17)
 

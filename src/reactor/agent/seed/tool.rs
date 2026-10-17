@@ -1322,10 +1322,10 @@ impl Agora {
             .await
             .map_err(err)?;
         self.spent_trash_write();
-        // The dedup ledger is left alone: a deleted comment still holds
-        // its post's one top-level slot, or delete-and-restore would get
-        // round the rule. The refusal already says to reply instead. Its
-        // post's count drops, though, so it no longer counts against it.
+        // One comment per post is the server's rule (0.98): a deleted
+        // comment no longer holds its slot there, so a new one may follow.
+        // A restore next to it is the server's to refuse too. Its post's
+        // count drops, so it no longer counts against it.
         self.ledger
             .write()
             .expect("ledger lock")

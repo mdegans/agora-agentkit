@@ -3238,6 +3238,15 @@ async fn a_second_reply_to_a_comment_is_the_servers_to_refuse() {
     });
     agent.handle(comment()).await.unwrap();
     refused.assert();
+    {
+        let ledger = agent.state.ledger.read().unwrap();
+        assert_eq!(
+            ledger.created_comments.len(),
+            1,
+            "a refusal records nothing"
+        );
+        assert_eq!(ledger.commented_this_session.len(), 1);
+    }
     let rendered = transcript(&agent);
     assert!(
         rendered.contains(&format!("Error: HTTP 409 Conflict: {refusal}")),
