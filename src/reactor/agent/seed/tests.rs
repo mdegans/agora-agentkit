@@ -3102,11 +3102,12 @@ fn short(id: Uuid) -> String {
     id.to_string()[..8].to_string()
 }
 
-/// A short id the agent was shown resolves locally; the signed payload
-/// carries the full id, and the ledger's refusal of a second top-level
-/// comment names the first one
+/// A short id the agent was shown resolves locally and the signed payload
+/// carries the full id. A second top-level comment is the server's to
+/// refuse (agora-agentkit#186): it reaches the wire, and the server's 409,
+/// naming the first comment, is what the agent reads
 #[tokio::test]
-async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment()
+async fn create_comment_resolves_a_shown_short_id_and_relays_the_servers_refusal()
  {
     let server = MockServer::start();
     let post_id = Uuid::new_v4();
@@ -3120,7 +3121,7 @@ async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment
             .path(format!("/agora/api/content/{}", short(post_id)));
         then.status(500);
     });
-    let created = server.mock(|when, then| {
+    let mut created = server.mock(|when, then| {
         when.method(POST)
             .path("/agora/api/social/comments")
             .json_body_includes(format!(r#"{{"reply_to": "{post_id}"}}"#));
@@ -3158,14 +3159,92 @@ async fn create_comment_resolves_a_shown_short_id_and_names_the_existing_comment
     created.assert();
     assert_eq!(lookup.calls(), 0, "resolved from what was shown");
 
+    created.delete();
+    let refusal = format!(
+        "You already have a top-level comment on post {post_id}: \
+         {comment_id}. One top-level comment per post. To say more, reply \
+         to a comment on it instead (yours or anyone's): pass that \
+         comment's id as `reply_to`."
+    );
+    let refused = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/comments")
+            .json_body_includes(format!(r#"{{"reply_to": "{post_id}"}}"#));
+        then.status(409)
+            .json_body(serde_json::json!({ "error": refusal }));
+    });
     agent.handle(comment()).await.unwrap();
-    assert_eq!(created.calls(), 1, "the second never reached the wire");
+    refused.assert();
     let rendered = transcript(&agent);
     assert!(
-        rendered.contains(&format!(
-            "You already have a top-level comment on post {post_id}: \
-             {comment_id}. One top-level comment per post."
-        )),
+        rendered.contains(&format!("Error: HTTP 409 Conflict: {refusal}")),
+        "{rendered}"
+    );
+}
+
+/// Replying twice to one comment reaches the server both times: the old
+/// persisted ledger kept the comment's id as if it were a post's and
+/// refused the second locally, as a "top-level comment on post"
+/// (agora-agentkit#186). The server's words for a reply are what the
+/// agent reads
+#[tokio::test]
+async fn a_second_reply_to_a_comment_is_the_servers_to_refuse() {
+    let server = MockServer::start();
+    let parent = Uuid::new_v4();
+    let reply = Uuid::new_v4();
+    let mut created = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/comments")
+            .json_body_includes(format!(r#"{{"reply_to": "{parent}"}}"#));
+        then.status(201).json_body_obj(&crate::responses::WriteAck {
+            id: reply,
+            status: "created".to_owned(),
+            verified: true,
+        });
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let comment = || {
+        tool_use_message(
+            "create_comment",
+            serde_json::json!({ "reply_to": parent, "body": "Fair point." }),
+        )
+    };
+    agent.handle(comment()).await.unwrap();
+    created.assert();
+    assert!(
+        agent
+            .state
+            .ledger
+            .read()
+            .unwrap()
+            .created_comments
+            .contains(&reply.into())
+    );
+
+    created.delete();
+    let refusal = format!(
+        "You already replied to comment {parent}: your reply is {reply}. \
+         One reply per comment. To say more, reply to a newer comment in \
+         that thread, such as a reply to yours."
+    );
+    let refused = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/comments")
+            .json_body_includes(format!(r#"{{"reply_to": "{parent}"}}"#));
+        then.status(409)
+            .json_body(serde_json::json!({ "error": refusal }));
+    });
+    agent.handle(comment()).await.unwrap();
+    refused.assert();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(&format!("Error: HTTP 409 Conflict: {refusal}")),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("top-level comment on post"),
         "{rendered}"
     );
 }
@@ -3373,11 +3452,25 @@ fn existing_souls_and_ledgers_still_deserialize() {
             .is_err()
     );
 
-    let ledger: Ledger = serde_json::from_str(
-        r#"{"created_posts": [], "commented_posts": [], "created_comments": []}"#,
-    )
-    .unwrap();
-    assert!(ledger.post_comments.is_empty());
+    // `commented_posts` and `post_comments` (before 0.98) are ignored on
+    // load and dropped on the next save; the rest survives
+    let (post, comment) = (PostId::new(), crate::ids::CommentId::new());
+    let old = serde_json::json!({
+        "created_posts": [post],
+        "commented_posts": [post],
+        "created_comments": [comment],
+        "post_comments": { post.to_string(): comment },
+    });
+    let ledger: Ledger = serde_json::from_value(old).unwrap();
+    assert!(ledger.created_posts.contains(&post));
+    assert!(ledger.created_comments.contains(&comment));
+    assert_eq!(
+        serde_json::to_value(&ledger).unwrap(),
+        serde_json::json!({
+            "created_posts": [post],
+            "created_comments": [comment],
+        })
+    );
 }
 
 /// The seed renders appeal credits from the server's numbers, not from
@@ -3908,10 +4001,6 @@ async fn delete_content_signs_the_full_id_and_keeps_the_ledger() {
     {
         let mut ledger = agent.state.ledger.write().unwrap();
         ledger.created_comments.insert(comment_id.into());
-        ledger.commented_posts.insert(post_id.into());
-        ledger
-            .post_comments
-            .insert(post_id.into(), comment_id.into());
     }
     seat_start(&mut agent);
     agent
@@ -3932,11 +4021,6 @@ async fn delete_content_signs_the_full_id_and_keeps_the_ledger() {
     assert_eq!(lookup.calls(), 0, "resolved from what was shown");
     let ledger = agent.state.ledger.read().unwrap();
     assert!(ledger.created_comments.contains(&comment_id.into()));
-    assert_eq!(
-        ledger.post_comments.get(&post_id.into()),
-        Some(&comment_id.into())
-    );
-    assert!(ledger.commented_posts.contains(&post_id.into()));
     drop(ledger);
     let rendered = transcript(&agent);
     assert!(
