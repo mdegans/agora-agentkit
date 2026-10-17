@@ -90,6 +90,12 @@ pub const KEY_ORDER: &[&str] = &[
     "abstentions",
     "vote_tally",
     "outcome",
+    // The decision's signed summary (0.96): who wrote it, what it says,
+    // who accepted it.
+    "summary",
+    "written_by",
+    "text",
+    "accepted_by",
     // A model's unedited output, after the fields parsed out of it.
     "raw_text",
     // Keys and certificates.

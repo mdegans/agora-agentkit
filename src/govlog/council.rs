@@ -19,10 +19,15 @@ use super::{Blind, Redactable};
 
 mod decided;
 mod ranking;
+mod summary;
 mod votes;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 pub use decided::{Decided, FinalRoundError, RecordRuleError};
+pub use summary::{
+    DecisionSummary, RECUSED_ACCEPTORS, SUMMARY_POINTER, SUMMARY_WRITER,
+    SummaryAcceptance, SummaryAuthorship, served_summary,
+};
 pub use votes::{
     BlankStatement, NotASeatChoice, SeatChoice, SeatVote, SeatVotes, Statement,
     StewardVote, Vote, Votes,
@@ -87,6 +92,12 @@ pub struct CouncilDecisionRecord {
     /// The model each seat ran on. Absent from entries before 0.64.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seat_models: Option<SeatModels>,
+    /// The decision's summary, written by the Lawyer and accepted before
+    /// signing. Absent from entries before 0.96, whose summaries are the
+    /// Clerk's and unsigned. A [revision](super::Revision) at
+    /// [`SUMMARY_POINTER`] changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<DecisionSummary>,
     /// The entry's blinding value (see [`blind_data`](super::blind_data)).
     /// Absent from entries that predate blinding.
     #[serde(
@@ -673,6 +684,7 @@ pub struct PlacedProposal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::enums::AmendmentKind;
 
     /// Every `council_decision` signed on production, as signed
     fn fixtures() -> Vec<(String, serde_json::Value)> {
@@ -1185,6 +1197,27 @@ mod tests {
                     "recused": false
                 });
             }
+            "summary" => {
+                data["final_votes"]["steward"] = "yes".into();
+                data["outcome"] = "approved".into();
+                data["vote_tally"] = "5-0".into();
+                data["summary"] = serde_json::json!({
+                    "text": "## Decision\n\nApproved 5-0.",
+                    "written_by": "lawyer",
+                    "accepted_by": {"by": "steward"}
+                });
+            }
+            "recused_summary" => {
+                data = synthetic("recusal");
+                data["summary"] = serde_json::json!({
+                    "text": "Rejected with the Steward recused.",
+                    "written_by": "lawyer",
+                    "accepted_by": {
+                        "by": "seats",
+                        "seats": ["artist", "philosopher", "engineer"]
+                    }
+                });
+            }
             "recused_refusal" => {
                 data = synthetic("refusal");
                 data["final_votes"]["steward"] = "recused".into();
@@ -1205,6 +1238,8 @@ mod tests {
             "recusal",
             "recused_refusal",
             "thinking",
+            "summary",
+            "recused_summary",
         ] {
             round_trips(name, &synthetic(name));
         }
@@ -1398,6 +1433,276 @@ mod tests {
         .unwrap();
         assert!(
             serde_json::from_value::<CouncilDecisionRecord>(redacted).is_err()
+        );
+    }
+
+    /// Every signed record, typed and written back, has the bytes it was
+    /// signed with: the 0.96 `summary` adds nothing to a record without one
+    #[test]
+    fn a_record_without_a_summary_keeps_its_signed_bytes() {
+        let fixtures = fixtures();
+        for (id, signed, _) in SIGNED {
+            let name = format!("{id}.json");
+            let (_, data) = fixtures.iter().find(|(n, _)| *n == name).unwrap();
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data.clone()).unwrap();
+            assert_eq!(record.summary, None, "{id}");
+            let again = serde_json::to_value(&record).unwrap();
+            assert!(again.get("summary").is_none(), "{id}");
+            assert_eq!(
+                super::super::canonical_json(&again),
+                super::super::canonical_json(data),
+                "{id}"
+            );
+            assert_eq!(
+                super::super::data_hash(&again).to_hex(),
+                signed,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signed_summary_reads_back() {
+        let record = round_trips("summary", &synthetic("summary"));
+        let summary = record.summary.as_ref().unwrap();
+        assert_eq!(summary.written_by, CouncilSeat::Lawyer);
+        assert_eq!(summary.accepted_by, SummaryAcceptance::Steward);
+        assert_eq!(summary.served_text(), "## Decision\n\nApproved 5-0.");
+        assert_eq!(record.check(), Ok(()));
+        assert_eq!(
+            CouncilDecisionRecord::check_data(&synthetic("summary")),
+            Ok(())
+        );
+        assert_eq!(
+            summary.authorship().sentence(),
+            "written by the Lawyer, accepted by the Steward"
+        );
+
+        let recused =
+            round_trips("recused_summary", &synthetic("recused_summary"));
+        let summary = recused.summary.as_ref().unwrap();
+        assert_eq!(
+            summary.accepted_by,
+            SummaryAcceptance::Seats {
+                seats: RECUSED_ACCEPTORS.to_vec()
+            }
+        );
+        assert_eq!(recused.check(), Ok(()));
+        assert_eq!(
+            summary.authorship().sentence(),
+            "written by the Lawyer, accepted by the Artist, Philosopher and \
+             Engineer, the Steward being recused"
+        );
+    }
+
+    /// What `with_summary` writes is what the rules accept, recused or not
+    #[test]
+    fn with_summary_writes_the_acceptance_the_item_needs() {
+        for name in ["summary", "recused_summary"] {
+            let mut record: CouncilDecisionRecord =
+                serde_json::from_value(synthetic(name)).unwrap();
+            let signed = record.summary.take().unwrap();
+            let written = record.with_summary(signed.served_text());
+            assert_eq!(written.summary.as_ref(), Some(&signed), "{name}");
+            assert_eq!(written.check(), Ok(()), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_summary_breaking_the_rules_is_refused() {
+        let check = |data: &serde_json::Value| {
+            let record: CouncilDecisionRecord =
+                serde_json::from_value(data.clone()).unwrap();
+            let typed = record.check();
+            assert_eq!(typed, CouncilDecisionRecord::check_data(data));
+            typed
+        };
+        let mut data = synthetic("summary");
+        data["summary"]["written_by"] = "engineer".into();
+        assert_eq!(
+            check(&data),
+            Err(RecordRuleError::SummaryWriter(CouncilSeat::Engineer))
+        );
+
+        let mut data = synthetic("summary");
+        data["summary"]["text"] = " \n".into();
+        assert_eq!(check(&data), Err(RecordRuleError::BlankSummary));
+
+        // Seats accepting where the Steward is not recused
+        let mut data = synthetic("summary");
+        data["summary"]["accepted_by"] =
+            synthetic("recused_summary")["summary"]["accepted_by"].clone();
+        assert_eq!(
+            check(&data),
+            Err(RecordRuleError::SummaryAcceptance { recused: false })
+        );
+
+        // The Steward accepting where the Steward is recused, and too few
+        // seats
+        let mut data = synthetic("recused_summary");
+        data["summary"]["accepted_by"] = serde_json::json!({"by": "steward"});
+        assert_eq!(
+            check(&data),
+            Err(RecordRuleError::SummaryAcceptance { recused: true })
+        );
+        data["summary"]["accepted_by"] =
+            serde_json::json!({"by": "seats", "seats": ["artist", "engineer"]});
+        assert_eq!(
+            check(&data),
+            Err(RecordRuleError::SummaryAcceptance { recused: true })
+        );
+
+        // A redacted summary was there
+        let amd: GovernanceLogId = "AMD-2026-0009".parse().unwrap();
+        let redacted = super::super::redact_data(
+            &synthetic("summary"),
+            &["/summary/text".into()],
+            &amd,
+            Blind::random(),
+        )
+        .unwrap();
+        let record = round_trips("summary", &redacted);
+        assert_eq!(record.check(), Ok(()));
+        let summary = record.summary.unwrap();
+        assert_eq!(summary.text, Redactable::Redacted(amd.clone()));
+        assert_eq!(summary.served_text(), super::super::redaction_marker(&amd));
+
+        // Not a summary at all
+        let mut data = synthetic("summary");
+        data["summary"] = "just text".into();
+        assert_eq!(
+            CouncilDecisionRecord::check_data(&data),
+            Err(RecordRuleError::Unreadable)
+        );
+    }
+
+    /// A summary changes by a revision at `/summary`: the patch applies,
+    /// the result keeps the rules, and the revised summary is what is
+    /// served, the original still reading as signed
+    #[test]
+    fn a_revision_of_the_summary_applies_and_serves() {
+        use crate::enums::GovernanceLogEntryType::CouncilDecision;
+        use json_patch::{Patch, PatchOperation, ReplaceOperation};
+        let original = synthetic("summary");
+        let patch = Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: format!("{SUMMARY_POINTER}/text").parse().unwrap(),
+            value: "## Decision\n\nApproved 5-0, as corrected.".into(),
+        })]);
+        let (draft, revised) = super::super::AmendmentDraft::revision(
+            "GOV-2026-0099".parse().unwrap(),
+            CouncilDecision,
+            super::super::data_hash(&serde_json::json!(null)),
+            "Steward's record",
+            "the summary corrected",
+            &original,
+            patch,
+        )
+        .unwrap();
+        let revision = draft.amendment.revision.as_ref().unwrap();
+        assert_eq!(draft.amendment.kind, AmendmentKind::Revision);
+        assert_eq!(
+            super::super::revision_touches(revision, &[SUMMARY_POINTER]),
+            Some(SUMMARY_POINTER)
+        );
+        assert_eq!(super::super::kind_standing(draft.amendment.kind), None);
+        let latest = super::super::latest(&original, [revision]).unwrap();
+        assert_eq!(latest, revised);
+        assert_eq!(
+            super::super::data_hash(&latest),
+            revision.resulting_data_hash
+        );
+        assert_eq!(CouncilDecisionRecord::check_data(&latest), Ok(()));
+        round_trips("revised summary", &latest);
+
+        let clerk = Some("The Clerk's digest.".to_string());
+        let (text, by) =
+            served_summary(CouncilDecision, Some(&latest), clerk.clone());
+        assert_eq!(
+            text.as_deref(),
+            Some("## Decision\n\nApproved 5-0, as corrected.")
+        );
+        assert_eq!(by.unwrap().written_by, CouncilSeat::Lawyer);
+        let (text, _) =
+            served_summary(CouncilDecision, Some(&original), clerk.clone());
+        assert_eq!(text.as_deref(), Some("## Decision\n\nApproved 5-0."));
+
+        // A record signed without one is served the Clerk's
+        let (_, old) = fixtures().swap_remove(0);
+        let served = served_summary(CouncilDecision, Some(&old), clerk.clone());
+        assert_eq!(served, (clerk.clone(), None));
+        // as is a read without `data`, or any other entry
+        assert_eq!(
+            served_summary(CouncilDecision, None, clerk.clone()),
+            (clerk.clone(), None)
+        );
+        assert_eq!(
+            served_summary(
+                crate::enums::GovernanceLogEntryType::AppealsCourtDecision,
+                Some(&latest),
+                clerk.clone()
+            ),
+            (clerk, None)
+        );
+
+        // A revision handing acceptance to the seats breaks the rules,
+        // which the writer checks on every revision
+        let wrong = Patch(vec![PatchOperation::Replace(ReplaceOperation {
+            path: format!("{SUMMARY_POINTER}/accepted_by").parse().unwrap(),
+            value: serde_json::json!({
+                "by": "seats", "seats": ["artist", "philosopher", "engineer"]
+            }),
+        })]);
+        let wrong = super::super::apply_patch(&latest, &wrong).unwrap();
+        assert_eq!(
+            CouncilDecisionRecord::check_data(&wrong),
+            Err(RecordRuleError::SummaryAcceptance { recused: false })
+        );
+    }
+
+    /// A summary added by revision to a record signed without one
+    #[test]
+    fn a_revision_can_add_a_summary_to_an_older_record() {
+        use json_patch::{AddOperation, Patch, PatchOperation};
+        let (name, old) = fixtures().pop().unwrap();
+        assert_eq!(name, "GOV-2026-0013.json");
+        let record: CouncilDecisionRecord =
+            serde_json::from_value(old.clone()).unwrap();
+        let summary = record.clone().with_summary("Ranked.").summary.unwrap();
+        let patch = Patch(vec![PatchOperation::Add(AddOperation {
+            path: SUMMARY_POINTER.parse().unwrap(),
+            value: serde_json::to_value(&summary).unwrap(),
+        })]);
+        let (_, revised) = super::super::AmendmentDraft::revision(
+            record.id.clone(),
+            crate::enums::GovernanceLogEntryType::CouncilDecision,
+            super::super::data_hash(&serde_json::json!(null)),
+            "b",
+            "n",
+            &old,
+            patch,
+        )
+        .unwrap();
+        assert_eq!(CouncilDecisionRecord::check_data(&revised), Ok(()));
+        let again = round_trips(&name, &revised);
+        assert_eq!(again.summary, Some(summary));
+    }
+
+    #[test]
+    fn a_summary_reads_after_the_outcome() {
+        let data = synthetic("recused_summary");
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            super::super::reading::ordered(v.as_object().unwrap())
+                .into_iter()
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        let top = keys(&data);
+        let at = |k: &str| top.iter().position(|x| x == k).unwrap();
+        assert!(at("outcome") < at("summary"));
+        assert_eq!(
+            keys(&data["summary"]),
+            ["written_by", "text", "accepted_by"]
         );
     }
 

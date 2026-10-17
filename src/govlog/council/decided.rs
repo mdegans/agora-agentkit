@@ -134,17 +134,33 @@ impl CouncilDecisionRecord {
     /// The rules a record must keep whoever wrote it, checked before it is
     /// signed and on every revision of it: a Steward veto carries its
     /// rationale (Constitution Art. IV § 5), and a rationale belongs to a
-    /// veto.
+    /// veto. A [`summary`](Self::summary) is the Lawyer's, not blank, and
+    /// accepted by the Steward, or by [`RECUSED_ACCEPTORS`] when the
+    /// Steward is recused (0.96).
+    ///
+    /// [`RECUSED_ACCEPTORS`]: super::RECUSED_ACCEPTORS
     ///
     /// [`StewardVote::Veto`] already cannot be built without one; this is
     /// the same rule for a record that did not come from [`Decided`]. No
     /// signed entry breaks it: no veto has ever been cast.
     pub fn check(&self) -> Result<(), RecordRuleError> {
-        veto_rule(Some(self.final_votes.steward), self.veto_rationale.as_ref())
+        let steward = Some(self.final_votes.steward);
+        veto_rule(steward, self.veto_rationale.as_ref())?;
+        self.summary.as_ref().map_or(Ok(()), |s| s.check(steward))
+    }
+
+    /// Sign `text` as the Lawyer's summary, accepted by whoever accepts on
+    /// this item: the Steward, or with `final_votes` recording the Steward
+    /// `recused`, the other three seats (0.96)
+    pub fn with_summary(mut self, text: impl Into<String>) -> Self {
+        let recused = self.final_votes.steward == CouncilVote::Recused;
+        self.summary = Some(super::DecisionSummary::by_lawyer(text, recused));
+        self
     }
 
     /// [`check`](Self::check) on a record's raw `data`, reading only what
-    /// the rule reads (`final_votes.steward` and `veto_rationale`), for a
+    /// the rules read (`final_votes.steward`, `veto_rationale` and
+    /// `summary`), for a
     /// writer that holds `data` rather than a record. Absent fields are
     /// absent: data with no `final_votes` has no veto.
     pub fn check_data(data: &serde_json::Value) -> Result<(), RecordRuleError> {
@@ -156,13 +172,13 @@ impl CouncilDecisionRecord {
         struct Part {
             final_votes: Option<Steward>,
             veto_rationale: Option<Redactable<String>>,
+            summary: Option<super::DecisionSummary>,
         }
         let part: Part = serde_json::from_value(data.clone())
             .map_err(|_| RecordRuleError::Unreadable)?;
-        veto_rule(
-            part.final_votes.map(|v| v.steward),
-            part.veto_rationale.as_ref(),
-        )
+        let steward = part.final_votes.map(|v| v.steward);
+        veto_rule(steward, part.veto_rationale.as_ref())?;
+        part.summary.as_ref().map_or(Ok(()), |s| s.check(steward))
     }
 }
 
@@ -196,8 +212,27 @@ pub enum RecordRuleError {
     VetoWithoutRationale,
     #[error("the record carries a veto rationale but the Steward did not veto")]
     RationaleWithoutVeto,
-    #[error("the record's `final_votes` or `veto_rationale` does not read")]
+    #[error(
+        "the record's `final_votes`, `veto_rationale` or `summary` does not read"
+    )]
     Unreadable,
+    /// (0.96)
+    #[error("the summary is the {}'s; the Lawyer writes it", .0.name())]
+    SummaryWriter(CouncilSeat),
+    /// (0.96)
+    #[error("the summary is blank")]
+    BlankSummary,
+    /// (0.96)
+    #[error(
+        "the summary's acceptance is not {}",
+        if *recused {
+            "the Artist's, Philosopher's and Engineer's, as on an item the \
+             Steward is recused from"
+        } else {
+            "the Steward's"
+        }
+    )]
+    SummaryAcceptance { recused: bool },
 }
 
 /// Why a final round's responses are not a seat's votes

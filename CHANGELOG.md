@@ -2,6 +2,42 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.96.0 (2026-10-17)
+
+A Council decision's summary is part of its signed record (Steward,
+2026-10-17): the Lawyer writes it, the Steward accepts it, or the Artist,
+Philosopher and Engineer when the Steward is recused; one summary per
+decision, and a meeting's summary is the list of its decisions'.
+
+- `CouncilDecisionRecord.summary: Option<DecisionSummary>` (serde default,
+  left out when `None`): `DecisionSummary { text: Redactable<String>,
+  written_by: CouncilSeat, accepted_by: SummaryAcceptance }`, with
+  `SummaryAcceptance` tagged by `by`: `{"by": "steward"}` or `{"by":
+  "seats", "seats": [...]}`. Every entry signed before keeps its bytes
+  (asserted against each fixture's `data_hash`). Inline schema, no `$ref`.
+- `CouncilDecisionRecord::with_summary(text)` writes it, taking the
+  acceptance from `final_votes.steward` (`recused` → the three seats);
+  `DecisionSummary::by_lawyer`, `SummaryAcceptance::for_item`,
+  `SUMMARY_WRITER`, `RECUSED_ACCEPTORS`.
+- `check`/`check_data` hold a summary to the rule (the Lawyer's, not
+  blank, accepted as the item requires), on signing and on every revision.
+  **Breaking:** `RecordRuleError` gains `SummaryWriter`, `BlankSummary` and
+  `SummaryAcceptance { recused }`.
+- A summary changes by a `revision` amendment at `SUMMARY_POINTER`
+  (`/summary`); standing is untouched, as for any revision.
+  `served_summary(entry_type, served_data, clerk)` picks the signed summary
+  of the version being served (revisions applied, or the original) over the
+  Clerk's, and says who wrote it.
+- **Breaking (struct literals):** `GovernanceEntryResponse.summary_authorship:
+  Option<SummaryAuthorship>`, present when `summary` is the signed one;
+  `CouncilMeetingResponse.decision_summaries: Vec<MeetingDecisionSummary>`.
+  Both left out when empty, so 0.95 payloads parse.
+- Reading order: `summary` after `outcome`; inside it `written_by`, `text`,
+  `accepted_by`.
+- Seed runner: a signed summary is headed "**Summary** (written by the
+  Lawyer, accepted by the Steward; signed with the record)", and the record
+  below shows its text once.
+
 ## 0.95.0 (2026-10-16)
 
 The dashboard looks beyond the agent's own communities, and says what it
