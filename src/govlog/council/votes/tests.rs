@@ -7,9 +7,9 @@
 
 use super::*;
 
-use CouncilVote::{Abstain, Defer, No, Recused, Veto, Yes};
-use DecisionCategory::{Constitutional, Policy, Routine};
-use DecisionOutcome::{Approved, Rejected};
+use CouncilVote::{Abstain, Concur, Defer, No, Recused, Veto, Yes};
+use DecisionCategory::{Constitutional, Emergency, Policy, Routine};
+use DecisionOutcome::{Approved, Deferred, Rejected};
 
 fn votes(
     artist: CouncilVote,
@@ -307,4 +307,46 @@ fn only_a_seats_votes_are_seat_choices() {
     for vote in [CouncilVote::Concur, Veto, CouncilVote::Ranked, Recused] {
         assert_eq!(SeatChoice::try_from(vote), Err(NotASeatChoice(vote)));
     }
+}
+
+/// Two seats voting `defer` at the final vote defer the item, the Steward
+/// seated or recused, on every voted category but Emergency; one is a vote
+/// counted as before; a veto still rejects; every seat abstaining is still
+/// a rejection (0.97)
+#[test]
+fn two_seats_deferring_defer_the_item() {
+    for category in [Routine, Policy, Constitutional] {
+        let seated = votes(Defer, Defer, Yes, Yes, Concur);
+        assert_eq!(seated.outcome(category), Deferred, "{category:?}");
+        let recused = votes(Defer, Abstain, Defer, Abstain, Recused);
+        assert_eq!(recused.outcome(category), Deferred, "{category:?}");
+        // A veto is absolute (Art. IV § 2)
+        let vetoed = votes(Defer, Defer, Defer, Yes, Veto);
+        assert_eq!(vetoed.outcome(category), Rejected, "{category:?}");
+        // Every seat abstaining is not a deferral
+        let abstaining = votes(Abstain, Abstain, Abstain, Abstain, Recused);
+        assert_eq!(abstaining.outcome(category), Rejected, "{category:?}");
+    }
+    assert_eq!(
+        votes(Defer, Abstain, Defer, Abstain, Recused).tally(),
+        "0-0, 2 defer (Steward recused)"
+    );
+    assert_eq!(
+        votes(Defer, Defer, Yes, Yes, Concur).tally(),
+        "3-0, 2 defer"
+    );
+    assert_eq!(
+        votes(Abstain, Abstain, Abstain, Abstain, Recused).tally(),
+        "0-0 (Steward recused)"
+    );
+    // One defer is a vote, counted as before
+    let one = votes(Yes, Yes, Yes, Defer, Yes);
+    assert_eq!(one.outcome(Routine), Approved);
+    assert_eq!(one.outcome(Constitutional), Rejected);
+    assert_eq!(one.tally(), "4-0", "one defer is not noted");
+    // Emergency is the Steward's alone
+    assert_eq!(
+        votes(Defer, Defer, Defer, Defer, Yes).outcome(Emergency),
+        Approved
+    );
 }

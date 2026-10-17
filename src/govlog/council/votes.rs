@@ -154,6 +154,10 @@ impl From<&StewardVote> for CouncilVote {
     }
 }
 
+/// How many seats voting `defer` at the final vote defer the item, on a
+/// Routine, Policy or Constitutional item ([`FinalVotes::outcome`]; 0.97)
+pub const DEFERRING_SEATS: usize = 2;
+
 /// What a seat can vote on a voted item
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -408,24 +412,41 @@ impl FinalVotes {
             .count()
     }
 
-    /// `"<yes>-<no>"`, noting a recused Steward: the record's `vote_tally`
-    /// on a voted item
+    /// Seats voting `defer` (0.97)
+    pub fn defer_count(&self) -> usize {
+        self.seats()
+            .iter()
+            .filter(|v| **v == CouncilVote::Defer)
+            .count()
+    }
+
+    /// `"<yes>-<no>"`, noting a recused Steward and, from
+    /// [`DEFERRING_SEATS`] seats voting `defer`, how many did (0.97): the
+    /// record's `vote_tally` on a voted item, e.g. `"0-0, 2 defer (Steward
+    /// recused)"`
     pub fn tally(&self) -> String {
+        let deferring = self.defer_count();
+        let defer = match deferring >= DEFERRING_SEATS {
+            true => format!(", {deferring} defer"),
+            false => String::new(),
+        };
         if self.steward_recused() {
             format!(
-                "{}-{} (Steward recused)",
+                "{}-{}{defer} (Steward recused)",
                 self.yes_count(),
                 self.no_count()
             )
         } else {
-            format!("{}-{}", self.yes_count(), self.no_count())
+            format!("{}-{}{defer}", self.yes_count(), self.no_count())
         }
     }
 
     /// The outcome under `category`'s threshold (Constitution Art. IV § 3,
     /// as amended by GOV-2026-0009).
     ///
-    /// A recused Steward puts the recused thresholds into effect, with no
+    /// A veto rejects first; then [`DEFERRING_SEATS`] or more seats voting
+    /// `defer` defer a Routine, Policy or Constitutional item (0.97). A
+    /// recused Steward puts the recused thresholds into effect, with no
     /// separate vote on the arithmetic. A `Schedule` item is ranked, not
     /// voted, and is recorded set without a tally; reaching this with one
     /// means a caller routed it through the yes/no path, and it is
@@ -442,6 +463,24 @@ impl FinalVotes {
         // the same field, so a recused Steward's vote cannot also be one.
         if self.steward == CouncilVote::Veto {
             return DecisionOutcome::Rejected;
+        }
+
+        // Two or more seats voting `defer` at the final vote send the item
+        // to a later sitting, the Steward seated or recused, on any item
+        // the seats vote on (Steward, 2026-10-17; 0.97). Not an Emergency
+        // item, which is the Steward's alone. There is no limit on how
+        // often an item may be deferred so: whether to limit repeated
+        // deferrals is the Council's question. After the veto, which is
+        // absolute (Art. IV § 2).
+        if self.defer_count() >= DEFERRING_SEATS
+            && matches!(
+                category,
+                DecisionCategory::Routine
+                    | DecisionCategory::Policy
+                    | DecisionCategory::Constitutional
+            )
+        {
+            return DecisionOutcome::Deferred;
         }
 
         match category {
