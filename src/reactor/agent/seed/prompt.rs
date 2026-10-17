@@ -2449,7 +2449,13 @@ pub(super) fn format_governance_entry(
         ));
     }
     match entry.summary.as_deref() {
-        Some(s) => out.push_str(&format!("\n{s}\n")),
+        Some(s) => match &entry.summary_authorship {
+            Some(by) => out.push_str(&format!(
+                "\n**Summary** ({}; signed with the record):\n\n{s}\n",
+                by.sentence()
+            )),
+            None => out.push_str(&format!("\n{s}\n")),
+        },
         None => out.push_str(
             "\n(No summary yet — this entry\'s precedent summary has not \
              been written.)\n",
@@ -2514,7 +2520,17 @@ pub(super) fn format_governance_entry(
         out.push_str(&format!("\n### Attachment: {name}\n\n{content}\n"));
     } else if let Some(data) = &entry.data {
         out.push_str("\n### Record\n\n");
-        out.push_str(&render_record(data));
+        // The signed summary was served above; once is enough
+        let shown = entry.summary_authorship.is_some()
+            && data.pointer("/summary/text").and_then(|t| t.as_str())
+                == entry.summary.as_deref();
+        if shown {
+            let mut data = data.clone();
+            data["summary"]["text"] = "(the summary above)".into();
+            out.push_str(&render_record(&data));
+        } else {
+            out.push_str(&render_record(data));
+        }
     }
 
     // Say how much there was, or is, when the reader did not ask for one
@@ -2821,6 +2837,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: Some("Approved 5-0.".into()),
+            summary_authorship: None,
             total_rounds: None,
             data: None,
             round: None,
@@ -2861,6 +2878,63 @@ mod tests {
         assert!(out.find("Cited by").unwrap() < out.find("Approved").unwrap());
     }
 
+    /// A signed summary says whose it is, and the record does not repeat it
+    #[test]
+    fn a_signed_summary_is_labelled_and_shown_once() {
+        use crate::govlog::{
+            CouncilSeat, SummaryAcceptance, SummaryAuthorship,
+        };
+        let text = "The Council approved the proposal 5-0.";
+        let data = serde_json::json!({
+            "id": "GOV-2026-0014",
+            "title": "t",
+            "outcome": "approved",
+            "summary": {
+                "text": text,
+                "written_by": "lawyer",
+                "accepted_by": {"by": "steward"}
+            }
+        });
+        let entry = GovernanceEntryResponse {
+            id: "GOV-2026-0014".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "t".into(),
+            created_at: chrono::Utc::now(),
+            tags: None,
+            summary: Some(text.into()),
+            summary_authorship: Some(SummaryAuthorship {
+                written_by: CouncilSeat::Lawyer,
+                accepted_by: SummaryAcceptance::Steward,
+            }),
+            total_rounds: None,
+            data: Some(data),
+            round: None,
+            attachments: Vec::new(),
+            attachment: None,
+            version: None,
+            revisions: Vec::new(),
+            attestation: None,
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            cited_by: Vec::new(),
+            texts: None,
+            obligation: None,
+            obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
+        };
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains(
+                "**Summary** (written by the Lawyer, accepted by the \
+                 Steward; signed with the record):"
+            ),
+            "{out}"
+        );
+        assert_eq!(out.matches(text).count(), 1, "{out}");
+        assert!(out.contains("(the summary above)"), "{out}");
+    }
+
     /// An entry that is no longer in force says so before anything an
     /// agent might quote out of it.
     #[test]
@@ -2877,6 +2951,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: Some("Denied on the merits.".into()),
+            summary_authorship: None,
             total_rounds: None,
             data: None,
             round: None,
@@ -3115,6 +3190,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: Some("Approved.".into()),
+            summary_authorship: None,
             total_rounds: None,
             data: Some(serde_json::json!({"title": "A motion"})),
             round: None,
@@ -3174,6 +3250,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: Some("Approved.".into()),
+            summary_authorship: None,
             total_rounds: Some(3),
             data: None,
             round: None,
@@ -3250,6 +3327,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: Some("A data set.".into()),
+            summary_authorship: None,
             total_rounds: None,
             data: None,
             round: None,
@@ -4087,6 +4165,7 @@ mod tests {
             created_at: Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 0).unwrap(),
             tags: None,
             summary: None,
+            summary_authorship: None,
             total_rounds: None,
             data: None,
             round: None,

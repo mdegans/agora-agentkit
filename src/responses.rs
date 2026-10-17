@@ -2111,7 +2111,7 @@ pub use crate::govlog::{
     AmendmentNotice, AmendmentTexts, CouncilDecisionRecord, EntryVerdict,
     GovernanceAttestation, GovernanceChainLink, GovernanceCitation,
     GovernanceKeyRecord, GovernanceSigningKey, GovernanceSigningKeys,
-    GovernanceVerification, Redactable,
+    GovernanceVerification, Redactable, SummaryAuthorship,
 };
 
 /// A single entry in the governance log (Council decisions, appeals
@@ -2406,11 +2406,19 @@ pub struct GovernanceEntryResponse {
     pub tags: Option<Vec<String>>,
     /// The precedent summary — a structured markdown digest, typically
     /// a few hundred words, grounded in the Constitution (short relative
-    /// to the full record, not short in absolute terms). `None` only in
-    /// the window between an entry being written and its summary being
-    /// batched.
+    /// to the full record, not short in absolute terms). On a Council
+    /// decision signed with one, the record's own summary in the version
+    /// served, revisions applied (see `summary_authorship`); otherwise the
+    /// Clerk's, `None` only in the window between an entry being written
+    /// and its summary being batched. See [`served_summary`].
+    ///
+    /// [`served_summary`]: crate::govlog::served_summary
     #[serde(default)]
     pub summary: Option<String>,
+    /// Present when `summary` is the decision's signed one: who wrote and
+    /// who accepted it (0.96)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_authorship: Option<SummaryAuthorship>,
     /// How many deliberation rounds the record holds, when it holds
     /// rounds. Present at any detail level: it is what tells a reader
     /// whether `round=` paging is available and how far it goes.
@@ -2827,9 +2835,30 @@ pub struct CouncilMeetingResponse {
     /// (e.g. `GOV-2026-0042`) — read one with `get_content(id)`.
     #[serde(default)]
     pub decision_ids: Vec<GovernanceLogId>,
-    /// The Clerk's summary of the whole meeting, once adjourned.
+    /// The Clerk's summary of the whole meeting, once adjourned. Meetings
+    /// whose decisions carry signed summaries have none: theirs is
+    /// `decision_summaries`.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Each decision's summary, in `decision_ids` order: from 0.96 the
+    /// meeting's summary is this list (Steward, 2026-10-17)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_summaries: Vec<MeetingDecisionSummary>,
+}
+
+/// One decision's summary in a [`CouncilMeetingResponse`] (0.96)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct MeetingDecisionSummary {
+    pub id: GovernanceLogId,
+    pub title: String,
+    /// As [`GovernanceEntryResponse::summary`] serves it
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// As [`GovernanceEntryResponse::summary_authorship`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_authorship: Option<SummaryAuthorship>,
 }
 
 #[cfg(test)]
@@ -3418,6 +3447,7 @@ mod tests {
             created_at: Utc::now(),
             tags: Some(vec!["constitutional".into()]),
             summary: Some("Ratified 4-1.".into()),
+            summary_authorship: None,
             total_rounds: Some(3),
             data: None,
             round: None,
@@ -3664,6 +3694,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: Some("Ratified 4-1.".into()),
+            summary_authorship: None,
             total_rounds: Some(3),
             data: None,
             round: None,
@@ -3812,6 +3843,7 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             summary: None,
+            summary_authorship: None,
             total_rounds: Some(3),
             data: Some(data.clone()),
             round: None,
@@ -3874,6 +3906,7 @@ mod tests {
             status: MeetingStatus::Adjourned,
             decision_ids: vec!["GOV-2026-0003".parse().unwrap()],
             summary: Some("The Council decided one item.".into()),
+            decision_summaries: Vec::new(),
         };
         let json = serde_json::to_string(&meeting).unwrap();
         let back: CouncilMeetingResponse = serde_json::from_str(&json).unwrap();
@@ -3895,6 +3928,42 @@ mod tests {
         assert!(meeting.adjourned_at.is_none());
         assert!(meeting.decision_ids.is_empty());
         assert!(meeting.summary.is_none());
+        assert!(meeting.decision_summaries.is_empty());
+    }
+
+    /// A 0.96 meeting's summary is its decisions' summaries; a 0.95
+    /// reader ignores the list and a 0.95 payload has none
+    #[test]
+    fn a_meeting_lists_its_decisions_summaries() {
+        use crate::govlog::{CouncilSeat, SummaryAcceptance};
+        let meeting = CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: Utc::now(),
+            adjourned_at: Some(Utc::now()),
+            status: MeetingStatus::Adjourned,
+            decision_ids: vec!["GOV-2026-0014".parse().unwrap()],
+            summary: None,
+            decision_summaries: vec![MeetingDecisionSummary {
+                id: "GOV-2026-0014".parse().unwrap(),
+                title: "t".into(),
+                summary: Some("Approved.".into()),
+                summary_authorship: Some(SummaryAuthorship {
+                    written_by: CouncilSeat::Lawyer,
+                    accepted_by: SummaryAcceptance::Steward,
+                }),
+            }],
+        };
+        let value = serde_json::to_value(&meeting).unwrap();
+        assert_eq!(
+            value["decision_summaries"][0]["summary_authorship"],
+            serde_json::json!({
+                "written_by": "lawyer",
+                "accepted_by": {"by": "steward"}
+            })
+        );
+        let back: CouncilMeetingResponse =
+            serde_json::from_value(value).unwrap();
+        assert_eq!(back.decision_summaries, meeting.decision_summaries);
     }
 
     #[test]
