@@ -21,6 +21,7 @@ mod decided;
 mod ranking;
 mod summary;
 mod votes;
+mod witness;
 use crate::enums::{DecisionOutcome, ProposalCategory, RoundType};
 use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 pub use decided::{Decided, FinalRoundError, RecordRuleError};
@@ -31,6 +32,10 @@ pub use summary::{
 pub use votes::{
     BlankStatement, DEFERRING_SEATS, NotASeatChoice, SeatChoice, SeatVote,
     SeatVotes, Statement, StewardVote, Vote, Votes,
+};
+pub use witness::{
+    Asked, Testimony, Unanswered, Unheard, Witness, WitnessQuestion,
+    WitnessSource, testimony_attachment_name,
 };
 
 /// The `data` of a `council_decision` entry. See the [module docs](self).
@@ -252,6 +257,11 @@ pub struct CouncilRound {
     /// (0.48)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tabled_by_recused_steward: bool,
+    /// The questions seats put to witnesses this round, in the order
+    /// asked. The answers are in the decision's testimony attachments.
+    /// (0.99)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_questions: Vec<WitnessQuestion>,
 }
 
 /// A recused Steward's note to the seats, made as an emergency act

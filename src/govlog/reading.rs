@@ -56,6 +56,8 @@ pub const KEY_ORDER: &[&str] = &[
     "tabled_by_recused_steward",
     "steward_contribution",
     "responses",
+    "witness_questions",
+    "witness",
     "rounds",
     "steward_recusal",
     "votes",

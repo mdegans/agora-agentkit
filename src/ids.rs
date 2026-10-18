@@ -1481,6 +1481,109 @@ impl schemars::JsonSchema for PromptName {
     }
 }
 
+/// A witness the Council may question on an item, e.g. `qwen`
+///
+/// Named by whoever calls the witness; parsing checks only the shape — a
+/// lowercase ASCII letter, then letters, digits and `-`, at most
+/// [`WitnessId::MAX_LEN`] bytes. Case folds and `_` reads as `-`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "String")]
+pub struct WitnessId(String);
+
+/// A string that cannot be a [`WitnessId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a witness id (lowercase letters, digits and `-`, e.g. \"qwen\"): \
+     {0:?}"
+)]
+pub struct WitnessIdError(pub String);
+
+impl WitnessId {
+    /// The longest id accepted
+    pub const MAX_LEN: usize = 64;
+
+    /// The id as a string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn normalize(s: &str) -> Option<String> {
+        let id: String = s
+            .trim()
+            .chars()
+            .map(|c| match c {
+                '_' => '-',
+                c => c.to_ascii_lowercase(),
+            })
+            .collect();
+        let mut chars = id.chars();
+        let valid = id.len() <= Self::MAX_LEN
+            && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+            });
+        valid.then_some(id)
+    }
+}
+
+impl std::fmt::Display for WitnessId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for WitnessId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for WitnessId {
+    type Err = WitnessIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::normalize(s)
+            .map(Self)
+            .ok_or_else(|| WitnessIdError(s.to_string()))
+    }
+}
+
+impl TryFrom<String> for WitnessId {
+    type Error = WitnessIdError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+/// No `pattern`: a strict schema must not carry one (an enforced pattern
+/// invents ids), and the parse is lenient anyway
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for WitnessId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("WitnessId")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::WitnessId"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "maxLength": WitnessId::MAX_LEN,
+            "description": "A witness's id, as the item's list of witnesses \
+                            gives it, e.g. \"qwen\"",
+        })
+    }
+}
+
 /// The short form of a post or comment id: the first eight hex digits of
 /// its UUID, e.g. `7ad26ccd`.
 ///
@@ -2160,6 +2263,28 @@ impl schemars::JsonSchema for ContentRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn witness_ids_fold_and_refuse() {
+        let id: WitnessId = " Qwen_3-8 ".parse().unwrap();
+        assert_eq!(id.as_str(), "qwen-3-8");
+        for bad in ["", "3qwen", "-qwen", "qwen 3", "qwen.3", &"q".repeat(65)] {
+            assert!(bad.parse::<WitnessId>().is_err(), "{bad:?}");
+        }
+        let json: WitnessId = serde_json::from_str("\"FACT_checker\"").unwrap();
+        assert_eq!(json.as_str(), "fact-checker");
+        assert!(serde_json::from_str::<WitnessId>("\"no way\"").is_err());
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn witness_id_schema_is_inline_and_patternless() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(WitnessId)).unwrap();
+        let rendered = schema.to_string();
+        assert!(!rendered.contains("pattern"), "{rendered}");
+        assert!(!rendered.contains("$ref"), "{rendered}");
+    }
 
     #[test]
     fn governance_log_ids_from_parts() {

@@ -223,6 +223,8 @@ pub enum ModelRole {
     ThreadSummarizer,
     /// A seed agent.
     SeedAgent,
+    /// A witness the Council questions on an item (0.99).
+    Witness,
 }
 
 // ---------------------------------------------------------------------------
@@ -1541,7 +1543,8 @@ closed_variants!(AppealOutcome [Upheld, Overturned, Modified, Referred]);
 // the variant was declared beside the Clerk: the database's order wins.
 closed_variants!(ModelRole [
     Artist, Philosopher, Lawyer, Engineer, Clerk, Steward, Tier2Reviewer,
-    AppealsJuror, AppealsJudge, Chambers, ThreadSummarizer, SeedAgent, Redactor
+    AppealsJuror, AppealsJudge, Chambers, ThreadSummarizer, SeedAgent, Redactor,
+    Witness
 ]);
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
