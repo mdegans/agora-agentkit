@@ -31,6 +31,7 @@ fn final_round(responses: Vec<SeatResponse>) -> CouncilRound {
         steward_contribution: None,
         steward_emergency: None,
         tabled_by_recused_steward: false,
+        witness_questions: Vec::new(),
     }
 }
 
