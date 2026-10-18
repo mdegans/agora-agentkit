@@ -71,16 +71,15 @@ pub struct Ledger {
     /// Posts this agent has created.
     #[serde(default)]
     pub created_posts: HashSet<PostId>,
-    /// Posts this agent has commented on.
-    #[serde(default)]
-    pub commented_posts: HashSet<PostId>,
     /// Comments this agent has created.
+    ///
+    /// No record of which posts it commented on: one comment per post (and
+    /// one reply per comment) is the server's rule, refused with a 409 that
+    /// names the comment in the way (0.98; agora-agentkit#186). Ledgers
+    /// saved before keep `commented_posts` and `post_comments`, ignored on
+    /// load and dropped on the next save.
     #[serde(default)]
     pub created_comments: HashSet<CommentId>,
-    /// This agent's top-level comment on each post, so a second attempt can
-    /// be pointed at it (0.49; older ledgers lack it)
-    #[serde(default)]
-    pub post_comments: HashMap<PostId, CommentId>,
     /// Titles visible at perception plus titles posted this session, for
     /// repetition checks. Refreshed each session; never persisted.
     #[serde(skip)]
@@ -543,32 +542,11 @@ impl Agora {
         &mut self,
         args: CreateCommentInput,
     ) -> Result<Content, Content> {
+        // No local check for a comment already there: the server refuses
+        // it (409), naming the comment in the way and telling a reply from a
+        // top-level comment, and counts only live comments. A local record
+        // outlived deletions, sessions and servers (agora-agentkit#186).
         let reply_to = self.resolve(args.reply_to).await?;
-        // Reinterpreting the resolved id as a `PostId` is a set membership
-        // *probe*, not a resolution: if it is really a comment id it simply
-        // misses, and threaded replies pass through — replying within a
-        // conversation is the point. That is why this goes through the raw
-        // uuid rather than a `From<ContentId> for PostId`, which
-        // deliberately does not exist — only the server can turn "an id"
-        // into "a post id".
-        let as_post = PostId::from(*reply_to.as_uuid());
-        {
-            let ledger = self.ledger.read().expect("ledger lock");
-            if ledger.commented_posts.contains(&as_post) {
-                let existing = match ledger.post_comments.get(&as_post) {
-                    Some(comment) => format!(": {comment}"),
-                    None => String::new(),
-                };
-                return Err(format!(
-                    "You already have a top-level comment on post \
-                     {as_post}{existing}. One top-level comment per post. \
-                     To say more, reply to a comment on it instead (yours \
-                     or anyone's): pass that comment's id as `reply_to`."
-                )
-                .into());
-            }
-        }
-
         let payload = CreateCommentPayload {
             reply_to,
             body: args.body,
@@ -584,16 +562,15 @@ impl Agora {
         // The post the comment is on: a reply's, when the comment it
         // answers was shown; otherwise `reply_to` names the post (a comment
         // id never shown here is never a `seen_posts` key, so it bumps
-        // nothing)
+        // nothing). Through the raw uuid: only the server can turn "an id"
+        // into "a post id", so there is no `From<ContentId> for PostId`.
         let on_post = ledger
             .comment_posts
             .get(&CommentId::from(*reply_to.as_uuid()))
             .copied()
-            .unwrap_or(as_post);
+            .unwrap_or_else(|| PostId::from(*reply_to.as_uuid()));
         ledger.commented_this_session.push(on_post);
         ledger.comment_posts.insert(comment_id, on_post);
-        ledger.commented_posts.insert(as_post);
-        ledger.post_comments.entry(as_post).or_insert(comment_id);
         ledger.created_comments.insert(comment_id);
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }
@@ -1345,10 +1322,10 @@ impl Agora {
             .await
             .map_err(err)?;
         self.spent_trash_write();
-        // The dedup ledger is left alone: a deleted comment still holds
-        // its post's one top-level slot, or delete-and-restore would get
-        // round the rule. The refusal already says to reply instead. Its
-        // post's count drops, though, so it no longer counts against it.
+        // One comment per post is the server's rule (0.98): a deleted
+        // comment no longer holds its slot there, so a new one may follow.
+        // A restore next to it is the server's to refuse too. Its post's
+        // count drops, so it no longer counts against it.
         self.ledger
             .write()
             .expect("ledger lock")
