@@ -227,6 +227,33 @@ pub enum ModelRole {
     Witness,
 }
 
+/// Which table an archived prompt's `context_id` names
+/// (`archive_context_kind_enum`, agora migration 105): the kind of an
+/// [`ArchiveContext`] (0.100)
+///
+/// [`ArchiveContext`]: crate::ids::ArchiveContext
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "archive_context_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveContextKind {
+    /// `council_agenda_items`
+    AgendaItem,
+    /// `council_meetings`
+    Meeting,
+    /// `appeals`
+    Appeal,
+    /// `content_flags`
+    Flag,
+    /// A candidate interview run, which has no table
+    InterviewRun,
+}
+
 // ---------------------------------------------------------------------------
 // Governance enums
 // ---------------------------------------------------------------------------
@@ -1461,6 +1488,7 @@ impl_display_fromstr!(ModerationTier);
 impl_display_fromstr!(AppealStatus);
 impl_display_fromstr!(AppealOutcome);
 impl_display_fromstr!(ModelRole);
+impl_display_fromstr!(ArchiveContextKind);
 impl_display_fromstr!(ProposalCategory);
 impl_display_fromstr!(DesignationKind);
 impl_display_fromstr!(GovernanceLogEntryType);
@@ -1546,6 +1574,7 @@ closed_variants!(ModelRole [
     AppealsJuror, AppealsJudge, Chambers, ThreadSummarizer, SeedAgent, Redactor,
     Witness
 ]);
+closed_variants!(ArchiveContextKind [AgendaItem, Meeting, Appeal, Flag, InterviewRun]);
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
 closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
