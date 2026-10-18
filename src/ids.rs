@@ -281,6 +281,13 @@ define_id! {
 }
 
 define_id! {
+    /// One candidate interview run: every prompt it archives carries it as
+    /// an [`ArchiveContext::InterviewRun`]. No table; the run's manifest
+    /// and directory are named by it (0.100)
+    InterviewRunId
+}
+
+define_id! {
     /// Unique identifier for a batch tracking record.
     BatchTrackingId
 }
@@ -808,6 +815,120 @@ impl From<CommentId> for PostOrCommentId {
 impl std::fmt::Display for PostOrCommentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.kind_str(), self.as_uuid())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What an archived prompt was for
+// ---------------------------------------------------------------------------
+
+/// What an archived prompt was for: `prompt_archive.context_kind` and
+/// `context_id` (agora migration 105) (0.100)
+///
+/// The two columns are stored apart, so build one with [`from_stored`] and
+/// take it apart with [`kind`] and [`as_uuid`] at the query, and nowhere
+/// else.
+///
+/// [`from_stored`]: Self::from_stored
+/// [`kind`]: Self::kind
+/// [`as_uuid`]: Self::as_uuid
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArchiveContext {
+    /// A Council agenda item: the seats' deliberation, the Clerk's passes
+    AgendaItem(AgendaItemId),
+    /// A Council sitting as a whole: the Lawyer's adjournment summary, on
+    /// sittings before 2026-10-17
+    Meeting(CouncilMeetingId),
+    /// An appeal, at any appeals stage
+    Appeal(AppealId),
+    /// A content flag, under Tier 2 review
+    Flag(FlagId),
+    /// A candidate interview run
+    InterviewRun(InterviewRunId),
+}
+
+impl ArchiveContext {
+    /// Which table the id names
+    pub fn kind(&self) -> crate::enums::ArchiveContextKind {
+        use crate::enums::ArchiveContextKind as K;
+        match self {
+            Self::AgendaItem(_) => K::AgendaItem,
+            Self::Meeting(_) => K::Meeting,
+            Self::Appeal(_) => K::Appeal,
+            Self::Flag(_) => K::Flag,
+            Self::InterviewRun(_) => K::InterviewRun,
+        }
+    }
+
+    /// The storage form, for the `context_id` column
+    pub fn as_uuid(&self) -> Uuid {
+        match self {
+            Self::AgendaItem(id) => *id.as_uuid(),
+            Self::Meeting(id) => *id.as_uuid(),
+            Self::Appeal(id) => *id.as_uuid(),
+            Self::Flag(id) => *id.as_uuid(),
+            Self::InterviewRun(id) => *id.as_uuid(),
+        }
+    }
+
+    /// Read the two stored columns back as one value
+    pub fn from_stored(
+        kind: crate::enums::ArchiveContextKind,
+        id: Uuid,
+    ) -> Self {
+        use crate::enums::ArchiveContextKind as K;
+        match kind {
+            K::AgendaItem => Self::AgendaItem(id.into()),
+            K::Meeting => Self::Meeting(id.into()),
+            K::Appeal => Self::Appeal(id.into()),
+            K::Flag => Self::Flag(id.into()),
+            K::InterviewRun => Self::InterviewRun(id.into()),
+        }
+    }
+}
+
+impl From<AgendaItemId> for ArchiveContext {
+    fn from(id: AgendaItemId) -> Self {
+        Self::AgendaItem(id)
+    }
+}
+
+impl From<CouncilMeetingId> for ArchiveContext {
+    fn from(id: CouncilMeetingId) -> Self {
+        Self::Meeting(id)
+    }
+}
+
+impl From<AppealId> for ArchiveContext {
+    fn from(id: AppealId) -> Self {
+        Self::Appeal(id)
+    }
+}
+
+impl From<FlagId> for ArchiveContext {
+    fn from(id: FlagId) -> Self {
+        Self::Flag(id)
+    }
+}
+
+impl From<InterviewRunId> for ArchiveContext {
+    fn from(id: InterviewRunId) -> Self {
+        Self::InterviewRun(id)
+    }
+}
+
+/// `agenda item <uuid>`, `meeting <uuid>`, `appeal <uuid>`, `flag <uuid>`,
+/// `interview run <uuid>`
+impl std::fmt::Display for ArchiveContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::AgendaItem(_) => "agenda item",
+            Self::Meeting(_) => "meeting",
+            Self::Appeal(_) => "appeal",
+            Self::Flag(_) => "flag",
+            Self::InterviewRun(_) => "interview run",
+        };
+        write!(f, "{kind} {}", self.as_uuid())
     }
 }
 
@@ -2299,6 +2420,29 @@ mod tests {
         assert!(GovernanceLogId::from_parts(gov, 2026, 10_000).is_none());
         assert!(GovernanceLogId::from_parts(gov, 2026, 0).is_none());
         assert!(GovernanceLogId::from_parts(gov, 999, 1).is_none());
+    }
+
+    /// Every kind reads back as the context it was stored from.
+    #[test]
+    fn archive_contexts_round_trip_through_their_columns() {
+        use crate::enums::ArchiveContextKind;
+        let contexts = [
+            ArchiveContext::from(AgendaItemId::new()),
+            ArchiveContext::from(CouncilMeetingId::new()),
+            ArchiveContext::from(AppealId::new()),
+            ArchiveContext::from(FlagId::new()),
+            ArchiveContext::from(InterviewRunId::new()),
+        ];
+        let kinds: Vec<_> = contexts.iter().map(ArchiveContext::kind).collect();
+        assert_eq!(kinds, ArchiveContextKind::ALL);
+        for c in contexts {
+            assert_eq!(ArchiveContext::from_stored(c.kind(), c.as_uuid()), c);
+        }
+        let id = AgendaItemId::new();
+        assert_eq!(
+            ArchiveContext::from(id).to_string(),
+            format!("agenda item {id}")
+        );
     }
 
     #[test]

@@ -2,6 +2,21 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.100.0 (2026-10-18)
+
+One type for what an archived prompt was for (agora CLAUDE.md rules 7
+and 8). `prompt_archive.context_id` named an agenda item, a meeting, an
+appeal, a flag or an interview run depending on the writer, and readers
+guessed which by comparing it against other ids. Agora migration 105 adds
+`context_kind` beside it.
+
+- `ids::ArchiveContext`: `AgendaItem`, `Meeting`, `Appeal`, `Flag` and
+  `InterviewRun`, each carrying its id. `kind()` and `as_uuid()` are the
+  two stored columns; `from_stored` reads them back. `Display` is
+  `agenda item <uuid>`, `meeting <uuid>`, and so on.
+- `enums::ArchiveContextKind` (`archive_context_kind_enum`), with `ALL`.
+- `ids::InterviewRunId`: a candidate interview run, which has no table.
+
 ## 0.98.0 (2026-10-17)
 
 One comment per post, and one reply per comment, is the server's rule and
