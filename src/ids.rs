@@ -1815,13 +1815,14 @@ impl schemars::JsonSchema for WitnessId {
     }
 }
 
-/// A question's short id among the questions the seats put to an item's
-/// witnesses: `q3` (0.104)
+/// A question's number among the questions the seats put to an item's
+/// witnesses: `3` (0.104)
 ///
 /// Numbered from 1 in the order asked, across every witness on the item,
 /// so a seat can name a question it asked and the record can find it in
-/// the batch it was sent in. Parsing is lenient on case and surrounding
-/// whitespace; the canonical form is `q` and the number.
+/// the batch it was sent in. One form everywhere: the bare number, in the
+/// batch the witness reads (`3.`), in what a seat is told, and in the
+/// record (the JSON number `3`).
 #[derive(
     Debug,
     Clone,
@@ -1834,14 +1835,12 @@ impl schemars::JsonSchema for WitnessId {
     Serialize,
     Deserialize,
 )]
-#[serde(try_from = "String", into = "String")]
+#[serde(try_from = "u32", into = "u32")]
 pub struct WitnessQuestionId(u32);
 
-/// A string that cannot be a [`WitnessQuestionId`].
+/// A value that cannot be a [`WitnessQuestionId`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "not a witness question id (`q` and a number from 1, e.g. \"q3\"): {0:?}"
-)]
+#[error("not a witness question number (a number from 1, e.g. 3): {0:?}")]
 pub struct WitnessQuestionIdError(pub String);
 
 impl WitnessQuestionId {
@@ -1862,7 +1861,7 @@ impl WitnessQuestionId {
 }
 
 impl Default for WitnessQuestionId {
-    /// The first question, `q1`
+    /// The first question, `1`
     fn default() -> Self {
         Self(1)
     }
@@ -1870,38 +1869,45 @@ impl Default for WitnessQuestionId {
 
 impl std::fmt::Display for WitnessQuestionId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "q{}", self.0)
+        self.0.fmt(f)
     }
 }
 
+/// The number as [`Display`](std::fmt::Display) writes it: ASCII digits,
+/// no sign and no leading zero; surrounding whitespace is ignored
 impl std::str::FromStr for WitnessQuestionId {
     type Err = WitnessQuestionIdError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let t = s.trim();
-        t.strip_prefix(['q', 'Q'])
-            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        Some(t)
+            .filter(|n| {
+                !n.is_empty()
+                    && !n.starts_with('0')
+                    && n.bytes().all(|b| b.is_ascii_digit())
+            })
             .and_then(|n| n.parse::<u32>().ok())
             .and_then(Self::new)
             .ok_or_else(|| WitnessQuestionIdError(s.to_string()))
     }
 }
 
-impl TryFrom<String> for WitnessQuestionId {
+impl TryFrom<u32> for WitnessQuestionId {
     type Error = WitnessQuestionIdError;
 
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        s.parse()
+    fn try_from(n: u32) -> Result<Self, Self::Error> {
+        Self::new(n).ok_or_else(|| WitnessQuestionIdError(n.to_string()))
     }
 }
 
-impl From<WitnessQuestionId> for String {
+impl From<WitnessQuestionId> for u32 {
     fn from(id: WitnessQuestionId) -> Self {
-        id.to_string()
+        id.0
     }
 }
 
-/// No `pattern` (CLAUDE.md strict-schema rule 4); the parse is lenient
+/// No `minimum` (strict-safe, as [`PollOptionNumber`]'s); deserializing
+/// refuses 0
 #[cfg(feature = "schemars")]
 impl schemars::JsonSchema for WitnessQuestionId {
     fn inline_schema() -> bool {
@@ -1921,8 +1927,8 @@ impl schemars::JsonSchema for WitnessQuestionId {
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
-            "type": "string",
-            "description": "A witness question's short id, e.g. \"q3\"",
+            "type": "integer",
+            "description": "A witness question's number on the item, e.g. 3",
         })
     }
 }
@@ -2677,21 +2683,22 @@ mod tests {
     }
 
     #[test]
-    fn witness_question_ids_read_leniently_and_print_short() {
-        let id: WitnessQuestionId = " Q12 ".parse().unwrap();
+    fn witness_question_ids_are_bare_numbers() {
+        let id: WitnessQuestionId = " 12 ".parse().unwrap();
         assert_eq!(id.get(), 12);
-        assert_eq!(id.to_string(), "q12");
-        assert_eq!(id.next().to_string(), "q13");
-        assert_eq!(WitnessQuestionId::default().to_string(), "q1");
-        for bad in ["", "q", "q0", "12", "q-1", "q1.5", "q１", "q99999999999"]
-        {
+        assert_eq!(id.to_string(), "12");
+        assert_eq!(id.next().to_string(), "13");
+        assert_eq!(WitnessQuestionId::default().to_string(), "1");
+        for bad in ["", "0", "012", "q12", "-1", "1.5", "１", "99999999999"] {
             assert!(bad.parse::<WitnessQuestionId>().is_err(), "{bad:?}");
         }
-        assert_eq!(serde_json::to_string(&id).unwrap(), "\"q12\"");
+        assert_eq!(serde_json::to_string(&id).unwrap(), "12");
         assert_eq!(
-            serde_json::from_str::<WitnessQuestionId>("\"q12\"").unwrap(),
+            serde_json::from_str::<WitnessQuestionId>("12").unwrap(),
             id
         );
+        assert!(serde_json::from_str::<WitnessQuestionId>("0").is_err());
+        assert!(serde_json::from_str::<WitnessQuestionId>("\"12\"").is_err());
     }
 
     #[cfg(feature = "schemars")]

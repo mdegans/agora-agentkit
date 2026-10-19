@@ -8,16 +8,18 @@ The Council's questions to a witness are batched: queued during a round,
 sent to the witness together when it ends as one user turn, and answered
 once (agora, OBL-2026-0028). Records made before still read as they did.
 
-- `ids::WitnessQuestionId`: a question's short id on an item, `q3`,
-  numbered from 1 in the order asked across every witness. Serializes as
-  the string `"q3"`; parsing is lenient on case and whitespace. Its
-  schema is an inline plain string, no `pattern`.
+- `ids::WitnessQuestionId`: a question's number on an item, `3`,
+  numbered from 1 in the order asked across every witness. One form
+  everywhere: the bare number in the batch, in what a seat is told, and
+  in the record (a JSON number). Its schema is an inline integer.
 - `govlog::WitnessBatch` and `BatchedQuestion`: one round's questions to
-  one witness. `render` writes the witness's turn (a heading for the
-  round, then each seat's questions under its name in seat order, every
-  line quoted, each question's last line ending in ` [qN]`); `parse`
-  reads one back exactly, and `get` finds a question by id. A seat's own
-  line that ends like an id is written with a backslash before its `[`.
+  one witness. `render` writes the witness's turn: a heading for the
+  round, then each seat's questions under its name in seat order, each
+  opening with its number (`> 3. ...`), later lines indented under it,
+  every line quoted, a blank `>` line between questions. `parse` reads
+  one back exactly, and `get` finds a question by id. A seat's own line
+  that starts like an id is written with a backslash before its `.`
+  (`3\.`). A batch may exceed one Agora DM; a DM transport splits it.
 - `WitnessQuestion.id` and `Unanswered.id` (optional, omitted when
   absent): with an id, `Asked::Message(i)` is the batch's turn, shared
   with the batch's other questions, and the answer at `i + 1` is one
