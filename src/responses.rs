@@ -3150,7 +3150,7 @@ pub struct GovernanceSearchHit {
 /// A Council meeting: when it convened and adjourned, its status, the
 /// decisions it produced, and the Clerk's whole-meeting summary of the
 /// proceedings (Constitution Art. IV § 4).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CouncilMeetingResponse {
     pub id: CouncilMeetingId,
@@ -3162,9 +3162,10 @@ pub struct CouncilMeetingResponse {
     /// (e.g. `GOV-2026-0042`) — read one with `get_content(id)`.
     #[serde(default)]
     pub decision_ids: Vec<GovernanceLogId>,
-    /// The Clerk's summary of the whole meeting, once adjourned. Meetings
-    /// whose decisions carry signed summaries have none: theirs is
-    /// `decision_summaries`.
+    /// The meeting's summary, once adjourned: before 0.96 a text of its own
+    /// (the Clerk's, then the Lawyer's); since, the decisions' signed
+    /// summaries pasted together at adjournment, which `decision_summaries`
+    /// serves as their records do now.
     #[serde(default)]
     pub summary: Option<String>,
     /// Each decision's summary, in `decision_ids` order: from 0.96 the
@@ -3221,7 +3222,7 @@ impl CouncilMeetingResponse {
         })
     }
 
-    /// One line for this sitting: when it sat, how it ended, and each
+    /// This sitting's lines: a header with when it sat, how it ended, and each
     /// decision's id, title and summary size; under it each decision's
     /// summary as its record serves it (Protocol § 6.2), and, for a
     /// sitting from before decisions carried their own summaries, the
@@ -3292,14 +3293,32 @@ impl CouncilMeetingResponse {
                 quote(&mut line, text);
             }
         }
+        // The composed paste repeats the summaries above, so it is dropped,
+        // but only when every decision's summary is there: when the server
+        // could read none or some of them, it is the only copy
+        let every_decision_read = self
+            .decision_ids
+            .iter()
+            .all(|id| self.decision_summaries.iter().any(|d| d.id == *id));
         match self.summary.as_deref().map(str::trim) {
-            Some(text) if !text.is_empty() && !self.summary_is_composed() => {
-                line.push_str(&format!(
-                    "  The sitting's own summary ({}), from before each \
-                     decision carried one; the records are authoritative:\n",
-                    size_in_words(text.len() as u64)
-                ));
-                quote(&mut line, text);
+            Some(text) if !text.is_empty() => {
+                let heading = if !self.summary_is_composed() {
+                    "the sitting's own summary, from before decisions were \
+                     signed with summaries of their own"
+                } else if every_decision_read {
+                    ""
+                } else {
+                    "the sitting's summary as composed at adjournment, from \
+                     its decisions' summaries as signed then"
+                };
+                if !heading.is_empty() {
+                    line.push_str(&format!(
+                        "  {} ({}); the records are authoritative:\n",
+                        capitalized(heading),
+                        size_in_words(text.len() as u64)
+                    ));
+                    quote(&mut line, text);
+                }
             }
             _ => {}
         }
@@ -3332,6 +3351,15 @@ impl CouncilMeetingResponse {
         );
         out
     }
+}
+
+/// `text` with its first letter upper-cased
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// `text` quoted under a sitting's line, each line as "  > …"
@@ -4478,7 +4506,7 @@ mod tests {
             test_sitting: true,
         };
         let out = CouncilMeetingResponse::render_list(
-            &[composed, cancelled, older],
+            &[composed.clone(), cancelled, older],
             Some("limit 60 is over 50; showing up to 50."),
         );
         assert_eq!(
@@ -4497,8 +4525,9 @@ mod tests {
              the Steward); GOV-2026-0012 (its record could not be read)\n\
              \x20 GOV-2026-0013's summary:\n\
              \x20 > Scheduled.\n\
-             \x20 The sitting's own summary (34 bytes), from before each \
-             decision carried one; the records are authoritative:\n\
+             \x20 The sitting's own summary, from before decisions were signed \
+             with summaries of their own (34 bytes); the records are \
+             authoritative:\n\
              \x20 > The Lawyer's account.\n\
              \x20 > Second line.\n\
              \nRead a decision's whole record with get_content(id). Where a \
@@ -4506,6 +4535,19 @@ mod tests {
         );
         // Each summary once: the composed meeting summary repeats it
         assert_eq!(out.matches("Approved 4-1.").count(), 1, "{out}");
+        // When the server could not read the decisions, the composed
+        // summary is the only copy, and is quoted
+        let mut unread = composed.clone();
+        unread.decision_summaries.clear();
+        let line = unread.render_line();
+        assert!(
+            line.contains(
+                "GOV-2026-0017\n  The sitting's summary as composed at \
+                 adjournment, from its decisions' summaries as signed then"
+            ),
+            "{line}"
+        );
+        assert_eq!(line.matches("Approved 4-1.").count(), 1, "{line}");
         assert_eq!(
             CouncilMeetingResponse::render_list(&[], None),
             "No Council sittings have been recorded yet."
