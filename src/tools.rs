@@ -46,7 +46,14 @@ macro_rules! agent_tools {
             description: $doc,
             seed: $seed,
             #[cfg(feature = "schemars")]
-            input_schema: tool_input_schema::<$input>,
+            input_schema: {
+                fn schema() -> serde_json::Value {
+                    let mut schema = tool_input_schema::<$input>();
+                    hide_fields($name, &mut schema);
+                    schema
+                }
+                schema
+            },
         },)*];
     };
 }
@@ -128,6 +135,32 @@ pub fn tool_input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut schema = crate::responses::inline_schema_for::<T>();
     model_facing_schema(&mut schema);
     schema
+}
+
+/// Fields a tool still reads that no tool schema shows: `get_governance_log`'s
+/// obligation filters, which are `get_obligations`' since 0.106. REST's
+/// OpenAPI still documents them (`GET /api/governance/log?view=obligations`
+/// is REST's way to the list)
+pub fn hidden_fields(tool: &str) -> &'static [&'static str] {
+    match tool {
+        "get_governance_log" => &["view", "owed_by", "status", "sort"],
+        _ => &[],
+    }
+}
+
+/// Take [`hidden_fields`] out of `tool`'s `schema`
+pub fn hide_fields(tool: &str, schema: &mut serde_json::Value) {
+    let hidden = hidden_fields(tool);
+    if let Some(props) =
+        schema.get_mut("properties").and_then(|p| p.as_object_mut())
+    {
+        props.retain(|k, _| !hidden.contains(&k.as_str()));
+    }
+    if let Some(required) =
+        schema.get_mut("required").and_then(|r| r.as_array_mut())
+    {
+        required.retain(|r| !r.as_str().is_some_and(|r| hidden.contains(&r)));
+    }
 }
 
 /// Rewrite a tool's input schema into the form a model reads, in place.
@@ -325,6 +358,15 @@ pub fn developer_text(text: &str) -> Vec<String> {
             out.push(path.to_owned());
         }
     }
+    // "agentkit 0.59", "since 0.103": a release named in passing
+    for release in ["agentkit 0.", "since 0.", "until 0."] {
+        if let Some(at) = text.find(release)
+            && text[at + release.len()..]
+                .starts_with(|c: char| c.is_ascii_digit())
+        {
+            out.push(release.to_owned());
+        }
+    }
     for issue in ["agora#", "agentkit#", "agora-agentkit#", "agora-agents#"] {
         if let Some(at) = text.find(issue) {
             let rest = &text[at + issue.len()..];
@@ -508,6 +550,20 @@ mod tests {
         }
     }
 
+    /// `get_governance_log`'s obligation filters are `get_obligations`'
+    /// in every tool schema, and still REST's
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn obligation_filters_are_hidden_from_tools_only() {
+        let tool = (agent_tool("get_governance_log").unwrap().input_schema)();
+        let rest =
+            crate::responses::inline_schema_for::<GetGovernanceLogInput>();
+        for field in hidden_fields("get_governance_log") {
+            assert!(tool["properties"].get(field).is_none(), "{field}");
+            assert!(rest["properties"].get(field).is_some(), "{field}");
+        }
+    }
+
     #[test]
     fn developer_text_is_found() {
         for (text, found) in [
@@ -516,6 +572,7 @@ mod tests {
             ("fixed in agora#529", "agora#"),
             ("since (0.72)", "(0.72)"),
             ("since (0.91.4)", "(0.91.4)"),
+            ("older than agentkit 0.59.", "agentkit 0."),
         ] {
             assert_eq!(developer_text(text), [found], "{text}");
         }

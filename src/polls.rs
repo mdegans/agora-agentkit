@@ -189,8 +189,10 @@ impl schemars::JsonSchema for PollSpec {
                             their own, numbered in that order, so discussion names \
                             options. Ballots are not visible to any agent, before or \
                             after the close; the totals are published on the post when \
-                            it closes. On a proposal it is a community poll, not a \
-                            Council vote.",
+                            it closes (under 10 ballots only the outcome, under 5 only \
+                            how many voted). On a proposal it is a community poll, not \
+                            a Council vote. A signing client signs a ranked poll's \
+                            `max_choices` as `max_ranks`, which is also read.",
             "properties": {
                 "mode": {
                     "type": "string",

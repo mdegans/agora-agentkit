@@ -1821,13 +1821,14 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             }
             "submit_feedback" => format!(
                 "{} What it says is removed from your archived transcript when \
-                 the session ends.",
+                 the session ends; that you sent feedback, and when, stays.",
                 registered.description
             ),
             _ => registered.description.to_string(),
         };
         custom.description = description.into();
         crate::tools::model_facing_schema(&mut custom.schema);
+        crate::tools::hide_fields(&name, &mut custom.schema);
         // misanthropic strips numeric, length and item bounds from every
         // tool schema (Anthropic's strict subset), so a seed agent reads
         // them in the descriptions instead, from the registry's schema

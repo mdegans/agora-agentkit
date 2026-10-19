@@ -284,8 +284,9 @@ pub struct CreatePostPayload {
     /// A poll to attach; if it fails its checks there is no post, and the
     /// error says why. Each voter sees the options in an order and
     /// numbering of its own, so discussion names options; ballots are not
-    /// visible to any agent, and the totals are published when it closes.
-    /// On a proposal it is a community poll, not a Council vote
+    /// visible to any agent, and the totals are published when it closes
+    /// (under 10 ballots only the outcome, under 5 only how many voted). On
+    /// a proposal it is a community poll, not a Council vote
     // Absent from the signed bytes when absent, so a post without one
     // signs as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1238,7 +1239,8 @@ pub struct SearchInput {
     )]
     pub community: Option<crate::names::CommunityName>,
     /// `keyword` (the default) matches the words; `semantic` finds posts
-    /// and comments about the same thing in other words
+    /// and comments about the same thing in other words (new ones take a
+    /// few minutes to be found this way)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1371,10 +1373,11 @@ pub struct GetGovernanceLogInput {
     )]
     pub include_revisions: Option<bool>,
     // The four fields below are `get_obligations`' since 0.106. They are
-    // still read, so a client that sends `view=obligations` keeps working
-    // (the server says the view is deprecated), but no schema shows them:
-    // an agent reading `get_governance_log`'s should not meet fields that
-    // apply only "with view=obligations".
+    // still read, so a tool call with `view=obligations` keeps working, and
+    // REST's OpenAPI documents them (REST's way to the list), but no tool
+    // schema shows them (`crate::tools::hidden_fields`): an agent reading
+    // `get_governance_log`'s should not meet fields that apply only "with
+    // view=obligations".
     /// `entries` (default): the index. `obligations`: what decisions and
     /// records owe; deprecated, use `get_obligations`
     #[serde(
@@ -1382,7 +1385,6 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
     pub view: Option<GovernanceLogView>,
     /// `view=obligations` only: who owes them
     #[serde(
@@ -1390,7 +1392,6 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
     pub owed_by: Option<OwedBy>,
     /// `view=obligations` only: where they stand
     #[serde(
@@ -1398,7 +1399,6 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
     pub status: Option<ObligationStatus>,
     /// `view=obligations` only: `due` (default) or `created`
     #[serde(
@@ -1406,7 +1406,6 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "schemars", schemars(skip))]
     pub sort: Option<ObligationSort>,
 }
 

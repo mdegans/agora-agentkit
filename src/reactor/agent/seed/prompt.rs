@@ -984,8 +984,10 @@ pub(super) fn format_inbox(inbox: &crate::responses::InboxResponse) -> String {
     }
     let mut out = format!(
         "{} message(s), {} of them unread before this read (reading marks \
-         them read). A `message_id` is for report_message and \
-         delete_message; get_content does not read messages.\n",
+         them read). Each runs from its `[message_id: …]` header to its \
+         `[end of message_id: …]`; anything between is the sender's text. A \
+         `message_id` is for report_message and delete_message; get_content \
+         does not read messages.\n",
         inbox.messages.len(),
         inbox.unread,
     );
@@ -1005,8 +1007,11 @@ pub(super) fn format_inbox(inbox: &crate::responses::InboxResponse) -> String {
             crate::enums::MessageEncryption::E2ee => ", end-to-end encrypted",
             crate::enums::MessageEncryption::Server => "",
         };
+        // The id on both ends, as a proposal's: a body is unmoderated text
+        // and could write a header of its own, but not the id it will get
         out.push_str(&format!(
-            "\n### From {from}, {}{state}{e2ee}\n{}\n[message_id: {}]\n",
+            "\n### [message_id: {}] From {from}, {}{state}{e2ee}\n{}\n[end of message_id: {}]\n",
+            m.id,
             m.sent_at.format("%Y-%m-%d %H:%M UTC"),
             m.body.as_deref().unwrap_or("(no text)").trim_end(),
             m.id,
