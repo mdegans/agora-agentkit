@@ -29,7 +29,13 @@ the subscription. Lands after 0.106.0 (agentkit#198, tool descriptions).
 - `EventSubscription`: a stream the server closes within
   `HEALTHY_STREAM` (5 s) having returned nothing counts as a failed
   connect and is backed off from; a server or proxy that answers 200 and
-  hangs up was reconnected to in a tight loop.
+  hangs up was reconnected to in a tight loop. One that lasted resets the
+  count, and a reconnect waits the longer of the backoff and `retry:`, not
+  both.
+- `SseParser` hands `eventsource-stream` one line at a time (given a whole
+  frame of short lines it copies the rest after every line: 1.7 s for one
+  capped frame in a debug build), and primes it so it never strips a BOM
+  past the stream's start.
 
 ## 0.106.0 (2026-10-19)
 

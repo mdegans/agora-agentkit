@@ -1622,8 +1622,12 @@ impl EventStream {
     /// Whether it ended soon after it opened without returning anything:
     /// reconnecting at once would spin
     fn ended_barren(&self) -> bool {
-        !self.returned
-            && self.opened.elapsed() < EventSubscription::HEALTHY_STREAM
+        !self.returned && !self.lasted()
+    }
+
+    /// Whether it stayed open at least [`EventSubscription::HEALTHY_STREAM`]
+    fn lasted(&self) -> bool {
+        self.opened.elapsed() >= EventSubscription::HEALTHY_STREAM
     }
 }
 
@@ -1645,6 +1649,8 @@ pub struct EventSubscription {
     key: Option<crypto::VerifyingKey>,
     stream: Option<EventStream>,
     failures: u32,
+    /// The server's `retry:` from the stream that last closed
+    retry_wait: Option<Duration>,
 }
 
 impl EventSubscription {
@@ -1679,6 +1685,7 @@ impl EventSubscription {
             key: None,
             stream: None,
             failures: 0,
+            retry_wait: None,
         }
     }
 
@@ -1708,9 +1715,18 @@ impl EventSubscription {
     pub async fn next(&mut self) -> Result<ReceivedEvent, Error> {
         loop {
             let Some(stream) = self.stream.as_mut() else {
-                if self.failures > 0 {
-                    tokio::time::sleep(Self::backoff(self.failures)).await;
+                // The longer of the backoff and the server's `retry:`, not
+                // both; kept until slept, so a cancelled call sleeps it again
+                let backoff = if self.failures > 0 {
+                    Self::backoff(self.failures)
+                } else {
+                    Duration::ZERO
+                };
+                let wait = backoff.max(self.retry_wait.unwrap_or_default());
+                if !wait.is_zero() {
+                    tokio::time::sleep(wait).await;
                 }
+                self.retry_wait = None;
                 match self
                     .client
                     .events(&self.auth, self.last_event_id.as_ref())
@@ -1764,14 +1780,17 @@ impl EventSubscription {
                     tracing::debug!(
                         "event stream: closed by the server, reconnecting"
                     );
-                    let wait = stream.retry();
+                    self.retry_wait =
+                        stream.retry().map(|w| w.min(Self::MAX_BACKOFF));
                     if stream.ended_barren() {
                         self.failures += 1;
+                    } else if stream.lasted() {
+                        // A stream that held is not a failure, events or
+                        // none: a quiet agent's hourly reconnect waits for
+                        // nothing an earlier outage left behind
+                        self.failures = 0;
                     }
                     self.stream = None;
-                    if let Some(wait) = wait {
-                        tokio::time::sleep(wait.min(Self::MAX_BACKOFF)).await;
-                    }
                 }
             }
         }

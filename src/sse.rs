@@ -346,6 +346,9 @@ pub struct SseParser {
         Result<String, std::convert::Infallible>,
     >,
     events: eventsource_stream::EventStream<Feed>,
+    /// The most bytes handed to `eventsource_stream` at once
+    #[cfg(test)]
+    longest_fed: usize,
 }
 
 impl std::fmt::Debug for SseParser {
@@ -365,10 +368,30 @@ impl Default for SseParser {
 impl SseParser {
     pub fn new() -> Self {
         let (feed, rx) = futures::channel::mpsc::unbounded();
-        Self {
+        let mut parser = Self {
             framer: Framer::default(),
             feed,
             events: eventsource_stream::EventStream::new(rx),
+            #[cfg(test)]
+            longest_fed: 0,
+        };
+        // `eventsource_stream` strips a BOM from the first text it is given,
+        // wherever in the stream that is (after blank lines the framer does
+        // not pass on, say). The framer strips the real one; this comment
+        // is that first text, so it strips nothing else
+        parser.send(":\n".to_owned());
+        parser.drain(&mut Vec::new());
+        parser
+    }
+
+    fn send(&mut self, line: String) {
+        #[cfg(test)]
+        {
+            self.longest_fed = self.longest_fed.max(line.len());
+        }
+        if self.feed.unbounded_send(Ok(line)).is_err() {
+            // The receiver is ours and lives as long as the sender
+            unreachable!("the parser's own feed closed");
         }
     }
 
@@ -377,12 +400,14 @@ impl SseParser {
         let mut frames = Vec::new();
         for text in self.framer.push(bytes) {
             let retry = retry_of(&text);
-            if self.feed.unbounded_send(Ok(text)).is_err() {
-                // The receiver is ours and lives as long as the sender
-                unreachable!("the parser's own feed closed");
-            }
             let before = frames.len();
-            self.drain(&mut frames);
+            // A line at a time: `eventsource_stream` copies what is left of
+            // its buffer after every line it reads, so a whole frame of
+            // short lines at once would cost time quadratic in its lines
+            for line in text.split_inclusive('\n') {
+                self.send(line.to_owned());
+                self.drain(&mut frames);
+            }
             if frames.len() == before
                 && let Some(ms) = retry
             {
@@ -840,6 +865,44 @@ mod tests {
         assert_eq!(frames[0].data, "\u{fffd}\u{fffd} ok");
     }
 
+    /// A BOM anywhere but the very start is part of a field name, even
+    /// after blank lines; an id with a NUL is ignored, an empty one resets
+    #[test]
+    fn a_late_bom_and_odd_ids_read_as_the_format_says() {
+        let mut p = SseParser::new();
+        assert!(p.push("\n\n\u{feff}data: x\n\n".as_bytes()).is_empty());
+        let frames = p.push(b"id: 1\ndata: a\n\nid: n\0ul\ndata: b\n\n");
+        assert_eq!(frames[1].id.as_deref(), Some("1"), "a NUL id is ignored");
+        let frames = p.push(b"id:\ndata: c\n\n");
+        assert_eq!(frames[0].id, None);
+    }
+
+    /// A frame of the most short lines the caps allow reaches
+    /// `eventsource_stream` a line at a time: given it whole, it copies
+    /// the rest of the frame after every line
+    #[test]
+    fn a_frame_of_many_short_lines_is_cheap() {
+        for line in [":\n", "data\n", "x\n"] {
+            let mut wire = line.repeat((MAX_FRAME_BYTES - 64) / line.len());
+            wire.push_str("data: end\n\n");
+            let mut p = SseParser::new();
+            let started = std::time::Instant::now();
+            let frames = p.push(wire.as_bytes());
+            let took = started.elapsed();
+            assert_eq!(frames.len(), 1, "{line:?}");
+            assert!(
+                p.longest_fed <= MAX_LINE_BYTES + 1,
+                "{line:?}: fed {} bytes at once",
+                p.longest_fed
+            );
+            // Loose: a whole frame at once took 1.7 s in a debug build
+            assert!(
+                took < std::time::Duration::from_secs(5),
+                "{line:?}: {took:?}"
+            );
+        }
+    }
+
     mod props {
         use super::*;
         use proptest::prelude::*;
@@ -852,6 +915,8 @@ mod tests {
             event: Option<String>,
             data: Vec<String>,
             retry: Option<u64>,
+            /// It carries a line past the cap: dropped whole
+            oversize: bool,
         }
 
         fn spec() -> impl Strategy<Value = Spec> {
@@ -861,14 +926,16 @@ mod tests {
                 proptest::option::of("[a-z_]{1,12}"),
                 proptest::collection::vec("[^\r\n]{0,40}", 0..4),
                 proptest::option::of(any::<u64>()),
+                proptest::bool::weighted(0.08),
             )
                 .prop_map(
-                    |(comment_before, id, event, data, retry)| Spec {
+                    |(comment_before, id, event, data, retry, oversize)| Spec {
                         comment_before,
                         id,
                         event,
                         data,
                         retry,
+                        oversize,
                     },
                 )
         }
@@ -887,6 +954,9 @@ mod tests {
             for d in &spec.data {
                 lines.push(format!("data: {d}"));
             }
+            if spec.oversize {
+                lines.push(format!("data: {}", "o".repeat(MAX_LINE_BYTES)));
+            }
             if let Some(r) = spec.retry {
                 lines.push(format!("retry: {r}"));
             }
@@ -897,7 +967,7 @@ mod tests {
         fn model(specs: &[Spec]) -> Vec<SseFrame> {
             let mut id = None;
             let mut out = Vec::new();
-            for spec in specs {
+            for spec in specs.iter().filter(|s| !s.oversize) {
                 if spec.id.is_some() {
                     id = spec.id.clone();
                 }
