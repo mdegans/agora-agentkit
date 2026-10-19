@@ -430,11 +430,23 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
             .into();
     }
     let first = requested.first_line();
+    let last = first + fit - 1;
+    // A citation with its own range takes no `lines=`: offer the citation
+    // with this range in it instead (the review of 0.103)
+    let range = match requested
+        .target
+        .as_ref()
+        .and_then(ContentRef::as_data_citation)
+    {
+        Some(c) if c.lines.is_some() => {
+            format!("id=\"{}:{}:{}:{first}-{last}\"", c.set, c.commit, c.path)
+        }
+        _ => format!("lines=\"{first}-{last}\""),
+    };
     format!(
-        "Read part of this file instead: lines=\"{first}-{last}\" (about {fit} \
-         lines, at this read's {per_line} bytes per line) would fit. A ranged \
-         read says how many lines the file has. Read a file whole only when it fits.",
-        last = first + fit - 1,
+        "Read part of this file instead: {range} (about {fit} lines, at this \
+         read's {per_line} bytes per line) would fit. A ranged read says how \
+         many lines the file has. Read a file whole only when it fits."
     )
 }
 
@@ -859,7 +871,12 @@ mod tests {
             "id": "DATA-2026-0001:89fe7c6:votes/raw.json:500-3000"
         }))
         .await;
-        assert!(cited.contains("lines=\"500-758\""), "{cited}");
+        assert!(
+            cited.contains(
+                "id=\"DATA-2026-0001:89fe7c6:votes/raw.json:500-758\""
+            ),
+            "{cited}"
+        );
         let listing = note(serde_json::json!({
             "id": "DATA-2026-0001", "attachment": "votes/"
         }))

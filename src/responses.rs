@@ -2765,23 +2765,22 @@ pub enum DataFileReadError {
     #[error(transparent)]
     NotText(#[from] NotText),
     /// A whole read of a file larger than one read shows whole
+    ///
+    /// Decided by the listed size alone, so a server refuses it before
+    /// reading the blob ([`DataFileContent::refuse_whole`])
     #[error(
-        "{path} is {bytes} bytes ({total_lines} lines), more than one read \
-         shows whole ({max} bytes), so read it in parts with lines: \
-         lines=\"1-{fit}\" fits this read's comment_budget of {budget} \
-         bytes (comment_budget={max} holds more). Cite a part as \
-         {set}:{commit}:{path}:<from>-<to>."
+        "{path} is {bytes} bytes, more than one read shows whole ({max} \
+         bytes), so it is read in parts: lines=\"<from>-<to>\" (1-based, \
+         both included) with comment_budget={max} shows up to {max} bytes of \
+         its lines in one read, and says how many lines the file has. Read \
+         the part you need. Cite a part as {set}:{commit}:{path}:<from>-<to>."
     )]
     TooLargeWhole {
         set: crate::ids::GovernanceLogId,
         path: crate::govlog::DataFilePath,
         commit: String,
         bytes: u64,
-        total_lines: u64,
         max: u64,
-        budget: usize,
-        /// The last line of the longest range from line 1 that fits `budget`
-        fit: u64,
     },
     /// A range that starts past the file's last line
     #[error(
@@ -2821,7 +2820,6 @@ impl DataFileContent {
             sha256: file.sha256,
         })?;
         let total_lines = crate::govlog::count_lines(text);
-        let max_whole = crate::govlog::MAX_WHOLE_READ_BYTES;
         let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
         let total = text.len();
         let content = |text: String, lines, omitted: u64, cut| Self {
@@ -2838,17 +2836,8 @@ impl DataFileContent {
             asked: None,
         };
         let Some(asked) = lines else {
-            if total as u64 > max_whole {
-                return Err(DataFileReadError::TooLargeWhole {
-                    set: set.clone(),
-                    path: file.path.clone(),
-                    commit: commit.to_hex()[..7].to_string(),
-                    bytes: file.bytes,
-                    total_lines,
-                    max: max_whole,
-                    budget,
-                    fit: lines_that_fit(text, budget).max(1),
-                });
+            if let Some(refused) = Self::refuse_whole(set, commit, file, None) {
+                return Err(refused);
             }
             let mut end = total.min(budget);
             while !text.is_char_boundary(end) {
@@ -2889,7 +2878,6 @@ impl DataFileContent {
             })?;
         let wanted = &text[span.start_byte..span.end_byte];
         let first = span.served.start();
-        let last = span.served.end().unwrap_or(first);
         if wanted.len() <= budget {
             let omitted = (total - wanted.len()) as u64;
             return Ok(content(
@@ -2934,25 +2922,48 @@ impl DataFileContent {
             format!(
                 "Lines {asked_range} are {wanted_bytes} bytes, more than the \
                  comment_budget of {budget}: shown are lines {served} \
-                 ({shown_bytes} bytes); lines {next}-{last} ({left} bytes) are \
+                 ({shown_bytes} bytes), and {left} bytes of the range are \
                  not. {fix}. The file has {total_lines} lines, {total} bytes.",
                 asked_range = span.served,
                 wanted_bytes = wanted.len(),
                 shown_bytes = shown.len(),
-                next = served_end + 1,
             )
         } else {
             format!(
                 "Line {first} alone is more than the comment_budget of \
-                 {budget}: shown are its first {shown_bytes} bytes; lines \
-                 {asked_range} ({left} more bytes) are not. {fix}. The file \
-                 has {total_lines} lines, {total} bytes.",
+                 {budget}: shown are its first {shown_bytes} bytes of lines \
+                 {asked_range}, and {left} bytes of the range are not. {fix}. \
+                 The file has {total_lines} lines, {total} bytes.",
                 asked_range = span.served,
                 shown_bytes = shown.len(),
             )
         };
         let omitted = (total - shown.len()) as u64;
         Ok(content(shown.to_string(), Some(served), omitted, Some(cut)))
+    }
+}
+
+impl DataFileContent {
+    /// The refusal of a whole read (`lines` absent) of a file listed over
+    /// [`MAX_WHOLE_READ_BYTES`](crate::govlog::MAX_WHOLE_READ_BYTES), from
+    /// the listing alone: a server calls this before it reads the blob, so
+    /// a refused read costs nothing (the review of 0.103)
+    pub fn refuse_whole(
+        set: &crate::ids::GovernanceLogId,
+        commit: crate::govlog::GitCommitId,
+        file: &crate::govlog::DataFile,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Option<DataFileReadError> {
+        let max = crate::govlog::MAX_WHOLE_READ_BYTES;
+        (lines.is_none() && file.bytes > max).then(|| {
+            DataFileReadError::TooLargeWhole {
+                set: set.clone(),
+                path: file.path.clone(),
+                commit: commit.to_hex()[..7].to_string(),
+                bytes: file.bytes,
+                max,
+            }
+        })
     }
 }
 
@@ -5029,7 +5040,7 @@ mod data_file_tests {
         let cut = read.cut.unwrap();
         for needle in [
             "Lines 1-20 are 200 bytes, more than the comment_budget of 55",
-            "shown are lines 1-5 (50 bytes); lines 6-20 (150 bytes) are not",
+            "shown are lines 1-5 (50 bytes), and 150 bytes of the range are not",
             "comment_budget=200 or more reads them all (at most 262144)",
             "The file has 100 lines, 1000 bytes.",
         ] {
@@ -5054,13 +5065,9 @@ mod data_file_tests {
         let err = read(text.as_bytes(), 32_768).unwrap_err();
         let msg = err.to_string();
         for needle in [
-            format!(
-                "a/b.md is {} bytes ({} lines)",
-                text.len(),
-                max / 100 + 10
-            ),
+            format!("a/b.md is {} bytes,", text.len()),
             "more than one read shows whole (262144 bytes)".into(),
-            "lines=\"1-327\" fits this read's comment_budget of 32768".into(),
+            "with comment_budget=262144 shows up to 262144 bytes".into(),
             "DATA-2026-0001:0123456:a/b.md:<from>-<to>".into(),
         ] {
             assert!(msg.contains(&needle), "{needle}: {msg}");

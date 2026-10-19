@@ -286,12 +286,15 @@ impl From<GitCommitId> for GitCommitPrefix {
 ///
 /// `get_content` takes one as its `id` and reads that file (and those
 /// lines). The commit is a prefix of at least seven hex digits of the
-/// commit the data set pins. A citation stays valid when a revision of the
-/// set pins a new commit: a server reads the set as revised when the commit
-/// is the revision's, and as originally signed when it is the original's.
+/// commit the data set pins. A server reads the set as revised (its latest
+/// version) when the commit is the latest version's, and as originally
+/// signed when it is the original's, so a citation made before any revision
+/// keeps reading what it cited. One made at an intermediate revision's
+/// commit stops resolving once a later revision pins another commit.
 ///
 /// The path runs from the second `:` to the end, or to the last `:` when
-/// what follows that is a range, so a path may hold a `:`.
+/// what follows that is a range written `<from>-<to>` or `<from>-`, so a
+/// path may hold a `:`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DataCitation {
     /// A `DATA-…` id
@@ -360,8 +363,18 @@ impl std::str::FromStr for DataCitation {
             }
         };
         let commit: GitCommitPrefix = commit.parse()?;
+        // The range in a citation is strictly `<from>-<to>` or `<from>-`,
+        // as `Display` writes it, so a path ending in `:12` is never read
+        // as a range of another file (the review of 0.103)
+        let canonical = |r: &str| {
+            r.split_once('-').is_some_and(|(a, b)| {
+                !a.is_empty()
+                    && a.bytes().all(|c| c.is_ascii_digit())
+                    && b.bytes().all(|c| c.is_ascii_digit())
+            })
+        };
         let (path, lines) = match rest.rsplit_once(':') {
-            Some((path, range)) if !path.is_empty() => {
+            Some((path, range)) if !path.is_empty() && canonical(range) => {
                 match range.parse::<LineRange>() {
                     Ok(lines) => (path, Some(lines)),
                     Err(_) => (rest, None),
@@ -518,6 +531,11 @@ mod tests {
             "DATA-2026-0001:89fe7c6:a:b.txt".parse().unwrap();
         assert_eq!(colon.path.as_str(), "a:b.txt");
         assert_eq!(colon.lines, None);
+        // Only the canonical `<from>-<to>` is a range: `log:12` is a file
+        let file: DataCitation =
+            "DATA-2026-0001:89fe7c6:log:12".parse().unwrap();
+        assert_eq!((file.path.as_str(), file.lines), ("log:12", None));
+        assert_eq!(file.to_string(), "DATA-2026-0001:89fe7c6:log:12");
         let both: DataCitation =
             "DATA-2026-0001:89fe7c6:a:b.txt:5-".parse().unwrap();
         assert_eq!(both.path.as_str(), "a:b.txt");

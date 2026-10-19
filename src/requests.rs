@@ -1813,9 +1813,11 @@ impl GetContentInput {
     /// and the commit it names, for the server to check against the set's.
     /// Any other read is returned as it is, with no commit (0.103).
     ///
-    /// A citation names its own file and lines, and its commit picks the
-    /// version, so `attachment`, `lines` or `version` beside one is refused
-    /// rather than one silently winning.
+    /// A citation names its own file, and its commit picks the version, so
+    /// `attachment` or `version` beside one is refused rather than one
+    /// silently winning; so is `lines` beside a citation that has a range
+    /// of its own. `lines` beside a citation of a whole file reads those
+    /// lines of it.
     pub fn split_citation(
         self,
     ) -> Result<(Self, Option<crate::govlog::GitCommitPrefix>), CitationConflict>
@@ -1825,7 +1827,7 @@ impl GetContentInput {
         };
         let given: Vec<&'static str> = [
             ("attachment", self.attachment.is_some()),
-            ("lines", self.lines.is_some()),
+            ("lines", self.lines.is_some() && citation.lines.is_some()),
             ("version", self.version.is_some()),
         ]
         .into_iter()
@@ -1838,7 +1840,7 @@ impl GetContentInput {
             Self {
                 id: ContentRef::Governance(citation.set),
                 attachment: Some(citation.path.to_string()),
-                lines: citation.lines,
+                lines: citation.lines.or(self.lines),
                 ..self
             },
             Some(citation.commit),
@@ -2782,6 +2784,16 @@ mod tests {
             err.to_string().contains("leave lines, version out"),
             "{err}"
         );
+        // A citation of a whole file takes `lines` (the advice a refused
+        // read gives)
+        let mut whole = GetContentInput::new(
+            "DATA-2026-0001:89fe7c6:votes/a.md"
+                .parse::<ContentRef>()
+                .unwrap(),
+        );
+        whole.lines = Some("5-6".parse().unwrap());
+        let (read, _) = whole.split_citation().unwrap();
+        assert_eq!(read.lines.unwrap().to_string(), "5-6");
     }
 
     /// `comment_budget` takes a stringified number, and refuses one past

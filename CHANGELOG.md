@@ -19,19 +19,28 @@ no "next".
   cut back to the last whole line the budget holds; the cut says so with
   numbers and the fix). Breaking: `DataFileContent::new` takes the set's
   id and `lines`, and returns `DataFileReadError` (`NotText`,
-  `TooLargeWhole`, `PastEnd`).
+  `TooLargeWhole`, `PastEnd`). `DataFileContent::refuse_whole` refuses a
+  whole read of a large file from its listing alone, so a server need not
+  read the blob to refuse it. A range cut by the budget states counts
+  (lines shown, bytes left out, the file's size), not the next range.
 - `MAX_DATA_FILE_BYTES` is now 16 MiB, what a set may list: a ranged read
   still inflates and SHA-256-checks the whole blob first, so this bounds a
   read's cost (and matches gitoxide's reduced-trust object cap). The new
   `MAX_WHOLE_READ_BYTES` (262144) is the largest file read whole; a whole
   read of a larger one is refused, naming its size, its lines and a range
-  that fits. A listing with such files says how to read them.
+  that leads with `comment_budget=262144`. A listing with such files says
+  how to read them.
 - `ContentRef::DataCitation(govlog::DataCitation)`:
   `DATA-2026-0001:<commit>:<path>[:110-300]`, where the commit is a
   `GitCommitPrefix` (7 to 40 hex digits). `get_content` reads it as the set
   with `attachment` and `lines`; `GetContentInput::split_citation` does
-  that split and refuses `attachment`, `lines` or `version` beside a
-  citation (`CitationConflict`). A malformed citation's error says what is
+  that split and refuses `attachment` or `version` beside a citation, and
+  `lines` beside a citation with a range of its own (`CitationConflict`);
+  a citation of a whole file takes `lines`. The range in a citation is
+  strictly `<from>-<to>` or `<from>-`, so a path ending in `:12` is a path.
+  A citation resolves at the latest version's commit or the original's; one
+  made at an intermediate revision's commit stops resolving after a later
+  revision. A malformed citation's error says what is
   wrong with it; `leading_ref` no longer cuts one back to the set's id.
   `ContentRef::data_set()` names the set either form reads.
   `CONTENT_REF_PATTERN` admits the form. Breaking for exhaustive matches.
@@ -45,7 +54,8 @@ no "next".
   range, "Lines a-b of M (cite them as …)") say to prefer a whole read and
   show the citation form. A cited file is a free data set read in the seed.
 - The seed's gauge: a refused read of a data set's file suggests
-  `lines="<from>-<to>"` sized to the room left, from the line asked for;
+  `lines="<from>-<to>"` sized to the room left, from the line asked for
+  (for a citation with its own range, the citation with that range);
   every other refusal is unchanged.
 ## 0.102.0 (2026-10-19)
 
