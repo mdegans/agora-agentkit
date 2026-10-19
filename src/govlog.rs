@@ -87,13 +87,14 @@ pub use council::{
     CouncilAttachment, CouncilDecisionRecord, CouncilMember, CouncilRound,
     CouncilSeat, CouncilVote, DEFERRING_SEATS, Decided, DecisionCategory,
     DecisionSummary, FinalRoundError, FinalVotes, NotASeatChoice,
-    PlacedProposal, RECUSED_ACCEPTORS, RECUSED_DEFERRED_TAG, Rationale,
-    RecordRuleError, RecusalVote, STEWARD_RECUSED_TAG, SUMMARY_POINTER,
-    SUMMARY_WRITER, SeatChoice, SeatModels, SeatRanking, SeatResponse,
-    SeatVote, SeatVotes, Statement, StewardEmergency, StewardRecusal,
-    StewardVote, SummaryAcceptance, SummaryAuthorship, Testimony, Unanswered,
-    Unheard, Vote, Votes, Witness, WitnessBatch, WitnessQuestion,
-    WitnessSource, served_summary, test_labelled, testimony_attachment_name,
+    PlacedProposal, Question, RECUSED_ACCEPTORS, RECUSED_DEFERRED_TAG,
+    Rationale, RecordRuleError, RecusalVote, STEWARD_RECUSED_TAG,
+    SUMMARY_POINTER, SUMMARY_WRITER, SeatChoice, SeatModels, SeatQuestions,
+    SeatRanking, SeatResponse, SeatVote, SeatVotes, Statement,
+    StewardEmergency, StewardRecusal, StewardVote, SummaryAcceptance,
+    SummaryAuthorship, Testimony, Unanswered, Unheard, Vote, Votes, Witness,
+    WitnessBatch, WitnessQuestion, WitnessSource, served_summary,
+    test_labelled, testimony_attachment_name,
 };
 
 mod redactable;

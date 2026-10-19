@@ -20,6 +20,13 @@ once (agora, OBL-2026-0028). Records made before still read as they did.
   one back exactly, and `get` finds a question by id. A seat's own line
   that starts like an id is written with a backslash before its `.`
   (`3\.`). A batch may exceed one Agora DM; a DM transport splits it.
+- Breaking: `SeatResponse.questions` is `Redactable<SeatQuestions>`, an
+  untagged `Addressed(Vec<Redactable<Question>>) | Legacy(Vec<Redactable<String>>)`.
+  A `Question` is `{ "for", "question" }`: who it is for (a witness's id,
+  or anyone else in free text) and the question, each redactable. A
+  record signed before keeps its bytes (`Legacy`); an empty list reads as
+  `Addressed` and writes back the same. The Council seats now ask
+  witnesses through their submission's `questions`, not a tool.
 - `WitnessQuestion.id` and `Unanswered.id` (optional, omitted when
   absent): with an id, `Asked::Message(i)` is the batch's turn, shared
   with the batch's other questions, and the answer at `i + 1` is one

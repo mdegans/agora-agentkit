@@ -353,9 +353,11 @@ pub struct SeatResponse {
     pub vote: Option<CouncilVote>,
     /// Why the seat said it. Empty on a refused turn.
     pub rationale: Redactable<Rationale>,
-    /// Questions the seat put to the others or the Steward. A redaction
-    /// can take one question or the whole list.
-    pub questions: Redactable<Vec<Redactable<String>>>,
+    /// Questions the seat put in its submission: until 0.104 to the
+    /// others or the Steward, as plain strings; since, each addressed
+    /// (`for`), to a witness or anyone else. A redaction can take one
+    /// question, one of its fields, or the whole list.
+    pub questions: Redactable<SeatQuestions>,
     /// Whether the seat said it was ready for the final vote
     pub ready_to_vote: bool,
     /// On a `Schedule` item's final round, the seat's ballot
@@ -365,6 +367,63 @@ pub struct SeatResponse {
     /// 2026-09-18; from GOV-2026-0003 on it duplicates `rationale`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_text: Option<Redactable<String>>,
+}
+
+/// The questions in a seat's submission (0.104). Untagged, so a record
+/// signed before 0.104 (a list of strings) reads and writes back byte for
+/// byte. `Addressed` is tried first: an empty list, or one whose every
+/// question was redacted, reads as it and writes back the same.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(untagged)]
+pub enum SeatQuestions {
+    /// Each question with who it is for (0.104)
+    Addressed(Vec<Redactable<Question>>),
+    /// Before 0.104: questions to the other seats or the Steward
+    Legacy(Vec<Redactable<String>>),
+}
+
+impl Default for SeatQuestions {
+    fn default() -> Self {
+        Self::Addressed(Vec::new())
+    }
+}
+
+impl From<Vec<Question>> for SeatQuestions {
+    fn from(questions: Vec<Question>) -> Self {
+        Self::Addressed(questions.into_iter().map(Redactable::Value).collect())
+    }
+}
+
+impl SeatQuestions {
+    /// How many questions there are, redacted ones included
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Addressed(q) => q.len(),
+            Self::Legacy(q) => q.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A question a seat put in its submission, and who it is for (0.104)
+///
+/// `for` is a witness's id (or name), to put the question to that witness
+/// when the round ends, or anyone else in free text: "the Lawyer", "the
+/// Steward", "all seats". Where it went is the program's to record: a
+/// witness question is also in the round's `witness_questions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct Question {
+    /// Who the question is for
+    #[serde(rename = "for")]
+    pub for_: Redactable<String>,
+    pub question: Redactable<String>,
 }
 
 /// Why a seat said what it said.
@@ -1374,6 +1433,42 @@ mod tests {
         assert_eq!(keys(&data["abstentions"][0]), ["member", "rationale"]);
     }
 
+    /// A response signed before 0.104 (questions as strings) reads as
+    /// `Legacy` and writes back byte for byte; a new one addresses each
+    /// question, to a witness or anyone else, and round-trips too
+    #[test]
+    fn seat_questions_old_and_addressed() {
+        let old = r#"{"role":"artist","position":"p","rationale":"r","questions":["What does the Steward know?","And the Lawyer?"],"ready_to_vote":false}"#;
+        let response: SeatResponse = serde_json::from_str(old).unwrap();
+        let Redactable::Value(SeatQuestions::Legacy(questions)) =
+            &response.questions
+        else {
+            panic!("{:?}", response.questions);
+        };
+        assert_eq!(questions.len(), 2);
+        assert_eq!(serde_json::to_string(&response).unwrap(), old);
+
+        let new = r#"{"role":"lawyer","position":"p","rationale":"r","questions":[{"for":"qwen","question":"Which version?"},{"for":"the Steward","question":"Is it signed?"},"[redacted by AMD-2026-0009]",{"for":"all seats","question":"[redacted by AMD-2026-0009]"}],"ready_to_vote":true}"#;
+        let response: SeatResponse = serde_json::from_str(new).unwrap();
+        let Redactable::Value(SeatQuestions::Addressed(questions)) =
+            &response.questions
+        else {
+            panic!("{:?}", response.questions);
+        };
+        assert_eq!(questions.len(), 4);
+        let first = questions[0].value().unwrap();
+        assert_eq!(first.for_.value().map(String::as_str), Some("qwen"));
+        assert!(questions[2].is_redacted());
+        assert!(questions[3].value().unwrap().question.is_redacted());
+        assert_eq!(serde_json::to_string(&response).unwrap(), new);
+
+        // An empty list reads one way and writes back the same
+        let empty = r#"{"role":"artist","position":"p","rationale":"r","questions":[],"ready_to_vote":false}"#;
+        let response: SeatResponse = serde_json::from_str(empty).unwrap();
+        assert!(response.questions.value().unwrap().is_empty());
+        assert_eq!(serde_json::to_string(&response).unwrap(), empty);
+    }
+
     /// GOV-2026-0001 through the real [`redact_data`](super::super::redact_data)
     #[test]
     fn a_redacted_record_parses_with_the_redactions_in_place() {
@@ -1407,7 +1502,10 @@ mod tests {
         assert_eq!(first.raw_text, Some(gone.clone()));
         assert!(!first.questions.is_redacted());
         assert_eq!(second.questions.redacted_by(), Some(&amd));
-        let questions = third.questions.value().unwrap();
+        let Some(SeatQuestions::Legacy(questions)) = third.questions.value()
+        else {
+            panic!("{:?}", third.questions);
+        };
         assert!(!questions[0].is_redacted());
         assert_eq!(questions[1], gone);
         assert_eq!(record.rounds[1].steward_contribution, Some(gone));
