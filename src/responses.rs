@@ -2525,7 +2525,7 @@ pub struct GovernanceEntryResponse {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct DataSetView {
     /// The data repository's name
-    pub repo: String,
+    pub repo: crate::govlog::DataRepoName,
     pub commit: crate::govlog::GitCommitId,
     /// Files in the whole set
     pub files: u64,
@@ -2673,6 +2673,15 @@ impl DataSetView {
              only one directory holds it.",
             read_first = Self::read_first(&set.index),
         );
+        let whole = crate::govlog::MAX_WHOLE_READ_BYTES;
+        let large = set.files.iter().filter(|f| f.bytes > whole).count();
+        if large > 0 {
+            how_to_read.push_str(&format!(
+                " {large} file(s) here are over {whole} bytes, more than one read \
+                 shows whole: read such a file in parts with lines=\"<from>-<to>\" \
+                 (1-based, e.g. lines=\"1-2000\"). Read any other file whole."
+            ));
+        }
         if rolled_up {
             how_to_read.push_str(
                 " One line per file did not fit this read's budget, so files below \
@@ -2702,7 +2711,7 @@ impl DataSetView {
 
 /// One file of a data set (`DATA-…`), as `get_content` serves it: checked
 /// against its signed SHA-256, then cut to the byte budget if it is longer
-/// (0.91)
+/// (0.91). With `lines`, only those lines (0.103)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -2712,10 +2721,18 @@ pub struct DataFileContent {
     pub commit: crate::govlog::GitCommitId,
     /// The whole file's size in bytes
     pub bytes: u64,
+    /// The whole file's lines (0.103; 0 from an older server)
+    #[serde(default)]
+    pub total_lines: u64,
     /// The whole file's SHA-256, as signed; the bytes read matched it
     pub sha256: crate::govlog::Sha256Hex,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The lines `text` holds, for a read of some lines (`lines=`): the
+    /// range asked for, its end clamped to the file's last line and cut
+    /// back to the last whole line the budget holds (0.103)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<crate::govlog::LineRange>,
     /// The file's text, or as much of it as the budget holds
     pub text: String,
     /// Bytes of the file not in `text`: 0 when it is whole
@@ -2741,65 +2758,229 @@ pub struct NotText {
     pub sha256: crate::govlog::Sha256Hex,
 }
 
+/// Why [`DataFileContent::new`] serves nothing: each says what to ask for
+/// instead (0.103)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DataFileReadError {
+    #[error(transparent)]
+    NotText(#[from] NotText),
+    /// A whole read of a file larger than one read shows whole
+    ///
+    /// Decided by the listed size alone, so a server refuses it before
+    /// reading the blob ([`DataFileContent::refuse_whole`])
+    #[error(
+        "{path} is {bytes} bytes, more than one read shows whole ({max} \
+         bytes), so it is read in parts: lines=\"<from>-<to>\" (1-based, \
+         both included) with comment_budget={max} shows up to {max} bytes of \
+         its lines in one read, and says how many lines the file has. Read \
+         the part you need. Cite a part as {set}:{commit}:{path}:<from>-<to>."
+    )]
+    TooLargeWhole {
+        set: crate::ids::GovernanceLogId,
+        path: crate::govlog::DataFilePath,
+        commit: String,
+        bytes: u64,
+        max: u64,
+    },
+    /// A range that starts past the file's last line
+    #[error(
+        "{path} has {total_lines} lines ({bytes} bytes), so lines={asked} \
+         starts past its end."
+    )]
+    PastEnd {
+        path: crate::govlog::DataFilePath,
+        asked: crate::govlog::LineRange,
+        total_lines: u64,
+        bytes: u64,
+    },
+}
+
 impl DataFileContent {
     /// `file`'s `bytes`, already [checked](crate::govlog::DataFile::check),
-    /// as text of at most `budget` bytes. A cut falls at the end of a line
-    /// when one ends in the budget's second half, else at a character
-    /// boundary.
+    /// as text of at most `budget` bytes: the whole file, or with `lines`
+    /// those lines. A whole read cut by the budget falls at the end of a
+    /// line when one ends in the budget's second half, else at a character
+    /// boundary; a range is cut back to its last whole line that fits (or,
+    /// when its first line alone does not, at a character boundary). A
+    /// whole read of a file over
+    /// [`MAX_WHOLE_READ_BYTES`](crate::govlog::MAX_WHOLE_READ_BYTES) is
+    /// refused, saying which range fits (0.103). `set` is the data set the
+    /// file is read from, for the citation form the refusal shows.
     pub fn new(
+        set: &crate::ids::GovernanceLogId,
         commit: crate::govlog::GitCommitId,
         file: &crate::govlog::DataFile,
         bytes: &[u8],
         budget: usize,
-    ) -> Result<Self, NotText> {
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Result<Self, DataFileReadError> {
         let text = std::str::from_utf8(bytes).map_err(|_| NotText {
             path: file.path.clone(),
             bytes: file.bytes,
             sha256: file.sha256,
         })?;
-        let mut end = text.len().min(budget);
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut at_line = false;
-        if end < text.len()
-            && let Some(newline) = text[..end].rfind('\n')
-            && newline + 1 >= end / 2
-        {
-            at_line = newline + 1 < end;
-            end = newline + 1;
-        }
-        let omitted = (text.len() - end) as u64;
+        let total_lines = crate::govlog::count_lines(text);
         let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
-        let cut = (omitted > 0).then(|| {
-            let total = text.len();
-            let pct = omitted * 100 / total as u64;
-            let rest = format!(
-                "the last {omitted} bytes ({pct}%) are not shown. \
-                 comment_budget={max} reads the whole file (no file in a data \
-                 set is larger)."
-            );
-            if at_line {
-                format!(
-                    "Cut at the last line break before byte {budget} (the \
-                     comment_budget), at byte {end} of {total}: {rest}"
-                )
-            } else {
-                format!("Cut at byte {end} of {total}: {rest}")
-            }
-        });
-        Ok(Self {
+        let total = text.len();
+        let content = |text: String, lines, omitted: u64, cut| Self {
             path: file.path.clone(),
             commit,
             bytes: file.bytes,
+            total_lines,
             sha256: file.sha256,
             note: file.note.clone(),
-            text: text[..end].to_string(),
+            lines,
+            text,
             omitted_bytes: omitted,
             cut,
             asked: None,
+        };
+        let Some(asked) = lines else {
+            if let Some(refused) = Self::refuse_whole(set, commit, file, None) {
+                return Err(refused);
+            }
+            let mut end = total.min(budget);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let mut at_line = false;
+            if end < total
+                && let Some(newline) = text[..end].rfind('\n')
+                && newline + 1 >= end / 2
+            {
+                at_line = newline + 1 < end;
+                end = newline + 1;
+            }
+            let omitted = (total - end) as u64;
+            let cut = (omitted > 0).then(|| {
+                let pct = omitted * 100 / total as u64;
+                let rest = format!(
+                    "the last {omitted} bytes ({pct}%) are not shown. \
+                     comment_budget={max} reads the whole file."
+                );
+                if at_line {
+                    format!(
+                        "Cut at the last line break before byte {budget} (the \
+                         comment_budget), at byte {end} of {total}: {rest}"
+                    )
+                } else {
+                    format!("Cut at byte {end} of {total}: {rest}")
+                }
+            });
+            return Ok(content(text[..end].to_string(), None, omitted, cut));
+        };
+        let span =
+            asked.span(text).map_err(|_| DataFileReadError::PastEnd {
+                path: file.path.clone(),
+                asked,
+                total_lines,
+                bytes: file.bytes,
+            })?;
+        let wanted = &text[span.start_byte..span.end_byte];
+        let first = span.served.start();
+        if wanted.len() <= budget {
+            let omitted = (total - wanted.len()) as u64;
+            return Ok(content(
+                wanted.to_string(),
+                Some(span.served),
+                omitted,
+                None,
+            ));
+        }
+        // Cut back to the last whole line that fits
+        let fit = lines_that_fit(wanted, budget);
+        let (shown, served_end) = if fit > 0 {
+            let end = wanted
+                .match_indices('\n')
+                .nth(fit as usize - 1)
+                .map_or(wanted.len(), |(at, _)| at + 1);
+            (&wanted[..end], first + fit - 1)
+        } else {
+            let mut end = budget.min(wanted.len());
+            while !wanted.is_char_boundary(end) {
+                end -= 1;
+            }
+            (&wanted[..end], first)
+        };
+        let served = crate::govlog::LineRange::new(first, Some(served_end))
+            .expect("first <= served_end");
+        let left = wanted.len() - shown.len();
+        let fix = if (wanted.len() as u64) <= u64::from(max)
+            && budget < max as usize
+        {
+            format!(
+                "comment_budget={} or more reads them all (at most {max})",
+                wanted.len()
+            )
+        } else {
+            format!(
+                "they are more than one read holds ({max} bytes), so ask for \
+                 fewer lines"
+            )
+        };
+        let cut = if fit > 0 {
+            format!(
+                "Lines {asked_range} are {wanted_bytes} bytes, more than the \
+                 comment_budget of {budget}: shown are lines {served} \
+                 ({shown_bytes} bytes), and {left} bytes of the range are \
+                 not. {fix}. The file has {total_lines} lines, {total} bytes.",
+                asked_range = span.served,
+                wanted_bytes = wanted.len(),
+                shown_bytes = shown.len(),
+            )
+        } else {
+            format!(
+                "Line {first} alone is more than the comment_budget of \
+                 {budget}: shown are its first {shown_bytes} bytes of lines \
+                 {asked_range}, and {left} bytes of the range are not. {fix}. \
+                 The file has {total_lines} lines, {total} bytes.",
+                asked_range = span.served,
+                shown_bytes = shown.len(),
+            )
+        };
+        let omitted = (total - shown.len()) as u64;
+        Ok(content(shown.to_string(), Some(served), omitted, Some(cut)))
+    }
+}
+
+impl DataFileContent {
+    /// The refusal of a whole read (`lines` absent) of a file listed over
+    /// [`MAX_WHOLE_READ_BYTES`](crate::govlog::MAX_WHOLE_READ_BYTES), from
+    /// the listing alone: a server calls this before it reads the blob, so
+    /// a refused read costs nothing (the review of 0.103)
+    pub fn refuse_whole(
+        set: &crate::ids::GovernanceLogId,
+        commit: crate::govlog::GitCommitId,
+        file: &crate::govlog::DataFile,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Option<DataFileReadError> {
+        let max = crate::govlog::MAX_WHOLE_READ_BYTES;
+        (lines.is_none() && file.bytes > max).then(|| {
+            DataFileReadError::TooLargeWhole {
+                set: set.clone(),
+                path: file.path.clone(),
+                commit: commit.to_hex()[..7].to_string(),
+                bytes: file.bytes,
+                max,
+            }
         })
     }
+}
+
+/// How many of `text`'s first lines, whole, fit in `budget` bytes
+fn lines_that_fit(text: &str, budget: usize) -> u64 {
+    let mut fit = 0;
+    for (at, _) in text.match_indices('\n') {
+        if at + 1 > budget {
+            return fit;
+        }
+        fit += 1;
+    }
+    // The last line, when it has no newline and fits too
+    if !text.ends_with('\n') && !text.is_empty() && text.len() <= budget {
+        fit += 1;
+    }
+    fit
 }
 
 impl GovernanceEntryResponse {
@@ -4778,17 +4959,122 @@ mod dashboard_agent_tests {
 
 #[cfg(test)]
 mod data_file_tests {
-    use super::{DataFileContent, NotText};
-    use crate::govlog::{DataFile, GitCommitId};
+    use super::{DataFileContent, DataFileReadError};
+    use crate::govlog::{DataFile, GitCommitId, LineRange};
     use crate::requests::GetContentInput;
 
     fn commit() -> GitCommitId {
         "0123456789abcdef0123456789abcdef01234567".parse().unwrap()
     }
 
-    fn read(bytes: &[u8], budget: usize) -> Result<DataFileContent, NotText> {
+    fn ranged(
+        bytes: &[u8],
+        budget: usize,
+        lines: Option<&str>,
+    ) -> Result<DataFileContent, DataFileReadError> {
         let file = DataFile::of("a/b.md".parse().unwrap(), bytes);
-        DataFileContent::new(commit(), &file, bytes, budget)
+        DataFileContent::new(
+            &"DATA-2026-0001".parse().unwrap(),
+            commit(),
+            &file,
+            bytes,
+            budget,
+            lines.map(|l| l.parse::<LineRange>().unwrap()),
+        )
+    }
+
+    fn read(
+        bytes: &[u8],
+        budget: usize,
+    ) -> Result<DataFileContent, DataFileReadError> {
+        ranged(bytes, budget, None)
+    }
+
+    /// `n` lines of `width` bytes each, newline included
+    fn lines(n: usize, width: usize) -> String {
+        (1..=n)
+            .map(|i| format!("{i:0>w$}\n", w = width - 1))
+            .collect()
+    }
+
+    #[test]
+    fn a_range_reads_those_lines_and_says_how_large_the_file_is() {
+        let text = lines(10, 4);
+        let read = ranged(text.as_bytes(), 32_768, Some("3-5")).unwrap();
+        assert_eq!(read.text, "003\n004\n005\n");
+        assert_eq!(read.lines.unwrap().to_string(), "3-5");
+        assert_eq!((read.bytes, read.total_lines), (40, 10));
+        assert_eq!(read.omitted_bytes, 28);
+        assert_eq!(read.cut, None);
+        // Past the end: clamped, and the range served says so
+        let read = ranged(text.as_bytes(), 32_768, Some("9-99")).unwrap();
+        assert_eq!(read.lines.unwrap().to_string(), "9-10");
+        assert_eq!(read.text, "009\n010\n");
+        let read = ranged(text.as_bytes(), 32_768, Some("8-")).unwrap();
+        assert_eq!(read.lines.unwrap().to_string(), "8-10");
+        // A whole read counts lines too
+        assert_eq!(read_whole_lines(&text), 10);
+        let err = ranged(text.as_bytes(), 32_768, Some("11-12")).unwrap_err();
+        assert!(matches!(
+            err,
+            DataFileReadError::PastEnd {
+                total_lines: 10,
+                ..
+            }
+        ));
+        assert!(err.to_string().contains("has 10 lines (40 bytes)"), "{err}");
+    }
+
+    fn read_whole_lines(text: &str) -> u64 {
+        read(text.as_bytes(), 32_768).unwrap().total_lines
+    }
+
+    /// A range the budget cannot hold is cut at a whole line and says so,
+    /// with numbers and the fix; no "next" offered
+    #[test]
+    fn a_range_past_the_budget_is_cut_and_says_so() {
+        let text = lines(100, 10);
+        let read = ranged(text.as_bytes(), 55, Some("1-20")).unwrap();
+        assert_eq!(read.lines.unwrap().to_string(), "1-5");
+        assert_eq!(read.text.len(), 50);
+        let cut = read.cut.unwrap();
+        for needle in [
+            "Lines 1-20 are 200 bytes, more than the comment_budget of 55",
+            "shown are lines 1-5 (50 bytes), and 150 bytes of the range are not",
+            "comment_budget=200 or more reads them all (at most 262144)",
+            "The file has 100 lines, 1000 bytes.",
+        ] {
+            assert!(cut.contains(needle), "{needle}: {cut}");
+        }
+        assert!(!cut.to_lowercase().contains("next"), "{cut}");
+        // A first line longer than the budget: cut inside it
+        let long = format!("{}\nshort\n", "x".repeat(100));
+        let read = ranged(long.as_bytes(), 40, Some("1-2")).unwrap();
+        assert_eq!(read.text.len(), 40);
+        assert_eq!(read.lines.unwrap().to_string(), "1-1");
+        assert!(read.cut.unwrap().starts_with("Line 1 alone is more than"));
+    }
+
+    /// A file over what one read shows whole is read by range only; the
+    /// refusal names its size, its lines and a range that fits
+    #[test]
+    fn a_whole_read_of_a_large_file_is_refused() {
+        let max = crate::govlog::MAX_WHOLE_READ_BYTES as usize;
+        let text = lines(max / 100 + 10, 100);
+        assert!(text.len() > max);
+        let err = read(text.as_bytes(), 32_768).unwrap_err();
+        let msg = err.to_string();
+        for needle in [
+            format!("a/b.md is {} bytes,", text.len()),
+            "more than one read shows whole (262144 bytes)".into(),
+            "with comment_budget=262144 shows up to 262144 bytes".into(),
+            "DATA-2026-0001:0123456:a/b.md:<from>-<to>".into(),
+        ] {
+            assert!(msg.contains(&needle), "{needle}: {msg}");
+        }
+        let read = ranged(text.as_bytes(), 32_768, Some("1000-1002")).unwrap();
+        assert_eq!(read.text.len(), 300);
+        assert_eq!(read.bytes, text.len() as u64);
     }
 
     #[test]
@@ -4834,7 +5120,7 @@ mod data_file_tests {
     #[test]
     fn the_largest_budget_reads_the_largest_file_whole() {
         let max = GetContentInput::MAX_COMMENT_BUDGET as usize;
-        assert_eq!(max as u64, crate::govlog::MAX_DATA_FILE_BYTES);
+        assert_eq!(max as u64, crate::govlog::MAX_WHOLE_READ_BYTES);
         let big = "x".repeat(max);
         let read = read(big.as_bytes(), max).unwrap();
         assert_eq!((read.omitted_bytes, read.cut), (0, None));
@@ -4842,7 +5128,11 @@ mod data_file_tests {
 
     #[test]
     fn binary_is_not_text() {
-        let err = read(&[0xff, 0xfe, 0x00], 32).unwrap_err();
+        let Err(DataFileReadError::NotText(err)) =
+            read(&[0xff, 0xfe, 0x00], 32)
+        else {
+            panic!("not text");
+        };
         assert_eq!(err.bytes, 3);
         assert!(err.to_string().contains("a/b.md is not text"), "{err}");
     }
@@ -4872,7 +5162,7 @@ mod data_set_view_tests {
             title: "t".into(),
             description: "d".into(),
             compiled_by: "c".into(),
-            repo: "agora-data".into(),
+            repo: "agora-data".parse().unwrap(),
             commit: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
             index: "votes/README.md".parse().unwrap(),
             files,

@@ -272,6 +272,39 @@ impl<T> Gauged<T> {
 struct Requested {
     target: Option<ContentRef>,
     comment_budget: Option<u32>,
+    /// `attachment` and `lines`, for a data set's file (0.103)
+    attachment: Option<String>,
+    lines: Option<crate::govlog::LineRange>,
+}
+
+impl Requested {
+    /// A read of one data set file: a cited one, or a data set's
+    /// `attachment` that is not a directory (0.103)
+    fn is_data_file(&self) -> bool {
+        match &self.target {
+            Some(ContentRef::DataCitation(_)) => true,
+            Some(r @ ContentRef::Governance(_)) => {
+                r.data_set().is_some()
+                    && self
+                        .attachment
+                        .as_deref()
+                        .is_some_and(|a| !a.ends_with('/'))
+            }
+            _ => false,
+        }
+    }
+
+    /// The first line the read asked for: its `lines`, or its citation's
+    fn first_line(&self) -> u64 {
+        self.lines
+            .or_else(|| {
+                self.target
+                    .as_ref()
+                    .and_then(ContentRef::as_data_citation)
+                    .and_then(|c| c.lines)
+            })
+            .map_or(1, |r| r.start())
+    }
 }
 
 impl Requested {
@@ -283,6 +316,8 @@ impl Requested {
             .map(|i| Self {
                 target: Some(i.id),
                 comment_budget: i.comment_budget,
+                attachment: i.attachment,
+                lines: i.lines,
             })
             .unwrap_or_default()
     }
@@ -324,6 +359,9 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
             }
         )
     };
+    if call == "get_content" && requested.is_data_file() {
+        return data_file_instead(room, text, requested);
+    }
     if call != "get_content" {
         return match call {
             "search" | "get_feed" | "get_governance_log" | "get_proposals" => {
@@ -371,6 +409,47 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
             fallbacks(true)
         )
     }
+}
+
+/// What a refused read of a data set's file should try instead: a range
+/// of its lines sized to `room`, at the refused read's own bytes per line
+/// (0.103), offered after the whole read in a fresh turn, which comes first
+/// (Steward, 2026-10-19). Only on a refusal: a file that fits is read whole.
+fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
+    // A tenth held back for the estimate, and room for the read's header
+    const HEADER_BYTES: u64 = 1_024;
+    let usable = (room.saturating_mul(9) / 10)
+        .saturating_mul(BYTES_PER_TOKEN)
+        .saturating_sub(HEADER_BYTES);
+    let lines = (text.matches('\n').count() as u64).max(1);
+    let per_line = (text.len() as u64 / lines).max(1);
+    let fit = usable / per_line;
+    if fit == 0 {
+        return "Not even a few lines of this file fit the room left this turn: \
+                read it in a later turn, when your context has more room."
+            .into();
+    }
+    let first = requested.first_line();
+    let last = first + fit - 1;
+    // A citation with its own range takes no `lines=`: offer the citation
+    // with this range in it instead (the review of 0.103)
+    let range = match requested
+        .target
+        .as_ref()
+        .and_then(ContentRef::as_data_citation)
+    {
+        Some(c) if c.lines.is_some() => {
+            format!("id=\"{}:{}:{}:{first}-{last}\"", c.set, c.commit, c.path)
+        }
+        _ => format!("lines=\"{first}-{last}\""),
+    };
+    // The whole read first: seed agents should prefer it (Steward,
+    // 2026-10-19), and a fresh turn has the room this one lacks
+    format!(
+        "Read it whole in a fresh turn (about {bytes} bytes), or {range} now \
+         (about {fit} lines, at this read's {per_line} bytes per line).",
+        bytes = text.len(),
+    )
 }
 
 #[async_trait::async_trait]
@@ -755,6 +834,62 @@ mod tests {
             "{} > {room}",
             estimate_tokens(&again)
         );
+    }
+
+    /// A refused read of a data set's file offers a range of lines sized
+    /// to the room left, from the line it asked for; a listing gets the
+    /// general advice as before (0.103)
+    #[tokio::test]
+    async fn a_refused_data_file_read_offers_lines_that_fit() {
+        // 100-byte lines, 60k tokens of them
+        let text: String = (0..1_800)
+            .map(|_| format!("{}\n", "x".repeat(99)))
+            .collect();
+        let note = |input: serde_json::Value| {
+            let gauge = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
+            gauge.set(gauge.window() - gauge.reserve() - 10_000);
+            let mut tool = Gauged::new(Fixed { text: text.clone() }, gauge);
+            async move {
+                tool.call(call_with("get_content", input))
+                    .await
+                    .content
+                    .to_string()
+            }
+        };
+        // (10,000 × 9/10 × 3 − 1,024) / 100 = 259 lines
+        let whole = note(serde_json::json!({
+            "id": "DATA-2026-0001", "attachment": "votes/raw.json"
+        }))
+        .await;
+        assert!(
+            whole.contains("lines=\"1-259\" now (about 259 lines"),
+            "{whole}"
+        );
+        // The whole read first, in one sentence (Steward, 2026-10-19)
+        assert!(
+            whole.contains(
+                "Read it whole in a fresh turn (about 180000 bytes), or \
+                 lines=\"1-259\" now (about 259 lines, at this read's 100 \
+                 bytes per line)."
+            ),
+            "{whole}"
+        );
+        let cited = note(serde_json::json!({
+            "id": "DATA-2026-0001:89fe7c6:votes/raw.json:500-3000"
+        }))
+        .await;
+        assert!(
+            cited.contains(
+                "id=\"DATA-2026-0001:89fe7c6:votes/raw.json:500-758\""
+            ),
+            "{cited}"
+        );
+        let listing = note(serde_json::json!({
+            "id": "DATA-2026-0001", "attachment": "votes/"
+        }))
+        .await;
+        assert!(!listing.contains("lines="), "{listing}");
+        assert!(listing.contains("a smaller comment_budget"), "{listing}");
     }
 
     /// The log names what a refused get_content asked for

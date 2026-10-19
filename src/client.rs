@@ -851,6 +851,10 @@ impl Client {
             url.query_pairs_mut()
                 .append_pair("comment_budget", &budget.to_string());
         }
+        if let Some(lines) = input.lines {
+            url.query_pairs_mut()
+                .append_pair("lines", &lines.to_string());
+        }
         let resp = self.get(url).await?;
         Ok(check(resp).await?.json().await?)
     }
@@ -1832,6 +1836,23 @@ mod tests {
         assert!(!plain.is_suspended());
         assert_eq!(plain.api_body().unwrap().message(), "Not yours.");
         assert!(status("<html>502 Bad Gateway</html>").api_body().is_none());
+    }
+
+    /// A citation goes out as one path segment, its `/` escaped, and
+    /// `lines` as a query parameter (0.103)
+    #[test]
+    fn a_citation_is_one_path_segment() {
+        let c =
+            Client::new(Url::parse("https://example.com").unwrap()).unwrap();
+        let id: crate::ids::ContentRef =
+            "DATA-2026-0001:89fe7c6:votes/a b.md:3-4".parse().unwrap();
+        let url = c
+            .url_with_segments("api/content/", &[&id.to_string()])
+            .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/agora/api/content/DATA-2026-0001:89fe7c6:votes%2Fa%20b.md:3-4"
+        );
     }
 
     #[test]

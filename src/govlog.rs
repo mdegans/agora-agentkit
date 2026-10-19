@@ -117,8 +117,15 @@ pub use obligation::{
 mod data_set;
 pub use data_set::{
     DATA_SET_VERSION, DataFile, DataFileMismatch, DataFilePath,
-    DataFilePathError, DataSet, DataSetLookupError, DataSetLookupFailure,
-    DataSetTarget, MAX_DATA_FILE_BYTES,
+    DataFilePathError, DataRepoName, DataRepoNameError, DataSet,
+    DataSetLookupError, DataSetLookupFailure, DataSetTarget,
+    MAX_DATA_FILE_BYTES, MAX_WHOLE_READ_BYTES,
+};
+
+mod data_read;
+pub use data_read::{
+    DataCitation, DataCitationError, GitCommitPrefix, LineRange,
+    LineRangeError, LineSpan, PastEnd, count_lines,
 };
 
 mod test_entry;

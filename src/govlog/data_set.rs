@@ -18,11 +18,23 @@ use super::{GitCommitId, Sha256Hex};
 /// The only `agora_data_set` version there is
 pub const DATA_SET_VERSION: u32 = 1;
 
-/// The largest file a data set may list: what one `get_content` read shows
-/// at its largest `comment_budget`, so every file is readable whole. A
-/// server refuses to read a larger blob at all
-pub const MAX_DATA_FILE_BYTES: u64 =
+/// The largest file one `get_content` read shows whole: what it holds at
+/// its largest `comment_budget`. A larger listed file is read by
+/// [`LineRange`] only (0.103)
+pub const MAX_WHOLE_READ_BYTES: u64 =
     crate::requests::GetContentInput::MAX_COMMENT_BUDGET as u64;
+
+/// The largest file a data set may list, 16 MiB (0.103; until then the
+/// same as [`MAX_WHOLE_READ_BYTES`]). A server refuses to read a larger
+/// blob at all.
+///
+/// Why 16 MiB: a ranged read still inflates the whole blob and checks its
+/// SHA-256 before it serves any line (a slice of an unchecked blob is never
+/// served), so this bounds the memory and hashing one read can cost. It is
+/// also the object cap gitoxide applies under reduced trust, the limit the
+/// data repository's readers were built and tested against (agora
+/// `memory/project_data_sets.md`). Larger data belongs split across files.
+pub const MAX_DATA_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// The `data` of a `data_set` entry. See the [module docs](self).
 ///
@@ -39,8 +51,10 @@ pub struct DataSet {
     pub description: String,
     /// Who compiled it, in their own words
     pub compiled_by: String,
-    /// The data repository's name, as it is cloned (`agora-data`)
-    pub repo: String,
+    /// The data repository's name, as it is cloned (`agora-data`). Each
+    /// data set may have its own repository (0.103): a server reads it at
+    /// `<its data repositories>/<repo>.git`
+    pub repo: DataRepoName,
     /// The commit every file is read at
     pub commit: GitCommitId,
     /// The file a reader should open first; one of `files`
@@ -77,10 +91,9 @@ impl DataSet {
         if blank(&self.title)
             || blank(&self.description)
             || blank(&self.compiled_by)
-            || blank(&self.repo)
         {
             return Err(
-                "title, description, compiled_by and repo must all say something",
+                "title, description and compiled_by must all say something",
             );
         }
         if self.files.is_empty() {
@@ -91,7 +104,7 @@ impl DataSet {
         }
         if self.files.iter().any(|f| f.bytes > MAX_DATA_FILE_BYTES) {
             return Err(
-                "a file is larger than MAX_DATA_FILE_BYTES (256 KiB); split it",
+                "a file is larger than MAX_DATA_FILE_BYTES (16 MiB); split it",
             );
         }
         if self.file(&self.index).is_none() {
@@ -336,6 +349,101 @@ pub struct DataFileMismatch {
     pub got_sha256: Sha256Hex,
 }
 
+/// A string that is not a [`DataRepoName`]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a data repository name (1 to 63 lowercase letters, digits and `-`, \
+     starting with a letter or digit): {0:?}"
+)]
+pub struct DataRepoNameError(pub String);
+
+/// The name of a data repository, as a [`DataSet`] names it: lowercase
+/// letters, digits and `-`, starting with a letter or digit, at most 63
+/// bytes (0.103). Nothing in it can name a path outside a directory of
+/// repositories (no `.`, `/` or `\`), so a server may join it to one before
+/// touching the filesystem.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
+pub struct DataRepoName(String);
+
+impl DataRepoName {
+    /// The longest name accepted, in bytes
+    pub const MAX_LEN: usize = 63;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The repository's directory name: `<name>.git`
+    pub fn dir_name(&self) -> String {
+        format!("{}.git", self.0)
+    }
+}
+
+impl std::str::FromStr for DataRepoName {
+    type Err = DataRepoNameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let ok = (1..=Self::MAX_LEN).contains(&s.len())
+            && s.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'
+            })
+            && !s.starts_with('-');
+        ok.then(|| Self(s.to_string()))
+            .ok_or_else(|| DataRepoNameError(s.to_string()))
+    }
+}
+
+impl TryFrom<String> for DataRepoName {
+    type Error = DataRepoNameError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<DataRepoName> for String {
+    fn from(name: DataRepoName) -> Self {
+        name.0
+    }
+}
+
+impl std::fmt::Display for DataRepoName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for DataRepoName {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for DataRepoName {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("DataRepoName")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::DataRepoName"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A data repository's name, e.g. \"agora-data\"",
+        })
+    }
+}
+
 /// A path that is not a [`DataFilePath`]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -442,7 +550,7 @@ pub(super) mod tests {
             title: "Ratification votes".into(),
             description: "Every ballot cast on GOV-2026-0001.".into(),
             compiled_by: "claude-opus, from the governance log".into(),
-            repo: "agora-data".into(),
+            repo: "agora-data".parse().unwrap(),
             commit: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
             index: path("votes/README.md"),
             // Sorted: "R" (0x52) before "b" (0x62).
@@ -616,6 +724,37 @@ pub(super) mod tests {
                 "votes/raw/".into()
             ])
         );
+    }
+
+    /// A repository name cannot leave the directory of repositories
+    /// (0.103)
+    #[test]
+    fn repo_names_are_one_plain_word() {
+        for good in ["agora-data", "a", "witness-2026-10-18", &"a".repeat(63)] {
+            assert_eq!(good.parse::<DataRepoName>().unwrap().as_str(), good);
+        }
+        assert_eq!(
+            "agora-data".parse::<DataRepoName>().unwrap().dir_name(),
+            "agora-data.git"
+        );
+        for bad in [
+            "",
+            "-a",
+            "Agora",
+            "a.git",
+            "..",
+            "a/b",
+            "a\\b",
+            "a b",
+            "a_b",
+            "/etc",
+            &"a".repeat(64),
+        ] {
+            assert!(bad.parse::<DataRepoName>().is_err(), "{bad:?}");
+        }
+        let mut m = serde_json::to_value(manifest()).unwrap();
+        m["repo"] = "../secrets".into();
+        assert!(serde_json::from_value::<DataSet>(m).is_err());
     }
 
     #[test]
