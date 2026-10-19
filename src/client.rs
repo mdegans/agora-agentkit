@@ -763,6 +763,8 @@ impl Client {
             parser: crate::sse::SseParser::new(),
             pending: std::collections::VecDeque::new(),
             retry: None,
+            opened: tokio::time::Instant::now(),
+            returned: false,
         })
     }
 
@@ -1550,6 +1552,9 @@ pub struct EventStream {
     parser: crate::sse::SseParser,
     pending: std::collections::VecDeque<crate::sse::SseFrame>,
     retry: Option<Duration>,
+    opened: tokio::time::Instant,
+    /// It has returned an event, readable or not
+    returned: bool,
 }
 
 impl EventStream {
@@ -1569,6 +1574,7 @@ impl EventStream {
                 if frame.data.is_empty() {
                     continue;
                 }
+                self.returned = true;
                 return Some(
                     serde_json::from_str(&frame.data)
                         .map(|event| ReceivedEvent {
@@ -1612,6 +1618,13 @@ impl EventStream {
     pub fn retry(&self) -> Option<Duration> {
         self.retry
     }
+
+    /// Whether it ended soon after it opened without returning anything:
+    /// reconnecting at once would spin
+    fn ended_barren(&self) -> bool {
+        !self.returned
+            && self.opened.elapsed() < EventSubscription::HEALTHY_STREAM
+    }
 }
 
 /// One event as it arrived: the signed event and its SSE id, the cursor to
@@ -1637,6 +1650,20 @@ pub struct EventSubscription {
 impl EventSubscription {
     /// Longest wait between reconnects
     pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+    /// A stream the server closes sooner than this having sent nothing
+    /// counts as a failed connect, so a server or proxy that answers 200
+    /// and hangs up is not reconnected to in a tight loop
+    pub const HEALTHY_STREAM: Duration = Duration::from_secs(5);
+
+    /// The wait before reconnect number `failures`
+    fn backoff(failures: u32) -> Duration {
+        #[cfg(not(test))]
+        const UNIT: Duration = Duration::from_secs(1);
+        #[cfg(test)]
+        const UNIT: Duration = Duration::from_millis(1);
+        (UNIT * (1u32 << failures.min(6))).min(Self::MAX_BACKOFF)
+    }
 
     /// A subscription as `auth`, starting after `last_event_id` (a fresh
     /// one, `None`, starts with the agent's unread messages)
@@ -1682,10 +1709,7 @@ impl EventSubscription {
         loop {
             let Some(stream) = self.stream.as_mut() else {
                 if self.failures > 0 {
-                    let backoff =
-                        Duration::from_secs(1u64 << self.failures.min(6))
-                            .min(Self::MAX_BACKOFF);
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(Self::backoff(self.failures)).await;
                 }
                 match self
                     .client
@@ -1741,6 +1765,9 @@ impl EventSubscription {
                         "event stream: closed by the server, reconnecting"
                     );
                     let wait = stream.retry();
+                    if stream.ended_barren() {
+                        self.failures += 1;
+                    }
                     self.stream = None;
                     if let Some(wait) = wait {
                         tokio::time::sleep(wait.min(Self::MAX_BACKOFF)).await;
@@ -2449,6 +2476,32 @@ mod tests {
             "c0",
             "a forged event leaves the cursor where it was"
         );
+    }
+
+    /// A server that answers 200 and hangs up at once is backed off from,
+    /// not reconnected to in a tight loop
+    #[tokio::test]
+    async fn a_barren_stream_is_backed_off_from() {
+        let server = MockServer::start_async().await;
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/events");
+                then.status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(": hello\n\n");
+            })
+            .await;
+        let mut sub = EventSubscription::new(
+            client(&server),
+            EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
+            None,
+        );
+        // Backoff in tests is a thousandth of the real one: 2, 4, … 64 ms
+        let _ =
+            tokio::time::timeout(Duration::from_millis(400), sub.next()).await;
+        let hits = mock.calls_async().await;
+        assert!(sub.failures >= 4, "failures {}", sub.failures);
+        assert!(hits <= 16, "{hits} connects in 400 ms");
     }
 
     /// A signed subscription knows its agent and refuses another's event

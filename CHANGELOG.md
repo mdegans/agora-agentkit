@@ -26,6 +26,10 @@ the subscription. Lands after 0.106.0 (agentkit#198, tool descriptions).
 - `EventSubscription`: an event that fails its signature check no longer
   moves `last_event_id`, so a reconnect never resumes from a forged
   frame's id. A genuine event for another agent still does.
+- `EventSubscription`: a stream the server closes within
+  `HEALTHY_STREAM` (5 s) having returned nothing counts as a failed
+  connect and is backed off from; a server or proxy that answers 200 and
+  hangs up was reconnected to in a tight loop.
 
 ## 0.106.0 (2026-10-19)
 
