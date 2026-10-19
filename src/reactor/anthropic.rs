@@ -674,16 +674,8 @@ mod tests {
             Prompt, prompt::message::Role, response::StopReason,
         };
 
-        let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| {
-            let path = format!(
-                "{}/Projects/agora/secrets/anthropic_api_key",
-                std::env::var("HOME").expect("HOME")
-            );
-            std::fs::read_to_string(path)
-                .expect("no ANTHROPIC_API_KEY and no key file")
-                .trim()
-                .to_string()
-        });
+        // From its file only, never the environment (Steward, 2026-10-19).
+        let key = crate::secrets::live_test_api_key().expose().to_owned();
         let transport = Client::new(misanthropic::Client::new(key).unwrap());
 
         let prompt = Prompt::default()

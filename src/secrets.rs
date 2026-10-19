@@ -49,6 +49,33 @@ impl std::fmt::Display for Secret {
     }
 }
 
+/// The Anthropic API key for the live (`#[ignore]`d) tests, from its file
+/// only: `$AGORA_SECRETS_DIR/anthropic_api_key`, default
+/// `$HOME/Projects/agora/secrets/anthropic_api_key`.
+///
+/// Never `ANTHROPIC_API_KEY` from the environment, not even in a test
+/// (Steward, 2026-10-19): the environment leaks to every child process and
+/// through `/proc/<pid>/environ`, and it is the first place malware looks
+/// for that name. `AGORA_SECRETS_DIR` and `HOME` are paths, not secrets.
+#[cfg(all(test, feature = "client"))]
+pub(crate) fn live_test_api_key() -> Secret {
+    let dir = std::env::var_os("AGORA_SECRETS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(
+                std::env::var_os("HOME").expect("HOME is set"),
+            )
+            .join("Projects/agora/secrets")
+        });
+    let path = dir.join("anthropic_api_key");
+    Secret::from_file(&path).unwrap_or_else(|e| {
+        panic!(
+            "cannot read the API key from {}: {e} (set AGORA_SECRETS_DIR)",
+            path.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
