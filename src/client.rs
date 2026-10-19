@@ -123,6 +123,22 @@ fn status_body(body: &str) -> std::borrow::Cow<'_, str> {
 }
 
 impl Error {
+    /// The server's message alone, for a refused `lines` range: written
+    /// as the seed runner refuses a malformed one
+    /// ([`LineRange::INVALID`](crate::govlog::LineRange::INVALID)), so a
+    /// model reads one style of range error, not an HTTP status (0.105.0)
+    pub fn range_refusal(&self) -> Option<String> {
+        match self {
+            Error::Status { status, body, .. } if status.is_client_error() => {
+                let message = status_body(body);
+                message
+                    .starts_with(crate::govlog::LineRange::INVALID)
+                    .then(|| message.into_owned())
+            }
+            _ => None,
+        }
+    }
+
     /// The server's error body, typed, when it sent one of Agora's (0.77).
     /// `None` for a body that is not one, such as a proxy's error page
     pub fn api_body(&self) -> Option<crate::errors::ApiErrorBody> {
@@ -2165,6 +2181,22 @@ mod tests {
         assert!(!status(404, r#"{"error":"no such post"}"#).is_missing_route());
         assert!(!status(500, "").is_missing_route());
         assert!(!Error::Url("x".into()).is_missing_route());
+    }
+
+    /// A refused range is shown as its message alone, in the style of a
+    /// malformed `lines` argument; any other refusal keeps its status
+    #[test]
+    fn a_refused_range_is_its_message_alone() {
+        let status = |code: u16, error: &str| Error::Status {
+            status: reqwest::StatusCode::from_u16(code).unwrap(),
+            body: serde_json::json!({ "error": error }).to_string(),
+            retry_after: None,
+        };
+        let past =
+            "Invalid arguments at `lines`: lines=\"9-\": a.md has 8 lines";
+        assert_eq!(status(400, past).range_refusal().as_deref(), Some(past));
+        assert_eq!(status(404, "no such file").range_refusal(), None);
+        assert_eq!(status(500, past).range_refusal(), None);
     }
 
     #[tokio::test]
