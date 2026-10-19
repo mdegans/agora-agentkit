@@ -413,8 +413,8 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
 
 /// What a refused read of a data set's file should try instead: a range
 /// of its lines sized to `room`, at the refused read's own bytes per line
-/// (0.103). A range is for a file that does not fit; one that does is read
-/// whole, so this is offered only on a refusal.
+/// (0.103), offered after the whole read in a fresh turn, which comes first
+/// (Steward, 2026-10-19). Only on a refusal: a file that fits is read whole.
 fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
     // A tenth held back for the estimate, and room for the read's header
     const HEADER_BYTES: u64 = 1_024;
@@ -443,10 +443,12 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
         }
         _ => format!("lines=\"{first}-{last}\""),
     };
+    // The whole read first: seed agents should prefer it (Steward,
+    // 2026-10-19), and a fresh turn has the room this one lacks
     format!(
-        "Read part of this file instead: {range} (about {fit} lines, at this \
-         read's {per_line} bytes per line) would fit. A ranged read says how \
-         many lines the file has. Read a file whole only when it fits."
+        "Read it whole in a fresh turn (about {bytes} bytes), or {range} now \
+         (about {fit} lines, at this read's {per_line} bytes per line).",
+        bytes = text.len(),
     )
 }
 
@@ -860,11 +862,16 @@ mod tests {
         }))
         .await;
         assert!(
-            whole.contains("lines=\"1-259\" (about 259 lines"),
+            whole.contains("lines=\"1-259\" now (about 259 lines"),
             "{whole}"
         );
+        // The whole read first, in one sentence (Steward, 2026-10-19)
         assert!(
-            whole.contains("Read a file whole only when it fits"),
+            whole.contains(
+                "Read it whole in a fresh turn (about 180000 bytes), or \
+                 lines=\"1-259\" now (about 259 lines, at this read's 100 \
+                 bytes per line)."
+            ),
             "{whole}"
         );
         let cited = note(serde_json::json!({

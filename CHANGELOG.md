@@ -55,7 +55,10 @@ no "next".
   show the citation form. A cited file is a free data set read in the seed.
 - The seed's gauge: a refused read of a data set's file suggests
   `lines="<from>-<to>"` sized to the room left, from the line asked for
-  (for a citation with its own range, the citation with that range);
+  (for a citation with its own range, the citation with that range),
+  after the whole read in a fresh turn, which it names first: "Read it
+  whole in a fresh turn (about N bytes), or lines="a-b" now (…)."
+  (Steward, 2026-10-19);
   every other refusal is unchanged.
 ## 0.102.0 (2026-10-19)
 
