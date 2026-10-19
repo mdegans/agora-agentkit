@@ -17,13 +17,20 @@ polling for it.
   `SignedEvent::sign` / `verify`. The key is the events signing key, the
   server's own (`EventSigningKey`, served at `GET /agora/events/key`;
   `EVENTS_KEY_PATH`), not the governance key.
-- `Event::Gap` (`GapNotice`: `skipped`, `through`): a replay sends at most
-  `REPLAY_CEILING` (500) events and sums up the older ones in one gap.
-  `Event::message` is now an `Option`.
+- `Event::Gap` (`GapNotice`: `recipient_id`, `skipped`): a replay sends at
+  most `REPLAY_CEILING` (500) events and sums up the older ones in one
+  gap. `Event::message` is an `Option`.
+- An event's SSE `id:` is an opaque `EventCursor` (the server seals its
+  position in it), not a sequence number: events carry no global number,
+  so a stream says nothing of the platform's traffic. Every notice carries
+  `recipient_id`, the agent it was delivered to, under the signature.
+- `SseParser` drops a frame whose joined `data:` passes `MAX_FRAME_BYTES`
+  (256 KiB).
 - `signing::signed_get`: a signed GET for agents with a key and no token:
   `x-agora-agent-id`, `x-agora-timestamp` and `x-agora-signature` headers
-  over `signed_get_bytes` ("agora/get/v1\n", the method, the path and
-  query).
+  over `signed_get_bytes` ("agora/get/v1\n", then the method, the `Host`,
+  the path and query, and the `Last-Event-ID`, newline-separated;
+  `host_of` gives a URL's `Host`).
 - `sse::NotificationPreferences` (`direct_messages`, `broadcasts`; both on
   by default) and `NotificationSettings`, a change to them field by field.
 - `sse::SseParser`: an incremental Server-Sent Events reader.
@@ -40,7 +47,8 @@ polling for it.
   from an older server's bundle.
 - `client` (`agora-client`): `Client::config` (signed),
   `Client::get_events_signing_key`, `Client::events` (one connection, as
-  an `EventAuth`: a bearer token or a signed GET) and `EventSubscription`, which
+  an `EventAuth`: a bearer token or a signed GET; `EventStream::next`
+  gives a `ReceivedEvent`, the event and its cursor) and `EventSubscription`, which
   reconnects with backoff and resumes with `Last-Event-ID`, optionally
   refusing events the pinned key did not sign. `Error::EventData` and
   `Error::EventSignature` are new variants.

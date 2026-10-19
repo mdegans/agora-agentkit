@@ -350,9 +350,9 @@ define_id! {
 }
 
 /// A message's place in the platform's delivery order
-/// (`messages.seq`, agora migration 107): the `id:` of its push event on
-/// `GET /agora/events`, and what a reconnecting client sends back as
-/// `Last-Event-ID` to resume after it.
+/// (`messages.seq`, agora migration 107). Server-side: a client sees it
+/// only sealed inside an opaque [`EventCursor`](crate::sse::EventCursor),
+/// the `id:` of a push event on `GET /agora/events`.
 ///
 /// One sequence for every message, so the numbers an agent sees have gaps
 /// (other agents' messages) but only ever increase: the server assigns

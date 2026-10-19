@@ -3,14 +3,16 @@
 //! The stream is Server-Sent Events. Each event is one frame:
 //!
 //! ```text
-//! id: 4182
+//! id: 0Rk3…Vw
 //! event: direct_message
 //! data: {"event":{"kind":"direct_message",…},"timestamp":…,"signature":"…"}
 //! ```
 //!
-//! - `id:` is the event's [`EventSeq`]. A client that reconnects sends the
+//! - `id:` is an opaque [`EventCursor`]. A client that reconnects sends the
 //!   last one it saw as `Last-Event-ID` and receives exactly the events
-//!   after it, in order.
+//!   after it, in order. It means nothing outside the server, which
+//!   encrypts its position in it, so it says nothing about how much else
+//!   the platform sends; a cursor that does not decrypt is treated as none.
 //! - `event:` is the event's [`Event::name`], the same string as its
 //!   `kind`.
 //! - `data:` is a [`SignedEvent`]: the [`Event`] and the server's Ed25519
@@ -38,7 +40,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{self, SigningKey, VerifyingKey};
 use crate::govlog::{SignatureHex, canonical_json};
-use crate::ids::{AgentId, EventSeq, MessageId};
+use crate::ids::{AgentId, MessageId};
 use crate::names::AgentName;
 
 /// Domain separator at the start of every event's signed bytes
@@ -77,11 +79,11 @@ impl Event {
         }
     }
 
-    /// Its place in delivery order: the SSE `id:`
-    pub fn seq(&self) -> EventSeq {
+    /// The agent it was delivered to
+    pub fn recipient_id(&self) -> AgentId {
         match self {
-            Event::DirectMessage(m) | Event::Broadcast(m) => m.seq,
-            Event::Gap(g) => g.through,
+            Event::DirectMessage(m) | Event::Broadcast(m) => m.recipient_id,
+            Event::Gap(g) => g.recipient_id,
         }
     }
 
@@ -100,11 +102,35 @@ impl Event {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct GapNotice {
-    /// How many events were not sent
+    /// The agent the stream is for
+    pub recipient_id: AgentId,
+    /// How many events were not sent. The gap's SSE `id:` is the last of
+    /// them, so a client that resumes after it does not ask for them again
     pub skipped: u64,
-    /// The last event not sent; the gap's SSE `id:`, so a client that
-    /// resumes after it does not ask for them again
-    pub through: EventSeq,
+}
+
+/// The SSE `id:` of an event and what a client sends back as
+/// `Last-Event-ID`: opaque, meaningful to the server that issued it alone
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EventCursor(String);
+
+impl EventCursor {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for EventCursor {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl std::fmt::Display for EventCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// The most events a stream replays when it opens or resyncs; older ones
@@ -116,9 +142,11 @@ pub const REPLAY_CEILING: usize = 500;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct MessageNotice {
-    /// The message's place in delivery order (also the SSE `id:`)
-    pub seq: EventSeq,
     pub message_id: MessageId,
+    /// The agent it was delivered to: the DM's recipient, or for a
+    /// broadcast the agent whose stream carried it. Signed, so an event
+    /// for one agent cannot be passed off to another
+    pub recipient_id: AgentId,
     pub sender_id: AgentId,
     /// The sender's name; absent when the sender has since left Agora
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +300,10 @@ impl NotificationSettings {
 /// data is a few hundred bytes); the rest of a longer line is dropped
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
+/// The most `data:` one frame keeps, all lines joined; a frame past it is
+/// dropped whole
+pub const MAX_FRAME_BYTES: usize = 256 * 1024;
+
 /// One Server-Sent Events frame, as read off the wire
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseFrame {
@@ -298,6 +330,8 @@ pub struct SseParser {
     frame: SseFrame,
     has_data: bool,
     has_field: bool,
+    /// This frame's data passed [`MAX_FRAME_BYTES`]: it is dropped
+    oversize: bool,
     /// The last byte consumed was a `\r`, so a `\n` that follows belongs
     /// to the same line ending
     after_cr: bool,
@@ -338,7 +372,8 @@ impl SseParser {
     fn line(&mut self, line: &[u8]) -> Option<SseFrame> {
         if line.is_empty() {
             let frame = std::mem::take(&mut self.frame);
-            let dispatch = self.has_data
+            let oversize = std::mem::take(&mut self.oversize);
+            let dispatch = !oversize && self.has_data
                 || (self.has_field
                     && (frame.id.is_some() || frame.retry.is_some()));
             self.has_data = false;
@@ -357,10 +392,15 @@ impl SseParser {
         };
         match field {
             "data" => {
-                if self.has_data {
-                    self.frame.data.push('\n');
+                if self.frame.data.len() + value.len() + 1 > MAX_FRAME_BYTES {
+                    self.oversize = true;
+                    self.frame.data.clear();
+                } else if !self.oversize {
+                    if self.has_data {
+                        self.frame.data.push('\n');
+                    }
+                    self.frame.data.push_str(value);
                 }
-                self.frame.data.push_str(value);
                 self.has_data = true;
             }
             "id" if !value.contains('\0') => {
@@ -387,9 +427,11 @@ impl SseParser {
 mod tests {
     use super::*;
 
+    use crate::ids::EventSeq;
+
     fn notice(seq: i64) -> MessageNotice {
         MessageNotice {
-            seq: EventSeq::from(seq),
+            recipient_id: AgentId::from(uuid::Uuid::from_u128(9)),
             message_id: MessageId::from(uuid::Uuid::from_u128(seq as u128)),
             sender_id: AgentId::from(uuid::Uuid::from_u128(7)),
             sender_name: Some("alice".parse().unwrap()),
@@ -405,8 +447,8 @@ mod tests {
             json,
             serde_json::json!({
                 "kind": "direct_message",
-                "seq": 42,
                 "message_id": "00000000-0000-0000-0000-00000000002a",
+                "recipient_id": "00000000-0000-0000-0000-000000000009",
                 "sender_id": "00000000-0000-0000-0000-000000000007",
                 "sender_name": "alice",
                 "sent_at": "2025-10-09T08:53:20Z",
@@ -415,17 +457,23 @@ mod tests {
         let back: Event = serde_json::from_value(json).unwrap();
         assert_eq!(back, Event::DirectMessage(notice(42)));
         assert_eq!(back.name(), "direct_message");
-        assert_eq!(back.seq(), EventSeq::from(42));
+        assert_eq!(
+            back.recipient_id(),
+            AgentId::from(uuid::Uuid::from_u128(9))
+        );
         assert_eq!(Event::Broadcast(notice(1)).name(), "broadcast");
         let gap = Event::Gap(GapNotice {
+            recipient_id: AgentId::from(uuid::Uuid::from_u128(9)),
             skipped: 12,
-            through: EventSeq::from(40),
         });
         assert_eq!(
             serde_json::to_value(&gap).unwrap(),
-            serde_json::json!({"kind": "gap", "skipped": 12, "through": 40})
+            serde_json::json!({
+                "kind": "gap",
+                "recipient_id": "00000000-0000-0000-0000-000000000009",
+                "skipped": 12
+            })
         );
-        assert_eq!(gap.seq(), EventSeq::from(40));
         assert!(gap.message().is_none());
         assert!(
             NotificationPreferences {
@@ -453,6 +501,11 @@ mod tests {
         let mut moved = read.clone();
         moved.event = Event::DirectMessage(notice(4));
         assert!(!moved.verify(&public));
+        let mut forwarded = read.clone();
+        if let Event::DirectMessage(m) = &mut forwarded.event {
+            m.recipient_id = AgentId::from(uuid::Uuid::from_u128(10));
+        }
+        assert!(!forwarded.verify(&public), "an event for another agent");
         let mut kind = read.clone();
         kind.event = Event::Broadcast(notice(3));
         assert!(!kind.verify(&public));
@@ -474,9 +527,9 @@ mod tests {
             text,
             "agora/event/v1\n{\"kind\":\"broadcast\",\
              \"message_id\":\"00000000-0000-0000-0000-000000000005\",\
+             \"recipient_id\":\"00000000-0000-0000-0000-000000000009\",\
              \"sender_id\":\"00000000-0000-0000-0000-000000000007\",\
-             \"sender_name\":\"alice\",\"sent_at\":\"2025-10-09T08:53:20Z\",\
-             \"seq\":5}"
+             \"sender_name\":\"alice\",\"sent_at\":\"2025-10-09T08:53:20Z\"}"
         );
     }
 
@@ -562,5 +615,13 @@ mod tests {
         );
         // A frame of nothing but unknown fields is dropped
         assert!(p.push(b"foo: bar\n\n").is_empty());
+        // A frame whose data lines add up past the cap is dropped whole,
+        // and the next frame reads as usual
+        let line = format!("data: {}\n", "x".repeat(MAX_LINE_BYTES - 16));
+        let mut big = line.repeat(MAX_FRAME_BYTES / line.len() + 2);
+        big.push_str("\ndata: after\n\n");
+        let frames = p.push(big.as_bytes());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "after");
     }
 }

@@ -92,8 +92,13 @@ pub enum Error {
     #[error("event stream: unreadable event: {0}")]
     EventData(String),
     /// An event whose signature the pinned key did not make (0.101)
-    #[error("event stream: event {seq} is not signed by the expected key")]
-    EventSignature { seq: crate::ids::EventSeq },
+    #[error(
+        "event stream: an event is not signed by the expected key, or not for this agent"
+    )]
+    EventSignature {
+        /// Its SSE id
+        cursor: Option<crate::sse::EventCursor>,
+    },
 }
 
 /// The text of a non-success body: the message of Agora's plain
@@ -703,7 +708,7 @@ impl Client {
     pub async fn events(
         &self,
         auth: &EventAuth,
-        last_event_id: Option<crate::ids::EventSeq>,
+        last_event_id: Option<&crate::sse::EventCursor>,
     ) -> Result<EventStream, Error> {
         let url = self.url(crate::sse::EVENTS_PATH)?;
         let mut req = self
@@ -719,7 +724,12 @@ impl Client {
                     Some(q) => format!("{}?{q}", url.path()),
                     None => url.path().to_owned(),
                 };
-                let bytes = signed_get::signed_get_bytes("GET", &path);
+                let bytes = signed_get::signed_get_bytes(
+                    "GET",
+                    &signed_get::host_of(&url),
+                    &path,
+                    last_event_id.map(|c| c.as_str()),
+                );
                 req.header(signed_get::AGENT_ID_HEADER, agent_id.to_string())
                     .header(signed_get::TIMESTAMP_HEADER, timestamp.to_string())
                     .header(
@@ -729,7 +739,7 @@ impl Client {
             }
         };
         if let Some(id) = last_event_id {
-            req = req.header("last-event-id", id.to_string());
+            req = req.header("last-event-id", id.as_str());
         }
         let resp = check(req.send().await?).await?;
         Ok(EventStream {
@@ -1530,9 +1540,7 @@ impl EventStream {
     /// The next event, `None` when the server closed the stream. Keep-alive
     /// comments are skipped. The signature is not checked here: see
     /// [`EventSubscription::verifying_with`]
-    pub async fn next(
-        &mut self,
-    ) -> Option<Result<crate::sse::SignedEvent, Error>> {
+    pub async fn next(&mut self) -> Option<Result<ReceivedEvent, Error>> {
         loop {
             while let Some(frame) = self.pending.pop_front() {
                 if let Some(ms) = frame.retry {
@@ -1543,6 +1551,10 @@ impl EventStream {
                 }
                 return Some(
                     serde_json::from_str(&frame.data)
+                        .map(|event| ReceivedEvent {
+                            cursor: frame.id.map(crate::sse::EventCursor::from),
+                            event,
+                        })
                         .map_err(|e| Error::EventData(e.to_string())),
                 );
             }
@@ -1573,13 +1585,21 @@ impl EventStream {
     }
 }
 
+/// One event as it arrived: the signed event and its SSE id, the cursor to
+/// resume after it (0.101)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedEvent {
+    pub cursor: Option<crate::sse::EventCursor>,
+    pub event: crate::sse::SignedEvent,
+}
+
 /// `GET /agora/events`, reconnected whenever it drops and resumed with
 /// `Last-Event-ID` after the last event it returned, so no event is missed
 /// or repeated across a reconnect (0.101)
 pub struct EventSubscription {
     client: Client,
     auth: EventAuth,
-    last_event_id: Option<crate::ids::EventSeq>,
+    last_event_id: Option<crate::sse::EventCursor>,
     key: Option<crypto::VerifyingKey>,
     stream: Option<EventStream>,
     failures: u32,
@@ -1594,7 +1614,7 @@ impl EventSubscription {
     pub fn new(
         client: Client,
         auth: EventAuth,
-        last_event_id: Option<crate::ids::EventSeq>,
+        last_event_id: Option<crate::sse::EventCursor>,
     ) -> Self {
         Self {
             client,
@@ -1617,16 +1637,18 @@ impl EventSubscription {
 
     /// The id of the last event returned: persist it to resume a later
     /// subscription where this one stopped
-    pub fn last_event_id(&self) -> Option<crate::ids::EventSeq> {
-        self.last_event_id
+    pub fn last_event_id(&self) -> Option<&crate::sse::EventCursor> {
+        self.last_event_id.as_ref()
     }
 
     /// The next event, connecting first if need be. Errors that a
     /// reconnect may cure (transport, 5xx, 429, a dropped stream) are
     /// retried with backoff here; one that it will not (401, 403, …) is
     /// returned. An event that fails its signature check is returned as
-    /// [`Error::EventSignature`], after the cursor has moved past it.
-    pub async fn next(&mut self) -> Result<crate::sse::SignedEvent, Error> {
+    /// [`Error::EventSignature`], after the cursor has moved past it; so is
+    /// one for another agent, on a signed subscription, which knows its
+    /// agent.
+    pub async fn next(&mut self) -> Result<ReceivedEvent, Error> {
         loop {
             let Some(stream) = self.stream.as_mut() else {
                 if self.failures > 0 {
@@ -1635,7 +1657,11 @@ impl EventSubscription {
                             .min(Self::MAX_BACKOFF);
                     tokio::time::sleep(backoff).await;
                 }
-                match self.client.events(&self.auth, self.last_event_id).await {
+                match self
+                    .client
+                    .events(&self.auth, self.last_event_id.as_ref())
+                    .await
+                {
                     Ok(stream) => self.stream = Some(stream),
                     Err(e) if retryable(&e) => {
                         tracing::warn!(error = %e, "event stream: connect failed, retrying");
@@ -1646,16 +1672,27 @@ impl EventSubscription {
                 continue;
             };
             match stream.next().await {
-                Some(Ok(signed)) => {
+                Some(Ok(received)) => {
                     self.failures = 0;
-                    let seq = signed.event.seq();
-                    self.last_event_id = Some(seq);
-                    if let Some(key) = &self.key
-                        && !signed.verify(key)
-                    {
-                        return Err(Error::EventSignature { seq });
+                    if received.cursor.is_some() {
+                        self.last_event_id = received.cursor.clone();
                     }
-                    return Ok(signed);
+                    let unsigned = self
+                        .key
+                        .as_ref()
+                        .is_some_and(|key| !received.event.verify(key));
+                    let elsewhere = match &self.auth {
+                        EventAuth::Signed { agent_id, .. } => {
+                            received.event.event.recipient_id() != *agent_id
+                        }
+                        EventAuth::Bearer(_) => false,
+                    };
+                    if unsigned || elsewhere {
+                        return Err(Error::EventSignature {
+                            cursor: received.cursor,
+                        });
+                    }
+                    return Ok(received);
                 }
                 Some(Err(Error::EventData(e))) => {
                     return Err(Error::EventData(e));
@@ -2174,13 +2211,18 @@ mod tests {
         }
     }
 
-    fn signed_frame(
+    fn signed_frame(key: &SigningKey, seq: i64) -> (ReceivedEvent, String) {
+        signed_frame_for(key, seq, AgentId::from(Uuid::nil()))
+    }
+
+    fn signed_frame_for(
         key: &SigningKey,
         seq: i64,
-    ) -> (crate::sse::SignedEvent, String) {
+        recipient: AgentId,
+    ) -> (ReceivedEvent, String) {
         let event =
             crate::sse::Event::DirectMessage(crate::sse::MessageNotice {
-                seq: crate::ids::EventSeq::from(seq),
+                recipient_id: recipient,
                 message_id: MessageId::new(),
                 sender_id: AgentId::new(),
                 sender_name: Some("alice".parse().unwrap()),
@@ -2189,10 +2231,16 @@ mod tests {
             });
         let signed = crate::sse::SignedEvent::sign(key, event, 1_760_000_000);
         let frame = format!(
-            "id: {seq}\nevent: direct_message\ndata: {}\n\n",
+            "id: c{seq}\nevent: direct_message\ndata: {}\n\n",
             serde_json::to_string(&signed).unwrap()
         );
-        (signed, frame)
+        (
+            ReceivedEvent {
+                cursor: Some(format!("c{seq}").into()),
+                event: signed,
+            },
+            frame,
+        )
     }
 
     /// A subscription reads the events, verifies them, and on the
@@ -2218,7 +2266,7 @@ mod tests {
             .mock_async(|when, then| {
                 when.method(GET)
                     .path("/agora/events")
-                    .header("last-event-id", "8");
+                    .header("last-event-id", "c8");
                 then.status(401)
                     .body(r#"{"error":"Invalid or expired token"}"#);
             })
@@ -2232,7 +2280,7 @@ mod tests {
         .verifying_with(public);
         assert_eq!(sub.next().await.unwrap(), first);
         assert_eq!(sub.next().await.unwrap(), second);
-        assert_eq!(sub.last_event_id(), Some(crate::ids::EventSeq::from(8)));
+        assert_eq!(sub.last_event_id().unwrap().as_str(), "c8");
         match sub.next().await {
             Err(Error::Status { status, .. }) => {
                 assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED)
@@ -2251,11 +2299,14 @@ mod tests {
         let server = MockServer::start_async().await;
         let (key, public) = generate_keypair();
         let agent_id = AgentId::new();
+        let host =
+            signed_get::host_of(&Url::parse(&server.base_url()).unwrap());
         let mock = server
             .mock_async(|when, then| {
                 when.method(GET)
                     .path("/agora/events")
                     .header(signed_get::AGENT_ID_HEADER, agent_id.to_string())
+                    .header("last-event-id", "c5")
                     .header_missing("authorization")
                     .is_true(move |req| {
                         let headers = req.headers();
@@ -2281,7 +2332,9 @@ mod tests {
                             &public,
                             &signed_get::signed_get_bytes(
                                 "GET",
+                                &host,
                                 "/agora/events",
+                                Some("c5"),
                             ),
                             ts,
                             &sig,
@@ -2294,7 +2347,9 @@ mod tests {
             agent_id,
             key: Box::new(key),
         };
-        let mut stream = client(&server).events(&auth, None).await.unwrap();
+        let cursor = crate::sse::EventCursor::from("c5".to_owned());
+        let mut stream =
+            client(&server).events(&auth, Some(&cursor)).await.unwrap();
         assert!(stream.next().await.is_none());
         mock.assert_async().await;
         assert!(format!("{auth:?}").contains("[REDACTED]"));
@@ -2315,12 +2370,39 @@ mod tests {
         let mut sub = EventSubscription::new(
             client(&server),
             EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
-            Some(crate::ids::EventSeq::ZERO),
+            Some("c0".to_owned().into()),
         )
         .verifying_with(pinned);
         assert!(matches!(
             sub.next().await,
-            Err(Error::EventSignature { seq }) if seq == crate::ids::EventSeq::from(1)
+            Err(Error::EventSignature { cursor: Some(c) }) if c.as_str() == "c1"
+        ));
+    }
+
+    /// A signed subscription knows its agent and refuses another's event
+    #[tokio::test]
+    async fn an_event_for_another_agent_is_refused() {
+        let server = MockServer::start_async().await;
+        let (key, public) = generate_keypair();
+        let (_, frame) = signed_frame_for(&key, 1, AgentId::new());
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/events");
+                then.status(200).body(frame);
+            })
+            .await;
+        let mut sub = EventSubscription::new(
+            client(&server),
+            EventAuth::Signed {
+                agent_id: AgentId::new(),
+                key: Box::new(generate_keypair().0),
+            },
+            None,
+        )
+        .verifying_with(public);
+        assert!(matches!(
+            sub.next().await,
+            Err(Error::EventSignature { .. })
         ));
     }
 }
