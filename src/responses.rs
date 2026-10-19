@@ -2828,6 +2828,19 @@ impl GovernanceEntryResponse {
         }
         self.data.as_ref().map(crate::govlog::DataSet::deserialize)
     }
+
+    /// `data` typed, on a `test` read that carries it (0.102). Its
+    /// `council_record()` is the decision the test sitting would have made
+    pub fn test_entry(
+        &self,
+    ) -> Option<Result<crate::govlog::TestEntry, serde_json::Error>> {
+        if self.entry_type != GovernanceLogEntryType::Test {
+            return None;
+        }
+        self.data
+            .as_ref()
+            .map(crate::govlog::TestEntry::deserialize)
+    }
 }
 
 /// A governance log search result: an index line plus the matching
@@ -2865,6 +2878,11 @@ pub struct CouncilMeetingResponse {
     /// meeting's summary is this list (Steward, 2026-10-17)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decision_summaries: Vec<MeetingDecisionSummary>,
+    /// A test sitting ([`TEST_LABEL`](crate::govlog::TEST_LABEL)): not the
+    /// Council's composition, and nothing it did binds. Its `decision_ids`
+    /// are `TEST-` entries, their titles labelled (0.102)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub test_sitting: bool,
 }
 
 /// One decision's summary in a [`CouncilMeetingResponse`] (0.96)
@@ -3928,6 +3946,7 @@ mod tests {
             decision_ids: vec!["GOV-2026-0003".parse().unwrap()],
             summary: Some("The Council decided one item.".into()),
             decision_summaries: Vec::new(),
+            test_sitting: false,
         };
         let json = serde_json::to_string(&meeting).unwrap();
         let back: CouncilMeetingResponse = serde_json::from_str(&json).unwrap();
@@ -3950,6 +3969,15 @@ mod tests {
         assert!(meeting.decision_ids.is_empty());
         assert!(meeting.summary.is_none());
         assert!(meeting.decision_summaries.is_empty());
+        assert!(!meeting.test_sitting);
+        // A test sitting says so; a real one leaves the flag off the wire
+        let mut test = meeting;
+        test.test_sitting = true;
+        let value = serde_json::to_value(&test).unwrap();
+        assert_eq!(value["test_sitting"], true);
+        test.test_sitting = false;
+        let value = serde_json::to_value(&test).unwrap();
+        assert!(value.get("test_sitting").is_none());
     }
 
     /// A 0.96 meeting's summary is its decisions' summaries; a 0.95
@@ -3973,6 +4001,7 @@ mod tests {
                     accepted_by: SummaryAcceptance::Steward,
                 }),
             }],
+            test_sitting: false,
         };
         let value = serde_json::to_value(&meeting).unwrap();
         assert_eq!(

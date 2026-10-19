@@ -10,7 +10,7 @@
 
 use super::tests::{
     Chain, at, certify, chain, data_id, gov, key_id, link, obl, rec, resalted,
-    root, roots, v1,
+    root, roots, test_id, v1,
 };
 use super::*;
 use crate::enums::{ObligationKind, OwedBy};
@@ -831,6 +831,117 @@ fn cases() -> Vec<Case> {
         pinned.clone(),
         c.links,
     ));
+
+    // -- a test sitting's record (0.102) --
+
+    let mut test_entry =
+        serde_json::to_value(super::test_entry::tests::entry()).unwrap();
+    test_entry[BLIND_KEY] = json!(Blind::from([0x5d; 32]));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        test_id(1),
+        GovernanceLogEntryType::Test,
+        test_entry.clone(),
+        false,
+    );
+    c.decision(&steward);
+    out.push(Case::new(
+        "test_entry",
+        "A test sitting's record between two decisions, in the TEST- \
+         series (four letters, like DATA-). It wraps a council decision \
+         that binds nothing; no verifier reads what it says.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    let mut c = Chain::new();
+    c.decision(&steward);
+    c.push(
+        &steward,
+        gov(2),
+        GovernanceLogEntryType::Test,
+        test_entry.clone(),
+        false,
+    );
+    c.push(
+        &steward,
+        test_id(1),
+        CouncilDecision,
+        json!({"title": "a decision wearing a TEST- id"}),
+        false,
+    );
+    out.push(Case::new(
+        "test_series_mismatch",
+        "A test sitting's record outside the TEST- series, and a council \
+         decision inside it.",
+        &steward_pk,
+        pinned.clone(),
+        c.links,
+    ));
+
+    // Redactable and revisable (Steward, 2026-10-19): a revision of the
+    // inner record's summary, then a redaction of an attachment.
+    let mut c = Chain::new();
+    c.decision(&steward);
+    let target = test_id(1);
+    c.push(
+        &steward,
+        target.clone(),
+        GovernanceLogEntryType::Test,
+        test_entry.clone(),
+        false,
+    );
+    let summary: json_patch::Patch = serde_json::from_value(json!([
+        {"op": "add", "path": "/inner/summary", "value": {
+            "text": "A test; nothing was decided.",
+            "written_by": "lawyer",
+            "accepted_by": {"by": "steward"}
+        }}
+    ]))
+    .unwrap();
+    let (revision, revised) = AmendmentDraft::revision(
+        target.clone(),
+        GovernanceLogEntryType::Test,
+        c.hash_at(2),
+        "Steward's record",
+        "the Lawyer's summary, written after the sitting",
+        &test_entry,
+        summary,
+    )
+    .unwrap();
+    c.amend(&steward, &revision);
+    let rev = revision.amendment.revision.clone().unwrap();
+    let (redaction, redacted) = AmendmentDraft::redaction(
+        &c.next_amd(),
+        target.clone(),
+        c.hash_at(2),
+        "GDPR Art. 17(1)(a)",
+        "removed on request",
+        vec!["/inner/attachments/0/content".into()],
+        &test_entry,
+        Blind::from([0x5e; 32]),
+        &[&rev],
+    )
+    .unwrap();
+    c.amend(&steward, &redaction);
+    assert_ne!(revised, redacted);
+    out.push(
+        Case::new(
+            "test_entry_revised_and_redacted",
+            "A test sitting's record, revised (the inner decision gains a \
+             summary) and then redacted (an attachment's text). Both are \
+             accepted, as on a decision: the stored data hashes to the \
+             redaction's resulting_data_hash.",
+            &steward_pk,
+            pinned.clone(),
+            c.links,
+        )
+        .content(target, redacted),
+    );
 
     // -- amendments --
 

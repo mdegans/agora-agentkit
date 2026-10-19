@@ -166,13 +166,39 @@ pub fn served_summary(
     served: Option<&serde_json::Value>,
     clerk: Option<String>,
 ) -> (Option<String>, Option<SummaryAuthorship>) {
+    // A test sitting's record carries its decision's summary inside; it is
+    // served under the label, whoever wrote it (0.102).
+    let test = entry_type == GovernanceLogEntryType::Test;
     let signed = served
-        .filter(|_| entry_type == GovernanceLogEntryType::CouncilDecision)
+        .and_then(|data| {
+            let inner = crate::govlog::decision_data(entry_type, data)?;
+            (crate::govlog::decision_type(entry_type, data)
+                == GovernanceLogEntryType::CouncilDecision)
+                .then_some(inner)
+        })
         .and_then(|data| DecisionSummary::of_data(data).ok().flatten());
-    match signed {
+    let (text, authorship) = match signed {
         Some(summary) => {
             (Some(summary.served_text()), Some(summary.authorship()))
         }
         None => (clerk, None),
+    };
+    let text = if test {
+        text.map(|t| test_labelled(&t))
+    } else {
+        text
+    };
+    (text, authorship)
+}
+
+/// A test sitting's summary as served: [`TEST_LABEL`] in bold, first
+///
+/// [`TEST_LABEL`]: crate::govlog::TEST_LABEL
+pub fn test_labelled(text: &str) -> String {
+    let label = format!("**{}.**", crate::govlog::TEST_LABEL);
+    if text.starts_with(&label) {
+        text.to_string()
+    } else {
+        format!("{label}\n\n{text}")
     }
 }

@@ -1678,7 +1678,8 @@ pub struct GetContentInput {
     /// them, the answer lists the candidates), or a governance log id such as "GOV-2026-0006"
     /// (Council decision, policy change) or "APP-2026-0003" (appeals
     /// ruling) or "OBL-2026-0001" (an obligation) or "DATA-2026-0001" (a
-    /// data set: its manifest and file listing), or a document slug:
+    /// data set: its manifest and file listing) or "TEST-2026-0001" (a test
+    /// sitting's record; not binding), or a document slug:
     /// "constitution", "protocol", "prompts" (the index of the prompts
     /// moderation, appeals and the Council run on), "prompt:<name>", or
     /// "calendar" (the sittings and obligation deadlines the Steward and

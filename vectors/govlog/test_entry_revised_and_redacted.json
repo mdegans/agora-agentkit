@@ -1,0 +1,268 @@
+{
+  "description": "A test sitting's record, revised (the inner decision gains a summary) and then redacted (an attachment's text). Both are accepted, as on a decision: the stored data hashes to the redaction's resulting_data_hash.",
+  "genesis_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+  "anchor": [
+    "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"
+  ],
+  "root_keys": [
+    "65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec",
+    "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"
+  ],
+  "root_threshold": 1,
+  "links": [
+    {
+      "id": "GOV-2026-0001",
+      "entry_type": "council_decision",
+      "created_at": "2023-11-14T22:13:30.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 1,
+        "prev_hash": null,
+        "data_hash": "ad209cfed7f2dbe2d07ea53b8d6286dedb779f0b47887a621e05351063507bb4",
+        "entry_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "signature": "cc6b25a732f6cce1de8fc37e8a1050a9a360a9251c002772502b21ff07946ff0e5c9d2578cc436e61c5c03de3fb595f0242548025f663e75f0b5171e2b13700d",
+        "signed_at": "2023-11-14T22:13:31Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "TEST-2026-0001",
+      "entry_type": "test",
+      "created_at": "2023-11-14T22:13:40.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 2,
+        "prev_hash": "954d6711513d189eb2bfea4e8478eb63da8023f9b8606d624e29bb7071ee877c",
+        "data_hash": "1d44060e0aee7b26716684b50dd92f982faf084b70a6d7ce8ad50306c8d40147",
+        "entry_hash": "3da8976eb01e214777f5ff49b42da9c052287abfef143737154be83b340f7be6",
+        "signature": "b18c5829db6c45358a2ab68b6fa9b7d6233d7328976d8a337ff9de13fbfc57e5a450131274f57dc15849fecb17270389a37fc3d46ad9474464527dca72e88502",
+        "signed_at": "2023-11-14T22:13:41Z",
+        "retroactive": false
+      }
+    },
+    {
+      "id": "AMD-2026-0001",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:13:50.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 3,
+        "prev_hash": "3da8976eb01e214777f5ff49b42da9c052287abfef143737154be83b340f7be6",
+        "data_hash": "2e95c9d540bcea5557efd93f67fa44fafa27af19ac85a4f763a7f674993ed030",
+        "entry_hash": "9564c32e2d75e0f27d678c8b8286264af396def3fd43415b61df8a35dee4eaca",
+        "signature": "a19f6641d5e0271d915eb58593c03842b547b1bd07e1845e5421a47c0013916c620af105562a0025d4032efc23bb0cf1c2818430ff16b7115a68f9a1fba48302",
+        "signed_at": "2023-11-14T22:13:51Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "e3e003f1d7e35e250da43e18cbd93e7cb3cd9bfb1abd1309a62958864311999e"
+        },
+        "kind": "revision",
+        "note": {
+          "commitment": "fb9d886af0486ca92ee54593cb6ece4e65830ebba06ad6c9389db7ee28973b45"
+        },
+        "revision": {
+          "patch": [
+            {
+              "op": "add",
+              "path": "/inner/summary",
+              "value": {
+                "accepted_by": {
+                  "by": "steward"
+                },
+                "text": "A test; nothing was decided.",
+                "written_by": "lawyer"
+              }
+            }
+          ],
+          "resulting_data_hash": "75741286e11a486db1272a630f09c55b99b701b36fe1016a6313a1d69a122a43"
+        },
+        "target": "TEST-2026-0001",
+        "target_entry_hash": "3da8976eb01e214777f5ff49b42da9c052287abfef143737154be83b340f7be6"
+      },
+      "texts": {
+        "basis": {
+          "salt": "2f611d37912ef859f0d714c63949a92ac378557a161dae455bcc7a5ab0de2024",
+          "text": "Steward's record"
+        },
+        "note": {
+          "salt": "8d023dc35e1a98c28bf98fb5d02e8d3bd9e885683e66e5233fba923698c28776",
+          "text": "the Lawyer's summary, written after the sitting"
+        }
+      }
+    },
+    {
+      "id": "AMD-2026-0002",
+      "entry_type": "amendment",
+      "created_at": "2023-11-14T22:14:00.123456Z",
+      "attestation": {
+        "envelope_version": 1,
+        "chain_seq": 4,
+        "prev_hash": "9564c32e2d75e0f27d678c8b8286264af396def3fd43415b61df8a35dee4eaca",
+        "data_hash": "4e38169f004d1875ed4f829f73e51515705a3b25ec3ccc58da7e783192e1f03e",
+        "entry_hash": "dbdab53926c2d18926a5ab00c0c98805b3ca5c53c0ac337843e86357adf8e623",
+        "signature": "bcabc0d93c2cda11c6aa9a9676b8db584e3e37a5974ca33cf5274282044ddfe12edfb56e3e484d7d214f84c93dce5664a662b800611ade9e3427f781ce28db02",
+        "signed_at": "2023-11-14T22:14:01Z",
+        "retroactive": false
+      },
+      "data": {
+        "agora_governance_amendment": 2,
+        "authority": null,
+        "basis": {
+          "commitment": "d3bed2d20116be56146b409ed90b458efbc7bd21c0bbf967ead0e5c3593e54a4"
+        },
+        "kind": "redaction",
+        "note": {
+          "commitment": "c86d777fba175b3448e63ec96aa591983d6c64da8ec96d87819e9b895f3cf56f"
+        },
+        "redaction": {
+          "fields": [
+            "/inner/attachments/0/content"
+          ],
+          "resulting_data_hash": "75955dc08a62bd7b6b687f8adb88f4a2e0647e9398f2bc5f8a9f4ff162436f4a",
+          "resulting_latest_hash": "f41f38dfc5184142c733849d7ca770ca6d209bd9b9e386431b390fef4df9273c"
+        },
+        "target": "TEST-2026-0001",
+        "target_entry_hash": "3da8976eb01e214777f5ff49b42da9c052287abfef143737154be83b340f7be6"
+      },
+      "texts": {
+        "basis": {
+          "salt": "e215c18702461b43db27841b345a302219eb948d2701be71fc94232c4cdd3096",
+          "text": "GDPR Art. 17(1)(a)"
+        },
+        "note": {
+          "salt": "dad5ff4fc0f682cb57b702c6c010dc6df8bf6de339bba507470a0227a13739f0",
+          "text": "removed on request"
+        }
+      }
+    }
+  ],
+  "contents": {
+    "TEST-2026-0001": {
+      "_blind": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+      "agora_test": 1,
+      "description": "Heard by a rehearsal composition; nothing binds.",
+      "inner": {
+        "attachments": [
+          {
+            "content": "[redacted by AMD-2026-0002]",
+            "name": "provenance.json",
+            "note": "What ran"
+          }
+        ],
+        "category": "Routine",
+        "final_votes": {
+          "artist": "yes",
+          "engineer": "yes",
+          "lawyer": "yes",
+          "philosopher": "yes",
+          "steward": "yes"
+        },
+        "id": "TEST-2026-0001",
+        "landmark": false,
+        "meeting_id": "00000000-0000-4000-8000-0000000000aa",
+        "outcome": "approved",
+        "rounds": [],
+        "title": "A test of the witness toolset",
+        "vote_tally": "5-0"
+      },
+      "inner_type": "council_decision",
+      "post": "00000000-0000-4000-8000-0000000000bb",
+      "title": "A test of the witness toolset"
+    }
+  },
+  "expect": {
+    "ok": true,
+    "head": "AMD-2026-0002",
+    "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    "repudiated": [],
+    "unanchored_keys": [],
+    "keys": [
+      {
+        "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "from_seq": 1,
+        "through_seq": null,
+        "status": "active",
+        "introduced_by": null,
+        "retired_by": null,
+        "certified": false
+      }
+    ],
+    "entries": [
+      {
+        "id": "GOV-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": null,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "TEST-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": true,
+        "revisions": [
+          "AMD-2026-0001"
+        ],
+        "latest_data_hash": "f41f38dfc5184142c733849d7ca770ca6d209bd9b9e386431b390fef4df9273c",
+        "superseded_revisions": [
+          "AMD-2026-0001"
+        ],
+        "repudiated": false,
+        "amended_by": [
+          "AMD-2026-0001",
+          "AMD-2026-0002"
+        ],
+        "texts": null,
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0001",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      },
+      {
+        "id": "AMD-2026-0002",
+        "signature_valid": true,
+        "link_valid": true,
+        "content_matches": true,
+        "retroactive": false,
+        "out_of_order": false,
+        "redacted": false,
+        "repudiated": false,
+        "amended_by": [],
+        "texts": {
+          "basis": "present",
+          "note": "present"
+        },
+        "problem": false
+      }
+    ],
+    "standing": {
+      "TEST-2026-0001": "in_force"
+    }
+  }
+}

@@ -21,7 +21,7 @@ pub const UUID_PATTERN: &str =
 
 /// The `pattern` on a [`GovernanceLogId`].
 pub const GOVERNANCE_LOG_ID_PATTERN: &str =
-    "^(GOV|APP|AMD|KEY|REC|OBL|DATA)-[0-9]{4}-[0-9]{4}$";
+    "^(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}$";
 
 /// The `pattern` on a [`ContentIdPrefix`]: the first eight hex digits of a
 /// post or comment UUID.
@@ -29,7 +29,7 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -1038,8 +1038,8 @@ impl std::fmt::Display for ArchiveContext {
 /// A citation-shaped id was handed to us that isn't one.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "not a governance log id (expected GOV-, APP-, AMD-, KEY-, REC-, OBL- \
-     or DATA-YYYY-NNNN): {0:?}"
+    "not a governance log id (expected GOV-, APP-, AMD-, KEY-, REC-, OBL-, \
+     DATA- or TEST-YYYY-NNNN): {0:?}"
 )]
 pub struct GovernanceLogIdError(pub String);
 
@@ -1065,6 +1065,9 @@ pub enum GovernanceLogPrefix {
     /// A data set: the signed manifest of files in the data repo (0.91).
     /// Four letters, the first series that is not three
     Data,
+    /// A test sitting's record (0.102): what a live test of the Council's
+    /// tools would have decided, wrapped so it binds nothing. Four letters
+    Test,
     /// A series this build does not know, on an id a newer server sent
     /// (0.91). Never parsed from input and not in `ALL`: an old reader
     /// keeps reading the log rather than failing on every line.
@@ -1073,7 +1076,7 @@ pub enum GovernanceLogPrefix {
 
 impl GovernanceLogPrefix {
     /// Every prefix, in the order they were introduced
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Gov,
         Self::App,
         Self::Amd,
@@ -1081,9 +1084,11 @@ impl GovernanceLogPrefix {
         Self::Rec,
         Self::Obl,
         Self::Data,
+        Self::Test,
     ];
 
-    /// The letters, as they appear in an id: three, or four for `DATA`
+    /// The letters, as they appear in an id: three, or four for `DATA` and
+    /// `TEST`
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Gov => "GOV",
@@ -1093,6 +1098,7 @@ impl GovernanceLogPrefix {
             Self::Rec => "REC",
             Self::Obl => "OBL",
             Self::Data => "DATA",
+            Self::Test => "TEST",
             Self::Unknown => "?",
         }
     }
@@ -1116,6 +1122,7 @@ impl std::str::FromStr for GovernanceLogPrefix {
             "REC" => Ok(Self::Rec),
             "OBL" => Ok(Self::Obl),
             "DATA" => Ok(Self::Data),
+            "TEST" => Ok(Self::Test),
             _ => Err(GovernanceLogIdError(s.to_string())),
         }
     }
@@ -1125,7 +1132,8 @@ impl std::str::FromStr for GovernanceLogPrefix {
 /// Council decision or policy change, `APP-2026-0003` for an appeals-court
 /// ruling, `AMD-2026-0001` for an amendment, `KEY-2026-0001` for a signing
 /// key rotation, `REC-2026-0001` for a Steward's record, `OBL-2026-0001`
-/// for an obligation, `DATA-2026-0001` for a data set. See
+/// for an obligation, `DATA-2026-0001` for a data set, `TEST-2026-0001`
+/// for a test sitting's record, which binds nothing. See
 /// [`GovernanceLogPrefix`].
 ///
 /// This is "an id someone handed us" in the same sense as [`ContentId`]: it
@@ -1160,7 +1168,7 @@ impl GovernanceLogId {
     }
 
     /// `true` when `s` matches the citation grammar
-    /// `(GOV|APP|AMD|KEY|REC|OBL|DATA)-YYYY-NNNN`.
+    /// `(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-YYYY-NNNN`.
     ///
     /// Ported from `agora_common::precedents::is_citation_shaped`, which is
     /// what decides whether a token scraped out of an agent's prose is a
@@ -1311,8 +1319,10 @@ impl schemars::JsonSchema for GovernanceLogId {
                             entry), \"KEY-2026-0001\" (signing key \
                             rotation), \"REC-2026-0001\" (a Steward's \
                             record of an operational act), \
-                            \"OBL-2026-0001\" (an obligation) or \
-                            \"DATA-2026-0001\" (a data set).",
+                            \"OBL-2026-0001\" (an obligation), \
+                            \"DATA-2026-0001\" (a data set) or \
+                            \"TEST-2026-0001\" (a test sitting's record; \
+                            not binding).",
         })
     }
 }
@@ -2221,9 +2231,9 @@ impl ContentRefError {
     /// next proposal's text, inside the `id` argument).
     pub fn leading_ref(&self) -> Option<ContentRef> {
         const UUID_LEN: usize = 36;
-        // `DATA-` is a letter longer than the rest. The longer first: cut
-        // at 13, "DATA-2026-0001…" is "DATA-2026-000", which a lenient
-        // parse pads to DATA-2026-0000.
+        // `DATA-` and `TEST-` are a letter longer than the rest. The longer
+        // first: cut at 13, "DATA-2026-0001…" is "DATA-2026-000", which a
+        // lenient parse pads to DATA-2026-0000.
         const CITATION_LENS: [usize; 2] =
             ["DATA-2026-0001".len(), "GOV-2026-0006".len()];
         let s = self.0.trim_start();
@@ -2586,6 +2596,8 @@ mod tests {
                 "DATA-2026-0001",
             ),
             ("DATA-2026-0012, index.md".to_string(), "DATA-2026-0012"),
+            // TEST is four letters too (0.102)
+            ("TEST-2026-0001 (the dry run)".to_string(), "TEST-2026-0001"),
             ("OBL-2026-0001 and more".to_string(), "OBL-2026-0001"),
             ("protocol, section 3".to_string(), "protocol"),
             ("prompts, please".to_string(), "prompts"),
@@ -2638,6 +2650,8 @@ mod tests {
             ("DATA.2026.12", "DATA-2026-0012"),
             (" Data/2026/0001 ", "DATA-2026-0001"),
             ("DATA 2026 7", "DATA-2026-0007"),
+            ("test-2026-3", "TEST-2026-0003"),
+            ("Test.2026.12", "TEST-2026-0012"),
         ] {
             let id: GovernanceLogId = written.parse().unwrap();
             assert_eq!(id.as_str(), canonical, "{written}");
@@ -2809,6 +2823,10 @@ mod tests {
         assert_eq!(
             "DATA-2026-0001".parse::<ContentRef>().unwrap(),
             ContentRef::Governance("DATA-2026-0001".parse().unwrap())
+        );
+        assert_eq!(
+            "TEST-2026-0001".parse::<ContentRef>().unwrap(),
+            ContentRef::Governance("TEST-2026-0001".parse().unwrap())
         );
     }
 
@@ -3072,6 +3090,7 @@ mod tests {
             ("REC-2026-0001", GovernanceLogPrefix::Rec),
             ("OBL-2026-0001", GovernanceLogPrefix::Obl),
             ("DATA-2026-0001", GovernanceLogPrefix::Data),
+            ("TEST-2026-0001", GovernanceLogPrefix::Test),
             ("GOV-1999-0000", GovernanceLogPrefix::Gov),
         ] {
             let id = good.parse::<GovernanceLogId>().unwrap();
@@ -3106,9 +3125,13 @@ mod tests {
             GovernanceLogId::from_parts(GovernanceLogPrefix::Unknown, 2026, 1),
             None
         );
-        // Every prefix but DATA is three letters; nothing else assumes it.
+        // Every prefix but DATA and TEST is three letters; nothing else
+        // assumes it.
         for prefix in GovernanceLogPrefix::ALL {
-            let want = if prefix == GovernanceLogPrefix::Data {
+            let want = if matches!(
+                prefix,
+                GovernanceLogPrefix::Data | GovernanceLogPrefix::Test
+            ) {
                 4
             } else {
                 3
@@ -3144,6 +3167,9 @@ mod tests {
             "DATAS-2026-0001",
             "DATA-2026-00001",
             "DATA-2026",
+            "TES-2026-0001",
+            "TESTS-2026-0001",
+            "TEST-2026-00001",
             "3f1a0000-0000-0000-0000-000000000000",
         ] {
             assert!(

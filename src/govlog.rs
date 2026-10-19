@@ -57,6 +57,11 @@
 //! in a git repository: a commit, and every file's size and SHA-256. No
 //! verifier reads it; a server checks each file against it before serving.
 //!
+//! A sixth, a [`TestEntry`] (`TEST-`), is what a test sitting would have
+//! decided, wrapped so it binds nothing: the inner entry's type and data
+//! beside a title, a description and the test proposal's post. No verifier
+//! reads it; readers label it [`TEST_LABEL`] wherever it appears.
+//!
 //! The envelope itself is unchanged by any of this: `ENVELOPE_VERSION` is
 //! still 1 and what it does and does not cover is exactly as above.
 
@@ -88,7 +93,7 @@ pub use council::{
     SeatVote, SeatVotes, Statement, StewardEmergency, StewardRecusal,
     StewardVote, SummaryAcceptance, SummaryAuthorship, Testimony, Unanswered,
     Unheard, Vote, Votes, Witness, WitnessQuestion, WitnessSource,
-    served_summary, testimony_attachment_name,
+    served_summary, test_labelled, testimony_attachment_name,
 };
 
 mod redactable;
@@ -114,6 +119,12 @@ pub use data_set::{
     DATA_SET_VERSION, DataFile, DataFileMismatch, DataFilePath,
     DataFilePathError, DataSet, DataSetLookupError, DataSetLookupFailure,
     DataSetTarget, MAX_DATA_FILE_BYTES,
+};
+
+mod test_entry;
+pub use test_entry::{
+    TEST_ENTRY_VERSION, TEST_INNER_POINTER, TEST_LABEL, TEST_MACHINE_FIELDS,
+    TestEntry, TestEntryError, decision_data, decision_type,
 };
 
 mod record;
@@ -2678,6 +2689,7 @@ fn reserved_prefix(
         GovernanceLogEntryType::StewardRecord => Some(GovernanceLogPrefix::Rec),
         GovernanceLogEntryType::Obligation => Some(GovernanceLogPrefix::Obl),
         GovernanceLogEntryType::DataSet => Some(GovernanceLogPrefix::Data),
+        GovernanceLogEntryType::Test => Some(GovernanceLogPrefix::Test),
         GovernanceLogEntryType::CouncilDecision
         | GovernanceLogEntryType::AppealsCourtDecision
         | GovernanceLogEntryType::EmergencyAction
@@ -2695,6 +2707,7 @@ fn reserved_for(prefix: GovernanceLogPrefix) -> Option<GovernanceLogEntryType> {
         GovernanceLogPrefix::Rec => Some(GovernanceLogEntryType::StewardRecord),
         GovernanceLogPrefix::Obl => Some(GovernanceLogEntryType::Obligation),
         GovernanceLogPrefix::Data => Some(GovernanceLogEntryType::DataSet),
+        GovernanceLogPrefix::Test => Some(GovernanceLogEntryType::Test),
         GovernanceLogPrefix::Gov
         | GovernanceLogPrefix::App
         | GovernanceLogPrefix::Unknown => None,
@@ -3414,6 +3427,10 @@ mod tests {
 
     pub(super) fn data_id(n: u32) -> GovernanceLogId {
         format!("DATA-2026-{n:04}").parse().unwrap()
+    }
+
+    pub(super) fn test_id(n: u32) -> GovernanceLogId {
+        format!("TEST-2026-{n:04}").parse().unwrap()
     }
 
     pub(super) fn at(secs: i64) -> DateTime<Utc> {
