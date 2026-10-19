@@ -3222,11 +3222,11 @@ impl CouncilMeetingResponse {
     }
 
     /// One line for this sitting: when it sat, how it ended, and each
-    /// decision's id, title and summary size; then, for a sitting from
-    /// before decisions carried their own summaries, the meeting's
-    /// summary, which is readable nowhere else. Each summary is given once
-    /// at most (beta round 3: `limit=3` was about 25k characters as JSON,
-    /// every summary twice)
+    /// decision's id, title and summary size; under it each decision's
+    /// summary as its record serves it (Protocol § 6.2), and, for a
+    /// sitting from before decisions carried their own summaries, the
+    /// meeting's own, which is readable nowhere else. Each summary is given
+    /// once (beta round 3: the JSON gave every one twice)
     pub fn render_line(&self) -> String {
         let mut line = format!(
             "- {}, {}",
@@ -3282,6 +3282,16 @@ impl CouncilMeetingResponse {
             }
         }
         line.push('\n');
+        // Each decision's summary, as its record serves it, once
+        // (Governance Protocol § 6.2: the tool lists them)
+        for d in &self.decision_summaries {
+            if let Some(text) = d.summary.as_deref().map(str::trim)
+                && !text.is_empty()
+            {
+                line.push_str(&format!("  {}'s summary:\n", d.id));
+                quote(&mut line, text);
+            }
+        }
         match self.summary.as_deref().map(str::trim) {
             Some(text) if !text.is_empty() && !self.summary_is_composed() => {
                 line.push_str(&format!(
@@ -3289,11 +3299,7 @@ impl CouncilMeetingResponse {
                      decision carried one; the records are authoritative:\n",
                     size_in_words(text.len() as u64)
                 ));
-                for l in text.lines() {
-                    line.push_str("  > ");
-                    line.push_str(l);
-                    line.push('\n');
-                }
+                quote(&mut line, text);
             }
             _ => {}
         }
@@ -3321,12 +3327,19 @@ impl CouncilMeetingResponse {
             out.push_str(&m.render_line());
         }
         out.push_str(
-            "\nRead a decision's summary with get_content(id, \
-             detail=\"summary\"), or its whole record with get_content(id). \
-             Where a summary and a record differ, the record is \
-             authoritative.\n",
+            "\nRead a decision's whole record with get_content(id). Where a \
+             summary and a record differ, the record is authoritative.\n",
         );
         out
+    }
+}
+
+/// `text` quoted under a sitting's line, each line as "  > …"
+fn quote(out: &mut String, text: &str) {
+    for l in text.lines() {
+        out.push_str("  > ");
+        out.push_str(l);
+        out.push('\n');
     }
 }
 
@@ -4406,7 +4419,7 @@ mod tests {
         use crate::govlog::{CouncilSeat, SummaryAcceptance};
         use chrono::TimeZone;
         let at = |d| Utc.with_ymd_and_hms(2026, 10, d, 7, 46, 0).unwrap();
-        let signed = "Approved 4-1. ".repeat(500);
+        let signed = "Approved 4-1.".to_string();
         let composed = CouncilMeetingResponse {
             id: CouncilMeetingId::new(),
             started_at: at(18),
@@ -4473,27 +4486,52 @@ mod tests {
             "limit 60 is over 50; showing up to 50.\n\n\
              ## Council sittings — 3, newest first\n\n\
              - 2026-10-18 07:46 UTC, adjourned: GOV-2026-0017 \"Motion: \
-             Publish Quarterly Data\" (summary 7000 bytes, written by the \
+             Publish Quarterly Data\" (summary 13 bytes, written by the \
              Lawyer, accepted by the Steward)\n\
+             \x20 GOV-2026-0017's summary:\n\
+             \x20 > Approved 4-1.\n\
              - 2026-10-17 07:46 UTC, cancelled (TEST: a test sitting; not \
              binding): no decisions\n\
              - 2026-10-11 07:46 UTC, adjourned: GOV-2026-0013 \"Next \
              sitting\" (summary 10 bytes, written by the Lawyer, accepted by \
              the Steward); GOV-2026-0012 (its record could not be read)\n\
+             \x20 GOV-2026-0013's summary:\n\
+             \x20 > Scheduled.\n\
              \x20 The sitting's own summary (34 bytes), from before each \
              decision carried one; the records are authoritative:\n\
              \x20 > The Lawyer's account.\n\
              \x20 > Second line.\n\
-             \nRead a decision's summary with get_content(id, \
-             detail=\"summary\"), or its whole record with get_content(id). \
-             Where a summary and a record differ, the record is \
-             authoritative.\n"
+             \nRead a decision's whole record with get_content(id). Where a \
+             summary and a record differ, the record is authoritative.\n"
         );
-        assert_eq!(out.matches("Approved 4-1.").count(), 0, "{out}");
+        // Each summary once: the composed meeting summary repeats it
+        assert_eq!(out.matches("Approved 4-1.").count(), 1, "{out}");
         assert_eq!(
             CouncilMeetingResponse::render_list(&[], None),
             "No Council sittings have been recorded yet."
         );
+    }
+
+    /// The text size of a `get_council_meetings` page, from a saved REST
+    /// answer: `MEETINGS_JSON=<file> cargo test --all-features
+    /// measure_meetings_text -- --ignored --nocapture`
+    #[test]
+    #[ignore = "reads a file; run by hand to measure"]
+    fn measure_meetings_text() {
+        let path = std::env::var("MEETINGS_JSON").expect("MEETINGS_JSON");
+        let json = std::fs::read_to_string(path).unwrap();
+        let meetings: Vec<CouncilMeetingResponse> =
+            serde_json::from_str(&json).unwrap();
+        for n in [3, 10, meetings.len()] {
+            let page = &meetings[..n.min(meetings.len())];
+            println!(
+                "limit={n}: json {} chars, text {} chars",
+                serde_json::to_string(page).unwrap().chars().count(),
+                CouncilMeetingResponse::render_list(page, None)
+                    .chars()
+                    .count()
+            );
+        }
     }
 
     #[test]
