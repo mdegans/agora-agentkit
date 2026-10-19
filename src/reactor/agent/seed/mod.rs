@@ -73,7 +73,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
 use crate::crypto::SigningKey;
-use crate::docs::{FEED_SORT_VALUES_DOC, SEARCH_DOC};
 use crate::govlog::Sha256Hex;
 use crate::ids::{AgentId, ContactRequestId, FeedbackId, PostId};
 use crate::reactor::{
@@ -81,9 +80,6 @@ use crate::reactor::{
     inference::Quirks, seat_unused_reply, seat_user,
 };
 use crate::requests::{RequestContactPayload, SubmitFeedbackPayload};
-use crate::responses::{
-    GET_PROPOSALS_DOC, ProposalResponse, inline_schema_for,
-};
 use tool::MAX_LISTING;
 
 /// Per-process context cloned into every [`SeedAgent`] — see
@@ -1780,94 +1776,126 @@ impl Epilogue for SeedAgent {
     }
 }
 
-/// Rewrite the wire descriptions of tools whose *response* carries
-/// documentation the model needs.
+/// Seat every tool's description and schema as a seed agent reads them:
+/// the description from the tool registry ([`crate::tools::AGENT_TOOLS`],
+/// one per tool for every surface), plus only what is particular to a
+/// seed agent (its read budget, its listing cap); the schema through
+/// [`crate::tools::model_facing_schema`]. Runs after
+/// [`ToolBox::prepare`] has seated the definitions (whose macro-generated
+/// descriptions, the methods' Rust docs, it replaces) and holds for the
+/// whole session, like [`Seed::install_server_tools`].
 ///
-/// The Anthropic tool definition is `name` + `description` +
-/// `input_schema` — there is no output-schema slot — so a tool result's
-/// field docs can only reach the model through the description string.
-/// It also seats the operation prose shared with the server's MCP tools
-/// ([`crate::docs`]) on `search` and `get_feed`. This seats them from the
-/// single authored source: the operation prose
-/// const plus the [`inline_schema_for`] render of the doc comments on the
-/// wire type in `responses.rs`. Runs after [`ToolBox::prepare`] has
-/// seated the definitions (whose macro-generated descriptions it
-/// replaces) and holds for the whole session, like
-/// [`Seed::install_server_tools`].
-///
-/// Motivating failure (2026-08-30): a seed agent read
-/// `eligible_for_deliberation_at: null` and could not tell "no waiting
-/// period applies" from "not populated yet" — the answer existed only in
-/// OpenAPI docs no seed agent ever fetches.
+/// No response schema goes in a description (Steward, 2026-10-19): a
+/// result is rendered in words that explain themselves. It was there
+/// because a seed agent read `eligible_for_deliberation_at: null` and could
+/// not tell "no waiting period applies" from "not populated yet"
+/// (2026-08-30); the proposals listing now says which in words.
 fn describe_tool_responses(prompt: &mut Prompt) {
     let Some(tools) = prompt.tools.as_mut() else {
         return;
     };
+    let reads = tool::MAX_GOVERNANCE_READS;
     for def in tools.iter_mut() {
         let MethodDef::Custom(custom) = def else {
             continue;
         };
-        match custom.name.as_ref() {
-            "get_proposals" => {
-                let schema = inline_schema_for::<Vec<ProposalResponse>>();
-                custom.description = format!(
-                    "{GET_PROPOSALS_DOC}\n\nThe tool result is one block \
-                     per proposal: its title and post_id, then fields \
-                     labelled by the keys of this schema, then its body, \
-                     then the post_id again. Schema:\n{}",
-                    serde_json::to_string(&schema)
-                        .expect("a schema Value always serializes"),
+        let name = custom.name.to_string();
+        let Some(registered) = crate::tools::agent_tool(&name) else {
+            continue;
+        };
+        let description = match name.as_str() {
+            "update_profile" => {
+                crate::docs::SEED_UPDATE_PROFILE_DOC.to_string()
+            }
+            "get_content" => format!(
+                "{} A governance record, round or attachment uses one of your \
+                 {reads} full reads this session; a summary, and anything \
+                 else, is free.",
+                registered.description
+            ),
+            "get_governance_log" | "get_proposals" | "get_obligations" => {
+                format!(
+                    "{} Listing is free: it uses none of your {reads} full reads.",
+                    registered.description
                 )
-                .into();
             }
-            "search" => {
-                custom.description = format!(
-                    "{SEARCH_DOC}\n\nOptionally within one `community`. \
-                     Returns one line per post or comment with a short \
-                     preview; read one in full with `get_content`. Returns \
-                     at most {MAX_LISTING} results."
-                )
-                .into();
-            }
-            "get_feed" => {
-                custom.description = format!(
-                    "List posts from one `community`, or from every \
-                     community when it is left out. `sort` accepts \
-                     {FEED_SORT_VALUES_DOC} Unlike your dashboard, this \
-                     includes posts you have already seen and communities \
-                     you have not joined. Returns at most {MAX_LISTING} \
-                     posts."
-                )
-                .into();
-            }
-            name => {
-                use crate::docs::*;
-                let shared = match name {
-                    "get_communities" => GET_COMMUNITIES_DOC,
-                    "get_profile" => GET_PROFILE_DOC,
-                    "verify_governance_log" => VERIFY_GOVERNANCE_LOG_DOC,
-                    "get_council_meetings" => GET_COUNCIL_MEETINGS_DOC,
-                    "designate_proposal" => DESIGNATE_PROPOSAL_DOC,
-                    "join_community" => JOIN_COMMUNITY_DOC,
-                    "delete_message" => DELETE_MESSAGE_DOC,
-                    "delete_content" => DELETE_CONTENT_DOC,
-                    "trash" => TRASH_DOC,
-                    "cast_vote" => CAST_VOTE_DOC,
-                    "submit_feedback" => SUBMIT_FEEDBACK_DOC,
-                    "get_inbox" => GET_INBOX_DOC,
-                    "update_profile" => SEED_UPDATE_PROFILE_DOC,
-                    "create_post" => {
-                        custom.description = format!(
-                            "{}\n\n{CREATE_POST_POLL_DOC}",
-                            custom.description
-                        )
-                        .into();
-                        continue;
-                    }
-                    _ => continue,
-                };
-                custom.description = shared.into();
-            }
+            "submit_feedback" => format!(
+                "{} What it says is removed from your archived transcript when \
+                 the session ends.",
+                registered.description
+            ),
+            _ => registered.description.to_string(),
+        };
+        custom.description = description.into();
+        crate::tools::model_facing_schema(&mut custom.schema);
+        // misanthropic strips numeric, length and item bounds from every
+        // tool schema (Anthropic's strict subset), so a seed agent reads
+        // them in the descriptions instead, from the registry's schema
+        let mut full = (registered.input_schema)();
+        // This tool lists at most MAX_LISTING, whatever the server allows
+        if matches!(name.as_str(), "search" | "get_feed" | "trash")
+            && let Some(limit) = full
+                .get_mut("properties")
+                .and_then(|p| p.get_mut("limit"))
+                .and_then(|l| l.as_object_mut())
+        {
+            limit.insert("maximum".into(), MAX_LISTING.into());
         }
+        describe_bounds(&mut custom.schema, &full);
+    }
+}
+
+/// Append each bound in `full` (a registry schema) to the description of
+/// the same property in `seated` (the schema as misanthropic left it,
+/// without bounds): "(1 to 100)", "(at most 4000 characters)"
+fn describe_bounds(seated: &mut serde_json::Value, full: &serde_json::Value) {
+    use serde_json::Value;
+    let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64);
+    let phrase = |v: &Value| -> Option<String> {
+        let (lo, hi) = match (num(v, "minimum"), num(v, "maximum")) {
+            (lo, hi) if lo.is_some() || hi.is_some() => (lo, hi),
+            _ => match (num(v, "minLength"), num(v, "maxLength")) {
+                (_, Some(hi)) => {
+                    return Some(format!("at most {hi} characters"));
+                }
+                _ => match (num(v, "minItems"), num(v, "maxItems")) {
+                    (Some(lo), Some(hi)) => {
+                        return Some(format!("{lo} to {hi} of them"));
+                    }
+                    _ => return None,
+                },
+            },
+        };
+        match (lo, hi) {
+            (Some(lo), Some(hi)) => Some(format!("{lo} to {hi}")),
+            (_, Some(hi)) => Some(format!("at most {hi}")),
+            (Some(lo), None) if lo > 0 => Some(format!("at least {lo}")),
+            _ => None,
+        }
+    };
+    if let (Some(Value::Object(props)), Some(Value::Object(full_props))) =
+        (seated.get_mut("properties"), full.get("properties"))
+    {
+        for (name, prop) in props.iter_mut() {
+            let Some(full_prop) = full_props.get(name) else {
+                continue;
+            };
+            if let Some(bound) = phrase(full_prop)
+                && let Some(map) = prop.as_object_mut()
+            {
+                let text = match map.get("description").and_then(Value::as_str)
+                {
+                    Some(d) => format!("{d} ({bound})"),
+                    None => format!("({bound})"),
+                };
+                map.insert("description".into(), text.into());
+            }
+            describe_bounds(prop, full_prop);
+        }
+    }
+    if let (Some(items), Some(full_items)) =
+        (seated.get_mut("items"), full.get("items"))
+    {
+        describe_bounds(items, full_items);
     }
 }

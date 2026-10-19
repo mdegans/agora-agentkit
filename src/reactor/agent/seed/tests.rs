@@ -374,13 +374,12 @@ async fn get_proposals_description_documents_the_response() {
 
     use crate::responses::GET_PROPOSALS_DOC;
     assert!(desc.starts_with(GET_PROPOSALS_DOC), "{desc}");
-    assert!(desc.contains("eligible_for_deliberation_at"), "{desc}");
-    assert!(desc.contains("`null`"), "{desc}");
-    // The renderer never shows a tally, so the schema must not document
-    // one (Steward 2026-10-03, precedent agora#278).
-    assert!(!desc.contains("\"score\""), "{desc}");
-    assert!(!desc.contains("$ref"), "{desc}");
-    assert!(!desc.contains("$defs"), "{desc}");
+    // No response schema in a description (Steward, 2026-10-19): the
+    // listing says in words what its fields used to (see
+    // `get_proposals_renders_blocks_with_the_id_on_both_ends`)
+    assert!(!desc.contains("Schema"), "{desc}");
+    assert!(!desc.contains("eligible_for_deliberation_at"), "{desc}");
+    assert!(desc.len() < 500, "{desc}");
 }
 
 /// Every id parameter a seed agent can fill carries its `pattern`, inline:
@@ -554,7 +553,11 @@ async fn get_proposals_renders_blocks_with_the_id_on_both_ends() {
         after.contains(&format!("[end of post_id: {safe_space}]")),
         "{t}"
     );
-    assert!(t.contains("eligible_for_deliberation_at: null"), "{t}");
+    // In words, where a null field used to need a schema to read
+    assert!(
+        t.contains("no waiting period: the Council may take it up now"),
+        "{t}"
+    );
     assert!(!t.contains("score"), "{t}");
 }
 
@@ -3287,10 +3290,13 @@ async fn cast_vote_looks_up_an_unseen_short_id() {
 
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
-    let input = crate::requests::CastVoteInput {
-        target: short(post_id).to_uppercase().parse().unwrap(),
-        value: crate::requests::VoteValue::Down,
-    };
+    let input = crate::requests::CastVoteInput::new(
+        short(post_id)
+            .to_uppercase()
+            .parse::<crate::ids::ContentTarget>()
+            .unwrap(),
+        crate::requests::VoteValue::Down,
+    );
     agent
         .handle(tool_use_message(
             "cast_vote",
@@ -4292,16 +4298,26 @@ async fn cast_vote_is_strict_and_its_schema_keeps_the_strict_rules() {
         vote.schema
     );
     let post = find("create_post");
-    assert!(
-        post.description
-            .ends_with(crate::docs::CREATE_POST_POLL_DOC)
-    );
+    assert_eq!(post.description, crate::docs::CREATE_POST_DOC);
     assert_ne!(post.strict, Some(true), "create_post is not strict (yet)");
+    // Not strict, so the poll carries its bounds; never a `$ref` or a
+    // `pattern`, and one object, not one per mode (0.106)
+    let poll = &post.schema["properties"]["poll"];
+    let rendered = poll.to_string();
+    assert!(!rendered.contains("$ref") && !rendered.contains("pattern"));
+    assert!(poll.get("anyOf").is_none(), "{poll}");
     assert_eq!(
-        crate::tools::strict_schema_violations(
-            &post.schema["properties"]["poll"]
-        ),
-        Vec::<String>::new()
+        poll["properties"]["mode"]["enum"],
+        serde_json::json!(["ranked", "approval", "single"])
+    );
+    // misanthropic strips bounds from every tool schema, so a seed agent
+    // reads them in the description
+    assert!(
+        poll["properties"]["options"]["description"]
+            .as_str()
+            .unwrap()
+            .ends_with("(2 to 100 of them)"),
+        "{poll}"
     );
 }
 
@@ -4430,7 +4446,11 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
             _ => None,
         })
         .expect("submit_feedback is installed");
-    assert_eq!(tool.description, crate::docs::SUBMIT_FEEDBACK_DOC);
+    assert!(
+        tool.description
+            .starts_with(crate::docs::SUBMIT_FEEDBACK_DOC)
+    );
+    assert!(tool.description.contains("archived transcript"));
     let inbox = agent
         .prompt()
         .tools
@@ -4477,11 +4497,15 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
 }
 
 #[test]
-fn docs_name_the_feedback_limit() {
-    assert!(
-        crate::docs::SUBMIT_FEEDBACK_DOC
-            .contains(&crate::requests::FEEDBACK_MAX_CHARS.to_string())
+fn the_feedback_schema_states_the_limit() {
+    let schema = crate::tools::tool_input_schema::<
+        crate::requests::SubmitFeedbackPayload,
+    >();
+    assert_eq!(
+        schema["properties"]["body"]["maxLength"],
+        crate::requests::FEEDBACK_MAX_CHARS
     );
+    assert_eq!(schema["properties"]["body"]["minLength"], 1);
 }
 
 /// The agent is told with a round's results when it has one round left, and
@@ -4779,4 +4803,76 @@ async fn a_deleted_own_comment_stops_counting() {
     );
     agent.on_teardown().await.unwrap();
     assert_eq!(agent.state.seen_posts.get(&PostId::from(post_id)), Some(&2));
+}
+
+/// Write the seed agent's tool definitions and system text, as `on_init`
+/// seats them, to `$SEED_TOOLS_DUMP` (a directory): offline, for measuring
+/// what an agent's first request carries. Run with
+/// `SEED_TOOLS_DUMP=<dir> cargo test --all-features dump_seed_tools -- --ignored`.
+#[tokio::test]
+#[ignore = "writes files; run by hand to measure the tool definitions"]
+async fn dump_seed_tools() {
+    let dir = std::path::PathBuf::from(
+        std::env::var("SEED_TOOLS_DUMP")
+            .expect("SEED_TOOLS_DUMP is a directory"),
+    );
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let tools = serde_json::to_string_pretty(&agent.prompt().tools).unwrap();
+    std::fs::write(dir.join("tools.json"), &tools).unwrap();
+    let compact = serde_json::to_string(&agent.prompt().tools).unwrap();
+    std::fs::write(dir.join("tools.min.json"), &compact).unwrap();
+    let system: String = agent
+        .prompt()
+        .system
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|block| match block {
+            Block::Text { text, .. } => text.to_string(),
+            other => panic!("non-text system block: {other:?}"),
+        })
+        .collect();
+    std::fs::write(dir.join("system.txt"), &system).unwrap();
+    let first = agent.prompt().messages.first().unwrap().to_string();
+    std::fs::write(dir.join("first_message.txt"), &first).unwrap();
+}
+
+/// What a seed agent reads of its tools carries no developer text: no
+/// rustdoc links, issue numbers or version tags (Steward, 2026-10-19), in
+/// any description or schema, and each tool's description is the
+/// registry's, in a sentence or two, with no response schema in it
+#[tokio::test]
+async fn seed_tool_definitions_carry_no_developer_text() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    for def in agent.prompt().tools.iter().flatten() {
+        let misanthropic::tool::MethodDef::Custom(c) = def else {
+            continue;
+        };
+        let value = serde_json::to_value(c).unwrap();
+        assert_eq!(
+            crate::tools::developer_text_in(&value, &c.name),
+            Vec::<String>::new(),
+        );
+        let registered = crate::tools::agent_tool(&c.name)
+            .unwrap_or_else(|| panic!("{} is not in the registry", c.name));
+        if c.name != "update_profile" {
+            assert!(
+                c.description.starts_with(registered.description),
+                "{}: {}",
+                c.name,
+                c.description
+            );
+        }
+        assert!(!c.description.contains("schema"), "{}", c.name);
+        assert!(c.description.len() < 600, "{}: {}", c.name, c.description);
+        // The root's type docs are gone; the tool's description says it
+        assert!(c.schema.get("description").is_none(), "{}", c.name);
+        assert!(c.schema.get("title").is_none(), "{}", c.name);
+    }
 }

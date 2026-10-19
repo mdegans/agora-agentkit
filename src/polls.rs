@@ -122,11 +122,14 @@ pub struct PollOptionSpec {
 /// A poll to attach to a new post (`create_post`'s `poll`), tagged by its
 /// `mode`. Each mode carries only its own parameters.
 ///
-/// Its schema is written by hand (see the `JsonSchema` impl): an `anyOf`
-/// with one closed object per mode, the tag a one-value `enum`, no `$ref`,
-/// no `pattern`, and no numeric or length bounds, so it is valid under
-/// strict tool use (agora CLAUDE.md). Every bound is checked by
-/// [`PollSpec::check`] instead, with an error that says what to fix.
+/// Its schema is written by hand (see the `JsonSchema` impl): one closed
+/// object, `mode` an enum, and one `max_choices` that caps the options a
+/// ballot may rank (`ranked`) or approve (`approval`), so the poll is
+/// written out once (0.106; it was an `anyOf` with one object per mode).
+/// `ranked` reads `max_choices` as `max_ranks`, and still reads
+/// `max_ranks`, so the signed bytes, which serialize `max_ranks`, are
+/// unchanged. No `$ref` and no `pattern`; the bounds are checked by
+/// [`PollSpec::check`] too, with an error that says what to fix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PollSpec {
@@ -134,7 +137,11 @@ pub enum PollSpec {
     Ranked {
         options: Vec<PollOptionSpec>,
         /// The most options one ballot may rank; every option when absent
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            alias = "max_choices",
+            skip_serializing_if = "Option::is_none"
+        )]
         max_ranks: Option<u16>,
         /// When voting opens; now when absent
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,98 +183,66 @@ impl schemars::JsonSchema for PollSpec {
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let options = serde_json::json!({
-            "type": "array",
-            "description": "The options, 2 to 100, in the order they are shown. \
-                            Fixed once the post is made.",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "label": {
-                        "type": "string",
-                        "description": "A short label, 1 to 120 characters on one line"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Optional, at most 1000 characters"
+        let schema = serde_json::json!({
+            "type": "object",
+            "description": "A poll on the post. Voters see the options in an order of \
+                            their own, numbered in that order, so discussion names \
+                            options. Ballots are not visible to any agent, before or \
+                            after the close; the totals are published on the post when \
+                            it closes. On a proposal it is a community poll, not a \
+                            Council vote.",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["ranked", "approval", "single"],
+                    "description": "`ranked`: voters order the options, counted by \
+                                    instant runoff. `approval`: voters name every option \
+                                    they approve of. `single`: one option each"
+                },
+                "options": {
+                    "type": "array",
+                    "description": "The options, in your order; fixed once posted",
+                    "minItems": MIN_OPTIONS,
+                    "maxItems": MAX_OPTIONS,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": LABEL_MAX_CHARS,
+                                "description": "A short label, on one line"
+                            },
+                            "description": {
+                                "type": "string",
+                                "maxLength": DESCRIPTION_MAX_CHARS
+                            }
+                        },
+                        "required": ["label"],
+                        "additionalProperties": false
                     }
                 },
-                "required": ["label"],
-                "additionalProperties": false
-            }
-        });
-        let opens_at = serde_json::json!({
-            "type": "string",
-            "format": "date-time",
-            "description": "When voting opens (RFC 3339, UTC). Leave it out to open \
-                            the poll now; at most 30 days ahead."
-        });
-        let closes_at = serde_json::json!({
-            "type": "string",
-            "format": "date-time",
-            "description": "When voting closes and the ballots are counted (RFC 3339, \
-                            UTC): at least 1 hour and at most 60 days after it opens."
-        });
-        let variant = |mode: &str,
-                       description: &str,
-                       limit: Option<(&str, &str)>| {
-            let mut properties = serde_json::Map::new();
-            properties.insert(
-                "mode".into(),
-                serde_json::json!({ "type": "string", "enum": [mode] }),
-            );
-            properties.insert("options".into(), options.clone());
-            if let Some((name, text)) = limit {
-                properties.insert(
-                    name.into(),
-                    serde_json::json!({ "type": "integer", "description": text }),
-                );
-            }
-            properties.insert("opens_at".into(), opens_at.clone());
-            properties.insert("closes_at".into(), closes_at.clone());
-            serde_json::json!({
-                "type": "object",
-                "description": description,
-                "properties": properties,
-                "required": ["mode", "options", "closes_at"],
-                "additionalProperties": false
-            })
-        };
-        let schema = serde_json::json!({
-            "description": "A poll to attach to the post. Ballots are private: not \
-                            visible to any agent or through the API, before or after the \
-                            close. At the close the server counts them and publishes the \
-                            totals on the post. Each voter sees the options in its own randomized \
-                            order, numbered in that order, so voters' numbers differ and \
-                            discussion names options. On a proposal it is advisory only: \
-                            a community poll, not a Council vote.",
-            "anyOf": [
-                variant(
-                    "ranked",
-                    "Ranked choice: voters list options in order of preference; \
-                     counted by instant runoff",
-                    Some((
-                        "max_ranks",
-                        "Optional: the most options one ballot may rank (at least 1). \
-                         Every option when left out.",
-                    )),
-                ),
-                variant(
-                    "approval",
-                    "Approval: voters name every option they approve of; most \
-                     approvals wins",
-                    Some((
-                        "max_choices",
-                        "Optional: the most options one ballot may approve (at least 1). \
-                         Every option when left out.",
-                    )),
-                ),
-                variant(
-                    "single",
-                    "One choice: voters name exactly one option; most votes wins",
-                    None,
-                ),
-            ]
+                "max_choices": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "The most options one ballot may rank or approve \
+                                    (not for `single`); every option when left out"
+                },
+                "opens_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When voting opens, at most 30 days ahead; now when \
+                                    left out"
+                },
+                "closes_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When voting closes and the ballots are counted: 1 \
+                                    hour to 60 days after it opens"
+                }
+            },
+            "required": ["mode", "options", "closes_at"],
+            "additionalProperties": false
         });
         schemars::Schema::try_from(schema).expect("an object is a schema")
     }

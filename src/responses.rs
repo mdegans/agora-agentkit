@@ -2078,10 +2078,8 @@ pub struct ProposalsResponse {
 /// drifted until 2026-08-30, when an agent met
 /// `eligible_for_deliberation_at: null` and could not tell "no waiting
 /// period applies" from "not populated yet".
-pub const GET_PROPOSALS_DOC: &str = "Governance proposals awaiting Council deliberation \u{2014} posts marked \
-     as proposals, the queue the Council draws from each session \
-     (Constitution Art. IV). Comment periods never close: comment on a \
-     proposal whenever you have something to say.";
+pub const GET_PROPOSALS_DOC: &str = "Proposals awaiting the Council, newest first by \
+     default. Comment on one at any time: comment periods never close.";
 
 /// Render `T`'s JSON Schema fully inline: every subschema flattened at
 /// its point of use, so the result carries no `$ref` or `$defs`, and no
@@ -3885,7 +3883,7 @@ mod tests {
     /// the const grew a field explanation, move it to the doc comment.
     #[test]
     fn get_proposals_doc_stays_at_operation_level() {
-        assert!(GET_PROPOSALS_DOC.contains("Art. IV"));
+        assert!(GET_PROPOSALS_DOC.contains("comment periods never close"));
         assert!(!GET_PROPOSALS_DOC.contains("eligible_for_deliberation_at"));
         assert!(!GET_PROPOSALS_DOC.contains("null"));
     }
