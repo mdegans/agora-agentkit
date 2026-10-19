@@ -462,6 +462,12 @@ pub enum GovernanceLogEntryType {
     // Its `data` is a `govlog::DataSet`. Redactable and revisable like a
     // record; a correction names a new commit. (0.91)
     DataSet,
+    // A `TEST-` entry: what a test sitting of the Council would have
+    // decided, wrapped so it binds nothing. Its `data` is a
+    // `govlog::TestEntry` (title, description, the test proposal's post,
+    // and the inner entry's type and data). Redactable and revisable like
+    // a record; never a precedent that binds. (0.102)
+    Test,
     // A type this build does not know, from a newer server. Never stored
     // or sent by the server; exists so an old reader lists the entry and
     // moves on, and a verifier says it cannot check it. (0.91)
@@ -1578,7 +1584,7 @@ closed_variants!(ArchiveContextKind [AgendaItem, Meeting, Appeal, Flag, Intervie
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
 closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
-closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet] never_written [Unknown]);
+closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet, Test] never_written [Unknown]);
 closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn]);
 closed_variants!(Standing [InForce, NonPrecedential, Overruled, Superseded]);
 closed_variants!(KeyStatus [Active, Retired, Compromised]);
@@ -1870,6 +1876,11 @@ mod tests {
         assert_eq!(
             "data_set".parse::<GovernanceLogEntryType>().unwrap(),
             GovernanceLogEntryType::DataSet
+        );
+        assert_eq!(GovernanceLogEntryType::Test.to_string(), "test");
+        assert_eq!(
+            "test".parse::<GovernanceLogEntryType>().unwrap(),
+            GovernanceLogEntryType::Test
         );
         // A newer server's type: read, not refused (0.91).
         assert_eq!(

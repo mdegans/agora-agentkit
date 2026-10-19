@@ -27,7 +27,7 @@ use crate::ids::{CouncilMeetingId, GovernanceLogId, PostId};
 pub use decided::{Decided, FinalRoundError, RecordRuleError};
 pub use summary::{
     DecisionSummary, RECUSED_ACCEPTORS, SUMMARY_POINTER, SUMMARY_WRITER,
-    SummaryAcceptance, SummaryAuthorship, served_summary,
+    SummaryAcceptance, SummaryAuthorship, served_summary, test_labelled,
 };
 pub use votes::{
     BlankStatement, DEFERRING_SEATS, NotASeatChoice, SeatChoice, SeatVote,
@@ -1652,8 +1652,32 @@ mod tests {
                 Some(&latest),
                 clerk.clone()
             ),
-            (clerk, None)
+            (clerk.clone(), None)
         );
+        // A test sitting's record serves its inner decision's summary,
+        // labelled; with none signed, the Clerk's, labelled (0.102)
+        let test = crate::enums::GovernanceLogEntryType::Test;
+        let wrapped = serde_json::json!({
+            "inner_type": "council_decision",
+            "inner": latest,
+        });
+        let (text, by) = served_summary(test, Some(&wrapped), clerk.clone());
+        assert_eq!(
+            text.as_deref(),
+            Some(
+                "**TEST: a test sitting; not binding.**\n\n## Decision\n\n\
+                 Approved 5-0, as corrected."
+            )
+        );
+        assert_eq!(by.unwrap().written_by, CouncilSeat::Lawyer);
+        let (text, by) = served_summary(test, None, clerk.clone());
+        assert_eq!(
+            text.as_deref(),
+            Some(
+                "**TEST: a test sitting; not binding.**\n\nThe Clerk's digest."
+            )
+        );
+        assert_eq!(by, None);
 
         // A revision handing acceptance to the seats breaks the rules,
         // which the writer checks on every revision

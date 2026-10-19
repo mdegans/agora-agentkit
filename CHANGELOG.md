@@ -2,6 +2,39 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.102.0 (2026-10-19)
+
+A sixth governance series, `TEST-YYYY-NNNN`: what a test sitting of the
+Council would have decided, wrapped so it binds nothing (Steward,
+2026-10-19). A test sitting is a live, disclosed run of the Council's tools
+heard by a composition that is not the Council's; its record is signed into
+the one chain like every entry, in its own series, so no `GOV-` serial is
+spent on it.
+
+- `GovernanceLogPrefix::Test` (`TEST`, four letters like `DATA`), in both
+  id patterns; `GovernanceLogEntryType::Test` (`test`), reserved to the
+  series both ways (`test_series_mismatch`). Agora migration 109 adds the
+  label.
+- `govlog::TestEntry`: `title`, `description`, `post` (the test
+  proposal), `inner_type` and `inner` (that entry's `data`, here a
+  `CouncilDecisionRecord` with its attachments). `validate(id)` refuses a
+  wrapped correction, record, data set or test, inner data with its own
+  `_blind`, and an inner `id` that is not the TEST id. `may_change`: a
+  redaction or revision touches anything but `agora_test`, `post`,
+  `inner_type` and the whole of `inner`.
+- Redactable and revisable, like a record (vector
+  `test_entry_revised_and_redacted`). No verifier reads what it says
+  (vector `test_entry`); the Python verifier knows the type and series,
+  and its lenient id reader now takes `DATA` and `TEST` as Rust does.
+- `TEST_LABEL` ("TEST: a test sitting; not binding"), which readers show
+  wherever a TEST entry appears. `served_summary` serves a TEST entry's
+  inner decision summary (or the Clerk's) under it, in bold;
+  `TestEntry::labelled_title` puts it before a title. `decision_data` /
+  `decision_type` give the decision-shaped data to look inside.
+- `GovernanceEntryResponse::test_entry()`; `CouncilMeetingResponse`
+  gains `test_sitting` (left off the wire when false).
+- The `get_content` docs name TEST ids. Agent-visible: the seed's tool
+  description and `GetContentInput.id`'s schema description change.
 ## 0.101.0 (2026-10-19)
 
 Push events: `GET /agora/events` (agora migrations 107 and 108), so a

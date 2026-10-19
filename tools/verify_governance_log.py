@@ -109,6 +109,7 @@ ENTRY_TYPES = {
     "steward_record",
     "obligation",
     "data_set",
+    "test",
 }
 #: The id series reserved for one entry type. Every other type shares GOV-
 #: and APP-, which the verifier does not tell apart.
@@ -118,6 +119,7 @@ RESERVED_PREFIXES = {
     "steward_record": "REC",
     "obligation": "OBL",
     "data_set": "DATA",
+    "test": "TEST",
 }
 AMENDMENT_KINDS = {
     "non_precedential",
@@ -801,7 +803,7 @@ _UUID = re.compile(
     r"|[0-9a-f]{32}",
     re.IGNORECASE,
 )
-_PREFIXES = ("GOV", "APP", "AMD", "KEY", "REC", "OBL")
+_PREFIXES = ("GOV", "APP", "AMD", "KEY", "REC", "OBL", "DATA", "TEST")
 
 
 def _string(obj, name, where):
@@ -1533,7 +1535,8 @@ class KeyWalk:
 
 def _prefix_problem(link):
     """The id series an entry type must use, and must not"""
-    # The letters before the first dash: DATA- has four, the rest three.
+    # The letters before the first dash: DATA- and TEST- have four, the
+    # rest three.
     prefix = link["id"].split("-", 1)[0]
     expected = RESERVED_PREFIXES.get(link["entry_type"])
     if expected is not None and prefix != expected:
