@@ -34,8 +34,8 @@ pub use votes::{
     SeatVotes, Statement, StewardVote, Vote, Votes,
 };
 pub use witness::{
-    Asked, Testimony, Unanswered, Unheard, Witness, WitnessQuestion,
-    WitnessSource, testimony_attachment_name,
+    Asked, BatchedQuestion, Testimony, Unanswered, Unheard, Witness,
+    WitnessBatch, WitnessQuestion, WitnessSource, testimony_attachment_name,
 };
 
 /// The `data` of a `council_decision` entry. See the [module docs](self).

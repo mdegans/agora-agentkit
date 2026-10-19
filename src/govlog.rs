@@ -83,7 +83,7 @@ pub use texts::{
 
 mod council;
 pub use council::{
-    Abstention, AgendaRanking, Asked, Ballot, BlankStatement,
+    Abstention, AgendaRanking, Asked, Ballot, BatchedQuestion, BlankStatement,
     CouncilAttachment, CouncilDecisionRecord, CouncilMember, CouncilRound,
     CouncilSeat, CouncilVote, DEFERRING_SEATS, Decided, DecisionCategory,
     DecisionSummary, FinalRoundError, FinalVotes, NotASeatChoice,
@@ -92,8 +92,8 @@ pub use council::{
     SUMMARY_WRITER, SeatChoice, SeatModels, SeatRanking, SeatResponse,
     SeatVote, SeatVotes, Statement, StewardEmergency, StewardRecusal,
     StewardVote, SummaryAcceptance, SummaryAuthorship, Testimony, Unanswered,
-    Unheard, Vote, Votes, Witness, WitnessQuestion, WitnessSource,
-    served_summary, test_labelled, testimony_attachment_name,
+    Unheard, Vote, Votes, Witness, WitnessBatch, WitnessQuestion,
+    WitnessSource, served_summary, test_labelled, testimony_attachment_name,
 };
 
 mod redactable;

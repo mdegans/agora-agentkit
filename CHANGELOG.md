@@ -2,6 +2,28 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.104.0 (2026-10-19)
+
+The Council's questions to a witness are batched: queued during a round,
+sent to the witness together when it ends as one user turn, and answered
+once (agora, OBL-2026-0028). Records made before still read as they did.
+
+- `ids::WitnessQuestionId`: a question's short id on an item, `q3`,
+  numbered from 1 in the order asked across every witness. Serializes as
+  the string `"q3"`; parsing is lenient on case and whitespace. Its
+  schema is an inline plain string, no `pattern`.
+- `govlog::WitnessBatch` and `BatchedQuestion`: one round's questions to
+  one witness. `render` writes the witness's turn (a heading for the
+  round, then each seat's questions under its name in seat order, every
+  line quoted, each question's last line ending in ` [qN]`); `parse`
+  reads one back exactly, and `get` finds a question by id. A seat's own
+  line that ends like an id is written with a backslash before its `[`.
+- `WitnessQuestion.id` and `Unanswered.id` (optional, omitted when
+  absent): with an id, `Asked::Message(i)` is the batch's turn, shared
+  with the batch's other questions, and the answer at `i + 1` is one
+  reply to all of them. Without one (records before 0.104) the turn is
+  the one question, as before; such records keep their bytes.
+
 ## 0.103.0 (2026-10-19)
 
 Ranged reads of a data set's file, a citation that names a file at a
