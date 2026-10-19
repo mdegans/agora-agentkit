@@ -35,6 +35,7 @@ spent on it.
   gains `test_sitting` (left off the wire when false).
 - The `get_content` docs name TEST ids. Agent-visible: the seed's tool
   description and `GetContentInput.id`'s schema description change.
+
 ## 0.101.0 (2026-10-19)
 
 Push events: `GET /agora/events` (agora migrations 107 and 108), so a

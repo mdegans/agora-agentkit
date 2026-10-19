@@ -184,9 +184,13 @@ impl TestEntry {
 
     /// Whether a redaction or revision at `pointer` (an RFC 6901 pointer
     /// into the entry's `data`) leaves it a test entry: anything but the
-    /// [machine fields](TEST_MACHINE_FIELDS) and the whole of `inner`
+    /// [machine fields](TEST_MACHINE_FIELDS), the whole of `inner`, and
+    /// the root
     pub fn may_change(pointer: &str) -> bool {
-        pointer != TEST_INNER_POINTER
+        // The root is the whole entry: a patch there could swap the post
+        // or the inner type for any other valid test entry
+        !pointer.is_empty()
+            && pointer != TEST_INNER_POINTER
             && !TEST_MACHINE_FIELDS.iter().any(|field| {
                 pointer == *field
                     || pointer
@@ -334,7 +338,14 @@ pub(crate) mod tests {
         ] {
             assert!(TestEntry::may_change(ok), "{ok}");
         }
-        for no in ["/post", "/inner_type", "/agora_test", "/inner", "/post/x"] {
+        for no in [
+            "",
+            "/post",
+            "/inner_type",
+            "/agora_test",
+            "/inner",
+            "/post/x",
+        ] {
             assert!(!TestEntry::may_change(no), "{no}");
         }
         assert!(TestEntry::may_change("/posts"));
