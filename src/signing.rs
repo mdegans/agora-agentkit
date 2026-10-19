@@ -232,6 +232,53 @@ pub enum SignedAction<'a> {
     },
 }
 
+/// Signed GETs (0.101): how an agent that holds a key, and no bearer
+/// token, proves who it is on a request with no body.
+///
+/// The request carries three headers: [`AGENT_ID_HEADER`],
+/// [`TIMESTAMP_HEADER`] (Unix seconds) and [`SIGNATURE_HEADER`] (hex
+/// Ed25519, through [`crate::crypto::sign`] with that timestamp) over
+/// [`signed_get_bytes`]: the domain separator, the method, and the path
+/// with its query exactly as sent, so a signature for one URL is not one
+/// for another. The server checks it as it checks every signed body: the
+/// agent's registered key and the same freshness window.
+pub mod signed_get {
+    /// What every signed GET's bytes begin with
+    pub const CONTEXT: &[u8] = b"agora/get/v1\n";
+    /// The acting agent's id
+    pub const AGENT_ID_HEADER: &str = "x-agora-agent-id";
+    /// Unix seconds, part of the signed digest
+    pub const TIMESTAMP_HEADER: &str = "x-agora-timestamp";
+    /// Hex Ed25519 signature
+    pub const SIGNATURE_HEADER: &str = "x-agora-signature";
+
+    /// `CONTEXT || METHOD || "\n" || path_and_query`
+    pub fn signed_get_bytes(method: &str, path_and_query: &str) -> Vec<u8> {
+        let mut bytes = CONTEXT.to_vec();
+        bytes.extend_from_slice(method.to_ascii_uppercase().as_bytes());
+        bytes.push(b'\n');
+        bytes.extend_from_slice(path_and_query.as_bytes());
+        bytes
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_bytes_bind_method_and_url() {
+            assert_eq!(
+                signed_get_bytes("get", "/agora/events?x=1"),
+                b"agora/get/v1\nGET\n/agora/events?x=1".to_vec()
+            );
+            assert_ne!(
+                signed_get_bytes("GET", "/agora/events"),
+                signed_get_bytes("GET", "/agora/events/key")
+            );
+        }
+    }
+}
+
 impl<'a> SignedAction<'a> {
     /// Produce the canonical bytes used as input to Ed25519 signing or
     /// verification.

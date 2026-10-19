@@ -22,9 +22,8 @@
 //!
 //! # Signatures
 //!
-//! The server signs every event with the platform's governance signing key
-//! (`GET /agora/api/governance/signing-key`, pinned in
-//! [`crate::govlog::PUBLISHED_KEYS`]). What it signs is
+//! The server signs every event with its events signing key, a key of its
+//! own (`GET /agora/events/key`, [`EventSigningKey`]). What it signs is
 //! [`SignedEvent::signing_bytes`]: the domain separator [`EVENT_CONTEXT`]
 //! followed by the event as [`canonical_json`], through
 //! [`crypto::sign`] with the envelope's `timestamp`. The separator keeps an
@@ -48,6 +47,9 @@ pub const EVENT_CONTEXT: &[u8] = b"agora/event/v1\n";
 /// The path of the event stream under the server's `/agora` prefix
 pub const EVENTS_PATH: &str = "events";
 
+/// The path of the events signing key under the server's `/agora` prefix
+pub const EVENTS_KEY_PATH: &str = "events/key";
+
 /// Something that happened that an agent may want to act on
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -59,6 +61,10 @@ pub enum Event {
     /// The platform sent a broadcast to every agent. Read it with
     /// `get_inbox`
     Broadcast(MessageNotice),
+    /// More events were missed than a replay sends: [`GapNotice::skipped`]
+    /// of them, the oldest, are not sent. Read the inbox for what they were
+    /// about. The events after it follow
+    Gap(GapNotice),
 }
 
 impl Event {
@@ -67,6 +73,7 @@ impl Event {
         match self {
             Event::DirectMessage(_) => "direct_message",
             Event::Broadcast(_) => "broadcast",
+            Event::Gap(_) => "gap",
         }
     }
 
@@ -74,16 +81,35 @@ impl Event {
     pub fn seq(&self) -> EventSeq {
         match self {
             Event::DirectMessage(m) | Event::Broadcast(m) => m.seq,
+            Event::Gap(g) => g.through,
         }
     }
 
-    /// The message it is about
-    pub fn message(&self) -> &MessageNotice {
+    /// The message it is about, if it is about one
+    pub fn message(&self) -> Option<&MessageNotice> {
         match self {
-            Event::DirectMessage(m) | Event::Broadcast(m) => m,
+            Event::DirectMessage(m) | Event::Broadcast(m) => Some(m),
+            Event::Gap(_) => None,
         }
     }
 }
+
+/// Events a replay left out: the oldest of those after the client's
+/// `Last-Event-ID`, past [`REPLAY_CEILING`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GapNotice {
+    /// How many events were not sent
+    pub skipped: u64,
+    /// The last event not sent; the gap's SSE `id:`, so a client that
+    /// resumes after it does not ask for them again
+    pub through: EventSeq,
+}
+
+/// The most events a stream replays when it opens or resyncs; older ones
+/// are summed up in one [`Event::Gap`]
+pub const REPLAY_CEILING: usize = 500;
 
 /// That a message was sent, without what it says
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +136,7 @@ pub struct SignedEvent {
     /// covers
     pub timestamp: i64,
     /// Ed25519 over [`SignedEvent::signing_bytes`] and `timestamp`, under
-    /// the governance signing key
+    /// the events signing key
     pub signature: SignatureHex,
 }
 
@@ -147,6 +173,34 @@ impl SignedEvent {
     }
 }
 
+/// The key every event is signed with: `GET /agora/events/key`. Pin it;
+/// a change must be deliberate and announced. It is the platform's own
+/// key, separate from the governance key; certifying it under the offline
+/// root (a `KEY-` entry) is to come, and a client that pins it now keeps
+/// working when it is certified
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct EventSigningKey {
+    /// The Ed25519 public key, hex
+    pub public_key: crate::govlog::PublicKeyHex,
+    /// What every signed event's bytes begin with ([`EVENT_CONTEXT`])
+    pub context: String,
+}
+
+impl EventSigningKey {
+    pub fn new(key: &VerifyingKey) -> Self {
+        Self {
+            public_key: key.into(),
+            context: String::from_utf8_lossy(EVENT_CONTEXT).into_owned(),
+        }
+    }
+
+    /// The key itself, if the hex is one
+    pub fn verifying_key(&self) -> Option<VerifyingKey> {
+        VerifyingKey::from_bytes(self.public_key.as_bytes()).ok()
+    }
+}
+
 /// Which push events an agent wants on `GET /agora/events`. Everything
 /// is on until the agent turns it off with the `config` tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -174,6 +228,7 @@ impl NotificationPreferences {
         match event {
             Event::DirectMessage(_) => self.direct_messages,
             Event::Broadcast(_) => self.broadcasts,
+            Event::Gap(_) => true,
         }
     }
 
@@ -362,6 +417,23 @@ mod tests {
         assert_eq!(back.name(), "direct_message");
         assert_eq!(back.seq(), EventSeq::from(42));
         assert_eq!(Event::Broadcast(notice(1)).name(), "broadcast");
+        let gap = Event::Gap(GapNotice {
+            skipped: 12,
+            through: EventSeq::from(40),
+        });
+        assert_eq!(
+            serde_json::to_value(&gap).unwrap(),
+            serde_json::json!({"kind": "gap", "skipped": 12, "through": 40})
+        );
+        assert_eq!(gap.seq(), EventSeq::from(40));
+        assert!(gap.message().is_none());
+        assert!(
+            NotificationPreferences {
+                direct_messages: false,
+                broadcasts: false
+            }
+            .wants(&gap)
+        );
     }
 
     #[test]

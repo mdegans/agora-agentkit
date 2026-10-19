@@ -686,21 +686,48 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Open `GET /agora/events` with a bearer `token`, resuming after
-    /// `last_event_id` when given (0.101). One connection: when it ends,
+    /// The key events are signed with (`GET /agora/events/key`). Pin it
+    /// and hand it to [`EventSubscription::verifying_with`] (0.101)
+    pub async fn get_events_signing_key(
+        &self,
+    ) -> Result<crate::sse::EventSigningKey, Error> {
+        let url = self.url(crate::sse::EVENTS_KEY_PATH)?;
+        let resp = self.get(url).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Open `GET /agora/events` as `auth`, resuming after `last_event_id`
+    /// when given (0.101). One connection: when it ends,
     /// [`EventStream::next`] returns `None`. [`EventSubscription`]
     /// reconnects and resumes on its own.
     pub async fn events(
         &self,
-        token: &crate::secrets::Secret,
+        auth: &EventAuth,
         last_event_id: Option<crate::ids::EventSeq>,
     ) -> Result<EventStream, Error> {
         let url = self.url(crate::sse::EVENTS_PATH)?;
         let mut req = self
             .http
-            .get(url)
-            .bearer_auth(token.expose())
+            .get(url.clone())
             .header(reqwest::header::ACCEPT, "text/event-stream");
+        req = match auth {
+            EventAuth::Bearer(token) => req.bearer_auth(token.expose()),
+            EventAuth::Signed { agent_id, key } => {
+                use crate::signing::signed_get;
+                let timestamp = chrono::Utc::now().timestamp();
+                let path = match url.query() {
+                    Some(q) => format!("{}?{q}", url.path()),
+                    None => url.path().to_owned(),
+                };
+                let bytes = signed_get::signed_get_bytes("GET", &path);
+                req.header(signed_get::AGENT_ID_HEADER, agent_id.to_string())
+                    .header(signed_get::TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(
+                        signed_get::SIGNATURE_HEADER,
+                        sign_hex(key, &bytes, timestamp),
+                    )
+            }
+        };
         if let Some(id) = last_event_id {
             req = req.header("last-event-id", id.to_string());
         }
@@ -1464,6 +1491,29 @@ impl Client {
     }
 }
 
+/// How a client proves who it is on `GET /agora/events` (0.101)
+#[derive(Clone)]
+pub enum EventAuth {
+    /// An OAuth bearer token
+    Bearer(crate::secrets::Secret),
+    /// The agent's own key: a signed GET, signed afresh on every connect
+    Signed {
+        agent_id: AgentId,
+        key: Box<SigningKey>,
+    },
+}
+
+impl std::fmt::Debug for EventAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventAuth::Bearer(_) => f.write_str("Bearer([REDACTED])"),
+            EventAuth::Signed { agent_id, .. } => {
+                write!(f, "Signed {{ agent_id: {agent_id}, key: [REDACTED] }}")
+            }
+        }
+    }
+}
+
 /// One connection to `GET /agora/events` ([`Client::events`]) (0.101)
 pub struct EventStream {
     resp: reqwest::Response,
@@ -1528,7 +1578,7 @@ impl EventStream {
 /// or repeated across a reconnect (0.101)
 pub struct EventSubscription {
     client: Client,
-    token: crate::secrets::Secret,
+    auth: EventAuth,
     last_event_id: Option<crate::ids::EventSeq>,
     key: Option<crypto::VerifyingKey>,
     stream: Option<EventStream>,
@@ -1539,17 +1589,16 @@ impl EventSubscription {
     /// Longest wait between reconnects
     pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-    /// A subscription for the agent `token` names, starting after
-    /// `last_event_id` (a fresh one, `None`, starts with the agent's
-    /// unread messages)
+    /// A subscription as `auth`, starting after `last_event_id` (a fresh
+    /// one, `None`, starts with the agent's unread messages)
     pub fn new(
         client: Client,
-        token: crate::secrets::Secret,
+        auth: EventAuth,
         last_event_id: Option<crate::ids::EventSeq>,
     ) -> Self {
         Self {
             client,
-            token,
+            auth,
             last_event_id,
             key: None,
             stream: None,
@@ -1557,8 +1606,10 @@ impl EventSubscription {
         }
     }
 
-    /// Refuse events `key` did not sign: pin the governance signing key
-    /// (see [`crate::govlog::PUBLISHED_KEYS`])
+    /// Refuse events `key` did not sign: the events signing key, pinned
+    /// from [`Client::get_events_signing_key`] or configured. A key the
+    /// offline root certifies later is the same key, so a pin taken now
+    /// keeps working
     pub fn verifying_with(mut self, key: crypto::VerifyingKey) -> Self {
         self.key = Some(key);
         self
@@ -1584,8 +1635,7 @@ impl EventSubscription {
                             .min(Self::MAX_BACKOFF);
                     tokio::time::sleep(backoff).await;
                 }
-                match self.client.events(&self.token, self.last_event_id).await
-                {
+                match self.client.events(&self.auth, self.last_event_id).await {
                     Ok(stream) => self.stream = Some(stream),
                     Err(e) if retryable(&e) => {
                         tracing::warn!(error = %e, "event stream: connect failed, retrying");
@@ -2176,7 +2226,7 @@ mod tests {
 
         let mut sub = EventSubscription::new(
             client(&server),
-            crate::secrets::Secret::new("tok".into()),
+            EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
             None,
         )
         .verifying_with(public);
@@ -2193,6 +2243,63 @@ mod tests {
         resumed.assert_async().await;
     }
 
+    /// The signed form sends the three headers, and the signature covers
+    /// the method and the path it was sent to
+    #[tokio::test]
+    async fn a_signed_events_request_carries_a_verifiable_signature() {
+        use crate::signing::signed_get;
+        let server = MockServer::start_async().await;
+        let (key, public) = generate_keypair();
+        let agent_id = AgentId::new();
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/agora/events")
+                    .header(signed_get::AGENT_ID_HEADER, agent_id.to_string())
+                    .header_missing("authorization")
+                    .is_true(move |req| {
+                        let headers = req.headers();
+                        let get = |name: &str| {
+                            headers.get(name)?.to_str().ok().map(str::to_owned)
+                        };
+                        let (Some(ts), Some(sig)) = (
+                            get(signed_get::TIMESTAMP_HEADER),
+                            get(signed_get::SIGNATURE_HEADER),
+                        ) else {
+                            return false;
+                        };
+                        let (Ok(ts), Ok(sig)) =
+                            (ts.parse::<i64>(), hex::decode(sig))
+                        else {
+                            return false;
+                        };
+                        let Ok(sig) = crypto::Signature::from_slice(&sig)
+                        else {
+                            return false;
+                        };
+                        verify(
+                            &public,
+                            &signed_get::signed_get_bytes(
+                                "GET",
+                                "/agora/events",
+                            ),
+                            ts,
+                            &sig,
+                        )
+                    });
+                then.status(200).body("");
+            })
+            .await;
+        let auth = EventAuth::Signed {
+            agent_id,
+            key: Box::new(key),
+        };
+        let mut stream = client(&server).events(&auth, None).await.unwrap();
+        assert!(stream.next().await.is_none());
+        mock.assert_async().await;
+        assert!(format!("{auth:?}").contains("[REDACTED]"));
+    }
+
     #[tokio::test]
     async fn an_event_signed_by_another_key_is_refused() {
         let server = MockServer::start_async().await;
@@ -2207,7 +2314,7 @@ mod tests {
             .await;
         let mut sub = EventSubscription::new(
             client(&server),
-            crate::secrets::Secret::new("tok".into()),
+            EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
             Some(crate::ids::EventSeq::ZERO),
         )
         .verifying_with(pinned);

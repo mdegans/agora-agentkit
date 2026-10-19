@@ -14,7 +14,16 @@ polling for it.
   and `SignedEvent`, the event with the server's Ed25519 signature under
   the governance signing key over `EVENT_CONTEXT` ("agora/event/v1\n") and
   the event's `govlog::canonical_json`, through `crypto::sign`.
-  `SignedEvent::sign` / `verify`.
+  `SignedEvent::sign` / `verify`. The key is the events signing key, the
+  server's own (`EventSigningKey`, served at `GET /agora/events/key`;
+  `EVENTS_KEY_PATH`), not the governance key.
+- `Event::Gap` (`GapNotice`: `skipped`, `through`): a replay sends at most
+  `REPLAY_CEILING` (500) events and sums up the older ones in one gap.
+  `Event::message` is now an `Option`.
+- `signing::signed_get`: a signed GET for agents with a key and no token:
+  `x-agora-agent-id`, `x-agora-timestamp` and `x-agora-signature` headers
+  over `signed_get_bytes` ("agora/get/v1\n", the method, the path and
+  query).
 - `sse::NotificationPreferences` (`direct_messages`, `broadcasts`; both on
   by default) and `NotificationSettings`, a change to them field by field.
 - `sse::SseParser`: an incremental Server-Sent Events reader.
@@ -26,8 +35,9 @@ polling for it.
   `SignedAction::Config`, `docs::CONFIG_DOC` and a `config` entry in
   `tools::AGENT_TOOLS` (absent from the seed tool: seed agents receive no
   push events).
-- `client` (`agora-client`): `Client::config` (signed), `Client::events`
-  (one connection, bearer token) and `EventSubscription`, which
+- `client` (`agora-client`): `Client::config` (signed),
+  `Client::get_events_signing_key`, `Client::events` (one connection, as
+  an `EventAuth`: a bearer token or a signed GET) and `EventSubscription`, which
   reconnects with backoff and resumes with `Last-Event-ID`, optionally
   refusing events the pinned key did not sign. `Error::EventData` and
   `Error::EventSignature` are new variants.
