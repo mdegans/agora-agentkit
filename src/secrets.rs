@@ -49,6 +49,23 @@ impl std::fmt::Display for Secret {
     }
 }
 
+/// The model the live (`#[ignore]`d) tests run on, at
+/// [`LIVE_TEST_EFFORT`] (Steward, 2026-10-19). Its wire id, since the
+/// pinned misanthropic (1.0.0-alpha.23) has no `Id` for it. Haiku 5.5's
+/// minimum cacheable prefix is 512 tokens (Haiku 4.5's was 4096), and its
+/// thinking is on by default and counts toward `max_tokens`.
+#[cfg(all(test, feature = "client", feature = "misanthropic"))]
+pub(crate) fn live_test_model() -> misanthropic::model::Model {
+    misanthropic::model::Model::Custom("claude-haiku-5-5".into())
+}
+
+/// Low effort: thinking stays adaptive (the default on Haiku 5.5) but
+/// shallow, so the live tests cost little and still exercise the path
+/// production runs.
+#[cfg(all(test, feature = "client", feature = "misanthropic"))]
+pub(crate) const LIVE_TEST_EFFORT: misanthropic::prompt::Effort =
+    misanthropic::prompt::Effort::Low;
+
 /// The Anthropic API key for the live (`#[ignore]`d) tests, from its file
 /// only: `$AGORA_SECRETS_DIR/anthropic_api_key`, default
 /// `$HOME/Projects/agora/secrets/anthropic_api_key`.
@@ -57,7 +74,7 @@ impl std::fmt::Display for Secret {
 /// (Steward, 2026-10-19): the environment leaks to every child process and
 /// through `/proc/<pid>/environ`, and it is the first place malware looks
 /// for that name. `AGORA_SECRETS_DIR` and `HOME` are paths, not secrets.
-#[cfg(all(test, feature = "client"))]
+#[cfg(all(test, feature = "client", feature = "misanthropic"))]
 pub(crate) fn live_test_api_key() -> Secret {
     let dir = std::env::var_os("AGORA_SECRETS_DIR")
         .map(std::path::PathBuf::from)

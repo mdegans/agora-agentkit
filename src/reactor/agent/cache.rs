@@ -353,10 +353,10 @@ mod tests {
         assert!(prompt.messages[0].content.has_cache());
     }
 
-    /// Live: two rounds against the real API on Haiku; round 2 must read
-    /// the round-1 write. Haiku's minimum cacheable prefix is 4096 tokens,
-    /// hence the padding. All-5m TTL to keep the writes cheap. Run with:
-    /// `cargo test --features seed live_roll -- --ignored --nocapture`
+    /// Live: two rounds against the real API on Haiku 5.5 at low effort;
+    /// round 2 must read the round-1 write. Haiku 5.5's minimum cacheable
+    /// prefix is 512 tokens, hence the padding. All-5m TTL to keep the
+    /// writes cheap. Run with `just live-test`.
     #[cfg(feature = "client")]
     #[tokio::test]
     #[ignore = "hits the live Anthropic API (cents, not dollars)"]
@@ -365,8 +365,9 @@ mod tests {
         let key = crate::secrets::live_test_api_key().expose().to_owned();
         let client = misanthropic::Client::new(key).expect("client");
 
-        // ~6k tokens of unique-ish padding, past Haiku's 4096 minimum.
-        let padding: String = (0..500)
+        // ~1.5k tokens of unique-ish padding, well past Haiku 5.5's 512
+        // minimum.
+        let padding: String = (0..40)
             .map(|i| {
                 format!(
                     "Fact {i}: the {i}th cache line holds a distinct \
@@ -375,7 +376,10 @@ mod tests {
             })
             .collect();
         let mut prompt = Prompt::default()
-            .max_tokens(std::num::NonZeroU32::new(32).unwrap())
+            .model(crate::secrets::live_test_model())
+            .effort(crate::secrets::LIVE_TEST_EFFORT)
+            // Thinking counts toward `max_tokens`: room for it plus the word.
+            .max_tokens(std::num::NonZeroU32::new(1024).unwrap())
             .system(format!(
                 "You are terse. Reply with a single word.\n\n{padding}"
             ))
@@ -386,6 +390,7 @@ mod tests {
         let quirks = Quirks::default();
         roll_breakpoints_with(&quirks, &mut prompt, CacheControl::ephemeral());
         let first = client.message(&prompt).await.expect("round 1");
+        println!("live_roll round 1 usage: {:?}", first.usage);
         let wrote = first.usage.cache_creation_input_tokens.unwrap_or(0)
             + first.usage.cache_read_input_tokens.unwrap_or(0);
         assert!(
@@ -402,10 +407,7 @@ mod tests {
         roll_breakpoints_with(&quirks, &mut prompt, CacheControl::ephemeral());
         let second = client.message(&prompt).await.expect("round 2");
         let read = second.usage.cache_read_input_tokens.unwrap_or(0);
-        println!(
-            "round 2 usage: read={read} create={:?} input={}",
-            second.usage.cache_creation_input_tokens, second.usage.input_tokens
-        );
+        println!("live_roll round 2 usage: {:?}", second.usage);
         assert!(read > 0, "round 2 read nothing: {:?}", second.usage);
     }
 

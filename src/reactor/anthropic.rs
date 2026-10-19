@@ -664,7 +664,8 @@ mod tests {
     /// `web_search_tool_result` block) or mid-search (`pause_turn`). Fails
     /// with the API's own words if the submission is rejected.
     ///
-    /// `cargo test --all-features live_batch -- --ignored --nocapture`
+    /// On Haiku 5.5 at low effort, one search at most. Run with
+    /// `just live-test`.
     #[tokio::test]
     #[ignore = "hits the live Anthropic API (a search, so cents)"]
     async fn live_batch_runs_server_tools() {
@@ -679,8 +680,11 @@ mod tests {
         let transport = Client::new(misanthropic::Client::new(key).unwrap());
 
         let prompt = Prompt::default()
-            .model(misanthropic::Id::Haiku45)
-            .max_tokens(std::num::NonZeroU32::new(512).unwrap())
+            .model(crate::secrets::live_test_model())
+            .effort(crate::secrets::LIVE_TEST_EFFORT)
+            // Thinking counts toward `max_tokens`; the search results are
+            // input, so this is thinking plus a one-line answer.
+            .max_tokens(std::num::NonZeroU32::new(2048).unwrap())
             // Not "search anthropic.com": `allowed_domains` is a server-side
             // filter the model can't see, and naming a domain it can't honor
             // makes it decline. The filter still scopes the results.
@@ -713,11 +717,8 @@ mod tests {
         let paused =
             matches!(response.stop_reason, Some(StopReason::PauseTurn));
         println!(
-            "batch server-tool run: stop={:?} searched={searched} \
-             usage={:?}\n{}",
-            response.stop_reason,
-            response.usage.server_tool_use,
-            response.inner.content
+            "live_batch: stop={:?} searched={searched} usage: {:?}\n{}",
+            response.stop_reason, response.usage, response.inner.content
         );
         assert!(
             searched || paused,
