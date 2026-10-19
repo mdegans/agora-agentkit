@@ -1591,7 +1591,16 @@ impl EventStream {
             };
             match chunk {
                 Ok(Some(bytes)) => {
-                    self.pending.extend(self.parser.push(&bytes))
+                    self.pending.extend(self.parser.push(&bytes));
+                    for dropped in self.parser.take_dropped() {
+                        tracing::warn!(
+                            cap = ?dropped.cap,
+                            bytes = dropped.bytes,
+                            max_line_bytes = crate::sse::MAX_LINE_BYTES,
+                            max_frame_bytes = crate::sse::MAX_FRAME_BYTES,
+                            "event stream: dropped a frame past its size cap"
+                        );
+                    }
                 }
                 Ok(None) => return None,
                 Err(e) => return Some(Err(e.into())),
@@ -1665,9 +1674,10 @@ impl EventSubscription {
     /// reconnect may cure (transport, 5xx, 429, a dropped stream) are
     /// retried with backoff here; one that it will not (401, 403, …) is
     /// returned. An event that fails its signature check is returned as
-    /// [`Error::EventSignature`], after the cursor has moved past it; so is
-    /// one for another agent, on a signed subscription, which knows its
-    /// agent.
+    /// [`Error::EventSignature`] and leaves the cursor where it was. One
+    /// signed but for another agent, on a signed subscription (which knows
+    /// its agent), is returned the same way after the cursor has moved
+    /// past it.
     pub async fn next(&mut self) -> Result<ReceivedEvent, Error> {
         loop {
             let Some(stream) = self.stream.as_mut() else {
@@ -1694,13 +1704,17 @@ impl EventSubscription {
             match stream.next().await {
                 Some(Ok(received)) => {
                     self.failures = 0;
-                    if received.cursor.is_some() {
-                        self.last_event_id = received.cursor.clone();
-                    }
                     let unsigned = self
                         .key
                         .as_ref()
                         .is_some_and(|key| !received.event.verify(key));
+                    // A forged frame is not in the server's log: resuming
+                    // from before it loses nothing, and its id may be
+                    // anything. A genuine one is the server's position,
+                    // even when it is refused for its recipient
+                    if !unsigned && received.cursor.is_some() {
+                        self.last_event_id = received.cursor.clone();
+                    }
                     let elsewhere = match &self.auth {
                         EventAuth::Signed { agent_id, .. } => {
                             received.event.event.recipient_id() != *agent_id
@@ -2430,6 +2444,11 @@ mod tests {
             sub.next().await,
             Err(Error::EventSignature { cursor: Some(c) }) if c.as_str() == "c1"
         ));
+        assert_eq!(
+            sub.last_event_id().unwrap().as_str(),
+            "c0",
+            "a forged event leaves the cursor where it was"
+        );
     }
 
     /// A signed subscription knows its agent and refuses another's event
@@ -2457,5 +2476,288 @@ mod tests {
             sub.next().await,
             Err(Error::EventSignature { .. })
         ));
+        assert_eq!(
+            sub.last_event_id().unwrap().as_str(),
+            "c1",
+            "a genuine event for another agent is the server's position: \
+             the cursor moves past it, unlike a forged one"
+        );
+    }
+}
+
+/// [`EventSubscription`] over a fake server that cuts connections at
+/// random points, with forged frames among the genuine ones
+#[cfg(test)]
+mod subscription_props {
+    use super::*;
+    use crate::sse::{Event, MessageNotice, SignedEvent};
+    use proptest::prelude::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Debug, Clone, Copy)]
+    enum Kind {
+        /// In the server's log, for us
+        Genuine,
+        /// In the server's log, signed, for another agent
+        Elsewhere,
+        /// Not in the log: signed by another key
+        OtherKey,
+        /// Not in the log: a genuine signature over another event
+        Tampered,
+        /// Not in the log: a signature that is not one
+        Garbage,
+    }
+
+    fn kind() -> impl Strategy<Value = Kind> {
+        prop_oneof![
+            6 => Just(Kind::Genuine),
+            1 => Just(Kind::Elsewhere),
+            1 => Just(Kind::OtherKey),
+            1 => Just(Kind::Tampered),
+            1 => Just(Kind::Garbage),
+        ]
+    }
+
+    /// One frame of the stream: its position in the log (a forged frame
+    /// has none) and its bytes
+    struct Entry {
+        pos: Option<u32>,
+        id: String,
+        kind: Kind,
+        frame: String,
+    }
+
+    fn entries(
+        kinds: &[Kind],
+        me: AgentId,
+    ) -> (Vec<Entry>, crypto::VerifyingKey) {
+        let (key, public) = crypto::generate_keypair();
+        let (other, _) = crypto::generate_keypair();
+        let notice = |recipient| {
+            Event::DirectMessage(MessageNotice {
+                message_id: MessageId::new(),
+                recipient_id: recipient,
+                sender_id: AgentId::new(),
+                sender_name: None,
+                sent_at: chrono::DateTime::from_timestamp(1_760_000_000, 0)
+                    .unwrap(),
+            })
+        };
+        let mut pos = 0;
+        let mut out = Vec::new();
+        for (i, &kind) in kinds.iter().enumerate() {
+            let (p, id, signed) = match kind {
+                Kind::Genuine | Kind::Elsewhere => {
+                    pos += 1;
+                    let to = if matches!(kind, Kind::Genuine) {
+                        me
+                    } else {
+                        AgentId::new()
+                    };
+                    (
+                        Some(pos),
+                        format!("c{pos}"),
+                        SignedEvent::sign(&key, notice(to), 1_760_000_000),
+                    )
+                }
+                forged => {
+                    // A forged frame claims a later position, or none: a
+                    // cursor moved to it would skip events or restart
+                    let id = if i % 2 == 0 {
+                        format!("c{}", pos + 2)
+                    } else {
+                        format!("forged{i}")
+                    };
+                    let signed = match forged {
+                        Kind::OtherKey => {
+                            SignedEvent::sign(&other, notice(me), 1_760_000_000)
+                        }
+                        Kind::Tampered => {
+                            let mut s = SignedEvent::sign(
+                                &key,
+                                notice(me),
+                                1_760_000_000,
+                            );
+                            s.event = notice(me);
+                            s
+                        }
+                        _ => {
+                            let mut s = SignedEvent::sign(
+                                &key,
+                                notice(me),
+                                1_760_000_000,
+                            );
+                            s.signature =
+                                crypto::Signature::from_bytes(&[7; 64]).into();
+                            s
+                        }
+                    };
+                    (None, id, signed)
+                }
+            };
+            let frame = format!(
+                "id: {id}\nevent: direct_message\ndata: {}\n\n",
+                serde_json::to_string(&signed).unwrap()
+            );
+            out.push(Entry {
+                pos: p,
+                id,
+                kind,
+                frame,
+            });
+        }
+        (out, public)
+    }
+
+    /// Serve `entries` after each request's `Last-Event-ID` (from the
+    /// start for one it does not know, as the server does), cutting the
+    /// n-th connection at `cuts[n]` bytes into its body. Every
+    /// `Last-Event-ID` it was sent is logged
+    async fn serve(
+        entries: Arc<Vec<Entry>>,
+        cuts: Vec<usize>,
+        log: Arc<Mutex<Vec<Option<String>>>>,
+    ) -> u16 {
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0;
+            loop {
+                let Ok((mut conn, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut head = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match conn.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(k) => head.extend_from_slice(&buf[..k]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&head).to_lowercase();
+                let last = head.lines().find_map(|l| {
+                    l.strip_prefix("last-event-id:")
+                        .map(|v| v.trim().to_owned())
+                });
+                log.lock().unwrap().push(last.clone());
+                let start = last
+                    .and_then(|id| {
+                        entries
+                            .iter()
+                            .position(|e| e.pos.is_some() && e.id == id)
+                    })
+                    .map_or(0, |i| i + 1);
+                let mut body = String::from(": keep-alive\n\n");
+                for e in &entries[start..] {
+                    body.push_str(&e.frame);
+                }
+                let cut =
+                    cuts.get(n).map_or(body.len(), |c| c % (body.len() + 1));
+                n += 1;
+                let _ = conn
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                          connection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = conn.write_all(&body.as_bytes()[..cut]).await;
+                let _ = conn.shutdown().await;
+            }
+        });
+        port
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// Every genuine event for us arrives exactly once, in order; a
+        /// forged one never arrives and never moves the cursor; and every
+        /// reconnect resumes from the last cursor the subscription held
+        #[test]
+        fn cut_connections_lose_and_repeat_nothing(
+            kinds in proptest::collection::vec(kind(), 0..16),
+            cuts in proptest::collection::vec(any::<usize>(), 0..12),
+        ) {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let me = AgentId::new();
+                let (entries, public) = entries(&kinds, me);
+                let entries = Arc::new(entries);
+                let log = Arc::new(Mutex::new(Vec::new()));
+                let port = serve(entries.clone(), cuts, log.clone()).await;
+                let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+                let mut sub = EventSubscription::new(
+                    Client::new(url).unwrap(),
+                    EventAuth::Signed {
+                        agent_id: me,
+                        key: Box::new(crypto::generate_keypair().0),
+                    },
+                    None,
+                )
+                .verifying_with(public);
+
+                let expected: Vec<&str> = entries
+                    .iter()
+                    .filter(|e| matches!(e.kind, Kind::Genuine))
+                    .map(|e| e.id.as_str())
+                    .collect();
+                let genuine = |id: &str| {
+                    entries.iter().any(|e| e.pos.is_some() && e.id == id)
+                };
+                // The cursors the subscription held, in order
+                let mut held: Vec<Option<String>> = vec![None];
+                let mut delivered = Vec::new();
+                let done = tokio::time::timeout(Duration::from_secs(30), async {
+                    while delivered.len() < expected.len() {
+                        let before = sub.last_event_id().cloned();
+                        match sub.next().await {
+                            Ok(received) => {
+                                let id = received.cursor.unwrap().to_string();
+                                assert_eq!(
+                                    received.event.event.recipient_id(),
+                                    me
+                                );
+                                assert!(received.event.verify(&public));
+                                delivered.push(id);
+                            }
+                            Err(Error::EventSignature { cursor }) => {
+                                let now = sub.last_event_id().cloned();
+                                if now != before {
+                                    // Only a genuine event moves it, and
+                                    // only to its own id
+                                    let now = now.unwrap().to_string();
+                                    assert!(genuine(&now), "moved to {now}");
+                                    assert_eq!(cursor.unwrap().as_str(), now);
+                                }
+                            }
+                            Err(e) => panic!("unexpected {e:?}"),
+                        }
+                        let now = sub.last_event_id().map(|c| c.to_string());
+                        if held.last() != Some(&now) {
+                            held.push(now);
+                        }
+                    }
+                })
+                .await;
+                assert!(done.is_ok(), "timed out; delivered {delivered:?}");
+                assert_eq!(delivered, expected);
+                // A reconnect resumes from a cursor the subscription held,
+                // never an earlier one than the last
+                let log = log.lock().unwrap().clone();
+                let mut at = 0;
+                for sent in &log {
+                    let Some(i) = held[at..].iter().position(|h| h == sent) else {
+                        panic!("resumed from {sent:?}; held {held:?}");
+                    };
+                    at += i;
+                }
+            });
+        }
     }
 }
