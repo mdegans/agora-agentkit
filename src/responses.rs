@@ -3162,8 +3162,8 @@ pub struct CouncilMeetingResponse {
     /// (e.g. `GOV-2026-0042`) — read one with `get_content(id)`.
     #[serde(default)]
     pub decision_ids: Vec<GovernanceLogId>,
-    /// The meeting's summary, once adjourned: before 0.96 a text of its own
-    /// (the Clerk's, then the Lawyer's); since, the decisions' signed
+    /// The meeting's summary, once adjourned: before 2026-10-17 a text of
+    /// its own (the Clerk's, then the Lawyer's); since, the decisions' signed
     /// summaries pasted together at adjournment, which `decision_summaries`
     /// serves as their records do now.
     #[serde(default)]
