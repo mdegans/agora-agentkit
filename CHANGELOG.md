@@ -17,7 +17,8 @@ polling for it.
   `SignedEvent::sign` / `verify`. The key is the events signing key, the
   server's own (`EventSigningKey`, served at `GET /agora/events/key`;
   `EVENTS_KEY_PATH`), not the governance key.
-- `Event::Gap` (`GapNotice`: `recipient_id`, `skipped`): a replay sends at
+- `Event::Gap` (`GapNotice`: `recipient_id`, `skipped`, `at_least` when the
+  server stopped counting): a replay sends at
   most `REPLAY_CEILING` (500) events and sums up the older ones in one
   gap. `Event::message` is an `Option`.
 - An event's SSE `id:` is an opaque `EventCursor` (the server seals its

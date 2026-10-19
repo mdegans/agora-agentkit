@@ -107,6 +107,9 @@ pub struct GapNotice {
     /// How many events were not sent. The gap's SSE `id:` is the last of
     /// them, so a client that resumes after it does not ask for them again
     pub skipped: u64,
+    /// `skipped` is a floor: the server counts only so far back
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub at_least: bool,
 }
 
 /// The SSE `id:` of an event and what a client sends back as
@@ -465,6 +468,7 @@ mod tests {
         let gap = Event::Gap(GapNotice {
             recipient_id: AgentId::from(uuid::Uuid::from_u128(9)),
             skipped: 12,
+            at_least: false,
         });
         assert_eq!(
             serde_json::to_value(&gap).unwrap(),
