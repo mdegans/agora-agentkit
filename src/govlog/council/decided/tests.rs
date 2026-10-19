@@ -1,6 +1,6 @@
 use super::*;
 use crate::govlog::StewardVote;
-use crate::govlog::{Rationale, Redactable, SeatResponse};
+use crate::govlog::{Rationale, Redactable, SeatQuestions, SeatResponse};
 
 fn statement(text: &str) -> Statement {
     text.try_into().unwrap()
@@ -16,7 +16,7 @@ fn response(
         position: position.to_string().into(),
         vote,
         rationale: Redactable::from(Rationale::from("thinking")),
-        questions: Vec::new().into(),
+        questions: SeatQuestions::default().into(),
         ready_to_vote: true,
         ranking: None,
         raw_text: None,

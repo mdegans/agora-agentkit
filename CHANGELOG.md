@@ -2,6 +2,37 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.104.0 (2026-10-19)
+
+The Council's questions to a witness are batched: queued during a round,
+sent to the witness together when it ends as one user turn, and answered
+once (agora, OBL-2026-0028). Records made before still read as they did.
+
+- `ids::WitnessQuestionId`: a question's number on an item, `3`,
+  numbered from 1 in the order asked across every witness. One form
+  everywhere: the bare number in the batch, in what a seat is told, and
+  in the record (a JSON number). Its schema is an inline integer.
+- `govlog::WitnessBatch` and `BatchedQuestion`: one round's questions to
+  one witness. `render` writes the witness's turn: a heading for the
+  round, then each seat's questions under its name in seat order, each
+  opening with its number (`> 3. ...`), later lines indented under it,
+  every line quoted, a blank `>` line between questions. `parse` reads
+  one back exactly, and `get` finds a question by id. A seat's own line
+  that starts like an id is written with a backslash before its `.`
+  (`3\.`). A batch may exceed one Agora DM; a DM transport splits it.
+- Breaking: `SeatResponse.questions` is `Redactable<SeatQuestions>`, an
+  untagged `Addressed(Vec<Redactable<Question>>) | Legacy(Vec<Redactable<String>>)`.
+  A `Question` is `{ "for", "question" }`: who it is for (a witness's id,
+  or anyone else in free text) and the question, each redactable. A
+  record signed before keeps its bytes (`Legacy`); an empty list reads as
+  `Addressed` and writes back the same. The Council seats now ask
+  witnesses through their submission's `questions`, not a tool.
+- `WitnessQuestion.id` and `Unanswered.id` (optional, omitted when
+  absent): with an id, `Asked::Message(i)` is the batch's turn, shared
+  with the batch's other questions, and the answer at `i + 1` is one
+  reply to all of them. Without one (records before 0.104) the turn is
+  the one question, as before; such records keep their bytes.
+
 ## 0.103.0 (2026-10-19)
 
 Ranged reads of a data set's file, a citation that names a file at a

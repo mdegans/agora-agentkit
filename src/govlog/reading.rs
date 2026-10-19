@@ -77,6 +77,8 @@ pub const KEY_ORDER: &[&str] = &[
     "precedents_cited",
     "position",
     "questions",
+    "for",
+    "question",
     "overrules",
     "refer_to_council",
     "referral_reason",
