@@ -2450,7 +2450,7 @@ pub struct GovernanceEntryResponse {
     #[serde(default)]
     pub total_rounds: Option<u64>,
     /// Each round's size in bytes, round 1 first, when the record holds
-    /// rounds: what one `round=<n>` read costs, known before reading it.
+    /// rounds: about what one `round=<n>` read costs, known before reading it.
     /// Empty from a server older than this field
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub round_bytes: Vec<u64>,

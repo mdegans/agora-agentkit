@@ -378,7 +378,13 @@ pub fn ballot_in_value(text: &str) -> Vec<String> {
             end += 1;
         }
         let around = &text[start..end];
-        if around.to_lowercase().contains("list") && !around.contains("REST") {
+        // The word "list" (not "listed"), or a list written out after it
+        let says_list = around
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|w| w.eq_ignore_ascii_case("list"));
+        let shows_list =
+            text[at + mention.len()..].trim_start().starts_with('[');
+        if (says_list || shows_list) && !around.contains("REST") {
             out.push(around.to_owned());
         }
     }
@@ -569,6 +575,7 @@ mod tests {
             "vote with cast_vote on its post, `value` a list of your option numbers",
             "pass a list of your option numbers as `value`, even of one",
             "A list in `value` is a ballot, which only a post with a poll takes",
+            "vote with `value` [3, 5]",
         ] {
             assert_eq!(ballot_in_value(found).len(), 1, "{found}");
         }

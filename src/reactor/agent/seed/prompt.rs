@@ -387,12 +387,9 @@ fn format_council(council: &CouncilSchedule) -> String {
             ));
         }
         if let Some(notes) = &next.notes {
-            // The Steward's own words, quoted: a note written as a heading
+            // The scheduler's own words, quoted: a note written as a heading
             // ("For past-due items the Council owes, …") is not a sentence
-            out.push_str(&format!(
-                "The Steward's note on it: \"{}\"\n",
-                notes.trim()
-            ));
+            out.push_str(&format!("The note on it: \"{}\"\n", notes.trim()));
         }
     }
 
@@ -465,7 +462,7 @@ fn format_obligation_tally(tally: &ObligationTally) -> String {
         }
     };
     let forward = if tally.owed_by.contains(&OwedBy::Council) {
-        " The Steward brings the Council's forward to a sitting."
+        " The Steward puts the Council's obligations on a sitting's agenda."
     } else {
         ""
     };
@@ -2360,7 +2357,8 @@ pub(super) fn format_governance_index(
         out.push('\n');
     }
     out.push_str(
-        "\nA line with no standing shown is in_force. Read one with \
+        "\nA line with no standing shown is in_force (KEY, REC, DATA and TEST \
+         entries still decide nothing). Read one with \
          get_content(id) for the whole record, or with detail=\"summary\" for \
          its summary alone (free).\n",
     );
@@ -2440,6 +2438,16 @@ fn format_omitted(o: &OmittedEntries) -> String {
     )
 }
 
+/// KEY, REC, DATA and TEST entries: in force, but they decide nothing (as
+/// get_governance_log's description says)
+fn decides_nothing(kind: crate::enums::GovernanceLogEntryType) -> bool {
+    use crate::enums::GovernanceLogEntryType as T;
+    matches!(
+        kind,
+        T::KeyRotation | T::StewardRecord | T::DataSet | T::Test
+    )
+}
+
 /// A size as a reader weighs it: bytes under 10 KB, else whole KB
 fn size_in_words(bytes: u64) -> String {
     if bytes < 10 * 1024 {
@@ -2472,6 +2480,13 @@ pub(super) fn format_governance_entry(
     if entry.standing != Standing::InForce {
         out.push_str(&format!(
             "**Standing: {}** — do not cite this as it stands.\n",
+            entry.standing
+        ));
+    } else if decides_nothing(entry.entry_type) {
+        // In force, but never authority: a TEST record read as "in_force"
+        // could be cited as if it bound (review, 2026-10-19)
+        out.push_str(&format!(
+            "Standing: {} (an entry of this kind decides nothing)\n",
             entry.standing
         ));
     } else {
@@ -2580,7 +2595,9 @@ pub(super) fn format_governance_entry(
     }
     // Each round's size before it is read, as attachments have theirs: a
     // beta read an 83 KB round with nothing to say it would be (2026-10-19)
-    if !entry.round_bytes.is_empty() && entry.round.is_none() {
+    // Only where the record is not already here: a summary, or the
+    // summary served when the record would not fit
+    if !entry.round_bytes.is_empty() && entry.data.is_none() {
         let sizes = entry
             .round_bytes
             .iter()
@@ -3155,6 +3172,13 @@ mod tests {
         };
         let out = format_governance_entry(&in_force);
         assert!(out.contains("Appeal denied\nStanding: in_force\n"), "{out}");
+        let test_entry = GovernanceEntryResponse {
+            entry_type: crate::enums::GovernanceLogEntryType::Test,
+            ..in_force.clone()
+        };
+        assert!(format_governance_entry(&test_entry).contains(
+            "Standing: in_force (an entry of this kind decides nothing)\n"
+        ));
         assert!(!out.contains("do not cite"), "{out}");
         // Each round's size, before reading one (2026-10-19)
         assert!(
@@ -3164,7 +3188,8 @@ mod tests {
             ),
             "{out}"
         );
-        in_force.round = Some(2);
+        // Not where the record is already here
+        in_force.data = Some(serde_json::json!({"rounds": []}));
         let out = format_governance_entry(&in_force);
         assert!(!out.contains("Rounds (read one"), "{out}");
 
@@ -4306,7 +4331,7 @@ mod tests {
             })
         };
         let tail = " List them with get_governance_log(view=\"obligations\").";
-        let forward = " The Steward brings the Council's forward to a sitting.";
+        let forward = " The Steward puts the Council's obligations on a sitting's agenda.";
         assert_eq!(
             line(1, 0, &[OwedBy::Steward]),
             format!(

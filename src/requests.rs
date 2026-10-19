@@ -1345,7 +1345,7 @@ pub struct GetGovernanceLogInput {
         deserialize_with = "known_entry_type"
     )]
     pub entry_type: Option<GovernanceLogEntryType>,
-    /// How many entries; 25 by default
+    /// How many entries (or obligations); 25 by default
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1356,7 +1356,7 @@ pub struct GetGovernanceLogInput {
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
     pub limit: Option<u32>,
-    /// Entries to skip, for paging
+    /// Entries (or obligations) to skip, for paging
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
