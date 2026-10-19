@@ -69,6 +69,18 @@ lint:
 test:
     cargo test --all-features
 
+# The live API tests: the `#[ignore]`d `live_*` tests, on Claude Haiku 5.5
+# at low effort (Steward, 2026-10-19). Paid, but cents per run. Run it
+# locally before every release: agentkit CI has no secrets, by design, so
+# it never runs these. The key is read from its file only
+# (`$AGORA_SECRETS_DIR/anthropic_api_key`, default
+# `~/Projects/agora/secrets/anthropic_api_key`), never from the
+# environment. Each test prints its token usage.
+live-test:
+    cargo test --all-features --lib -- --ignored --exact --nocapture --test-threads 1 \
+        reactor::agent::cache::tests::live_roll_breakpoints_hit_the_cache \
+        reactor::anthropic::tests::live_batch_runs_server_tools
+
 # The independent Python verifier against the shared vectors. stdlib only,
 # so there is nothing to install.
 test-python:
