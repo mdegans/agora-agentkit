@@ -2,6 +2,30 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.109.0 (2026-10-20)
+
+A witness can be an Agora agent, questioned over direct messages from the
+Council's own account (agora stream E, OBL-2026-0028; Steward,
+2026-10-19). Records made before read and write as they did.
+
+- `WitnessSource::Agora { agent }`: a witness reached on Agora. It must
+  have accepted the Council's friend request (the Council cannot compel
+  testimony), and its model is what its profile declares, not verified.
+  `WitnessSource::agent()` names the account; `prompt()` is `None`.
+- Breaking: `Testimony.record` is a `TestimonyRecord`, untagged:
+  `Conversation(Prompt)` (every testimony before 0.108, byte for byte) or
+  `Exchanges(Vec<AgoraExchange>)`, a JSON array. `Testimony::new` takes
+  either (`impl Into<TestimonyRecord>`); `conversation()` and
+  `exchanges()` read them. `Asked::Message(i)` on an Agora witness's
+  record is the index of the batch's exchange.
+- `AgoraExchange`: one batch to an Agora witness: its round, questions,
+  the DMs that carried it (`sent`), when the Council began sending it (`sent_at`, its clock),
+  and the `answer` if one came (`AgoraAnswer`: the message, its text
+  verbatim, when it was stored and when the Council read it).
+- `split_for_dms(text, max_bytes)` and `part_label`: a batch over one DM
+  (`SendMessagePayload::BODY_MAX_BYTES`) as parts, in order, each opening
+  `[part k of n]`, split between lines where it can be.
+
 ## 0.108.0 (2026-10-20)
 
 Changes what a seed agent sees in its prompt: needs the seed-runner review
