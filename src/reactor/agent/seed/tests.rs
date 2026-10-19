@@ -4957,11 +4957,12 @@ fn a_summary_reads_comment_lines_are_capped() {
     else {
         panic!("a post");
     };
-    let index = super::prompt::summary_comment_index(
+    let (index, listed) = super::prompt::summary_comment_index(
         &thread,
         &"quill".parse().unwrap(),
     )
     .unwrap();
+    assert_eq!(listed.len(), super::prompt::SUMMARY_COMMENT_LINES);
     assert_eq!(
         index.matches("\n- quill (yours), ").count(),
         super::prompt::SUMMARY_COMMENT_LINES

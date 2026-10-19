@@ -3204,13 +3204,21 @@ pub fn size_in_words(bytes: u64) -> String {
 
 impl CouncilMeetingResponse {
     /// The meeting's own `summary` is the decisions' summaries again: from
-    /// 0.96 it is composed from them at adjournment, mechanically, and a
-    /// meeting of that era has signed (authored) decision summaries.
-    /// Before, it was a separate text, readable nowhere else
+    /// 0.96 it is composed from them at adjournment, mechanically
+    /// (agora-council's `adjournment::compose`), and opens "The Council sat
+    /// on <date> and decided N item(s)." Before, it was a separate text,
+    /// readable nowhere else. Told by the text, not by authorship: a
+    /// revision can add a signed summary to an older decision, and that
+    /// must not hide its sitting's own summary (review, beta round 3)
     fn summary_is_composed(&self) -> bool {
-        self.decision_summaries
-            .iter()
-            .any(|d| d.summary_authorship.is_some())
+        self.summary.as_deref().is_some_and(|s| {
+            let first = s.trim_start().lines().next().unwrap_or_default();
+            first.starts_with("The Council sat on ")
+                && first.contains(" and decided ")
+                && first.contains(
+                    " item(s). Each summary below is the decision's own",
+                )
+        })
     }
 
     /// One line for this sitting: when it sat, how it ended, and each
@@ -3228,32 +3236,44 @@ impl CouncilMeetingResponse {
         if self.test_sitting {
             line.push_str(&format!(" ({})", crate::govlog::TEST_LABEL));
         }
-        let decisions: Vec<String> = if self.decision_summaries.is_empty() {
-            // An older server's: ids alone
-            self.decision_ids.iter().map(ToString::to_string).collect()
-        } else {
-            self.decision_summaries
-                .iter()
-                .map(|d| {
-                    let summary = match (&d.summary, &d.summary_authorship) {
-                        (None, _) => "no summary".to_string(),
-                        (Some(s), Some(a)) => format!(
-                            "summary {}, {}",
-                            size_in_words(s.len() as u64),
-                            a.sentence()
-                        ),
-                        (Some(s), None) => {
-                            format!("summary {}", size_in_words(s.len() as u64))
-                        }
-                    };
-                    format!(
-                        "{} \"{}\" ({summary})",
-                        d.id,
-                        one_line_cut(&d.title, 100)
-                    )
-                })
-                .collect()
-        };
+        // Every decision id, its summary attached by id: the server skips a
+        // decision whose log entry it cannot read, and the line says so
+        // rather than drop the id. An older server sends no summaries
+        let with_summaries = !self.decision_summaries.is_empty();
+        let decisions: Vec<String> = self
+            .decision_ids
+            .iter()
+            .map(|id| {
+                match self.decision_summaries.iter().find(|d| d.id == *id) {
+                    None if with_summaries => {
+                        format!("{id} (its record could not be read)")
+                    }
+                    None => id.to_string(),
+                    Some(d) => {
+                        let summary = match (&d.summary, &d.summary_authorship)
+                        {
+                            (None, _) => "no summary".to_string(),
+                            (Some(s), Some(a)) => format!(
+                                "summary {}, {}",
+                                size_in_words(s.len() as u64),
+                                a.sentence()
+                            ),
+                            (Some(s), None) => {
+                                format!(
+                                    "summary {}",
+                                    size_in_words(s.len() as u64)
+                                )
+                            }
+                        };
+                        format!(
+                            "{} \"{}\" ({summary})",
+                            d.id,
+                            one_line_cut(&d.title, 100)
+                        )
+                    }
+                }
+            })
+            .collect();
         match decisions.as_slice() {
             [] => line.push_str(": no decisions"),
             _ => {
@@ -3310,9 +3330,14 @@ impl CouncilMeetingResponse {
     }
 }
 
+/// `text` on one line: every run of whitespace, newlines included, one space
+pub(crate) fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// `text` on one line, cut to `max` characters with "…"
-fn one_line_cut(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+pub(crate) fn one_line_cut(text: &str, max: usize) -> String {
+    let flat = one_line(text);
     if flat.chars().count() <= max {
         flat
     } else {
@@ -4388,7 +4413,12 @@ mod tests {
             adjourned_at: Some(at(18)),
             status: MeetingStatus::Adjourned,
             decision_ids: vec!["GOV-2026-0017".parse().unwrap()],
-            summary: Some(format!("The Council sat on 2026-10-18.\n{signed}")),
+            summary: Some(format!(
+                "The Council sat on 2026-10-18 and decided 1 item(s). Each \
+                 summary below is the decision's own, written by the Lawyer \
+                 and signed with its record; the record is authoritative.\n\n\
+                 ## GOV-2026-0017: Motion\n\n{signed}"
+            )),
             decision_summaries: vec![MeetingDecisionSummary {
                 id: "GOV-2026-0017".parse().unwrap(),
                 title: "Motion: Publish\nQuarterly Data".into(),
@@ -4405,13 +4435,22 @@ mod tests {
             started_at: at(11),
             adjourned_at: Some(at(11)),
             status: MeetingStatus::Adjourned,
-            decision_ids: vec!["GOV-2026-0013".parse().unwrap()],
+            // The second decision's entry could not be read; the first was
+            // revised to carry a signed summary, which must not hide the
+            // sitting's own
+            decision_ids: vec![
+                "GOV-2026-0013".parse().unwrap(),
+                "GOV-2026-0012".parse().unwrap(),
+            ],
             summary: Some("The Lawyer's account.\nSecond line.".into()),
             decision_summaries: vec![MeetingDecisionSummary {
                 id: "GOV-2026-0013".parse().unwrap(),
                 title: "Next sitting".into(),
                 summary: Some("Scheduled.".into()),
-                summary_authorship: None,
+                summary_authorship: Some(SummaryAuthorship {
+                    written_by: CouncilSeat::Lawyer,
+                    accepted_by: SummaryAcceptance::Steward,
+                }),
             }],
             test_sitting: false,
         };
@@ -4439,7 +4478,8 @@ mod tests {
              - 2026-10-17 07:46 UTC, cancelled (TEST: a test sitting; not \
              binding): no decisions\n\
              - 2026-10-11 07:46 UTC, adjourned: GOV-2026-0013 \"Next \
-             sitting\" (summary 10 bytes)\n\
+             sitting\" (summary 10 bytes, written by the Lawyer, accepted by \
+             the Steward); GOV-2026-0012 (its record could not be read)\n\
              \x20 The sitting's own summary (34 bytes), from before each \
              decision carried one; the records are authoritative:\n\
              \x20 > The Lawyer's account.\n\

@@ -366,20 +366,16 @@ impl Agora {
         let crate::responses::ContentResponse::Post(thread) = read.ok()? else {
             return None;
         };
-        // Their ids are shown, so a short one resolves
-        self.shown.extend(ids_in_post(&thread));
+        let (lines, listed) =
+            prompt::summary_comment_index(&thread, &self.agent_name)?;
+        // The ids the lines show, and only those, so a short one resolves
+        self.shown
+            .extend(listed.iter().map(|&c| ContentId::from(c)));
         self.ledger
             .write()
             .expect("ledger lock")
-            .note_comment_posts(
-                thread.post.id,
-                thread
-                    .comments
-                    .iter()
-                    .map(|c| c.id)
-                    .chain(thread.comment_stubs.iter().map(|c| c.id)),
-            );
-        prompt::summary_comment_index(&thread, &self.agent_name)
+            .note_comment_posts(thread.post.id, listed);
+        Some(lines)
     }
 }
 

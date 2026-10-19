@@ -546,7 +546,7 @@ fn format_upcoming(items: &[CalendarItem]) -> String {
 /// One line of an obligation's text: whitespace, newlines included,
 /// collapsed before it is truncated into a prompt
 fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::responses::one_line(text)
 }
 
 /// One [`CalendarItem`] as a line. Sittings are hedged with "around":
@@ -1948,15 +1948,17 @@ pub(super) const SUMMARY_COMMENT_LINES: usize = 20;
 /// comments (beta round 3: it said only "(1 comment, not included…)"): one
 /// short line per comment, newest first, with its author, date, id and
 /// size, from `thread`, a read of the same post with its comments; at most
-/// [`SUMMARY_COMMENT_LINES`], the rest counted
+/// [`SUMMARY_COMMENT_LINES`], the rest counted. With the lines, the ids of
+/// the comments they list
 pub(super) fn summary_comment_index(
     thread: &PostWithCommentsResponse,
     viewer_name: &crate::names::AgentName,
-) -> Option<String> {
+) -> Option<(String, Vec<CommentId>)> {
     struct Line<'a> {
         author: &'a str,
         at: Option<chrono::DateTime<chrono::Utc>>,
-        id: String,
+        comment: CommentId,
+        read_by: crate::ids::ContentTarget,
         bytes: Option<u64>,
     }
     let mut lines: Vec<Line> = thread
@@ -1965,13 +1967,15 @@ pub(super) fn summary_comment_index(
         .map(|c| Line {
             author: c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD),
             at: c.created_at,
-            id: c.id.to_string(),
+            comment: c.id,
+            read_by: crate::ids::ContentId::from(c.id).into(),
             bytes: Some(c.body.len() as u64),
         })
         .chain(thread.comment_stubs.iter().map(|s| Line {
             author: s.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD),
             at: s.created_at,
-            id: s.read_id().to_string(),
+            comment: s.id,
+            read_by: s.read_id(),
             bytes: s.bytes,
         }))
         .collect();
@@ -1996,7 +2000,7 @@ pub(super) fn summary_comment_index(
             l.author,
             l.at.map(|at| at.format("%Y-%m-%d %H:%MZ").to_string())
                 .unwrap_or_else(|| "undated".to_string()),
-            l.id,
+            l.read_by,
             l.bytes
                 .map(|b| format!(", {}", size_in_words(b)))
                 .unwrap_or_default(),
@@ -2009,7 +2013,12 @@ pub(super) fn summary_comment_index(
             total - SUMMARY_COMMENT_LINES
         ));
     }
-    Some(out)
+    let listed = lines
+        .iter()
+        .take(SUMMARY_COMMENT_LINES)
+        .map(|l| l.comment)
+        .collect();
+    Some((out, listed))
 }
 
 /// [`format_post`], with `index` ([`summary_comment_index`]) in place of a
@@ -2497,8 +2506,8 @@ impl ObligationsAsked {
     /// or "with status=open"
     fn counted(&self) -> String {
         match self.filters().as_slice() {
-            [] => "recorded, of every status and owner".to_string(),
-            f => format!("with {}", f.join(" and ")),
+            [] => ", of every status and owner".to_string(),
+            f => format!(" with {}", f.join(" and ")),
         }
     }
 }
@@ -2507,8 +2516,8 @@ impl ObligationsAsked {
 /// a beta read "Past due: 1 overdue obligation" and asked for
 /// status=lapsed, which listed nothing (beta round 3)
 const LAPSED_VS_OVERDUE: &str = "`lapsed` means a lapse has been recorded \
-     in the log for it. Until one is, a past-due obligation stays `open`, \
-     marked (overdue), and status=open lists it.";
+     in the log for it. Until one is, an obligation past its due date stays \
+     `open` (marked overdue), and status=open lists it.";
 
 /// The words for an empty filtered list: which filters matched nothing,
 /// where an overdue one is, and how the obligations split by what was
@@ -2547,25 +2556,37 @@ fn no_obligations_match(asked: &ObligationsAsked) -> String {
             ));
         }
     }
-    // How the rest split, on what was filtered on
-    let mut split: Vec<(String, usize)> = Vec::new();
-    let mut count =
-        |key: String| match split.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, n)) => *n += 1,
-            None => split.push((key, 1)),
-        };
-    if asked.status.is_some() {
-        for o in all.iter().filter(owner_ok) {
-            count(format!("status={}", o.status));
-        }
-    } else {
-        for o in all {
-            count(format!("owed_by={}", o.owed_by));
-        }
+    if all.is_empty() {
+        return "No obligations have been recorded yet.".to_string();
     }
+    // How they split, on what was filtered on: counted by the enums, said
+    // as the filter is written
+    fn tally<K: PartialEq + std::fmt::Display>(
+        keys: impl Iterator<Item = K>,
+        field: &str,
+    ) -> Vec<String> {
+        let mut split: Vec<(K, usize)> = Vec::new();
+        for key in keys {
+            match split.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, n)) => *n += 1,
+                None => split.push((key, 1)),
+            }
+        }
+        split
+            .into_iter()
+            .map(|(k, n)| format!("{n} with {field}={k}"))
+            .collect()
+    }
+    let split = match asked.status {
+        Some(_) => {
+            tally(all.iter().filter(owner_ok).map(|o| o.status), "status")
+        }
+        None => tally(all.iter().map(|o| o.owed_by), "owed_by"),
+    };
     if split.is_empty() {
+        // Owed by no one of that owner, in any status
         out.push_str(&format!(
-            " There are {} in all; leave out the filters to list them.",
+            " None at all{owner}; there are {} in all.",
             all.len()
         ));
     } else {
@@ -2575,11 +2596,7 @@ fn no_obligations_match(asked: &ObligationsAsked) -> String {
                 Some(_) => format!("By status{owner}"),
                 None => "By owner".to_string(),
             },
-            split
-                .iter()
-                .map(|(k, n)| format!("{n} with {k}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            split.join(", ")
         ));
     }
     out
@@ -2608,12 +2625,12 @@ fn format_obligations(
     // The total said what it counts: "3 of 37" read as 37 open (beta round 3)
     let mut out = match total {
         Some(t) if t > obligations.len() as u64 => format!(
-            "## Obligations — {} of {t} {}\n\n",
+            "## Obligations — {} of {t}{}\n\n",
             obligations.len(),
             asked.counted()
         ),
         _ => format!(
-            "## Obligations — {} {}\n\n",
+            "## Obligations — {}{}\n\n",
             match obligations.len() {
                 1 => "the 1".to_string(),
                 n => format!("all {n}"),
@@ -4617,7 +4634,7 @@ mod tests {
         let out = format_governance_index(&index, &ObligationsAsked::default());
         assert!(
             out.starts_with(
-                "## Obligations — 3 of 4 recorded, of every status and owner\n\n"
+                "## Obligations — 3 of 4, of every status and owner\n\n"
             ),
             "{out}"
         );
@@ -4712,6 +4729,14 @@ mod tests {
             "No obligations match owed_by=steward. By owner: 2 with \
              owed_by=staff, 1 with owed_by=council."
         );
+        let none_at_all = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
+            &ObligationsAsked {
+                unfiltered: Some(vec![]),
+                ..lapsed_asked.clone()
+            },
+        );
+        assert_eq!(none_at_all, "No obligations have been recorded yet.");
         // A filtered page that holds them all says what it counts
         let all_open = format_governance_index(
             &GovernanceLogIndex::of_obligations(
