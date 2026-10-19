@@ -1473,6 +1473,10 @@ pub struct EventStream {
 }
 
 impl EventStream {
+    /// How long a stream may be silent before it counts as dead: three of
+    /// the server's 15-second keep-alives
+    pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
     /// The next event, `None` when the server closed the stream. Keep-alive
     /// comments are skipped. The signature is not checked here: see
     /// [`EventSubscription::verifying_with`]
@@ -1492,7 +1496,18 @@ impl EventStream {
                         .map_err(|e| Error::EventData(e.to_string())),
                 );
             }
-            match self.resp.chunk().await {
+            // The server writes a keep-alive every 15 s; silence for three
+            // of them is a dead connection (a half-open TCP one would
+            // otherwise hang here for good). Ended like a close, so a
+            // subscription reconnects and resumes.
+            let Ok(chunk) =
+                tokio::time::timeout(Self::IDLE_TIMEOUT, self.resp.chunk())
+                    .await
+            else {
+                tracing::warn!("event stream: silent past its keep-alives");
+                return None;
+            };
+            match chunk {
                 Ok(Some(bytes)) => {
                     self.pending.extend(self.parser.push(&bytes))
                 }

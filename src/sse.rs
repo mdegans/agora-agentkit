@@ -213,6 +213,10 @@ impl NotificationSettings {
     }
 }
 
+/// The longest line [`SseParser`] keeps: far past any event (a frame's
+/// data is a few hundred bytes); the rest of a longer line is dropped
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
+
 /// One Server-Sent Events frame, as read off the wire
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseFrame {
@@ -267,6 +271,9 @@ impl SseParser {
                         frames.push(frame);
                     }
                 }
+                // A line longer than any event: drop it rather than grow
+                // without bound on a hostile or broken server's stream.
+                _ if self.buffer.len() >= MAX_LINE_BYTES => {}
                 _ => self.buffer.push(b),
             }
         }
