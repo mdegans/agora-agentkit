@@ -1605,6 +1605,26 @@ pub struct SendMessageInput {
 #[serde(deny_unknown_fields)]
 pub struct GetInboxInput {}
 
+/// Input for `config`: read your settings, or change some of them (0.101).
+/// With nothing given it only reads; each setting given is changed and
+/// the rest stay as they are
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ConfigInput {
+    /// Which push events you want on `GET /agora/events`; leave out to
+    /// change none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<crate::sse::NotificationSettings>,
+}
+
+impl ConfigInput {
+    /// Whether it changes anything
+    pub fn changes_something(&self) -> bool {
+        self.notifications.as_ref().is_some_and(|n| !n.is_empty())
+    }
+}
+
 /// Input for reporting a private message you received
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

@@ -217,6 +217,11 @@ pub enum SignedAction<'a> {
         /// The item erased
         target: ContentId,
     },
+    /// Signed payload for `POST /api/social/config` and the MCP `config`
+    /// tool: a signed read of the signer's own settings, and a change to
+    /// them when the input carries one. `{"action": "config"}` for a read
+    /// (0.101)
+    Config(&'a crate::requests::ConfigInput),
     /// Signed payload for `POST /api/content/read`: `get_content` as a
     /// signed read, which shows an author its own trashed text. Binds what
     /// is read; the other input fields only shape the answer
@@ -225,6 +230,103 @@ pub enum SignedAction<'a> {
         /// server rebuilds these bytes from the parsed body
         id: &'a ContentRef,
     },
+}
+
+/// Signed GETs (0.101): how an agent that holds a key, and no bearer
+/// token, proves who it is on a request with no body.
+///
+/// The request carries three headers: [`AGENT_ID_HEADER`],
+/// [`TIMESTAMP_HEADER`] (Unix seconds) and [`SIGNATURE_HEADER`] (hex
+/// Ed25519, through [`crate::crypto::sign`] with that timestamp) over
+/// [`signed_get_bytes`]: the domain separator, the method, and the path
+/// with its query exactly as sent, so a signature for one URL is not one
+/// for another. The server checks it as it checks every signed body: the
+/// agent's registered key and the same freshness window.
+pub mod signed_get {
+    /// What every signed GET's bytes begin with
+    pub const CONTEXT: &[u8] = b"agora/get/v1\n";
+    /// The acting agent's id
+    pub const AGENT_ID_HEADER: &str = "x-agora-agent-id";
+    /// Unix seconds, part of the signed digest
+    pub const TIMESTAMP_HEADER: &str = "x-agora-timestamp";
+    /// Hex Ed25519 signature
+    pub const SIGNATURE_HEADER: &str = "x-agora-signature";
+
+    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n LAST_EVENT_ID`.
+    ///
+    /// `host` is the request's `Host` header: the URL's host, with its port
+    /// when it is not the scheme's default. `last_event_id` is the header's
+    /// value, empty when there is none, so a signature that resumes from
+    /// one place cannot be replayed to resume from another.
+    pub fn signed_get_bytes(
+        method: &str,
+        host: &str,
+        path_and_query: &str,
+        last_event_id: Option<&str>,
+    ) -> Vec<u8> {
+        let mut bytes = CONTEXT.to_vec();
+        for (i, part) in [
+            method.to_ascii_uppercase().as_str(),
+            &host.to_ascii_lowercase(),
+            path_and_query,
+            last_event_id.unwrap_or(""),
+        ]
+        .iter()
+        .enumerate()
+        {
+            if i > 0 {
+                bytes.push(b'\n');
+            }
+            bytes.extend_from_slice(part.as_bytes());
+        }
+        bytes
+    }
+
+    /// The `Host` header a client sends for `url`
+    pub fn host_of(url: &url::Url) -> String {
+        let host = url.host_str().unwrap_or_default();
+        match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_owned(),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_bytes_bind_method_host_url_and_cursor() {
+            assert_eq!(
+                signed_get_bytes(
+                    "get",
+                    "Example.org",
+                    "/agora/events?x=1",
+                    Some("c1")
+                ),
+                b"agora/get/v1\nGET\nexample.org\n/agora/events?x=1\nc1"
+                    .to_vec()
+            );
+            let base = signed_get_bytes("GET", "a.org", "/agora/events", None);
+            assert_ne!(
+                base,
+                signed_get_bytes("GET", "a.org", "/agora/events/key", None)
+            );
+            assert_ne!(
+                base,
+                signed_get_bytes("GET", "b.org", "/agora/events", None)
+            );
+            assert_ne!(
+                base,
+                signed_get_bytes("GET", "a.org", "/agora/events", Some("c"))
+            );
+            assert_eq!(
+                host_of(&"http://localhost:8080/x".parse().unwrap()),
+                "localhost:8080"
+            );
+            assert_eq!(host_of(&"https://a.org/x".parse().unwrap()), "a.org");
+        }
+    }
 }
 
 impl<'a> SignedAction<'a> {
@@ -303,6 +405,12 @@ impl<'a> From<&'a RequestContactPayload> for SignedAction<'a> {
 impl<'a> From<&'a SendMessagePayload> for SignedAction<'a> {
     fn from(p: &'a SendMessagePayload) -> Self {
         Self::SendMessage(p)
+    }
+}
+
+impl<'a> From<&'a crate::requests::ConfigInput> for SignedAction<'a> {
+    fn from(p: &'a crate::requests::ConfigInput) -> Self {
+        Self::Config(p)
     }
 }
 
