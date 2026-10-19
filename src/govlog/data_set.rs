@@ -79,6 +79,16 @@ pub struct DataFile {
     pub note: Option<String>,
 }
 
+/// What [`DataSet::resolve_ranged`] finds: the file and its range (or the
+/// range's error), or why the file part names no single file
+pub type RangedLookup<'a> = Result<
+    (
+        DataSetTarget<'a>,
+        Result<super::LineRange, super::LineRangeError>,
+    ),
+    DataSetLookupError,
+>;
+
 impl DataSet {
     /// What a writer refuses to sign: another version, a blank text field,
     /// no files, paths out of order or repeated, an index that is not
@@ -256,28 +266,55 @@ impl DataSet {
     /// as it stands: when the part before its last `:` names a listed
     /// file, that file and the part after read as a
     /// [`LineRange`](super::LineRange), with the errors `lines=` gives.
-    /// `None` when it does not, so the caller's own miss stands (0.105.1)
+    /// `None` when it does not, or when what follows the `:` does not look
+    /// like a range (`notes.md:v2`), so the caller's own miss stands. A
+    /// file part that names several files is that error (0.105.0)
     ///
     /// A citation's range is parsed strictly (`<from>-<to>`), so a path
     /// such as `log:12` stays a path; here the listing has settled that no
     /// such file exists, and `rubric.md:8-3` or `rubric.md:8` is a range
     /// of `rubric.md`, refused or read as written.
-    pub fn resolve_ranged(
-        &self,
-        asked: &str,
-    ) -> Option<(
-        DataSetTarget<'_>,
-        Result<super::LineRange, super::LineRangeError>,
-    )> {
+    pub fn resolve_ranged(&self, asked: &str) -> Option<RangedLookup<'_>> {
         let (path, range) = asked.trim().rsplit_once(':')?;
-        if range.trim().is_empty() || self.resolve(asked).is_ok() {
+        // Digits, with what a range is written with (`L8-L30`, `8..30`,
+        // `lines 8-30`, `8 to 30`), and nothing else: `v2` is a path's
+        let r = range.trim().to_ascii_lowercase().replace(" to ", "-");
+        let r = r
+            .strip_prefix("lines")
+            .or_else(|| r.strip_prefix("line"))
+            .unwrap_or(&r);
+        let rangeish = r.chars().any(|c| c.is_ascii_digit())
+            && r.chars().all(|c| {
+                c.is_ascii_digit()
+                    || matches!(
+                        c,
+                        'l' | '-'
+                            | '.'
+                            | '#'
+                            | '='
+                            | ' '
+                            | '\u{2013}'
+                            | '\u{2014}'
+                    )
+            });
+        if !rangeish {
             return None;
         }
-        match self.resolve(path).ok()? {
-            target @ DataSetTarget::File { .. } => {
-                Some((target, range.parse()))
+        let ambiguous = |e: &DataSetLookupError| {
+            matches!(e.kind, DataSetLookupFailure::Ambiguous(_))
+        };
+        // Found as asked, or a miss of its own to report
+        match self.resolve(asked) {
+            Ok(_) => return None,
+            Err(e) if ambiguous(&e) => return None,
+            Err(_) => {}
+        }
+        match self.resolve(path) {
+            Ok(target @ DataSetTarget::File { .. }) => {
+                Some(Ok((target, range.parse())))
             }
-            DataSetTarget::Directory { .. } => None,
+            Err(e) if ambiguous(&e) => Some(Err(e)),
+            _ => None,
         }
     }
 }
@@ -599,7 +636,8 @@ pub(super) mod tests {
     fn a_trailing_range_of_a_listed_file_is_read_as_one() {
         let m = manifest();
         let ranged = |asked: &str| {
-            m.resolve_ranged(asked).map(|(target, lines)| {
+            m.resolve_ranged(asked).map(|found| {
+                let (target, lines) = found.unwrap();
                 let DataSetTarget::File { file, .. } = target else {
                     panic!("{asked}: not a file");
                 };
@@ -614,7 +652,7 @@ pub(super) mod tests {
             ranged("ballots.csv:L2-L3"),
             Some(("votes/ballots.csv".into(), Ok("2-3".into())))
         );
-        let Some((_, Err(e))) = m.resolve_ranged("votes/ballots.csv:8-3")
+        let Some(Ok((_, Err(e)))) = m.resolve_ranged("votes/ballots.csv:8-3")
         else {
             panic!("8-3 is a refused range");
         };
@@ -627,6 +665,8 @@ pub(super) mod tests {
             "votes/missing.csv:8-3",
             "votes:1-2",
             "votes/ballots.csv:",
+            "votes/ballots.csv:v2",
+            "votes/ballots.csv:old",
         ] {
             assert_eq!(ranged(asked), None, "{asked}");
         }
@@ -637,6 +677,18 @@ pub(super) mod tests {
         colon.files.push(DataFile::of(path("votes/x.md"), b"x\n"));
         colon.files.sort_by(|a, b| a.path.cmp(&b.path));
         assert!(colon.resolve_ranged("votes/x.md:1-2").is_none());
+        // A file under two top directories: that error, not a miss
+        let mut two = manifest();
+        two.files
+            .push(DataFile::of(path("other/ballots.csv"), b"x\n"));
+        two.files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(matches!(
+            two.resolve_ranged("ballots.csv:8"),
+            Some(Err(DataSetLookupError {
+                kind: DataSetLookupFailure::Ambiguous(_),
+                ..
+            }))
+        ));
     }
 
     #[test]

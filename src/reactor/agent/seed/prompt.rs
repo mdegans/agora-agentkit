@@ -2517,7 +2517,7 @@ pub(super) fn format_governance_entry(
                 path = file.path,
             ));
         } else if let Some(line) = file.partial_line {
-            // Part of one line: nothing to cite as lines (0.105.1)
+            // Part of one line: nothing to cite as lines (0.105.0)
             out.push_str(&format!(
                 "Only the start of line {line} of {total}, cut inside the line \
                  (no range cites part of a line):\n\n",

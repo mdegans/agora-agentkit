@@ -2547,7 +2547,7 @@ pub struct DataSetView {
     pub asked: Option<String>,
     pub how_to_read: String,
     /// A `lines=` given with this read, which a listing ignores: it reads
-    /// a file's lines (0.105.1)
+    /// a file's lines (0.105.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines_ignored: Option<crate::govlog::LineRange>,
 }
@@ -2737,12 +2737,12 @@ pub struct DataFileContent {
     /// range asked for, its end clamped to the file's last line and cut
     /// back to the last whole line the budget holds (0.103). Absent when
     /// `text` is only the start of one line (`partial_line`),
-    /// so that it never names a line not shown whole (0.105.1)
+    /// so that it never names a line not shown whole (0.105.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<crate::govlog::LineRange>,
     /// For a read of some lines whose first line alone is over the
     /// budget: that line's number. `text` is its start, cut inside it, and
-    /// holds no whole line (0.105.1)
+    /// holds no whole line (0.105.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_line: Option<u64>,
     /// The file's text, or as much of it as the budget holds
@@ -2795,7 +2795,7 @@ pub enum DataFileReadError {
         max: u64,
     },
     /// A range that starts past the file's last line, refused as the
-    /// seed runner refuses a malformed one (0.105.1)
+    /// seed runner refuses a malformed one (0.105.0)
     #[error(
         "{invalid}lines=\"{asked}\": {path} has {total_lines} lines ({bytes} \
          bytes), so the range starts past its end. {form}",
@@ -2928,12 +2928,19 @@ impl DataFileContent {
             .expect("first <= served_end");
         let left = wanted.len() - shown.len();
         let last = span.served.end().expect("a span's end is set");
-        // Where to read on from: the first line not shown whole, to the
-        // range's end as asked
+        // Where to read on from, to the range's end as asked: the first
+        // line not shown, or past a line cut inside (asked again, it would
+        // be cut again)
         let on_from = served_end + 1;
         let on = (on_from <= last).then(|| {
             let to = asked.end().map_or(String::new(), |_| last.to_string());
-            format!(" lines=\"{on_from}-{to}\" reads on from line {on_from}.")
+            if fit > 0 {
+                format!(
+                    " lines=\"{on_from}-{to}\" reads on from line {on_from}."
+                )
+            } else {
+                format!(" lines=\"{on_from}-{to}\" reads on past line {first}.")
+            }
         });
         let on = on.unwrap_or_default();
         let fix = if (wanted.len() as u64) <= u64::from(max)
@@ -2974,7 +2981,7 @@ impl DataFileContent {
             )
         };
         let omitted = (total - shown.len()) as u64;
-        // Part of one line: no range names it (0.105.1)
+        // Part of one line: no range names it (0.105.0)
         let partial = fit == 0;
         Ok(Self {
             partial_line: partial.then_some(first),
@@ -5125,7 +5132,7 @@ mod data_file_tests {
             ),
             "{cut}"
         );
-        assert!(cut.contains("lines=\"2-2\" reads on from line 2."), "{cut}");
+        assert!(cut.contains("lines=\"2-2\" reads on past line 1."), "{cut}");
         // Nothing past the cut line in the range: nothing to read on to
         let read = ranged(long.as_bytes(), 40, Some("1-1")).unwrap();
         assert!(!read.cut.unwrap().contains("reads on"));

@@ -126,7 +126,7 @@ impl Error {
     /// The server's message alone, for a refused `lines` range: written
     /// as the seed runner refuses a malformed one
     /// ([`LineRange::INVALID`](crate::govlog::LineRange::INVALID)), so a
-    /// model reads one style of range error, not an HTTP status (0.105.1)
+    /// model reads one style of range error, not an HTTP status (0.105.0)
     pub fn range_refusal(&self) -> Option<String> {
         match self {
             Error::Status { status, body, .. } if status.is_client_error() => {

@@ -2,24 +2,26 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.105.1 (2026-10-19)
+## 0.105.0 (2026-10-19)
 
 Fixes to ranged reads of a data set's file, from the beta round on the
-0.104 runner (agora#821). Numbered after 0.105.0 (agentkit#196); either
-may land first.
+0.104 runner (agora#821). Lands before agentkit#196, which becomes 0.106.0.
 
 - `DataSet::resolve_ranged`: an `attachment` (or a citation's path) that
   names nothing as it stands, but whose part before its last `:` names a
   listed file, is that file and a range, parsed as `lines=` parses one
-  and refused with its errors. `rubric.md:8-3` is now "the range ends
-  before it starts", not a missing path; `rubric.md:8` is line 8.
+  and refused with its errors, when what follows the `:` looks like a
+  range (`notes.md:v2` stays a missing path). `rubric.md:8-3` is now "the
+  range ends before it starts", not a missing path; `rubric.md:8` is
+  line 8. A file part naming several files is that lookup error.
 - `DataFileContent.partial_line`: a ranged read whose first line alone
   is over the budget shows the start of that line and sets this to its
   number; `lines` is then absent, so no range claims a line not shown
   whole. The seed runner's header says the line is cut and offers no
   citation; `cut` gives the line's length.
 - `cut` says where to read on: `lines="N-"` from the first line not
-  shown whole (to the range's end, for a closed range).
+  shown whole (to the range's end, for a closed range), or past a line
+  cut inside.
 - `DataFileReadError::PastEnd` reads as a malformed range does in the
   runner: `Invalid arguments at \`lines\`: lines="…": …`, with
   `LineRange::FORM`. New `LineRange::INVALID` is that opening;

@@ -61,7 +61,7 @@ impl LineRange {
          the end of the file.";
 
     /// How a refused range opens, as the seed runner shows a malformed
-    /// `lines` argument, so that every range error reads alike (0.105.1)
+    /// `lines` argument, so that every range error reads alike (0.105.0)
     pub const INVALID: &'static str = "Invalid arguments at `lines`: ";
 
     /// Lines `start..=end` (`end` absent: to the end), or why not
