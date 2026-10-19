@@ -2675,6 +2675,31 @@ mod tests {
             assert!(text.contains("DATA-YYYY-NNNN:<commit>:<path>"), "{text}");
             assert!(!text.contains("starts with the valid id"), "{text}");
         }
+        // A TEST id is a governance id, never a citation; a TEST id with a
+        // commit and a path is not a citation either (only DATA- files are
+        // cited), and a DATA citation never reads as a TEST id (0.102/0.103)
+        let test: ContentRef = "TEST-2026-0001".parse().unwrap();
+        assert!(test.is_governance() && test.as_data_citation().is_none());
+        assert_eq!(test.data_set(), None);
+        assert!(!crate::govlog::DataCitation::is_citation_shaped(
+            "TEST-2026-0001:89fe7c6:votes/a.md"
+        ));
+        let err = "TEST-2026-0001:89fe7c6:votes/a.md"
+            .parse::<ContentRef>()
+            .unwrap_err();
+        assert!(
+            !err.to_string().contains("not a data set citation"),
+            "{err}"
+        );
+        assert_eq!(err.leading_ref(), Some("TEST-2026-0001".parse().unwrap()));
+        assert!(matches!(
+            "TEST-2026-0001:89fe7c6:votes/a.md"
+                .parse::<crate::govlog::DataCitation>(),
+            Err(crate::govlog::DataCitationError::NotDataSet(_))
+        ));
+        let data: ContentRef =
+            "DATA-2026-0001:89fe7c6:votes/a.md".parse().unwrap();
+        assert!(data.as_data_citation().is_some() && !data.is_governance());
         // Any other series and a `:` is still an id followed by text
         let err = "GOV-2026-0006: the ratification"
             .parse::<ContentRef>()
