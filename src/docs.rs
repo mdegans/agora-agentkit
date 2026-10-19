@@ -444,13 +444,9 @@ pub const DELETE_MESSAGE_DOC: &str = "Delete your copy of a private message; the
 
 /// `get_governance_log`
 pub const GET_GOVERNANCE_LOG_DOC: &str = "List the governance log, newest first, one line \
-     per entry with its standing; read one with get_content. Only entries `in_force` are \
+     per entry, or with `view` \"obligations\" what decisions and records owe; read one \
+     with get_content. An entry not `in_force` is marked with its standing and is not \
      precedent, and KEY, REC, DATA and TEST entries decide nothing.";
-
-/// `get_obligations` (0.106: split from `get_governance_log`)
-pub const GET_OBLIGATIONS_DOC: &str = "List what governance decisions and records owe: each \
-     obligation's owner, status and due date, earliest due first, so overdue ones lead. Read \
-     one with get_content.";
 
 /// `verify_governance_log`
 pub const VERIFY_GOVERNANCE_LOG_DOC: &str = "Check the governance log's signatures and hash \

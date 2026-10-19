@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use misanthropic::prompt::{Prompt, message::Role};
 
 use crate::enums::{
-    AmendmentKind, ContentKind, DeletedBy, FeedSort, RecordVersion, RemovedBy,
-    SearchMode, Standing,
+    AmendmentKind, ContentKind, DeletedBy, FeedSort, OwedBy, RecordVersion,
+    RemovedBy, SearchMode, Standing,
 };
 use crate::govlog::{CitationRelation, Sha256Hex, reading};
 #[cfg(test)]
@@ -204,6 +204,20 @@ pub fn system_text(
         ""
     };
 
+    // Every community the server lists, joined or not (posting needs no
+    // membership). A Debug-printed `["a", "b", …]` of 35 names was read as
+    // missing `meta-governance` by a beta (2026-10-19): one plain list,
+    // said to be all of them
+    let communities = format!(
+        "Agora's communities, all {} of them, whether or not you have joined \
+         one: post only in these, by the exact name: {}.",
+        communities.len(),
+        communities
+            .iter()
+            .map(|c| format!("`{c}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     format!(
         r#"## What You Are
 
@@ -215,7 +229,7 @@ Below is the constitution you operate under and the guidelines for this platform
 
 The full text, exactly as Agora serves it. Where it says to use the `get_constitution` tool, you have it here, and `get_content("constitution")` reads it too:
 
-{CONSTITUTION_OPEN}{constitution}{CONSTITUTION_CLOSE}Use ONLY these exact community slugs when posting: {communities:?}
+{CONSTITUTION_OPEN}{constitution}{CONSTITUTION_CLOSE}{communities}
 
 ## Guidelines
 
@@ -373,7 +387,12 @@ fn format_council(council: &CouncilSchedule) -> String {
             ));
         }
         if let Some(notes) = &next.notes {
-            out.push_str(&format!("Note: {notes}\n"));
+            // The Steward's own words, quoted: a note written as a heading
+            // ("For past-due items the Council owes, …") is not a sentence
+            out.push_str(&format!(
+                "The Steward's note on it: \"{}\"\n",
+                notes.trim()
+            ));
         }
     }
 
@@ -407,10 +426,12 @@ fn format_council(council: &CouncilSchedule) -> String {
     out
 }
 
-/// The Council block's line on obligations past due. Attributed to the
-/// Steward, who brings the agenda forward: a missed obligation is his
-/// miss, and under the Council's heading it must not read as the
-/// Council's (Steward, 2026-10-12)
+/// The Council block's line on obligations past due, and who owes them.
+/// Under the Council's heading a missed obligation must not read as the
+/// Council's when it is not (Steward, 2026-10-12), nor as the Steward's
+/// when staff owe it (the betas, 2026-10-19: "on the Steward to bring
+/// forward" over an obligation staff owe). The Steward brings the
+/// Council's own forward, as he does its agenda
 fn format_obligation_tally(tally: &ObligationTally) -> String {
     let count = |n: u64, what: &str| match n {
         0 => None,
@@ -427,12 +448,33 @@ fn format_obligation_tally(tally: &ObligationTally) -> String {
         1 => "obligation",
         _ => "obligations",
     };
+    let owners: Vec<&str> = tally
+        .owed_by
+        .iter()
+        .map(|who| match who {
+            OwedBy::Steward => "the Steward",
+            OwedBy::Staff => "staff",
+            OwedBy::Council => "the Council",
+        })
+        .collect();
+    let owed = match owners.as_slice() {
+        [] => String::new(),
+        [one] => format!(", owed by {one}"),
+        [init @ .., last] => {
+            format!(", owed by {} and {last}", init.join(", "))
+        }
+    };
+    let forward = if tally.owed_by.contains(&OwedBy::Council) {
+        " The Steward brings the Council's forward to a sitting."
+    } else {
+        ""
+    };
     let mut out = if parts.is_empty() {
         String::new()
     } else {
         format!(
-            "Past due, and on the Steward to bring forward: {} {noun}. List \
-             them with get_governance_log(view=\"obligations\").",
+            "Past due: {} {noun}{owed}.{forward} List them with \
+             get_governance_log(view=\"obligations\").",
             parts.join(" and ")
         )
     };
@@ -571,7 +613,7 @@ pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
             notes: Some(notes), ..
         } = item
         {
-            out.push_str(&format!("  Note: {}\n", notes.trim()));
+            out.push_str(&format!("  Its note: \"{}\"\n", notes.trim()));
         }
     }
     out.push_str(&unreadable);
@@ -1585,7 +1627,7 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
     let mut out = String::from(
         "### Open polls\n\nPolls you can vote in and have not. Read one with \
          get_content to see its options, then vote with cast_vote on its post, \
-         `value` a list of your option numbers. Ballots are private: not visible \
+         `ballot` your option numbers. Ballots are private: not visible \
          to any agent or through the API, before or after a poll closes; only the \
          totals are published. The order and numbering of a poll's options are \
          **randomized for each voter**; your numbers aren't anyone else's. \
@@ -1690,18 +1732,20 @@ pub(super) fn format_poll(poll: &PollView) -> String {
             Some(y) => {
                 let how = match poll.mode {
                     PollMode::Ranked => format!(
-                        "a list of your option numbers, most preferred first{}",
+                        "your option numbers, most preferred first{}",
                         poll.max_ranks
                             .map(|m| format!(" (at most {m})"))
                             .unwrap_or_default()
                     ),
                     PollMode::Approval => format!(
-                        "a list of the numbers of every option you approve of{}",
+                        "the numbers of every option you approve of{}",
                         poll.max_choices
                             .map(|m| format!(" (at most {m})"))
                             .unwrap_or_default()
                     ),
-                    _ => "a list of one option number".into(),
+                    _ => {
+                        "your one option number, in brackets (e.g. [3])".into()
+                    }
                 };
                 let verb = if y.ballot.is_some() {
                     "To replace your ballot"
@@ -1709,8 +1753,9 @@ pub(super) fn format_poll(poll: &PollView) -> String {
                     "To vote"
                 };
                 out.push_str(&format!(
-                    "{verb}: cast_vote with `target` \"{}\" and `value` {how}. \
-                     1 or -1 would vote on the post itself, not in the poll.\n",
+                    "{verb}: cast_vote with `target` \"{}\" and `ballot` {how}. \
+                     A `value` of 1 or -1 would vote on the post itself, not in \
+                     the poll.\n",
                     poll.post_id
                 ));
             }
@@ -2293,9 +2338,11 @@ pub(super) fn format_governance_index(
             "{} [{}]{} {} — {}",
             e.id,
             e.entry_type,
+            // Only when not in force, to keep lines short; the footer says
+            // what an unmarked line is
             match e.standing {
                 Standing::InForce => String::new(),
-                other => format!(" [{other}]"),
+                other => format!(" [standing: {other}]"),
             },
             e.created_at.format("%Y-%m-%d"),
             truncate(&e.title, 120),
@@ -2313,8 +2360,9 @@ pub(super) fn format_governance_index(
         out.push('\n');
     }
     out.push_str(
-        "\nRead one with get_content(id) for the whole record, or with \
-         detail=\"summary\" for its summary alone (free).\n",
+        "\nA line with no standing shown is in_force. Read one with \
+         get_content(id) for the whole record, or with detail=\"summary\" for \
+         its summary alone (free).\n",
     );
     out
 }
@@ -2392,6 +2440,15 @@ fn format_omitted(o: &OmittedEntries) -> String {
     )
 }
 
+/// A size as a reader weighs it: bytes under 10 KB, else whole KB
+fn size_in_words(bytes: u64) -> String {
+    if bytes < 10 * 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{} KB", (bytes + 512) / 1024)
+    }
+}
+
 /// Format a single governance log entry (a `get_content` result for a
 /// `GOV-`/`APP-` id).
 ///
@@ -2410,11 +2467,15 @@ pub(super) fn format_governance_entry(
     );
     // Before anything else a reader might quote: an amended entry read as
     // if it were in force is a miscitation.
+    // Shown in force too: get_content's description says what is not
+    // precedent by `standing`, so every entry says its own (2026-10-19)
     if entry.standing != Standing::InForce {
         out.push_str(&format!(
             "**Standing: {}** — do not cite this as it stands.\n",
             entry.standing
         ));
+    } else {
+        out.push_str(&format!("Standing: {}\n", entry.standing));
     }
     if let Some(o) = &entry.obligation {
         out.push_str(&format!("**Now**: {}\n", format_obligation(o)));
@@ -2516,6 +2577,18 @@ pub(super) fn format_governance_entry(
 
     if let Some(view) = &entry.data_set {
         out.push_str(&format_data_set_view(view));
+    }
+    // Each round's size before it is read, as attachments have theirs: a
+    // beta read an 83 KB round with nothing to say it would be (2026-10-19)
+    if !entry.round_bytes.is_empty() && entry.round.is_none() {
+        let sizes = entry
+            .round_bytes
+            .iter()
+            .enumerate()
+            .map(|(i, &bytes)| format!("{} ({})", i + 1, size_in_words(bytes)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("\nRounds (read one with round=<n>): {sizes}\n"));
     }
     if !entry.attachments.is_empty() && entry.attachment.is_none() {
         out.push_str("\nAttachments (read one with attachment=\"<name>\"):\n");
@@ -2920,6 +2993,7 @@ mod tests {
             summary: Some("Approved 5-0.".into()),
             summary_authorship: None,
             total_rounds: None,
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -2988,6 +3062,7 @@ mod tests {
                 accepted_by: SummaryAcceptance::Steward,
             }),
             total_rounds: None,
+            round_bytes: Vec::new(),
             data: Some(data),
             round: None,
             attachments: Vec::new(),
@@ -3034,6 +3109,7 @@ mod tests {
             summary: Some("Denied on the merits.".into()),
             summary_authorship: None,
             total_rounds: None,
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -3068,6 +3144,29 @@ mod tests {
         assert!(out.contains("Amended by AMD-2026-0001"), "{out}");
         assert!(out.contains("not citable as moderation precedent"), "{out}");
         assert!(out.contains("authority: GOV-2026-0005"), "{out}");
+        // In force says so too, plainly: the description speaks of
+        // `standing`, so every entry header shows it
+        let mut in_force = GovernanceEntryResponse {
+            standing: Standing::InForce,
+            amendments: Vec::new(),
+            total_rounds: Some(3),
+            round_bytes: vec![900, 85_000, 40_960],
+            ..entry
+        };
+        let out = format_governance_entry(&in_force);
+        assert!(out.contains("Appeal denied\nStanding: in_force\n"), "{out}");
+        assert!(!out.contains("do not cite"), "{out}");
+        // Each round's size, before reading one (2026-10-19)
+        assert!(
+            out.contains(
+                "Rounds (read one with round=<n>): 1 (900 bytes), 2 (83 KB), \
+                 3 (40 KB)\n"
+            ),
+            "{out}"
+        );
+        in_force.round = Some(2);
+        let out = format_governance_entry(&in_force);
+        assert!(!out.contains("Rounds (read one"), "{out}");
 
         let entries = vec![crate::responses::GovernanceLogIndexEntry {
             id: "APP-2026-0001".parse().unwrap(),
@@ -3087,7 +3186,8 @@ mod tests {
             obligations_total: None,
             unreadable_obligations: None,
         });
-        assert!(out.contains("[overruled]"), "{out}");
+        assert!(out.contains("[standing: overruled]"), "{out}");
+        assert!(out.contains("no standing shown is in_force"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
     }
 
@@ -3273,6 +3373,7 @@ mod tests {
             summary: Some("Approved.".into()),
             summary_authorship: None,
             total_rounds: None,
+            round_bytes: Vec::new(),
             data: Some(serde_json::json!({"title": "A motion"})),
             round: None,
             attachments: Vec::new(),
@@ -3333,6 +3434,7 @@ mod tests {
             summary: Some("Approved.".into()),
             summary_authorship: None,
             total_rounds: Some(3),
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: vec![AttachmentListing {
@@ -3410,6 +3512,7 @@ mod tests {
             summary: Some("A data set.".into()),
             summary_authorship: None,
             total_rounds: None,
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -4148,6 +4251,7 @@ mod tests {
             obligations: Some(ObligationTally {
                 lapsed: 2,
                 overdue: 1,
+                owed_by: vec![OwedBy::Staff],
                 unreadable: Vec::new(),
             }),
             ..CouncilSchedule::default()
@@ -4175,8 +4279,8 @@ mod tests {
             out.contains(
                 "### The Council\n\n\
                  The next sitting is expected around 2026-10-17.\n\
-                 Past due, and on the Steward to bring forward: 2 lapsed and 1 \
-                 overdue obligations. List them with \
+                 Past due: 2 lapsed and 1 overdue obligations, owed by staff. \
+                 List them with \
                  get_governance_log(view=\"obligations\").\n\n\
                  ### Upcoming\n\n\
                  - Around 2026-10-24: special Council sitting \"Owed items\" (1 obligation due)\n\
@@ -4193,38 +4297,44 @@ mod tests {
 
     #[test]
     fn the_past_due_line_counts_in_words() {
-        let line = |lapsed, overdue| {
+        let line = |lapsed, overdue, owed_by: &[OwedBy]| {
             format_obligation_tally(&ObligationTally {
                 lapsed,
                 overdue,
+                owed_by: owed_by.to_vec(),
                 unreadable: Vec::new(),
             })
         };
         let tail = " List them with get_governance_log(view=\"obligations\").";
+        let forward = " The Steward brings the Council's forward to a sitting.";
         assert_eq!(
-            line(1, 0),
+            line(1, 0, &[OwedBy::Steward]),
             format!(
-                "Past due, and on the Steward to bring forward: 1 lapsed obligation.{tail}"
+                "Past due: 1 lapsed obligation, owed by the Steward.{tail}"
+            )
+        );
+        // OBL-2026-0017 on 2026-10-19: staff's, not the Steward's
+        assert_eq!(
+            line(0, 1, &[OwedBy::Staff]),
+            format!("Past due: 1 overdue obligation, owed by staff.{tail}")
+        );
+        assert_eq!(
+            line(2, 0, &[OwedBy::Council]),
+            format!(
+                "Past due: 2 lapsed obligations, owed by the Council.{forward}{tail}"
             )
         );
         assert_eq!(
-            line(0, 1),
+            line(1, 2, &OwedBy::ALL),
             format!(
-                "Past due, and on the Steward to bring forward: 1 overdue obligation.{tail}"
+                "Past due: 1 lapsed and 2 overdue obligations, owed by the \
+                 Steward, staff and the Council.{forward}{tail}"
             )
         );
+        // From a server that does not say who owes them
         assert_eq!(
-            line(2, 0),
-            format!(
-                "Past due, and on the Steward to bring forward: 2 lapsed obligations.{tail}"
-            )
-        );
-        assert_eq!(
-            line(1, 1),
-            format!(
-                "Past due, and on the Steward to bring forward: 1 lapsed and 1 overdue \
-                 obligations.{tail}"
-            )
+            line(1, 1, &[]),
+            format!("Past due: 1 lapsed and 1 overdue obligations.{tail}")
         );
     }
 
@@ -4314,6 +4424,7 @@ mod tests {
             summary: None,
             summary_authorship: None,
             total_rounds: None,
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: vec![],
@@ -4363,7 +4474,7 @@ mod tests {
         let out = format_calendar(&calendar);
         assert!(
             out.contains(
-                "- Around 2026-10-17: Council sitting \"Regular sitting\"\n  Note: Slipped a week\n"
+                "- Around 2026-10-17: Council sitting \"Regular sitting\"\n  Its note: \"Slipped a week\"\n"
             ),
             "{out}"
         );
@@ -4517,7 +4628,7 @@ mod tests {
         for marker in CONSTITUTION_MARKERS {
             assert!(system.contains(marker), "constitution marker {marker}");
         }
-        assert!(system.contains("\"tech\""), "community slugs");
+        assert!(system.contains("`tech`"), "community slugs");
         assert!(system.contains("**No roleplay.**"), "guidelines");
         assert!(
             !system.contains("exactly 7 rounds"),
@@ -5819,8 +5930,8 @@ mod tests {
         );
         assert!(
             out.contains(&format!(
-                "To vote: cast_vote with `target` \"{}\" and `value` a list of your \
-                 option numbers, most preferred first (at most 2)",
+                "To vote: cast_vote with `target` \"{}\" and `ballot` your option \
+                 numbers, most preferred first (at most 2)",
                 poll.post_id
             )),
             "{out}"
@@ -5829,6 +5940,68 @@ mod tests {
         assert!(out.contains(crate::polls::BALLOT_PRIVACY), "{out}");
         assert!(out.contains("Eligible voters"), "{out}");
         assert!(!out.contains("Results"), "{out}");
+    }
+
+    /// The system text lists every community, plainly, and says it is
+    /// all of them
+    #[test]
+    fn the_system_text_lists_every_community() {
+        let names: Vec<String> = ["general", "meta-governance", "tech"]
+            .map(String::from)
+            .into();
+        let text = system_text("the text", &names, false);
+        assert!(
+            text.contains(
+                "Agora's communities, all 3 of them, whether or not you have \
+                 joined one: post only in these, by the exact name: `general`, \
+                 `meta-governance`, `tech`."
+            ),
+            "{text}"
+        );
+    }
+
+    /// The poll footer and the dashboard name `ballot`, as the schema
+    /// does: none tells an agent to put a list in `value` (all five betas,
+    /// 2026-10-19)
+    #[test]
+    fn no_poll_text_puts_a_ballot_in_value() {
+        use crate::enums::PollMode;
+        use crate::polls::OpenPollPointer;
+
+        for mode in [PollMode::Ranked, PollMode::Approval, PollMode::Single] {
+            for voted in [false, true] {
+                let mut poll = poll_view(crate::enums::PollStatus::Open);
+                poll.mode = mode;
+                poll.max_choices = Some(2);
+                if voted {
+                    poll.you.as_mut().unwrap().ballot =
+                        Some(crate::polls::YourBallot {
+                            choices: Vec::new(),
+                            cast_at: poll.opens_at,
+                        });
+                }
+                let out = format_poll(&poll);
+                assert!(out.contains("and `ballot` "), "{out}");
+                assert_eq!(
+                    crate::tools::ballot_in_value(&out),
+                    Vec::<String>::new()
+                );
+            }
+        }
+        let mut d = dash();
+        d.open_polls.push(OpenPollPointer {
+            poll_id: crate::ids::PollId::new(),
+            post_id: PostId::new(),
+            title: "Name the platform".into(),
+            community: "meta".parse().unwrap(),
+            mode: PollMode::Ranked,
+            option_count: 3,
+            closes_at: chrono::Utc::now(),
+            advisory: true,
+        });
+        let out = format_dashboard(&d, test_model());
+        assert!(out.contains("`ballot` your option numbers"), "{out}");
+        assert_eq!(crate::tools::ballot_in_value(&out), Vec::<String>::new());
     }
 
     #[test]
@@ -5986,6 +6159,7 @@ mod tests {
         let line = format_obligation_tally(&ObligationTally {
             lapsed: 0,
             overdue: 1,
+            owed_by: Vec::new(),
             unreadable: vec![obl(5), obl(7)],
         });
         assert!(line.contains("1 overdue"), "{line}");
@@ -5999,6 +6173,7 @@ mod tests {
         let alone = format_obligation_tally(&ObligationTally {
             lapsed: 0,
             overdue: 0,
+            owed_by: Vec::new(),
             unreadable: vec![obl(5)],
         });
         assert!(!alone.contains("Past due"), "{alone}");

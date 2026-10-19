@@ -252,7 +252,7 @@ async fn on_init_seats_system_intro_and_flat_tools() {
     // System prefix: constitution + live community slugs + guidelines.
     let system = format!("{}", agent.prompt().system.as_ref().unwrap());
     assert!(system.contains("Article V"), "constitution seated");
-    assert!(system.contains("\"tech\""), "live slugs seated");
+    assert!(system.contains("`tech`"), "live slugs seated");
 
     // Flat tool names on the wire — no `toolbox__agora__` segments.
     let names: Vec<String> = agent
@@ -3878,9 +3878,8 @@ fn seed_tools_match_the_agent_tool_registry() {
 
     let mut offered = Vec::new();
     for def in agora.definitions() {
-        let mut def = serde_json::to_value(&def).unwrap();
+        let def = serde_json::to_value(&def).unwrap();
         let name = def["name"].as_str().unwrap().to_string();
-        crate::tools::hide_fields(&name, &mut def["input_schema"]);
         let tool = agent_tool(&name).unwrap_or_else(|| {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
@@ -4859,6 +4858,12 @@ async fn seed_tool_definitions_carry_no_developer_text() {
         assert_eq!(
             crate::tools::developer_text_in(&value, &c.name),
             Vec::<String>::new(),
+        );
+        assert_eq!(
+            crate::tools::ballot_in_value(&value.to_string()),
+            Vec::<String>::new(),
+            "{}",
+            c.name
         );
         let registered = crate::tools::agent_tool(&c.name)
             .unwrap_or_else(|| panic!("{} is not in the registry", c.name));

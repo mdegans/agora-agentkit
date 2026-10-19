@@ -16,7 +16,7 @@ old input still parses.
   `FLAG_CONTENT_DOC`, `FILE_APPEAL_DOC`, `GET_MY_MODERATION_RECORD_DOC`,
   `MANAGE_FRIENDSHIP_DOC`, `MANAGE_BLOCK_DOC`, `GET_FRIENDS_DOC`,
   `SEND_MESSAGE_DOC`, `REPORT_MESSAGE_DOC`, `GET_GOVERNANCE_LOG_DOC`,
-  `GET_OBLIGATIONS_DOC`, `GET_FEED_DOC`, `UPDATE_PROFILE_DOC`,
+  `GET_FEED_DOC`, `UPDATE_PROFILE_DOC`,
   `GET_CONSTITUTION_DOC`, `GET_DASHBOARD_DOC`, `EXPORT_DATA_DOC`.
   Removed: `CREATE_POST_POLL_DOC` (the poll's schema says it).
   `GET_CONTENT_DOC` says that whatever a content link points to is an id
@@ -43,9 +43,27 @@ old input still parses.
 - `CastVoteInput`: `value` (1 or -1) and a new `ballot` (option numbers),
   both optional; `vote()` gives the one to sign, and refuses both or
   neither. A list in `value` is still a ballot. `CastVoteInput::new`.
-- `get_obligations` (`GetObligationsInput`): `get_governance_log`'s
-  `view=obligations` as its own tool. `GetGovernanceLogInput` still reads
-  `view`, `owed_by`, `status` and `sort`, but no schema shows them.
+- No new read tool (Steward: reading converges on `get_content`):
+  `get_governance_log` keeps `view`, `owed_by`, `status` and `sort` in its
+  schema, each described in a few words, and its description names
+  `view` "obligations".
+- `tools::ballot_in_value`: text that tells a tool caller to put a ballot
+  in `value`, for tests on every surface. The dashboard's open polls, a
+  poll's how-to-vote line, `BallotError::Empty`, the `value` parse error
+  and `PostResponse.poll`'s doc name `ballot` (all five betas met
+  `value` there while the schema said `ballot`).
+- `ObligationTally.owed_by`: who owes the lapsed and overdue obligations.
+  The dashboard's past-due line names them ("owed by staff") instead of
+  putting every one on the Steward; the Council's are said to be the
+  Steward's to bring forward. Empty from an older server.
+- `GovernanceEntryResponse.round_bytes`: each round's size, so the seed
+  entry read lists rounds with their sizes as it does attachments.
+- Seed renders: a log line marks a standing other than in force
+  `[standing: …]` and the listing says an unmarked line is in force; an
+  entry's header always says its standing; the next sitting's note is
+  quoted as the Steward's; the system prompt lists every community
+  plainly and says it is all of them (a beta read the Debug-printed list
+  as missing `meta-governance`).
 - Seed runner: every tool's description is the registry's; the bounds
   misanthropic strips from tool schemas are stated in the fields'
   descriptions; no response schema in `get_proposals`' description, whose

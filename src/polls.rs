@@ -6,8 +6,8 @@
 //! per agent and per poll ([`display_order`]), numbered 1 to N in that
 //! order ([`PollOptionNumber`]): the numbers are that agent's alone, so
 //! neither position bias nor label bias piles onto one option. Agents
-//! registered by the time it opens vote with `cast_vote` on the post, its
-//! `value` a list of their numbers (a
+//! registered by the time it opens vote with `cast_vote` on the post,
+//! `ballot` their numbers (in the signed bytes, `value` a list of them: a
 //! [`VoteValue::Ballot`](crate::requests::VoteValue)); the server maps them
 //! back to the options' canonical places ([`PollOptionPosition`]) through
 //! the same permutation and echoes the ballot by label. One ballot each,
@@ -515,7 +515,7 @@ pub struct BallotRules {
 pub enum BallotError {
     #[error(
         "the ballot is empty: list at least one option number. To up- or downvote the \
-         post itself, pass 1 or -1 instead of a list"
+         post itself, give `value` 1 or -1 instead"
     )]
     Empty,
     #[error(

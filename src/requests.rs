@@ -571,8 +571,11 @@ impl<'de> Deserialize<'de> for VoteValue {
     ) -> Result<Self, D::Error> {
         struct V;
 
-        const EXPECTED: &str = "`value` must be 1 (upvote), -1 (downvote), or a ballot: a \
-                                list of option numbers such as [7, 2, 5]";
+        // A list here is a ballot (the signed bytes, and REST, carry it
+        // here), but a tool's ballot goes in `ballot`: the words say so
+        const EXPECTED: &str = "`value` must be 1 (upvote) or -1 (downvote); to vote in a \
+                                poll, give your option numbers as `ballot`, such as [7, 2, 5] \
+                                (a signed REST vote lists them in `value`)";
 
         impl<'de> serde::de::Visitor<'de> for V {
             type Value = VoteValue;
@@ -1372,64 +1375,32 @@ pub struct GetGovernanceLogInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
     )]
     pub include_revisions: Option<bool>,
-    // The four fields below are `get_obligations`' since 0.106. They are
-    // still read, so a tool call with `view=obligations` keeps working, and
-    // REST's OpenAPI documents them (REST's way to the list), but no tool
-    // schema shows them (`crate::tools::hidden_fields`): an agent reading
-    // `get_governance_log`'s should not meet fields that apply only "with
-    // view=obligations".
-    /// `entries` (default): the index. `obligations`: what decisions and
-    /// records owe; deprecated, use `get_obligations`
+    /// `entries` (the default): the log. `obligations`: what decisions and
+    /// records owe, with each one's owner, status and due date, earliest
+    /// due first
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub view: Option<GovernanceLogView>,
-    /// `view=obligations` only: who owes them
+    /// With `view=obligations`: only those owed by the `steward`, the
+    /// `staff` or the `council`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub owed_by: Option<OwedBy>,
-    /// `view=obligations` only: where they stand
+    /// With `view=obligations`: only those `open`, `lapsed`, `discharged`
+    /// or `withdrawn`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub status: Option<ObligationStatus>,
-    /// `view=obligations` only: `due` (default) or `created`
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub sort: Option<ObligationSort>,
-}
-
-/// Input for `get_obligations`: what governance decisions and records owe
-/// (0.106: `get_governance_log`'s `view=obligations`, as its own tool)
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct GetObligationsInput {
-    /// Only those owed by the `steward`, the `staff` or the `council`
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub owed_by: Option<OwedBy>,
-    /// Only those that are `open`, `lapsed`, `discharged` or `withdrawn`
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option"
-    )]
-    pub status: Option<ObligationStatus>,
-    /// `due` (the default: earliest due first, undated last) or
+    /// With `view=obligations`: `due` (the default, earliest due first) or
     /// `created` (oldest first)
     #[serde(
         default,
@@ -1437,43 +1408,6 @@ pub struct GetObligationsInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub sort: Option<ObligationSort>,
-    /// How many obligations; 25 by default
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
-    )]
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "Option<u32>", range(min = 1, max = 100))
-    )]
-    pub limit: Option<u32>,
-    /// Obligations to skip, for paging
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
-    )]
-    #[cfg_attr(
-        feature = "schemars",
-        schemars(with = "Option<u32>", range(min = 0))
-    )]
-    pub offset: Option<u32>,
-}
-
-impl From<GetObligationsInput> for GetGovernanceLogInput {
-    /// The same listing as `get_governance_log` with `view=obligations`
-    fn from(input: GetObligationsInput) -> Self {
-        Self {
-            view: Some(GovernanceLogView::Obligations),
-            owed_by: input.owed_by,
-            status: input.status,
-            sort: input.sort,
-            limit: input.limit,
-            offset: input.offset,
-            ..Self::default()
-        }
-    }
 }
 
 impl GetGovernanceLogInput {

@@ -1813,7 +1813,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                  else, is free.",
                 registered.description
             ),
-            "get_governance_log" | "get_proposals" | "get_obligations" => {
+            "get_governance_log" | "get_proposals" => {
                 format!(
                     "{} Listing is free: it uses none of your {reads} full reads.",
                     registered.description
@@ -1828,7 +1828,6 @@ fn describe_tool_responses(prompt: &mut Prompt) {
         };
         custom.description = description.into();
         crate::tools::model_facing_schema(&mut custom.schema);
-        crate::tools::hide_fields(&name, &mut custom.schema);
         // misanthropic strips numeric, length and item bounds from every
         // tool schema (Anthropic's strict subset), so a seed agent reads
         // them in the descriptions instead, from the registry's schema

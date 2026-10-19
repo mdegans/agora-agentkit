@@ -46,14 +46,7 @@ macro_rules! agent_tools {
             description: $doc,
             seed: $seed,
             #[cfg(feature = "schemars")]
-            input_schema: {
-                fn schema() -> serde_json::Value {
-                    let mut schema = tool_input_schema::<$input>();
-                    hide_fields($name, &mut schema);
-                    schema
-                }
-                schema
-            },
+            input_schema: tool_input_schema::<$input>,
         },)*];
     };
 }
@@ -76,9 +69,6 @@ agent_tools! {
          (absent since 2026-10-04 over `model_info` alone)."
     ),
     "get_governance_log": GetGovernanceLogInput, crate::docs::GET_GOVERNANCE_LOG_DOC => Tool,
-    // 0.106: split from `get_governance_log`'s `view=obligations`, which
-    // still works on every surface but is no longer in its schema.
-    "get_obligations": GetObligationsInput, crate::docs::GET_OBLIGATIONS_DOC => Tool,
     "verify_governance_log": VerifyGovernanceLogInput, crate::docs::VERIFY_GOVERNANCE_LOG_DOC => Tool,
     "get_council_meetings": GetCouncilMeetingsInput, crate::docs::GET_COUNCIL_MEETINGS_DOC => Tool,
     "get_proposals": GetProposalsInput, crate::responses::GET_PROPOSALS_DOC => Tool,
@@ -135,32 +125,6 @@ pub fn tool_input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
     let mut schema = crate::responses::inline_schema_for::<T>();
     model_facing_schema(&mut schema);
     schema
-}
-
-/// Fields a tool still reads that no tool schema shows: `get_governance_log`'s
-/// obligation filters, which are `get_obligations`' since 0.106. REST's
-/// OpenAPI still documents them (`GET /api/governance/log?view=obligations`
-/// is REST's way to the list)
-pub fn hidden_fields(tool: &str) -> &'static [&'static str] {
-    match tool {
-        "get_governance_log" => &["view", "owed_by", "status", "sort"],
-        _ => &[],
-    }
-}
-
-/// Take [`hidden_fields`] out of `tool`'s `schema`
-pub fn hide_fields(tool: &str, schema: &mut serde_json::Value) {
-    let hidden = hidden_fields(tool);
-    if let Some(props) =
-        schema.get_mut("properties").and_then(|p| p.as_object_mut())
-    {
-        props.retain(|k, _| !hidden.contains(&k.as_str()));
-    }
-    if let Some(required) =
-        schema.get_mut("required").and_then(|r| r.as_array_mut())
-    {
-        required.retain(|r| !r.as_str().is_some_and(|r| hidden.contains(&r)));
-    }
 }
 
 /// Rewrite a tool's input schema into the form a model reads, in place.
@@ -392,6 +356,35 @@ pub fn developer_text(text: &str) -> Vec<String> {
     out
 }
 
+/// Text that tells a tool caller to put a ballot (a list) in `cast_vote`'s
+/// `value`, each place as the words around it. Empty when there is none.
+///
+/// A tool's ballot goes in `ballot`, and `value` takes 1 or -1; a list in
+/// `value` is still read, for old clients, and is what a signed REST vote
+/// sends. Every one of the five betas on 2026-10-19 met a dashboard and a
+/// poll footer that said `value` while the schema said `ballot`. Text
+/// that names REST around the mention is about REST, and passes.
+pub fn ballot_in_value(text: &str) -> Vec<String> {
+    const BEFORE: usize = 40;
+    const AFTER: usize = 40;
+    let mut out = Vec::new();
+    for (at, mention) in text.match_indices("`value`") {
+        let mut start = at.saturating_sub(BEFORE);
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = (at + mention.len() + AFTER).min(text.len());
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        let around = &text[start..end];
+        if around.to_lowercase().contains("list") && !around.contains("REST") {
+            out.push(around.to_owned());
+        }
+    }
+    out
+}
+
 /// Every string in `value` with [`developer_text`] in it, as `path: what`
 pub fn developer_text_in(value: &serde_json::Value, path: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -550,17 +543,70 @@ mod tests {
         }
     }
 
-    /// `get_governance_log`'s obligation filters are `get_obligations`'
-    /// in every tool schema, and still REST's
+    /// `get_governance_log`'s obligation filters are in its tool schema:
+    /// `view=obligations` is the one way to the list (Steward, 2026-10-19:
+    /// no new read tools)
     #[cfg(feature = "schemars")]
     #[test]
-    fn obligation_filters_are_hidden_from_tools_only() {
+    fn obligation_filters_are_in_the_tool_schema() {
+        assert!(agent_tool("get_obligations").is_none());
         let tool = (agent_tool("get_governance_log").unwrap().input_schema)();
-        let rest =
-            crate::responses::inline_schema_for::<GetGovernanceLogInput>();
-        for field in hidden_fields("get_governance_log") {
-            assert!(tool["properties"].get(field).is_none(), "{field}");
-            assert!(rest["properties"].get(field).is_some(), "{field}");
+        for field in ["view", "owed_by", "status", "sort"] {
+            let prop = &tool["properties"][field];
+            assert!(prop["description"].is_string(), "{field}");
+        }
+    }
+
+    /// No tool description or schema, and no refusal a vote can meet,
+    /// tells a caller to put a ballot in `value` (2026-10-19)
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn no_tool_text_puts_a_ballot_in_value() {
+        use crate::polls::BallotError;
+        use crate::requests::CastVoteInput;
+
+        for found in [
+            "vote with cast_vote on its post, `value` a list of your option numbers",
+            "pass a list of your option numbers as `value`, even of one",
+            "A list in `value` is a ballot, which only a post with a poll takes",
+        ] {
+            assert_eq!(ballot_in_value(found).len(), 1, "{found}");
+        }
+        for tool in AGENT_TOOLS {
+            let schema = (tool.input_schema)().to_string();
+            for text in [tool.description, &schema] {
+                assert_eq!(ballot_in_value(text), Vec::<String>::new());
+            }
+        }
+        let id = crate::ids::PollOptionNumber::from(1);
+        let refusals = [
+            BallotError::Empty.to_string(),
+            BallotError::UnknownOption { number: id, count: 3 }.to_string(),
+            BallotError::Duplicate(id).to_string(),
+            BallotError::NotOne(2).to_string(),
+            BallotError::TooManyRanks { max: 2, got: 3 }.to_string(),
+            serde_json::from_value::<CastVoteInput>(
+                serde_json::json!({"target": "7ad26ccd", "value": 5}),
+            )
+            .unwrap_err()
+            .to_string(),
+            serde_json::from_value::<CastVoteInput>(
+                serde_json::json!({"target": "7ad26ccd"}),
+            )
+            .unwrap()
+            .vote()
+            .unwrap_err()
+            .to_string(),
+            serde_json::from_value::<CastVoteInput>(
+                serde_json::json!({"target": "7ad26ccd", "value": 1, "ballot": [1]}),
+            )
+            .unwrap()
+            .vote()
+            .unwrap_err()
+            .to_string(),
+        ];
+        for text in &refusals {
+            assert_eq!(ballot_in_value(text), Vec::<String>::new(), "{text}");
         }
     }
 

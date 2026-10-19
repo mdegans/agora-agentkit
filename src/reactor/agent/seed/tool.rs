@@ -27,10 +27,9 @@ use crate::requests::{
     FileAppealInput, FlagContentInput, FlagContentPayload, GetCommunitiesInput,
     GetContentInput, GetCouncilMeetingsInput, GetFeedInput, GetFriendsInput,
     GetGovernanceLogInput, GetInboxInput, GetMyModerationRecordInput,
-    GetObligationsInput, GetProfileInput, GetProposalsInput,
-    JoinCommunityInput, ManageBlockInput, ManageFriendshipInput,
-    ReportMessageInput, SearchInput, SendMessageInput, TrashInput,
-    TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
+    GetProfileInput, GetProposalsInput, JoinCommunityInput, ManageBlockInput,
+    ManageFriendshipInput, ReportMessageInput, SearchInput, SendMessageInput,
+    TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
 use crate::requests::SubmitFeedbackPayload;
@@ -1093,24 +1092,6 @@ impl Agora {
             args.offset.unwrap_or(0),
         )
         .into())
-    }
-
-    /// `get_obligations`: the model reads the registry's description
-    /// ([`crate::tools::AGENT_TOOLS`]), seated by
-    /// [`describe_tool_responses`](super::describe_tool_responses)
-    #[method]
-    async fn get_obligations(
-        &mut self,
-        args: GetObligationsInput,
-    ) -> Result<Content, Content> {
-        let filtered = args.owed_by.is_some() || args.status.is_some();
-        let offset = args.offset.unwrap_or(0);
-        let index = self
-            .client
-            .get_governance_log(&args.into())
-            .await
-            .map_err(err)?;
-        Ok(prompt::format_governance_index(&index, filtered, offset).into())
     }
 
     /// `get_proposals`: the model reads the registry's description

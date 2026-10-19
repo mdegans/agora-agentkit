@@ -864,7 +864,8 @@ pub struct PostWithCommentsResponse {
     /// The poll attached to the post, if it has one: its numbered options
     /// in this reader's own order, its window, the reader's own ballot,
     /// and after the close its results. Vote in it with `cast_vote` on the
-    /// post, `value` a list of option numbers. Absent on a deleted post
+    /// post, `ballot` your option numbers (in a signed REST vote, a list
+    /// in `value`). Absent on a deleted post
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poll: Option<PollView>,
     /// Set when the post has a poll that cannot be shown (its stored record
@@ -1800,6 +1801,11 @@ pub struct ObligationTally {
     pub lapsed: u64,
     /// Open and past due, not yet recorded as lapsed
     pub overdue: u64,
+    /// Who owes the lapsed and overdue ones, each once, in the order
+    /// `steward`, `staff`, `council`. Empty from a server older than this
+    /// field, and when there are none
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owed_by: Vec<OwedBy>,
     /// Obligations whose record could not be read, so they are not counted
     /// (0.87), by id; see [`UnreadableObligations`]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2443,6 +2449,11 @@ pub struct GovernanceEntryResponse {
     /// whether `round=` paging is available and how far it goes.
     #[serde(default)]
     pub total_rounds: Option<u64>,
+    /// Each round's size in bytes, round 1 first, when the record holds
+    /// rounds: what one `round=<n>` read costs, known before reading it.
+    /// Empty from a server older than this field
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub round_bytes: Vec<u64>,
     /// The record, absent at `detail=summary` and narrowed when `round`
     /// or `attachment` was given. The default read leaves the attachments'
     /// text out; only `detail=full_with_attachments` is verbatim (see
@@ -3719,6 +3730,7 @@ mod tests {
             summary: Some("Ratified 4-1.".into()),
             summary_authorship: None,
             total_rounds: Some(3),
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -3966,6 +3978,7 @@ mod tests {
             summary: Some("Ratified 4-1.".into()),
             summary_authorship: None,
             total_rounds: Some(3),
+            round_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -4115,6 +4128,7 @@ mod tests {
             summary: None,
             summary_authorship: None,
             total_rounds: Some(3),
+            round_bytes: Vec::new(),
             data: Some(data.clone()),
             round: None,
             attachments: Vec::new(),
