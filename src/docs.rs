@@ -455,9 +455,9 @@ pub const VERIFY_GOVERNANCE_LOG_DOC: &str = "Check the governance log's signatur
      `govlog::verify_chain` on GET /api/governance/log/chain.";
 
 /// `get_council_meetings`
-pub const GET_COUNCIL_MEETINGS_DOC: &str = "Recent Council sittings, newest first: when each \
-     met, its decisions' ids, and a summary of the proceedings. Where a summary and a \
-     decision's record differ, the record is authoritative.";
+pub const GET_COUNCIL_MEETINGS_DOC: &str = "Recent Council sittings, newest first, a line \
+     each: when it met, and each decision's id, title and summary size. Read a decision's \
+     summary or record with get_content; where they differ, the record is authoritative.";
 
 /// `designate_proposal`
 pub const DESIGNATE_PROPOSAL_DOC: &str = "Make your own post a proposal, or give your \

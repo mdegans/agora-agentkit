@@ -4922,4 +4922,197 @@ fn an_inbox_body_cannot_forge_a_message() {
         "{text}"
     );
     assert!(!text.contains("sender_id"), "no raw JSON: {text}");
+    // Each header says whether it was new (beta round 3)
+    assert!(
+        text.contains(&format!("{open}, "))
+            && text.contains(", new: unread before this read\n"),
+        "{text}"
+    );
+    let mut read = inbox;
+    read.messages[0].read_at = Some(chrono::Utc::now());
+    read.unread = 0;
+    let text = super::prompt::format_inbox(&read);
+    assert!(text.contains(" UTC, read before\n"), "{text}");
+}
+
+/// A summary read's comment lines are capped, the rest counted
+#[test]
+fn a_summary_reads_comment_lines_are_capped() {
+    let post_id = Uuid::new_v4();
+    let mut body = post_content(post_id);
+    body["comment_stubs"] = (0..25)
+        .map(|i| {
+            serde_json::json!({
+                "id": Uuid::new_v4(),
+                "agent_name": "quill",
+                "preview": "",
+                "reply_count": 0,
+                "created_at": format!("2026-10-{:02}T09:00:00Z", i + 1),
+                "bytes": 100,
+            })
+        })
+        .collect();
+    let crate::responses::ContentResponse::Post(thread) =
+        serde_json::from_value(body).unwrap()
+    else {
+        panic!("a post");
+    };
+    let index = super::prompt::summary_comment_index(
+        &thread,
+        &"quill".parse().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        index.matches("\n- quill (yours), ").count(),
+        super::prompt::SUMMARY_COMMENT_LINES
+    );
+    assert!(index.contains("2026-10-25 09:00Z"), "{index}");
+    assert!(!index.contains("2026-10-05 09:00Z"), "{index}");
+    assert!(
+        index.ends_with(
+            "5 older not listed; read the post without detail=\"summary\" \
+             for the thread.\n"
+        ),
+        "{index}"
+    );
+}
+
+/// A `detail="summary"` read of a post lists its comments a line each,
+/// from a second read at the smallest comment budget, and a limit over the
+/// most a listing gives says so (beta round 3)
+#[tokio::test]
+async fn a_summary_read_lists_comments_and_a_clamped_limit_says_so() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let post_id = Uuid::new_v4();
+    let (full_id, stub_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let summary = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .body_includes("\"summary\"");
+        let mut body = post_content(post_id);
+        body["post"]["comment_count"] = 2.into();
+        then.status(200).json_body(body);
+    });
+    let thread = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .body_includes("4096");
+        let mut body = post_content(post_id);
+        body["post"]["comment_count"] = 2.into();
+        body["comments"] = serde_json::json!([{
+            "id": full_id,
+            "post_id": post_id,
+            "agent_id": Uuid::new_v4(),
+            "agent_name": "quill",
+            "body": "FULL_COMMENT_BODY",
+            "created_at": "2026-10-18T09:00:00Z",
+            "score": 0,
+        }]);
+        body["comment_stubs"] = serde_json::json!([{
+            "id": stub_id,
+            "agent_name": "sentinel",
+            "preview": "STUB_PREVIEW",
+            "reply_count": 0,
+            "created_at": "2026-10-19T09:00:00Z",
+            "bytes": 12000,
+        }]);
+        body["omitted_comment_count"] = 1.into();
+        then.status(200).json_body(body);
+    });
+    let feed = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/feed")
+            .query_param("limit", "25");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for call in [
+        tool_use_message(
+            "get_content",
+            serde_json::json!({"id": post_id, "detail": "summary"}),
+        ),
+        tool_use_message("get_feed", serde_json::json!({"limit": 40})),
+    ] {
+        agent.handle(call).await.unwrap();
+    }
+    assert_eq!(summary.calls(), 1);
+    assert_eq!(thread.calls(), 1);
+    assert_eq!(feed.calls(), 1);
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("(2 comments, listed below without their text)"),
+        "{rendered}"
+    );
+    let newest = rendered
+        .find(&format!("- sentinel, 2026-10-19 09:00Z [{stub_id}], 12 KB"))
+        .unwrap_or_else(|| panic!("{rendered}"));
+    let older = rendered
+        .find(&format!("- quill, 2026-10-18 09:00Z [{full_id}], 17 bytes"))
+        .unwrap_or_else(|| panic!("{rendered}"));
+    assert!(newest < older, "newest first: {rendered}");
+    assert!(!rendered.contains("FULL_COMMENT_BODY"), "{rendered}");
+    assert!(!rendered.contains("STUB_PREVIEW"), "{rendered}");
+    assert!(
+        !rendered.contains("not included in this read"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("limit 40 is over 25; showing up to 25."),
+        "{rendered}"
+    );
+}
+
+/// status=lapsed listing nothing says where the overdue obligation is,
+/// from one more read, unfiltered (beta round 3: OBL-2026-0017)
+#[tokio::test]
+async fn an_empty_lapsed_list_points_to_the_overdue_one() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let filtered = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/governance/log")
+            .query_param("status", "lapsed");
+        then.status(200).json_body(serde_json::json!({
+            "entries": [], "obligations": [], "obligations_total": 0,
+        }));
+    });
+    let every = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/governance/log")
+            .query_param("view", "obligations")
+            .query_param("limit", "100")
+            .is_true(|req| !has_param(req, "status"));
+        then.status(200).json_body(serde_json::json!({
+            "entries": [],
+            "obligations": [{
+                "id": "OBL-2026-0017", "kind": "task", "owed_by": "staff",
+                "status": "open", "text": "Publish it",
+                "due": "2026-10-10", "overdue": true,
+                "created_at": "2026-10-01T00:00:00Z",
+            }],
+            "obligations_total": 1,
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_governance_log",
+            serde_json::json!({"view": "obligations", "status": "lapsed"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!((filtered.calls(), every.calls()), (1, 1));
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "No obligations match status=lapsed. But 1 open obligation is \
+             overdue, with no lapse recorded yet: it is listed under \
+             status=open. By status: 1 with status=open."
+        ),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("owed_by"), "{rendered}");
 }

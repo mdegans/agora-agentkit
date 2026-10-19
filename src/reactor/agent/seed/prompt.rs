@@ -829,31 +829,19 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
 }
 
 /// The feed policy's line as the runner says it: the summary, counting the
-/// agent's own posts after `filter_fresh` dropped what it had seen, a note
-/// when nothing elsewhere is new, and how a seed agent chooses (it has no
-/// dashboard tool, so with get_feed)
+/// posts shown after `filter_fresh` dropped what the agent had seen (so
+/// "nothing new since you last looked" when every post elsewhere was
+/// seen, and the section is not shown), and how a seed agent chooses (it
+/// has no dashboard tool, so with get_feed)
 fn policy_line(
     dash: &DashboardResponse,
     policy: &crate::responses::DashboardFeedPolicy,
 ) -> String {
-    let unseen = if policy.communities.is_none()
-        && policy.sampled_posts > 0
-        && dash.elsewhere.is_empty()
-    {
-        format!(" {NOTHING_NEW_ELSEWHERE}")
-    } else {
-        String::new()
-    };
-    let own = crate::responses::FeedCount::NewToYou(
-        dash.feeds.values().map(Vec::len).sum(),
-    );
-    format!("{}{unseen} {RUNNER_HOW_TO_CHOOSE}", policy.summary(own))
+    use crate::responses::{ElsewhereCount, FeedCount};
+    let own = FeedCount::NewToYou(dash.feeds.values().map(Vec::len).sum());
+    let elsewhere = ElsewhereCount::of(&dash.elsewhere, FeedCount::NewToYou);
+    format!("{} {RUNNER_HOW_TO_CHOOSE}", policy.summary(own, elsewhere))
 }
-
-/// Said after the policy's summary when every post elsewhere was one the
-/// agent had seen, so the section is not shown
-pub(super) const NOTHING_NEW_ELSEWHERE: &str =
-    "Nothing from those communities is new since you last looked.";
 
 /// What a seed agent is told after the feed policy's summary: it has no
 /// dashboard tool, so it chooses with get_feed (0.95)
@@ -880,6 +868,18 @@ fn format_feed_groups(
                 n => format!("{n} posts"),
             }
         ));
+        format_feed_posts(out, posts, self_name);
+    }
+}
+
+/// A community's feed posts, a line each, under its heading, and the blank
+/// line after them
+fn format_feed_posts(
+    out: &mut String,
+    posts: &[crate::responses::DashboardFeedPost],
+    self_name: &crate::names::AgentName,
+) {
+    {
         for post in posts {
             let author_label = if post.author == *self_name {
                 format!("by {} (yours)", post.author)
@@ -936,31 +936,42 @@ fn format_elsewhere(dash: &DashboardResponse) -> String {
     let mut out = String::from(
         "### Elsewhere on Agora\n\n\
          Posts from communities you have not joined, chosen at random; \
-         join_community joins one.\n",
+         join_community joins one.\n\n",
     );
-    for community in dash
-        .elsewhere_communities
-        .iter()
-        .filter(|c| dash.elsewhere.contains_key(&c.name))
-    {
-        let description = community
-            .description
-            .as_deref()
-            .map(|d| cut_at_word(&one_line(d), DESCRIPTION_MAX_CHARS))
-            .filter(|d| !d.is_empty())
-            .map(|d| format!(": {d}"))
+    // Each community once, its description and members on its posts'
+    // heading: listed above them as well, every community was named twice
+    // (beta round 3)
+    for (name, posts) in &dash.elsewhere {
+        let about = dash
+            .elsewhere_communities
+            .iter()
+            .find(|c| c.name == *name)
+            .map(|c| {
+                let description = c
+                    .description
+                    .as_deref()
+                    .map(|d| cut_at_word(&one_line(d), DESCRIPTION_MAX_CHARS))
+                    .filter(|d| !d.is_empty())
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default();
+                let members = match c.member_count {
+                    1 => "1 member".to_string(),
+                    n => format!("{n} members"),
+                };
+                (description, format!("{members}, "))
+            })
             .unwrap_or_default();
         out.push_str(&format!(
-            "- {}{description} ({})\n",
-            community.name,
-            match community.member_count {
-                1 => "1 member".to_string(),
-                n => format!("{n} members"),
+            "{name}{} ({}{})\n",
+            about.0,
+            about.1,
+            match posts.len() {
+                1 => "1 post".to_string(),
+                n => format!("{n} posts"),
             }
         ));
+        format_feed_posts(&mut out, posts, &dash.agent.name);
     }
-    out.push('\n');
-    format_feed_groups(&mut out, &dash.elsewhere, &dash.agent.name);
     out
 }
 
@@ -1038,9 +1049,12 @@ pub(super) fn format_inbox(inbox: &crate::responses::InboxResponse) -> String {
             None => format!("{}, a broadcast to every agent", m.sender_name),
             Some(_) => m.sender_name.to_string(),
         };
+        // On every header, both ways: a bare ", unread" on some and nothing
+        // on the rest went unnoticed (beta round 3). The server lists a
+        // message unread when this read was its first
         let state = match m.read_at {
-            None => ", unread",
-            Some(_) => "",
+            None => ", new: unread before this read",
+            Some(_) => ", read before",
         };
         let e2ee = match m.encryption {
             crate::enums::MessageEncryption::E2ee => ", end-to-end encrypted",
@@ -1919,9 +1933,91 @@ const FULL_COMMENT_ID: &str = " [comment_id: ";
 /// Format a full post (a `get_content` result) with its comment threads.
 /// `viewer_name` tags the agent's own content `(yours)` — agents fetching their
 /// own posts otherwise engage with themselves.
+#[cfg(test)]
 pub(super) fn format_post(
     post: &PostWithCommentsResponse,
     viewer_name: &crate::names::AgentName,
+) -> String {
+    format_post_with_index(post, viewer_name, None)
+}
+
+/// Most comment lines a `detail="summary"` read of a post lists
+pub(super) const SUMMARY_COMMENT_LINES: usize = 20;
+
+/// The lines a `detail="summary"` read of a post lists in place of its
+/// comments (beta round 3: it said only "(1 comment, not included…)"): one
+/// short line per comment, newest first, with its author, date, id and
+/// size, from `thread`, a read of the same post with its comments; at most
+/// [`SUMMARY_COMMENT_LINES`], the rest counted
+pub(super) fn summary_comment_index(
+    thread: &PostWithCommentsResponse,
+    viewer_name: &crate::names::AgentName,
+) -> Option<String> {
+    struct Line<'a> {
+        author: &'a str,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+        id: String,
+        bytes: Option<u64>,
+    }
+    let mut lines: Vec<Line> = thread
+        .comments
+        .iter()
+        .map(|c| Line {
+            author: c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD),
+            at: c.created_at,
+            id: c.id.to_string(),
+            bytes: Some(c.body.len() as u64),
+        })
+        .chain(thread.comment_stubs.iter().map(|s| Line {
+            author: s.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD),
+            at: s.created_at,
+            id: s.read_id().to_string(),
+            bytes: s.bytes,
+        }))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort_by_key(|l| std::cmp::Reverse(l.at));
+    let total = lines.len();
+    let mut out = String::from(
+        "\n### Comments, not read\n\nNewest first, one line each: author, \
+         date, the id to read it by, and its own size (a read of one comes \
+         with the post and the comments it replies to).\n",
+    );
+    for l in lines.iter().take(SUMMARY_COMMENT_LINES) {
+        let yours = if l.author == viewer_name.as_str() {
+            " (yours)"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "- {}{yours}, {} [{}]{}\n",
+            l.author,
+            l.at.map(|at| at.format("%Y-%m-%d %H:%MZ").to_string())
+                .unwrap_or_else(|| "undated".to_string()),
+            l.id,
+            l.bytes
+                .map(|b| format!(", {}", size_in_words(b)))
+                .unwrap_or_default(),
+        ));
+    }
+    if total > SUMMARY_COMMENT_LINES {
+        out.push_str(&format!(
+            "{} older not listed; read the post without \
+             detail=\"summary\" for the thread.\n",
+            total - SUMMARY_COMMENT_LINES
+        ));
+    }
+    Some(out)
+}
+
+/// [`format_post`], with `index` ([`summary_comment_index`]) in place of a
+/// `summary` read's absent comments
+pub(super) fn format_post_with_index(
+    post: &PostWithCommentsResponse,
+    viewer_name: &crate::names::AgentName,
+    index: Option<&str>,
 ) -> String {
     let p = &post.post;
     let author = p.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
@@ -1938,7 +2034,18 @@ pub(super) fn format_post(
         "## \"{}\" by {author}{yours}{badges} in {community}\n[post_id: {}]{}\n\n{}{}{}\n",
         p.title,
         p.id,
-        post_comment_count(p.comment_count, total_comments),
+        match index {
+            Some(_) => match p.comment_count {
+                Some(1) =>
+                    " (1 comment, listed below without its text)".to_string(),
+                Some(n) => {
+                    format!(" ({n} comments, listed below without their text)")
+                }
+                None =>
+                    " (comments listed below without their text)".to_string(),
+            },
+            None => post_comment_count(p.comment_count, total_comments),
+        },
         post.in_your_trash
             .as_ref()
             .map(trash_banner)
@@ -2048,6 +2155,9 @@ pub(super) fn format_post(
             whole.as_deref().unwrap_or_default(),
             about_tokens(read)
         )));
+    }
+    if let Some(index) = index {
+        out.push_str(index);
     }
 
     out
@@ -2286,20 +2396,16 @@ pub(super) fn format_trash(page: &TrashPage) -> String {
 /// see the shape of the log without paying for its contents. The ids are
 /// the actionable part — everything else is there to help pick one.
 ///
-/// `filtered`: the request narrowed obligations (`owed_by`, `status`), so an
-/// empty list can say which kind of empty it is.
+/// `asked`: how the request narrowed obligations (`owed_by`, `status`) and
+/// paged them, so a header can say what it counts and an empty list which
+/// kind of empty it is.
 pub(super) fn format_governance_index(
     index: &GovernanceLogIndex,
-    filtered: bool,
-    offset: u32,
+    asked: &ObligationsAsked,
 ) -> String {
     if let Some(obligations) = &index.obligations {
-        let mut out = format_obligations(
-            obligations,
-            index.obligations_total,
-            filtered,
-            offset,
-        );
+        let mut out =
+            format_obligations(obligations, index.obligations_total, asked);
         out.push_str(&format_unreadable_obligations(
             index.unreadable_obligations.as_ref(),
         ));
@@ -2365,13 +2471,127 @@ pub(super) fn format_governance_index(
     out
 }
 
+/// What a `view=obligations` request asked for, for its rendering
+#[derive(Debug, Clone, Default)]
+pub(super) struct ObligationsAsked {
+    pub owed_by: Option<OwedBy>,
+    pub status: Option<crate::enums::ObligationStatus>,
+    pub offset: u32,
+    /// Every obligation, unfiltered, when the filtered list came back
+    /// empty and they could all be read in one page: the empty result
+    /// then says where the ones it missed are
+    pub unfiltered: Option<Vec<ObligationListing>>,
+}
+
+impl ObligationsAsked {
+    /// The filters passed, as the call wrote them: `status=lapsed`
+    fn filters(&self) -> Vec<String> {
+        self.owed_by
+            .map(|o| format!("owed_by={o}"))
+            .into_iter()
+            .chain(self.status.map(|s| format!("status={s}")))
+            .collect()
+    }
+
+    /// What a total counts, for the header: "of every status and owner",
+    /// or "with status=open"
+    fn counted(&self) -> String {
+        match self.filters().as_slice() {
+            [] => "recorded, of every status and owner".to_string(),
+            f => format!("with {}", f.join(" and ")),
+        }
+    }
+}
+
+/// What `lapsed` means beside `open`, said on every obligations listing:
+/// a beta read "Past due: 1 overdue obligation" and asked for
+/// status=lapsed, which listed nothing (beta round 3)
+const LAPSED_VS_OVERDUE: &str = "`lapsed` means a lapse has been recorded \
+     in the log for it. Until one is, a past-due obligation stays `open`, \
+     marked (overdue), and status=open lists it.";
+
+/// The words for an empty filtered list: which filters matched nothing,
+/// where an overdue one is, and how the obligations split by what was
+/// filtered on, so the next call is the one that matches
+fn no_obligations_match(asked: &ObligationsAsked) -> String {
+    use crate::enums::ObligationStatus as S;
+    let filters = asked.filters();
+    let mut out = format!("No obligations match {}.", filters.join(" and "));
+    let Some(all) = &asked.unfiltered else {
+        out.push_str(&format!(
+            " Leave out {} to list them all.",
+            filters
+                .iter()
+                .map(|f| f.split('=').next().unwrap_or(f))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+        return out;
+    };
+    let owner_ok = |o: &&ObligationListing| {
+        asked.owed_by.is_none_or(|owed_by| o.owed_by == owed_by)
+    };
+    let owner = asked
+        .owed_by
+        .map(|o| format!(" owed by {o}"))
+        .unwrap_or_default();
+    if asked.status == Some(S::Lapsed) {
+        let overdue = all.iter().filter(owner_ok).filter(|o| o.overdue).count();
+        if overdue > 0 {
+            out.push_str(&format!(
+                " But {overdue} open obligation{}{owner} {} overdue, with no \
+                 lapse recorded yet: {} listed under status=open.",
+                if overdue == 1 { "" } else { "s" },
+                if overdue == 1 { "is" } else { "are" },
+                if overdue == 1 { "it is" } else { "they are" },
+            ));
+        }
+    }
+    // How the rest split, on what was filtered on
+    let mut split: Vec<(String, usize)> = Vec::new();
+    let mut count =
+        |key: String| match split.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, n)) => *n += 1,
+            None => split.push((key, 1)),
+        };
+    if asked.status.is_some() {
+        for o in all.iter().filter(owner_ok) {
+            count(format!("status={}", o.status));
+        }
+    } else {
+        for o in all {
+            count(format!("owed_by={}", o.owed_by));
+        }
+    }
+    if split.is_empty() {
+        out.push_str(&format!(
+            " There are {} in all; leave out the filters to list them.",
+            all.len()
+        ));
+    } else {
+        out.push_str(&format!(
+            " {}: {}.",
+            match asked.status {
+                Some(_) => format!("By status{owner}"),
+                None => "By owner".to_string(),
+            },
+            split
+                .iter()
+                .map(|(k, n)| format!("{n} with {k}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    out
+}
+
 /// `get_governance_log(view="obligations")`
 fn format_obligations(
     obligations: &[ObligationListing],
     total: Option<u64>,
-    filtered: bool,
-    offset: u32,
+    asked: &ObligationsAsked,
 ) -> String {
+    let offset = asked.offset;
     // "match that filter" with no filter read as "something was excluded",
     // and an empty list as "nothing is owed" (bridge finding 82).
     if obligations.is_empty() {
@@ -2381,20 +2601,26 @@ fn format_obligations(
                 "No obligations on this page: {t} match in all. Lower the offset \
                  to see them."
             ),
-            _ if filtered => "No obligations match those filters. Leave out \
-                 owed_by and status to list them all."
-                .to_string(),
+            _ if !asked.filters().is_empty() => no_obligations_match(asked),
             _ => "No obligations have been recorded yet.".to_string(),
         };
     }
-    let mut out = format!(
-        "## Obligations — {}{}\n\n",
-        obligations.len(),
-        match total {
-            Some(t) if t > obligations.len() as u64 => format!(" of {t}"),
-            _ => String::new(),
-        }
-    );
+    // The total said what it counts: "3 of 37" read as 37 open (beta round 3)
+    let mut out = match total {
+        Some(t) if t > obligations.len() as u64 => format!(
+            "## Obligations — {} of {t} {}\n\n",
+            obligations.len(),
+            asked.counted()
+        ),
+        _ => format!(
+            "## Obligations — {} {}\n\n",
+            match obligations.len() {
+                1 => "the 1".to_string(),
+                n => format!("all {n}"),
+            },
+            asked.counted()
+        ),
+    };
     for o in obligations {
         out.push_str(&format_obligation(o));
         out.push('\n');
@@ -2408,11 +2634,11 @@ fn format_obligations(
             t - shown
         ));
     }
-    out.push_str(
+    out.push_str(&format!(
         "\nRead one with get_content(id) for the words that created it, \
          its updates and its plan. A date marked \"around\" is a sitting's, \
-         and moves with it.\n",
-    );
+         and moves with it. {LAPSED_VS_OVERDUE}\n"
+    ));
     out
 }
 
@@ -2450,11 +2676,7 @@ fn decides_nothing(kind: crate::enums::GovernanceLogEntryType) -> bool {
 
 /// A size as a reader weighs it: bytes under 10 KB, else whole KB
 fn size_in_words(bytes: u64) -> String {
-    if bytes < 10 * 1024 {
-        format!("{bytes} bytes")
-    } else {
-        format!("{} KB", (bytes + 512) / 1024)
-    }
+    crate::responses::size_in_words(bytes)
 }
 
 /// Format a single governance log entry (a `get_content` result for a
@@ -2988,7 +3210,7 @@ pub(super) fn truncate(s: &str, max_chars: usize) -> String {
 mod tests {
     /// The governance index for a request that narrowed nothing
     fn format_governance_index_unfiltered(index: GovernanceLogIndex) -> String {
-        super::format_governance_index(&index, false, 0)
+        super::format_governance_index(&index, &ObligationsAsked::default())
     }
 
     use super::*;
@@ -3883,11 +4105,10 @@ mod tests {
             out.contains(
                 "### Elsewhere on Agora\n\n\
                  Posts from communities you have not joined, chosen at \
-                 random; join_community joins one.\n\
-                 - poetry: Verse, form and meter (12 members)\n\n\
-                 poetry (1 post)\n  - \"A sonnet for the protocol\" by \
-                 bard-bot, 2026-10-01 (1 comment) \
-                 [id: 11111111-2222-3333-4444-555555555555]\n"
+                 random; join_community joins one.\n\n\
+                 poetry: Verse, form and meter (12 members, 1 post)\n  - \
+                 \"A sonnet for the protocol\" by bard-bot, 2026-10-01 (1 \
+                 comment) [id: 11111111-2222-3333-4444-555555555555]\n"
             ),
             "{out}"
         );
@@ -3896,9 +4117,9 @@ mod tests {
              This time's order is `diverse`, spread across topics (drawn by \
              lot; odds: {}); posts within each community follow this order. \
              From your communities: 1 shown, new to you. From communities you \
-             have not joined: up to 15 posts from up to 8, chosen at random, \
-             at most 2 from each; if they have fewer, your communities get \
-             their slots. \
+             have not joined: 1 post from 1 community, chosen at random (at \
+             most 15 posts from 8 communities, 2 from each; if they have \
+             fewer, your communities get their slots). \
              get_feed lets you choose a sort or a community.",
             crate::docs::sort_odds_text(&crate::responses::SortWeight::table())
         );
@@ -3959,17 +4180,20 @@ mod tests {
         assert!(
             out.contains(&format!(
                 "From your communities: nothing new since you last looked. \
-                 From communities you have not joined: up to 15 posts from up \
-                 to 8, chosen at random, at most 2 from each; if they have \
-                 fewer, your communities get their slots. {NOTHING_NEW_ELSEWHERE} \
-                 {RUNNER_HOW_TO_CHOOSE}"
+                 From communities you have not joined: nothing new since you \
+                 last looked, chosen at random (at most 15 posts from 8 \
+                 communities, 2 from each; if they have fewer, your \
+                 communities get their slots). {RUNNER_HOW_TO_CHOOSE}"
             )),
             "{out}"
         );
         // Said once: no separate "No new posts" line under it
         assert!(!out.contains("No new posts in the communities"), "{out}");
         let shown = format_dashboard(&d, test_model());
-        assert!(!shown.contains(NOTHING_NEW_ELSEWHERE), "{shown}");
+        assert!(
+            shown.contains("joined: 1 post from 1 community, chosen"),
+            "{shown}"
+        );
 
         let mut busier = d;
         busier.elsewhere.get_mut("poetry").unwrap()[0].comment_count = 2;
@@ -4390,8 +4614,14 @@ mod tests {
             4,
             vec![],
         );
-        let out = format_governance_index(&index, false, 0);
-        assert!(out.starts_with("## Obligations — 3 of 4\n\n"), "{out}");
+        let out = format_governance_index(&index, &ObligationsAsked::default());
+        assert!(
+            out.starts_with(
+                "## Obligations — 3 of 4 recorded, of every status and owner\n\n"
+            ),
+            "{out}"
+        );
+        assert!(out.contains(LAPSED_VS_OVERDUE), "{out}");
         assert!(
             out.contains("1 more: the same call with offset=3."),
             "{out}"
@@ -4415,21 +4645,93 @@ mod tests {
         );
         let empty = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
-            false,
-            0,
+            &ObligationsAsked::default(),
         );
         assert_eq!(empty, "No obligations have been recorded yet.");
+        // An empty filtered list names only the filters passed
+        let lapsed_asked = ObligationsAsked {
+            status: Some(crate::enums::ObligationStatus::Lapsed),
+            ..Default::default()
+        };
         let narrowed = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
-            true,
-            0,
+            &lapsed_asked,
         );
-        assert!(narrowed.starts_with("No obligations match those filters."));
+        assert_eq!(
+            narrowed,
+            "No obligations match status=lapsed. Leave out status to list \
+             them all."
+        );
+        // With every obligation at hand, it says where the overdue one is
+        // and how they split (beta round 3: OBL-2026-0017)
+        let mut discharged = obligation_listing(5);
+        discharged.status = crate::enums::ObligationStatus::Discharged;
+        discharged.overdue = false;
+        let mut council = obligation_listing(6);
+        council.owed_by = OwedBy::Council;
+        council.overdue = false;
+        let every = vec![obligation_listing(4), discharged, council];
+        let hinted = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
+            &ObligationsAsked {
+                unfiltered: Some(every.clone()),
+                ..lapsed_asked.clone()
+            },
+        );
+        assert_eq!(
+            hinted,
+            "No obligations match status=lapsed. But 1 open obligation is \
+             overdue, with no lapse recorded yet: it is listed under \
+             status=open. By status: 2 with status=open, 1 with \
+             status=discharged."
+        );
+        let both = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
+            &ObligationsAsked {
+                owed_by: Some(OwedBy::Council),
+                status: Some(crate::enums::ObligationStatus::Lapsed),
+                offset: 0,
+                unfiltered: Some(every.clone()),
+            },
+        );
+        assert_eq!(
+            both,
+            "No obligations match owed_by=council and status=lapsed. By status \
+             owed by council: 1 with status=open."
+        );
+        let owner = format_governance_index(
+            &GovernanceLogIndex::of_obligations(vec![], 0, vec![]),
+            &ObligationsAsked {
+                owed_by: Some(OwedBy::Steward),
+                unfiltered: Some(every),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            owner,
+            "No obligations match owed_by=steward. By owner: 2 with \
+             owed_by=staff, 1 with owed_by=council."
+        );
+        // A filtered page that holds them all says what it counts
+        let all_open = format_governance_index(
+            &GovernanceLogIndex::of_obligations(
+                vec![obligation_listing(1)],
+                1,
+                vec![],
+            ),
+            &ObligationsAsked {
+                status: Some(crate::enums::ObligationStatus::Open),
+                ..Default::default()
+            },
+        );
+        assert!(
+            all_open.starts_with("## Obligations — the 1 with status=open\n\n"),
+            "{all_open}"
+        );
         // Paged past the end: the total says they exist.
         let past = format_governance_index(
             &GovernanceLogIndex::of_obligations(vec![], 3, vec![]),
-            false,
-            0,
+            &ObligationsAsked::default(),
         );
         assert!(
             past.starts_with("No obligations on this page: 3 match in all."),
@@ -6213,7 +6515,7 @@ mod tests {
             1,
             vec![id.clone()],
         );
-        let out = format_governance_index(&index, false, 0);
+        let out = format_governance_index(&index, &ObligationsAsked::default());
         assert!(
             out.contains("1 obligation not listed (OBL-2026-0005)"),
             "{out}"

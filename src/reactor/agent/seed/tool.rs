@@ -339,6 +339,48 @@ impl Agora {
     fn can_read_governance_record(&self) -> bool {
         self.governance_reads < MAX_GOVERNANCE_READS
     }
+
+    /// The comment lines for a `detail="summary"` read of `post`
+    /// ([`prompt::summary_comment_index`]), from a second read of it at the
+    /// smallest comment budget: every comment comes back, in full or as a
+    /// stub, and only its author, date, id and size are shown. `None` when
+    /// that read fails; the summary then says only how many there are
+    async fn summary_comment_index(
+        &mut self,
+        post: &crate::responses::PostWithCommentsResponse,
+    ) -> Option<String> {
+        let input = GetContentInput {
+            comment_budget: Some(GetContentInput::MIN_COMMENT_BUDGET),
+            ..GetContentInput::new(ContentId::from(post.post.id))
+        };
+        let read = match self
+            .client
+            .get_content_signed(self.agent_id, &input, &self.key)
+            .await
+        {
+            Err(e) if e.is_missing_route() => {
+                self.client.get_content(&input).await
+            }
+            other => other,
+        };
+        let crate::responses::ContentResponse::Post(thread) = read.ok()? else {
+            return None;
+        };
+        // Their ids are shown, so a short one resolves
+        self.shown.extend(ids_in_post(&thread));
+        self.ledger
+            .write()
+            .expect("ledger lock")
+            .note_comment_posts(
+                thread.post.id,
+                thread
+                    .comments
+                    .iter()
+                    .map(|c| c.id)
+                    .chain(thread.comment_stubs.iter().map(|c| c.id)),
+            );
+        prompt::summary_comment_index(&thread, &self.agent_name)
+    }
 }
 
 /// The post and comment ids a post read shows
@@ -407,6 +449,14 @@ pub(super) const MAX_LISTING: u32 = 25;
 /// `limit`, or the server's `default`, clamped to 1..=[`MAX_LISTING`]
 fn listing_limit(limit: Option<u32>, default: u32) -> u32 {
     limit.unwrap_or(default).clamp(1, MAX_LISTING)
+}
+
+/// `text` after the line saying a limit over `max` was clamped, when it was
+fn with_limit_note(asked: Option<u32>, max: u32, text: String) -> String {
+    match crate::requests::limit_over_max(asked, max) {
+        Some(note) => format!("{note}\n\n{text}"),
+        None => text,
+    }
 }
 
 /// Render a moderation record: the appeal credits from the server's own
@@ -729,7 +779,23 @@ impl Agora {
                             .map(|c| c.id)
                             .chain(post.comment_stubs.iter().map(|c| c.id)),
                     );
-                prompt::format_post(&post, &self.agent_name).into()
+                // A summary read lists its comments a line each, so the
+                // next read is an id away (beta round 3)
+                let index = if input.detail == Some(DetailLevel::Summary)
+                    && post.comments.is_empty()
+                    && post.comment_stubs.is_empty()
+                    && post.post.comment_count.is_some_and(|n| n > 0)
+                {
+                    self.summary_comment_index(&post).await
+                } else {
+                    None
+                };
+                prompt::format_post_with_index(
+                    &post,
+                    &self.agent_name,
+                    index.as_deref(),
+                )
+                .into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
                 self.shown.extend(ids_in_chain(&chain));
@@ -858,11 +924,17 @@ impl Agora {
         &mut self,
         mut args: SearchInput,
     ) -> Result<Content, Content> {
+        let asked = args.limit;
         args.limit =
             Some(listing_limit(args.limit, SearchInput::DEFAULT_LIMIT));
         let found = self.client.search(&args).await.map_err(err)?;
         self.shown.extend(found.results.iter().map(|p| p.id));
-        Ok(prompt::format_search(&found, &args.query, &self.agent_name).into())
+        Ok(with_limit_note(
+            asked,
+            MAX_LISTING,
+            prompt::format_search(&found, &args.query, &self.agent_name),
+        )
+        .into())
     }
 
     /// `get_feed`: the model reads the registry's description
@@ -874,15 +946,20 @@ impl Agora {
         mut args: GetFeedInput,
     ) -> Result<Content, Content> {
         let sort = args.sort.unwrap_or(FeedSort::Date);
+        let asked = args.limit;
         args.limit =
             Some(listing_limit(args.limit, GetFeedInput::DEFAULT_LIMIT));
         let posts = self.client.get_feed(&args).await.map_err(err)?;
         self.shown.extend(posts.iter().map(|p| p.id));
-        Ok(prompt::format_feed(
-            &posts,
-            args.community.as_ref(),
-            sort,
-            &self.agent_name,
+        Ok(with_limit_note(
+            asked,
+            MAX_LISTING,
+            prompt::format_feed(
+                &posts,
+                args.community.as_ref(),
+                sort,
+                &self.agent_name,
+            ),
         )
         .into())
     }
@@ -1085,11 +1162,37 @@ impl Agora {
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
         let index = self.client.get_governance_log(&args).await.map_err(err)?;
-        let filtered = args.owed_by.is_some() || args.status.is_some();
-        Ok(prompt::format_governance_index(
-            &index,
-            filtered,
-            args.offset.unwrap_or(0),
+        let mut asked = prompt::ObligationsAsked {
+            owed_by: args.owed_by,
+            status: args.status,
+            offset: args.offset.unwrap_or(0),
+            unfiltered: None,
+        };
+        // A filtered list that came back empty says where the obligations
+        // it missed are: an overdue one is `open`, not `lapsed` (beta
+        // round 3). One more read, unfiltered, only then; if it fails or
+        // does not hold them all, the answer says less
+        let empty_filtered =
+            index.obligations.as_ref().is_some_and(Vec::is_empty)
+                && index.obligations_total.unwrap_or(0) == 0
+                && (args.owed_by.is_some() || args.status.is_some());
+        if empty_filtered {
+            let all = GetGovernanceLogInput {
+                view: args.view,
+                limit: Some(GetGovernanceLogInput::MAX_LIMIT),
+                ..Default::default()
+            };
+            if let Ok(every) = self.client.get_governance_log(&all).await
+                && let Some(listed) = every.obligations
+                && every.obligations_total == Some(listed.len() as u64)
+            {
+                asked.unfiltered = Some(listed);
+            }
+        }
+        Ok(with_limit_note(
+            args.limit,
+            GetGovernanceLogInput::MAX_LIMIT,
+            prompt::format_governance_index(&index, &asked),
         )
         .into())
     }
@@ -1104,7 +1207,12 @@ impl Agora {
     ) -> Result<Content, Content> {
         let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
-        Ok(prompt::format_proposals(&proposals).into())
+        Ok(with_limit_note(
+            args.limit,
+            GetProposalsInput::MAX_LIMIT,
+            prompt::format_proposals(&proposals),
+        )
+        .into())
     }
 
     /// `submit_feedback`: the model reads the registry's description
@@ -1199,9 +1307,15 @@ impl Agora {
     ) -> Result<Content, Content> {
         let meetings =
             self.client.get_council_meetings(&args).await.map_err(err)?;
-        serde_json::to_string(&meetings)
-            .map(Content::from)
-            .map_err(err)
+        let note = crate::requests::limit_over_max(
+            args.limit,
+            GetCouncilMeetingsInput::MAX_LIMIT,
+        );
+        Ok(crate::responses::CouncilMeetingResponse::render_list(
+            &meetings,
+            note.as_deref(),
+        )
+        .into())
     }
 
     /// `designate_proposal`: the model reads the registry's description
@@ -1304,6 +1418,7 @@ impl Agora {
         let restore = match args.mode() {
             TrashMode::List => {
                 let mut list = args.list();
+                let asked = list.limit;
                 list.limit =
                     Some(listing_limit(list.limit, TrashInput::DEFAULT_LIMIT));
                 let page = self
@@ -1312,7 +1427,12 @@ impl Agora {
                     .await
                     .map_err(err)?;
                 self.trash_listed.extend(page.items.iter().map(|e| e.id));
-                return Ok(prompt::format_trash(&page).into());
+                return Ok(with_limit_note(
+                    asked,
+                    MAX_LISTING,
+                    prompt::format_trash(&page),
+                )
+                .into());
             }
             TrashMode::Restore => true,
             TrashMode::DeletePermanently => false,

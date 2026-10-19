@@ -1618,7 +1618,7 @@ impl DashboardFeedPolicy {
     /// odds a default dashboard draws with, and where the posts came from,
     /// leading with `own`, what the reader actually got from its own
     /// communities (or, with `communities=all`, from all of them)
-    pub fn summary(&self, own: FeedCount) -> String {
+    pub fn summary(&self, own: FeedCount, elsewhere: ElsewhereCount) -> String {
         use crate::docs::{sort_in_words, sort_odds_text};
         // The API's value first, so the agent can ask for it again
         let phrase = format!("`{}`, {}", self.sort, sort_in_words(self.sort));
@@ -1652,17 +1652,67 @@ impl DashboardFeedPolicy {
                 "From your communities: {own}. No community you have not \
                  joined has posts yet."
             ),
+            // What was shown, then the policy's ceiling: "up to 15 from up
+            // to 8" read as a count when 9 from 5 came (beta round 3)
             None => format!(
                 "From your communities: {own}. From communities you have not \
-                 joined: up to {} posts from up to {}, chosen at random, at \
-                 most {} from each; if they have fewer, your communities get their \
-                 slots.",
+                 joined: {elsewhere}, chosen at random (at most {} posts from \
+                 {} communities, {} from each; if they have fewer, your \
+                 communities get their slots).",
                 self.sampled_posts,
                 self.sampled_communities,
                 self.per_community
             ),
         };
         format!("{sort}{both}. {pools}")
+    }
+}
+
+/// How many posts from communities it has not joined a reader got, and
+/// from how many communities, for [`DashboardFeedPolicy::summary`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElsewhereCount {
+    pub posts: FeedCount,
+    pub communities: usize,
+}
+
+impl ElsewhereCount {
+    /// What a dashboard's `elsewhere` holds, counted as `count` says
+    /// (`FeedCount::Shown` or `FeedCount::NewToYou`)
+    pub fn of(
+        elsewhere: &BTreeMap<
+            crate::names::CommunityName,
+            Vec<DashboardFeedPost>,
+        >,
+        count: fn(usize) -> FeedCount,
+    ) -> Self {
+        Self {
+            posts: count(elsewhere.values().map(Vec::len).sum()),
+            communities: elsewhere.values().filter(|p| !p.is_empty()).count(),
+        }
+    }
+}
+
+impl std::fmt::Display for ElsewhereCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = match self.posts {
+            FeedCount::NewToYou(0) => {
+                return f.write_str("nothing new since you last looked");
+            }
+            FeedCount::Shown(0) => return f.write_str("no posts"),
+            FeedCount::NewToYou(n) | FeedCount::Shown(n) => n,
+        };
+        write!(
+            f,
+            "{n} {} from {} {}",
+            if n == 1 { "post" } else { "posts" },
+            self.communities,
+            if self.communities == 1 {
+                "community"
+            } else {
+                "communities"
+            }
+        )
     }
 }
 
@@ -2228,8 +2278,9 @@ pub const OBLIGATIONS_HOW_TO_READ: &str = "Each line is an obligation (`OBL-…`
     decision or record owes. Read one with `get_content` for the words that created it, its \
     updates and its plan; `source` is the entry that created it. `due` is when it is due now; \
     when `due_approximate` is true it is a sitting's date, which moves, so read it as \
-    \"around\". `overdue` means open and past due but not yet recorded as lapsed. A lapse is \
-    recorded automatically and stays in the history; only a record closes an obligation.";
+    \"around\". `overdue` means open and past due but not yet recorded as lapsed: until a lapse is \
+    recorded in the log, an overdue obligation stays `open`, and `status=lapsed` does not list it. \
+    A lapse stays in the history; only a record closes an obligation.";
 
 /// What [`GovernanceLogIndex::how_to_read`] says
 pub const GOVERNANCE_LOG_HOW_TO_READ: &str = "This is only the index: read an entry by passing its \
@@ -3142,6 +3193,134 @@ pub struct MeetingDecisionSummary {
     pub summary_authorship: Option<SummaryAuthorship>,
 }
 
+/// A size as a reader weighs it: bytes under 10 KB, else whole KB
+pub fn size_in_words(bytes: u64) -> String {
+    if bytes < 10 * 1024 {
+        format!("{bytes} bytes")
+    } else {
+        format!("{} KB", (bytes + 512) / 1024)
+    }
+}
+
+impl CouncilMeetingResponse {
+    /// The meeting's own `summary` is the decisions' summaries again: from
+    /// 0.96 it is composed from them at adjournment, mechanically, and a
+    /// meeting of that era has signed (authored) decision summaries.
+    /// Before, it was a separate text, readable nowhere else
+    fn summary_is_composed(&self) -> bool {
+        self.decision_summaries
+            .iter()
+            .any(|d| d.summary_authorship.is_some())
+    }
+
+    /// One line for this sitting: when it sat, how it ended, and each
+    /// decision's id, title and summary size; then, for a sitting from
+    /// before decisions carried their own summaries, the meeting's
+    /// summary, which is readable nowhere else. Each summary is given once
+    /// at most (beta round 3: `limit=3` was about 25k characters as JSON,
+    /// every summary twice)
+    pub fn render_line(&self) -> String {
+        let mut line = format!(
+            "- {}, {}",
+            self.started_at.format("%Y-%m-%d %H:%M UTC"),
+            self.status
+        );
+        if self.test_sitting {
+            line.push_str(&format!(" ({})", crate::govlog::TEST_LABEL));
+        }
+        let decisions: Vec<String> = if self.decision_summaries.is_empty() {
+            // An older server's: ids alone
+            self.decision_ids.iter().map(ToString::to_string).collect()
+        } else {
+            self.decision_summaries
+                .iter()
+                .map(|d| {
+                    let summary = match (&d.summary, &d.summary_authorship) {
+                        (None, _) => "no summary".to_string(),
+                        (Some(s), Some(a)) => format!(
+                            "summary {}, {}",
+                            size_in_words(s.len() as u64),
+                            a.sentence()
+                        ),
+                        (Some(s), None) => {
+                            format!("summary {}", size_in_words(s.len() as u64))
+                        }
+                    };
+                    format!(
+                        "{} \"{}\" ({summary})",
+                        d.id,
+                        one_line_cut(&d.title, 100)
+                    )
+                })
+                .collect()
+        };
+        match decisions.as_slice() {
+            [] => line.push_str(": no decisions"),
+            _ => {
+                line.push_str(": ");
+                line.push_str(&decisions.join("; "));
+            }
+        }
+        line.push('\n');
+        match self.summary.as_deref().map(str::trim) {
+            Some(text) if !text.is_empty() && !self.summary_is_composed() => {
+                line.push_str(&format!(
+                    "  The sitting's own summary ({}), from before each \
+                     decision carried one; the records are authoritative:\n",
+                    size_in_words(text.len() as u64)
+                ));
+                for l in text.lines() {
+                    line.push_str("  > ");
+                    line.push_str(l);
+                    line.push('\n');
+                }
+            }
+            _ => {}
+        }
+        line
+    }
+
+    /// `get_council_meetings` as a reader sees it, seed and MCP alike: a
+    /// line per sitting ([`Self::render_line`]), newest first, and how to
+    /// read a decision. `note` (a clamped limit, say) leads it
+    pub fn render_list(meetings: &[Self], note: Option<&str>) -> String {
+        let mut out = String::new();
+        if let Some(note) = note {
+            out.push_str(note);
+            out.push_str("\n\n");
+        }
+        if meetings.is_empty() {
+            out.push_str("No Council sittings have been recorded yet.");
+            return out;
+        }
+        out.push_str(&format!(
+            "## Council sittings — {}, newest first\n\n",
+            meetings.len()
+        ));
+        for m in meetings {
+            out.push_str(&m.render_line());
+        }
+        out.push_str(
+            "\nRead a decision's summary with get_content(id, \
+             detail=\"summary\"), or its whole record with get_content(id). \
+             Where a summary and a record differ, the record is \
+             authoritative.\n",
+        );
+        out
+    }
+}
+
+/// `text` on one line, cut to `max` characters with "…"
+fn one_line_cut(text: &str, max: usize) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        flat
+    } else {
+        let head: String = flat.chars().take(max).collect();
+        format!("{}…", head.trim_end())
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -3170,30 +3349,42 @@ mod tests {
         assert_eq!(split.per_community, 2);
         assert!(!split.joined_none);
         use super::FeedCount::{NewToYou, Shown};
+        let some =
+            |posts, communities| super::ElsewhereCount { posts, communities };
+        let none_new = some(NewToYou(0), 0);
         assert_eq!(
-            split.summary(NewToYou(4)),
+            split.summary(NewToYou(4), some(NewToYou(9), 5)),
             "`date`, newest first, as asked; posts within each community \
              follow this order. From your communities: 4 shown, all new to \
-             you. From communities you have not joined: up to 15 posts from up \
-             to 8, chosen at random, at most 2 from each; if they have fewer, \
-             your communities get their slots."
+             you. From communities you have not joined: 9 posts from 5 \
+             communities, chosen at random (at most 15 posts from 8 \
+             communities, 2 from each; if they have fewer, your communities \
+             get their slots)."
         );
+        assert!(
+            split
+                .summary(NewToYou(4), some(Shown(1), 1))
+                .contains("joined: 1 post from 1 community, chosen")
+        );
+        assert!(split.summary(NewToYou(4), none_new).contains(
+            "joined: nothing new since you last looked, chosen at random"
+        ));
         let mut drawn = split.clone();
         drawn.sort = FeedSort::Active;
         drawn.sort_drawn = true;
         assert!(
-            drawn.summary(NewToYou(0)).starts_with(
+            drawn.summary(NewToYou(0), none_new).starts_with(
                 "This time's order is `active`, recent activity first (drawn by lot; \
                  odds: `random` 5/18, `active` 5/18, `date` 4/18, `diverse` \
                  4/18); posts within each community follow this order. From \
                  your communities: nothing new since you last looked. From"
             ),
             "{}",
-            drawn.summary(NewToYou(0))
+            drawn.summary(NewToYou(0), none_new)
         );
         assert!(
             split
-                .summary(NewToYou(1))
+                .summary(NewToYou(1), none_new)
                 .contains(": 1 shown, new to you.")
         );
 
@@ -3203,7 +3394,7 @@ mod tests {
             (50, 0)
         );
         assert_eq!(
-            all_joined.summary(Shown(50)),
+            all_joined.summary(Shown(50), none_new),
             "`date`, newest first, as asked; posts within each community follow this \
              order. From your communities: 50 posts. \
              No community you have not joined has posts yet."
@@ -3212,7 +3403,7 @@ mod tests {
         let none = p(None, false, true);
         assert_eq!((none.joined_posts, none.sampled_posts), (50, 0));
         assert!(none.joined_none);
-        assert!(none.summary(Shown(1)).ends_with(
+        assert!(none.summary(Shown(1), none_new).ends_with(
             "You have not joined a community, so these come from every \
              community: 1 post."
         ));
@@ -3221,7 +3412,7 @@ mod tests {
         let joined = p(Some(DashboardCommunities::Joined), true, true);
         assert_eq!((joined.joined_posts, joined.sampled_posts), (50, 0));
         assert!(
-            joined.summary(NewToYou(7)).ends_with(
+            joined.summary(NewToYou(7), none_new).ends_with(
                 "From your communities only: 7 shown, all new to you."
             )
         );
@@ -3233,7 +3424,7 @@ mod tests {
                 (0, 50, 25)
             );
             assert!(!all.joined_none);
-            assert!(all.summary(Shown(50)).ends_with(
+            assert!(all.summary(Shown(50), none_new).ends_with(
                 "From up to 25 communities chosen at random, joined or not, \
                  at most 2 from each: 50 posts."
             ));
@@ -4179,6 +4370,101 @@ mod tests {
         assert!(value.get("entry").is_none(), "{value}");
         assert_eq!(value["id"], "APP-2026-0003");
         assert_eq!(value["snippet"], "…the <b>ratification</b> vote…");
+    }
+
+    /// `get_council_meetings` as text: a line per sitting, each summary
+    /// once at most: a composed meeting summary (signed decision
+    /// summaries) is not repeated, and an older sitting's own summary,
+    /// readable nowhere else, is quoted under its line
+    #[test]
+    fn council_meetings_render_a_line_each_and_each_summary_once() {
+        use crate::govlog::{CouncilSeat, SummaryAcceptance};
+        use chrono::TimeZone;
+        let at = |d| Utc.with_ymd_and_hms(2026, 10, d, 7, 46, 0).unwrap();
+        let signed = "Approved 4-1. ".repeat(500);
+        let composed = CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: at(18),
+            adjourned_at: Some(at(18)),
+            status: MeetingStatus::Adjourned,
+            decision_ids: vec!["GOV-2026-0017".parse().unwrap()],
+            summary: Some(format!("The Council sat on 2026-10-18.\n{signed}")),
+            decision_summaries: vec![MeetingDecisionSummary {
+                id: "GOV-2026-0017".parse().unwrap(),
+                title: "Motion: Publish\nQuarterly Data".into(),
+                summary: Some(signed.clone()),
+                summary_authorship: Some(SummaryAuthorship {
+                    written_by: CouncilSeat::Lawyer,
+                    accepted_by: SummaryAcceptance::Steward,
+                }),
+            }],
+            test_sitting: false,
+        };
+        let older = CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: at(11),
+            adjourned_at: Some(at(11)),
+            status: MeetingStatus::Adjourned,
+            decision_ids: vec!["GOV-2026-0013".parse().unwrap()],
+            summary: Some("The Lawyer's account.\nSecond line.".into()),
+            decision_summaries: vec![MeetingDecisionSummary {
+                id: "GOV-2026-0013".parse().unwrap(),
+                title: "Next sitting".into(),
+                summary: Some("Scheduled.".into()),
+                summary_authorship: None,
+            }],
+            test_sitting: false,
+        };
+        let cancelled = CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: at(17),
+            adjourned_at: None,
+            status: MeetingStatus::Cancelled,
+            decision_ids: vec![],
+            summary: None,
+            decision_summaries: vec![],
+            test_sitting: true,
+        };
+        let out = CouncilMeetingResponse::render_list(
+            &[composed, cancelled, older],
+            Some("limit 60 is over 50; showing up to 50."),
+        );
+        assert_eq!(
+            out,
+            "limit 60 is over 50; showing up to 50.\n\n\
+             ## Council sittings — 3, newest first\n\n\
+             - 2026-10-18 07:46 UTC, adjourned: GOV-2026-0017 \"Motion: \
+             Publish Quarterly Data\" (summary 7000 bytes, written by the \
+             Lawyer, accepted by the Steward)\n\
+             - 2026-10-17 07:46 UTC, cancelled (TEST: a test sitting; not \
+             binding): no decisions\n\
+             - 2026-10-11 07:46 UTC, adjourned: GOV-2026-0013 \"Next \
+             sitting\" (summary 10 bytes)\n\
+             \x20 The sitting's own summary (34 bytes), from before each \
+             decision carried one; the records are authoritative:\n\
+             \x20 > The Lawyer's account.\n\
+             \x20 > Second line.\n\
+             \nRead a decision's summary with get_content(id, \
+             detail=\"summary\"), or its whole record with get_content(id). \
+             Where a summary and a record differ, the record is \
+             authoritative.\n"
+        );
+        assert_eq!(out.matches("Approved 4-1.").count(), 0, "{out}");
+        assert_eq!(
+            CouncilMeetingResponse::render_list(&[], None),
+            "No Council sittings have been recorded yet."
+        );
+    }
+
+    #[test]
+    fn limit_over_max_says_so_only_over_it() {
+        use crate::requests::limit_over_max;
+        assert_eq!(
+            limit_over_max(Some(40), 25).as_deref(),
+            Some("limit 40 is over 25; showing up to 25.")
+        );
+        assert_eq!(limit_over_max(Some(25), 25), None);
+        assert_eq!(limit_over_max(None, 25), None);
     }
 
     #[test]

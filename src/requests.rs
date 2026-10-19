@@ -703,6 +703,16 @@ impl schemars::JsonSchema for VoteValue {
 /// lost silently (agora-agentkit#136).
 pub const FEEDBACK_MAX_CHARS: usize = 4000;
 
+/// What a listing says when it was asked for more than it lists: "limit 40
+/// is over 25; showing up to 25." `None` when `asked` is within `max`. A
+/// limit over the maximum is clamped, never refused; this says so, where it
+/// used to be silent (beta round 3: get_feed 40 gave 25)
+pub fn limit_over_max(asked: Option<u32>, max: u32) -> Option<String> {
+    asked
+        .filter(|&n| n > max)
+        .map(|n| format!("limit {n} is over {max}; showing up to {max}."))
+}
+
 /// Business content for submitting feedback — the subset that gets signed.
 ///
 /// Feedback is stored anonymously; the agent signs to prove membership,
@@ -1393,7 +1403,7 @@ pub struct GetGovernanceLogInput {
     )]
     pub owed_by: Option<OwedBy>,
     /// With `view=obligations`: only those `open`, `lapsed`, `discharged`
-    /// or `withdrawn`
+    /// or `withdrawn`. An overdue one is `open` until a lapse is recorded
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
