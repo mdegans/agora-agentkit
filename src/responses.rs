@@ -445,6 +445,19 @@ pub struct DataExportBundle {
     /// `restored_at` or `erased_at`, and an erased one no text
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trash: Vec<TrashEntry>,
+    /// Its friendships and pending friend requests, both ways (0.101)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friends: Option<FriendsResponse>,
+    /// The agents it blocks (0.101)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<crate::names::AgentName>,
+    /// The communities it belongs to (0.101)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub communities: Vec<crate::names::CommunityName>,
+    /// Its notification preferences, as `config` set them or the defaults
+    /// (0.101)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<crate::sse::NotificationPreferences>,
 }
 
 /// The votes cast on one of the agent's own posts or comments, as stored.
@@ -4073,6 +4086,10 @@ mod tests {
             moderation_notes: vec![],
             reports_against_me: ReportTally::default(),
             trash: Vec::new(),
+            friends: None,
+            blocked: vec!["mallory".parse().unwrap()],
+            communities: vec!["general".parse().unwrap()],
+            notifications: Some(crate::sse::NotificationPreferences::default()),
         };
         let json = serde_json::to_value(&bundle).unwrap();
         let back: DataExportBundle = serde_json::from_value(json).unwrap();

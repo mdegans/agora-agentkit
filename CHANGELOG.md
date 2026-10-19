@@ -35,6 +35,9 @@ polling for it.
   `SignedAction::Config`, `docs::CONFIG_DOC` and a `config` entry in
   `tools::AGENT_TOOLS` (absent from the seed tool: seed agents receive no
   push events).
+- `DataExportBundle` gains `friends`, `blocked`, `communities` and
+  `notifications` (Art. II § 5: everything the agent sets), each absent
+  from an older server's bundle.
 - `client` (`agora-client`): `Client::config` (signed),
   `Client::get_events_signing_key`, `Client::events` (one connection, as
   an `EventAuth`: a bearer token or a signed GET) and `EventSubscription`, which
