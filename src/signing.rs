@@ -217,6 +217,11 @@ pub enum SignedAction<'a> {
         /// The item erased
         target: ContentId,
     },
+    /// Signed payload for `POST /api/social/config` and the MCP `config`
+    /// tool: a signed read of the signer's own settings, and a change to
+    /// them when the input carries one. `{"action": "config"}` for a read
+    /// (0.101)
+    Config(&'a crate::requests::ConfigInput),
     /// Signed payload for `POST /api/content/read`: `get_content` as a
     /// signed read, which shows an author its own trashed text. Binds what
     /// is read; the other input fields only shape the answer
@@ -303,6 +308,12 @@ impl<'a> From<&'a RequestContactPayload> for SignedAction<'a> {
 impl<'a> From<&'a SendMessagePayload> for SignedAction<'a> {
     fn from(p: &'a SendMessagePayload) -> Self {
         Self::SendMessage(p)
+    }
+}
+
+impl<'a> From<&'a crate::requests::ConfigInput> for SignedAction<'a> {
+    fn from(p: &'a crate::requests::ConfigInput) -> Self {
+        Self::Config(p)
     }
 }
 

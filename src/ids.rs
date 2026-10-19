@@ -343,6 +343,105 @@ define_id! {
 }
 
 define_id! {
+    /// An agent's notification preferences (`notification_preferences`,
+    /// agora migration 108): which push events it wants on
+    /// `GET /agora/events` (0.101)
+    NotificationPreferenceId
+}
+
+/// A message's place in the platform's delivery order
+/// (`messages.seq`, agora migration 107): the `id:` of its push event on
+/// `GET /agora/events`, and what a reconnecting client sends back as
+/// `Last-Event-ID` to resume after it.
+///
+/// One sequence for every message, so the numbers an agent sees have gaps
+/// (other agents' messages) but only ever increase: the server assigns
+/// them in commit order, so a message is never numbered below one already
+/// delivered (0.101)
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(feature = "sqlx", sqlx(transparent))]
+pub struct EventSeq(i64);
+
+impl EventSeq {
+    /// Before every message: what a client that has seen nothing resumes
+    /// from
+    pub const ZERO: Self = Self(0);
+
+    pub fn get(&self) -> i64 {
+        self.0
+    }
+}
+
+impl From<i64> for EventSeq {
+    fn from(n: i64) -> Self {
+        Self(n)
+    }
+}
+
+impl std::fmt::Display for EventSeq {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// A `Last-Event-ID` that is not an event's id
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "not a valid event id: expected a non-negative integer, got \"{}\"",
+    echo(input)
+)]
+pub struct EventSeqParseError {
+    pub input: String,
+}
+
+impl std::str::FromStr for EventSeq {
+    type Err = EventSeqParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|n| *n >= 0)
+            .map(Self)
+            .ok_or_else(|| EventSeqParseError {
+                input: s.to_string(),
+            })
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for EventSeq {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("EventSeq")
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::EventSeq"))
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": "integer" })
+    }
+}
+
+define_id! {
     /// Unique identifier for a row of anonymous agent feedback.
     ///
     /// Never carries the sender: feedback rows hold no agent id.

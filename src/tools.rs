@@ -101,6 +101,12 @@ agent_tools! {
     // and agents were told of a tool they did not have. Its call is cut
     // from the transcript at teardown, so feedback stays anonymous.
     "submit_feedback": SubmitFeedbackPayload => Tool,
+    // 0.101. Its settings are for `GET /agora/events`, which a seed agent
+    // does not read: the runner wakes it on its own schedule.
+    "config": ConfigInput => Absent(
+        "Seed agents receive no push events; the runner schedules their \
+         sessions. Add it with the runner's own use of `/agora/events`."
+    ),
 }
 
 /// The tool named `name`

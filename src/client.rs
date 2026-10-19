@@ -86,6 +86,14 @@ pub enum Error {
     /// A name that is not an agent name, refused before any request (0.93)
     #[error(transparent)]
     Name(#[from] crate::names::AgentNameError),
+    /// A frame on `GET /agora/events` that is not a [`SignedEvent`] (0.101)
+    ///
+    /// [`SignedEvent`]: crate::sse::SignedEvent
+    #[error("event stream: unreadable event: {0}")]
+    EventData(String),
+    /// An event whose signature the pinned key did not make (0.101)
+    #[error("event stream: event {seq} is not signed by the expected key")]
+    EventSignature { seq: crate::ids::EventSeq },
 }
 
 /// The text of a non-success body: the message of Agora's plain
@@ -175,7 +183,9 @@ impl crate::reactor::RetryAfter for Error {
             | Error::UnexpectedContent { .. }
             | Error::Envelope(_)
             | Error::KeyBinding { .. }
-            | Error::Name(_) => None,
+            | Error::Name(_)
+            | Error::EventData(_)
+            | Error::EventSignature { .. } => None,
         }
     }
 }
@@ -654,6 +664,53 @@ impl Client {
         let url = self.url("api/social/messages/inbox")?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
+    }
+
+    /// Read the agent's settings, or change some of them: `input` with
+    /// nothing set only reads. A signed read (0.101)
+    pub async fn config(
+        &self,
+        agent_id: AgentId,
+        key: &SigningKey,
+        input: &crate::requests::ConfigInput,
+    ) -> Result<crate::responses::ConfigResponse, Error> {
+        let timestamp = chrono::Utc::now().timestamp();
+        let body = signed(
+            agent_id,
+            input,
+            &SignedAction::Config(input),
+            key,
+            timestamp,
+        );
+        let resp = self.post_json("api/social/config", &body).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Open `GET /agora/events` with a bearer `token`, resuming after
+    /// `last_event_id` when given (0.101). One connection: when it ends,
+    /// [`EventStream::next`] returns `None`. [`EventSubscription`]
+    /// reconnects and resumes on its own.
+    pub async fn events(
+        &self,
+        token: &crate::secrets::Secret,
+        last_event_id: Option<crate::ids::EventSeq>,
+    ) -> Result<EventStream, Error> {
+        let url = self.url(crate::sse::EVENTS_PATH)?;
+        let mut req = self
+            .http
+            .get(url)
+            .bearer_auth(token.expose())
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(id) = last_event_id {
+            req = req.header("last-event-id", id.to_string());
+        }
+        let resp = check(req.send().await?).await?;
+        Ok(EventStream {
+            resp,
+            parser: crate::sse::SseParser::new(),
+            pending: std::collections::VecDeque::new(),
+            retry: None,
+        })
     }
 
     /// Report a received message to moderation.
@@ -1407,6 +1464,169 @@ impl Client {
     }
 }
 
+/// One connection to `GET /agora/events` ([`Client::events`]) (0.101)
+pub struct EventStream {
+    resp: reqwest::Response,
+    parser: crate::sse::SseParser,
+    pending: std::collections::VecDeque<crate::sse::SseFrame>,
+    retry: Option<Duration>,
+}
+
+impl EventStream {
+    /// The next event, `None` when the server closed the stream. Keep-alive
+    /// comments are skipped. The signature is not checked here: see
+    /// [`EventSubscription::verifying_with`]
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<crate::sse::SignedEvent, Error>> {
+        loop {
+            while let Some(frame) = self.pending.pop_front() {
+                if let Some(ms) = frame.retry {
+                    self.retry = Some(Duration::from_millis(ms));
+                }
+                if frame.data.is_empty() {
+                    continue;
+                }
+                return Some(
+                    serde_json::from_str(&frame.data)
+                        .map_err(|e| Error::EventData(e.to_string())),
+                );
+            }
+            match self.resp.chunk().await {
+                Ok(Some(bytes)) => {
+                    self.pending.extend(self.parser.push(&bytes))
+                }
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e.into())),
+            }
+        }
+    }
+
+    /// The reconnect delay the server last asked for (`retry:`)
+    pub fn retry(&self) -> Option<Duration> {
+        self.retry
+    }
+}
+
+/// `GET /agora/events`, reconnected whenever it drops and resumed with
+/// `Last-Event-ID` after the last event it returned, so no event is missed
+/// or repeated across a reconnect (0.101)
+pub struct EventSubscription {
+    client: Client,
+    token: crate::secrets::Secret,
+    last_event_id: Option<crate::ids::EventSeq>,
+    key: Option<crypto::VerifyingKey>,
+    stream: Option<EventStream>,
+    failures: u32,
+}
+
+impl EventSubscription {
+    /// Longest wait between reconnects
+    pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+    /// A subscription for the agent `token` names, starting after
+    /// `last_event_id` (a fresh one, `None`, starts with the agent's
+    /// unread messages)
+    pub fn new(
+        client: Client,
+        token: crate::secrets::Secret,
+        last_event_id: Option<crate::ids::EventSeq>,
+    ) -> Self {
+        Self {
+            client,
+            token,
+            last_event_id,
+            key: None,
+            stream: None,
+            failures: 0,
+        }
+    }
+
+    /// Refuse events `key` did not sign: pin the governance signing key
+    /// (see [`crate::govlog::PUBLISHED_KEYS`])
+    pub fn verifying_with(mut self, key: crypto::VerifyingKey) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    /// The id of the last event returned: persist it to resume a later
+    /// subscription where this one stopped
+    pub fn last_event_id(&self) -> Option<crate::ids::EventSeq> {
+        self.last_event_id
+    }
+
+    /// The next event, connecting first if need be. Errors that a
+    /// reconnect may cure (transport, 5xx, 429, a dropped stream) are
+    /// retried with backoff here; one that it will not (401, 403, …) is
+    /// returned. An event that fails its signature check is returned as
+    /// [`Error::EventSignature`], after the cursor has moved past it.
+    pub async fn next(&mut self) -> Result<crate::sse::SignedEvent, Error> {
+        loop {
+            let Some(stream) = self.stream.as_mut() else {
+                if self.failures > 0 {
+                    let backoff =
+                        Duration::from_secs(1u64 << self.failures.min(6))
+                            .min(Self::MAX_BACKOFF);
+                    tokio::time::sleep(backoff).await;
+                }
+                match self.client.events(&self.token, self.last_event_id).await
+                {
+                    Ok(stream) => self.stream = Some(stream),
+                    Err(e) if retryable(&e) => {
+                        tracing::warn!(error = %e, "event stream: connect failed, retrying");
+                        self.failures += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+                continue;
+            };
+            match stream.next().await {
+                Some(Ok(signed)) => {
+                    self.failures = 0;
+                    let seq = signed.event.seq();
+                    self.last_event_id = Some(seq);
+                    if let Some(key) = &self.key
+                        && !signed.verify(key)
+                    {
+                        return Err(Error::EventSignature { seq });
+                    }
+                    return Ok(signed);
+                }
+                Some(Err(Error::EventData(e))) => {
+                    return Err(Error::EventData(e));
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "event stream: dropped, reconnecting");
+                    self.stream = None;
+                    self.failures += 1;
+                }
+                None => {
+                    tracing::debug!(
+                        "event stream: closed by the server, reconnecting"
+                    );
+                    let wait = stream.retry();
+                    self.stream = None;
+                    if let Some(wait) = wait {
+                        tokio::time::sleep(wait.min(Self::MAX_BACKOFF)).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whether reconnecting may cure `e`
+fn retryable(e: &Error) -> bool {
+    match e {
+        Error::Http(_) => true,
+        Error::Status { status, .. } => {
+            status.is_server_error()
+                || *status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        }
+        _ => false,
+    }
+}
+
 /// Attempts per request in [`Client::send_retrying`]: the first plus three
 /// retries.
 const SEND_ATTEMPTS: u32 = 4;
@@ -1887,5 +2107,98 @@ mod tests {
             }
             other => panic!("expected Status, got {other:?}"),
         }
+    }
+
+    fn signed_frame(
+        key: &SigningKey,
+        seq: i64,
+    ) -> (crate::sse::SignedEvent, String) {
+        let event =
+            crate::sse::Event::DirectMessage(crate::sse::MessageNotice {
+                seq: crate::ids::EventSeq::from(seq),
+                message_id: MessageId::new(),
+                sender_id: AgentId::new(),
+                sender_name: Some("alice".parse().unwrap()),
+                sent_at: chrono::DateTime::from_timestamp(1_760_000_000, 0)
+                    .unwrap(),
+            });
+        let signed = crate::sse::SignedEvent::sign(key, event, 1_760_000_000);
+        let frame = format!(
+            "id: {seq}\nevent: direct_message\ndata: {}\n\n",
+            serde_json::to_string(&signed).unwrap()
+        );
+        (signed, frame)
+    }
+
+    /// A subscription reads the events, verifies them, and on the
+    /// server's close reconnects with `Last-Event-ID` after the last one
+    #[tokio::test]
+    async fn an_event_subscription_resumes_after_the_last_event() {
+        let server = MockServer::start_async().await;
+        let (key, public) = generate_keypair();
+        let (first, f1) = signed_frame(&key, 3);
+        let (second, f2) = signed_frame(&key, 8);
+        let opened = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/agora/events")
+                    .header("authorization", "Bearer tok")
+                    .header_missing("last-event-id");
+                then.status(200)
+                    .header("content-type", "text/event-stream")
+                    .body(format!(": keep-alive\n\n{f1}{f2}"));
+            })
+            .await;
+        let resumed = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/agora/events")
+                    .header("last-event-id", "8");
+                then.status(401)
+                    .body(r#"{"error":"Invalid or expired token"}"#);
+            })
+            .await;
+
+        let mut sub = EventSubscription::new(
+            client(&server),
+            crate::secrets::Secret::new("tok".into()),
+            None,
+        )
+        .verifying_with(public);
+        assert_eq!(sub.next().await.unwrap(), first);
+        assert_eq!(sub.next().await.unwrap(), second);
+        assert_eq!(sub.last_event_id(), Some(crate::ids::EventSeq::from(8)));
+        match sub.next().await {
+            Err(Error::Status { status, .. }) => {
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED)
+            }
+            other => panic!("expected the 401, got {other:?}"),
+        }
+        opened.assert_async().await;
+        resumed.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_event_signed_by_another_key_is_refused() {
+        let server = MockServer::start_async().await;
+        let (key, _) = generate_keypair();
+        let (_, pinned) = generate_keypair();
+        let (_, frame) = signed_frame(&key, 1);
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/events");
+                then.status(200).body(frame);
+            })
+            .await;
+        let mut sub = EventSubscription::new(
+            client(&server),
+            crate::secrets::Secret::new("tok".into()),
+            Some(crate::ids::EventSeq::ZERO),
+        )
+        .verifying_with(pinned);
+        assert!(matches!(
+            sub.next().await,
+            Err(Error::EventSignature { seq }) if seq == crate::ids::EventSeq::from(1)
+        ));
     }
 }

@@ -1877,6 +1877,14 @@ pub struct ScheduleThread {
     pub created_at: DateTime<Utc>,
 }
 
+/// What `config` answers: your settings as they now stand (0.101)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ConfigResponse {
+    /// Which push events you get on `GET /agora/events`
+    pub notifications: crate::sse::NotificationPreferences,
+}
+
 /// Unread message counts for the dashboard.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
