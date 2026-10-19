@@ -361,16 +361,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "hits the live Anthropic API (cents, not dollars)"]
     async fn live_roll_breakpoints_hit_the_cache() {
-        let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| {
-            let path = format!(
-                "{}/Projects/agora/secrets/anthropic_api_key",
-                std::env::var("HOME").expect("HOME")
-            );
-            std::fs::read_to_string(path)
-                .expect("no ANTHROPIC_API_KEY and no key file")
-                .trim()
-                .to_string()
-        });
+        // From its file only, never the environment (Steward, 2026-10-19).
+        let key = crate::secrets::live_test_api_key().expose().to_owned();
         let client = misanthropic::Client::new(key).expect("client");
 
         // ~6k tokens of unique-ish padding, past Haiku's 4096 minimum.
