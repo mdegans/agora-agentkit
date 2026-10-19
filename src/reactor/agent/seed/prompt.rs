@@ -2492,8 +2492,14 @@ pub(super) fn format_governance_entry(
     let has_record = entry.data.is_some();
     // A data set's file: text as it is, after the server checked its hash.
     if let Some(file) = &entry.data_file {
+        // The line count from 0.103 on; an older server sends none
+        let lines = if file.total_lines > 0 {
+            format!(", {} lines,", file.total_lines)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "\n### File: {path}\n{bytes} bytes at commit {commit}, SHA-256 {sha256}, \
+            "\n### File: {path}\n{bytes} bytes{lines} at commit {commit}, SHA-256 {sha256}, \
              checked against the manifest on record (verify_governance_log checks \
              its signature)\n\n",
             path = file.path,
@@ -2501,6 +2507,16 @@ pub(super) fn format_governance_entry(
             commit = file.commit,
             sha256 = file.sha256,
         ));
+        // A ranged read says which lines, and how to cite them (0.103)
+        if let Some(range) = file.lines {
+            out.push_str(&format!(
+                "Lines {range} of {total} (cite them as {id}:{short}:{path}:{range}):\n\n",
+                total = file.total_lines,
+                id = entry.id,
+                short = &file.commit.to_hex()[..7],
+                path = file.path,
+            ));
+        }
         if let Some(asked) = &file.asked {
             out.push_str(&format!(
                 "(attachment={asked:?} is not a path from the repository root; \
@@ -3315,7 +3331,7 @@ mod tests {
             title: "Ratification votes".into(),
             description: "d".into(),
             compiled_by: "c".into(),
-            repo: "agora-data".into(),
+            repo: "agora-data".parse().unwrap(),
             commit: "0123456789abcdef0123456789abcdef01234567".parse().unwrap(),
             index: file.path.clone(),
             files: vec![noted],
@@ -3362,11 +3378,18 @@ mod tests {
         entry.data_set = None;
         entry.attachment = Some("votes/README.md".into());
         entry.data_file = Some(
-            DataFileContent::new(set.commit, &file, b"# Votes\nline 2\n", 9)
-                .unwrap(),
+            DataFileContent::new(
+                &entry.id,
+                set.commit,
+                &file,
+                b"# Votes\nline 2\n",
+                9,
+                None,
+            )
+            .unwrap(),
         );
         let out = format_governance_entry(&entry);
-        assert!(out.contains("### File: votes/README.md\n15 bytes at commit 0123456789abcdef0123456789abcdef01234567"), "{out}");
+        assert!(out.contains("### File: votes/README.md\n15 bytes, 2 lines, at commit 0123456789abcdef0123456789abcdef01234567"), "{out}");
         assert!(out.contains(&file.sha256.to_string()), "{out}");
         assert!(out.contains("manifest on record"), "{out}");
         assert!(
@@ -3377,6 +3400,30 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("line 2"), "{out}");
+
+        // A ranged read says which lines, and how to cite them (0.103)
+        let whole = entry.data_file.take();
+        entry.data_file = Some(
+            DataFileContent::new(
+                &entry.id,
+                set.commit,
+                &file,
+                b"# Votes\nline 2\n",
+                9,
+                Some("2-".parse().unwrap()),
+            )
+            .unwrap(),
+        );
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains(
+                "Lines 2-2 of 2 (cite them as \
+                 DATA-2026-0001:0123456:votes/README.md:2-2):\n\nline 2\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("# Votes"), "{out}");
+        entry.data_file = whole;
 
         // A path relative to the top directory says what it resolved to,
         // before the text

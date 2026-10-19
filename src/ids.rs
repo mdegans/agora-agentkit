@@ -28,8 +28,9 @@ pub const GOVERNANCE_LOG_ID_PATTERN: &str =
 pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
-/// hex digits), a governance citation, or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
+/// hex digits), a governance citation, a data set's file cited at a commit
+/// (0.103), or a document slug.
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:[0-9a-f]{7,40}:.+|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -2237,6 +2238,12 @@ impl ContentRefError {
         const CITATION_LENS: [usize; 2] =
             ["DATA-2026-0001".len(), "GOV-2026-0006".len()];
         let s = self.0.trim_start();
+        // A data set's id and a `:` is a citation, and its own error says
+        // what is wrong with it; cutting it back to the id would offer the
+        // set's listing for a read of one file (0.103)
+        if crate::govlog::DataCitation::is_citation_shaped(s) {
+            return None;
+        }
         // A prompt slug runs to the first character a name cannot hold.
         let prompt_len = PROMPT_PREFIXES.iter().find_map(|prefix| {
             let head = s.get(..prefix.len())?;
@@ -2275,10 +2282,16 @@ impl ContentRefError {
 
 impl std::fmt::Display for ContentRefError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if crate::govlog::DataCitation::is_citation_shaped(&self.0)
+            && let Err(e) = self.0.parse::<crate::govlog::DataCitation>()
+        {
+            return write!(f, "not a data set citation: {e} ({:?})", self.0);
+        }
         write!(
             f,
             "not a content reference (expected a post/comment UUID or its \
-             first eight hex digits, a GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, or a document slug \
+             first eight hex digits, a GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, a data \
+             set's file as DATA-YYYY-NNNN:<commit>:<path>, or a document slug \
              like \"constitution\", \"protocol\", \"prompts\" or \
              \"prompt:<name>\"): {:?}",
             self.0
@@ -2320,6 +2333,9 @@ pub enum ContentRef {
     ContentPrefix(ContentIdPrefix),
     /// A governance log entry id.
     Governance(GovernanceLogId),
+    /// A data set's file at a commit, and maybe some of its lines:
+    /// `DATA-2026-0001:<commit>:<path>:110-300` (0.103)
+    DataCitation(crate::govlog::DataCitation),
     /// A platform governing document, by slug.
     Document(PlatformDoc),
 }
@@ -2349,7 +2365,32 @@ impl ContentRef {
         }
     }
 
-    /// `true` when this reference names a governance log entry.
+    /// The [`DataCitation`](crate::govlog::DataCitation), when this
+    /// reference cites a data set's file (0.103)
+    pub fn as_data_citation(&self) -> Option<&crate::govlog::DataCitation> {
+        match self {
+            ContentRef::DataCitation(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The data set (`DATA-…`) this reference reads: the set itself, or a
+    /// file cited in it (0.103)
+    pub fn data_set(&self) -> Option<&GovernanceLogId> {
+        match self {
+            ContentRef::Governance(id)
+                if id.prefix() == GovernanceLogPrefix::Data =>
+            {
+                Some(id)
+            }
+            ContentRef::DataCitation(c) => Some(&c.set),
+            _ => None,
+        }
+    }
+
+    /// `true` when this reference names a governance log entry; a
+    /// [`DataCitation`](ContentRef::DataCitation) names a file, not the
+    /// entry.
     pub fn is_governance(&self) -> bool {
         matches!(self, ContentRef::Governance(_))
     }
@@ -2360,6 +2401,7 @@ impl ContentRef {
         match self {
             ContentRef::Content(_) | ContentRef::ContentPrefix(_) => "content",
             ContentRef::Governance(_) => "governance",
+            ContentRef::DataCitation(_) => "data file",
             ContentRef::Document(_) => "document",
         }
     }
@@ -2371,6 +2413,7 @@ impl std::fmt::Display for ContentRef {
             ContentRef::Content(id) => id.fmt(f),
             ContentRef::ContentPrefix(prefix) => prefix.fmt(f),
             ContentRef::Governance(id) => id.fmt(f),
+            ContentRef::DataCitation(c) => c.fmt(f),
             ContentRef::Document(doc) => doc.fmt(f),
         }
     }
@@ -2388,6 +2431,12 @@ impl std::str::FromStr for ContentRef {
         }
         if let Ok(id) = s.parse::<GovernanceLogId>() {
             return Ok(ContentRef::Governance(id));
+        }
+        if crate::govlog::DataCitation::is_citation_shaped(s) {
+            return s
+                .parse()
+                .map(ContentRef::DataCitation)
+                .map_err(|_| ContentRefError(s.to_string()));
         }
         if let Ok(doc) = s.parse::<PlatformDoc>() {
             return Ok(ContentRef::Document(doc));
@@ -2431,6 +2480,12 @@ impl From<ContentIdPrefix> for ContentRef {
 impl From<GovernanceLogId> for ContentRef {
     fn from(id: GovernanceLogId) -> Self {
         ContentRef::Governance(id)
+    }
+}
+
+impl From<crate::govlog::DataCitation> for ContentRef {
+    fn from(c: crate::govlog::DataCitation) -> Self {
+        ContentRef::DataCitation(c)
     }
 }
 
@@ -2480,7 +2535,10 @@ impl schemars::JsonSchema for ContentRef {
             "description": "A post or comment UUID, or its first eight \
                             hex digits (e.g. \"7ad26ccd\"); a governance log id \
                             such as \"GOV-2026-0006\" (Council decision) \
-                            or \"APP-2026-0003\" (appeals ruling); or a \
+                            or \"APP-2026-0003\" (appeals ruling); a data \
+                            set's file cited at a commit, \
+                            \"DATA-2026-0001:<commit>:<path>\" (or \
+                            \"…:<path>:110-300\" for some of its lines); or a \
                             document slug — \"constitution\", \
                             \"protocol\" (the Governance Protocol), \
                             \"prompts\" (the index of the model prompts \
@@ -2577,6 +2635,51 @@ mod tests {
         assert!("a".repeat(256).parse::<OAuthClientId>().is_err());
         assert!("abc\ndef".parse::<OAuthClientId>().is_err());
         assert!(serde_json::from_str::<OAuthClientId>("\"\"").is_err());
+    }
+
+    /// A data set's file cited at a commit reads as one reference, and a
+    /// malformed one says what is wrong with it rather than offering the
+    /// set's id (0.103)
+    #[test]
+    fn a_data_citation_is_a_content_ref() {
+        let written = "DATA-2026-0001:89fe7c6:votes/ballots.csv:110-300";
+        let r: ContentRef = written.parse().unwrap();
+        let c = r.as_data_citation().expect("a citation");
+        assert_eq!(c.path.as_str(), "votes/ballots.csv");
+        assert_eq!(r.to_string(), written);
+        assert_eq!(
+            r.data_set().map(GovernanceLogId::as_str),
+            Some("DATA-2026-0001")
+        );
+        assert!(!r.is_governance());
+        assert_eq!(r.kind_str(), "data file");
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json, written);
+        assert_eq!(serde_json::from_value::<ContentRef>(json).unwrap(), r);
+        let whole: ContentRef =
+            "DATA-2026-0001:89fe7c6:votes/ballots.csv".parse().unwrap();
+        assert_eq!(whole.as_data_citation().unwrap().lines, None);
+        let set: ContentRef = "DATA-2026-0001".parse().unwrap();
+        assert_eq!(set.data_set(), Some(&"DATA-2026-0001".parse().unwrap()));
+        assert!(set.as_data_citation().is_none());
+
+        for bad in [
+            "DATA-2026-0001:89fe7c:votes/ballots.csv",
+            "DATA-2026-0001:89fe7c6",
+            "DATA-2026-0001: the vote tallies",
+        ] {
+            let err = bad.parse::<ContentRef>().unwrap_err();
+            assert_eq!(err.leading_ref(), None, "{bad}");
+            let text = err.to_string();
+            assert!(text.contains("not a data set citation"), "{text}");
+            assert!(text.contains("DATA-YYYY-NNNN:<commit>:<path>"), "{text}");
+            assert!(!text.contains("starts with the valid id"), "{text}");
+        }
+        // Any other series and a `:` is still an id followed by text
+        let err = "GOV-2026-0006: the ratification"
+            .parse::<ContentRef>()
+            .unwrap_err();
+        assert_eq!(err.leading_ref(), Some("GOV-2026-0006".parse().unwrap()));
     }
 
     #[test]

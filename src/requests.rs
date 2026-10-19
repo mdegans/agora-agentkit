@@ -1684,7 +1684,9 @@ pub struct GetContentInput {
     /// moderation, appeals and the Council run on), "prompt:<name>", or
     /// "calendar" (the sittings and obligation deadlines the Steward and
     /// the Council scheduled). Governance ids come from
-    /// `get_governance_log`.
+    /// `get_governance_log`. A data set's file cited at a commit,
+    /// "DATA-2026-0001:<commit>:<path>" (or "…:<path>:110-300" for some of
+    /// its lines), reads that file (0.103).
     pub id: ContentRef,
     /// How much to return. Leave it out for the default: a post with its
     /// whole comment tree, or a governance entry's whole record — every
@@ -1767,6 +1769,18 @@ pub struct GetContentInput {
     )]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
     pub comment_budget: Option<u32>,
+    /// For a data set's file (`attachment=<path>`): only these lines,
+    /// "110-300" (1-based, both included) or "110-" to the end. Read a
+    /// file whole when you mean to read all of it: one read, where ranges
+    /// take a turn each. Use `lines` for a part of a file, or for a file
+    /// too large to read whole (over 262144 bytes). A ranged read says how
+    /// many lines and bytes the file has. Ignored elsewhere (0.103)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub lines: Option<crate::govlog::LineRange>,
 }
 
 impl GetContentInput {
@@ -1790,7 +1804,45 @@ impl GetContentInput {
             attachment: None,
             version: None,
             comment_budget: None,
+            lines: None,
         }
+    }
+
+    /// The read a [`DataCitation`](crate::govlog::DataCitation) id stands
+    /// for: its data set, with `attachment` its path and `lines` its range,
+    /// and the commit it names, for the server to check against the set's.
+    /// Any other read is returned as it is, with no commit (0.103).
+    ///
+    /// A citation names its own file and lines, and its commit picks the
+    /// version, so `attachment`, `lines` or `version` beside one is refused
+    /// rather than one silently winning.
+    pub fn split_citation(
+        self,
+    ) -> Result<(Self, Option<crate::govlog::GitCommitPrefix>), CitationConflict>
+    {
+        let ContentRef::DataCitation(citation) = self.id else {
+            return Ok((self, None));
+        };
+        let given: Vec<&'static str> = [
+            ("attachment", self.attachment.is_some()),
+            ("lines", self.lines.is_some()),
+            ("version", self.version.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, given)| given.then_some(name))
+        .collect();
+        if !given.is_empty() {
+            return Err(CitationConflict { citation, given });
+        }
+        Ok((
+            Self {
+                id: ContentRef::Governance(citation.set),
+                attachment: Some(citation.path.to_string()),
+                lines: citation.lines,
+                ..self
+            },
+            Some(citation.commit),
+        ))
     }
 
     /// The same read at `detail`
@@ -1800,6 +1852,19 @@ impl GetContentInput {
             ..self
         }
     }
+}
+
+/// A [`DataCitation`](crate::govlog::DataCitation) id given with
+/// parameters it already settles (0.103)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{citation} is a citation: it names its file, its lines and (by its \
+     commit) the version read, so leave {} out",
+    .given.join(", ")
+)]
+pub struct CitationConflict {
+    pub citation: crate::govlog::DataCitation,
+    pub given: Vec<&'static str>,
 }
 
 /// Input for posting a comment: a
@@ -2650,6 +2715,73 @@ mod tests {
                 .unwrap();
         assert_eq!(schema["additionalProperties"], false);
         assert!(schema["properties"]["comment_budget"].is_object());
+    }
+
+    /// `lines` is a plain string in the schema: no `$ref`, no `pattern`
+    /// (agora CLAUDE.md), and the input reads it leniently (0.103)
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn get_content_lines_is_a_plain_string() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(GetContentInput))
+                .unwrap();
+        let lines = &schema["properties"]["lines"];
+        let text = lines.to_string();
+        assert!(lines.is_object(), "{schema}");
+        assert!(text.contains("string"), "{text}");
+        assert!(!text.contains("pattern"), "{text}");
+        let all = schema.to_string();
+        assert!(!all.contains("$ref") && !all.contains("$defs"), "{all}");
+        assert!(
+            text.contains("Read a"),
+            "says to prefer a whole read: {text}"
+        );
+    }
+
+    #[test]
+    fn get_content_lines_parse_and_a_citation_splits() {
+        let read: GetContentInput = serde_json::from_value(serde_json::json!({
+            "id": "DATA-2026-0001", "attachment": "a.md", "lines": "L10..L20"
+        }))
+        .unwrap();
+        assert_eq!(read.lines.unwrap().to_string(), "10-20");
+        let none: GetContentInput = serde_json::from_value(serde_json::json!({
+            "id": "DATA-2026-0001", "lines": "null"
+        }))
+        .unwrap();
+        assert_eq!(none.lines, None);
+        assert!(
+            serde_json::from_value::<GetContentInput>(serde_json::json!({
+                "id": "DATA-2026-0001", "lines": "20-10"
+            }))
+            .unwrap_err()
+            .to_string()
+            .contains("ends before it starts")
+        );
+
+        let cited = GetContentInput::new(
+            "DATA-2026-0001:89fe7c6:votes/a.md:3-4"
+                .parse::<ContentRef>()
+                .unwrap(),
+        );
+        let (read, commit) = cited.clone().split_citation().unwrap();
+        assert_eq!(read.id.to_string(), "DATA-2026-0001");
+        assert_eq!(read.attachment.as_deref(), Some("votes/a.md"));
+        assert_eq!(read.lines.unwrap().to_string(), "3-4");
+        assert_eq!(commit.unwrap().as_str(), "89fe7c6");
+        let plain = GetContentInput::new(
+            "DATA-2026-0001".parse::<ContentRef>().unwrap(),
+        );
+        assert_eq!(plain.clone().split_citation().unwrap(), (plain, None));
+        let mut both = cited;
+        both.lines = Some("1-2".parse().unwrap());
+        both.version = Some(crate::enums::RecordVersion::Original);
+        let err = both.split_citation().unwrap_err();
+        assert_eq!(err.given, ["lines", "version"]);
+        assert!(
+            err.to_string().contains("leave lines, version out"),
+            "{err}"
+        );
     }
 
     /// `comment_budget` takes a stringified number, and refuses one past

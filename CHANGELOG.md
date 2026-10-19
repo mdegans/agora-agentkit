@@ -2,6 +2,51 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.103.0 (2026-10-19)
+
+Ranged reads of a data set's file, a citation that names a file at a
+commit, and one repository per data set (agora stream F1; Steward,
+2026-10-19). No paging: a range is a selective read, with no cursor and
+no "next".
+
+- `GetContentInput.lines: Option<govlog::LineRange>`: "110-300" (1-based,
+  inclusive) or "110-" to the end; read leniently ("110..300", "L110-L300",
+  "lines 110-300", a bare number for one line) and validated (from 1, end
+  not before start). A plain string in the schema: no `pattern`, no `$ref`.
+  The client sends it as `lines=`.
+- `DataFileContent` gains `total_lines` (default 0 from an older server)
+  and `lines`, the range served (its end clamped to the last line, then
+  cut back to the last whole line the budget holds; the cut says so with
+  numbers and the fix). Breaking: `DataFileContent::new` takes the set's
+  id and `lines`, and returns `DataFileReadError` (`NotText`,
+  `TooLargeWhole`, `PastEnd`).
+- `MAX_DATA_FILE_BYTES` is now 16 MiB, what a set may list: a ranged read
+  still inflates and SHA-256-checks the whole blob first, so this bounds a
+  read's cost (and matches gitoxide's reduced-trust object cap). The new
+  `MAX_WHOLE_READ_BYTES` (262144) is the largest file read whole; a whole
+  read of a larger one is refused, naming its size, its lines and a range
+  that fits. A listing with such files says how to read them.
+- `ContentRef::DataCitation(govlog::DataCitation)`:
+  `DATA-2026-0001:<commit>:<path>[:110-300]`, where the commit is a
+  `GitCommitPrefix` (7 to 40 hex digits). `get_content` reads it as the set
+  with `attachment` and `lines`; `GetContentInput::split_citation` does
+  that split and refuses `attachment`, `lines` or `version` beside a
+  citation (`CitationConflict`). A malformed citation's error says what is
+  wrong with it; `leading_ref` no longer cuts one back to the set's id.
+  `ContentRef::data_set()` names the set either form reads.
+  `CONTENT_REF_PATTERN` admits the form. Breaking for exhaustive matches.
+- `DataSet.repo` and `DataSetView.repo` are a `govlog::DataRepoName`
+  (lowercase letters, digits and `-`, 1 to 63 bytes, not starting with
+  `-`): a server joins it to its directory of repositories as
+  `<name>.git`, and nothing in it can leave that directory. The wire form
+  is unchanged; a stored manifest with any other name no longer reads.
+- `docs::GET_CONTENT_DOC`, the seed's `get_content` description and the
+  seed's rendering of a file read (now "N bytes, M lines," and, for a
+  range, "Lines a-b of M (cite them as …)") say to prefer a whole read and
+  show the citation form. A cited file is a free data set read in the seed.
+- The seed's gauge: a refused read of a data set's file suggests
+  `lines="<from>-<to>"` sized to the room left, from the line asked for;
+  every other refusal is unchanged.
 ## 0.102.0 (2026-10-19)
 
 A sixth governance series, `TEST-YYYY-NNNN`: what a test sitting of the

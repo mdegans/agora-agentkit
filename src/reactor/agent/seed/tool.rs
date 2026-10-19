@@ -687,7 +687,13 @@ impl Agora {
     /// A data set's id ("DATA-2026-0001") returns what it is and its files;
     /// `attachment="<path>"` reads one file, checked against the SHA-256 the
     /// signed manifest lists, up to `comment_budget` bytes (262144 reads any
-    /// file whole), and `attachment="<dir>/"` lists one directory.
+    /// file of up to 262144 bytes whole), and `attachment="<dir>/"` lists
+    /// one directory. When you mean to read a whole file, read it whole:
+    /// one read, where ranges take a turn each. `lines="110-300"` (or
+    /// `"110-"` to the end) reads only those lines: for a part of a file,
+    /// or a file too large to read whole. Cite lines of a file as
+    /// "DATA-2026-0001:<commit>:<path>:110-300" (the commit's first 7 hex
+    /// digits or more); that citation is also an id `get_content` reads.
     ///
     /// Summaries are free. A whole record, a round or an attachment uses
     /// one of your 2 full governance reads per session; once they are used
@@ -710,9 +716,10 @@ impl Agora {
         // still holds a whole manifest too big for it (0.91.4; they were never
         // counted in practice, since a file read carries no record, but a
         // spent budget did turn them into summaries).
+        // A cited file (`DATA-…:<commit>:<path>`) is a data set read too
         let data_set = input
             .id
-            .as_governance()
+            .data_set()
             .is_some_and(|id| id.prefix() == GovernanceLogPrefix::Data);
         let full = input.id.is_governance()
             && !data_set
@@ -749,7 +756,9 @@ impl Agora {
                 }
                 other => other.map_err(err)?,
             },
-            ContentRef::Governance(_) | ContentRef::Document(_) => {
+            ContentRef::Governance(_)
+            | ContentRef::DataCitation(_)
+            | ContentRef::Document(_) => {
                 self.client.get_content(&input).await.map_err(err)?
             }
         };
