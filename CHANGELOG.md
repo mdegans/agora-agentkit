@@ -2,6 +2,35 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.105.1 (2026-10-19)
+
+Fixes to ranged reads of a data set's file, from the beta round on the
+0.104 runner (agora#821). Numbered after 0.105.0 (agentkit#196); either
+may land first.
+
+- `DataSet::resolve_ranged`: an `attachment` (or a citation's path) that
+  names nothing as it stands, but whose part before its last `:` names a
+  listed file, is that file and a range, parsed as `lines=` parses one
+  and refused with its errors. `rubric.md:8-3` is now "the range ends
+  before it starts", not a missing path; `rubric.md:8` is line 8.
+- `DataFileContent.partial_line`: a ranged read whose first line alone
+  is over the budget shows the start of that line and sets this to its
+  number; `lines` is then absent, so no range claims a line not shown
+  whole. The seed runner's header says the line is cut and offers no
+  citation; `cut` gives the line's length.
+- `cut` says where to read on: `lines="N-"` from the first line not
+  shown whole (to the range's end, for a closed range).
+- `DataFileReadError::PastEnd` reads as a malformed range does in the
+  runner: `Invalid arguments at \`lines\`: lines="…": …`, with
+  `LineRange::FORM`. New `LineRange::INVALID` is that opening;
+  `client::Error::range_refusal` gives such a refusal's message alone,
+  and the runner's `get_content` shows it so, without an HTTP status.
+- `DataSetView.lines_ignored`: a `lines=` given to a listing or a
+  directory, which the runner says was ignored.
+- `lines`'s descriptions (the field, `LineRange`'s schema, the runner's
+  and MCP's `get_content`) name `"-300"` (from the start) and `"110"`
+  (one line).
+
 ## 0.104.0 (2026-10-19)
 
 The Council's questions to a witness are batched: queued during a round,

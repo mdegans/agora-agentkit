@@ -251,6 +251,37 @@ impl DataSet {
     }
 }
 
+impl DataSet {
+    /// `asked` read as `<file>:<range>`, for an `asked` that names nothing
+    /// as it stands: when the part before its last `:` names a listed
+    /// file, that file and the part after read as a
+    /// [`LineRange`](super::LineRange), with the errors `lines=` gives.
+    /// `None` when it does not, so the caller's own miss stands (0.105.1)
+    ///
+    /// A citation's range is parsed strictly (`<from>-<to>`), so a path
+    /// such as `log:12` stays a path; here the listing has settled that no
+    /// such file exists, and `rubric.md:8-3` or `rubric.md:8` is a range
+    /// of `rubric.md`, refused or read as written.
+    pub fn resolve_ranged(
+        &self,
+        asked: &str,
+    ) -> Option<(
+        DataSetTarget<'_>,
+        Result<super::LineRange, super::LineRangeError>,
+    )> {
+        let (path, range) = asked.trim().rsplit_once(':')?;
+        if range.trim().is_empty() || self.resolve(asked).is_ok() {
+            return None;
+        }
+        match self.resolve(path).ok()? {
+            target @ DataSetTarget::File { .. } => {
+                Some((target, range.parse()))
+            }
+            DataSetTarget::Directory { .. } => None,
+        }
+    }
+}
+
 /// What a data set's `attachment=` named (0.91.4)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataSetTarget<'a> {
@@ -559,6 +590,53 @@ pub(super) mod tests {
                 DataFile::of(path("votes/ballots.csv"), b"seat,vote\n"),
             ],
         }
+    }
+
+    /// A citation's `:<range>` that the strict parse left in the path is
+    /// read as a range once the listing settles that no such file exists
+    /// (beta findings, 2026-10-19)
+    #[test]
+    fn a_trailing_range_of_a_listed_file_is_read_as_one() {
+        let m = manifest();
+        let ranged = |asked: &str| {
+            m.resolve_ranged(asked).map(|(target, lines)| {
+                let DataSetTarget::File { file, .. } = target else {
+                    panic!("{asked}: not a file");
+                };
+                (file.path.to_string(), lines.map(|l| l.to_string()))
+            })
+        };
+        assert_eq!(
+            ranged("votes/ballots.csv:8"),
+            Some(("votes/ballots.csv".into(), Ok("8-8".into())))
+        );
+        assert_eq!(
+            ranged("ballots.csv:L2-L3"),
+            Some(("votes/ballots.csv".into(), Ok("2-3".into())))
+        );
+        let Some((_, Err(e))) = m.resolve_ranged("votes/ballots.csv:8-3")
+        else {
+            panic!("8-3 is a refused range");
+        };
+        assert!(e.to_string().contains("ends before it starts"), "{e}");
+        assert!(e.to_string().contains(super::super::LineRange::FORM), "{e}");
+        // Nothing to split, a miss either side, a directory, or a listed
+        // file: `None`, so the caller's own answer stands
+        for asked in [
+            "votes/ballots.csv",
+            "votes/missing.csv:8-3",
+            "votes:1-2",
+            "votes/ballots.csv:",
+        ] {
+            assert_eq!(ranged(asked), None, "{asked}");
+        }
+        let mut colon = manifest();
+        colon
+            .files
+            .push(DataFile::of(path("votes/x.md:1-2"), b"x\n"));
+        colon.files.push(DataFile::of(path("votes/x.md"), b"x\n"));
+        colon.files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(colon.resolve_ranged("votes/x.md:1-2").is_none());
     }
 
     #[test]

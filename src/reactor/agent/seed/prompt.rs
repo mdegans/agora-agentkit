@@ -2516,6 +2516,13 @@ pub(super) fn format_governance_entry(
                 short = &file.commit.to_hex()[..7],
                 path = file.path,
             ));
+        } else if let Some(line) = file.partial_line {
+            // Part of one line: nothing to cite as lines (0.105.1)
+            out.push_str(&format!(
+                "Only the start of line {line} of {total}, cut inside the line \
+                 (no range cites part of a line):\n\n",
+                total = file.total_lines,
+            ));
         }
         if let Some(asked) = &file.asked {
             out.push_str(&format!(
@@ -2581,6 +2588,12 @@ fn format_data_set_view(view: &crate::responses::DataSetView) -> String {
         commit = view.commit,
         how_to_read = view.how_to_read,
     );
+    if let Some(lines) = view.lines_ignored {
+        out.push_str(&format!(
+            "(lines=\"{lines}\" was ignored: it reads lines of a file, and this \
+             is a listing.)\n"
+        ));
+    }
     if let (Some(asked), Some(dir)) = (&view.asked, &view.directory) {
         out.push_str(&format!(
             "\nattachment={asked:?} is not a path from the repository root; it \
@@ -3374,6 +3387,19 @@ mod tests {
         );
         assert!(!out.contains(&file.sha256.to_string()), "{out}");
         assert!(!out.contains("### Record"), "{out}");
+        assert!(!out.contains("was ignored"), "{out}");
+        // `lines=` on a listing: said to be ignored, once
+        if let Some(view) = entry.data_set.as_mut() {
+            view.lines_ignored = Some("5-9".parse().unwrap());
+        }
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains(
+                "(lines=\"5-9\" was ignored: it reads lines of a file, and \
+                 this is a listing.)\n"
+            ),
+            "{out}"
+        );
 
         entry.data_set = None;
         entry.attachment = Some("votes/README.md".into());
@@ -3399,7 +3425,7 @@ mod tests {
             ),
             "{out}"
         );
-        assert!(!out.contains("line 2"), "{out}");
+        assert!(!out.contains("\nline 2\n"), "{out}");
 
         // A ranged read says which lines, and how to cite them (0.103)
         let whole = entry.data_file.take();
@@ -3423,6 +3449,28 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains("# Votes"), "{out}");
+        // Part of one line: the header says so and offers no citation
+        // (beta findings, 2026-10-19)
+        entry.data_file = Some(
+            DataFileContent::new(
+                &entry.id,
+                set.commit,
+                &file,
+                b"# Votes\nline 2\n",
+                3,
+                Some("1-".parse().unwrap()),
+            )
+            .unwrap(),
+        );
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains(
+                "Only the start of line 1 of 2, cut inside the line (no range \
+                 cites part of a line):\n\n# V\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("cite them as"), "{out}");
         entry.data_file = whole;
 
         // A path relative to the top directory says what it resolved to,

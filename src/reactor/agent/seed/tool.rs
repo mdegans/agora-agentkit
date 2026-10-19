@@ -690,7 +690,8 @@ impl Agora {
     /// file of up to 262144 bytes whole), and `attachment="<dir>/"` lists
     /// one directory. When you mean to read a whole file, read it whole:
     /// one read, where ranges take a turn each. `lines="110-300"` (or
-    /// `"110-"` to the end) reads only those lines: for a part of a file,
+    /// `"110-"` to the end, `"-300"` from the start, `"110"` for one line)
+    /// reads only those lines: for a part of a file,
     /// or a file too large to read whole. Cite lines of a file as
     /// "DATA-2026-0001:<commit>:<path>:110-300" (the commit's first 7 hex
     /// digits or more); that citation is also an id `get_content` reads.
@@ -759,7 +760,9 @@ impl Agora {
             ContentRef::Governance(_)
             | ContentRef::DataCitation(_)
             | ContentRef::Document(_) => {
-                self.client.get_content(&input).await.map_err(err)?
+                self.client.get_content(&input).await.map_err(|e| {
+                    e.range_refusal().map_or_else(|| err(&e), Content::from)
+                })?
             }
         };
         Ok(match content {

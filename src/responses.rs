@@ -2546,6 +2546,10 @@ pub struct DataSetView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked: Option<String>,
     pub how_to_read: String,
+    /// A `lines=` given with this read, which a listing ignores: it reads
+    /// a file's lines (0.105.1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_ignored: Option<crate::govlog::LineRange>,
 }
 
 /// One line of a [`DataSetView`]
@@ -2705,6 +2709,7 @@ impl DataSetView {
             unlisted,
             asked: None,
             how_to_read,
+            lines_ignored: None,
         })
     }
 }
@@ -2730,9 +2735,16 @@ pub struct DataFileContent {
     pub note: Option<String>,
     /// The lines `text` holds, for a read of some lines (`lines=`): the
     /// range asked for, its end clamped to the file's last line and cut
-    /// back to the last whole line the budget holds (0.103)
+    /// back to the last whole line the budget holds (0.103). Absent when
+    /// `text` is only the start of one line (`partial_line`),
+    /// so that it never names a line not shown whole (0.105.1)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lines: Option<crate::govlog::LineRange>,
+    /// For a read of some lines whose first line alone is over the
+    /// budget: that line's number. `text` is its start, cut inside it, and
+    /// holds no whole line (0.105.1)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_line: Option<u64>,
     /// The file's text, or as much of it as the budget holds
     pub text: String,
     /// Bytes of the file not in `text`: 0 when it is whole
@@ -2782,10 +2794,13 @@ pub enum DataFileReadError {
         bytes: u64,
         max: u64,
     },
-    /// A range that starts past the file's last line
+    /// A range that starts past the file's last line, refused as the
+    /// seed runner refuses a malformed one (0.105.1)
     #[error(
-        "{path} has {total_lines} lines ({bytes} bytes), so lines={asked} \
-         starts past its end."
+        "{invalid}lines=\"{asked}\": {path} has {total_lines} lines ({bytes} \
+         bytes), so the range starts past its end. {form}",
+        invalid = crate::govlog::LineRange::INVALID,
+        form = crate::govlog::LineRange::FORM
     )]
     PastEnd {
         path: crate::govlog::DataFilePath,
@@ -2823,6 +2838,7 @@ impl DataFileContent {
         let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
         let total = text.len();
         let content = |text: String, lines, omitted: u64, cut| Self {
+            partial_line: None,
             path: file.path.clone(),
             commit,
             bytes: file.bytes,
@@ -2854,9 +2870,15 @@ impl DataFileContent {
             let omitted = (total - end) as u64;
             let cut = (omitted > 0).then(|| {
                 let pct = omitted * 100 / total as u64;
+                // The first line not shown whole: after a line break, the
+                // one it starts; else the one the cut fell in
+                let on = (crate::govlog::count_lines(&text[..end])
+                    + u64::from(text[..end].ends_with('\n')))
+                .max(1);
                 let rest = format!(
                     "the last {omitted} bytes ({pct}%) are not shown. \
-                     comment_budget={max} reads the whole file."
+                     comment_budget={max} reads the whole file, or \
+                     lines=\"{on}-\" reads on from line {on}."
                 );
                 if at_line {
                     format!(
@@ -2905,6 +2927,15 @@ impl DataFileContent {
         let served = crate::govlog::LineRange::new(first, Some(served_end))
             .expect("first <= served_end");
         let left = wanted.len() - shown.len();
+        let last = span.served.end().expect("a span's end is set");
+        // Where to read on from: the first line not shown whole, to the
+        // range's end as asked
+        let on_from = served_end + 1;
+        let on = (on_from <= last).then(|| {
+            let to = asked.end().map_or(String::new(), |_| last.to_string());
+            format!(" lines=\"{on_from}-{to}\" reads on from line {on_from}.")
+        });
+        let on = on.unwrap_or_default();
         let fix = if (wanted.len() as u64) <= u64::from(max)
             && budget < max as usize
         {
@@ -2923,23 +2954,37 @@ impl DataFileContent {
                 "Lines {asked_range} are {wanted_bytes} bytes, more than the \
                  comment_budget of {budget}: shown are lines {served} \
                  ({shown_bytes} bytes), and {left} bytes of the range are \
-                 not. {fix}. The file has {total_lines} lines, {total} bytes.",
+                 not. {fix}.{on} The file has {total_lines} lines, {total} \
+                 bytes.",
                 asked_range = span.served,
                 wanted_bytes = wanted.len(),
                 shown_bytes = shown.len(),
             )
         } else {
+            let line_bytes =
+                wanted.find('\n').map_or(wanted.len(), |at| at + 1);
             format!(
-                "Line {first} alone is more than the comment_budget of \
-                 {budget}: shown are its first {shown_bytes} bytes of lines \
-                 {asked_range}, and {left} bytes of the range are not. {fix}. \
-                 The file has {total_lines} lines, {total} bytes.",
+                "Line {first} alone is {line_bytes} bytes, more than the \
+                 comment_budget of {budget}: shown are its first \
+                 {shown_bytes} bytes, cut inside the line, and {left} bytes \
+                 of lines {asked_range} are not. {fix}.{on} The file has \
+                 {total_lines} lines, {total} bytes.",
                 asked_range = span.served,
                 shown_bytes = shown.len(),
             )
         };
         let omitted = (total - shown.len()) as u64;
-        Ok(content(shown.to_string(), Some(served), omitted, Some(cut)))
+        // Part of one line: no range names it (0.105.1)
+        let partial = fit == 0;
+        Ok(Self {
+            partial_line: partial.then_some(first),
+            ..content(
+                shown.to_string(),
+                (!partial).then_some(served),
+                omitted,
+                Some(cut),
+            )
+        })
     }
 }
 
@@ -5022,7 +5067,14 @@ mod data_file_tests {
                 ..
             }
         ));
-        assert!(err.to_string().contains("has 10 lines (40 bytes)"), "{err}");
+        let text = err.to_string();
+        assert!(text.contains("has 10 lines (40 bytes)"), "{err}");
+        // As the runner refuses a malformed range, help text included
+        assert!(
+            text.starts_with("Invalid arguments at `lines`: lines=\"11-12\": "),
+            "{err}"
+        );
+        assert!(text.ends_with(LineRange::FORM), "{err}");
     }
 
     fn read_whole_lines(text: &str) -> u64 {
@@ -5047,12 +5099,36 @@ mod data_file_tests {
             assert!(cut.contains(needle), "{needle}: {cut}");
         }
         assert!(!cut.to_lowercase().contains("next"), "{cut}");
-        // A first line longer than the budget: cut inside it
+        // It says where to read on from, to the range's end as asked
+        assert!(
+            cut.contains("lines=\"6-20\" reads on from line 6."),
+            "{cut}"
+        );
+        let open = ranged(text.as_bytes(), 55, Some("1-")).unwrap();
+        assert!(
+            open.cut
+                .unwrap()
+                .contains("lines=\"6-\" reads on from line 6."),
+            "open-ended"
+        );
+        // A first line longer than the budget: cut inside it, and no range
+        // claims the line (beta findings, 2026-10-19)
         let long = format!("{}\nshort\n", "x".repeat(100));
         let read = ranged(long.as_bytes(), 40, Some("1-2")).unwrap();
         assert_eq!(read.text.len(), 40);
-        assert_eq!(read.lines.unwrap().to_string(), "1-1");
-        assert!(read.cut.unwrap().starts_with("Line 1 alone is more than"));
+        assert_eq!((read.lines, read.partial_line), (None, Some(1)));
+        let cut = read.cut.unwrap();
+        assert!(
+            cut.starts_with(
+                "Line 1 alone is 101 bytes, more than the comment_budget of \
+                 40: shown are its first 40 bytes, cut inside the line"
+            ),
+            "{cut}"
+        );
+        assert!(cut.contains("lines=\"2-2\" reads on from line 2."), "{cut}");
+        // Nothing past the cut line in the range: nothing to read on to
+        let read = ranged(long.as_bytes(), 40, Some("1-1")).unwrap();
+        assert!(!read.cut.unwrap().contains("reads on"));
     }
 
     /// A file over what one read shows whole is read by range only; the
@@ -5102,9 +5178,18 @@ mod data_file_tests {
         );
         assert!(cut.contains("last 11 bytes (37%)"), "{cut}");
         assert!(
-            cut.contains("comment_budget=262144 reads the whole file"),
+            cut.contains(
+                "comment_budget=262144 reads the whole file, or lines=\"3-\" \
+                 reads on from line 3."
+            ),
             "{cut}"
         );
+        // Cut inside a line: read on from that line
+        let long = format!("ab\n{}", "x".repeat(30));
+        let mid = ranged(long.as_bytes(), 20, None).unwrap();
+        let cut = mid.cut.unwrap();
+        assert!(cut.starts_with("Cut at byte 20 of 33"), "{cut}");
+        assert!(cut.contains("lines=\"2-\" reads on from line 2."), "{cut}");
     }
 
     #[test]

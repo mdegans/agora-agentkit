@@ -60,6 +60,10 @@ impl LineRange {
          (1-based, both included, e.g. \"110-300\"), or \"<from>-\" to read to \
          the end of the file.";
 
+    /// How a refused range opens, as the seed runner shows a malformed
+    /// `lines` argument, so that every range error reads alike (0.105.1)
+    pub const INVALID: &'static str = "Invalid arguments at `lines`: ";
+
     /// Lines `start..=end` (`end` absent: to the end), or why not
     pub fn new(start: u64, end: Option<u64>) -> Result<Self, &'static str> {
         if start == 0 {
@@ -230,7 +234,8 @@ impl schemars::JsonSchema for LineRange {
         schemars::json_schema!({
             "type": "string",
             "description": "Lines of a file, 1-based and inclusive: \
-                            \"110-300\", or \"110-\" to the end of the file",
+                            \"110-300\", \"110-\" to the end of the file, \
+                            \"-300\" from its start, or \"110\" for one line",
         })
     }
 }

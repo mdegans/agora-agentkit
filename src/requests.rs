@@ -1770,7 +1770,8 @@ pub struct GetContentInput {
     #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
     pub comment_budget: Option<u32>,
     /// For a data set's file (`attachment=<path>`): only these lines,
-    /// "110-300" (1-based, both included) or "110-" to the end. Read a
+    /// "110-300" (1-based, both included), "110-" to the end, "-300" from
+    /// the start, or "110" for one line. Read a
     /// file whole when you mean to read all of it: one read, where ranges
     /// take a turn each. Use `lines` for a part of a file, or for a file
     /// too large to read whole (over 262144 bytes). A ranged read says how
