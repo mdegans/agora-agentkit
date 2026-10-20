@@ -1902,112 +1902,198 @@ pub struct FetchAgoraLinkInput {
     pub link: crate::links::AgoraLink,
 }
 
+/// One option of [`GetContentInput`] beside its id
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOption {
+    Detail,
+    Round,
+    Attachment,
+    Version,
+    CommentBudget,
+    Lines,
+}
+
+impl ReadOption {
+    pub const ALL: [ReadOption; 6] = [
+        ReadOption::Detail,
+        ReadOption::Round,
+        ReadOption::Attachment,
+        ReadOption::Version,
+        ReadOption::CommentBudget,
+        ReadOption::Lines,
+    ];
+
+    /// Its field's name
+    pub fn name(self) -> &'static str {
+        match self {
+            ReadOption::Detail => "detail",
+            ReadOption::Round => "round",
+            ReadOption::Attachment => "attachment",
+            ReadOption::Version => "version",
+            ReadOption::CommentBudget => "comment_budget",
+            ReadOption::Lines => "lines",
+        }
+    }
+}
+
+/// What a read's id names, as far as its options go
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTarget {
+    /// A post or a comment
+    Content,
+    /// A governance entry that is not a data set
+    Entry,
+    /// A data set (`DATA-…`), its listing or one of its files
+    DataSet,
+    /// A data set's file cited by a [`DataCitation`](crate::govlog::DataCitation)
+    CitedFile,
+    /// A document: the Constitution, the Protocol, the calendar, a prompt
+    Document,
+}
+
+impl ReadTarget {
+    /// The target `id` names
+    pub fn of(id: &ContentRef) -> Self {
+        match id {
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => {
+                ReadTarget::Content
+            }
+            ContentRef::Governance(id)
+                if id.prefix() == crate::ids::GovernanceLogPrefix::Data =>
+            {
+                ReadTarget::DataSet
+            }
+            ContentRef::Governance(_) => ReadTarget::Entry,
+            ContentRef::DataCitation(_) => ReadTarget::CitedFile,
+            ContentRef::Document(_) => ReadTarget::Document,
+        }
+    }
+
+    /// What it is, in a refusal
+    pub fn noun(self) -> &'static str {
+        match self {
+            ReadTarget::Content => "a post or comment",
+            ReadTarget::Entry => "a governance entry",
+            ReadTarget::DataSet => "a data set",
+            ReadTarget::CitedFile => "a data set's cited file",
+            ReadTarget::Document => "a document",
+        }
+    }
+
+    /// The options a read of it takes. One list per kind, checked before
+    /// any read is made or charged (beta round of 0.112.0)
+    pub fn options(self) -> &'static [ReadOption] {
+        use ReadOption::*;
+        match self {
+            ReadTarget::Content => &[Detail, CommentBudget],
+            ReadTarget::Entry => &[Detail, Round, Attachment, Version],
+            ReadTarget::DataSet => {
+                &[Detail, Attachment, Version, CommentBudget, Lines]
+            }
+            // The citation names its file and version; `lines` only
+            // beside one without a range (`split_citation`)
+            ReadTarget::CitedFile => &[CommentBudget, Lines],
+            ReadTarget::Document => &[],
+        }
+    }
+
+    /// The bounds of `comment_budget` on it: a post's comments from the
+    /// floor up, a data file's bytes from one
+    pub fn comment_budget_bounds(self) -> std::ops::RangeInclusive<u32> {
+        match self {
+            ReadTarget::Content => {
+                GetContentInput::MIN_COMMENT_BUDGET
+                    ..=GetContentInput::MAX_COMMENT_BUDGET
+            }
+            _ => 1..=GetContentInput::MAX_COMMENT_BUDGET,
+        }
+    }
+}
+
 impl GetContentInput {
-    /// Why this read cannot be what was asked, if it cannot: options that
-    /// contradict each other or the kind of thing read, or a
-    /// `comment_budget` out of its bounds. Checked before a read is made,
-    /// so none is spent on it (beta round of 0.112.0: `detail=summary`
-    /// beside `round=2` spent a full read on the round)
-    pub fn conflict(&self) -> Option<String> {
-        use crate::enums::DetailLevel;
-        let given = |name: &'static str, is: bool| is.then_some(name);
-        let parts: Vec<&str> = [
-            given("round", self.round.is_some()),
-            given("attachment", self.attachment.is_some()),
-            given("lines", self.lines.is_some()),
+    /// The options this read gives
+    pub fn options(&self) -> Vec<ReadOption> {
+        use ReadOption::*;
+        [
+            (Detail, self.detail.is_some()),
+            (Round, self.round.is_some()),
+            (Attachment, self.attachment.is_some()),
+            (Version, self.version.is_some()),
+            (CommentBudget, self.comment_budget.is_some()),
+            (Lines, self.lines.is_some()),
         ]
         .into_iter()
-        .flatten()
-        .collect();
-        // A post's comments are budgeted from the floor up; a data set's
-        // file may be read by fewer bytes
-        let post = matches!(
-            self.id,
-            ContentRef::Content(_) | ContentRef::ContentPrefix(_)
-        );
-        if let Some(budget) = self.comment_budget
-            && post
-            && !(Self::MIN_COMMENT_BUDGET..=Self::MAX_COMMENT_BUDGET)
-                .contains(&budget)
-        {
+        .filter_map(|(o, given)| given.then_some(o))
+        .collect()
+    }
+
+    /// Why this read cannot be what was asked, if it cannot: an option its
+    /// target does not take (refused with the ones it does), a
+    /// `comment_budget` out of its bounds, or options that contradict each
+    /// other. Checked before a read is made, so none is spent on it (beta
+    /// round of 0.112.0: `detail=summary` beside `round=2` spent a full
+    /// read on the round, and a `comment_budget` on an entry was ignored)
+    pub fn conflict(&self) -> Option<String> {
+        use crate::enums::DetailLevel;
+        let target = ReadTarget::of(&self.id);
+        let allowed = target.options();
+        let refused: Vec<&str> = self
+            .options()
+            .into_iter()
+            .filter(|o| !allowed.contains(o))
+            .map(ReadOption::name)
+            .collect();
+        if !refused.is_empty() {
+            let takes = match allowed {
+                [] => "no options".to_string(),
+                _ => allowed
+                    .iter()
+                    .map(|o| o.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
             return Some(format!(
-                "comment_budget={budget} is out of its bounds, {} to {}",
-                Self::MIN_COMMENT_BUDGET,
-                Self::MAX_COMMENT_BUDGET
+                "{} does not apply to {}, which takes {takes}",
+                refused.join(", "),
+                target.noun()
             ));
         }
-        match &self.id {
-            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => {
-                let mut asked = parts.clone();
-                asked.extend(given("version", self.version.is_some()));
-                if !asked.is_empty() {
-                    return Some(format!(
-                        "{} is for a governance entry or a data set's file; \
-                         a post or comment takes detail and comment_budget",
-                        asked.join(", ")
-                    ));
-                }
-            }
-            ContentRef::Document(_) => {
-                let mut asked = parts.clone();
-                asked.extend(given("detail", self.detail.is_some()));
-                asked.extend(given("version", self.version.is_some()));
-                asked.extend(given(
-                    "comment_budget",
-                    self.comment_budget.is_some(),
+        if let Some(budget) = self.comment_budget {
+            let bounds = target.comment_budget_bounds();
+            if !bounds.contains(&budget) {
+                return Some(format!(
+                    "comment_budget={budget} is out of its bounds here, {} to \
+                     {}",
+                    bounds.start(),
+                    bounds.end()
                 ));
-                if !asked.is_empty() {
+            }
+        }
+        // A part of an entry's record, and a depth that is not a part
+        if target == ReadTarget::Entry {
+            let parts: Vec<&str> = [
+                ("round", self.round.is_some()),
+                ("attachment", self.attachment.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(n, given)| given.then_some(n))
+            .collect();
+            match self.detail {
+                Some(DetailLevel::Summary) if !parts.is_empty() => {
                     return Some(format!(
-                        "a document is read whole, so it takes no {}",
-                        asked.join(", ")
+                        "detail=summary reads the summary alone, and {} \
+                         reads part of the record: give one",
+                        parts.join(" and ")
                     ));
                 }
-            }
-            ContentRef::Governance(id) => {
-                let data = id.prefix() == crate::ids::GovernanceLogPrefix::Data;
-                if data && self.round.is_some() {
-                    return Some(
-                        "a data set has no rounds; read its files one at a \
-                         time"
-                            .into(),
-                    );
+                Some(DetailLevel::FullWithAttachments) if !parts.is_empty() => {
+                    return Some(format!(
+                        "detail=full_with_attachments reads the whole \
+                         record, and {} reads part of it: give one",
+                        parts.join(" and ")
+                    ));
                 }
-                // A data set's listing says a `lines` was ignored, and a
-                // summary-depth read of one of its files reads the file
-                if data {
-                    return None;
-                }
-                if self.lines.is_some() {
-                    return Some("lines is for a data set's file".into());
-                }
-                match self.detail {
-                    Some(DetailLevel::Summary) if !parts.is_empty() => {
-                        return Some(format!(
-                            "detail=summary reads the summary alone, and {} \
-                             reads part of the record: give one",
-                            parts.join(" and ")
-                        ));
-                    }
-                    Some(DetailLevel::FullWithAttachments)
-                        if !parts.is_empty() =>
-                    {
-                        return Some(format!(
-                            "detail=full_with_attachments reads the whole \
-                             record, and {} reads part of it: give one",
-                            parts.join(" and ")
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-            ContentRef::DataCitation(_) => {
-                if self.round.is_some() || self.detail.is_some() {
-                    return Some(
-                        "a data set's file takes lines and comment_budget, \
-                         not round or detail"
-                            .into(),
-                    );
-                }
+                _ => {}
             }
         }
         None

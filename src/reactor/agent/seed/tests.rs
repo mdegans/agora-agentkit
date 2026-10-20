@@ -2052,8 +2052,20 @@ async fn data_set_reads_are_free_and_never_capped() {
             .await
             .unwrap();
     }
-    assert_eq!(data.calls(), 3, "every data set read went out as asked");
+    // Read once, past the spent full reads; the same file again is
+    // pointed at, read and spent never (0.112.0)
+    assert_eq!(data.calls(), 1, "the data set's file was read");
     let rendered = transcript(&agent);
+    assert_eq!(
+        rendered
+            .matches(
+                "(`agora://gov/DATA-2026-0001/votes/README.md` is in your \
+                 context already"
+            )
+            .count(),
+        2,
+        "{rendered}"
+    );
     assert!(rendered.contains("### File: votes/README.md"), "{rendered}");
     assert!(
         rendered.contains("(Data set reads are free: listings and files do not count against your 2 full governance reads.)"),
@@ -2072,10 +2084,10 @@ async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
     let server = MockServer::start();
     let read = server.mock(|when, then| {
         when.method(GET)
-            .path("/agora/api/content/GOV-2026-0006")
+            .path("/agora/api/content/DATA-2026-0006")
             .query_param("comment_budget", "8192");
         then.status(200).json_body(governance_content(
-            "GOV-2026-0006",
+            "DATA-2026-0006",
             Some(two_round_record()),
         ));
     });
@@ -2084,7 +2096,7 @@ async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
     agent
         .handle(tool_use_message(
             "get_content",
-            serde_json::json!({"id": "GOV-2026-0006", "comment_budget": 8192}),
+            serde_json::json!({"id": "DATA-2026-0006", "comment_budget": 8192}),
         ))
         .await
         .unwrap();
@@ -2093,7 +2105,7 @@ async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
     agent
         .handle(tool_use_message(
             "get_content",
-            serde_json::json!({"id": "GOV-2026-0006", "depth": "full"}),
+            serde_json::json!({"id": "DATA-2026-0006", "depth": "full"}),
         ))
         .await
         .unwrap();
@@ -5879,7 +5891,10 @@ async fn documents_read_once_titled() {
             "document": "prompts",
             "title": "Agora's Model Prompts",
             "version": "sha256:0123456789abcdef",
-            "text": "# Agora's Model Prompts\n\nThe index.",
+            "text": "# Agora's Model Prompts\n\nRead one with \
+                     `get_content(\"prompt:<name>\")`, e.g. \
+                     `get_content(\"prompt:tier2_reviewer\")`; also \
+                     `get_content(\"constitution\")`.",
         }));
     });
     let mut agent = agent(&server, quiet_config());
@@ -5904,4 +5919,102 @@ async fn documents_read_once_titled() {
     );
     assert_eq!(rendered.matches("# Agora's Model Prompts").count(), 1);
     assert!(rendered.contains("(Version sha256:0123456789abcdef.)"));
+    assert!(
+        rendered.contains(
+            "Read one with `agora://gov/prompts/<name>`, e.g. \
+             `agora://gov/prompts/tier2_reviewer`; also \
+             `agora://gov/constitution`."
+        ),
+        "{rendered}"
+    );
+}
+
+/// An attachment read twice, by either tool, is read and spent once; the
+/// read that spends says what is left after it (beta round of 0.112.0)
+#[tokio::test]
+async fn an_attachment_is_read_once_a_session() {
+    let server = MockServer::start();
+    let listed = serde_json::json!([{
+        "name": "clerk-reads",
+        "note": "what the Clerk read",
+        "bytes": 3000,
+    }]);
+    let attachment = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("attachment", "clerk-reads");
+        let mut body = governance_content(
+            "GOV-2026-0006",
+            Some(serde_json::json!({"attachments": [
+                {"name": "clerk-reads", "content": "WHAT_THE_CLERK_READ"}
+            ]})),
+        );
+        body["attachment"] = "clerk-reads".into();
+        body["attachments"] = listed.clone();
+        then.status(200).json_body(body);
+    });
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| !has_param(req, "attachment"));
+        let mut body =
+            governance_content("GOV-2026-0006", Some(two_round_record()));
+        body["attachments"] = listed.clone();
+        then.status(200).json_body(body);
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "attachment": "clerk-reads"}),
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0006/clerk-reads"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(attachment.calls(), 1);
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered.matches("WHAT_THE_CLERK_READ").count(),
+        1,
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "(`agora://gov/GOV-2026-0006/clerk-reads` is in your context \
+             already: shown in your read of GOV-2026-0006"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("(That was a full read: 1 of 2 left this session.)")
+    );
+    // The record read spends the second: its attachment line says 0 left
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0006"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.calls(), 1);
+    let rendered = transcript(&agent);
+    let last = rendered.rsplit("## GOV-2026-0006").next().unwrap();
+    assert!(
+        last.contains("Attachments (your full reads are spent this session):"),
+        "{last}"
+    );
+    assert!(last.contains("(That was a full read: 0 of 2 left this session.)"));
 }

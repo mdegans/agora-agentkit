@@ -59,6 +59,11 @@ struct Inner {
     /// showed it again)
     summaries: HashMap<GovernanceLogId, Shown>,
     pending_summaries: Vec<(GovernanceLogId, Shown)>,
+    /// Parts of governance records shown this session (an attachment, a
+    /// data set's file or lines of one), by the read's canonical link
+    /// (0.112.0, beta round)
+    parts: HashMap<String, Shown>,
+    pending_parts: Vec<(String, Shown)>,
     /// How the result being rendered points at further reads (0.112.0)
     cues: Cues,
 }
@@ -89,7 +94,35 @@ impl ShownOnce {
         inner.pending.clear();
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
+        inner.pending_parts.clear();
         inner.read = read.into();
+    }
+
+    /// Where the part of a record `link` reads was shown this session
+    pub fn earlier_part(&self, link: &str) -> Option<Shown> {
+        let inner = self.0.read().expect("shown-once lock");
+        inner.parts.get(link).cloned().or_else(|| {
+            inner
+                .pending_parts
+                .iter()
+                .find(|(p, _)| p == link)
+                .map(|(_, s)| s.clone())
+        })
+    }
+
+    /// The result being rendered shows the part `link` reads, `bytes` long
+    pub fn mark_part(&self, link: String, bytes: usize) {
+        let mut inner = self.0.write().expect("shown-once lock");
+        let read = inner.read.clone();
+        inner.pending_parts.push((
+            link,
+            Shown {
+                read,
+                bytes: bytes as u64,
+                raw: bytes as u64,
+                post: None,
+            },
+        ));
     }
 
     /// How the result about to be rendered points at further reads
@@ -216,6 +249,10 @@ impl ShownOnce {
         for (id, shown) in summaries {
             inner.summaries.entry(id).or_insert(shown);
         }
+        let parts = std::mem::take(&mut inner.pending_parts);
+        for (link, shown) in parts {
+            inner.parts.entry(link).or_insert(shown);
+        }
     }
 
     /// The rendered result was left out of the context: nothing it marked
@@ -225,6 +262,7 @@ impl ShownOnce {
         inner.pending.clear();
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
+        inner.pending_parts.clear();
     }
 
     /// Of `post`'s comments in the context: how many, and their raw bodies'

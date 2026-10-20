@@ -59,6 +59,38 @@ fn data_set_reads_are_free() -> String {
     )
 }
 
+/// `text` with each `get_content("<id>")` it names written as the id's
+/// link, and the template `get_content("prompt:<name>")` as
+/// `agora://gov/prompts/<name>` (0.112.0)
+fn relink(text: &str) -> String {
+    const OPEN: &str = "get_content(\"";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + OPEN.len()..];
+        let Some(end) = after.find("\")") else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        let id = &after[..end];
+        match id.parse::<crate::links::AgoraLink>() {
+            Ok(link)
+                if !matches!(link, crate::links::AgoraLink::Content { .. }) =>
+            {
+                out.push_str(&link.to_string())
+            }
+            _ if id == "prompt:<name>" => {
+                out.push_str("agora://gov/prompts/<name>")
+            }
+            _ => out.push_str(&rest[at..at + OPEN.len() + end + 2]),
+        }
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Deletions, restores and erasures allowed per session, together.
 ///
 /// Against a degenerate loop (delete, restore, delete …), not a rate on
@@ -616,6 +648,25 @@ impl Agora {
         // A server without the signed route answers a bare 404 or 405;
         // that read is retried unsigned, while a real "no such post"
         // (Agora's JSON error) goes back to the model as is.
+        // A part of a record (an attachment, a data set's file or lines
+        // of one) shown this session is pointed at, not read again: it is
+        // in the context, and a second read would spend another full read
+        // (beta round of 0.112.0)
+        let part_link = (!capped
+            && (input.attachment.is_some()
+                || matches!(input.id, ContentRef::DataCitation(_))))
+        .then(|| AgoraLink::from(input.clone()).to_string());
+        if let Some(link) = &part_link
+            && let Some(shown) = self.shown_once.earlier_part(link)
+        {
+            return Ok(format!(
+                "(`{link}` is in your context already: shown in {}, {}. \
+                 Nothing was read, and no full read was spent.)",
+                shown.read,
+                crate::threads::about_tokens(shown.bytes)
+            )
+            .into());
+        }
         let content = match &input.id {
             ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
                 .client
@@ -648,6 +699,19 @@ impl Agora {
                 )));
             }
             self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
+            // Marked with the part's own size; a read that is left out, or
+            // served as the summary instead, begins afresh and marks nothing
+            if let Some(link) = part_link {
+                let bytes = match &entry.data_file {
+                    Some(file) => file.text.len() as u64,
+                    None => entry
+                        .attachments
+                        .iter()
+                        .find(|a| Some(&a.name) == entry.attachment.as_ref())
+                        .map_or(0, |a| a.bytes),
+                };
+                self.shown_once.mark_part(link, bytes as usize);
+            }
         }
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
@@ -754,6 +818,17 @@ impl Agora {
                 .into()
             }
             crate::responses::ContentResponse::Governance(mut entry) => {
+                // A record this read will spend a full read on says what is
+                // left after it (beta round of 0.112.0: "2 left" in the
+                // result that spent one)
+                if entry.data.is_some() && !data_set {
+                    self.shown_once.set_cues(super::Cues {
+                        links: self.by_link,
+                        full_reads_left: Some(
+                            self.full_reads_left().saturating_sub(1),
+                        ),
+                    });
+                }
                 let rendered = prompt::format_governance_entry_once(
                     &entry,
                     &self.shown_once,
@@ -807,6 +882,7 @@ impl Agora {
                 // A fresh render: what the record's render marked was not
                 // shown
                 self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
+                self.set_cues();
                 let summary = prompt::format_governance_entry_once(
                     &entry,
                     &self.shown_once,
@@ -893,16 +969,20 @@ impl Agora {
                 };
                 // A document whose text opens with its own title is not
                 // given a second one
-                if doc.text.trim_start().starts_with("# ") {
-                    format!(
-                        "{held}(Version {v}{}.)\n\n{}",
-                        doc.version, doc.text
-                    )
-                    .into()
+                // A read by link points in links, the document's own
+                // `get_content("…")` pointers too (beta round of 0.112.0)
+                let text = if self.by_link {
+                    relink(&doc.text)
+                } else {
+                    doc.text.clone()
+                };
+                if text.trim_start().starts_with("# ") {
+                    format!("{held}(Version {v}{}.)\n\n{text}", doc.version)
+                        .into()
                 } else {
                     format!(
-                        "{held}# {} ({v}{})\n\n{}",
-                        doc.title, doc.version, doc.text
+                        "{held}# {} ({v}{})\n\n{text}",
+                        doc.title, doc.version
                     )
                     .into()
                 }

@@ -101,6 +101,23 @@ tool that opens one.
   summary it had said was in context. A part read now never marks the
   header, and its record's summary is shown once.
 
+### Re-check of the beta round
+
+- One allow-list of options per kind of read (`ReadTarget::options`:
+  a post or comment takes `detail`, `comment_budget`; an entry `detail`,
+  `round`, `attachment`, `version`; a data set those and `comment_budget`,
+  `lines`, but not `round`; a cited file `comment_budget`, `lines`; a
+  document none), with `comment_budget` bounded (4,096 to 262,144 on a
+  post, 1 to 262,144 on a data file). Anything else is refused, naming the
+  list, by both tools before a read is made or charged. A
+  `comment_budget` on an entry was ignored and spent a full read.
+- An attachment or a data set's file (or lines of one) read twice in a
+  session is pointed at the second time, by either tool: nothing is read
+  or spent (`ShownOnce::earlier_part`).
+- The full reads left, said in the result that spends one, count that
+  read.
+- The prompts index read by link names its prompts by link.
+
 ## 0.110.0 (2026-10-20)
 
 A data set's file may be cited without its commit, for the one the set

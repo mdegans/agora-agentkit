@@ -716,20 +716,41 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         ),
         (
             "agora://gov/GOV-2026-0016?lines=1-5",
-            "lines is for a data set's file",
+            "lines does not apply to a governance entry, which takes detail, \
+             round, attachment, version",
         ),
-        ("agora://gov/DATA-2026-0001?round=1", "no rounds"),
+        (
+            "agora://gov/DATA-2026-0001?round=1",
+            "round does not apply to a data set,",
+        ),
         (
             "agora://gov/prompts?detail=summary",
-            "a document is read whole",
+            "detail does not apply to a document, which takes no options",
         ),
         (
             "agora://post/7ad26ccd?comment_budget=1",
-            "out of its bounds, 4096 to 262144",
+            "out of its bounds here, 4096 to 262144",
         ),
         (
             "agora://gov/DATA-2026-0001/a.md?round=2",
-            "not round or detail",
+            "round does not apply to a data set's cited file",
+        ),
+        (
+            "agora://post/7ad26ccd?round=2",
+            "round does not apply to a post or comment, which takes detail, \
+             comment_budget",
+        ),
+        (
+            "agora://gov/GOV-2026-0017?comment_budget=1",
+            "comment_budget does not apply to a governance entry",
+        ),
+        (
+            "agora://gov/GOV-2026-0017?comment_budget=999999",
+            "comment_budget does not apply to a governance entry",
+        ),
+        (
+            "agora://gov/DATA-2026-0001/a.md?comment_budget=999999",
+            "out of its bounds here, 1 to 262144",
         ),
     ] {
         let why_not = link(s).as_read().unwrap().conflict();
@@ -754,4 +775,69 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         panic!()
     };
     assert!(search.conflict().unwrap().contains("keyword"));
+}
+
+/// Every kind of read against every option: allowed exactly where the
+/// kind's list says, and refused with the list elsewhere
+#[test]
+fn every_kind_takes_exactly_its_options() {
+    use crate::requests::{ReadOption, ReadTarget};
+    let ids: [(ReadTarget, ContentRef); 5] = [
+        (ReadTarget::Content, "7ad26ccd".parse().unwrap()),
+        (ReadTarget::Entry, "GOV-2026-0017".parse().unwrap()),
+        (ReadTarget::DataSet, "DATA-2026-0001".parse().unwrap()),
+        (
+            ReadTarget::CitedFile,
+            "DATA-2026-0001:/votes/index.md".parse().unwrap(),
+        ),
+        (ReadTarget::Document, "constitution".parse().unwrap()),
+    ];
+    for (target, id) in ids {
+        assert_eq!(ReadTarget::of(&id), target);
+        for option in ReadOption::ALL {
+            let mut read = GetContentInput::new(id.clone());
+            match option {
+                ReadOption::Detail => read.detail = Some(DetailLevel::Full),
+                ReadOption::Round => read.round = Some(1),
+                ReadOption::Attachment => read.attachment = Some("a.md".into()),
+                ReadOption::Version => {
+                    read.version = Some(crate::enums::RecordVersion::Original)
+                }
+                ReadOption::CommentBudget => read.comment_budget = Some(8192),
+                ReadOption::Lines => read.lines = Some("1-2".parse().unwrap()),
+            }
+            let allowed = target.options().contains(&option);
+            match read.conflict() {
+                None => assert!(allowed, "{target:?} {option:?}"),
+                Some(why) => {
+                    assert!(!allowed, "{target:?} {option:?}: {why}");
+                    assert!(
+                        why.starts_with(&format!(
+                            "{} does not apply to {}",
+                            option.name(),
+                            target.noun()
+                        )),
+                        "{why}"
+                    );
+                }
+            }
+            if option == ReadOption::CommentBudget && allowed {
+                let bounds = target.comment_budget_bounds();
+                for (budget, ok) in [
+                    (*bounds.start(), true),
+                    (*bounds.end(), true),
+                    (bounds.end() + 1, false),
+                    (bounds.start() - 1, false),
+                    (999_999, false),
+                ] {
+                    read.comment_budget = Some(budget);
+                    assert_eq!(
+                        read.conflict().is_none(),
+                        ok,
+                        "{target:?} {budget}"
+                    );
+                }
+            }
+        }
+    }
 }
