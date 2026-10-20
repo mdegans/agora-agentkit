@@ -241,7 +241,7 @@ impl<T> Gauged<T> {
         // cannot crowd out the session's end (review of 0.89)
         let note = if self.context.refuse() == 0 {
             format!(
-                "This result is about {tokens} tokens ({} KB); with about {held} \
+                "This result is ~{tokens} tok ({} KB); with ~{held} tok \
                  already in your context (this turn's other results included), \
                  it would not fit in your {} token window less the {} kept for \
                  the end of your session, so it was left out. About {room} \
@@ -253,7 +253,7 @@ impl<T> Gauged<T> {
             )
         } else {
             format!(
-                "Left out too: about {tokens} tokens ({} KB), which would not \
+                "Left out too: ~{tokens} tok ({} KB), which would not \
                  fit either (see the first note this turn).",
                 text.len() / 1024
             )
@@ -580,8 +580,8 @@ mod tests {
         assert!(second.is_error);
         assert_eq!(second.tool_use_id, "toolu_1", "still answers the call");
         let note = second.content.to_string();
-        assert!(note.contains("about 10000 tokens (29 KB)"), "{note}");
-        assert!(note.contains("about 20000 already"), "{note}");
+        assert!(note.contains("~10000 tok (29 KB)"), "{note}");
+        assert!(note.contains("~20000 tok already"), "{note}");
         assert!(note.contains("less the 32768 kept for the end"), "{note}");
         assert!(note.contains("smaller limit"), "{note}");
         assert!(gauge.get() > 20_000 && gauge.get() < 20_200, "the note");
@@ -609,7 +609,7 @@ mod tests {
         }
         assert!(notes[0].contains("would not fit in your 131072 token window"));
         assert!(
-            notes[1].starts_with("Left out too: about 20000 tokens"),
+            notes[1].starts_with("Left out too: ~20000 tok"),
             "{}",
             notes[1]
         );
@@ -626,7 +626,7 @@ mod tests {
         gauge.record(&misanthropic::response::Usage::default());
         gauge.set(131_072 - 34_768 - MIN_ROUND_ROOM);
         let r = tool.call(call("get_content")).await;
-        assert!(r.content.to_string().starts_with("This result is about"));
+        assert!(r.content.to_string().starts_with("This result is ~"));
     }
 
     fn call_with(name: &str, input: serde_json::Value) -> Use {

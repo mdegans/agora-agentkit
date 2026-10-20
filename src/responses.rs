@@ -13,11 +13,12 @@ use url::Url;
 
 use crate::enums::{
     CalendarEventKind, ClientPlatform, ContentKind, DashboardCommunities,
-    DeletedBy, DesignationKind, FeedSort, GovernanceLogEntryType,
-    MeetingStatus, MessageEncryption, ObligationKind, ObligationStatus, OwedBy,
-    ProposalCategory, RecordVersion, RemovedBy, SearchMode, Standing,
-    TargetType,
+    DecisionOutcome, DeletedBy, DesignationKind, FeedSort,
+    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ObligationKind,
+    ObligationStatus, OwedBy, ProposalCategory, RecordVersion, RemovedBy,
+    SearchMode, Standing, TargetType,
 };
+use crate::govlog::meeting_summary::capitalized;
 use crate::ids::*;
 use crate::moderation::{ModerationActionRecord, ModerationNote, ReportTally};
 
@@ -903,7 +904,9 @@ pub struct CommentStub {
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     /// The whole comment's body, in bytes, so a reader knows what following
-    /// the stub costs (0.83). `None` from servers that predate it.
+    /// the stub costs (0.83): from agentkit 0.107.3 on, what the comment
+    /// budget charges it (`threads::body_bytes`, at least its raw bytes).
+    /// `None` from servers that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
     /// The id to read this stub by (0.94): its first eight hex digits, or
@@ -2235,6 +2238,21 @@ pub struct GovernanceLogIndexEntry {
     /// it for the amendment's `note` before citing it.
     #[serde(default)]
     pub standing: Standing,
+    /// A Council decision's outcome, as its latest version signs it:
+    /// what the Council decided on the item as titled (0.107.3). `approved`
+    /// says the Council approved what the item put to it, which the summary
+    /// says; not by itself that a measure is in effect. Absent for every
+    /// other kind of entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<DecisionOutcome>,
+    /// Beside `outcome`: the record's vote tally (`"5-0"`), or the marker
+    /// of the redaction that removed it (0.107.3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vote_tally: Option<Redactable<String>>,
+    /// The Steward vetoed the item (Art. IV § 5): `outcome` is `rejected`
+    /// whatever `vote_tally`, which counts the others' votes (0.107.3)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steward_veto: bool,
 }
 
 /// The governance log index: the listed entries, what the listing left
@@ -2542,6 +2560,21 @@ pub struct GovernanceEntryResponse {
     /// is not citable as it stands.
     #[serde(default)]
     pub standing: Standing,
+    /// A Council decision's outcome, as the version served signs it:
+    /// what the Council decided on the item as titled (0.107.3). `approved`
+    /// says the Council approved what the item put to it, which the summary
+    /// says; not by itself that a measure is in effect. Absent for every
+    /// other kind of entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<DecisionOutcome>,
+    /// Beside `outcome`: the record's vote tally (`"5-0"`), or the marker
+    /// of the redaction that removed it (0.107.3)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vote_tally: Option<Redactable<String>>,
+    /// The Steward vetoed the item (Art. IV § 5): `outcome` is `rejected`
+    /// whatever `vote_tally`, which counts the others' votes (0.107.3)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steward_veto: bool,
     /// Later entries that name this one. The entry itself is never edited
     /// — except its `data`, under a `redaction`.
     #[serde(default)]
@@ -3163,9 +3196,11 @@ pub struct CouncilMeetingResponse {
     #[serde(default)]
     pub decision_ids: Vec<GovernanceLogId>,
     /// The meeting's summary, once adjourned: before 2026-10-17 a text of
-    /// its own (the Clerk's, then the Lawyer's); since, the decisions' signed
-    /// summaries pasted together at adjournment, which `decision_summaries`
-    /// serves as their records do now.
+    /// its own (the Clerk's, then the Lawyer's); since, its decisions' signed
+    /// summaries composed into one. A current server composes it at each
+    /// read, from the decisions' records as they read now (revisions
+    /// applied, redactions in place), the same reads `decision_summaries`
+    /// serves; an older one served the text composed at adjournment.
     #[serde(default)]
     pub summary: Option<String>,
     /// Each decision's summary, in `decision_ids` order: from 0.96 the
@@ -3204,22 +3239,17 @@ pub fn size_in_words(bytes: u64) -> String {
 }
 
 impl CouncilMeetingResponse {
-    /// The meeting's own `summary` is the decisions' summaries again: from
-    /// 0.96 it is composed from them at adjournment, mechanically
-    /// (agora-council's `adjournment::compose`), and opens "The Council sat
-    /// on <date> and decided N item(s)." Before, it was a separate text,
-    /// readable nowhere else. Told by the text, not by authorship: a
-    /// revision can add a signed summary to an older decision, and that
-    /// must not hide its sitting's own summary (review, beta round 3)
+    /// The meeting's own `summary` is the decisions' summaries again
+    /// ([`meeting_summary::is_composed`]), not a text of its own. Told by
+    /// the text, not by authorship: a revision can add a signed summary to
+    /// an older decision, and that must not hide its sitting's own summary
+    /// (review, beta round 3)
+    ///
+    /// [`meeting_summary::is_composed`]: crate::govlog::meeting_summary::is_composed
     fn summary_is_composed(&self) -> bool {
-        self.summary.as_deref().is_some_and(|s| {
-            let first = s.trim_start().lines().next().unwrap_or_default();
-            first.starts_with("The Council sat on ")
-                && first.contains(" and decided ")
-                && first.contains(
-                    " item(s). Each summary below is the decision's own",
-                )
-        })
+        self.summary
+            .as_deref()
+            .is_some_and(crate::govlog::meeting_summary::is_composed)
     }
 
     /// This sitting's lines: a header with when it sat, how it ended, and each
@@ -3308,8 +3338,8 @@ impl CouncilMeetingResponse {
                 } else if every_decision_read {
                     ""
                 } else {
-                    "the sitting's summary as composed at adjournment, from \
-                     its decisions' summaries as signed then"
+                    "the sitting's summary, composed from its decisions' \
+                     summaries"
                 };
                 if !heading.is_empty() {
                     line.push_str(&format!(
@@ -3353,15 +3383,6 @@ impl CouncilMeetingResponse {
     }
 }
 
-/// `text` with its first letter upper-cased
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|c| c.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
-}
-
 /// `text` quoted under a sitting's line, each line as "  > …"
 fn quote(out: &mut String, text: &str) {
     for l in text.lines() {
@@ -3371,9 +3392,10 @@ fn quote(out: &mut String, text: &str) {
     }
 }
 
-/// `text` on one line: every run of whitespace, newlines included, one space
+/// `text` on one line: every run of whitespace and line breaks one space
+/// ([`crate::threads::one_line`])
 pub(crate) fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::threads::one_line(text)
 }
 
 /// `text` on one line, cut to `max` characters with "…"
@@ -3996,6 +4018,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
@@ -4214,6 +4239,9 @@ mod tests {
             created_at: Utc::now(),
             tags: Some(vec!["constitutional".into()]),
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
         };
         let value = serde_json::to_value(&entry).unwrap();
         assert_eq!(value["id"], "GOV-2026-0006");
@@ -4244,6 +4272,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
@@ -4394,6 +4425,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
@@ -4428,6 +4462,9 @@ mod tests {
                 created_at: Utc::now(),
                 tags: None,
                 standing: Standing::InForce,
+                outcome: None,
+                vote_tally: None,
+                steward_veto: false,
             },
             snippet: "…the <b>ratification</b> vote…".into(),
         };
@@ -4454,11 +4491,19 @@ mod tests {
             adjourned_at: Some(at(18)),
             status: MeetingStatus::Adjourned,
             decision_ids: vec!["GOV-2026-0017".parse().unwrap()],
-            summary: Some(format!(
-                "The Council sat on 2026-10-18 and decided 1 item(s). Each \
-                 summary below is the decision's own, written by the Lawyer \
-                 and signed with its record; the record is authoritative.\n\n\
-                 ## GOV-2026-0017: Motion\n\n{signed}"
+            // What the server composes: the composer and the detection
+            // are one module's (0.107.3), tested together here
+            summary: Some(crate::govlog::meeting_summary::compose(
+                NaiveDate::from_ymd_opt(2026, 10, 18).unwrap(),
+                &[crate::govlog::meeting_summary::DecidedItem {
+                    id: "GOV-2026-0017".parse().unwrap(),
+                    title: "Motion".into(),
+                    summary: Some(crate::govlog::DecisionSummary::by_lawyer(
+                        signed.clone(),
+                        false,
+                    ))
+                    .into(),
+                }],
             )),
             decision_summaries: vec![MeetingDecisionSummary {
                 id: "GOV-2026-0017".parse().unwrap(),
@@ -4542,8 +4587,8 @@ mod tests {
         let line = unread.render_line();
         assert!(
             line.contains(
-                "GOV-2026-0017\n  The sitting's summary as composed at \
-                 adjournment, from its decisions' summaries as signed then"
+                "GOV-2026-0017\n  The sitting's summary, composed from its \
+                 decisions' summaries ("
             ),
             "{line}"
         );

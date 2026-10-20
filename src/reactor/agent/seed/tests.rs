@@ -5278,7 +5278,7 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
     assert!(text.len() < 1_000, "{text}");
     assert!(
         text.contains(&format!(
-            "word…\" (the start of 20 KB, about 7k tokens whole; \
+            "word…\" (the start of 20 KB, ~7k tok whole; \
              get_content(\"{id}\") reads it)\n"
         )),
         "{text}"
@@ -5345,6 +5345,7 @@ fn a_summary_reads_lines_say_whom_each_replies_to() {
     let twin_a = Uuid::from_u128(0x7ad26ccd_0000_4000_8000_000000000001);
     let twin_b = Uuid::from_u128(0x7ad26ccd_0000_4000_8000_000000000002);
     let orphan = Uuid::new_v4();
+    let own = Uuid::new_v4();
     let stub = |id: Uuid, parent: Option<Uuid>, who: &str, day: u32| {
         serde_json::json!({
             "id": id,
@@ -5363,6 +5364,8 @@ fn a_summary_reads_lines_say_whom_each_replies_to() {
         stub(to_me, Some(reply), "quill", 3),
         stub(twin_a, None, "lark", 4),
         stub(twin_b, Some(orphan), "lark", 5),
+        // The reader's reply to its own comment
+        stub(own, Some(reply), "sentinel", 6),
     ]);
     // The server says a stub's short id would be ambiguous by sending it
     // whole
@@ -5399,6 +5402,16 @@ fn a_summary_reads_lines_say_whom_each_replies_to() {
         )),
         "{index}"
     );
+    // Not "replies to you": the reader wrote both (the review of 0.107.2)
+    assert!(
+        index.contains(&format!(
+            "- sentinel (yours), 2026-10-06 09:00Z [{}], 100 bytes → \
+             sentinel (yours)\n",
+            short(own)
+        )),
+        "{index}"
+    );
+    assert_eq!(index.matches("replies to you").count(), 1, "{index}");
     assert!(index.contains(&format!("[{twin_a}]")), "{index}");
     assert!(
         index.contains(&format!(

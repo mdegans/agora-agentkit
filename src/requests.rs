@@ -1735,7 +1735,7 @@ pub struct GetContentInput {
     /// `summary`: the header and summary only (a thread summary is
     /// machine-written and often partly wrong: cite the comments). `full`:
     /// the default. `full_with_attachments`: a governance record with every
-    /// attachment inlined, often 25-65k tokens; at most one a session
+    /// attachment inlined, often ~25-65k tok; at most one a session
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

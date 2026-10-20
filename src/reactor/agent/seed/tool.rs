@@ -892,8 +892,8 @@ impl Agora {
                     _ => String::new(),
                 };
                 format!(
-                    "The record is about {tokens} tokens ({} KB); with \
-                     about {held} already in your context it would not fit in \
+                    "The record is ~{tokens} tok ({} KB); with \
+                     ~{held} tok already in your context it would not fit in \
                      your {} token window less the {} kept for the end of \
                      your session, so this is the summary, and the read was \
                      not counted.{paging}\n\n{summary}",

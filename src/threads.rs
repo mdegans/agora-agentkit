@@ -115,12 +115,69 @@ pub fn is_line_break(c: char) -> bool {
     )
 }
 
-/// What a full comment's body costs a read: its bytes, and
-/// [`CONTINUATION_BYTES`] for each line break in it (`\r\n` is one)
+/// Separates words when text is put on one line ([`one_line`]): any
+/// whitespace, any line break ([`is_line_break`]: U+001C to U+001E are
+/// breaks, not whitespace, to Rust) and U+001F, the unit separator
+pub fn is_word_break(c: char) -> bool {
+    c.is_whitespace() || is_line_break(c) || c == '\u{1F}'
+}
+
+/// `text` on one line: every run of [`is_word_break`] characters, line
+/// breaks included, one space. Until 0.107.3 only whitespace was, so
+/// U+001C to U+001E (line breaks to some readers) stayed in (the review of
+/// 0.107.2)
+pub fn one_line(text: &str) -> String {
+    text.split(is_word_break)
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A post's or comment's body as the seed runner shows it (0.107.3,
+/// Steward's call): each line's trailing whitespace trimmed, every run of
+/// blank lines one blank line, no blank lines at the start or end, and
+/// every line break `\n` (`\r\n` is one). Only what is shown: the text
+/// stored and sent is untouched.
+///
+/// Each break a body keeps costs a read up to [`CONTINUATION_BYTES`], so a
+/// comment of about 65,000 blank lines rendered to about 786 KB in 0.107.2
+/// (the review of 0.107.2); tidied, it is empty.
+pub fn tidy(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    // A blank line seen since the last line with text, and whether there
+    // was one
+    let mut blank = false;
+    let mut started = false;
+    for line in body.split("\r\n").flat_map(|l| l.split(is_line_break)) {
+        let line = line.trim_end();
+        if line.is_empty() {
+            blank = started;
+            continue;
+        }
+        if started {
+            out.push('\n');
+            if blank {
+                out.push('\n');
+            }
+        }
+        out.push_str(line);
+        started = true;
+        blank = false;
+    }
+    out
+}
+
+/// What a full comment's body costs a read: its bytes as [`tidy`] shows
+/// them, and [`CONTINUATION_BYTES`] for each line break left, but never
+/// less than its raw bytes, which MCP and REST send (the review of
+/// 0.107.3: 65,536 `\n` were charged nothing and sent as about 128 KB of
+/// JSON). The server's comment budget charges this, and sends it as a
+/// stub's size
 pub fn body_bytes(body: &str) -> usize {
-    let breaks =
-        body.matches(is_line_break).count() - body.matches("\r\n").count();
-    body.len() + breaks * CONTINUATION_BYTES
+    let shown = tidy(body);
+    let rendered =
+        shown.len() + shown.matches('\n').count() * CONTINUATION_BYTES;
+    rendered.max(body.len())
 }
 
 /// The longest a stub's JSON gets beyond its name and preview, for a reader
@@ -133,10 +190,10 @@ pub const COMMENT_LINE_JSON_BYTES: usize = 360;
 
 /// A stub's preview: the first `chars` characters of `body`, cut back to
 /// the last word boundary when that keeps at least half of them, and
-/// marked `…` when anything was cut. Whitespace is collapsed, so a preview
-/// stays on its line.
+/// marked `…` when anything was cut. Put on one line ([`one_line`]), so a
+/// preview stays on its line.
 pub fn preview(body: &str, chars: usize) -> String {
-    let flat: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = one_line(body);
     if flat.chars().count() <= chars {
         return flat;
     }
@@ -266,6 +323,144 @@ mod tests {
             comment_json + 2 <= COMMENT_LINE_JSON_BYTES,
             "comment JSON is {comment_json}"
         );
+    }
+
+    /// The Steward's call (0.107.3): trailing whitespace off each line,
+    /// a run of blank lines one blank line, none at either end, every break
+    /// `\n`
+    #[test]
+    fn tidy_collapses_blank_lines_and_trims_line_ends() {
+        assert_eq!(tidy(""), "");
+        assert_eq!(tidy(" \n\t\n  "), "");
+        assert_eq!(tidy("one"), "one");
+        assert_eq!(tidy("one  \ntwo\t"), "one\ntwo");
+        assert_eq!(tidy("one\n\ntwo"), "one\n\ntwo", "one blank line stays");
+        assert_eq!(tidy("one\n\n\n\n \n\ntwo"), "one\n\ntwo");
+        assert_eq!(tidy("\n\n  indented\n\n\n"), "  indented");
+        // `\r\n` is one break; the other breaks are breaks too
+        assert_eq!(tidy("a\r\nb\r\n\r\n\r\nc"), "a\nb\n\nc");
+        assert_eq!(
+            tidy("a\u{2028}b\u{1C}\u{1D}\u{1E}c\u{85}d"),
+            "a\nb\n\nc\nd"
+        );
+        // What the review of 0.107.2 found: 65k blank lines cost 786 KB
+        // Tidied it is nothing, but MCP and REST send it raw: charged its
+        // raw bytes (the review of 0.107.3)
+        let blank = "\n".repeat(65_536);
+        assert_eq!(tidy(&blank), "");
+        assert_eq!(body_bytes(&blank), 65_536);
+        assert_eq!(body_bytes(&format!("a{blank}b")), 65_538);
+    }
+
+    #[test]
+    fn body_bytes_charges_the_breaks_tidy_keeps() {
+        assert_eq!(body_bytes("x"), 1);
+        assert_eq!(body_bytes("x\ny"), 3 + CONTINUATION_BYTES);
+        assert_eq!(body_bytes("x\r\ny"), 3 + CONTINUATION_BYTES);
+        assert_eq!(body_bytes("x   \n\n\n\ny\n"), 4 + 2 * CONTINUATION_BYTES);
+        // Never under the raw bytes
+        assert_eq!(body_bytes(&" ".repeat(100)), 100);
+        // The worst a 65,536-byte body gets: a line break every other byte
+        let lines = "a\n".repeat(32_768);
+        assert_eq!(
+            body_bytes(&lines),
+            32_768 + 32_767 * (1 + CONTINUATION_BYTES)
+        );
+    }
+
+    /// U+001C to U+001E are line breaks Rust's whitespace leaves out, and
+    /// U+001F a separator; all go, with the whitespace ones (the review of
+    /// 0.107.2)
+    #[test]
+    fn one_line_flattens_every_separator() {
+        assert_eq!(
+            one_line(
+                "a\u{1C}b\u{1D}c\u{1E}d\u{1F}e\u{0B}f\u{0C}g\u{85}h\u{2028}i"
+            ),
+            "a b c d e f g h i"
+        );
+        assert_eq!(one_line("  a \r\n\u{2029} b  "), "a b");
+        assert_eq!(preview("a\u{1E}b", 40), "a b");
+    }
+
+    mod tidy_properties {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        /// Lines of words, spaces, tabs and every kind of break, so runs of
+        /// blank and space-only lines are common
+        fn body() -> impl Strategy<Value = String> {
+            proptest::collection::vec(
+                prop_oneof![
+                    "[a-z]{1,4}",
+                    Just(" ".to_string()),
+                    Just("\t".to_string()),
+                    Just("\u{3000}".to_string()),
+                    Just("\n".to_string()),
+                    Just("\r\n".to_string()),
+                    Just("\r".to_string()),
+                    Just("\u{1C}".to_string()),
+                    Just("\u{2028}".to_string()),
+                    Just("\u{85}".to_string()),
+                    Just("\u{1F}".to_string()),
+                    Just("│".to_string()),
+                ],
+                0..60,
+            )
+            .prop_map(|parts| parts.concat())
+        }
+
+        /// What tidy may not touch: everything but whitespace and breaks
+        fn kept(s: &str) -> String {
+            s.chars()
+                .filter(|&c| !c.is_whitespace() && !is_line_break(c))
+                .collect()
+        }
+
+        proptest! {
+            #[test]
+            fn idempotent(s in body()) {
+                let once = tidy(&s);
+                prop_assert_eq!(tidy(&once), once);
+            }
+
+            #[test]
+            fn never_grows(s in body()) {
+                prop_assert!(tidy(&s).len() <= s.len());
+                prop_assert!(body_bytes(&s) <= s.len() * (1 + CONTINUATION_BYTES));
+            }
+
+            /// MCP and REST send the raw body: the charge covers it
+            #[test]
+            fn charges_at_least_the_raw_body(s in any::<String>()) {
+                prop_assert!(body_bytes(&s) >= s.len());
+            }
+
+            #[test]
+            fn keeps_the_text_in_order(s in body()) {
+                prop_assert_eq!(kept(&tidy(&s)), kept(&s));
+            }
+
+            #[test]
+            fn no_blank_runs_or_line_ends(s in body()) {
+                let t = tidy(&s);
+                prop_assert!(!t.contains("\n\n\n"));
+                prop_assert!(!t.starts_with('\n') && !t.ends_with('\n'));
+                prop_assert!(!t.contains(|c: char| is_line_break(c) && c != '\n'));
+                for line in t.split('\n') {
+                    prop_assert_eq!(line, line.trim_end());
+                }
+            }
+
+            /// Arbitrary text, not just the shaped kind
+            #[test]
+            fn idempotent_on_anything(s in any::<String>()) {
+                let once = tidy(&s);
+                prop_assert_eq!(tidy(&once), once.clone());
+                prop_assert!(once.len() <= s.len());
+                prop_assert_eq!(kept(&once), kept(&s));
+            }
+        }
     }
 
     #[test]

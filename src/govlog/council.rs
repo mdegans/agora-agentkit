@@ -113,6 +113,64 @@ pub struct CouncilDecisionRecord {
     pub blind: Option<Blind>,
 }
 
+/// A Council decision's outcome and vote tally, as its record signs them:
+/// what a governance log line and an entry's header show beside its
+/// standing (0.107.3).
+///
+/// `outcome` is what the Council decided on the item as titled.
+/// `approved` says the Council approved what the item put to it, which
+/// the decision's summary says (a motion to draft, say, or to defer); it
+/// does not by itself say that a measure is in effect. `standing` says
+/// whether the decision itself has been amended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CouncilOutcome {
+    pub outcome: DecisionOutcome,
+    /// The record's `vote_tally` (`"5-0"`, `"Deferred: …"`), or the marker
+    /// of the redaction that removed it; `None` when the data read has no
+    /// tally
+    pub vote_tally: Option<Redactable<String>>,
+    /// The Steward vetoed the item (Art. IV § 5): `rejected` whatever the
+    /// tally, which counts the others' votes and not the veto
+    pub steward_veto: bool,
+}
+
+impl CouncilOutcome {
+    /// The outcome, tally and veto in a `council_decision` entry's `data`
+    /// (the version served: revisions are already in it), reading nothing
+    /// else: `outcome`, `vote_tally` and `final_votes.steward`. `None` for
+    /// any other entry type (a test sitting's decides nothing), and for
+    /// data with no outcome that parses.
+    pub fn of_data(
+        entry_type: crate::enums::GovernanceLogEntryType,
+        data: &serde_json::Value,
+    ) -> Option<Self> {
+        /// The Steward's final vote, alone
+        #[derive(Deserialize)]
+        struct StewardsVote {
+            #[serde(default)]
+            steward: Option<CouncilVote>,
+        }
+        #[derive(Deserialize)]
+        struct Read {
+            outcome: DecisionOutcome,
+            #[serde(default)]
+            vote_tally: Option<Redactable<String>>,
+            #[serde(default)]
+            final_votes: Option<StewardsVote>,
+        }
+        if entry_type != crate::enums::GovernanceLogEntryType::CouncilDecision {
+            return None;
+        }
+        let read = Read::deserialize(data).ok()?;
+        Some(Self {
+            outcome: read.outcome,
+            vote_tally: read.vote_tally,
+            steward_veto: read.final_votes.and_then(|v| v.steward)
+                == Some(CouncilVote::Veto),
+        })
+    }
+}
+
 /// Material put before the Council, inline as markdown
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1818,6 +1876,76 @@ mod tests {
         assert_eq!(CouncilDecisionRecord::check_data(&revised), Ok(()));
         let again = round_trips(&name, &revised);
         assert_eq!(again.summary, Some(summary));
+    }
+
+    /// The outcome and tally a log line shows, from a decision's data
+    /// alone; nothing for another entry type, or data without an outcome
+    #[test]
+    fn council_outcome_reads_the_record_and_nothing_else() {
+        use crate::enums::GovernanceLogEntryType as T;
+        let data = serde_json::json!({
+            "title": "Structural Immunity",
+            "outcome": "approved",
+            "vote_tally": "5-0",
+            "rounds": [{"anything": true}],
+        });
+        assert_eq!(
+            CouncilOutcome::of_data(T::CouncilDecision, &data),
+            Some(CouncilOutcome {
+                outcome: DecisionOutcome::Approved,
+                vote_tally: Some(Redactable::Value("5-0".into())),
+                steward_veto: false,
+            })
+        );
+        let vetoed = serde_json::json!({
+            "outcome": "rejected",
+            "vote_tally": "4-0",
+            "final_votes": {"artist": "yes", "steward": "veto"},
+        });
+        assert!(
+            CouncilOutcome::of_data(T::CouncilDecision, &vetoed)
+                .unwrap()
+                .steward_veto
+        );
+        // What the index's SQL builds for a record with no final votes
+        let bare = serde_json::json!({
+            "outcome": "rejected",
+            "vote_tally": null,
+            "final_votes": {"steward": null},
+        });
+        assert!(
+            !CouncilOutcome::of_data(T::CouncilDecision, &bare)
+                .unwrap()
+                .steward_veto
+        );
+        assert_eq!(
+            CouncilOutcome::of_data(T::AppealsCourtDecision, &data),
+            None
+        );
+        assert_eq!(CouncilOutcome::of_data(T::Test, &data), None);
+        let redacted = serde_json::json!({
+            "outcome": "deferred",
+            "vote_tally": "[redacted by AMD-2026-0002]",
+        });
+        assert_eq!(
+            CouncilOutcome::of_data(T::CouncilDecision, &redacted)
+                .and_then(|o| o.vote_tally)
+                .and_then(|t| t.redacted_by().cloned()),
+            Some("AMD-2026-0002".parse().unwrap())
+        );
+        let untallied = serde_json::json!({"outcome": "rejected"});
+        assert_eq!(
+            CouncilOutcome::of_data(T::CouncilDecision, &untallied)
+                .map(|o| (o.outcome, o.vote_tally)),
+            Some((DecisionOutcome::Rejected, None))
+        );
+        for bad in [
+            serde_json::json!({"vote_tally": "5-0"}),
+            serde_json::json!({"outcome": "overturned"}),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(CouncilOutcome::of_data(T::CouncilDecision, &bad), None);
+        }
     }
 
     #[test]
