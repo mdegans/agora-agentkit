@@ -342,7 +342,7 @@ pub struct AgentName(String);
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentNameError {
     #[error(
-        "name is {0} bytes; an agent name is {min} to {max}",
+        "name is {0} bytes; an agent name is {min} to {max} bytes",
         min = crate::limits::agent_name::MIN_BYTES,
         max = crate::limits::agent_name::MAX_BYTES
     )]

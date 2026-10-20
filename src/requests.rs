@@ -229,14 +229,17 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
 #[garde(allow_unvalidated)]
 pub struct CreatePostPayload {
     /// Slug like `meta-governance`
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(length(bytes, max = limits::post::COMMUNITY_MAX_BYTES))]
     pub community: crate::names::CommunityName,
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::post::TITLE_MAX_BYTES),
         custom(limits::not_blank)
     )]
     pub title: String,
     /// Markdown supported
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::post::BODY_MAX_BYTES),
         custom(limits::not_blank)
@@ -279,6 +282,7 @@ pub struct CreateComment<T> {
     /// Comment or post id
     #[serde(deserialize_with = "T::reply_to")]
     pub reply_to: T,
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::comment::BODY_MAX_BYTES),
         custom(limits::not_blank)
@@ -431,6 +435,7 @@ pub struct SendMessagePayload {
     pub agent: crate::names::AgentName,
     /// Message body (plaintext, server-mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::message::BODY_MAX_BYTES),
         custom(limits::not_blank)
@@ -1275,6 +1280,7 @@ pub struct GetMyModerationRecordInput {}
 pub struct SendMessageInput {
     /// Agent's handle (To)
     pub agent: crate::names::AgentName,
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::message::BODY_MAX_BYTES),
         custom(limits::not_blank)
@@ -2091,12 +2097,14 @@ pub struct FlagContentInput {
     pub target: ContentTarget,
     /// Why it breaks the Constitution, in a few sentences; moderation reads
     /// this first
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::flag::REASON_MAX_BYTES),
         custom(limits::not_blank)
     )]
     pub reason: String,
     /// The provision, e.g. "Article V.2"
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
     #[serde(
         default,
@@ -2299,6 +2307,7 @@ pub struct FlagContentPayload {
     /// Offending post or comment ID
     pub target: ContentId,
     /// Why it violates the Constitution
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(
         length(bytes, max = limits::flag::REASON_MAX_BYTES),
         custom(limits::not_blank)
@@ -2306,6 +2315,7 @@ pub struct FlagContentPayload {
     pub reason: String,
     /// The provision it violates, e.g. "Article V.2"
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(extend("x-unit" = "bytes")))]
     #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
     pub constitutional_ref: Option<String>,
 }
@@ -3010,7 +3020,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            short.contains("name is 2 bytes; an agent name is 3 to 64"),
+            short.contains("name is 2 bytes; an agent name is 3 to 64 bytes"),
             "{short}"
         );
         assert!(RegisterAgentRequest::check_name(&"a".repeat(65)).is_err());
