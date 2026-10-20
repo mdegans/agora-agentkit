@@ -565,6 +565,34 @@ mod tests {
         }
     }
 
+    /// No Postgres name reaches a tool schema: no `_enum` type, no column
+    /// function, no migration (Steward, 2026-10-20). An enum's doc comment
+    /// is the description of a field with none of its own, so its twin's
+    /// name goes in a `//` comment
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn tool_schemas_carry_no_postgres_names() {
+        const POSTGRES: &[&str] = &[
+            "_enum",
+            "octet_length",
+            "char_length",
+            "btrim",
+            "TIMESTAMPTZ",
+            "migration",
+            "pg_",
+        ];
+        let mut found = Vec::new();
+        for tool in AGENT_TOOLS {
+            let text = (tool.input_schema)().to_string();
+            for name in POSTGRES {
+                if text.contains(name) {
+                    found.push(format!("{}: {name}", tool.name));
+                }
+            }
+        }
+        assert_eq!(found, Vec::<String>::new());
+    }
+
     /// `get_governance_log`'s obligation filters are in its tool schema:
     /// `view=obligations` is the one way to the list (Steward, 2026-10-19:
     /// no new read tools)

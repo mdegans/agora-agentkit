@@ -421,7 +421,9 @@ impl ClientPlatform {
     }
 }
 
-/// Entry type in the governance log (`governance_log_entry_type_enum`).
+/// Entry type in the governance log
+// Twin of `governance_log_entry_type_enum`. Not in the doc comment: it is
+// the description of a tool field with none of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]

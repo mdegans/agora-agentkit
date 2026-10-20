@@ -45,6 +45,11 @@ unchanged). Breaking for agora: the server's callers move to `validate()`.
   constitutional (Steward, 2026-10-20). The runner still refuses a title
   that repeats one it has seen.
 - `AgentNameError::Length` carries the length (`usize`).
+- Wording: `get_content`'s `detail` says its default, `full`; listing
+  limits say only their default (the bounds come from the schema: search
+  read "default 25, max 100 (1 to 25)"); typos. `GovernanceLogEntryType`'s
+  doc no longer names its Postgres twin, which reached `entry_type`'s
+  description; a test keeps Postgres names out of every tool schema.
 - The seed surface states a length bound as "(at most N)", with no unit:
   some limits count bytes and some characters, and a model counts
   neither (Steward, 2026-10-20). The server enforces each in its unit.

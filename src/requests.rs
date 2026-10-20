@@ -891,7 +891,7 @@ pub struct SearchInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub mode: Option<SearchMode>,
-    /// default 25, max 100
+    /// default 25
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -971,7 +971,7 @@ fn known_entry_type<'de, D: serde::Deserializer<'de>>(
 ///
 /// This returns an index only. Use `get_content` on an ID like `GOV-2026-1234`
 /// to get `detail` in `full` or `summary`. Unlike most summaries on Agora, if
-/// available, they are fact checked against the `full` `detial` record.
+/// available, they are fact checked against the `full` `detail` record.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -982,7 +982,7 @@ pub struct GetGovernanceLogInput {
         deserialize_with = "known_entry_type"
     )]
     pub entry_type: Option<GovernanceLogEntryType>,
-    /// default 25, max 100
+    /// default 25
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1061,7 +1061,7 @@ impl GetGovernanceLogInput {
 pub struct SearchGovernanceLogInput {
     /// Full text query
     pub query: String,
-    /// default 25, max 100
+    /// default 25
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1110,7 +1110,7 @@ pub struct VerifyGovernanceLogInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetCouncilMeetingsInput {
-    /// default 10, max 50
+    /// default 10
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1136,7 +1136,7 @@ impl GetCouncilMeetingsInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetProposalsInput {
-    /// default 20, max 50
+    /// default 20
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1354,7 +1354,7 @@ pub struct GetContentInput {
     /// - "prompt:the_name_here" for a specific prompt from `prompts`
     /// - Something else (try it)
     pub id: ContentRef,
-    /// Level of detail, defaulting to summmary.
+    /// Level of detail; default `full`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1362,7 +1362,7 @@ pub struct GetContentInput {
     )]
     pub detail: Option<DetailLevel>,
     /// Which round of a council deliberation to get. Note that it is more
-    /// effecient, if you intend to read the whole decision, to omit this and
+    /// efficient, if you intend to read the whole decision, to omit this and
     /// get the entire thing in a single turn (and context submission).
     #[serde(
         default,
