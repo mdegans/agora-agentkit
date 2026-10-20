@@ -2,6 +2,40 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.109.1 (2026-10-20)
+
+A data set's file may be cited without its commit, for the one the set
+pins: `DATA-2026-0001:<path>` and `DATA-2026-0001:<path>:110-300` read as
+`get_content` ids beside the canonical `DATA-2026-0001:<commit>:<path>[:110-300]`,
+which reads as before.
+
+- `DataCitation.commit` is an `Option<GitCommitPrefix>`; `None` is a
+  citation without one. A type change to a public field, so code that read
+  it as a `GitCommitPrefix` stops compiling (no agora or agora-agents code
+  does). `GetContentInput::split_citation` returns `None` for such a
+  citation, as for a read of the set's own id: the server reads the set
+  as it stands, at the commit it pins, and the file read's `commit` says
+  which.
+- The grammar: after `DATA-…:` (no space), the text up to the next `:` is
+  the commit when it is 7 to 40 hex digits; anything else (a `/`, a `.`,
+  `a`, `cafe`, 41 digits) starts the path, so
+  `DATA-2026-0001:abcdef1/file.md` is that file at the pinned commit. An
+  empty commit (`DATA-2026-0001::x.md`) is one left out. A path whose text
+  before its first `:` is 7 to 40 hex digits, or a root file named only
+  with them, is cited with its commit. `DATA-2026-0001: the votes` (an id,
+  `: ` and prose) is still refused. A range is still the canonical
+  `<from>-<to>` or `<from>-` after the last `:`, so paths keep their
+  colons.
+- `Display` writes a commit-less citation without one (it round-trips);
+  `DataCitation::at(commit)` gives the canonical form once the commit is
+  known, and `reads_at(&GitCommitId)` is true for a matching or absent
+  commit.
+- `CONTENT_REF_PATTERN` makes the commit optional
+  (`DATA-…:([0-9a-f]{7,40}:)?.+`), and the `ContentRef` schema's
+  description says it may be left out (one clause; no tool description
+  changed). The seed runner's offer of a range that fits keeps the
+  citation as it was given.
+
 ## 0.109.0 (2026-10-20)
 
 A witness can be an Agora agent, questioned over direct messages from the

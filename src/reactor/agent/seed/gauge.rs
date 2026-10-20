@@ -454,11 +454,18 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
         .target
         .as_ref()
         .and_then(ContentRef::as_data_citation)
+        .filter(|c| c.lines.is_some())
+        .zip(crate::govlog::LineRange::new(first, Some(last)).ok())
     {
-        Some(c) if c.lines.is_some() => {
-            format!("id=\"{}:{}:{}:{first}-{last}\"", c.set, c.commit, c.path)
+        // With or without its commit, as it was given (0.109.1)
+        Some((c, cut)) => {
+            let cut = crate::govlog::DataCitation {
+                lines: Some(cut),
+                ..c.clone()
+            };
+            format!("id=\"{cut}\"")
         }
-        _ => format!("lines=\"{first}-{last}\""),
+        None => format!("lines=\"{first}-{last}\""),
     };
     // The whole read first: seed agents should prefer it (Steward,
     // 2026-10-19), and a fresh turn has the room this one lacks
@@ -955,6 +962,15 @@ mod tests {
                 "id=\"DATA-2026-0001:89fe7c6:votes/raw.json:500-758\""
             ),
             "{cited}"
+        );
+        // A citation without its commit is offered without one (0.109.1)
+        let pinned = note(serde_json::json!({
+            "id": "DATA-2026-0001:votes/raw.json:500-3000"
+        }))
+        .await;
+        assert!(
+            pinned.contains("id=\"DATA-2026-0001:votes/raw.json:500-758\""),
+            "{pinned}"
         );
         let listing = note(serde_json::json!({
             "id": "DATA-2026-0001", "attachment": "votes/"

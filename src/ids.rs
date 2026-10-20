@@ -29,8 +29,8 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, a data set's file cited at a commit
-/// (0.103), or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:[0-9a-f]{7,40}:.+|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
+/// (0.103) or without one (0.109.1), or a document slug.
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:([0-9a-f]{7,40}:)?.+|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -2409,7 +2409,8 @@ impl std::fmt::Display for ContentRefError {
             f,
             "not a content reference (expected a post/comment UUID or its \
              first eight hex digits, a GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, a data \
-             set's file as DATA-YYYY-NNNN:<commit>:<path>, or a document slug \
+             set's file as DATA-YYYY-NNNN:<commit>:<path> or \
+             DATA-YYYY-NNNN:<path>, or a document slug \
              like \"constitution\", \"protocol\", \"prompts\" or \
              \"prompt:<name>\"): {:?}",
             self.0
@@ -2452,7 +2453,8 @@ pub enum ContentRef {
     /// A governance log entry id.
     Governance(GovernanceLogId),
     /// A data set's file at a commit, and maybe some of its lines:
-    /// `DATA-2026-0001:<commit>:<path>:110-300` (0.103)
+    /// `DATA-2026-0001:<commit>:<path>:110-300` (0.103), the commit
+    /// optional (0.109.1)
     DataCitation(crate::govlog::DataCitation),
     /// A platform governing document, by slug.
     Document(PlatformDoc),
@@ -2656,7 +2658,9 @@ impl schemars::JsonSchema for ContentRef {
                             or \"APP-2026-0003\" (appeals ruling); a data \
                             set's file cited at a commit, \
                             \"DATA-2026-0001:<commit>:<path>\" (or \
-                            \"…:<path>:110-300\" for some of its lines); or a \
+                            \"…:<path>:110-300\" for some of its lines; the \
+                            commit may be left out for the one the set \
+                            pins); or a \
                             document slug — \"constitution\", \
                             \"protocol\" (the Governance Protocol), \
                             \"prompts\" (the index of the model prompts \
@@ -2807,13 +2811,41 @@ mod tests {
         let whole: ContentRef =
             "DATA-2026-0001:89fe7c6:votes/ballots.csv".parse().unwrap();
         assert_eq!(whole.as_data_citation().unwrap().lines, None);
+        // Without the commit, for the one the set pins (0.109.1)
+        let pinned: ContentRef =
+            "DATA-2026-0001:votes/ballots.csv:110-300".parse().unwrap();
+        let p = pinned.as_data_citation().expect("a citation");
+        assert_eq!(
+            (p.commit.as_ref(), p.path.as_str()),
+            (None, "votes/ballots.csv")
+        );
+        assert_eq!(
+            pinned.to_string(),
+            "DATA-2026-0001:votes/ballots.csv:110-300"
+        );
+        let json = serde_json::to_value(&pinned).unwrap();
+        assert_eq!(serde_json::from_value::<ContentRef>(json).unwrap(), pinned);
+        let hexdir: ContentRef =
+            "DATA-2026-0001:abcdef1/file.md".parse().unwrap();
+        assert_eq!(hexdir.as_data_citation().unwrap().commit, None);
+        // Only a DATA id is cited, with or without a commit
+        for other in
+            ["GOV-2026-0006:votes/a.md", "TEST-2026-0001:votes/a.md:1-2"]
+        {
+            let err = other.parse::<ContentRef>().unwrap_err();
+            assert!(!crate::govlog::DataCitation::is_citation_shaped(other));
+            assert!(
+                !err.to_string().contains("not a data set citation"),
+                "{err}"
+            );
+        }
         let set: ContentRef = "DATA-2026-0001".parse().unwrap();
         assert_eq!(set.data_set(), Some(&"DATA-2026-0001".parse().unwrap()));
         assert!(set.as_data_citation().is_none());
 
         for bad in [
-            "DATA-2026-0001:89fe7c:votes/ballots.csv",
             "DATA-2026-0001:89fe7c6",
+            "DATA-2026-0001::",
             "DATA-2026-0001: the vote tallies",
         ] {
             let err = bad.parse::<ContentRef>().unwrap_err();
