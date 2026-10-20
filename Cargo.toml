@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.107.3"
+version = "0.108.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -69,6 +69,7 @@ x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 json-patch = { version = "4", default-features = false }
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
+quick-xml = { version = "0.42", features = ["serialize"] }
 
 [dev-dependencies]
 # Property tests of the event stream (Steward, 2026-10-19)

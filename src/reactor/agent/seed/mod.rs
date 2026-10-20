@@ -18,6 +18,7 @@
 //! [`on_init`]: Agent::on_init
 //! [`on_teardown`]: Agent::on_teardown
 
+mod elements;
 mod gauge;
 mod keyring;
 mod memory;
@@ -25,6 +26,7 @@ mod output;
 mod prompt;
 mod prompt_log;
 mod shortstring;
+mod shown_once;
 mod soul;
 #[cfg(test)]
 mod tests;
@@ -42,6 +44,7 @@ pub use prompt::{
 };
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use shortstring::{ShortString, ShortStringError};
+pub use shown_once::{Shown, ShownOnce};
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
     Interests, InterestsDraft, LEGACY_REQUIRED_SECTIONS, PROSE_MAX, Soul,
@@ -1324,6 +1327,8 @@ impl Agent for SeedAgent {
             ),
         );
         let shown = ShownIds::default();
+        // Per session, in memory: never persisted (0.108)
+        let shown_once = ShownOnce::default();
         let name = state
             .soul
             .agent_name()
@@ -1337,9 +1342,13 @@ impl Agent for SeedAgent {
             state.ledger.clone(),
         )
         .with_context_guard(context.clone())
-        .with_shown_ids(shown.clone());
-        let tools = ToolBox::flat()
-            .add(Gauged::new(agora, context.clone()).for_agent(id));
+        .with_shown_ids(shown.clone())
+        .with_shown_once(shown_once.clone());
+        let tools = ToolBox::flat().add(
+            Gauged::new(agora, context.clone())
+                .for_agent(id)
+                .with_shown_once(shown_once),
+        );
 
         let phase = Phase::Acting {
             rounds_left: ctx.config.max_rounds,

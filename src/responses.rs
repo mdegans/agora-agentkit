@@ -2106,6 +2106,15 @@ pub struct ProposalResponse {
     /// the category, and when. Absent for an author's own filing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<ActiveDesignation>,
+    /// Its live comments, as a post's `comment_count`. Absent from
+    /// an older server
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_count: Option<i64>,
+    /// How much text it is, as a post's `size`, so a listing can
+    /// say what a read of it returns, not only its body. Absent from an
+    /// older server
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<ReadSize>,
 }
 
 /// The `get_proposals` response as an object: `{ "proposals": [...] }`.
@@ -3229,15 +3238,6 @@ pub struct MeetingDecisionSummary {
     pub summary_authorship: Option<SummaryAuthorship>,
 }
 
-/// A size as a reader weighs it: bytes under 10 KB, else whole KB
-pub fn size_in_words(bytes: u64) -> String {
-    if bytes < 10 * 1024 {
-        format!("{bytes} bytes")
-    } else {
-        format!("{} KB", (bytes + 512) / 1024)
-    }
-}
-
 impl CouncilMeetingResponse {
     /// The meeting's own `summary` is the decisions' summaries again
     /// ([`meeting_summary::is_composed`]), not a text of its own. Told by
@@ -3259,6 +3259,17 @@ impl CouncilMeetingResponse {
     /// meeting's own, which is readable nowhere else. Each summary is given
     /// once (beta round 3: the JSON gave every one twice)
     pub fn render_line(&self) -> String {
+        self.render_line_with(&|_, _| None)
+    }
+
+    /// [`Self::render_line`], with `earlier` asked of each decision's
+    /// summary (its id and text) before it is quoted: what it returns is
+    /// said in its place. The seed runner says one shown earlier in the
+    /// session is in the agent's context already (0.108)
+    pub fn render_line_with(
+        &self,
+        earlier: &dyn Fn(&GovernanceLogId, &str) -> Option<String>,
+    ) -> String {
         let mut line = format!(
             "- {}, {}",
             self.started_at.format("%Y-%m-%d %H:%M UTC"),
@@ -3286,13 +3297,13 @@ impl CouncilMeetingResponse {
                             (None, _) => "no summary".to_string(),
                             (Some(s), Some(a)) => format!(
                                 "summary {}, {}",
-                                size_in_words(s.len() as u64),
+                                crate::threads::about_tokens(s.len() as u64),
                                 a.sentence()
                             ),
                             (Some(s), None) => {
                                 format!(
                                     "summary {}",
-                                    size_in_words(s.len() as u64)
+                                    crate::threads::about_tokens(s.len() as u64)
                                 )
                             }
                         };
@@ -3319,8 +3330,14 @@ impl CouncilMeetingResponse {
             if let Some(text) = d.summary.as_deref().map(str::trim)
                 && !text.is_empty()
             {
-                line.push_str(&format!("  {}'s summary:\n", d.id));
-                quote(&mut line, text);
+                match earlier(&d.id, text) {
+                    Some(said) => line
+                        .push_str(&format!("  {}'s summary: {said}\n", d.id)),
+                    None => {
+                        line.push_str(&format!("  {}'s summary:\n", d.id));
+                        quote(&mut line, text);
+                    }
+                }
             }
         }
         // The composed paste repeats the summaries above, so it is dropped,
@@ -3345,7 +3362,7 @@ impl CouncilMeetingResponse {
                     line.push_str(&format!(
                         "  {} ({}); the records are authoritative:\n",
                         capitalized(heading),
-                        size_in_words(text.len() as u64)
+                        crate::threads::about_tokens(text.len() as u64)
                     ));
                     quote(&mut line, text);
                 }
@@ -3359,6 +3376,15 @@ impl CouncilMeetingResponse {
     /// line per sitting ([`Self::render_line`]), newest first, and how to
     /// read a decision. `note` (a clamped limit, say) leads it
     pub fn render_list(meetings: &[Self], note: Option<&str>) -> String {
+        Self::render_list_with(meetings, note, &|_, _| None)
+    }
+
+    /// [`Self::render_list`], each line by [`Self::render_line_with`]
+    pub fn render_list_with(
+        meetings: &[Self],
+        note: Option<&str>,
+        earlier: &dyn Fn(&GovernanceLogId, &str) -> Option<String>,
+    ) -> String {
         let mut out = String::new();
         if let Some(note) = note {
             out.push_str(note);
@@ -3373,7 +3399,7 @@ impl CouncilMeetingResponse {
             meetings.len()
         ));
         for m in meetings {
-            out.push_str(&m.render_line());
+            out.push_str(&m.render_line_with(earlier));
         }
         out.push_str(
             "\nRead a decision's whole record with get_content(id). Where a \
@@ -4086,6 +4112,8 @@ mod tests {
             proposal_category: Some(ProposalCategory::Constitutional),
             eligible_for_deliberation_at: None,
             designation: None,
+            comment_count: None,
+            size: None,
         };
         let json = serde_json::to_string(&proposal).unwrap();
         let back: ProposalResponse = serde_json::from_str(&json).unwrap();
@@ -4115,6 +4143,8 @@ mod tests {
             proposal_category: None,
             eligible_for_deliberation_at: None,
             designation: None,
+            comment_count: None,
+            size: None,
         };
         let value = serde_json::to_value(&proposal).unwrap();
         // Optional fields with #[serde(default)] still serialize as null
@@ -4559,19 +4589,19 @@ mod tests {
             "limit 60 is over 50; showing up to 50.\n\n\
              ## Council sittings — 3, newest first\n\n\
              - 2026-10-18 07:46 UTC, adjourned: GOV-2026-0017 \"Motion: \
-             Publish Quarterly Data\" (summary 13 bytes, written by the \
+             Publish Quarterly Data\" (summary ~4 tok, written by the \
              Lawyer, accepted by the Steward)\n\
              \x20 GOV-2026-0017's summary:\n\
              \x20 > Approved 4-1.\n\
              - 2026-10-17 07:46 UTC, cancelled (TEST: a test sitting; not \
              binding): no decisions\n\
              - 2026-10-11 07:46 UTC, adjourned: GOV-2026-0013 \"Next \
-             sitting\" (summary 10 bytes, written by the Lawyer, accepted by \
+             sitting\" (summary ~3 tok, written by the Lawyer, accepted by \
              the Steward); GOV-2026-0012 (its record could not be read)\n\
              \x20 GOV-2026-0013's summary:\n\
              \x20 > Scheduled.\n\
              \x20 The sitting's own summary, from before decisions were signed \
-             with summaries of their own (34 bytes); the records are \
+             with summaries of their own (~11 tok); the records are \
              authoritative:\n\
              \x20 > The Lawyer's account.\n\
              \x20 > Second line.\n\
