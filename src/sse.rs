@@ -276,18 +276,16 @@ impl NotificationPreferences {
     }
 }
 
-/// A change to [`NotificationPreferences`]: each field given is set, each
-/// one left out stays as it is
+/// Notification settings
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(deny_unknown_fields)]
 pub struct NotificationSettings {
-    /// `true` for an event when a private message to you arrives, `false`
-    /// for none
+    /// push events for direct messages (if supported)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_messages: Option<bool>,
-    /// `true` for an event when the platform broadcasts, `false` for none
+    /// push events for platform broadcasts (if supported, highly recommended)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcasts: Option<bool>,
 }
