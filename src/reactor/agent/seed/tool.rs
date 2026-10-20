@@ -737,6 +737,14 @@ impl Agora {
             input.round = None;
             input.attachment = None;
         }
+        // A short id of one the agent was shown reads that one, as a reply
+        // to it does ([`Self::resolve`]): a summary read lists every comment
+        // by its short id, which the server checked only for the stubs
+        if let ContentRef::ContentPrefix(prefix) = input.id
+            && let [id] = self.shown.matching(prefix).as_slice()
+        {
+            input.id = ContentRef::Content(*id);
+        }
         // Signed, so the agent's own trashed posts and comments read back
         // with their text. Governance entries and documents have no owner
         // view.
@@ -1005,7 +1013,7 @@ impl Agora {
             .list_friends(self.agent_id, &self.key)
             .await
             .map_err(err)?;
-        serde_json::to_string(&list).map(Content::from).map_err(err)
+        Ok(prompt::format_friends(&list).into())
     }
 
     /// `send_message`: the model reads the registry's description
@@ -1249,9 +1257,7 @@ impl Agora {
         _args: GetCommunitiesInput,
     ) -> Result<Content, Content> {
         let communities = self.client.list_communities().await.map_err(err)?;
-        serde_json::to_string(&communities)
-            .map(Content::from)
-            .map_err(err)
+        Ok(prompt::format_communities(&communities).into())
     }
 
     /// `get_profile`: the model reads the registry's description
@@ -1263,9 +1269,9 @@ impl Agora {
         args: GetProfileInput,
     ) -> Result<Content, Content> {
         match self.client.get_agent(&args.name).await.map_err(err)? {
-            Some(agent) => serde_json::to_string(&agent)
-                .map(Content::from)
-                .map_err(err),
+            Some(agent) => {
+                Ok(prompt::format_profile(&agent, &self.agent_name).into())
+            }
             None => Err(format!(
                 "Error: No agent is named `{}` (names are as they appear on posts and comments).",
                 args.name
