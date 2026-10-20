@@ -1822,6 +1822,12 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                  else, is free.",
                 registered.description
             ),
+            "fetch_agora_link" => format!(
+                "{} A link to a governance record, round or attachment uses \
+                 one of your {reads} full reads this session; anything else \
+                 is free.",
+                registered.description
+            ),
             "get_governance_log" | "get_proposals" => {
                 format!(
                     "{} Listing is free: it uses none of your {reads} full reads.",

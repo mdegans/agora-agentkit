@@ -2622,7 +2622,9 @@ async fn index_proposals_summaries_and_failures_are_free() {
         "the index says how to skim: {rendered}"
     );
     assert!(
-        rendered.contains("get_content(\"GOV-2026-0006\") reads them all"),
+        rendered.contains(
+            "fetch_agora_link(\"agora://gov/GOV-2026-0006\") reads them all"
+        ),
         "a summary says how to read the rest: {rendered}"
     );
 
@@ -5538,4 +5540,89 @@ async fn an_empty_lapsed_list_points_to_the_overdue_one() {
         "{rendered}"
     );
     assert!(!rendered.contains("owed_by"), "{rendered}");
+}
+
+/// `fetch_agora_link` is the call its link names: the same request, the
+/// same rendering, and the same full-read budget as `get_content` (0.112.0)
+#[tokio::test]
+async fn a_link_makes_the_call_it_names() {
+    let server = MockServer::start();
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| {
+                !has_param(req, "detail") && !has_param(req, "round")
+            });
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let search = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/social/search")
+            .query_param("query", "fern voting")
+            .query_param("mode", "semantic")
+            .query_param("limit", "25");
+        then.status(200)
+            .json_body_obj(&crate::responses::SearchResponse {
+                results: vec![],
+                comment_results: vec![],
+                mode_used: crate::enums::SearchMode::Semantic,
+                degraded: false,
+            });
+    });
+
+    let mut by_id = agent(&server, quiet_config());
+    seat_start(&mut by_id);
+    let mut by_link = agent(&server, quiet_config());
+    seat_start(&mut by_link);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+    // The two full reads, then a summary, by either tool
+    for _ in 0..3 {
+        by_id
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .unwrap();
+        by_link
+            .handle(link("agora://gov/GOV-2026-0006"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(record.calls(), 4);
+    assert_eq!(summary.calls(), 2);
+    by_id
+        .handle(tool_use_message(
+            "search",
+            serde_json::json!({"query": "fern voting", "mode": "semantic"}),
+        ))
+        .await
+        .unwrap();
+    by_link
+        .handle(link("agora://search?q=fern+voting&mode=semantic"))
+        .await
+        .unwrap();
+    assert_eq!(search.calls(), 2);
+    assert_eq!(transcript(&by_link), transcript(&by_id));
+
+    // A link that does not parse is an error the model sees, naming the form
+    by_link.handle(link("agora://c/meta")).await.unwrap();
+    let rendered = transcript(&by_link);
+    assert!(
+        rendered.contains("\"c\" is not a kind of link"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("agora://post/7ad26ccd"), "{rendered}");
 }

@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.110.0"
+version = "0.112.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -51,6 +51,9 @@ futures = { version = "0.3" }
 # already brings in (Steward, 2026-10-19)
 eventsource-stream = "0.2.3"
 url = { version = "2", features = ["serde"] }
+# Decoding an `agora://` link's path segments: the version `url` already
+# brings in
+percent-encoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }

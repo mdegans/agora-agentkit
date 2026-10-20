@@ -267,7 +267,7 @@ impl<T> Gauged<T> {
                  left for results this turn. {}",
                 self.context.window(),
                 self.context.reserve(),
-                instead(call, room, &text, &requested),
+                instead(requested.tool(call), room, &text, &requested),
             )
         } else {
             format!(
@@ -292,6 +292,9 @@ struct Requested {
     /// `attachment` and `lines`, for a data set's file (0.103)
     attachment: Option<String>,
     lines: Option<crate::govlog::LineRange>,
+    /// The link a `fetch_agora_link` call opened, and the tool it stands
+    /// for (0.112.0)
+    link: Option<(crate::links::AgoraLink, &'static str)>,
 }
 
 impl Requested {
@@ -326,17 +329,37 @@ impl Requested {
 
 impl Requested {
     fn of(call: &str, input: &serde_json::Value) -> Self {
-        if call != "get_content" {
-            return Self::default();
-        }
-        serde_json::from_value::<GetContentInput>(input.clone())
-            .map(|i| Self {
-                target: Some(i.id),
-                comment_budget: i.comment_budget,
-                attachment: i.attachment,
-                lines: i.lines,
+        let read = |i: GetContentInput| Self {
+            target: Some(i.id),
+            comment_budget: i.comment_budget,
+            attachment: i.attachment,
+            lines: i.lines,
+            link: None,
+        };
+        match call {
+            "get_content" => {
+                serde_json::from_value::<GetContentInput>(input.clone())
+                    .map(read)
+                    .unwrap_or_default()
+            }
+            "fetch_agora_link" => serde_json::from_value::<
+                crate::requests::FetchAgoraLinkInput,
+            >(input.clone())
+            .map(|i| {
+                let tool = i.link.tool();
+                Self {
+                    link: Some((i.link.clone(), tool)),
+                    ..i.link.as_read().cloned().map(read).unwrap_or_default()
+                }
             })
-            .unwrap_or_default()
+            .unwrap_or_default(),
+            _ => Self::default(),
+        }
+    }
+
+    /// The tool the call stands for: a link's, or the call's own
+    fn tool<'a>(&self, call: &'a str) -> &'a str {
+        self.link.as_ref().map_or(call, |(_, tool)| tool)
     }
 }
 
@@ -450,6 +473,25 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
     let last = first + fit - 1;
     // A citation with its own range takes no `lines=`: offer the citation
     // with this range in it instead (the review of 0.103)
+    // Asked by a link: the link with this range (0.112.0)
+    if let Some(read) =
+        requested.link.as_ref().and_then(|(link, _)| link.as_read())
+        && let Ok(cut) = crate::govlog::LineRange::new(first, Some(last))
+    {
+        let mut read = read.clone();
+        match &mut read.id {
+            ContentRef::DataCitation(c) if c.lines.is_some() => {
+                c.lines = Some(cut)
+            }
+            _ => read.lines = Some(cut),
+        }
+        return format!(
+            "Read it whole in a fresh turn ({tokens}), or \
+             link=\"{link}\" now (about {fit} lines).",
+            tokens = crate::threads::about_tokens(text.len() as u64),
+            link = crate::links::AgoraLink::from(read),
+        );
+    }
     let range = match requested
         .target
         .as_ref()

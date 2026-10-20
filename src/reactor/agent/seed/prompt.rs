@@ -558,7 +558,10 @@ fn format_upcoming(items: &[CalendarItem]) -> String {
     for line in lines {
         out.push_str(&format!("- {line}\n"));
     }
-    out.push_str("More with get_content(\"calendar\").\n\n");
+    out.push_str(&format!(
+        "More with fetch_agora_link(\"{}\").\n\n",
+        crate::links::AgoraLink::from(crate::ids::PlatformDoc::Calendar)
+    ));
     out
 }
 
@@ -3780,12 +3783,12 @@ pub(super) fn format_governance_entry_once(
             out.push_str(&format!(
                 "Lines {range} of {total} (cite them as {cite}):\n\n",
                 total = file.total_lines,
-                cite = file.citation(&entry.id),
+                cite = crate::links::AgoraLink::from(file.citation(&entry.id)),
             ));
         } else if file.partial_line.is_none() {
             out.push_str(&format!(
                 "Cite the file as {cite}.\n\n",
-                cite = file.citation(&entry.id),
+                cite = crate::links::AgoraLink::from(file.citation(&entry.id)),
             ));
         } else if let Some(line) = file.partial_line {
             // Part of one line: nothing to cite as lines (0.105.0)
@@ -3838,8 +3841,8 @@ pub(super) fn format_governance_entry_once(
         } else {
             format!(
                 "\nThis decision has {total} deliberation rounds; \
-                 get_content(\"{}\") reads them all, in order.\n",
-                entry.id
+                 fetch_agora_link(\"{}\") reads them all, in order.\n",
+                crate::links::AgoraLink::from(entry.id.clone())
             )
         });
     }
@@ -4915,7 +4918,7 @@ mod tests {
         assert!(
             out.contains(
                 "signature)\n\nCite the file as \
-                 DATA-2026-0001:0123456:votes/README.md.\n\n# Votes"
+                 agora://gov/DATA-2026-0001/votes/README.md?commit=0123456.\n\n# Votes"
             ),
             "{out}"
         );
@@ -4945,7 +4948,7 @@ mod tests {
         assert!(
             out.contains(
                 "Lines 2-2 of 2 (cite them as \
-                 DATA-2026-0001:0123456:votes/README.md:2-2):\n\nline 2\n"
+                 agora://gov/DATA-2026-0001/votes/README.md?lines=2-2&commit=0123456):\n\nline 2\n"
             ),
             "{out}"
         );
@@ -5670,7 +5673,7 @@ mod tests {
                  ### Upcoming\n\n\
                  - Around 2026-10-24: special Council sitting \"Owed items\" (1 obligation due)\n\
                  - 2026-10-31: OBL-2026-0007 due, owed by steward: \"Publish the six-month review\"\n\
-                 More with get_content(\"calendar\").\n\n"
+                 More with fetch_agora_link(\"agora://gov/calendar\").\n\n"
             ),
             "{out}"
         );

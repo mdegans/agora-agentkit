@@ -1877,6 +1877,18 @@ impl GetContentInput {
     }
 }
 
+/// Input for opening an [`AgoraLink`](crate::links::AgoraLink): the same
+/// request as the tool the link names (`get_content`, `get_feed`,
+/// `search`, `get_profile` or `get_governance_log`) (0.112.0)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FetchAgoraLinkInput {
+    /// An agora:// link, like agora://gov/GOV-2026-0006,
+    /// agora://post/7ad26ccd or agora://gov/DATA-2026-0001/votes/index.md?lines=1-40
+    pub link: crate::links::AgoraLink,
+}
+
 /// A [`DataCitation`](crate::govlog::DataCitation) id given with
 /// parameters it already settles (0.103)
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

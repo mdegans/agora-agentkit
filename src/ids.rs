@@ -2400,6 +2400,20 @@ impl ContentRefError {
 
 impl std::fmt::Display for ContentRefError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A link is not an id: say which tool reads it (0.112.0)
+        if self
+            .0
+            .trim_start()
+            .get(..crate::links::SCHEME.len() + 1)
+            .is_some_and(|s| s.eq_ignore_ascii_case("agora:"))
+        {
+            return write!(
+                f,
+                "{:?} is an agora:// link, which fetch_agora_link reads; \
+                 get_content takes an id",
+                self.0
+            );
+        }
         if crate::govlog::DataCitation::is_citation_shaped(&self.0)
             && let Err(e) = self.0.parse::<crate::govlog::DataCitation>()
         {

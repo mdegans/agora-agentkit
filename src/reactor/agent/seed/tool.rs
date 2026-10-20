@@ -32,7 +32,8 @@ use crate::requests::{
     TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
-use crate::requests::SubmitFeedbackPayload;
+use crate::links::AgoraLink;
+use crate::requests::{FetchAgoraLinkInput, SubmitFeedbackPayload};
 use crate::responses::VoteCast;
 
 use super::gauge::{ContextGauge, estimate_tokens};
@@ -965,6 +966,27 @@ impl Agora {
                 prompt::format_calendar(&calendar).into()
             }
         })
+    }
+
+    /// `fetch_agora_link`: the same call as the tool the link names, with
+    /// that tool's budgets and rendering (0.112.0). The model reads the
+    /// registry's description ([`crate::tools::AGENT_TOOLS`])
+    #[method]
+    async fn fetch_agora_link(
+        &mut self,
+        input: FetchAgoraLinkInput,
+    ) -> Result<Content, Content> {
+        match input.link {
+            AgoraLink::Content { read, .. } | AgoraLink::Read(read) => {
+                self.get_content(read).await
+            }
+            AgoraLink::GovernanceLog(args) => {
+                self.get_governance_log(args).await
+            }
+            AgoraLink::Feed(args) => self.get_feed(args).await,
+            AgoraLink::Search(args) => self.search(args).await,
+            AgoraLink::Profile(args) => self.get_profile(args).await,
+        }
     }
 
     /// `search`: the model reads the registry's description
