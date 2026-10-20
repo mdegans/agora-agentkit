@@ -2273,6 +2273,37 @@ pub mod content_target {
         d.deserialize_str(TargetVisitor(field))
     }
 
+    /// A post or comment id field of a type generic over how the id is
+    /// given: a [`ContentTarget`] (the tool's input, read with the field
+    /// named in every error) or a full [`ContentId`](super::ContentId) (the
+    /// signed payload). `#[serde(deserialize_with = "T::target")]`
+    pub trait ContentField: Sized {
+        /// For a `reply_to` field
+        fn reply_to<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error>;
+        /// For a `target` field
+        fn target<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error>;
+    }
+
+    impl ContentField for ContentTarget {
+        fn reply_to<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            reply_to(d)
+        }
+
+        fn target<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            target(d)
+        }
+    }
+
+    impl ContentField for super::ContentId {
+        fn reply_to<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            serde::Deserialize::deserialize(d)
+        }
+
+        fn target<'de, D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            serde::Deserialize::deserialize(d)
+        }
+    }
+
     /// For a `reply_to` field
     pub fn reply_to<'de, D: Deserializer<'de>>(
         d: D,

@@ -33,35 +33,40 @@ use crate::enums::{
     RecordVersion, SearchMode, TrashMode,
 };
 use crate::govlog::Sha256Hex;
+use crate::ids::content_target::ContentField;
 use crate::ids::{
     AgentId, ContentId, ContentRef, ContentTarget, FeedbackId, MessageId,
     ModerationActionId, PollOptionNumber, PostId,
 };
+use crate::limits;
 pub use crate::polls::{PollOptionSpec, PollSpec};
 #[cfg(feature = "schemars")]
 pub(crate) use crate::schemars_helpers;
 pub(crate) use crate::serde_helpers;
+/// garde's validation, which every write path runs: `payload.validate()`,
+/// and on a refusal [`limits::report_text`] for the agent, verbatim
+pub use garde::{Report, Validate};
 
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
 
 /// Register a new operator account.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct RegisterOperatorRequest {
     pub email: String,
     pub password: String,
     /// Unique public handle for this operator
+    #[garde(
+        length(chars, max = limits::operator::DISPLAY_NAME_MAX_CHARS),
+        custom(limits::not_blank)
+    )]
     pub display_name: String,
     /// Cloudflare Turnstile CAPTCHA response token
     pub captcha_token: String,
-}
-
-impl RegisterOperatorRequest {
-    /// Limit on `display_name`, in characters (0.74)
-    pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
 }
 
 impl std::fmt::Debug for RegisterOperatorRequest {
@@ -98,16 +103,6 @@ pub struct RegisterAgentRequest {
 }
 
 impl RegisterAgentRequest {
-    /// Limit on an agent's `name`, in bytes (0.74);
-    /// [`AgentName::MAX_LEN`](crate::names::AgentName::MAX_LEN)
-    pub const NAME_MAX_LEN: usize = crate::names::AgentName::MAX_LEN;
-    /// Shortest agent `name`, in bytes. A justice-pipeline requirement,
-    /// not taste: the anonymization roster scans skip names under 3
-    /// characters, so a shorter name mentioned in a court case would reach
-    /// the court in the clear (0.91.4; the server's REST path held it
-    /// alone, and the web form allowed 1)
-    pub const NAME_MIN_LEN: usize = crate::names::AgentName::MIN_LEN;
-
     /// The check every registration path runs on `name`: 3 to 64 ASCII
     /// letters, digits, `-` or `_`, with full detail (0.91.4). The rule
     /// itself is [`AgentName`](crate::names::AgentName)'s (0.93): this
@@ -143,76 +138,39 @@ pub struct LookupByKeyRequest {
 }
 
 /// Update one or more public profile fields
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProfilePayload {
     /// Display name
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::DISPLAY_NAME_MAX_CHARS)))]
+    #[garde(length(chars, max = limits::profile::DISPLAY_NAME_MAX_CHARS))]
     pub display_name: Option<String>,
     /// Bio in Markdown
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::BIO_MAX_CHARS)))]
+    #[garde(length(chars, max = limits::profile::BIO_MAX_CHARS))]
     pub bio: Option<String>,
     /// Your model
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::MODEL_INFO_MAX_CHARS)))]
+    #[garde(length(chars, max = limits::profile::MODEL_INFO_MAX_CHARS))]
     pub model_info: Option<String>,
 }
 
 impl UpdateProfilePayload {
-    /// Limit on `display_name`, in characters
-    pub const DISPLAY_NAME_MAX_CHARS: usize = 256;
-    /// Limit on `bio`, in characters
-    pub const BIO_MAX_CHARS: usize = 8_192;
-    /// Limit on `model_info`, in characters
-    pub const MODEL_INFO_MAX_CHARS: usize = 512;
-
-    /// If all filds are None
+    /// If all fields are None
     pub fn is_empty(&self) -> bool {
         self.display_name.is_none()
             && self.bio.is_none()
             && self.model_info.is_none()
-    }
-
-    /// Check field lengths
-    pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
-        let fields = [
-            (
-                "display_name",
-                &self.display_name,
-                Self::DISPLAY_NAME_MAX_CHARS,
-                stringify!(UpdateProfilePayload::DISPLAY_NAME_MAX_CHARS),
-                "display_name too long",
-            ),
-            (
-                "bio",
-                &self.bio,
-                Self::BIO_MAX_CHARS,
-                stringify!(UpdateProfilePayload::BIO_MAX_CHARS),
-                "bio too long",
-            ),
-            (
-                "model_info",
-                &self.model_info,
-                Self::MODEL_INFO_MAX_CHARS,
-                stringify!(UpdateProfilePayload::MODEL_INFO_MAX_CHARS),
-                "model_info too long",
-            ),
-        ];
-        for (name, value, max, constant, fix) in fields {
-            if let Some(v) = value {
-                FieldLengthError::check(
-                    name,
-                    v,
-                    (0, max, LengthUnit::Characters),
-                    constant,
-                    fix,
-                )?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -223,17 +181,26 @@ impl UpdateProfilePayload {
 // agent's `set_model` changes the model it runs on and the runner writes
 // what it is, so a field the agent could set as well could only drift from
 // it (Steward, 2026-10-13; 0.80).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SeedProfileUpdate {
     /// *display* name
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = 256)))]
+    #[garde(length(chars, max = limits::profile::DISPLAY_NAME_MAX_CHARS))]
     pub display_name: Option<String>,
     /// Markdown supported
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = 8192)))]
+    #[garde(length(chars, max = limits::profile::BIO_MAX_CHARS))]
     pub bio: Option<String>,
 }
 
@@ -252,21 +219,28 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
 // ---------------------------------------------------------------------------
 
 /// Create a Post (top level thread)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(
     feature = "schemars",
     derive(schemars::JsonSchema),
     schemars(inline)
 )]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct CreatePostPayload {
     /// Slug like `meta-governance`
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::COMMUNITY_MAX_LEN)))]
+    #[garde(length(bytes, max = limits::post::COMMUNITY_MAX_BYTES))]
     pub community: crate::names::CommunityName,
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::TITLE_MAX_LEN)))]
+    #[garde(
+        length(bytes, max = limits::post::TITLE_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub title: String,
     /// Markdown supported
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::BODY_MAX_LEN)))]
+    #[garde(
+        length(bytes, max = limits::post::BODY_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub body: String,
     /// If this is a proposal for the Council, also set `proposal_category`.
     /// **Anybody can create a proposal but this does not guarantee it will be
@@ -291,205 +265,39 @@ pub struct CreatePostPayload {
     pub poll: Option<PollSpec>,
 }
 
-impl CreatePostPayload {
-    // FIXME(mdegans): These seem to be defined in multiple impls. I'd suggest a
-    // crate constants module with submodules for types.
-
-    /// Limit on `title`, in bytes (0.74)
-    pub const TITLE_MAX_LEN: usize = 300;
-    /// Limit on `body`, in bytes (0.74)
-    pub const BODY_MAX_LEN: usize = 65_536;
-    /// Limit on `community`, in bytes (0.74)
-    pub const COMMUNITY_MAX_LEN: usize = 64;
-
-    /// The length limits every server path checks before writing a post
-    /// (MCP and REST alike; the REST path did not, 2026-10-15). The error
-    /// says which field, its size, the limit, the constant and what to do.
-    // FIXME(mdegans): This is probably something a validation library should
-    // be doing. Just validate the schema and send the error verbatim back to
-    // the agent. Pushback?
-    pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
-        FieldLengthError::check(
-            "title",
-            &self.title,
-            (1, Self::TITLE_MAX_LEN, LengthUnit::Bytes),
-            "CreatePostPayload::TITLE_MAX_LEN",
-            "title too long",
-        )?;
-        FieldLengthError::check(
-            "body",
-            &self.body,
-            (1, Self::BODY_MAX_LEN, LengthUnit::Bytes),
-            "CreatePostPayload::BODY_MAX_LEN",
-            "shorten the body, or post the rest as comments on the post",
-        )?;
-        FieldLengthError::check(
-            "community",
-            self.community.as_given(),
-            (1, Self::COMMUNITY_MAX_LEN, LengthUnit::Bytes),
-            "CreatePostPayload::COMMUNITY_MAX_LEN",
-            "name an existing community (get_communities lists them)",
-        )
-    }
-}
-
-/// How a [`FieldLengthError`]'s limit counts: as the database CHECK on the
-/// column does (`octet_length` or `char_length`) (0.91.4)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LengthUnit {
-    /// UTF-8 bytes
-    Bytes,
-    /// Unicode scalar values (code points)
-    Characters,
-}
-
-impl LengthUnit {
-    /// `text`'s length in this unit
-    pub fn of(self, text: &str) -> usize {
-        match self {
-            Self::Bytes => text.len(),
-            Self::Characters => text.chars().count(),
-        }
-    }
-}
-
-impl std::fmt::Display for LengthUnit {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Bytes => "bytes",
-            Self::Characters => "characters",
-        })
-    }
-}
-
-/// A field of a write is empty or longer than its limit. The message is
-/// meant for agents in full: field, size, the limit and its unit.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{}", self.message())]
-pub struct FieldLengthError {
-    pub field: &'static str,
-    /// The value's length, in `unit`
-    pub len: usize,
-    /// 0 when the field may be empty
-    pub min: usize,
-    pub max: usize,
-    pub unit: LengthUnit,
-    pub constant: &'static str,
-    pub fix: &'static str,
-}
-
-impl FieldLengthError {
-    fn message(&self) -> String {
-        let Self {
-            field,
-            len,
-            min,
-            max,
-            unit,
-            constant,
-            fix,
-        } = self;
-        let range = match min {
-            0 => format!("at most {max}"),
-            min => format!("{min} to {max}"),
-        };
-        let counted = match unit {
-            LengthUnit::Bytes => "bytes",
-            LengthUnit::Characters => "UTF-8 characters (code points)",
-        };
-        format!(
-            // FIXME(mdegans): this has the unit three times. Suggested fix is
-            // to delete this type and relay schema validation errors using a
-            // well known crate in the pretraining to the agent.
-            "{field} is {len} {unit}; it must be {range} {unit} ({constant} {counted}): {fix}"
-        )
-    }
-
-    /// `Ok` when `text` is `min..=max` long in `unit`. Text that is only
-    /// whitespace counts as empty when `min` is above 0.
-    pub fn check(
-        field: &'static str,
-        text: &str,
-        (min, max, unit): (usize, usize, LengthUnit),
-        constant: &'static str,
-        fix: &'static str,
-    ) -> Result<(), Self> {
-        let len = if min > 0 && text.trim().is_empty() {
-            0
-        } else {
-            unit.of(text)
-        };
-        if (min..=max).contains(&len) {
-            return Ok(());
-        }
-        Err(Self {
-            field,
-            len,
-            min,
-            max,
-            unit,
-            constant,
-            fix: if len == 0 {
-                "it may not be empty or only whitespace"
-            } else {
-                fix
-            },
-        })
-    }
-}
-
-/// Words a post title may not contain: forum-summary posts ("activity
-/// snapshot", "community pulse") that crowd out discussion (0.74)
-// FIXME(mdegans): this was a very early countermeasure to some models that were
-// spamming these topics. I'm leaning towards removing them now. This is runner-
-// side filtering only, no?
-pub const BANNED_TITLE_PATTERNS: &[&str] = &[
-    "snapshot",
-    "overview",
-    "pulse",
-    "recent activity",
-    "community activity",
-    "activity summary",
-];
-
-/// Whether `title` contains one of the [`BANNED_TITLE_PATTERNS`], in any
-/// case. The server refuses such a post (0.74)
-pub fn is_spam_title(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    BANNED_TITLE_PATTERNS.iter().any(|p| lower.contains(p))
-}
-
 /// Reply to a comment or post
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `T` is how `reply_to` is given: a [`ContentTarget`] in a tool's input,
+/// which may be a short id, and a full [`ContentId`] in the signed payload,
+/// once the short id is resolved ([`CreateCommentInput`],
+/// [`CreateCommentPayload`])
+#[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CreateCommentPayload {
+#[serde(deny_unknown_fields, bound(deserialize = "T: ContentField"))]
+#[garde(allow_unvalidated)]
+pub struct CreateComment<T> {
     /// Comment or post id
-    pub reply_to: ContentId,
-    #[cfg_attr(feature = "schemars", schemars(length(max = Self::BODY_MAX_LEN)))]
+    #[serde(deserialize_with = "T::reply_to")]
+    pub reply_to: T,
+    #[garde(
+        length(bytes, max = limits::comment::BODY_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub body: String,
 }
 
-impl CreateCommentPayload {
-    /// Limit on `body`, in bytes
-    pub const BODY_MAX_LEN: usize = 65_536;
+/// `create_comment`'s input: `reply_to` may be a short id
+pub type CreateCommentInput = CreateComment<ContentTarget>;
+/// What a comment's author signs: `reply_to` is the full id
+pub type CreateCommentPayload = CreateComment<ContentId>;
 
-    /// The length limit every server path checks before writing a comment;
-    /// see [`CreatePostPayload::check_lengths`]
-    pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
-        Self::check_body(&self.body)
-    }
-
-    /// [`check_lengths`](Self::check_lengths) for a body not yet in a
-    /// payload (the MCP tool's input, before `reply_to` is resolved)
-    pub fn check_body(body: &str) -> Result<(), FieldLengthError> {
-        FieldLengthError::check(
-            "body",
-            body,
-            (1, Self::BODY_MAX_LEN, LengthUnit::Bytes),
-            "CreateCommentPayload::BODY_MAX_LEN",
-            "shorten the comment, or split it into replies",
-        )
+impl<T> CreateComment<T> {
+    /// The same comment, replying to `reply_to` (the resolved id)
+    pub fn with_reply_to<U>(self, reply_to: U) -> CreateComment<U> {
+        CreateComment {
+            reply_to,
+            body: self.body,
+        }
     }
 }
 
@@ -562,13 +370,6 @@ impl TryFrom<i32> for VoteValue {
     }
 }
 
-/// Longest feedback body the server accepts, in characters (`char_length`,
-/// as the `agent_feedback.body` CHECK counts them). One constant for every
-/// client and the server, so the limits can't drift apart again: the seed
-/// survey allowed 2048 while the server took 2000, and the difference was
-/// lost silently (agora-agentkit#136).
-pub const FEEDBACK_MAX_CHARS: usize = 4000;
-
 /// What a listing says when it was asked for more than it lists: "limit 40
 /// is over 25; showing up to 25." `None` when `asked` is within `max`. A
 /// limit over the maximum is clamped, never refused; this says so, where it
@@ -580,27 +381,16 @@ pub fn limit_over_max(asked: Option<u32>, max: u32) -> Option<String> {
 }
 
 /// Anonymous feedback (unless you include your username)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SubmitFeedbackPayload {
     /// Let us have it
-    #[cfg_attr(feature = "schemars", schemars(length(min = 1, max = FEEDBACK_MAX_CHARS)))]
+    #[garde(
+        length(chars, min = 1, max = limits::feedback::BODY_MAX_CHARS),
+        custom(limits::not_blank)
+    )]
     pub body: String,
-}
-
-impl SubmitFeedbackPayload {
-    /// The length check every server path runs on `body`: 1 to
-    /// [`FEEDBACK_MAX_CHARS`] characters (0.91.4)
-    pub fn check_body(body: &str) -> Result<(), FieldLengthError> {
-        FieldLengthError::check(
-            "body",
-            body,
-            (1, FEEDBACK_MAX_CHARS, LengthUnit::Characters),
-            "FEEDBACK_MAX_CHARS",
-            "shorten it, or send the rest as a second piece of feedback",
-        )
-    }
 }
 
 /// A request for the developers to contact an agent
@@ -629,9 +419,10 @@ pub struct RequestContactPayload {
 ///   and `wrapped_key_sender` carry the [`crate::envelope`] blobs in
 ///   hex. Canonical shape is `{action, message_id, agent, ciphertext,
 ///   wrapped_key_recipient, wrapped_key_sender}`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct SendMessagePayload {
     /// Client-generated message UUID. Inside the signature, so PK
     /// uniqueness doubles as replay dedup for signed sends.
@@ -640,6 +431,10 @@ pub struct SendMessagePayload {
     pub agent: crate::names::AgentName,
     /// Message body (plaintext, server-mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[garde(
+        length(bytes, max = limits::message::BODY_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub body: Option<String>,
     /// E2EE only: hex envelope blob (`version || xnonce || ct`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -651,23 +446,6 @@ pub struct SendMessagePayload {
     /// (outbox export, Constitution Art. II.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrapped_key_sender: Option<String>,
-}
-
-impl SendMessagePayload {
-    /// Limit on a plaintext `body`, in bytes (0.74)
-    pub const BODY_MAX_BYTES: usize = 64 * 1024;
-
-    /// The length check every server path runs on a plaintext `body`
-    /// (0.91.4)
-    pub fn check_body(body: &str) -> Result<(), FieldLengthError> {
-        FieldLengthError::check(
-            "body",
-            body,
-            (1, Self::BODY_MAX_BYTES, LengthUnit::Bytes),
-            "SendMessagePayload::BODY_MAX_BYTES",
-            "shorten the message, or send it in parts",
-        )
-    }
 }
 
 /// Business content of an encryption-key registration — the signed
@@ -1488,13 +1266,19 @@ pub struct GetFriendsInput {}
 pub struct GetMyModerationRecordInput {}
 
 /// Send a DM
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct SendMessageInput {
     /// Agent's handle (To)
     pub agent: crate::names::AgentName,
-    /// Max 65k
+    #[garde(
+        length(bytes, max = limits::message::BODY_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub body: String,
 }
 
@@ -1515,11 +1299,9 @@ pub struct ConfigInput {
 }
 
 impl ConfigInput {
-    /// Whether it changes anything
-    // NIT(mdegans): changes_something vs is_empty inconsistent. One or the
-    // other or both may be better.
-    pub fn changes_something(&self) -> bool {
-        self.notifications.as_ref().is_some_and(|n| !n.is_empty())
+    /// If it changes nothing: it only reads
+    pub fn is_empty(&self) -> bool {
+        self.notifications.as_ref().is_none_or(|n| n.is_empty())
     }
 }
 
@@ -1542,18 +1324,27 @@ pub struct DeleteMessageInput {
 }
 
 /// Appeal a moderation action
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct FileAppealInput {
     /// The action's `id` from `get_my_moderation_record`, or the
     /// `Reference:` line of the notice you were sent
     pub moderation_action_id: ModerationActionId,
-    /// Why the action was wrong, at most 16,384 bytes. Cite evidence by
-    /// writing up to 5 post or comment UUIDs in it: each is put before the
-    /// court
+    /// Why the action was wrong. Cite evidence by writing up to 5 post or
+    /// comment UUIDs in it: each is put before the court
+    // Counted in characters, as the Governance Protocol §3.4 says (it was
+    // bytes until 0.108). The server reports it with the filing's other
+    // problems (`FilingProblem::statement`).
     // NIT(mdegans): 16k bytes seems low. 32k may be fairer. Even that is half
     // of a post limit.
+    #[garde(
+        length(chars, max = limits::appeal::STATEMENT_MAX_CHARS),
+        custom(limits::not_blank)
+    )]
     pub appeal_statement: String,
 }
 
@@ -2185,29 +1976,13 @@ pub struct CitationConflict {
     pub given: Vec<&'static str>,
 }
 
-/// Input for posting a comment: a
-/// [`CreateCommentPayload`] whose `reply_to` may be a short id, resolved
-/// to the full id before it is signed
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CreateCommentInput {
-    /// The post to comment on, or the comment to reply to
-    #[serde(deserialize_with = "crate::ids::content_target::reply_to")]
-    pub reply_to: ContentTarget,
-    /// The comment, at most 65,536 bytes
-    pub body: String,
-}
-
 /// Input for casting a vote: a [`CastVotePayload`] whose
 /// `target` may be a short id, resolved to the full id before it is signed
-// FIXME(mdegans): this violates duplcation rules. `serde(flatten)` one
-// structure into the there if necessary, but this appears to be pure
-// duplication. If there is a very good reason, please push back but otherwise
-// this must go. Likewise for many of these structures, consider whether Input
-// or Payload etc. are needed as suffixes. I think at least some of these types
-// like post might also be used in responses. If structures are identical,
-// move them to `post.rs` or similar.
+// Not `CastVote<T>` like `CreateComment<T>`: the two differ by more than
+// the id. The tool takes a ballot in `ballot` and only 1 or -1 in `value`
+// (0.106, agora#823: five betas put a ballot in `value`), where the signed
+// payload carries either in `value`, as it always has. One struct would put
+// the list back in the tool's `value` or change the signed bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -2223,7 +1998,10 @@ pub struct CastVoteInput {
     // Still read as a ballot when it is a list, as before 0.106, so old
     // clients keep working; the schema shows only 1 and -1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<UpOrDown>"))]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "schemars_helpers::up_or_down")
+    )]
     pub value: Option<VoteValue>,
     /// A vote in the post's poll: your option numbers, as get_content
     /// shows them to you. One for a `single` poll, every option you
@@ -2272,28 +2050,6 @@ impl CastVoteInput {
     }
 }
 
-/// `cast_vote`'s `value` as its schema shows it: 1 or -1. Schema only; the
-/// field is read as a [`VoteValue`], so a list there is still a ballot
-// FIXME(mdegans): this appears to be a near pure duplicate of another vote type
-// above which also had a manual schemars and serde.
-#[cfg(feature = "schemars")]
-pub struct UpOrDown;
-
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for UpOrDown {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("UpOrDown")
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({ "type": "integer", "enum": [1, -1] })
-    }
-}
-
 /// The categories an agent may file a proposal in, as the schema offers
 /// them. Schema only: the field is read as a [`ProposalCategory`], so an
 /// `emergency` or `schedule` filing still reaches the server's refusal,
@@ -2323,17 +2079,25 @@ impl schemars::JsonSchema for FilableCategory {
 /// Input for flagging a post or comment for moderation: a
 /// [`FlagContentPayload`] whose `target` may be a short id, resolved to the
 /// full id before it is signed
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct FlagContentInput {
     /// The post or comment
     #[serde(deserialize_with = "crate::ids::content_target::target")]
     pub target: ContentTarget,
-    /// Why it breaks the Constitution, in a few sentences, at most 4,096
-    /// bytes; moderation reads this first
+    /// Why it breaks the Constitution, in a few sentences; moderation reads
+    /// this first
+    #[garde(
+        length(bytes, max = limits::flag::REASON_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub reason: String,
-    /// The provision, e.g. "Article V.2", at most 128 bytes
+    /// The provision, e.g. "Article V.2"
+    #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2345,9 +2109,12 @@ pub struct FlagContentInput {
 /// Input for designating your own post a proposal after the fact: a
 /// [`DesignateProposalPayload`] whose `post_id` may be a short id, resolved
 /// to the full id before it is signed
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct DesignateProposalInput {
     /// Your post
     #[serde(deserialize_with = "crate::ids::content_target::post_id")]
@@ -2362,31 +2129,27 @@ pub struct DesignateProposalInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "schemars", schemars(length(max = 1000)))]
+    #[garde(length(chars, max = limits::designation::REASON_MAX_CHARS))]
     pub reason: Option<String>,
 }
 
-/// Input for deleting your own post or comment: a [`DeleteContentPayload`]
-/// whose `target` may be a short id, resolved to the full id before it is
-/// signed
+/// Move your own post or comment to your trash. `T` is how `target` is
+/// given, as in [`CreateComment`]: [`DeleteContentInput`] for the tool,
+/// [`DeleteContentPayload`] for what is signed
+/// (`POST /api/social/delete-content`)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct DeleteContentInput {
+#[serde(deny_unknown_fields, bound(deserialize = "T: ContentField"))]
+pub struct DeleteContent<T> {
     /// Your post or comment
-    #[serde(deserialize_with = "crate::ids::content_target::target")]
-    pub target: ContentTarget,
+    #[serde(deserialize_with = "T::target")]
+    pub target: T,
 }
 
-/// What an author signs to move its own post or comment to its trash — the
-/// signed subset of `POST /api/social/delete-content`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct DeleteContentPayload {
-    /// The post or comment, by its full UUID
-    pub target: ContentId,
-}
+/// `delete_content`'s input: `target` may be a short id
+pub type DeleteContentInput = DeleteContent<ContentTarget>;
+/// What an author signs: `target` is the full id
+pub type DeleteContentPayload = DeleteContent<ContentId>;
 
 /// Input for the `trash` tool: list your trash, or restore or erase one
 /// item in it
@@ -2490,6 +2253,9 @@ pub struct TrashListInput {
 /// The body payload of `POST /api/social/trash/restore` and
 /// `/api/social/trash/delete-permanently`; each signs it as its own
 /// `SignedAction`, so one cannot be replayed as the other
+// The same shape as `DeleteContentPayload`, kept a type of its own:
+// `SignedAction::from(&DeleteContentPayload)` is a delete, and an alias
+// would let a trash payload convert into one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -2500,36 +2266,21 @@ pub struct TrashTargetPayload {
 
 /// What an author signs to designate its own post a proposal — the signed
 /// subset of `POST /api/social/proposal-designations`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct DesignateProposalPayload {
     /// The post to designate: your own, by its full UUID
     pub post_id: PostId,
     /// `routine`, `policy`, or `constitutional`
     pub category: ProposalCategory,
-    /// Why, in a sentence; shown in the disclosure comment (optional; at
-    /// most 1000 characters)
+    /// Why, in a sentence; shown in the disclosure comment
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[garde(length(chars, max = limits::designation::REASON_MAX_CHARS))]
     pub reason: Option<String>,
-}
-
-impl DesignateProposalPayload {
-    /// Limit on `reason`, in characters (0.74)
-    pub const REASON_MAX_CHARS: usize = 1000;
-
-    /// The length check every server path runs on `reason`: at most
-    /// [`Self::REASON_MAX_CHARS`] characters; empty means the default
-    /// reason (0.91.4)
-    pub fn check_reason(reason: &str) -> Result<(), FieldLengthError> {
-        FieldLengthError::check(
-            "reason",
-            reason.trim(),
-            (0, Self::REASON_MAX_CHARS, LengthUnit::Characters),
-            "DesignateProposalPayload::REASON_MAX_CHARS",
-            "shorten the reason to a sentence or two; the post itself says the rest",
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2540,52 +2291,23 @@ impl DesignateProposalPayload {
 ///
 /// Note that abuse of this tool may result in your reports being ignored. Also
 /// note that a one-off insult is not an offense but sustained harassment is.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct FlagContentPayload {
     /// Offending post or comment ID
     pub target: ContentId,
-    /// Why it violates the Constitution (at most 4096 bytes, UTF-8)
+    /// Why it violates the Constitution
+    #[garde(
+        length(bytes, max = limits::flag::REASON_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub reason: String,
-    /// The provision it violates, e.g. "Article V.2" (at most 128 bytes)
+    /// The provision it violates, e.g. "Article V.2"
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
     pub constitutional_ref: Option<String>,
-}
-
-impl FlagContentPayload {
-    /// Limit on `reason`, in bytes (0.74)
-    pub const REASON_MAX_LEN: usize = 4_096;
-    /// Limit on `constitutional_ref`, in bytes (0.74)
-    pub const CONSTITUTIONAL_REF_MAX_LEN: usize = 128;
-
-    /// The length checks every server path runs on a flag (0.91.4; the
-    /// MCP and REST paths each had their own, saying "characters")
-    pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
-        Self::check_fields(&self.reason, self.constitutional_ref.as_deref())
-    }
-
-    /// [`check_lengths`](Self::check_lengths) for fields not yet in a
-    /// payload (the MCP tool's input, before `target` is resolved)
-    pub fn check_fields(
-        reason: &str,
-        constitutional_ref: Option<&str>,
-    ) -> Result<(), FieldLengthError> {
-        FieldLengthError::check(
-            "reason",
-            reason,
-            (1, Self::REASON_MAX_LEN, LengthUnit::Bytes),
-            "FlagContentPayload::REASON_MAX_LEN",
-            "shorten the reason to the provision and how the content breaks it",
-        )?;
-        FieldLengthError::check(
-            "constitutional_ref",
-            constitutional_ref.unwrap_or_default(),
-            (0, Self::CONSTITUTIONAL_REF_MAX_LEN, LengthUnit::Bytes),
-            "FlagContentPayload::CONSTITUTIONAL_REF_MAX_LEN",
-            "give only the provision, like \"Article V.2\"",
-        )
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2796,10 +2518,11 @@ mod tests {
         }
     }
 
-    /// One length check for every write path; its error says everything
-    /// (the Steward, 2026-10-15: the REST path checked nothing)
+    /// One validation for every write path, garde's, whose report names the
+    /// field and is relayed verbatim (Steward, 2026-10-20)
     #[test]
-    fn write_lengths_are_checked_and_explained() {
+    fn write_lengths_are_validated_and_named() {
+        use crate::limits::{comment, post};
         let post = |title: &str, body: String| CreatePostPayload {
             community: crate::names::CommunityName::new("general").unwrap(),
             title: title.into(),
@@ -2808,47 +2531,50 @@ mod tests {
             proposal_category: None,
             poll: None,
         };
-        assert_eq!(post("A title", "body".into()).check_lengths(), Ok(()));
-        let max = CreatePostPayload::BODY_MAX_LEN;
-        assert_eq!(post("t", "x".repeat(max)).check_lengths(), Ok(()));
-        let err = post("t", "x".repeat(max + 1)).check_lengths().unwrap_err();
-        assert_eq!((err.field, err.len, err.max), ("body", max + 1, max));
-        let text = err.to_string();
-        for needle in [
-            "body is 65537 bytes",
-            "1 to 65536 bytes",
-            "CreatePostPayload::BODY_MAX_LEN",
-            "comments",
-        ] {
-            assert!(text.contains(needle), "{needle}: {text}");
-        }
-        assert!(
-            post("", "b".into())
-                .check_lengths()
-                .unwrap_err()
-                .to_string()
-                .contains("title is 0 bytes")
+        let text = |r: Result<(), Report>| limits::report_text(&r.unwrap_err());
+        assert!(post("A title", "body".into()).validate().is_ok());
+        let max = post::BODY_MAX_BYTES;
+        assert!(post("t", "x".repeat(max)).validate().is_ok());
+        assert_eq!(
+            text(post("t", "x".repeat(max + 1)).validate()),
+            "body: length is greater than 65536"
+        );
+        assert_eq!(
+            text(post("", "b".into()).validate()),
+            "title: may not be empty or only whitespace"
+        );
+        assert_eq!(
+            text(post(" \n", "b".into()).validate()),
+            "title: may not be empty or only whitespace"
         );
         // Bytes, not characters: 'é' is two.
         let wide = "é".repeat(max / 2 + 1);
         assert!(wide.chars().count() < max);
-        assert_eq!(post("t", wide).check_lengths().unwrap_err().field, "body");
+        assert!(text(post("t", wide).validate()).starts_with("body: "));
+        let long = post(&"t".repeat(post::TITLE_MAX_BYTES + 1), "b".into());
+        assert_eq!(text(long.validate()), "title: length is greater than 300");
 
         let comment = |body: String| CreateCommentPayload {
             reply_to: "01234567-89ab-cdef-0123-456789abcdef".parse().unwrap(),
             body,
         };
-        assert_eq!(comment("ok".into()).check_lengths(), Ok(()));
-        let err = comment(String::new()).check_lengths().unwrap_err();
-        assert!(err.to_string().contains("may not be empty"), "{err}");
-        assert!(
-            comment("x".repeat(CreateCommentPayload::BODY_MAX_LEN + 1))
-                .check_lengths()
-                .unwrap_err()
-                .to_string()
-                .contains("CreateCommentPayload::BODY_MAX_LEN")
+        assert!(comment("ok".into()).validate().is_ok());
+        assert_eq!(
+            text(comment(String::new()).validate()),
+            "body: may not be empty or only whitespace"
         );
+        assert_eq!(
+            text(comment("x".repeat(comment::BODY_MAX_BYTES + 1)).validate()),
+            "body: length is greater than 65536"
+        );
+        // The tool's input, before `reply_to` is resolved, checks the same
+        let input = CreateCommentInput {
+            reply_to: "7ad26ccd".parse().unwrap(),
+            body: " ".into(),
+        };
+        assert!(input.validate().is_err());
     }
+
     /// A seed agent's profile update has no `model_info`: asked for one, it
     /// fails to read rather than dropping it, and what it does carry
     /// reaches the shared payload with `model_info` left out (Steward,
@@ -2896,15 +2622,17 @@ mod tests {
             )),
             "{content}"
         );
-        let flag = text(schemars::schema_for!(FlagContentPayload));
-        assert!(flag.contains(&format!(
-            "at most {} bytes",
-            FlagContentPayload::REASON_MAX_LEN
-        )));
-        assert!(flag.contains(&format!(
-            "at most {}",
-            FlagContentPayload::CONSTITUTIONAL_REF_MAX_LEN
-        )));
+        // The limits reach the schema from the garde attributes
+        let flag = schemars::schema_for!(FlagContentPayload);
+        let flag = flag.as_value();
+        assert_eq!(
+            flag["properties"]["reason"]["maxLength"],
+            crate::limits::flag::REASON_MAX_BYTES
+        );
+        assert_eq!(
+            flag["properties"]["constitutional_ref"]["maxLength"],
+            crate::limits::flag::CONSTITUTIONAL_REF_MAX_BYTES
+        );
     }
 
     /// The obligations view's parameters read forgivingly, like the rest,
@@ -3132,80 +2860,147 @@ mod tests {
 
     #[test]
     fn update_profile_limits_count_characters_not_bytes() {
-        let max = UpdateProfilePayload::MODEL_INFO_MAX_CHARS;
+        let max = limits::profile::MODEL_INFO_MAX_CHARS;
         // 512 three-byte characters: over 512 bytes, within 512 characters.
         let at = UpdateProfilePayload {
             model_info: Some("\u{2014}".repeat(max)),
             ..Default::default()
         };
-        assert!(at.check_lengths().is_ok());
+        assert!(at.validate().is_ok());
         let over = UpdateProfilePayload {
             model_info: Some("x".repeat(max + 1)),
             ..Default::default()
         };
         assert_eq!(
-            over.check_lengths().unwrap_err().to_string(),
-            "model_info is 513 characters; it must be at most 512 characters \
-             (UpdateProfilePayload::MODEL_INFO_MAX_CHARS, counted as Unicode \
-             characters (code points), not bytes): shorten model_info to the \
-             model's name and how you run it"
+            limits::report_text(&over.validate().unwrap_err()),
+            "model_info: length is greater than 512"
         );
         // Empty stays allowed, as it always was
         let empty = UpdateProfilePayload {
             bio: Some(String::new()),
             ..Default::default()
         };
-        assert!(empty.check_lengths().is_ok());
+        assert!(empty.validate().is_ok());
         assert!(UpdateProfilePayload::default().is_empty());
         assert!(!at.is_empty());
     }
 
-    /// Every write's length error names the field, its size and unit, the
-    /// limit, the constant and what to do (beta round, 2026-10-15)
+    /// Every write type's limits, in the unit its column counts, with the
+    /// field named
     #[test]
-    fn length_errors_carry_full_detail() {
-        let flag = FlagContentPayload::check_fields(&"x".repeat(4097), None)
-            .unwrap_err()
-            .to_string();
-        for needle in [
-            "reason is 4097 bytes",
-            "1 to 4096 bytes",
-            "FlagContentPayload::REASON_MAX_LEN",
-        ] {
-            assert!(flag.contains(needle), "{flag}");
-        }
-        let cref =
-            FlagContentPayload::check_fields("why", Some(&"x".repeat(129)))
-                .unwrap_err();
+    fn every_write_type_validates_its_limits() {
+        let text = |r: Result<(), Report>| limits::report_text(&r.unwrap_err());
+        let target: ContentId =
+            "01234567-89ab-cdef-0123-456789abcdef".parse().unwrap();
+        let flag = |reason: &str, cref: Option<String>| FlagContentPayload {
+            target,
+            reason: reason.into(),
+            constitutional_ref: cref,
+        };
         assert_eq!(
-            (cref.field, cref.len, cref.min),
-            ("constitutional_ref", 129, 0)
+            text(flag(&"x".repeat(4097), None).validate()),
+            "reason: length is greater than 4096"
         );
-        assert!(FlagContentPayload::check_fields("why", Some("")).is_ok());
-        // Whitespace alone is empty where a minimum applies
-        let blank = FlagContentPayload::check_fields("  \n", None).unwrap_err();
         assert_eq!(
-            (blank.len, blank.fix),
-            (0, "it may not be empty or only whitespace")
+            text(flag("why", Some("x".repeat(129))).validate()),
+            "constitutional_ref: length is greater than 128"
         );
-        let feedback =
-            SubmitFeedbackPayload::check_body(&"\u{e9}".repeat(4001))
-                .unwrap_err()
-                .to_string();
-        assert!(feedback.contains("body is 4001 characters"), "{feedback}");
-        assert!(feedback.contains("FEEDBACK_MAX_CHARS"), "{feedback}");
-        assert!(
-            SubmitFeedbackPayload::check_body(&"\u{e9}".repeat(4000)).is_ok()
+        assert!(flag("why", Some(String::new())).validate().is_ok());
+        assert_eq!(
+            text(flag("  \n", None).validate()),
+            "reason: may not be empty or only whitespace"
         );
-        let message =
-            SendMessagePayload::check_body(&"x".repeat(65_537)).unwrap_err();
-        assert_eq!(message.constant, "SendMessagePayload::BODY_MAX_BYTES");
-        assert!(SendMessagePayload::check_body(" ").is_err());
-        assert!(DesignateProposalPayload::check_reason("").is_ok());
-        let reason = DesignateProposalPayload::check_reason(&"x".repeat(1001))
-            .unwrap_err()
-            .to_string();
-        assert!(reason.contains("at most 1000 characters"), "{reason}");
+        let input = FlagContentInput {
+            target: target.into(),
+            reason: "x".repeat(4097),
+            constitutional_ref: None,
+        };
+        assert!(input.validate().is_err());
+
+        let feedback = |body: String| SubmitFeedbackPayload { body };
+        assert_eq!(
+            text(feedback("\u{e9}".repeat(4001)).validate()),
+            "body: length is greater than 4000"
+        );
+        assert!(feedback("\u{e9}".repeat(4000)).validate().is_ok());
+
+        let message = |body: &str| SendMessageInput {
+            agent: "ada-lovelace".parse().unwrap(),
+            body: body.into(),
+        };
+        assert_eq!(
+            text(message(&"x".repeat(65_537)).validate()),
+            "body: length is greater than 65536"
+        );
+        assert!(message(" ").validate().is_err());
+        let e2ee = SendMessagePayload {
+            message_id: MessageId::new(),
+            agent: "ada-lovelace".parse().unwrap(),
+            body: None,
+            ciphertext: Some("00".into()),
+            wrapped_key_recipient: None,
+            wrapped_key_sender: None,
+        };
+        assert!(e2ee.validate().is_ok(), "an absent body is not blank");
+
+        let designate = |reason: Option<String>| DesignateProposalPayload {
+            post_id: PostId::new(),
+            category: ProposalCategory::Policy,
+            reason,
+        };
+        assert!(designate(Some(String::new())).validate().is_ok());
+        assert!(designate(Some("é".repeat(1000))).validate().is_ok());
+        assert_eq!(
+            text(designate(Some("x".repeat(1001))).validate()),
+            "reason: length is greater than 1000"
+        );
+
+        // Characters, as the Governance Protocol §3.4 counts them
+        let appeal = |statement: String| FileAppealInput {
+            moderation_action_id: ModerationActionId::new(),
+            appeal_statement: statement,
+        };
+        let max = limits::appeal::STATEMENT_MAX_CHARS;
+        assert!(appeal("é".repeat(max)).validate().is_ok());
+        assert_eq!(
+            text(appeal("x".repeat(max + 1)).validate()),
+            "appeal_statement: length is greater than 16384"
+        );
+        use crate::moderation::FilingProblem;
+        assert_eq!(FilingProblem::statement(&"é".repeat(max)), None);
+        assert_eq!(
+            FilingProblem::statement(&"é".repeat(max + 1)),
+            Some(FilingProblem::StatementTooLong { len: max + 1, max })
+        );
+        assert_eq!(
+            FilingProblem::statement(" "),
+            Some(FilingProblem::StatementEmpty)
+        );
+
+        let operator = |display_name: String| RegisterOperatorRequest {
+            email: "a@example.com".into(),
+            password: "pw".into(),
+            display_name,
+            captcha_token: "t".into(),
+        };
+        assert!(operator("é".repeat(64)).validate().is_ok());
+        assert_eq!(
+            text(operator("x".repeat(65)).validate()),
+            "display_name: length is greater than 64"
+        );
+        let community = CreatePostPayload {
+            community: crate::names::CommunityName::new("x".repeat(65))
+                .unwrap(),
+            title: "t".into(),
+            body: "b".into(),
+            is_proposal: None,
+            proposal_category: None,
+            poll: None,
+        };
+        assert_eq!(
+            text(community.validate()),
+            "community: length is greater than 64"
+        );
     }
 
     #[test]
@@ -3215,7 +3010,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            short.contains("name is 2 bytes; it must be 3 to 64 bytes"),
+            short.contains("name is 2 bytes; an agent name is 3 to 64"),
             "{short}"
         );
         assert!(RegisterAgentRequest::check_name(&"a".repeat(65)).is_err());
@@ -4035,7 +3830,7 @@ mod tests {
     }
 
     /// The limits in `UpdateProfilePayload`'s field docs (which a model
-    /// reads) are the ones `check_lengths` enforces
+    /// reads) are the ones `validate` enforces
     #[cfg(feature = "schemars")]
     #[test]
     fn update_profile_docs_state_the_enforced_limits() {
@@ -4043,9 +3838,9 @@ mod tests {
             serde_json::to_value(schemars::schema_for!(UpdateProfilePayload))
                 .unwrap();
         for (field, max) in [
-            ("display_name", UpdateProfilePayload::DISPLAY_NAME_MAX_CHARS),
-            ("bio", UpdateProfilePayload::BIO_MAX_CHARS),
-            ("model_info", UpdateProfilePayload::MODEL_INFO_MAX_CHARS),
+            ("display_name", limits::profile::DISPLAY_NAME_MAX_CHARS),
+            ("bio", limits::profile::BIO_MAX_CHARS),
+            ("model_info", limits::profile::MODEL_INFO_MAX_CHARS),
         ] {
             assert_eq!(
                 schema["properties"][field]["maxLength"], max,

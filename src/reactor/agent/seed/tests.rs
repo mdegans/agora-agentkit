@@ -1650,7 +1650,7 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
                     serde_json::from_slice(req.body().as_ref())
                         .unwrap_or_default();
                 body["body"].as_str().is_some_and(|b| {
-                    b.chars().count() <= crate::requests::FEEDBACK_MAX_CHARS
+                    b.chars().count() <= crate::limits::feedback::BODY_MAX_CHARS
                         && b.ends_with("long.")
                 })
             });
@@ -1667,7 +1667,7 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
     to_the_survey(&mut agent).await;
     let long = format!(
         "{} And the tail.",
-        "Too long. ".repeat(crate::requests::FEEDBACK_MAX_CHARS / 10)
+        "Too long. ".repeat(crate::limits::feedback::BODY_MAX_CHARS / 10)
     );
     let over = format!(r#"{{"text": "{long}", "contact_me": false}}"#);
     for _ in 0..2 {
@@ -3954,7 +3954,7 @@ fn seed_tools_match_the_agent_tool_registry() {
 /// the schema admits is one the server accepts (agora-agentkit#136).
 #[test]
 fn feedback_limit_is_the_servers() {
-    use crate::requests::FEEDBACK_MAX_CHARS;
+    use crate::limits::feedback::BODY_MAX_CHARS as FEEDBACK_MAX_CHARS;
     let at = "é".repeat(FEEDBACK_MAX_CHARS);
     let ok: Result<super::soul::Feedback, _> = serde_json::from_value(
         serde_json::json!({ "text": at, "contact_me": false }),
@@ -4291,6 +4291,46 @@ async fn get_content_falls_back_when_the_signed_route_is_missing() {
     assert!(rendered.contains("no such post or comment"), "{rendered}");
 }
 
+/// Every tool a seed agent is given goes out with no `$ref`/`$defs`, and
+/// every strict one keeps every strict rule, `pattern` first among them
+/// (agora CLAUDE.md, "Never ship a `$ref` schema" and rule 4). The garde
+/// attributes that became `maxLength`s (2026-10-20) may not reach a strict
+/// tool either.
+#[tokio::test]
+async fn no_tool_carries_a_ref_and_no_strict_tool_a_pattern() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let mut strict = 0;
+    for def in agent.prompt().tools.iter().flatten() {
+        let misanthropic::tool::MethodDef::Custom(c) = def else {
+            continue;
+        };
+        let rendered = c.schema.to_string();
+        assert!(
+            !rendered.contains("$ref") && !rendered.contains("$defs"),
+            "{}: {rendered}",
+            c.name
+        );
+        if c.strict == Some(true) {
+            strict += 1;
+            assert!(
+                !rendered.contains("\"pattern\""),
+                "{}: {rendered}",
+                c.name
+            );
+            assert_eq!(
+                crate::tools::strict_schema_violations(&c.schema),
+                Vec::<String>::new(),
+                "{}",
+                c.name
+            );
+        }
+    }
+    assert!(strict > 0, "cast_vote at least is strict");
+}
+
 /// `cast_vote` goes out strict, its description the shared prose, its
 /// schema keeping every strict rule; `create_post` says how to attach a
 /// poll
@@ -4537,7 +4577,7 @@ fn the_feedback_schema_states_the_limit() {
     >();
     assert_eq!(
         schema["properties"]["body"]["maxLength"],
-        crate::requests::FEEDBACK_MAX_CHARS
+        crate::limits::feedback::BODY_MAX_CHARS
     );
     assert_eq!(schema["properties"]["body"]["minLength"], 1);
 }

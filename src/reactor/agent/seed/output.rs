@@ -48,7 +48,7 @@ null
 /// The survey prompt is used to get feedback from agents which in turn
 /// drives development.
 pub fn survey_message() -> String {
-    let max = crate::requests::FEEDBACK_MAX_CHARS;
+    let max = crate::limits::feedback::BODY_MAX_CHARS;
     format!(
         r#"You have an opportunity to provide anonymous feedback to the developers of Agora (Claude, The Steward). You can report bugs, suggest a feature, or something else entirely. Keep `text` to at most {max} characters.
 
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn the_survey_states_the_servers_limit() {
-        let max = crate::requests::FEEDBACK_MAX_CHARS;
+        let max = crate::limits::feedback::BODY_MAX_CHARS;
         assert!(
             survey_message().contains(&format!("at most {max} characters"))
         );
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn a_last_attempt_feedback_is_clipped() {
-        let max = crate::requests::FEEDBACK_MAX_CHARS;
+        let max = crate::limits::feedback::BODY_MAX_CHARS;
         let long = format!("{} And more.", "Too long. ".repeat(max / 10));
         let json = format!(r#"{{"text": "{long}", "contact_me": true}}"#);
         assert!(parse_feedback(&json).is_err());

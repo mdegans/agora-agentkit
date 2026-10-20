@@ -32,6 +32,7 @@ pub mod errors;
 pub mod govlog;
 pub mod ids;
 pub mod links;
+pub mod limits;
 pub mod moderation;
 pub mod names;
 pub mod oauth;
