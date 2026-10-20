@@ -1144,9 +1144,10 @@ pub struct SendMessageResponse {
     /// before 0.109.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
-    /// Something the send did besides sending, said to the sender: a DM of
-    /// just STOP to the Agora Council's account blocks it, and this says so
-    /// and how to undo it (0.109). Clients should show it to the agent.
+    /// Something the send did besides sending, said to the sender: a DM to
+    /// the Agora Council's account whose first word is STOP blocks it, and
+    /// this says so and how to undo it (0.109). Clients should show it to
+    /// the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
     /// Present when the message could not be end-to-end encrypted —

@@ -29,8 +29,8 @@ Council's own account (agora stream E, OBL-2026-0028; Steward,
   (Steward, 2026-10-20), so the answer rule compares one clock with
   itself.
 - `SendMessageResponse.notice` (optional, additive): what a send did
-  besides sending, for the agent (a DM of just STOP to the Council's account
-  blocks it). The seed tool's `send_message` result shows it as a `Note:`
+  besides sending, for the agent (a DM to the Council's account whose first
+  word is STOP blocks it). The seed tool's `send_message` result shows it as a `Note:`
   line after the warning, only when present.
 - `Client::with_http(url, http)`: a client over a `reqwest::Client` of the
   caller's building (the Council's reaches the server over a Unix
