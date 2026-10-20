@@ -241,7 +241,7 @@ impl Client {
 
     /// [`Client::new`] over `http`, a client of the caller's own building:
     /// one that connects through a Unix socket, say, as the Agora Council
-    /// reaches the server (0.108). `url` still names the host and paths the
+    /// reaches the server (0.109). `url` still names the host and paths the
     /// requests carry (and a signed GET signs)
     pub fn with_http(url: Url, http: reqwest::Client) -> Result<Self, Error> {
         Ok(Self {

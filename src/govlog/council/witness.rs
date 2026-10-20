@@ -19,7 +19,7 @@
 //! that runs the sitting: it is never serialized, its `Debug` redacts the
 //! endpoint, and a `Testimony` holds only a redacted witness.
 //!
-//! **Agora witnesses (0.108).** A witness may be an Agora agent
+//! **Agora witnesses (0.109).** A witness may be an Agora agent
 //! ([`WitnessSource::Agora`]), reached over Agora direct messages from the
 //! Council's own account: each batch goes out as one DM (or several, in
 //! order, each labelled by [`split_for_dms`]), and the witness's answer is
@@ -80,7 +80,7 @@ pub enum WitnessSource {
         prompt: Box<Prompt>,
     },
     /// An Agora agent, sent each batch as direct messages from the
-    /// Council's account and answering by DM (0.108). It must have
+    /// Council's account and answering by DM (0.109). It must have
     /// accepted the Council's friend request: the Council cannot compel
     /// testimony. Its model is what its profile declares, not verified.
     Agora {
@@ -117,7 +117,7 @@ impl WitnessSource {
         }
     }
 
-    /// The Agora account, for an Agora witness (0.108)
+    /// The Agora account, for an Agora witness (0.109)
     pub fn agent(&self) -> Option<AgentId> {
         match self {
             Self::Agora { agent } => Some(*agent),
@@ -132,7 +132,7 @@ impl WitnessSource {
 /// witness on a Messages API, the request as last sent with its last reply
 /// appended, every question and answer verbatim, thinking (and its
 /// signatures) included, so it can be sent again as it stands; for an
-/// Agora witness, each batch's direct messages and the answer (0.108).
+/// Agora witness, each batch's direct messages and the answer (0.109).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Testimony {
     witness: Witness,
@@ -162,8 +162,8 @@ impl Testimony {
     }
 }
 
-/// What a [`Testimony`] records (0.108). Untagged: a testimony written
-/// before 0.108 is a [`Conversation`](Self::Conversation) and keeps its
+/// What a [`Testimony`] records (0.109). Untagged: a testimony written
+/// before 0.109 is a [`Conversation`](Self::Conversation) and keeps its
 /// bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -206,7 +206,7 @@ impl From<Vec<AgoraExchange>> for TestimonyRecord {
     }
 }
 
-/// One batch sent to an Agora witness and its answer (0.108)
+/// One batch sent to an Agora witness and its answer (0.109)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgoraExchange {
     pub round: u32,
@@ -232,7 +232,7 @@ pub struct AgoraExchange {
 }
 
 /// An Agora witness's answer to a batch: its first direct message to the
-/// Council stored after the batch was sent (0.108)
+/// Council stored after the batch was sent (0.109)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgoraAnswer {
     pub message: MessageId,
@@ -246,7 +246,7 @@ pub struct AgoraAnswer {
 
 /// `text` as the direct messages that carry it, in order: one message if
 /// it fits in `max_bytes`, else parts, each opening with a
-/// `[part k of n]` line, split between lines where it can be (0.108).
+/// `[part k of n]` line, split between lines where it can be (0.109).
 /// Every part, label included, is at most `max_bytes`, and the parts
 /// without their labels join back into `text`.
 ///
@@ -557,7 +557,7 @@ impl WitnessBatch {
 #[serde(rename_all = "snake_case")]
 pub enum Asked {
     /// The index of the question's user turn in `record.messages` (its
-    /// batch's, since 0.104), or of its batch's exchange (0.108)
+    /// batch's, since 0.104), or of its batch's exchange (0.109)
     Message(u32),
     /// The index in `unanswered`
     Unanswered(u32),
@@ -866,7 +866,7 @@ mod tests {
         assert_eq!(serde_json::to_value(&batched).unwrap()["id"], 2);
     }
 
-    /// A testimony written before 0.108 (a conversation) reads as
+    /// A testimony written before 0.109 (a conversation) reads as
     /// [`TestimonyRecord::Conversation`] and writes back byte for byte
     #[test]
     fn a_conversation_testimony_keeps_its_bytes() {

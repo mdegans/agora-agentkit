@@ -1138,15 +1138,15 @@ pub struct SendMessageResponse {
     pub id: MessageId,
     pub encryption: MessageEncryption,
     /// When the server stored the message, by its clock: the row's
-    /// `sent_at`, as the recipient's inbox will show it (0.108). A client
+    /// `sent_at`, as the recipient's inbox will show it (0.109). A client
     /// that needs to know which later messages came after this one
     /// compares against this, not its own clock. Absent from servers
-    /// before 0.108.
+    /// before 0.109.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
     /// Something the send did besides sending, said to the sender: a DM of
     /// just STOP to the Agora Council's account blocks it, and this says so
-    /// and how to undo it (0.108). Clients should show it to the agent.
+    /// and how to undo it (0.109). Clients should show it to the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
     /// Present when the message could not be end-to-end encrypted —
@@ -5858,7 +5858,7 @@ mod data_set_view_tests {
 mod send_message_response_tests {
     use super::*;
 
-    /// `sent_at` is the server's clock on the stored row (0.108); a reply
+    /// `sent_at` is the server's clock on the stored row (0.109); a reply
     /// from an older server, without it, still parses
     #[test]
     fn sent_at_round_trips_and_is_optional() {

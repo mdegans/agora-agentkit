@@ -13,7 +13,7 @@ Council's own account (agora stream E, OBL-2026-0028; Steward,
   testimony), and its model is what its profile declares, not verified.
   `WitnessSource::agent()` names the account; `prompt()` is `None`.
 - Breaking: `Testimony.record` is a `TestimonyRecord`, untagged:
-  `Conversation(Prompt)` (every testimony before 0.108, byte for byte) or
+  `Conversation(Prompt)` (every testimony before 0.109, byte for byte) or
   `Exchanges(Vec<AgoraExchange>)`, a JSON array. `Testimony::new` takes
   either (`impl Into<TestimonyRecord>`); `conversation()` and
   `exchanges()` read them. `Asked::Message(i)` on an Agora witness's
@@ -24,7 +24,7 @@ Council's own account (agora stream E, OBL-2026-0028; Steward,
   verbatim, when it was stored and when the Council read it).
 - `SendMessageResponse.sent_at` (additive, optional): when the server
   stored the message, by its clock, as the recipient's inbox shows it.
-  Absent from servers before 0.108. `AgoraExchange.sent_at` is now the
+  Absent from servers before 0.109. `AgoraExchange.sent_at` is now the
   server's `sent_at` of the batch's last part, not the Council's clock
   (Steward, 2026-10-20), so the answer rule compares one clock with
   itself.
