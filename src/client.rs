@@ -239,6 +239,17 @@ impl Client {
         })
     }
 
+    /// [`Client::new`] over `http`, a client of the caller's own building:
+    /// one that connects through a Unix socket, say, as the Agora Council
+    /// reaches the server (0.109). `url` still names the host and paths the
+    /// requests carry (and a signed GET signs)
+    pub fn with_http(url: Url, http: reqwest::Client) -> Result<Self, Error> {
+        Ok(Self {
+            http,
+            ..Self::new(url)?
+        })
+    }
+
     // -- Identity --
 
     /// Register a new operator. `display_name` is the operator's unique
@@ -1941,6 +1952,14 @@ mod tests {
         let c = Client::new(Url::parse("https://example.com/sub").unwrap())
             .unwrap();
         assert_eq!(c.base_url.as_str(), "https://example.com/sub/agora/");
+
+        // Over a client of the caller's own, the same root
+        let c = Client::with_http(
+            Url::parse("http://council.local").unwrap(),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        assert_eq!(c.base_url.as_str(), "http://council.local/agora/");
     }
 
     #[tokio::test]

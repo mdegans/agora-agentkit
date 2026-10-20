@@ -19,13 +19,22 @@
 //! that runs the sitting: it is never serialized, its `Debug` redacts the
 //! endpoint, and a `Testimony` holds only a redacted witness.
 //!
+//! **Agora witnesses (0.109).** A witness may be an Agora agent
+//! ([`WitnessSource::Agora`]), reached over Agora direct messages from the
+//! Council's own account: each batch goes out as one DM (or several, in
+//! order, each labelled by [`split_for_dms`]), and the witness's answer is
+//! its next DM back. Its testimony's record is then the exchanges
+//! ([`TestimonyRecord::Exchanges`]) rather than a conversation.
+//!
 //! [`CouncilRound::witness_questions`]: super::CouncilRound::witness_questions
 
 use misanthropic::Prompt;
 use serde::{Deserialize, Serialize};
 
+use chrono::{DateTime, Utc};
+
 use super::CouncilSeat;
-use crate::ids::{WitnessId, WitnessQuestionId};
+use crate::ids::{AgentId, MessageId, WitnessId, WitnessQuestionId};
 
 /// Someone the Council may question on an item
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +79,14 @@ pub enum WitnessSource {
         /// to it.
         prompt: Box<Prompt>,
     },
+    /// An Agora agent, sent each batch as direct messages from the
+    /// Council's account and answering by DM (0.109). It must have
+    /// accepted the Council's friend request: the Council cannot compel
+    /// testimony. Its model is what its profile declares, not verified.
+    Agora {
+        /// The witness's account
+        agent: AgentId,
+    },
     /// Removed, as on the record
     #[default]
     Redacted,
@@ -83,6 +100,9 @@ impl std::fmt::Debug for WitnessSource {
                 .field("endpoint", &endpoint.as_ref().map(|_| "[REDACTED]"))
                 .field("prompt", prompt)
                 .finish(),
+            Self::Agora { agent } => {
+                f.debug_struct("Agora").field("agent", agent).finish()
+            }
             Self::Redacted => f.write_str("Redacted"),
         }
     }
@@ -93,20 +113,30 @@ impl WitnessSource {
     pub fn prompt(&self) -> Option<&Prompt> {
         match self {
             Self::Anthropic { prompt, .. } => Some(prompt),
-            Self::Redacted => None,
+            Self::Agora { .. } | Self::Redacted => None,
+        }
+    }
+
+    /// The Agora account, for an Agora witness (0.109)
+    pub fn agent(&self) -> Option<AgentId> {
+        match self {
+            Self::Agora { agent } => Some(*agent),
+            Self::Anthropic { .. } | Self::Redacted => None,
         }
     }
 }
 
-/// A witness's conversation on an item, as attached to the decision
+/// A witness's testimony on an item, as attached to the decision
 ///
-/// `record` is the request as last sent, with the witness's last reply
-/// appended: every question and answer verbatim, thinking (and its
-/// signatures) included, so it can be sent again as it stands.
+/// `record` is what passed between the Council and the witness: for a
+/// witness on a Messages API, the request as last sent with its last reply
+/// appended, every question and answer verbatim, thinking (and its
+/// signatures) included, so it can be sent again as it stands; for an
+/// Agora witness, each batch's direct messages and the answer (0.109).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Testimony {
     witness: Witness,
-    pub record: Prompt,
+    pub record: TestimonyRecord,
     /// Questions that got no answer, which `record` cannot hold
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unanswered: Vec<Unanswered>,
@@ -116,12 +146,12 @@ impl Testimony {
     /// A testimony for `witness`, whose source is removed
     pub fn new(
         witness: &Witness,
-        record: Prompt,
+        record: impl Into<TestimonyRecord>,
         unanswered: Vec<Unanswered>,
     ) -> Self {
         Self {
             witness: witness.redacted(),
-            record,
+            record: record.into(),
             unanswered,
         }
     }
@@ -130,6 +160,137 @@ impl Testimony {
     pub fn witness(&self) -> &Witness {
         &self.witness
     }
+}
+
+/// What a [`Testimony`] records (0.109). Untagged: a testimony written
+/// before 0.109 is a [`Conversation`](Self::Conversation) and keeps its
+/// bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TestimonyRecord {
+    /// An Agora witness's exchanges, one per batch sent, in the order sent
+    /// (a JSON array). [`Asked::Message`] indexes this list.
+    Exchanges(Vec<AgoraExchange>),
+    /// A witness on a Messages API: the whole conversation (a JSON object).
+    /// [`Asked::Message`] indexes its `messages`.
+    Conversation(Box<Prompt>),
+}
+
+impl TestimonyRecord {
+    /// The conversation, for a witness on a Messages API
+    pub fn conversation(&self) -> Option<&Prompt> {
+        match self {
+            Self::Conversation(prompt) => Some(prompt),
+            Self::Exchanges(_) => None,
+        }
+    }
+
+    /// The exchanges, for an Agora witness
+    pub fn exchanges(&self) -> Option<&[AgoraExchange]> {
+        match self {
+            Self::Exchanges(exchanges) => Some(exchanges),
+            Self::Conversation(_) => None,
+        }
+    }
+}
+
+impl From<Prompt> for TestimonyRecord {
+    fn from(prompt: Prompt) -> Self {
+        Self::Conversation(Box::new(prompt))
+    }
+}
+
+impl From<Vec<AgoraExchange>> for TestimonyRecord {
+    fn from(exchanges: Vec<AgoraExchange>) -> Self {
+        Self::Exchanges(exchanges)
+    }
+}
+
+/// One batch sent to an Agora witness and its answer (0.109)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgoraExchange {
+    pub round: u32,
+    /// The batch's questions, as [`WitnessBatch::render`] wrote them into
+    /// the DMs
+    pub questions: Vec<BatchedQuestion>,
+    /// The DMs that carried the batch, in order: one, or the parts of
+    /// [`split_for_dms`]
+    pub sent: Vec<MessageId>,
+    /// When the server stored the batch's last part, by the server's clock
+    /// (the send's `SendMessageResponse::sent_at`): the answer is the
+    /// witness's first DM to the Council stored after it, by the same clock
+    pub sent_at: DateTime<Utc>,
+    /// The witness's answer: absent when none came, and the questions are
+    /// then among the testimony's `unanswered`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<AgoraAnswer>,
+    /// The witness's other direct messages to the Council stored after the
+    /// batch (and before its next one), in order: a second message, or one
+    /// that came after the wait ran out. On the record, never the answer
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub late: Vec<AgoraAnswer>,
+}
+
+/// An Agora witness's answer to a batch: its first direct message to the
+/// Council stored after the batch was sent (0.109)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgoraAnswer {
+    pub message: MessageId,
+    /// The message's text, verbatim
+    pub text: String,
+    /// When the server stored it
+    pub sent_at: DateTime<Utc>,
+    /// When the Council read it
+    pub received_at: DateTime<Utc>,
+}
+
+/// `text` as the direct messages that carry it, in order: one message if
+/// it fits in `max_bytes`, else parts, each opening with a
+/// `[part k of n]` line, split between lines where it can be (0.109).
+/// Every part, label included, is at most `max_bytes`, and the parts
+/// without their labels join back into `text`.
+///
+/// # Panics
+///
+/// If `max_bytes` leaves no room beside a label (under 64 bytes).
+pub fn split_for_dms(text: &str, max_bytes: usize) -> Vec<String> {
+    /// The room a label takes, `[part 9999 of 9999]\n\n`, rounded up
+    const LABEL: usize = 32;
+    assert!(
+        max_bytes >= 2 * LABEL,
+        "a DM must hold a label and some text"
+    );
+    if text.len() <= max_bytes {
+        return vec![text.to_string()];
+    }
+    let room = max_bytes - LABEL;
+    let mut chunks: Vec<&str> = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.len() <= room {
+            chunks.push(rest);
+            break;
+        }
+        // The last line break that fits, else the last char boundary
+        let mut end = room;
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let cut = rest[..end].rfind('\n').map_or(end, |i| i + 1);
+        chunks.push(&rest[..cut]);
+        rest = &rest[cut..];
+    }
+    let n = chunks.len();
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(k, chunk)| format!("{}{chunk}", part_label(k + 1, n)))
+        .collect()
+}
+
+/// The label [`split_for_dms`] opens part `k` of `n` with
+pub fn part_label(k: usize, n: usize) -> String {
+    format!("[part {k} of {n}]\n\n")
 }
 
 /// A question a witness did not answer
@@ -387,13 +548,16 @@ impl WitnessBatch {
 }
 
 /// Where a question is in its witness's [`Testimony`]
+///
+/// For an Agora witness ([`TestimonyRecord::Exchanges`]),
+/// `Message(i)` is the index of the question's batch in the exchanges.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum Asked {
     /// The index of the question's user turn in `record.messages` (its
-    /// batch's, since 0.104)
+    /// batch's, since 0.104), or of its batch's exchange (0.109)
     Message(u32),
     /// The index in `unanswered`
     Unanswered(u32),
@@ -700,5 +864,190 @@ mod tests {
             ..read
         };
         assert_eq!(serde_json::to_value(&batched).unwrap()["id"], 2);
+    }
+
+    /// A testimony written before 0.109 (a conversation) reads as
+    /// [`TestimonyRecord::Conversation`] and writes back byte for byte
+    #[test]
+    fn a_conversation_testimony_keeps_its_bytes() {
+        let old = r###"{
+  "witness": {
+    "id": "qwen",
+    "name": "Qwen 3.8",
+    "description": "A local model.",
+    "interest": "the model under consideration"
+  },
+  "record": {
+    "model": "qwen3.8",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "## Questions from the Council (round 1)\n\n### Artist\n> 1. Which model are you?\n"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Qwen 3.8."
+          }
+        ]
+      }
+    ],
+    "max_tokens": 32000,
+    "system": [
+      {
+        "type": "text",
+        "text": "You are a witness."
+      }
+    ]
+  },
+  "unanswered": [
+    {
+      "seat": "lawyer",
+      "round": 2,
+      "question": "Who operates you?",
+      "why": "timed_out",
+      "id": 2
+    }
+  ]
+}"###;
+        let t: Testimony = serde_json::from_str(old).unwrap();
+        let prompt = t.record.conversation().expect("a conversation");
+        assert_eq!(prompt.messages.len(), 2);
+        assert!(t.record.exchanges().is_none());
+        assert_eq!(serde_json::to_string_pretty(&t).unwrap(), old);
+    }
+
+    fn agora_witness() -> Witness {
+        serde_json::from_value(serde_json::json!({
+            "id": "fact-checker",
+            "name": "The fact-checker",
+            "source": {"agora": {
+                "agent": "0e6c1f3a-5d7e-4b0a-9c55-2f1d8a3b4c5d"
+            }}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_agora_witness_names_its_account_and_never_serializes_it() {
+        let w = agora_witness();
+        let agent = w.source.agent().expect("an Agora witness");
+        assert_eq!(agent.to_string(), "0e6c1f3a-5d7e-4b0a-9c55-2f1d8a3b4c5d");
+        assert!(w.source.prompt().is_none());
+        assert!(format!("{w:?}").contains("Agora"));
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(!json.contains("source"), "{json}");
+    }
+
+    /// An Agora witness's testimony: its exchanges, a JSON array, read
+    /// back exactly, an unanswered batch without an `answer`
+    #[test]
+    fn an_exchanges_testimony_round_trips() {
+        let at = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        let message = |n: u128| MessageId::from(uuid::Uuid::from_u128(n));
+        let t = Testimony::new(
+            &agora_witness(),
+            vec![
+                AgoraExchange {
+                    round: 1,
+                    questions: vec![q(1, CouncilSeat::Artist, "Which model?")],
+                    sent: vec![message(10)],
+                    sent_at: at("2026-10-25T10:00:00Z"),
+                    answer: Some(AgoraAnswer {
+                        message: message(11),
+                        text: "I run on Claude Opus 5.5, by my own account."
+                            .into(),
+                        sent_at: at("2026-10-25T10:03:00Z"),
+                        received_at: at("2026-10-25T10:03:01Z"),
+                    }),
+                    late: vec![AgoraAnswer {
+                        message: message(14),
+                        text: "And one more thing.".into(),
+                        sent_at: at("2026-10-25T10:04:00Z"),
+                        received_at: at("2026-10-25T10:04:01Z"),
+                    }],
+                },
+                AgoraExchange {
+                    round: 2,
+                    questions: vec![q(2, CouncilSeat::Lawyer, "Who?")],
+                    sent: vec![message(12), message(13)],
+                    sent_at: at("2026-10-25T11:00:00Z"),
+                    answer: None,
+                    late: Vec::new(),
+                },
+            ],
+            vec![Unanswered {
+                seat: CouncilSeat::Lawyer,
+                round: 2,
+                question: "Who?".into(),
+                why: Unheard::TimedOut,
+                id: Some(id(2)),
+            }],
+        );
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(json["record"].is_array(), "{json}");
+        assert!(json["record"][1].get("answer").is_none(), "{json}");
+        assert!(json["record"][1].get("late").is_none(), "none, no key");
+        assert_eq!(json["record"][0]["late"][0]["text"], "And one more thing.");
+        assert_eq!(
+            json["record"][0]["answer"]["message"],
+            "00000000-0000-0000-0000-00000000000b"
+        );
+        let back: Testimony = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.record.exchanges().unwrap().len(), 2);
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// A batch that fits is one DM, unlabelled; one that does not is
+    /// parts, each labelled and within the cap, which join back into it
+    #[test]
+    fn a_long_batch_is_split_into_labelled_parts() {
+        assert_eq!(split_for_dms("short", 64 * 1024), vec!["short"]);
+
+        let batch = WitnessBatch {
+            round: 3,
+            questions: (1..=20)
+                .map(|n| {
+                    q(n, CouncilSeat::ALL[n as usize % 4], &"é".repeat(2000))
+                })
+                .collect(),
+        };
+        let text = batch.render();
+        assert!(text.len() > 64 * 1024);
+        let parts = split_for_dms(&text, 64 * 1024);
+        assert!(parts.len() >= 2);
+        let n = parts.len();
+        let mut joined = String::new();
+        for (k, part) in parts.iter().enumerate() {
+            assert!(part.len() <= 64 * 1024, "part {k} is {}", part.len());
+            let label = part_label(k + 1, n);
+            joined.push_str(part.strip_prefix(&label).expect("labelled"));
+        }
+        assert_eq!(joined, text);
+        // Split between lines: every part but the last ends a line
+        for part in &parts[..n - 1] {
+            assert!(part.ends_with('\n'));
+        }
+
+        // One line longer than a DM is cut at a char boundary
+        let long = "é".repeat(100);
+        let parts = split_for_dms(&long, 64);
+        let joined: String = parts
+            .iter()
+            .enumerate()
+            .map(|(k, p)| {
+                p.strip_prefix(&part_label(k + 1, parts.len())).unwrap()
+            })
+            .collect();
+        assert_eq!(joined, long);
+        assert!(parts.iter().all(|p| p.len() <= 64));
     }
 }

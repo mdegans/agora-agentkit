@@ -83,18 +83,19 @@ pub use texts::{
 
 mod council;
 pub use council::{
-    Abstention, AgendaRanking, Asked, Ballot, BatchedQuestion, BlankStatement,
-    CouncilAttachment, CouncilDecisionRecord, CouncilMember, CouncilOutcome,
-    CouncilRound, CouncilSeat, CouncilVote, DEFERRING_SEATS, Decided,
-    DecisionCategory, DecisionSummary, FinalRoundError, FinalVotes,
-    NotASeatChoice, PlacedProposal, Question, RECUSED_ACCEPTORS,
-    RECUSED_DEFERRED_TAG, Rationale, RecordRuleError, RecusalVote,
-    STEWARD_RECUSED_TAG, SUMMARY_POINTER, SUMMARY_WRITER, SeatChoice,
-    SeatModels, SeatQuestions, SeatRanking, SeatResponse, SeatVote, SeatVotes,
-    Statement, StewardEmergency, StewardRecusal, StewardVote,
-    SummaryAcceptance, SummaryAuthorship, Testimony, Unanswered, Unheard, Vote,
-    Votes, Witness, WitnessBatch, WitnessQuestion, WitnessSource,
-    served_summary, test_labelled, testimony_attachment_name,
+    Abstention, AgendaRanking, AgoraAnswer, AgoraExchange, Asked, Ballot,
+    BatchedQuestion, BlankStatement, CouncilAttachment, CouncilDecisionRecord,
+    CouncilMember, CouncilOutcome, CouncilRound, CouncilSeat, CouncilVote,
+    DEFERRING_SEATS, Decided, DecisionCategory, DecisionSummary,
+    FinalRoundError, FinalVotes, NotASeatChoice, PlacedProposal, Question,
+    RECUSED_ACCEPTORS, RECUSED_DEFERRED_TAG, Rationale, RecordRuleError,
+    RecusalVote, STEWARD_RECUSED_TAG, SUMMARY_POINTER, SUMMARY_WRITER,
+    SeatChoice, SeatModels, SeatQuestions, SeatRanking, SeatResponse, SeatVote,
+    SeatVotes, Statement, StewardEmergency, StewardRecusal, StewardVote,
+    SummaryAcceptance, SummaryAuthorship, Testimony, TestimonyRecord,
+    Unanswered, Unheard, Vote, Votes, Witness, WitnessBatch, WitnessQuestion,
+    WitnessSource, part_label, served_summary, split_for_dms, test_labelled,
+    testimony_attachment_name,
 };
 
 mod redactable;
