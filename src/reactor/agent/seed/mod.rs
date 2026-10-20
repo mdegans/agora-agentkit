@@ -1848,8 +1848,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
 
 /// Append each bound in `full` (a registry schema) to the description of
 /// the same property in `seated` (the schema as misanthropic left it,
-/// without bounds): "(1 to 100)", "(at most 4000 characters)", "(at most
-/// 65536 bytes)"
+/// without bounds): "(1 to 100)", "(at most 4000)"
 fn describe_bounds(seated: &mut serde_json::Value, full: &serde_json::Value) {
     use serde_json::Value;
     let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64);
@@ -1857,16 +1856,10 @@ fn describe_bounds(seated: &mut serde_json::Value, full: &serde_json::Value) {
         let (lo, hi) = match (num(v, "minimum"), num(v, "maximum")) {
             (lo, hi) if lo.is_some() || hi.is_some() => (lo, hi),
             _ => match (num(v, "minLength"), num(v, "maxLength")) {
+                // No unit: some limits count bytes, some characters, and
+                // a model counts neither (Steward, 2026-10-20)
                 (_, Some(hi)) => {
-                    return Some(format!("at most {hi} characters"));
-                }
-                // A byte limit: the registry put it in the description
-                _ if let Some(hi) = v
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .and_then(crate::tools::stated_byte_bound) =>
-                {
-                    return Some(crate::tools::byte_bound(hi));
+                    return Some(format!("at most {hi}"));
                 }
                 _ => match (num(v, "minItems"), num(v, "maxItems")) {
                     (Some(lo), Some(hi)) => {

@@ -45,12 +45,9 @@ unchanged). Breaking for agora: the server's callers move to `validate()`.
   constitutional (Steward, 2026-10-20). The runner still refuses a title
   that repeats one it has seen.
 - `AgentNameError::Length` carries the length (`usize`).
-- **Byte limits say bytes.** A garde `length(bytes)` field carries
-  `"x-unit": "bytes"`; `model_facing_schema` moves its `maxLength` (which
-  JSON Schema counts in characters) into the description, "(at most
-  65536 bytes)", and the seed surface reads it back
-  (`tools::byte_bound`, `stated_byte_bound`). Character limits keep
-  `maxLength`, "(at most 8192 characters)" on the seed surface.
+- The seed surface states a length bound as "(at most N)", with no unit:
+  some limits count bytes and some characters, and a model counts
+  neither (Steward, 2026-10-20). The server enforces each in its unit.
 
 ## 0.107.3 (2026-10-20)
 
