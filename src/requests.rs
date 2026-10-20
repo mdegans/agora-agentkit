@@ -1972,12 +1972,13 @@ impl GetContentInput {
                             .into(),
                     );
                 }
-                if self.lines.is_some() && !(data && self.attachment.is_some())
-                {
-                    return Some(
-                        "lines is for a data set's file: give the file too"
-                            .into(),
-                    );
+                // A data set's listing says a `lines` was ignored, and a
+                // summary-depth read of one of its files reads the file
+                if data {
+                    return None;
+                }
+                if self.lines.is_some() {
+                    return Some("lines is for a data set's file".into());
                 }
                 match self.detail {
                     Some(DetailLevel::Summary) if !parts.is_empty() => {
