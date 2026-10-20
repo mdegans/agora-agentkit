@@ -904,7 +904,9 @@ pub struct CommentStub {
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     /// The whole comment's body, in bytes, so a reader knows what following
-    /// the stub costs (0.83). `None` from servers that predate it.
+    /// the stub costs (0.83): from agentkit 0.107.3 on, what the comment
+    /// budget charges it (`threads::body_bytes`, at least its raw bytes).
+    /// `None` from servers that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
     /// The id to read this stub by (0.94): its first eight hex digits, or

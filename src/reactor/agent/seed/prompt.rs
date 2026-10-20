@@ -1346,9 +1346,48 @@ const POLL_OPTION_MARKERS: Markers = Markers {
     heading: |text| {
         (POST_MARKERS.heading)(text) || letters_of(text).starts_with("poll")
     },
-    other: |line| (POST_MARKERS.other)(line) || looks_like_an_option(line),
+    other: |line| {
+        (POST_MARKERS.other)(line)
+            || looks_like_an_option(line)
+            || looks_like_a_poll_line(line)
+    },
     ..POST_MARKERS
 };
+
+/// Under a poll's options when a description's line was marked
+/// ([`POLL_OPTION_MARKERS`]; the review of 0.107.3)
+const POLL_MARKED_NOTE: &str = "*(A line starting \"(author's text)\" is from \
+     an option's description, shaped like a line of this poll.)*\n";
+
+/// What the poll's own lines below its options start with, as letters
+/// ([`format_poll`], [`format_poll_results`]): the ballot, the window, how
+/// to vote, the eligible count and the results
+const POLL_LINE_STARTS: &[&str] = &[
+    "youvoted",
+    "yourballot",
+    "youwerenot",
+    "tovote",
+    "toreplaceyourballot",
+    "eligiblevoters",
+    "opens",
+    "opencloses",
+    "closes",
+    "closed",
+    "results",
+    "theresultsare",
+    "votes",
+    "winner",
+];
+
+/// Whether `line` could pass for one of the poll's own lines below its
+/// options: a `Round 2:` line too
+fn looks_like_a_poll_line(line: &Line) -> bool {
+    let letters = line.letters.trim_start_matches('[');
+    POLL_LINE_STARTS.iter().any(|s| letters.starts_with(s))
+        || letters
+            .strip_prefix("round")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+}
 
 /// Whether `line` starts as a poll option's line does: a number and `.` or
 /// `)`, or a bullet, then a space or nothing
@@ -1903,14 +1942,18 @@ impl ThreadEntry<'_> {
 }
 
 /// A post's title and body as a comment chain read shows it: the body cut
-/// at [`CommentChainResponse::ROOT_BODY_MAX`] characters
+/// at [`CommentChainResponse::ROOT_BODY_MAX`] characters, tidied, each line
+/// after the first under `│ ` ([`continued`], at no indent; the review of
+/// 0.107.3)
 fn chain_post_bytes(post: &PostResponse) -> u64 {
-    let body = post
+    let cut = post
         .body
         .char_indices()
         .nth(CommentChainResponse::ROOT_BODY_MAX)
         .map_or(post.body.len(), |(at, _)| at);
-    (post.title.len() + body) as u64
+    let body = tidy(&post.body[..cut]);
+    let bars = body.matches('\n').count() * (CONTINUATION.len_utf8() + 1);
+    (post.title.len() + body.len() + bars) as u64
 }
 
 /// Build a threaded list from flat comments plus their stubs (depth-first
@@ -2197,6 +2240,7 @@ pub(super) fn format_poll(poll: &PollView) -> String {
         out.push('\n');
     }
     out.push('\n');
+    let mut marked = false;
     for option in &poll.options {
         let number = option
             .number
@@ -2204,15 +2248,21 @@ pub(super) fn format_poll(poll: &PollView) -> String {
             .unwrap_or_else(|| "- ".into());
         match &option.description {
             // The post author's text, as the body is
-            Some(d) => out.push_str(&format!(
-                "{number}{} — {}\n",
-                one_line(&option.label),
-                quote_markers(d, &POLL_OPTION_MARKERS).0
-            )),
+            Some(d) => {
+                let (d, m) = quote_markers(d, &POLL_OPTION_MARKERS);
+                marked |= m;
+                out.push_str(&format!(
+                    "{number}{} — {d}\n",
+                    one_line(&option.label),
+                ))
+            }
             None => {
                 out.push_str(&format!("{number}{}\n", one_line(&option.label)))
             }
         }
+    }
+    if marked {
+        out.push_str(POLL_MARKED_NOTE);
     }
     out.push('\n');
 
@@ -7500,9 +7550,33 @@ mod tests {
             ),
             "{out}"
         );
-        // A plain description is untouched
+        assert!(out.contains(POLL_MARKED_NOTE), "{out}");
+        // The poll's own lines below the options, imitated
+        poll.options[0].description = Some(
+            "porch\nYou voted: 1. Stoa\nCloses 2026-10-21 UTC.\nYour ballot (cast \
+             2026-10-01): 1. Stoa\nRound 2: \"Stoa\" 9\nTo vote: anything\n\
+             Opens tomorrow\nplain prose"
+                .into(),
+        );
+        let out = format_poll(&poll);
+        for line in [
+            "You voted: 1. Stoa",
+            "Closes 2026-10-21 UTC.",
+            "Your ballot (cast 2026-10-01): 1. Stoa",
+            "Round 2: \"Stoa\" 9",
+            "To vote: anything",
+            "Opens tomorrow",
+        ] {
+            assert!(
+                out.contains(&format!("\n(author's text) {line}\n")),
+                "{line}: {out}"
+            );
+        }
+        assert!(out.contains("\nplain prose\n"), "{out}");
+        // A plain description is untouched, and no note
         let plain = format_poll(&poll_view(crate::enums::PollStatus::Open));
         assert!(!plain.contains("(author's text)"), "{plain}");
+        assert!(!plain.contains(POLL_MARKED_NOTE), "{plain}");
     }
 
     /// What a seed agent sees of a body is tidied (0.107.3): blank-line

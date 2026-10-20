@@ -168,10 +168,16 @@ pub fn tidy(body: &str) -> String {
 }
 
 /// What a full comment's body costs a read: its bytes as [`tidy`] shows
-/// them, and [`CONTINUATION_BYTES`] for each line break left
+/// them, and [`CONTINUATION_BYTES`] for each line break left, but never
+/// less than its raw bytes, which MCP and REST send (the review of
+/// 0.107.3: 65,536 `\n` were charged nothing and sent as about 128 KB of
+/// JSON). The server's comment budget charges this, and sends it as a
+/// stub's size
 pub fn body_bytes(body: &str) -> usize {
     let shown = tidy(body);
-    shown.len() + shown.matches('\n').count() * CONTINUATION_BYTES
+    let rendered =
+        shown.len() + shown.matches('\n').count() * CONTINUATION_BYTES;
+    rendered.max(body.len())
 }
 
 /// The longest a stub's JSON gets beyond its name and preview, for a reader
@@ -338,12 +344,12 @@ mod tests {
             "a\nb\n\nc\nd"
         );
         // What the review of 0.107.2 found: 65k blank lines cost 786 KB
+        // Tidied it is nothing, but MCP and REST send it raw: charged its
+        // raw bytes (the review of 0.107.3)
         let blank = "\n".repeat(65_536);
-        assert_eq!(body_bytes(&blank), 0);
-        assert_eq!(
-            body_bytes(&format!("a{blank}b")),
-            4 + CONTINUATION_BYTES * 2
-        );
+        assert_eq!(tidy(&blank), "");
+        assert_eq!(body_bytes(&blank), 65_536);
+        assert_eq!(body_bytes(&format!("a{blank}b")), 65_538);
     }
 
     #[test]
@@ -352,6 +358,8 @@ mod tests {
         assert_eq!(body_bytes("x\ny"), 3 + CONTINUATION_BYTES);
         assert_eq!(body_bytes("x\r\ny"), 3 + CONTINUATION_BYTES);
         assert_eq!(body_bytes("x   \n\n\n\ny\n"), 4 + 2 * CONTINUATION_BYTES);
+        // Never under the raw bytes
+        assert_eq!(body_bytes(&" ".repeat(100)), 100);
         // The worst a 65,536-byte body gets: a line break every other byte
         let lines = "a\n".repeat(32_768);
         assert_eq!(
@@ -420,6 +428,12 @@ mod tests {
             fn never_grows(s in body()) {
                 prop_assert!(tidy(&s).len() <= s.len());
                 prop_assert!(body_bytes(&s) <= s.len() * (1 + CONTINUATION_BYTES));
+            }
+
+            /// MCP and REST send the raw body: the charge covers it
+            #[test]
+            fn charges_at_least_the_raw_body(s in any::<String>()) {
+                prop_assert!(body_bytes(&s) >= s.len());
             }
 
             #[test]

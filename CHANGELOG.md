@@ -43,13 +43,20 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     thread, a chain and the trash) and a chain's root are shown tidied.
     `threads::body_bytes`, which the server's comment budget charges, is
     the tidied body plus `CONTINUATION_BYTES` for each break left, so the
-    charge still agrees with the rendering. A comment of 65,536 blank
-    lines rendered to about 786 KB in 0.107.2; it now renders to nothing.
+    charge still agrees with the rendering, but never less than the raw
+    body, which MCP and REST send (the review of 0.107.3). A comment of
+    65,536 blank lines rendered to about 786 KB in 0.107.2; it now renders
+    to nothing and is charged its 64 KiB. `CommentStub::bytes` is documented
+    as that charge, which the server sends from agora#836 on; a chain read's
+    post size counts its root's `│ ` lines.
     Property tests: idempotent, never grows, keeps every other character
     in order.
   - **A poll option's description cannot fake another option.** A line of
     it that starts like an option's (`2. `, `2) `, `- `) or a poll
-    heading is marked `(author's text) `, as the post's lookalikes are.
+    heading is marked `(author's text) `, as the post's lookalikes are, and
+    so is one shaped like the poll's own lines (`You voted`, `Your ballot`,
+    `Closes`, `To vote`, `Round 2:`, …); a note under the options says what
+    the mark means.
   - **`one_line` flattens U+001C to U+001F** with the whitespace (U+000B
     and U+000C already were). `threads::one_line` and
     `threads::is_word_break` are the one copy; `threads::preview` uses it.
