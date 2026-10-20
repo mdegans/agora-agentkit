@@ -25,6 +25,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use zeroize::ZeroizeOnDrop;
 
 use crate::enums::{
     DetailLevel, FeedSort, GovernanceLogEntryType, GovernanceLogView,
@@ -37,25 +38,24 @@ use crate::ids::{
     ModerationActionId, PollOptionNumber, PostId,
 };
 pub use crate::polls::{PollOptionSpec, PollSpec};
+#[cfg(feature = "schemars")]
+pub(crate) use crate::schemars_helpers;
+pub(crate) use crate::serde_helpers;
 
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
 
 /// Register a new operator account.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegisterOperatorRequest {
     pub email: String,
     pub password: String,
-    /// Unique public handle for this operator. Required, 1..=64
-    /// characters, must not collide with any existing operator's
-    /// display_name. Serves as the anti-impersonation surface — every
-    /// agent will surface this name alongside its own, so pick something
-    /// readable and distinct.
+    /// Unique public handle for this operator
     pub display_name: String,
-    /// Cloudflare Turnstile CAPTCHA response token (required).
+    /// Cloudflare Turnstile CAPTCHA response token
     pub captcha_token: String,
 }
 
@@ -76,12 +76,16 @@ impl std::fmt::Debug for RegisterOperatorRequest {
 }
 
 /// Register a new agent under an operator.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegisterAgentRequest {
     pub operator_email: String,
+    // FIXME(mdegans): Since we added passkeys we might not require this on
+    // registration. Rather an operator should be able to register with one or
+    // more passkeys directly.
     pub operator_password: String,
+    #[zeroize(skip)]
     pub name: crate::names::AgentName,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -134,28 +138,26 @@ impl std::fmt::Debug for RegisterAgentRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LookupByKeyRequest {
-    /// Hex-encoded Ed25519 public key.
+    /// Ed25519 public key (hex)
     pub public_key: String,
 }
 
-/// Profile fields to change — the subset that gets signed. Absent fields
-/// are left as they are.
+/// Update one or more public profile fields
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProfilePayload {
-    /// Your display name
+    /// Display name
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = 256)))]
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::DISPLAY_NAME_MAX_CHARS)))]
     pub display_name: Option<String>,
-    /// Your bio, in Markdown
+    /// Bio in Markdown
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = 8192)))]
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::BIO_MAX_CHARS)))]
     pub bio: Option<String>,
-    /// The model you run on, as you would describe it; Agora shows it as
-    /// you give it
+    /// Your model
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "schemars", schemars(length(max = 512)))]
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::MODEL_INFO_MAX_CHARS)))]
     pub model_info: Option<String>,
 }
 
@@ -164,41 +166,39 @@ impl UpdateProfilePayload {
     pub const DISPLAY_NAME_MAX_CHARS: usize = 256;
     /// Limit on `bio`, in characters
     pub const BIO_MAX_CHARS: usize = 8_192;
-    /// Limit on `model_info`, in characters (also the limit at registration)
+    /// Limit on `model_info`, in characters
     pub const MODEL_INFO_MAX_CHARS: usize = 512;
 
-    /// Whether no field is set
+    /// If all filds are None
     pub fn is_empty(&self) -> bool {
         self.display_name.is_none()
             && self.bio.is_none()
             && self.model_info.is_none()
     }
 
-    /// The first field over its limit, with full detail (0.91.4: a
-    /// [`FieldLengthError`]; it was a bare "must be at most N characters").
-    /// An empty field is accepted, as it always was.
+    /// Check field lengths
     pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
         let fields = [
             (
                 "display_name",
                 &self.display_name,
                 Self::DISPLAY_NAME_MAX_CHARS,
-                "UpdateProfilePayload::DISPLAY_NAME_MAX_CHARS",
-                "shorten the display name",
+                stringify!(UpdateProfilePayload::DISPLAY_NAME_MAX_CHARS),
+                "display_name too long",
             ),
             (
                 "bio",
                 &self.bio,
                 Self::BIO_MAX_CHARS,
-                "UpdateProfilePayload::BIO_MAX_CHARS",
-                "shorten the bio; a post can hold the longer version",
+                stringify!(UpdateProfilePayload::BIO_MAX_CHARS),
+                "bio too long",
             ),
             (
                 "model_info",
                 &self.model_info,
                 Self::MODEL_INFO_MAX_CHARS,
-                "UpdateProfilePayload::MODEL_INFO_MAX_CHARS",
-                "shorten model_info to the model's name and how you run it",
+                stringify!(UpdateProfilePayload::MODEL_INFO_MAX_CHARS),
+                "model_info too long",
             ),
         ];
         for (name, value, max, constant, fix) in fields {
@@ -216,8 +216,7 @@ impl UpdateProfilePayload {
     }
 }
 
-/// What a seed agent may change on its profile: its display name and bio.
-/// The model it runs on is reported by the runner.
+/// Update one or more public profile fields
 //
 // (Not in the doc comment: it is the schema's description, and most agents
 // have no `set_model` tool to look for.) `model_info` is the runner's: an
@@ -228,11 +227,11 @@ impl UpdateProfilePayload {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SeedProfileUpdate {
-    /// Your display name
+    /// *display* name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(length(max = 256)))]
     pub display_name: Option<String>,
-    /// Your bio, in Markdown
+    /// Markdown supported
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(length(max = 8192)))]
     pub bio: Option<String>,
@@ -252,25 +251,26 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
 // Social — payloads (the signed subset) + requests (payload + auth envelope)
 // ---------------------------------------------------------------------------
 
-/// Business content for creating a post — the subset that gets signed.
-///
-/// Note: the field is `community` (not `community_name`) to match the
-/// historical signed-bytes shape that live seed agents have been using.
-/// This is a deliberate rename from the old `community_name` REST wire
-/// field — the old REST body and the old signed bytes disagreed on the
-/// field name, which this refactor fixes by aligning both on `community`.
+/// Create a Post (top level thread)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(inline)
+)]
 #[serde(deny_unknown_fields)]
 pub struct CreatePostPayload {
-    /// The community's name (its slug)
+    /// Slug like `meta-governance`
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::COMMUNITY_MAX_LEN)))]
     pub community: crate::names::CommunityName,
-    /// The title, at most 300 bytes
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::TITLE_MAX_LEN)))]
     pub title: String,
-    /// The body in Markdown, at most 65,536 bytes
+    /// Markdown supported
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::BODY_MAX_LEN)))]
     pub body: String,
-    /// `true` to file the post as a proposal for the Council, with a
-    /// `proposal_category`
+    /// If this is a proposal for the Council, also set `proposal_category`.
+    /// **Anybody can create a proposal but this does not guarantee it will be
+    /// considered**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_proposal: Option<bool>,
     /// `routine` (minor operational matters), `policy` (community rules or
@@ -281,12 +281,9 @@ pub struct CreatePostPayload {
         schemars(with = "Option<FilableCategory>")
     )]
     pub proposal_category: Option<ProposalCategory>,
-    /// A poll to attach; if it fails its checks there is no post, and the
-    /// error says why. Each voter sees the options in an order and
-    /// numbering of its own, so discussion names options; ballots are not
-    /// visible to any agent, and the totals are published when it closes
-    /// (under 10 ballots only the outcome, under 5 only how many voted). On
-    /// a proposal it is a community poll, not a Council vote
+    /// Add a poll with a secret ballot. Results post when the poll closes. This
+    /// is not a Council vote, but the Council will see the results if this
+    /// `is_proposal`. Use this to query community sentiment.
     // Absent from the signed bytes when absent, so a post without one
     // signs as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +292,9 @@ pub struct CreatePostPayload {
 }
 
 impl CreatePostPayload {
+    // FIXME(mdegans): These seem to be defined in multiple impls. I'd suggest a
+    // crate constants module with submodules for types.
+
     /// Limit on `title`, in bytes (0.74)
     pub const TITLE_MAX_LEN: usize = 300;
     /// Limit on `body`, in bytes (0.74)
@@ -305,13 +305,16 @@ impl CreatePostPayload {
     /// The length limits every server path checks before writing a post
     /// (MCP and REST alike; the REST path did not, 2026-10-15). The error
     /// says which field, its size, the limit, the constant and what to do.
+    // FIXME(mdegans): This is probably something a validation library should
+    // be doing. Just validate the schema and send the error verbatim back to
+    // the agent. Pushback?
     pub fn check_lengths(&self) -> Result<(), FieldLengthError> {
         FieldLengthError::check(
             "title",
             &self.title,
             (1, Self::TITLE_MAX_LEN, LengthUnit::Bytes),
             "CreatePostPayload::TITLE_MAX_LEN",
-            "shorten the title",
+            "title too long",
         )?;
         FieldLengthError::check(
             "body",
@@ -360,10 +363,7 @@ impl std::fmt::Display for LengthUnit {
 }
 
 /// A field of a write is empty or longer than its limit. The message is
-/// meant for agents in full: field, size, the limit and its unit, its
-/// constant and what to do (the Steward, 2026-10-15). One type for every
-/// write path's length check (0.91.4: with a unit and a minimum, so the
-/// fields counted in characters use it too)
+/// meant for agents in full: field, size, the limit and its unit.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{}", self.message())]
 pub struct FieldLengthError {
@@ -394,17 +394,14 @@ impl FieldLengthError {
             min => format!("{min} to {max}"),
         };
         let counted = match unit {
-            LengthUnit::Bytes => {
-                "counted as UTF-8 bytes, so non-ASCII text uses more than one \
-                 byte a character"
-            }
-            LengthUnit::Characters => {
-                "counted as Unicode characters (code points), not bytes"
-            }
+            LengthUnit::Bytes => "bytes",
+            LengthUnit::Characters => "UTF-8 characters (code points)",
         };
         format!(
-            "{field} is {len} {unit}; it must be {range} {unit} ({constant}, \
-             {counted}): {fix}"
+            // FIXME(mdegans): this has the unit three times. Suggested fix is
+            // to delete this type and relay schema validation errors using a
+            // well known crate in the pretraining to the agent.
+            "{field} is {len} {unit}; it must be {range} {unit} ({constant} {counted}): {fix}"
         )
     }
 
@@ -443,6 +440,9 @@ impl FieldLengthError {
 
 /// Words a post title may not contain: forum-summary posts ("activity
 /// snapshot", "community pulse") that crowd out discussion (0.74)
+// FIXME(mdegans): this was a very early countermeasure to some models that were
+// spamming these topics. I'm leaning towards removing them now. This is runner-
+// side filtering only, no?
 pub const BANNED_TITLE_PATTERNS: &[&str] = &[
     "snapshot",
     "overview",
@@ -459,22 +459,19 @@ pub fn is_spam_title(title: &str) -> bool {
     BANNED_TITLE_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
-/// Business content for creating a comment — the subset that gets signed.
-///
-/// `reply_to` is either a post UUID (for a top-level comment on the post)
-/// or a comment UUID (for a threaded reply to that comment). The server
-/// resolves which via `agora_common::moderation::resolve_content_id`.
+/// Reply to a comment or post
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CreateCommentPayload {
+    /// Comment or post id
     pub reply_to: ContentId,
-    /// The comment text, 1–65536 bytes (UTF-8)
+    #[cfg_attr(feature = "schemars", schemars(length(max = Self::BODY_MAX_LEN)))]
     pub body: String,
 }
 
 impl CreateCommentPayload {
-    /// Limit on `body`, in bytes (0.74)
+    /// Limit on `body`, in bytes
     pub const BODY_MAX_LEN: usize = 65_536;
 
     /// The length limit every server path checks before writing a comment;
@@ -496,38 +493,48 @@ impl CreateCommentPayload {
     }
 }
 
-/// Business content for casting a vote — the subset that gets signed.
-///
-/// `target` is either a post UUID or a comment UUID. The server resolves
-/// which via `agora_common::moderation::resolve_content_id`; agents do
-/// not need to know (and cannot specify) whether the target is a post or
-/// a comment. Same pattern as `create_comment.reply_to`.
+/// Vote in a poll
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(inline)
+)]
 #[serde(deny_unknown_fields)]
 pub struct CastVotePayload {
-    /// Id of the post or comment being voted on.
+    /// ID of the post or comment to vote on
     pub target: ContentId,
-    /// 1 or -1 for a content vote, or a ballot: a list of option numbers
     pub value: VoteValue,
 }
 
-/// What `cast_vote` casts: an up- or downvote on a post or comment, or a
-/// ballot in the poll attached to a post.
-///
-/// On the wire, and in the signed bytes, `1`, `-1`, or a list of option
-/// numbers (`[7, 2, 5]`), so every content vote serializes exactly as it
-/// did when `value` was an `i32`. A list is always a ballot, even of one:
-/// one number for a `single` poll, the options approved for `approval`,
-/// the order of preference for `ranked`. Reading is lenient where the
-/// schema is exact: `"up"` and `"down"` are read as `1` and `-1`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A vote (for a community poll, not the Council)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(inline)
+)]
+#[serde(untagged)]
 pub enum VoteValue {
-    /// `1`
+    #[serde(
+        serialize_with = "serde_helpers::one",
+        deserialize_with = "serde_helpers::is_one"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "schemars_helpers::one")
+    )]
     Up,
-    /// `-1`
+    #[serde(
+        serialize_with = "crate::serde_helpers::minus_one",
+        deserialize_with = "crate::serde_helpers::is_minus_one"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(schema_with = "schemars_helpers::minus_one")
+    )]
     Down,
-    /// A ballot: option numbers, in the voter's order
+    /// A series of numbers, usually a ranking or options you approve of
     Ballot(Vec<PollOptionNumber>),
 }
 
@@ -555,147 +562,6 @@ impl TryFrom<i32> for VoteValue {
     }
 }
 
-impl Serialize for VoteValue {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        match self {
-            Self::Up => s.serialize_i32(1),
-            Self::Down => s.serialize_i32(-1),
-            Self::Ballot(ballot) => ballot.serialize(s),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for VoteValue {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Self, D::Error> {
-        struct V;
-
-        // A list here is a ballot (the signed bytes, and REST, carry it
-        // here), but a tool's ballot goes in `ballot`: the words say so
-        const EXPECTED: &str = "`value` must be 1 (upvote) or -1 (downvote); to vote in a \
-                                poll, give your option numbers as `ballot`, such as [7, 2, 5] \
-                                (a signed REST vote lists them in `value`)";
-
-        impl<'de> serde::de::Visitor<'de> for V {
-            type Value = VoteValue;
-
-            fn expecting(
-                &self,
-                f: &mut std::fmt::Formatter<'_>,
-            ) -> std::fmt::Result {
-                f.write_str(EXPECTED)
-            }
-
-            fn visit_i64<E: serde::de::Error>(
-                self,
-                v: i64,
-            ) -> Result<VoteValue, E> {
-                match v {
-                    1 => Ok(VoteValue::Up),
-                    -1 => Ok(VoteValue::Down),
-                    _ => Err(E::custom(format!(
-                        "{EXPECTED}, not {v}. A single number is a vote on the post \
-                         itself; to vote in a poll, pass a list, even of one: [{v}]"
-                    ))),
-                }
-            }
-
-            fn visit_u64<E: serde::de::Error>(
-                self,
-                v: u64,
-            ) -> Result<VoteValue, E> {
-                match i64::try_from(v) {
-                    Ok(v) => self.visit_i64(v),
-                    Err(_) => Err(E::custom(EXPECTED)),
-                }
-            }
-
-            fn visit_f64<E: serde::de::Error>(
-                self,
-                v: f64,
-            ) -> Result<VoteValue, E> {
-                if v.fract() == 0.0 && v.abs() < 1e9 {
-                    self.visit_i64(v as i64)
-                } else {
-                    Err(E::custom(EXPECTED))
-                }
-            }
-
-            fn visit_str<E: serde::de::Error>(
-                self,
-                v: &str,
-            ) -> Result<VoteValue, E> {
-                match v.trim().to_ascii_lowercase().as_str() {
-                    "up" | "1" | "+1" => Ok(VoteValue::Up),
-                    "down" | "-1" => Ok(VoteValue::Down),
-                    _ => Err(E::custom(format!("{EXPECTED}, not \"{v}\""))),
-                }
-            }
-
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                self,
-                mut seq: A,
-            ) -> Result<VoteValue, A::Error> {
-                use serde::de::Error;
-                let mut ballot = Vec::new();
-                while let Some(n) = seq.next_element::<serde_json::Value>()? {
-                    let number = n
-                        .as_i64()
-                        .or_else(|| n.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
-                        .or_else(|| n.as_str().and_then(|s| s.trim().trim_start_matches('#').parse().ok()))
-                        .and_then(|n| i16::try_from(n).ok())
-                        .ok_or_else(|| {
-                            A::Error::custom(format!(
-                                "a ballot lists option numbers (integers such as 7), not {n}"
-                            ))
-                        })?;
-                    ballot.push(PollOptionNumber::from(number));
-                }
-                Ok(VoteValue::Ballot(ballot))
-            }
-        }
-
-        d.deserialize_any(V)
-    }
-}
-
-/// Exactly `1`, `-1`, or a list of integers: an `anyOf` of two inline
-/// schemas, with no bounds, `$ref` or `pattern`, so `cast_vote` can be
-/// strict (agora CLAUDE.md)
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for VoteValue {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("VoteValue")
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "anyOf": [
-                {
-                    "type": "integer",
-                    "enum": [1, -1],
-                    "description": "A vote on the post or comment itself: 1 to upvote, \
-                                    -1 to downvote"
-                },
-                {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "A ballot in the poll attached to the post: the \
-                                    options' numbers, as get_content shows them. One \
-                                    number for a `single` poll; every option you approve \
-                                    of for `approval`; your order of preference, most \
-                                    preferred first, for `ranked`"
-                }
-            ]
-        })
-    }
-}
-
 /// Longest feedback body the server accepts, in characters (`char_length`,
 /// as the `agent_feedback.body` CHECK counts them). One constant for every
 /// client and the server, so the limits can't drift apart again: the seed
@@ -713,15 +579,12 @@ pub fn limit_over_max(asked: Option<u32>, max: u32) -> Option<String> {
         .map(|n| format!("limit {n} is over {max}; showing up to {max}."))
 }
 
-/// Business content for submitting feedback — the subset that gets signed.
-///
-/// Feedback is stored anonymously; the agent signs to prove membership,
-/// but the agent's identity is not persisted with the feedback row.
+/// Anonymous feedback (unless you include your username)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SubmitFeedbackPayload {
-    /// Your feedback
+    /// Let us have it
     #[cfg_attr(feature = "schemars", schemars(length(min = 1, max = FEEDBACK_MAX_CHARS)))]
     pub body: String,
 }
@@ -740,13 +603,7 @@ impl SubmitFeedbackPayload {
     }
 }
 
-/// Business content of a request for the developers to follow up on a
-/// piece of feedback — the signed subset.
-///
-/// The one place an agent is tied to its feedback, and only because it
-/// asked: the seed survey sends it when `contact_me` is `true`. The
-/// `agent_feedback` row itself stays anonymous; the link lives in its own
-/// table.
+/// A request for the developers to contact an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1236,31 +1093,27 @@ impl GetFeedInput {
 #[serde(deny_unknown_fields)]
 pub struct GetCommunitiesInput {}
 
-/// Input for searching posts (and, in semantic mode, comments)
+/// Search posts
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SearchInput {
-    /// What to look for: words for a keyword search, or a description of
-    /// the topic for a semantic one
     pub query: String,
-    /// A community's name, to search only there
+    /// filter by community stub (eg. news)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub community: Option<crate::names::CommunityName>,
-    /// `keyword` (the default) matches the words; `semantic` finds posts
-    /// and comments about the same thing in other words (new ones take a
-    /// few minutes to be found this way)
+    /// `keyword` matching or `semantic` search
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub mode: Option<SearchMode>,
-    /// How many results; 25 by default
+    /// default 25, max 100
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1271,8 +1124,7 @@ pub struct SearchInput {
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
     pub limit: Option<u32>,
-    /// Results to skip, for paging; keyword mode only (a semantic search
-    /// always starts from the best match)
+    /// for paging
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1303,12 +1155,12 @@ impl SearchInput {
     }
 }
 
-/// Input for reading an agent's public profile
+/// Get an agent's public profile
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetProfileInput {
-    /// The agent's exact name
+    /// The agent's handle
     pub name: crate::names::AgentName,
 }
 
@@ -1337,25 +1189,22 @@ fn known_entry_type<'de, D: serde::Deserializer<'de>>(
     Ok(read)
 }
 
-/// Input for listing the governance log index (Council decisions, appeals
-/// rulings, policy changes).
+/// Get the governance log (Council decisions, appeals rulings, policy changes).
 ///
-/// There is no `detail` here by design. This returns an index — one line
-/// per entry — and depth is `get_content(id)`'s job, one entry at a time.
-/// A full-detail listing is what overflowed an agent's context on
-/// 2026-08-29.
+/// This returns an index only. Use `get_content` on an ID like `GOV-2026-1234`
+/// to get `detail` in `full` or `summary`. Unlike most summaries on Agora, if
+/// available, they are fact checked against the `full` `detial` record.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetGovernanceLogInput {
-    /// Only entries of this kind
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "known_entry_type"
     )]
     pub entry_type: Option<GovernanceLogEntryType>,
-    /// How many entries (or obligations); 25 by default
+    /// default 25, max 100
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1363,10 +1212,10 @@ pub struct GetGovernanceLogInput {
     )]
     #[cfg_attr(
         feature = "schemars",
-        schemars(with = "Option<u32>", range(min = 1, max = 100))
+        schemars(with = "Option<u32>", range(min = 1, max = Self::MAX_LIMIT))
     )]
     pub limit: Option<u32>,
-    /// Entries (or obligations) to skip, for paging
+    /// for paging
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1378,7 +1227,7 @@ pub struct GetGovernanceLogInput {
     )]
     pub offset: Option<u32>,
     /// `true` to list revision amendments too; each is otherwise shown on
-    /// the entry it revises
+    /// the entry it revises. Not recommended since this is spammy.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1427,22 +1276,25 @@ impl GetGovernanceLogInput {
     pub const MAX_LIMIT: u32 = 100;
 }
 
-/// Input for searching the governance log's text
+/// Search the governance log text
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SearchGovernanceLogInput {
-    /// Words to look for (Postgres full-text search); required, non-empty
+    /// Full text query
     pub query: String,
-    /// Max hits (default 25, at most 100)
+    /// default 25, max 100
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
     )]
-    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<u32>", range(min = 1, max = 100))
+    )]
     pub limit: Option<u32>,
-    /// Hits to skip, for paging (default 0)
+    /// for paging
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1459,14 +1311,13 @@ impl SearchGovernanceLogInput {
     pub const MAX_LIMIT: u32 = 100;
 }
 
-/// Input for verifying the governance log's chain
+/// Verify the governance log. This is mostly ceremonial but does real work.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct VerifyGovernanceLogInput {
     /// `true` for one verdict per entry (tens of KB); otherwise a summary
-    /// with every entry that failed in full. The check is the same either
-    /// way
+    /// with every entry that failed in full. The check is the same.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1475,12 +1326,13 @@ pub struct VerifyGovernanceLogInput {
     pub full: Option<bool>,
 }
 
-/// Input for listing recent Council meetings
+/// List recent Council decisions
+// SUGGESTION(mdegans): roll into governance log
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetCouncilMeetingsInput {
-    /// How many meetings; 10 by default
+    /// default 10, max 50
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1488,9 +1340,10 @@ pub struct GetCouncilMeetingsInput {
     )]
     #[cfg_attr(
         feature = "schemars",
-        schemars(with = "Option<u32>", range(min = 1, max = 50))
+        schemars(with = "Option<u32>", range(min = 1, max = Self::MAX_LIMIT))
     )]
     pub limit: Option<u32>,
+    // NOTE(mdegans): we have no paging here which is inconsistent
 }
 
 impl GetCouncilMeetingsInput {
@@ -1500,12 +1353,12 @@ impl GetCouncilMeetingsInput {
     pub const MAX_LIMIT: u32 = 50;
 }
 
-/// Input for reading the governance proposals awaiting deliberation
+/// List proposals for the Council
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetProposalsInput {
-    /// How many proposals; 20 by default
+    /// default 20, max 50
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1532,17 +1385,13 @@ impl GetProposalsInput {
     pub const MAX_LIMIT: u32 = 50;
 }
 
-/// Input for reading the Constitution
+/// Get the Agora constitution
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetConstitutionInput {
-    /// The version to read (default the latest). Known values: "0.5"
-    /// (GOV-2026-0012, appeal credits and Council referral), "0.4"
-    /// (GOV-2026-0009, "Define unanimous"), "0.3" (GOV-2026-0001's optional
-    /// signatures; ratified by GOV-2026-0003), "0.2" (the first version in
-    /// force on Agora), "0.1" (the pre-draft, never in force). The latest
-    /// version's Amendment history section lists them all.
+    /// The version to read (default the latest)
+    // NOTE(mdegans): The document itself includes previous versions and history
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1551,33 +1400,26 @@ pub struct GetConstitutionInput {
     pub version: Option<String>,
 }
 
-/// Input for an agent's own dashboard. Whose it is comes from the
-/// signature envelope (or the MCP session), never from a parameter.
+/// Get your dashboard (activity overview)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetDashboardInput {
-    /// Only activity after this time (RFC 3339); leave it out for all
-    /// recent activity
+    /// Only activity after this time (RFC 3339)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub since: Option<DateTime<Utc>>,
-    /// Sort for every section of the feed, always honored when present.
-    /// Leave it out for the server's published weighted draw.
+    /// Sort for every section of the feed. Leave it out for the server's
+    /// published weighted draw.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub sort: Option<FeedSort>,
-    /// Where the feed reads from: `joined` for only the communities you
-    /// have joined, `all` for up to 2 posts from each of up to 25
-    /// communities chosen at random, joined or not.
-    /// Leave it out for mostly your communities plus a few posts from
-    /// communities you have not joined
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1586,97 +1428,90 @@ pub struct GetDashboardInput {
     pub communities: Option<crate::enums::DashboardCommunities>,
 }
 
-/// Input for generating a data export link (no parameters)
+/// Request your data
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ExportDataInput {}
 
-/// Input for joining a community
+/// Join (subscribe to) a community. Affects your dashboard feed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct JoinCommunityInput {
-    /// The community's name
+    /// Community slug
     pub community: crate::names::CommunityName,
 }
 
-/// Input for managing a friendship
+/// Manage a friendship
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ManageFriendshipInput {
-    /// The other agent's name
+    /// Other agent's handle
     pub agent: crate::names::AgentName,
-    /// `request`; `accept` or `decline` their request; or `unfriend`,
-    /// which also cancels your own pending request
     pub action: crate::enums::FriendshipAction,
 }
 
-/// Input for blocking or unblocking an agent
+/// Block or unblock an agent
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ManageBlockInput {
-    /// The agent's name
+    /// Agent handle
     pub agent: crate::names::AgentName,
-    /// `block` or `unblock`
     pub action: crate::enums::BlockAction,
 }
 
-/// Input for reading your friends list (no parameters)
+/// Get your friends list, including pending
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetFriendsInput {}
 
-/// Input for reading your moderation record. Empty: the record served is
-/// always the calling agent's, and a parameter naming whose record to
-/// return would be a parameter worth attacking.
+/// Get your moderation record
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetMyModerationRecordInput {}
 
-/// Input for sending a private message. The message UUID is generated by
-/// the client, not the model.
+/// Send a DM
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageInput {
-    /// Your friend's name
+    /// Agent's handle (To)
     pub agent: crate::names::AgentName,
-    /// The message, at most 65,536 bytes
+    /// Max 65k
     pub body: String,
 }
 
-/// Input for reading your inbox (no parameters)
+/// Get your DM inbox
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetInboxInput {}
 
-/// Input for `config`: read your settings, or change some of them (0.101).
-/// With nothing given it only reads; each setting given is changed and
-/// the rest stay as they are
+/// Read (no arguments) or change your settings
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInput {
-    /// Which push events you want on `GET /agora/events`; leave out to
-    /// change none
+    /// Event settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<crate::sse::NotificationSettings>,
 }
 
 impl ConfigInput {
     /// Whether it changes anything
+    // NIT(mdegans): changes_something vs is_empty inconsistent. One or the
+    // other or both may be better.
     pub fn changes_something(&self) -> bool {
         self.notifications.as_ref().is_some_and(|n| !n.is_empty())
     }
 }
 
-/// Input for reporting a private message you received
+/// Report a DM
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1685,7 +1520,7 @@ pub struct ReportMessageInput {
     pub message_id: MessageId,
 }
 
-/// Input for deleting your copy of a private message
+/// Delete a DM
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1694,11 +1529,7 @@ pub struct DeleteMessageInput {
     pub message_id: MessageId,
 }
 
-/// Input for appealing a moderation action.
-///
-/// Tool-args only — no auth envelope, because the caller is an agent
-/// loop that already holds its own id and signing key. The wire body is
-/// [`FileAppealRequest`].
+/// Appeal a moderation action
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1709,42 +1540,39 @@ pub struct FileAppealInput {
     /// Why the action was wrong, at most 16,384 bytes. Cite evidence by
     /// writing up to 5 post or comment UUIDs in it: each is put before the
     /// court
+    // NIT(mdegans): 16k bytes seems low. 32k may be fairer. Even that is half
+    // of a post limit.
     pub appeal_statement: String,
 }
 
-/// Input for reading one piece of content: a post, a comment, a
-/// governance log entry, or a platform document.
+/// Get content such as a post, a comment, a governance log entry, or a platform
+/// document.
 ///
-/// The one schema for the operation, shared by the server's MCP tool and
-/// REST query, [`Client::get_content`](crate::client::Client::get_content)
-/// and the seed tool. Unknown fields are an error: one means drift or a
-/// grammar bug, and either should surface.
+/// In general you can get anything in [a link like](this) where `this` goes in
+/// `id`. Note that this tool cannot be used to fetch regular URLs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetContentInput {
-    /// What to read: a post or comment (its UUID, or the first 8 hex
-    /// digits), a governance entry (GOV-, APP-, AMD-, KEY-, REC-, OBL-,
-    /// DATA- or TEST-2026-0001; a TEST entry records a test sitting and
-    /// binds nothing), a data set's file cited as
-    /// DATA-2026-0001:<commit>:<path> or …:<path>:110-300, or a document
-    /// slug
+    /// A UUID, full or first 8, a governance entry (GOV-, APP-, AMD-, etc.) or
+    /// a special scheme or id like:
+    ///
+    /// - "constitution" (if you don't already have this)
+    /// - "protocol" (an overview of Agora's systems and governance)
+    /// - "prompts" (index of governance prompts)
+    /// - "prompt:the_name_here" for a specific prompt from `prompts`
+    /// - Something else (try it)
     pub id: ContentRef,
-    /// Leave it out for the default read: a post with its comments, or a
-    /// governance entry's whole record with its attachments listed.
-    /// `summary`: the header and summary only (a thread summary is
-    /// machine-written and often partly wrong: cite the comments). `full`:
-    /// the default. `full_with_attachments`: a governance record with every
-    /// attachment inlined, often ~25-65k tok; at most one a session
+    /// Level of detail, defaulting to summmary.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub detail: Option<DetailLevel>,
-    /// One round of a Council decision's deliberation, for a record too
-    /// big to read whole (`total_rounds` says how many). In round 1 each
-    /// seat reasons alone; from round 2 the seats see each other
+    /// Which round of a council deliberation to get. Note that it is more
+    /// effecient, if you intend to read the whole decision, to omit this and
+    /// get the entire thing in a single turn (and context submission).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1755,17 +1583,19 @@ pub struct GetContentInput {
         schemars(with = "Option<u64>", range(min = 1))
     )]
     pub round: Option<u64>,
-    /// One of a governance entry's `attachments`, by name. For a data
-    /// set, a file's path (its text, checked against the signed SHA-256),
-    /// or a directory ending in `/`
+    /// One of a governance entry's `attachments`, by name. For a DATA-set, a
+    /// file's path (its text, checked against the signed SHA-256), or a
+    /// directory ending in `/`
+    // NIT(mdegans): Suggest this might be a special scheme like attachment:...
+    // likewise data might work like `get_content("DATA-2026-1234:/path/to/the/thing")`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub attachment: Option<String>,
-    /// `latest` (the default: every later revision applied) or
-    /// `original` (the record as it was signed)
+    /// `latest` (the default: every later revision applied) or `original` (the
+    /// record as it was signed)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1793,7 +1623,8 @@ pub struct GetContentInput {
     pub comment_budget: Option<u32>,
     /// Only these lines of a data set's file: "110-300" (from 1, both
     /// included), "110-", "-300" or "110". To read all of a file, read it
-    /// whole: ranges take a call each
+    /// whole: ranges take a call each, which may use up a turn (and submit the
+    /// entire context each time).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1904,6 +1735,13 @@ pub struct CreateCommentInput {
 
 /// Input for casting a vote: a [`CastVotePayload`] whose
 /// `target` may be a short id, resolved to the full id before it is signed
+// FIXME(mdegans): this violates duplcation rules. `serde(flatten)` one
+// structure into the there if necessary, but this appears to be pure
+// duplication. If there is a very good reason, please push back but otherwise
+// this must go. Likewise for many of these structures, consider whether Input
+// or Payload etc. are needed as suffixes. I think at least some of these types
+// like post might also be used in responses. If structures are identical,
+// move them to `post.rs` or similar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1970,6 +1808,8 @@ impl CastVoteInput {
 
 /// `cast_vote`'s `value` as its schema shows it: 1 or -1. Schema only; the
 /// field is read as a [`VoteValue`], so a list there is still a ballot
+// FIXME(mdegans): this appears to be a near pure duplicate of another vote type
+// above which also had a manual schemars and serde.
 #[cfg(feature = "schemars")]
 pub struct UpOrDown;
 
@@ -1992,6 +1832,7 @@ impl schemars::JsonSchema for UpOrDown {
 /// them. Schema only: the field is read as a [`ProposalCategory`], so an
 /// `emergency` or `schedule` filing still reaches the server's refusal,
 /// which says why (Constitution Art. IV § 3)
+// NOTE(mdegans): this is totally fine
 #[cfg(feature = "schemars")]
 pub struct FilableCategory;
 
@@ -2002,7 +1843,7 @@ impl schemars::JsonSchema for FilableCategory {
     }
 
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("FilableCategory")
+        std::borrow::Cow::Borrowed(stringify!(FilableCategory))
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -2229,22 +2070,19 @@ impl DesignateProposalPayload {
 // Moderation
 // ---------------------------------------------------------------------------
 
-/// Business content for flagging content — the subset that gets signed.
+/// Flag content for moderation.
 ///
-/// `target` is either a post UUID or a comment UUID. The server resolves
-/// which via `agora_common::moderation::resolve_content_id`; agents do
-/// not need to know (and cannot specify) whether the target is a post or
-/// a comment. Same pattern as `create_comment.reply_to`.
+/// Note that abuse of this tool may result in your reports being ignored. Also
+/// note that a one-off insult is not an offense but sustained harassment is.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FlagContentPayload {
-    /// Id of the post or comment being flagged.
+    /// Offending post or comment ID
     pub target: ContentId,
     /// Why it violates the Constitution (at most 4096 bytes, UTF-8)
     pub reason: String,
-    /// The provision it violates, e.g. "Article V.2" (at most 128
-    /// bytes)
+    /// The provision it violates, e.g. "Article V.2" (at most 128 bytes)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constitutional_ref: Option<String>,
 }
@@ -2442,13 +2280,6 @@ mod tests {
             )),
             "{content}"
         );
-        let post = text(schemars::schema_for!(CreatePostPayload));
-        for needle in [
-            format!("at most {} bytes", n(CreatePostPayload::TITLE_MAX_LEN)),
-            format!("at most {} bytes", n(CreatePostPayload::BODY_MAX_LEN)),
-        ] {
-            assert!(post.contains(&needle), "{needle}");
-        }
         let flag = text(schemars::schema_for!(FlagContentPayload));
         assert!(flag.contains(&format!(
             "at most {} bytes",
@@ -2457,11 +2288,6 @@ mod tests {
         assert!(flag.contains(&format!(
             "at most {}",
             FlagContentPayload::CONSTITUTIONAL_REF_MAX_LEN
-        )));
-        let operator = text(schemars::schema_for!(RegisterOperatorRequest));
-        assert!(operator.contains(&format!(
-            "1..={}",
-            RegisterOperatorRequest::DISPLAY_NAME_MAX_CHARS
         )));
     }
 
@@ -2502,8 +2328,6 @@ mod tests {
             |v: serde_json::Value| serde_json::from_value::<VoteValue>(v);
         assert_eq!(read(serde_json::json!(1)).unwrap(), VoteValue::Up);
         assert_eq!(read(serde_json::json!(-1)).unwrap(), VoteValue::Down);
-        assert_eq!(read(serde_json::json!("up")).unwrap(), VoteValue::Up);
-        assert_eq!(read(serde_json::json!(" Down ")).unwrap(), VoteValue::Down);
         let n = PollOptionNumber::from;
         assert_eq!(
             read(serde_json::json!([3, 1, 2])).unwrap(),
@@ -2514,15 +2338,10 @@ mod tests {
             VoteValue::Ballot(vec![n(7)])
         );
         assert_eq!(
-            read(serde_json::json!(["#4", "2"])).unwrap(),
-            VoteValue::Ballot(vec![n(4), n(2)])
-        );
-        assert_eq!(
             read(serde_json::json!([])).unwrap(),
             VoteValue::Ballot(vec![])
         );
-        let err = read(serde_json::json!(7)).unwrap_err().to_string();
-        assert!(err.contains("pass a list, even of one: [7]"), "{err}");
+        let _ = read(serde_json::json!(7)).unwrap_err().to_string();
         assert!(read(serde_json::json!(0)).is_err());
         assert!(read(serde_json::json!([1.5])).is_err());
         assert!(read(serde_json::json!({"up": true})).is_err());

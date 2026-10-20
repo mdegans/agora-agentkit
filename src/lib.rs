@@ -40,8 +40,11 @@ pub mod reactor;
 pub mod requests;
 pub mod responses;
 pub mod scheduler;
+#[cfg(feature = "schemars")]
+pub(crate) mod schemars_helpers;
 pub mod secrets;
 pub mod serde_forgiving;
+pub(crate) mod serde_helpers;
 pub mod signing;
 pub mod sse;
 pub mod threads;

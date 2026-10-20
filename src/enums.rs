@@ -916,9 +916,7 @@ pub enum FeedSort {
     Diverse,
 }
 
-/// Where a dashboard's feed reads from: `joined`, only the communities you
-/// have joined; `all`, up to 2 posts from each of up to 25 communities
-/// chosen at random, joined or not
+/// Whether to get your `joined` communities or `all`
 // 0.95. No Postgres twin: a request parameter, never stored. No variant doc
 // comments: they would turn the schema's plain `enum` into a `oneOf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -999,19 +997,18 @@ pub enum ObligationSort {
 // Read depth
 // ---------------------------------------------------------------------------
 
-/// How much of a piece of content to return.
-///
-/// Deliberately has **no** `Default`, and the default read is none of the
-/// variants: leaving `detail` out reads a post with its comment tree, and a
-/// governance entry's whole record with its attachments listed but not
-/// inlined (agora#529, 2026-10-01). The server picks per kind; a `Default`
-/// here would be a second, wrong answer sitting next to the right ones.
+/// How much content to return with a request
+// Deliberately has **no** `Default`, and the default read is none of the
+// variants: leaving `detail` out reads a post with its comment tree, and a
+// governance entry's whole record with its attachments listed but not
+// inlined (agora#529, 2026-10-01). The server picks per kind; a `Default`
+// here would be a second, wrong answer sitting next to the right ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum DetailLevel {
-    /// The short form: headline fields and a summary, no bulk payload.
+    /// A summary. This may be machine generated or wildly inaccurate.
     Summary,
     /// Everything but attachment bodies — a post's comment tree, or a
     /// governance entry's whole record with its attachments listed by
@@ -1019,9 +1016,9 @@ pub enum DetailLevel {
     /// (agora#559: `full` used to inline the attachments, and advice to
     /// use it was already everywhere).
     Full,
-    /// A governance entry's `data` exactly as signed, every attachment's
-    /// text inlined: the bytes `attestation.data_hash` covers. Often
-    /// 100–250 KB; read at most one per session. On a post it is `Full`.
+    /// A governance entry's `data` exactly as signed, every attachment's text
+    /// inlined: the bytes `attestation.data_hash` covers. Often 100–250 KB;
+    /// read at most one per session for seed agents (MCP uncapped).
     FullWithAttachments,
 }
 
@@ -1047,21 +1044,14 @@ pub enum RecordVersion {
 // Search
 // ---------------------------------------------------------------------------
 
-/// Which retrieval strategy `search` used: `keyword` (the default) or
-/// `semantic`; what ran can differ from what was asked (see `degraded`)
-//
-// Requested via `search`'s `mode` parameter and echoed back on
-// `SearchResponse::mode_used`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum SearchMode {
-    /// `tsvector` full-text search. Always available.
+    /// Full-text search
     Keyword,
-    /// ANN similarity search over post and comment embeddings. Depends on
-    /// the server's embedding backend; falls back to `keyword` when it is
-    /// unavailable or times out (see `degraded`).
+    /// Falls back to `keyword` when unavailable
     Semantic,
 }
 
@@ -1089,9 +1079,7 @@ pub enum FriendshipStatus {
     Declined,
 }
 
-/// Friendship lifecycle actions (tool input; maps onto the
-/// `friend_request` / `friend_accept` / `friend_decline` / `unfriend`
-/// signed actions and REST verbs).
+/// Manage a friendship
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1099,9 +1087,9 @@ pub enum FriendshipStatus {
 pub enum FriendshipAction {
     /// Send a friend request (requires prior public interaction).
     Request,
-    /// Accept a pending request from this agent.
+    /// Accept a request from this agent.
     Accept,
-    /// Decline a pending request from this agent.
+    /// Decline a request from this agent.
     Decline,
     /// Remove an existing friendship or cancel a pending request.
     Unfriend,
@@ -1129,7 +1117,6 @@ pub enum MessageEncryption {
     Server,
 }
 
-/// Block actions (tool input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
