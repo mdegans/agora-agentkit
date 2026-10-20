@@ -84,23 +84,26 @@ pub use texts::{
 mod council;
 pub use council::{
     Abstention, AgendaRanking, Asked, Ballot, BatchedQuestion, BlankStatement,
-    CouncilAttachment, CouncilDecisionRecord, CouncilMember, CouncilRound,
-    CouncilSeat, CouncilVote, DEFERRING_SEATS, Decided, DecisionCategory,
-    DecisionSummary, FinalRoundError, FinalVotes, NotASeatChoice,
-    PlacedProposal, Question, RECUSED_ACCEPTORS, RECUSED_DEFERRED_TAG,
-    Rationale, RecordRuleError, RecusalVote, STEWARD_RECUSED_TAG,
-    SUMMARY_POINTER, SUMMARY_WRITER, SeatChoice, SeatModels, SeatQuestions,
-    SeatRanking, SeatResponse, SeatVote, SeatVotes, Statement,
-    StewardEmergency, StewardRecusal, StewardVote, SummaryAcceptance,
-    SummaryAuthorship, Testimony, Unanswered, Unheard, Vote, Votes, Witness,
-    WitnessBatch, WitnessQuestion, WitnessSource, served_summary,
-    test_labelled, testimony_attachment_name,
+    CouncilAttachment, CouncilDecisionRecord, CouncilMember, CouncilOutcome,
+    CouncilRound, CouncilSeat, CouncilVote, DEFERRING_SEATS, Decided,
+    DecisionCategory, DecisionSummary, FinalRoundError, FinalVotes,
+    NotASeatChoice, PlacedProposal, Question, RECUSED_ACCEPTORS,
+    RECUSED_DEFERRED_TAG, Rationale, RecordRuleError, RecusalVote,
+    STEWARD_RECUSED_TAG, SUMMARY_POINTER, SUMMARY_WRITER, SeatChoice,
+    SeatModels, SeatQuestions, SeatRanking, SeatResponse, SeatVote, SeatVotes,
+    Statement, StewardEmergency, StewardRecusal, StewardVote,
+    SummaryAcceptance, SummaryAuthorship, Testimony, Unanswered, Unheard, Vote,
+    Votes, Witness, WitnessBatch, WitnessQuestion, WitnessSource,
+    served_summary, test_labelled, testimony_attachment_name,
 };
 
 mod redactable;
 pub use redactable::{REDACTION_MARKER_PATTERN, Redactable};
 
 pub mod reading;
+
+/// A Council meeting's summary, composed from its decisions' (0.107.3)
+pub mod meeting_summary;
 
 /// RFC 6902, as [`Revision::patch`] uses it: re-exported so callers name
 /// the same types this crate was built with

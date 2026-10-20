@@ -3024,7 +3024,7 @@ pub(super) fn format_governance_index(
     );
     for e in entries {
         out.push_str(&format!(
-            "{} [{}]{} {} — {}",
+            "{} [{}]{}{} {} — {}",
             e.id,
             e.entry_type,
             // Only when not in force, to keep lines short; the footer says
@@ -3032,6 +3032,20 @@ pub(super) fn format_governance_index(
             match e.standing {
                 Standing::InForce => String::new(),
                 other => format!(" [standing: {other}]"),
+            },
+            // Before the title, which can read as adopted when the Council
+            // only approved drafting it (GOV-2026-0010, 2026-10-20)
+            match e.outcome {
+                Some(outcome) => format!(
+                    " [outcome: {}]",
+                    outcome_words(
+                        outcome,
+                        e.vote_tally.as_ref(),
+                        e.steward_veto,
+                        LINE_TALLY
+                    )
+                ),
+                None => String::new(),
             },
             e.created_at.format("%Y-%m-%d"),
             truncate(&one_line(&e.title), 120),
@@ -3054,7 +3068,72 @@ pub(super) fn format_governance_index(
          get_content(id) for the whole record, or with detail=\"summary\" for \
          its summary alone (free).\n",
     );
+    if entries.iter().any(|e| e.outcome.is_some()) {
+        out.push_str(OUTCOME_NOTE);
+        out.push('\n');
+    }
     out
+}
+
+/// The longest tally an entry's header shows
+const HEADER_TALLY: usize = 200;
+
+/// What an outcome on a Council decision says, and what it does not
+const OUTCOME_NOTE: &str = "An outcome is the Council's vote on the item as \
+    titled: \"approved\" means it approved what the item put to it (its \
+    summary says what), not by itself that a measure is in effect.";
+
+/// The longest tally a log line shows; a longer one (a deferral's reason,
+/// a scheduling sentence) is left to the entry's read
+const LINE_TALLY: usize = 24;
+
+/// "approved, 5-0": a Council decision's outcome as its record signs it,
+/// with its tally when that is at most `max_tally` characters (else it
+/// says the record has it, or a redaction removed it). A vetoed item says
+/// so: its tally counts the others' votes, not the veto
+fn outcome_words(
+    outcome: crate::enums::DecisionOutcome,
+    tally: Option<&crate::govlog::Redactable<String>>,
+    steward_veto: bool,
+    max_tally: usize,
+) -> String {
+    use crate::govlog::Redactable;
+    let word = if steward_veto {
+        format!("{outcome} by the Steward's veto")
+    } else {
+        outcome.to_string()
+    };
+    let others = if steward_veto {
+        "the others voted "
+    } else {
+        ""
+    };
+    match tally {
+        Some(Redactable::Value(t)) => {
+            let t = one_line(t);
+            // A tabled item's tally is "Deferred" or "Deferred: <why>",
+            // which would repeat the outcome
+            let bare = outcome.to_string();
+            let (t, sep) = match t.get(..bare.len()) {
+                Some(head) if head.eq_ignore_ascii_case(&bare) => (
+                    t[bare.len()..].trim_start_matches([':', ' ']).to_string(),
+                    ": ",
+                ),
+                _ => (t, ", "),
+            };
+            if t.is_empty() {
+                word
+            } else if t.chars().count() > max_tally {
+                format!("{word} (tally in the record)")
+            } else {
+                format!("{word}{sep}{others}{t}")
+            }
+        }
+        Some(Redactable::Redacted(id)) => {
+            format!("{word}, tally redacted by {id}")
+        }
+        None => word,
+    }
 }
 
 /// What a `view=obligations` request asked for, for its rendering
@@ -3293,9 +3372,36 @@ pub(super) fn format_governance_entry(
     // if it were in force is a miscitation.
     // Shown in force too: get_content's description says what is not
     // precedent by `standing`, so every entry says its own (2026-10-19)
+    // A Council decision's outcome beside its standing: "in_force" alone
+    // read as a measure in force, where the Council had approved only
+    // drafting one (GOV-2026-0010, 2026-10-20). Standing is the decision's,
+    // and the outcome says what was decided on the item as titled
+    if let Some(outcome) = entry.outcome {
+        out.push_str(&format!(
+            "Outcome: {}{} · ",
+            outcome_words(
+                outcome,
+                entry.vote_tally.as_ref(),
+                entry.steward_veto,
+                HEADER_TALLY
+            ),
+            // The original's outcome, beside the standing it has now
+            if entry.version == Some(crate::enums::RecordVersion::Original) {
+                " (as first signed)"
+            } else {
+                ""
+            }
+        ));
+    }
     if entry.standing != Standing::InForce {
         out.push_str(&format!(
             "**Standing: {}** — do not cite this as it stands.\n",
+            entry.standing
+        ));
+    } else if entry.outcome.is_some() {
+        out.push_str(&format!(
+            "Standing: {} (no amendment has retired it as precedent; what \
+             it decided on the item is in its summary and record)\n",
             entry.standing
         ));
     } else if decides_nothing(entry.entry_type) {
@@ -3835,6 +3941,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: vec![GovernanceCitation {
                 id: "REC-2026-0012".parse().unwrap(),
@@ -3904,6 +4013,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
@@ -3951,6 +4063,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::NonPrecedential,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: vec![AmendmentNotice {
                 id: "AMD-2026-0001".parse().unwrap(),
                 kind: AmendmentKind::NonPrecedential,
@@ -4017,6 +4132,9 @@ mod tests {
             created_at: Utc::now(),
             tags: None,
             standing: Standing::Overruled,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
         }];
         let out = format_governance_index_unfiltered(GovernanceLogIndex {
             entries,
@@ -4030,6 +4148,149 @@ mod tests {
         assert!(out.contains("[standing: overruled]"), "{out}");
         assert!(out.contains("no standing shown is in_force"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
+    }
+
+    /// A Council decision shows its outcome beside its standing, and says
+    /// what "in_force" is of: the decision, not a measure (GOV-2026-0010,
+    /// which approved drafting and deferral, read as an immunity in force)
+    #[test]
+    fn a_council_decision_shows_its_outcome_beside_its_standing() {
+        use crate::enums::{DecisionOutcome, GovernanceLogEntryType as T};
+        use crate::govlog::Redactable;
+        use chrono::Utc;
+        let entry = GovernanceEntryResponse {
+            id: "GOV-2026-0010".parse().unwrap(),
+            entry_type: T::CouncilDecision,
+            title: "Structural Immunity".into(),
+            created_at: Utc::now(),
+            tags: None,
+            summary: Some("Approved drafting; no amendment adopted.".into()),
+            summary_authorship: None,
+            total_rounds: None,
+            round_bytes: Vec::new(),
+            data: None,
+            round: None,
+            attachments: Vec::new(),
+            attachment: None,
+            version: None,
+            revisions: Vec::new(),
+            attestation: None,
+            standing: Standing::InForce,
+            outcome: Some(DecisionOutcome::Approved),
+            vote_tally: Some(Redactable::Value("5-0".into())),
+            steward_veto: false,
+            amendments: Vec::new(),
+            cited_by: Vec::new(),
+            texts: None,
+            obligation: None,
+            obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
+        };
+        let out = format_governance_entry(&entry);
+        assert!(
+            out.contains(
+                "Structural Immunity\nOutcome: approved, 5-0 · Standing: \
+                 in_force (no amendment has retired it as precedent; what it \
+                 decided on the item is in its summary and record)\n"
+            ),
+            "{out}"
+        );
+        let overruled = GovernanceEntryResponse {
+            standing: Standing::Overruled,
+            outcome: Some(DecisionOutcome::Deferred),
+            vote_tally: Some(Redactable::Value("Deferred: no quorum".into())),
+            ..entry.clone()
+        };
+        let out = format_governance_entry(&overruled);
+        assert!(
+            out.contains(
+                "Outcome: deferred: no quorum · **Standing: overruled** — do \
+                 not cite this as it stands.\n"
+            ),
+            "{out}"
+        );
+        let redacted = GovernanceEntryResponse {
+            vote_tally: Some(Redactable::Redacted(
+                "AMD-2026-0003".parse().unwrap(),
+            )),
+            ..entry.clone()
+        };
+        assert!(
+            format_governance_entry(&redacted).contains(
+                "Outcome: approved, tally redacted by AMD-2026-0003 · "
+            )
+        );
+
+        // A veto rejects whatever the tally, which counts the others
+        let vetoed = GovernanceEntryResponse {
+            outcome: Some(DecisionOutcome::Rejected),
+            vote_tally: Some(Redactable::Value("4-0".into())),
+            steward_veto: true,
+            ..entry.clone()
+        };
+        assert!(format_governance_entry(&vetoed).contains(
+            "Outcome: rejected by the Steward's veto, the others voted \
+                 4-0 · "
+        ));
+        // The original's outcome is said to be the original's
+        let original = GovernanceEntryResponse {
+            version: Some(crate::enums::RecordVersion::Original),
+            ..entry.clone()
+        };
+        assert!(
+            format_governance_entry(&original)
+                .contains("Outcome: approved, 5-0 (as first signed) · ")
+        );
+
+        let line = |outcome, tally: Option<&str>| {
+            crate::responses::GovernanceLogIndexEntry {
+                id: "GOV-2026-0010".parse().unwrap(),
+                entry_type: T::CouncilDecision,
+                title: "Structural Immunity".into(),
+                created_at: Utc::now(),
+                tags: None,
+                standing: Standing::InForce,
+                outcome,
+                vote_tally: tally.map(|t| Redactable::Value(t.to_string())),
+                steward_veto: false,
+            }
+        };
+        let index = |entries| GovernanceLogIndex {
+            entries,
+            omitted: None,
+            how_to_read: String::new(),
+            omitted_obligations: None,
+            obligations: None,
+            obligations_total: None,
+            unreadable_obligations: None,
+        };
+        let out = format_governance_index_unfiltered(index(vec![
+            line(Some(DecisionOutcome::Approved), Some("5-0")),
+            line(
+                Some(DecisionOutcome::Approved),
+                Some("Scheduled for the sitting of 2026-11-01, ranked first"),
+            ),
+        ]));
+        assert!(
+            out.contains(
+                "GOV-2026-0010 [council_decision] [outcome: approved, 5-0] "
+            ),
+            "{out}"
+        );
+        // A long tally is left to the entry's read
+        assert!(
+            out.contains(
+                "[council_decision] [outcome: approved (tally in the record)] "
+            ),
+            "{out}"
+        );
+        assert!(out.contains(OUTCOME_NOTE), "{out}");
+        // No outcome, no note
+        let out =
+            format_governance_index_unfiltered(index(vec![line(None, None)]));
+        assert!(!out.contains("[outcome:"), "{out}");
+        assert!(!out.contains(OUTCOME_NOTE), "{out}");
     }
 
     /// What the index left out is one line after the entries: count, ids,
@@ -4055,6 +4316,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             tags: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
         }];
         let out = format_governance_index_unfiltered(GovernanceLogIndex {
             entries,
@@ -4223,6 +4487,9 @@ mod tests {
             revisions: vec!["AMD-2026-0004".parse().unwrap()],
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: vec![AmendmentNotice {
                 id: "AMD-2026-0004".parse().unwrap(),
                 kind: AmendmentKind::Revision,
@@ -4288,6 +4555,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
@@ -4362,6 +4632,9 @@ mod tests {
             revisions: Vec::new(),
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: Vec::new(),
             cited_by: Vec::new(),
             texts: None,
@@ -5399,6 +5672,9 @@ mod tests {
             revisions: vec![],
             attestation: None,
             standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
             amendments: vec![],
             cited_by: vec![],
             texts: None,

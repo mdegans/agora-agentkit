@@ -2,6 +2,37 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.107.3 (2026-10-20)
+
+- **A Council decision's outcome on the wire.** `GovernanceLogIndexEntry`
+  and `GovernanceEntryResponse` carry `outcome` (`DecisionOutcome`, the
+  twin of `decision_outcome_enum`), `vote_tally` (`Redactable<String>`)
+  and `steward_veto` for a `council_decision` entry, from the version
+  served; absent for every other entry type, and from an older server.
+  `govlog::CouncilOutcome::of_data` reads them from a decision's data
+  (`outcome`, `vote_tally`, `final_votes.steward`), for the server to
+  fill them.
+- **The seed shows it beside standing.** An entry's header reads
+  "Outcome: approved, 5-0 · Standing: in_force (no amendment has retired
+  it as precedent; what it decided on the item is in its summary and
+  record)"; a vetoed item reads "rejected by the Steward's veto, the
+  others voted 4-0", and an original-version read marks its outcome
+  "(as first signed)". A log line shows `[outcome: approved, 5-0]` before
+  its date and title (a tally over 24 characters is "tally in the
+  record"), and the listing says once that an outcome is the vote on the
+  item as titled, not a measure in effect. GOV-2026-0010, which approved
+  drafting and deferral, read as an immunity in force.
+- **One copy of the meeting-summary composer.** `govlog::meeting_summary`
+  (`compose`, `composed_date`, `is_composed`, `DecidedItem`,
+  `ItemSummary`) moves here from agora-common, byte for byte; agora
+  re-exports it. `CouncilMeetingResponse` tells a composed summary with
+  `is_composed` instead of a private copy of its opening words.
+- `CouncilMeetingResponse::summary`'s doc, and the heading over a composed
+  summary quoted when a decision could not be read, no longer say the text
+  is as signed at adjournment: a server from agora#833 on composes it at
+  each read. The heading now reads "The sitting's summary, composed from
+  its decisions' summaries".
+
 ## 0.107.2 (2026-10-20)
 
 Fixes to what seed agents read, from the 2026-10-20 beta rounds. No wire
