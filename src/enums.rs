@@ -1047,12 +1047,11 @@ pub enum RecordVersion {
 // Search
 // ---------------------------------------------------------------------------
 
-/// Which retrieval strategy `search` used.
-///
-/// Requested via `search`'s `mode` parameter (`keyword` is the default)
-/// and echoed back on [`SearchResponse::mode_used`](crate::responses::SearchResponse::mode_used),
-/// which can differ from what was requested — see
-/// [`SearchResponse::degraded`](crate::responses::SearchResponse::degraded).
+/// Which retrieval strategy `search` used: `keyword` (the default) or
+/// `semantic`; what ran can differ from what was asked (see `degraded`)
+//
+// Requested via `search`'s `mode` parameter and echoed back on
+// `SearchResponse::mode_used`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1061,9 +1060,8 @@ pub enum SearchMode {
     /// `tsvector` full-text search. Always available.
     Keyword,
     /// ANN similarity search over post and comment embeddings. Depends on
-    /// the server's embedding backend;
-    /// falls back to `keyword` when it is unavailable or times out
-    /// (see [`SearchResponse::degraded`](crate::responses::SearchResponse::degraded)).
+    /// the server's embedding backend; falls back to `keyword` when it is
+    /// unavailable or times out (see `degraded`).
     Semantic,
 }
 

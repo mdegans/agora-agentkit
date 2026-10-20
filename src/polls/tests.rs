@@ -60,11 +60,24 @@ fn a_spec_is_tagged_by_mode_and_carries_only_its_own_parameters() {
     assert_eq!(spec.mode(), PollMode::Ranked);
     assert_eq!(spec.options()[1].description.as_deref(), Some("the second"));
 
+    // The schema's one `max_choices` caps a ranked ballot's ranks too
+    // (0.106), and it signs as `max_ranks`, as before
+    let ranked: PollSpec = serde_json::from_value(serde_json::json!({
+        "mode": "ranked",
+        "options": [{"label": "A"}, {"label": "B"}],
+        "max_choices": 1,
+        "closes_at": "2026-11-09T12:00:00Z"
+    }))
+    .unwrap();
+    let signed = serde_json::to_value(&ranked).unwrap();
+    assert_eq!(signed["max_ranks"], 1);
+    assert!(signed.get("max_choices").is_none());
+
     // `max_ranks` is ranked's; `single` has no limit at all.
     for (mode, field) in [
         ("single", "max_ranks"),
+        ("single", "max_choices"),
         ("approval", "max_ranks"),
-        ("ranked", "max_choices"),
     ] {
         let err = serde_json::from_value::<PollSpec>(serde_json::json!({
             "mode": mode,
@@ -208,38 +221,35 @@ fn check_refuses_every_bound_with_a_reason() {
     );
 }
 
-/// The schema `create_post` carries for `poll` keeps every strict rule: an
-/// `anyOf` (never `oneOf`) of closed objects, the tag a one-value enum,
-/// nothing a strict decoder refuses (agora CLAUDE.md)
+/// The schema `create_post` carries for `poll`: one closed object (0.106;
+/// it was an `anyOf` with one per mode), `mode` a flat enum, inline, with
+/// no `$ref` and no `pattern`. `create_post` is not strict, so the poll
+/// carries its bounds
 #[cfg(feature = "schemars")]
 #[test]
-fn the_spec_schema_is_strict_safe() {
+fn the_spec_schema_is_one_object() {
     let schema = crate::responses::inline_schema_for::<PollSpec>();
+    let rendered = schema.to_string();
+    assert!(!rendered.contains("$ref") && !rendered.contains("pattern"));
+    assert_eq!(schema["additionalProperties"], false);
     assert_eq!(
-        crate::tools::strict_schema_violations(&schema),
-        Vec::<String>::new(),
-        "{schema}"
+        schema["properties"]["mode"]["enum"],
+        serde_json::json!(["ranked", "approval", "single"])
     );
-    let variants = schema["anyOf"].as_array().expect("an anyOf");
-    let modes: Vec<&str> = variants
-        .iter()
-        .map(|v| {
-            assert_eq!(v["additionalProperties"], false, "{v}");
-            let tag = v["properties"]["mode"]["enum"].as_array().unwrap();
-            assert_eq!(tag.len(), 1, "{v}");
-            tag[0].as_str().unwrap()
-        })
-        .collect();
-    assert_eq!(modes, ["ranked", "approval", "single"]);
-    assert!(variants[2]["properties"].get("max_ranks").is_none());
-    assert!(variants[2]["properties"].get("max_choices").is_none());
+    assert!(schema["properties"].get("max_ranks").is_none());
+    assert_eq!(schema["properties"]["options"]["minItems"], MIN_OPTIONS);
+    assert_eq!(schema["properties"]["options"]["maxItems"], MAX_OPTIONS);
+    assert_eq!(
+        schema["properties"]["options"]["items"]["properties"]["label"]["maxLength"],
+        LABEL_MAX_CHARS
+    );
 
     // As `create_post`'s `poll`: the same schema, inline, not required.
     let post = crate::responses::inline_schema_for::<
         crate::requests::CreatePostPayload,
     >();
     assert_eq!(
-        post["properties"]["poll"]["anyOf"], schema["anyOf"],
+        post["properties"]["poll"]["properties"], schema["properties"],
         "{post}"
     );
     assert!(
@@ -248,10 +258,6 @@ fn the_spec_schema_is_strict_safe() {
             .unwrap()
             .iter()
             .any(|r| r == "poll")
-    );
-    assert_eq!(
-        crate::tools::strict_schema_violations(&post["properties"]["poll"]),
-        Vec::<String>::new()
     );
 }
 
@@ -691,10 +697,14 @@ fn the_privacy_text_does_not_overclaim() {
     );
     assert!(BALLOT_PRIVACY.contains("before or after the poll closes"));
     assert!(!BALLOT_PRIVACY.to_lowercase().contains("no one"));
-    for doc in [
-        crate::docs::CAST_VOTE_DOC,
-        crate::docs::CREATE_POST_POLL_DOC,
-    ] {
+    #[cfg(feature = "schemars")]
+    let poll = crate::responses::inline_schema_for::<PollSpec>()["description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    #[cfg(not(feature = "schemars"))]
+    let poll = String::from("not visible to any agent");
+    for doc in [crate::docs::CAST_VOTE_DOC, poll.as_str()] {
         assert!(doc.contains("not visible to any agent"), "{doc}");
         assert!(!doc.contains("until the poll closes, and"), "{doc}");
     }

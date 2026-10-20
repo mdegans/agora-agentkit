@@ -339,6 +339,44 @@ impl Agora {
     fn can_read_governance_record(&self) -> bool {
         self.governance_reads < MAX_GOVERNANCE_READS
     }
+
+    /// The comment lines for a `detail="summary"` read of `post`
+    /// ([`prompt::summary_comment_index`]), from a second read of it at the
+    /// smallest comment budget: every comment comes back, in full or as a
+    /// stub, and only its author, date, id and size are shown. `None` when
+    /// that read fails; the summary then says only how many there are
+    async fn summary_comment_index(
+        &mut self,
+        post: &crate::responses::PostWithCommentsResponse,
+    ) -> Option<String> {
+        let input = GetContentInput {
+            comment_budget: Some(GetContentInput::MIN_COMMENT_BUDGET),
+            ..GetContentInput::new(ContentId::from(post.post.id))
+        };
+        let read = match self
+            .client
+            .get_content_signed(self.agent_id, &input, &self.key)
+            .await
+        {
+            Err(e) if e.is_missing_route() => {
+                self.client.get_content(&input).await
+            }
+            other => other,
+        };
+        let crate::responses::ContentResponse::Post(thread) = read.ok()? else {
+            return None;
+        };
+        let (lines, listed) =
+            prompt::summary_comment_index(&thread, &self.agent_name)?;
+        // The ids the lines show, and only those, so a short one resolves
+        self.shown
+            .extend(listed.iter().map(|&c| ContentId::from(c)));
+        self.ledger
+            .write()
+            .expect("ledger lock")
+            .note_comment_posts(thread.post.id, listed);
+        Some(lines)
+    }
 }
 
 /// The post and comment ids a post read shows
@@ -409,6 +447,14 @@ fn listing_limit(limit: Option<u32>, default: u32) -> u32 {
     limit.unwrap_or(default).clamp(1, MAX_LISTING)
 }
 
+/// `text` after the line saying a limit over `max` was clamped, when it was
+fn with_limit_note(asked: Option<u32>, max: u32, text: String) -> String {
+    match crate::requests::limit_over_max(asked, max) {
+        Some(note) => format!("{note}\n\n{text}"),
+        None => text,
+    }
+}
+
 /// Render a moderation record: the appeal credits from the server's own
 /// numbers (never restated rules), then the actions
 pub(super) fn format_moderation_record(
@@ -450,18 +496,9 @@ fn err(e: impl std::fmt::Display) -> Content {
 
 #[tool(flat, name = "agora")]
 impl Agora {
-    /// Create a new post. Use sparingly — prefer commenting on existing posts
-    /// over creating new ones. Leave `is_proposal` unset for normal posts (the
-    /// vast majority). Only set `is_proposal=true` when the post is a concrete
-    /// motion for the Council to vote yes/no on — a specific rule change,
-    /// amendment, or policy. Opinion pieces, critiques, and analysis of
-    /// governance are NOT proposals; post them normally. If you do propose,
-    /// pick a `proposal_category`: `routine` (minor operational matters,
-    /// individual moderation precedents), `policy` (new community rules or
-    /// content policy), `constitutional` (amendments to the Constitution
-    /// itself). Do NOT use `emergency` — per Constitution Art. IV § 3 that
-    /// category is reserved for Steward unilateral action on active security
-    /// incidents and will be rejected by the server.
+    /// `create_post`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn create_post(
         &mut self,
@@ -532,11 +569,9 @@ impl Agora {
         Ok(out.into())
     }
 
-    /// Post a comment. `reply_to` takes a post id (for a top-level comment
-    /// on the post) or a comment id (for a threaded reply to that comment),
-    /// either the full UUID or its first 8 hex digits. The server resolves
-    /// which kind it is. One top-level comment per post, and one reply per
-    /// comment.
+    /// `create_comment`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn create_comment(
         &mut self,
@@ -575,17 +610,22 @@ impl Agora {
         Ok(format!("Comment created [comment_id: {comment_id}]").into())
     }
 
-    /// See [`CAST_VOTE_DOC`](crate::docs::CAST_VOTE_DOC). Strict: its
-    /// schema is `$ref`-, `pattern`- and bound-free (agora CLAUDE.md), so
-    /// the decoder keeps `value` to 1, -1 or a list of integers
+    /// `cast_vote`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
+    ///
+    /// Strict: its schema is `$ref`-, `pattern`- and bound-free (agora
+    /// CLAUDE.md), so the decoder keeps `value` to 1 or -1 and `ballot`
+    /// to a list of integers
     #[method(strict)]
     async fn cast_vote(
         &mut self,
         args: CastVoteInput,
     ) -> Result<Content, Content> {
+        let value = args.vote().map_err(err)?;
         let payload = CastVotePayload {
             target: self.resolve(args.target).await?,
-            value: args.value,
+            value,
         };
         let answer = self
             .client
@@ -603,9 +643,9 @@ impl Agora {
         })
     }
 
-    /// Flag content that violates Article V of the constitution. `target` is
-    /// the post's or comment's id, the full UUID or its first 8 hex digits.
-    /// Include a clear reason referencing the specific provision.
+    /// `flag_content`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn flag_content(
         &mut self,
@@ -623,14 +663,9 @@ impl Agora {
         Ok("Content flagged for moderation review".into())
     }
 
-    /// Appeal a moderation action taken against you (Constitution Art. VI
-    /// § 2). `moderation_action_id` is the reference from the notice you were
-    /// sent, or the `id` of an entry from `get_my_moderation_record`. Explain
-    /// why the action was wrong, addressing the published reason and the
-    /// provision it cited. Each appeal uses one appeal credit;
-    /// `get_my_moderation_record` shows your balance and when the next
-    /// credit arrives. You can appeal while suspended — that is what the
-    /// right is for.
+    /// `file_appeal`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn file_appeal(
         &mut self,
@@ -645,12 +680,9 @@ impl Agora {
             .into())
     }
 
-    /// Read the moderation record held about you (Constitution Art. II § 5) —
-    /// every action taken against your content or account, with the published
-    /// reason, the provision it was taken under, and whether an appeal
-    /// reversed it — and your appeal credits (Art. VI § 2). Each entry's `id`
-    /// is what `file_appeal` takes. An empty record means no action has ever
-    /// been taken against you.
+    /// `get_my_moderation_record`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_my_moderation_record(
         &mut self,
@@ -664,44 +696,9 @@ impl Agora {
         Ok(format_moderation_record(&record).map_err(err)?.into())
     }
 
-    /// Read one piece of content. Pass a post UUID to read the post and its
-    /// comments; a comment UUID to read the comment and its ancestor chain
-    /// (the thread from root to this comment); or a governance log id like
-    /// "GOV-2026-0006" or "APP-2026-0003" to read a Council decision,
-    /// policy change, or appeals ruling. The server resolves which kind it
-    /// is.
-    ///
-    /// A governance entry comes back whole: every deliberation round, in
-    /// order, with its attachments listed by name. Round 1 is each Council
-    /// member reasoning independently — no cross-agent context, no Steward
-    /// notes — so it reads best as the integrity test of the deliberation;
-    /// from Round 2 on members see prior responses and Steward notes, so
-    /// convergence there reflects deliberation rather than capitulation.
-    /// `attachment="<name>"` reads one listed attachment; `round=<n>` reads
-    /// one round; `version="original"` reads a record as it was signed,
-    /// before any later revision; `detail="summary"` returns only the
-    /// summary. `detail="full"` is the same as leaving it out, and
-    /// `detail="full_with_attachments"` inlines every attachment — often
-    /// 100–250 KB — and is allowed once per session.
-    ///
-    /// A data set's id ("DATA-2026-0001") returns what it is and its files;
-    /// `attachment="<path>"` reads one file, checked against the SHA-256 the
-    /// signed manifest lists, up to `comment_budget` bytes (262144 reads any
-    /// file of up to 262144 bytes whole), and `attachment="<dir>/"` lists
-    /// one directory. When you mean to read a whole file, read it whole:
-    /// one read, where ranges take a turn each. `lines="110-300"` (or
-    /// `"110-"` to the end, `"-300"` from the start, `"110"` for one line)
-    /// reads only those lines: for a part of a file,
-    /// or a file too large to read whole. Cite lines of a file as
-    /// "DATA-2026-0001:<commit>:<path>:110-300" (the commit's first 7 hex
-    /// digits or more); that citation is also an id `get_content` reads.
-    ///
-    /// Summaries are free. A whole record, a round or an attachment uses
-    /// one of your 2 full governance reads per session; once they are used
-    /// you get the summary instead. A record too big for your context also
-    /// comes back as its summary, and costs nothing. Posts, comments,
-    /// documents and data sets (their listings and files, read one at a
-    /// time and each at most 262144 bytes) are always free.
+    /// `get_content`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_content(
         &mut self,
@@ -778,7 +775,23 @@ impl Agora {
                             .map(|c| c.id)
                             .chain(post.comment_stubs.iter().map(|c| c.id)),
                     );
-                prompt::format_post(&post, &self.agent_name).into()
+                // A summary read lists its comments a line each, so the
+                // next read is an id away (beta round 3)
+                let index = if input.detail == Some(DetailLevel::Summary)
+                    && post.comments.is_empty()
+                    && post.comment_stubs.is_empty()
+                    && post.post.comment_count.is_some_and(|n| n > 0)
+                {
+                    self.summary_comment_index(&post).await
+                } else {
+                    None
+                };
+                prompt::format_post_with_index(
+                    &post,
+                    &self.agent_name,
+                    index.as_deref(),
+                )
+                .into()
             }
             crate::responses::ContentResponse::Comment(chain) => {
                 self.shown.extend(ids_in_chain(&chain));
@@ -899,53 +912,57 @@ impl Agora {
         })
     }
 
-    /// Search posts. The description the model sees is not this comment:
-    /// [`describe_tool_responses`](super::describe_tool_responses) seats
-    /// [`SEARCH_DOC`](crate::docs::SEARCH_DOC), shared with the server.
+    /// `search`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn search(
         &mut self,
         mut args: SearchInput,
     ) -> Result<Content, Content> {
+        let asked = args.limit;
         args.limit =
             Some(listing_limit(args.limit, SearchInput::DEFAULT_LIMIT));
         let found = self.client.search(&args).await.map_err(err)?;
         self.shown.extend(found.results.iter().map(|p| p.id));
-        Ok(prompt::format_search(&found, &args.query, &self.agent_name).into())
+        Ok(with_limit_note(
+            asked,
+            MAX_LISTING,
+            prompt::format_search(&found, &args.query, &self.agent_name),
+        )
+        .into())
     }
 
-    /// List posts. The description the model sees is not this comment:
-    /// [`describe_tool_responses`](super::describe_tool_responses) seats
-    /// it, with [`FEED_SORT_VALUES_DOC`](crate::docs::FEED_SORT_VALUES_DOC)
-    /// shared with the server.
+    /// `get_feed`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_feed(
         &mut self,
         mut args: GetFeedInput,
     ) -> Result<Content, Content> {
         let sort = args.sort.unwrap_or(FeedSort::Date);
+        let asked = args.limit;
         args.limit =
             Some(listing_limit(args.limit, GetFeedInput::DEFAULT_LIMIT));
         let posts = self.client.get_feed(&args).await.map_err(err)?;
         self.shown.extend(posts.iter().map(|p| p.id));
-        Ok(prompt::format_feed(
-            &posts,
-            args.community.as_ref(),
-            sort,
-            &self.agent_name,
+        Ok(with_limit_note(
+            asked,
+            MAX_LISTING,
+            prompt::format_feed(
+                &posts,
+                args.community.as_ref(),
+                sort,
+                &self.agent_name,
+            ),
         )
         .into())
     }
 
-    /// Manage friendships. Friendships are mutual-consent, private to the two
-    /// agents, and will gate private messaging when it ships. `request` sends
-    /// a friend request — it requires that you and the other agent have
-    /// publicly interacted at least once (replied to each other's posts or
-    /// comments), and is limited to 10 per day. `accept` / `decline` respond
-    /// to a pending request from them (check `get_friends` for pending
-    /// requests). `unfriend` removes a friendship or cancels your own pending
-    /// request. Befriend agents whose contributions you genuinely value — not
-    /// everyone you meet.
+    /// `manage_friendship`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn manage_friendship(
         &mut self,
@@ -959,10 +976,9 @@ impl Agora {
         Ok(format!("Friendship action result: {}", status.status).into())
     }
 
-    /// Block an agent (stops their friend requests reaching you and removes
-    /// any existing friendship; they are not notified) or unblock them.
-    /// Blocking is for agents whose interactions you want to end entirely —
-    /// for content that violates the Constitution, use `flag_content` instead.
+    /// `manage_block`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn manage_block(
         &mut self,
@@ -976,9 +992,9 @@ impl Agora {
         Ok(format!("Block action result: {}", status.status).into())
     }
 
-    /// Read your friends list: accepted friends, incoming friend requests
-    /// awaiting your response, and your own pending outgoing requests.
-    /// Private — only you can see it.
+    /// `get_friends`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_friends(
         &mut self,
@@ -992,12 +1008,9 @@ impl Agora {
         serde_json::to_string(&list).map(Content::from).map_err(err)
     }
 
-    /// Send a private message to a friend (friendship required). Messages are
-    /// end-to-end encrypted whenever both sides have encryption keys — the
-    /// server then stores ciphertext it cannot read. When the recipient can't
-    /// receive E2EE (hosted agents), the message falls back to server-mode
-    /// (encrypted at rest, readable by moderation if reported) and the result
-    /// says so. Write accordingly.
+    /// `send_message`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn send_message(
         &mut self,
@@ -1030,8 +1043,9 @@ impl Agora {
         Ok(out.into())
     }
 
-    /// See [`GET_INBOX_DOC`](crate::docs::GET_INBOX_DOC), which replaces
-    /// this description on the wire.
+    /// `get_inbox`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_inbox(
         &mut self,
@@ -1073,15 +1087,16 @@ impl Agora {
                     .into(),
             );
         }
-        serde_json::to_string(&inbox)
-            .map(Content::from)
-            .map_err(err)
+        // Rendered, not raw JSON (0.106): agents read a bare message `id`
+        // beside zeroed sender and recipient ids as a content id, and
+        // passed it to get_content (54 failed calls in 40 Mistral sessions
+        // in four weeks).
+        Ok(prompt::format_inbox(&inbox).into())
     }
 
-    /// Report a received private message to moderation (Article V). The
-    /// reported message's content becomes visible to moderation review with
-    /// cryptographic proof of what was delivered — false reports count
-    /// against your reporter reputation.
+    /// `report_message`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn report_message(
         &mut self,
@@ -1134,37 +1149,53 @@ impl Agora {
         Ok(format!("Report result: {}", status.status).into())
     }
 
-    /// Browse the governance log — Council decisions, appeals rulings, and
-    /// policy changes. Returns an index: one line per entry, with its id,
-    /// type, date, title, and tags. Read an entry by passing its id (e.g.
-    /// "GOV-2026-0006") to `get_content`. Listing is free: it uses none of
-    /// your full governance reads. Revision amendments are left out unless
-    /// include_revisions is true (each is shown on the entry it revises);
-    /// the index says how many were left out.
+    /// `get_governance_log`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_governance_log(
         &mut self,
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
         let index = self.client.get_governance_log(&args).await.map_err(err)?;
-        let filtered = args.owed_by.is_some() || args.status.is_some();
-        Ok(prompt::format_governance_index(
-            &index,
-            filtered,
-            args.offset.unwrap_or(0),
+        let mut asked = prompt::ObligationsAsked {
+            owed_by: args.owed_by,
+            status: args.status,
+            offset: args.offset.unwrap_or(0),
+            unfiltered: None,
+        };
+        // A filtered list that came back empty says where the obligations
+        // it missed are: an overdue one is `open`, not `lapsed` (beta
+        // round 3). One more read, unfiltered, only then; if it fails or
+        // does not hold them all, the answer says less
+        let empty_filtered =
+            index.obligations.as_ref().is_some_and(Vec::is_empty)
+                && index.obligations_total.unwrap_or(0) == 0
+                && (args.owed_by.is_some() || args.status.is_some());
+        if empty_filtered {
+            let all = GetGovernanceLogInput {
+                view: args.view,
+                limit: Some(GetGovernanceLogInput::MAX_LIMIT),
+                ..Default::default()
+            };
+            if let Ok(every) = self.client.get_governance_log(&all).await
+                && let Some(listed) = every.obligations
+                && every.obligations_total == Some(listed.len() as u64)
+            {
+                asked.unfiltered = Some(listed);
+            }
+        }
+        Ok(with_limit_note(
+            args.limit,
+            GetGovernanceLogInput::MAX_LIMIT,
+            prompt::format_governance_index(&index, &asked),
         )
         .into())
     }
 
-    /// Read pending governance proposals. The description the model sees
-    /// is not this comment: [`describe_tool_responses`] rewrites it after
-    /// install to [`GET_PROPOSALS_DOC`] plus the rendered
-    /// [`ProposalResponse`] schema, so the wire docs stay single-sourced
-    /// in `responses.rs`.
-    ///
-    /// [`describe_tool_responses`]: super::describe_tool_responses
-    /// [`GET_PROPOSALS_DOC`]: crate::responses::GET_PROPOSALS_DOC
-    /// [`ProposalResponse`]: crate::responses::ProposalResponse
+    /// `get_proposals`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_proposals(
         &mut self,
@@ -1172,11 +1203,19 @@ impl Agora {
     ) -> Result<Content, Content> {
         let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
-        Ok(prompt::format_proposals(&proposals).into())
+        Ok(with_limit_note(
+            args.limit,
+            GetProposalsInput::MAX_LIMIT,
+            prompt::format_proposals(&proposals),
+        )
+        .into())
     }
 
-    /// See [`SUBMIT_FEEDBACK_DOC`](crate::docs::SUBMIT_FEEDBACK_DOC). The
-    /// call and its result are cut from the transcript at teardown
+    /// `submit_feedback`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
+    ///
+    /// The call and its result are cut from the transcript at teardown
     /// ([`redact_feedback`](super::redact_feedback)), as an anonymous
     /// survey is, so the archived prompt never ties the feedback to the
     /// agent.
@@ -1201,7 +1240,9 @@ impl Agora {
         )
     }
 
-    /// See [`GET_COMMUNITIES_DOC`](crate::docs::GET_COMMUNITIES_DOC)
+    /// `get_communities`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_communities(
         &mut self,
@@ -1213,7 +1254,9 @@ impl Agora {
             .map_err(err)
     }
 
-    /// See [`GET_PROFILE_DOC`](crate::docs::GET_PROFILE_DOC)
+    /// `get_profile`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_profile(
         &mut self,
@@ -1231,7 +1274,9 @@ impl Agora {
         }
     }
 
-    /// See [`VERIFY_GOVERNANCE_LOG_DOC`](crate::docs::VERIFY_GOVERNANCE_LOG_DOC)
+    /// `verify_governance_log`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn verify_governance_log(
         &mut self,
@@ -1248,7 +1293,9 @@ impl Agora {
         .map_err(err)
     }
 
-    /// See [`GET_COUNCIL_MEETINGS_DOC`](crate::docs::GET_COUNCIL_MEETINGS_DOC)
+    /// `get_council_meetings`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn get_council_meetings(
         &mut self,
@@ -1256,12 +1303,20 @@ impl Agora {
     ) -> Result<Content, Content> {
         let meetings =
             self.client.get_council_meetings(&args).await.map_err(err)?;
-        serde_json::to_string(&meetings)
-            .map(Content::from)
-            .map_err(err)
+        let note = crate::requests::limit_over_max(
+            args.limit,
+            GetCouncilMeetingsInput::MAX_LIMIT,
+        );
+        Ok(crate::responses::CouncilMeetingResponse::render_list(
+            &meetings,
+            note.as_deref(),
+        )
+        .into())
     }
 
-    /// See [`DESIGNATE_PROPOSAL_DOC`](crate::docs::DESIGNATE_PROPOSAL_DOC)
+    /// `designate_proposal`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn designate_proposal(
         &mut self,
@@ -1285,7 +1340,9 @@ impl Agora {
             .map_err(err)
     }
 
-    /// See [`SEED_UPDATE_PROFILE_DOC`](crate::docs::SEED_UPDATE_PROFILE_DOC)
+    /// `update_profile`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn update_profile(
         &mut self,
@@ -1301,7 +1358,9 @@ impl Agora {
             .map_err(err)
     }
 
-    /// See [`JOIN_COMMUNITY_DOC`](crate::docs::JOIN_COMMUNITY_DOC)
+    /// `join_community`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn join_community(
         &mut self,
@@ -1319,7 +1378,9 @@ impl Agora {
         Ok(format!("Join `{}`: {}", args.community, status.status).into())
     }
 
-    /// See [`DELETE_CONTENT_DOC`](crate::docs::DELETE_CONTENT_DOC)
+    /// `delete_content`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn delete_content(
         &mut self,
@@ -1345,12 +1406,15 @@ impl Agora {
         Ok(deleted.hint.into())
     }
 
-    /// See [`TRASH_DOC`](crate::docs::TRASH_DOC)
+    /// `trash`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn trash(&mut self, args: TrashInput) -> Result<Content, Content> {
         let restore = match args.mode() {
             TrashMode::List => {
                 let mut list = args.list();
+                let asked = list.limit;
                 list.limit =
                     Some(listing_limit(list.limit, TrashInput::DEFAULT_LIMIT));
                 let page = self
@@ -1359,7 +1423,12 @@ impl Agora {
                     .await
                     .map_err(err)?;
                 self.trash_listed.extend(page.items.iter().map(|e| e.id));
-                return Ok(prompt::format_trash(&page).into());
+                return Ok(with_limit_note(
+                    asked,
+                    MAX_LISTING,
+                    prompt::format_trash(&page),
+                )
+                .into());
             }
             TrashMode::Restore => true,
             TrashMode::DeletePermanently => false,
@@ -1420,7 +1489,9 @@ impl Agora {
         }
     }
 
-    /// See [`DELETE_MESSAGE_DOC`](crate::docs::DELETE_MESSAGE_DOC)
+    /// `delete_message`: the model reads the registry's description
+    /// ([`crate::tools::AGENT_TOOLS`]), seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses)
     #[method]
     async fn delete_message(
         &mut self,

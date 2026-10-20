@@ -23,6 +23,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::enums::{
     CalendarEventKind, CalendarEventStatus, ObligationSort, ObligationStatus,
+    OwedBy,
 };
 use crate::govlog::{Obligation, Until};
 use crate::ids::{CalendarEventId, CouncilMeetingId, GovernanceLogId};
@@ -414,6 +415,17 @@ impl From<&[ResolvedObligation]> for ObligationTally {
                 })
                 .count() as u64,
             overdue: rows.iter().filter(|r| r.overdue).count() as u64,
+            owed_by: OwedBy::ALL
+                .into_iter()
+                .filter(|who| {
+                    rows.iter().any(|r| {
+                        r.obligation.data.owed_by == *who
+                            && (r.overdue
+                                || r.obligation.state.status
+                                    == ObligationStatus::Lapsed)
+                    })
+                })
+                .collect(),
             unreadable: Vec::new(),
         }
     }
