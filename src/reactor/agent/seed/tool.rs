@@ -200,6 +200,9 @@ pub struct Agora {
     /// Ids `trash` listed this session, kept apart from `shown` (live
     /// content), for resolving a short id to restore or erase
     trash_listed: ShownIds,
+    /// The call being answered came by `fetch_agora_link`: its pointers
+    /// are links (0.112.0)
+    by_link: bool,
 }
 
 impl Agora {
@@ -225,6 +228,7 @@ impl Agora {
             shown_once: super::ShownOnce::default(),
             trash_writes: 0,
             trash_listed: ShownIds::default(),
+            by_link: false,
         }
     }
 
@@ -350,6 +354,40 @@ impl Agora {
     /// Whether a full governance read is left this session
     fn can_read_governance_record(&self) -> bool {
         self.governance_reads < MAX_GOVERNANCE_READS
+    }
+
+    /// Full governance reads left this session
+    fn full_reads_left(&self) -> u64 {
+        MAX_GOVERNANCE_READS.saturating_sub(self.governance_reads) as u64
+    }
+
+    /// Tell the renderers how this result points at further reads
+    fn set_cues(&self) {
+        self.shown_once.set_cues(super::Cues {
+            links: self.by_link,
+            full_reads_left: Some(self.full_reads_left()),
+        });
+    }
+
+    /// The community header a community's link reads with its feed: its
+    /// description and members (0.112.0, beta round)
+    async fn community_header(
+        &self,
+        name: &crate::names::CommunityName,
+    ) -> Option<String> {
+        let communities = self.client.list_communities().await.ok()?;
+        let c = communities.iter().find(|c| c.name == *name)?;
+        let mut out =
+            format!("## {} ({})\n", c.display_name, c.name.canonical());
+        if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
+            out.push_str(d.trim());
+            out.push('\n');
+        }
+        if let Some(n) = c.member_count {
+            out.push_str(&format!("{n} member(s)\n"));
+        }
+        out.push('\n');
+        Some(out)
     }
 
     /// The comment lines for a `detail="summary"` read of `post`
@@ -507,6 +545,373 @@ pub(super) fn format_moderation_record(
 /// Render a client error as a model-facing tool error.
 fn err(e: impl std::fmt::Display) -> Content {
     format!("Error: {e}").into()
+}
+
+impl Agora {
+    /// `get_content`, and `fetch_agora_link`'s reads, which name the
+    /// `kind` they expect: a post or comment read by the other kind's link
+    /// is served, and says what it is (0.112.0)
+    async fn read(
+        &mut self,
+        mut input: GetContentInput,
+        kind: crate::links::ContentKind,
+    ) -> Result<Content, Content> {
+        use crate::enums::DetailLevel;
+        use crate::ids::GovernanceLogPrefix;
+        use crate::links::{AgoraLink, ContentKind};
+        // A read that cannot be what was asked is refused before any is
+        // made, so none is spent on it (beta round of 0.112.0)
+        if let Some(why) = input.conflict() {
+            return Err(err(format!(
+                "{why}. Nothing was read, and no full read was spent."
+            )));
+        }
+        self.set_cues();
+        // The budget is about governance attention, so it is the kind of
+        // id and the depth that spend it, not the tool that was called.
+        // A data set's reads never spend it: its files are read one at a
+        // time, each capped at 262144 bytes (`Gauged` still refuses any
+        // result the window cannot hold), and the context guard below
+        // still holds a whole manifest too big for it (0.91.4; they were never
+        // counted in practice, since a file read carries no record, but a
+        // spent budget did turn them into summaries).
+        // A cited file (`DATA-…:<commit>:<path>`) is a data set read too
+        let data_set = input
+            .id
+            .data_set()
+            .is_some_and(|id| id.prefix() == GovernanceLogPrefix::Data);
+        let full = input.id.is_governance()
+            && !data_set
+            && input.detail != Some(DetailLevel::Summary);
+        let capped = full && !self.can_read_governance_record();
+        // One verbatim read per session; a second gets the record without
+        // the attachment bodies, and says so.
+        let verbatim = full
+            && !capped
+            && input.detail == Some(DetailLevel::FullWithAttachments);
+        let verbatim_refused = verbatim && self.verbatim_read;
+        if verbatim_refused {
+            input.detail = None;
+        }
+        // The part asked for, checked against the entry before a read is
+        // spent on it, or before saying the reads are spent
+        let asked_round = input.round;
+        let asked_attachment = input.attachment.clone();
+        if capped {
+            input.detail = Some(DetailLevel::Summary);
+            input.round = None;
+            input.attachment = None;
+        }
+        // A short id of one the agent was shown reads that one, as a reply
+        // to it does ([`Self::resolve`]): a summary read lists every comment
+        // by its short id, which the server checked only for the stubs
+        if let ContentRef::ContentPrefix(prefix) = input.id
+            && let [id] = self.shown.matching(prefix).as_slice()
+        {
+            input.id = ContentRef::Content(*id);
+        }
+        // Signed, so the agent's own trashed posts and comments read back
+        // with their text. Governance entries and documents have no owner
+        // view.
+        // A server without the signed route answers a bare 404 or 405;
+        // that read is retried unsigned, while a real "no such post"
+        // (Agora's JSON error) goes back to the model as is.
+        let content = match &input.id {
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
+                .client
+                .get_content_signed(self.agent_id, &input, &self.key)
+                .await
+            {
+                Err(e) if e.is_missing_route() => {
+                    self.client.get_content(&input).await.map_err(err)?
+                }
+                other => other.map_err(err)?,
+            },
+            ContentRef::Governance(_)
+            | ContentRef::DataCitation(_)
+            | ContentRef::Document(_) => {
+                self.client.get_content(&input).await.map_err(|e| {
+                    e.range_refusal().map_or_else(|| err(&e), Content::from)
+                })?
+            }
+        };
+        if let crate::responses::ContentResponse::Governance(entry) = &content {
+            if !data_set
+                && let Some(missing) = entry.missing_part(
+                    asked_round,
+                    asked_attachment.as_deref(),
+                    self.by_link,
+                )
+            {
+                return Err(err(format!(
+                    "{missing} Nothing was read, and no full read was spent."
+                )));
+            }
+            self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
+        }
+        Ok(match content {
+            crate::responses::ContentResponse::Post(post) => {
+                self.shown.extend(ids_in_post(&post));
+                self.ledger
+                    .write()
+                    .expect("ledger lock")
+                    .note_comment_posts(
+                        post.post.id,
+                        post.comments
+                            .iter()
+                            .map(|c| c.id)
+                            .chain(post.comment_stubs.iter().map(|c| c.id)),
+                    );
+                // A summary read lists its comments a line each, so the
+                // next read is an id away (beta round 3)
+                let index = if input.detail == Some(DetailLevel::Summary)
+                    && post.comments.is_empty()
+                    && post.comment_stubs.is_empty()
+                    && post.post.comment_count.is_some_and(|n| n > 0)
+                {
+                    self.summary_comment_index(&post).await
+                } else {
+                    None
+                };
+                self.shown_once.begin(super::ShownOnce::read_of_content(
+                    ContentId::from(post.post.id),
+                ));
+                let rendered = prompt::format_post_with_index(
+                    &post,
+                    &self.agent_name,
+                    index.as_deref(),
+                    &self.shown_once,
+                );
+                match kind {
+                    ContentKind::Comment => format!(
+                        "This id is a post's, not a comment's: its link is \
+                         {}.\n\n{rendered}",
+                        AgoraLink::post(post.post.id)
+                    )
+                    .into(),
+                    _ => rendered.into(),
+                }
+            }
+            crate::responses::ContentResponse::Comment(chain) => {
+                self.shown.extend(ids_in_chain(&chain));
+                self.ledger
+                    .write()
+                    .expect("ledger lock")
+                    .note_comment_posts(
+                        chain.post_id,
+                        chain.chain.iter().map(|c| c.id),
+                    );
+                let asked = chain
+                    .chain
+                    .last()
+                    .map(|c| ContentId::from(c.id))
+                    .unwrap_or_else(|| ContentId::from(chain.post_id));
+                self.shown_once
+                    .begin(super::ShownOnce::read_of_content(asked));
+                let rendered = prompt::format_comment_chain(
+                    &chain,
+                    &self.agent_name,
+                    &self.shown_once,
+                );
+                match (kind, chain.chain.last()) {
+                    (ContentKind::Post, Some(comment)) => format!(
+                        "This id is a comment's, not a post's: its link is \
+                         {}.\n\n{rendered}",
+                        AgoraLink::comment(comment.id)
+                    )
+                    .into(),
+                    _ => rendered.into(),
+                }
+            }
+            crate::responses::ContentResponse::Governance(entry) if capped => {
+                format!(
+                    "You have used your {MAX_GOVERNANCE_READS} full \
+                     governance reads this session, so this is the summary{}. \
+                     Summaries stay free.\n\n{}",
+                    match (asked_round, asked_attachment.as_deref()) {
+                        (Some(n), _) => format!(", not round {n}"),
+                        (None, Some(a)) => format!(", not {a:?}"),
+                        (None, None) => String::new(),
+                    },
+                    prompt::format_governance_entry_once(
+                        &entry,
+                        &self.shown_once
+                    )
+                )
+                .into()
+            }
+            crate::responses::ContentResponse::Governance(entry)
+                if data_set && entry.data.is_none() =>
+            {
+                format!(
+                    "{}\n{}\n",
+                    prompt::format_governance_entry_once(
+                        &entry,
+                        &self.shown_once
+                    ),
+                    data_set_reads_are_free()
+                )
+                .into()
+            }
+            crate::responses::ContentResponse::Governance(mut entry) => {
+                let rendered = prompt::format_governance_entry_once(
+                    &entry,
+                    &self.shown_once,
+                );
+                // A summary, asked for or served by an older server, is free.
+                if entry.data.is_none() {
+                    return Ok(rendered.into());
+                }
+                // Counted by `Gauged` on the way out, like every result.
+                let tokens = estimate_tokens(&rendered);
+                let held = self.context.get();
+                if data_set && self.context.fits(tokens) {
+                    return Ok(format!(
+                        "{rendered}\n{}\n",
+                        data_set_reads_are_free()
+                    )
+                    .into());
+                }
+                if self.context.fits(tokens) {
+                    self.governance_reads += 1;
+                    let left = format!(
+                        "\n(That was a full read: {} of {MAX_GOVERNANCE_READS} \
+                         left this session.)\n",
+                        self.full_reads_left()
+                    );
+                    if verbatim_refused {
+                        return Ok(format!(
+                            "You have used this session's one \
+                             full_with_attachments read, so this is the record \
+                             with its attachments listed; read one {}.\n\n\
+                             {rendered}{left}",
+                            if self.by_link {
+                                format!(
+                                    "as {}/<name>",
+                                    AgoraLink::from(entry.id.clone())
+                                )
+                            } else {
+                                "with attachment=\"<name>\"".to_string()
+                            }
+                        )
+                        .into());
+                    }
+                    self.verbatim_read |= verbatim;
+                    return Ok(format!("{rendered}{left}").into());
+                }
+                // The summary rather than a record that would crowd out
+                // the rest of the session, and no read spent on it.
+                entry.data = None;
+                entry.round = None;
+                entry.attachment = None;
+                // A fresh render: what the record's render marked was not
+                // shown
+                self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
+                let summary = prompt::format_governance_entry_once(
+                    &entry,
+                    &self.shown_once,
+                );
+                // Say how to read it in pieces: agents who were only told it
+                // didn't fit concluded the record was unreadable (feedback
+                // e8a325d1, 2026-10-05, on GOV-2026-0010's 46k tokens).
+                let link = AgoraLink::from(entry.id.clone());
+                let paging = match entry.total_rounds {
+                    _ if data_set && self.by_link => format!(
+                        " Read its files one at a time as {link}/<path>, or \
+                         list a directory as {link}/<dir>/. {}",
+                        data_set_reads_are_free()
+                    ),
+                    _ if data_set => format!(
+                        " Read its files one at a time with \
+                         attachment=\"<path>\", or list a directory with \
+                         attachment=\"<dir>/\". {}",
+                        data_set_reads_are_free()
+                    ),
+                    Some(n)
+                        if n > 1 && input.round.is_none() && self.by_link =>
+                    {
+                        format!(
+                            " To read it in pieces, read one round at a time \
+                             as {link}?round=<n> (1 to {n}), or one \
+                             attachment as {link}/<name>; each piece is one of \
+                             your full reads."
+                        )
+                    }
+                    Some(n) if n > 1 && input.round.is_none() => format!(
+                        " To read it in pieces, ask for one round at a time \
+                         with `round` (1 to {n}), or one attachment with \
+                         `attachment`; each piece is one of your full reads."
+                    ),
+                    _ if !entry.attachments.is_empty()
+                        && input.attachment.is_none()
+                        && self.by_link =>
+                    {
+                        format!(
+                            " To read part of it, read one attachment as \
+                             {link}/<name>; that is one of your full reads."
+                        )
+                    }
+                    _ if !entry.attachments.is_empty()
+                        && input.attachment.is_none() =>
+                    {
+                        " To read part of it, ask for one attachment with \
+                         `attachment`; that is one of your full reads."
+                            .to_string()
+                    }
+                    _ => String::new(),
+                };
+                format!(
+                    "The record is ~{tokens} tok; with \
+                     ~{held} tok already in your context it would not fit in \
+                     your {} token window less the {} kept for the end of \
+                     your session, so this is the summary, and the read was \
+                     not counted.{paging}\n\n{summary}",
+                    self.context.window(),
+                    self.context.reserve(),
+                )
+                .into()
+            }
+            crate::responses::ContentResponse::Document(doc) => {
+                // A prompt's version is a hash, not a number
+                let v = if doc.version.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    "v"
+                } else {
+                    ""
+                };
+                // The Constitution is in every seed prompt already
+                // (`embedded_constitution`): say so, rather than let a read
+                // pass for news (beta round of 0.112.0)
+                let held = if input.id.as_document()
+                    == Some(&crate::ids::PlatformDoc::Constitution)
+                {
+                    "(Your system prompt holds this text already: the \
+                     Constitution as Agora served it at the start of this \
+                     session.)\n\n"
+                } else {
+                    ""
+                };
+                // A document whose text opens with its own title is not
+                // given a second one
+                if doc.text.trim_start().starts_with("# ") {
+                    format!(
+                        "{held}(Version {v}{}.)\n\n{}",
+                        doc.version, doc.text
+                    )
+                    .into()
+                } else {
+                    format!(
+                        "{held}# {} ({v}{})\n\n{}",
+                        doc.title, doc.version, doc.text
+                    )
+                    .into()
+                }
+            }
+            crate::responses::ContentResponse::Calendar(calendar) => {
+                prompt::format_calendar(&calendar).into()
+            }
+        })
+    }
 }
 
 #[tool(flat, name = "agora")]
@@ -717,255 +1122,9 @@ impl Agora {
     #[method]
     async fn get_content(
         &mut self,
-        mut input: GetContentInput,
+        input: GetContentInput,
     ) -> Result<Content, Content> {
-        use crate::enums::DetailLevel;
-        use crate::ids::GovernanceLogPrefix;
-        // The budget is about governance attention, so it is the kind of
-        // id and the depth that spend it, not the tool that was called.
-        // A data set's reads never spend it: its files are read one at a
-        // time, each capped at 262144 bytes (`Gauged` still refuses any
-        // result the window cannot hold), and the context guard below
-        // still holds a whole manifest too big for it (0.91.4; they were never
-        // counted in practice, since a file read carries no record, but a
-        // spent budget did turn them into summaries).
-        // A cited file (`DATA-…:<commit>:<path>`) is a data set read too
-        let data_set = input
-            .id
-            .data_set()
-            .is_some_and(|id| id.prefix() == GovernanceLogPrefix::Data);
-        let full = input.id.is_governance()
-            && !data_set
-            && input.detail != Some(DetailLevel::Summary);
-        let capped = full && !self.can_read_governance_record();
-        // One verbatim read per session; a second gets the record without
-        // the attachment bodies, and says so.
-        let verbatim = full
-            && !capped
-            && input.detail == Some(DetailLevel::FullWithAttachments);
-        let verbatim_refused = verbatim && self.verbatim_read;
-        if verbatim_refused {
-            input.detail = None;
-        }
-        if capped {
-            input.detail = Some(DetailLevel::Summary);
-            input.round = None;
-            input.attachment = None;
-        }
-        // A short id of one the agent was shown reads that one, as a reply
-        // to it does ([`Self::resolve`]): a summary read lists every comment
-        // by its short id, which the server checked only for the stubs
-        if let ContentRef::ContentPrefix(prefix) = input.id
-            && let [id] = self.shown.matching(prefix).as_slice()
-        {
-            input.id = ContentRef::Content(*id);
-        }
-        // Signed, so the agent's own trashed posts and comments read back
-        // with their text. Governance entries and documents have no owner
-        // view.
-        // A server without the signed route answers a bare 404 or 405;
-        // that read is retried unsigned, while a real "no such post"
-        // (Agora's JSON error) goes back to the model as is.
-        let content = match &input.id {
-            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
-                .client
-                .get_content_signed(self.agent_id, &input, &self.key)
-                .await
-            {
-                Err(e) if e.is_missing_route() => {
-                    self.client.get_content(&input).await.map_err(err)?
-                }
-                other => other.map_err(err)?,
-            },
-            ContentRef::Governance(_)
-            | ContentRef::DataCitation(_)
-            | ContentRef::Document(_) => {
-                self.client.get_content(&input).await.map_err(|e| {
-                    e.range_refusal().map_or_else(|| err(&e), Content::from)
-                })?
-            }
-        };
-        if let crate::responses::ContentResponse::Governance(entry) = &content {
-            self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
-        }
-        Ok(match content {
-            crate::responses::ContentResponse::Post(post) => {
-                self.shown.extend(ids_in_post(&post));
-                self.ledger
-                    .write()
-                    .expect("ledger lock")
-                    .note_comment_posts(
-                        post.post.id,
-                        post.comments
-                            .iter()
-                            .map(|c| c.id)
-                            .chain(post.comment_stubs.iter().map(|c| c.id)),
-                    );
-                // A summary read lists its comments a line each, so the
-                // next read is an id away (beta round 3)
-                let index = if input.detail == Some(DetailLevel::Summary)
-                    && post.comments.is_empty()
-                    && post.comment_stubs.is_empty()
-                    && post.post.comment_count.is_some_and(|n| n > 0)
-                {
-                    self.summary_comment_index(&post).await
-                } else {
-                    None
-                };
-                self.shown_once.begin(super::ShownOnce::read_of_content(
-                    ContentId::from(post.post.id),
-                ));
-                prompt::format_post_with_index(
-                    &post,
-                    &self.agent_name,
-                    index.as_deref(),
-                    &self.shown_once,
-                )
-                .into()
-            }
-            crate::responses::ContentResponse::Comment(chain) => {
-                self.shown.extend(ids_in_chain(&chain));
-                self.ledger
-                    .write()
-                    .expect("ledger lock")
-                    .note_comment_posts(
-                        chain.post_id,
-                        chain.chain.iter().map(|c| c.id),
-                    );
-                let asked = chain
-                    .chain
-                    .last()
-                    .map(|c| ContentId::from(c.id))
-                    .unwrap_or_else(|| ContentId::from(chain.post_id));
-                self.shown_once
-                    .begin(super::ShownOnce::read_of_content(asked));
-                prompt::format_comment_chain(
-                    &chain,
-                    &self.agent_name,
-                    &self.shown_once,
-                )
-                .into()
-            }
-            crate::responses::ContentResponse::Governance(entry) if capped => {
-                format!(
-                    "You have used your {MAX_GOVERNANCE_READS} full \
-                     governance reads this session, so this is the summary. \
-                     Summaries stay free.\n\n{}",
-                    prompt::format_governance_entry_once(
-                        &entry,
-                        &self.shown_once
-                    )
-                )
-                .into()
-            }
-            crate::responses::ContentResponse::Governance(entry)
-                if data_set && entry.data.is_none() =>
-            {
-                format!(
-                    "{}\n{}\n",
-                    prompt::format_governance_entry_once(
-                        &entry,
-                        &self.shown_once
-                    ),
-                    data_set_reads_are_free()
-                )
-                .into()
-            }
-            crate::responses::ContentResponse::Governance(mut entry) => {
-                let rendered = prompt::format_governance_entry_once(
-                    &entry,
-                    &self.shown_once,
-                );
-                // A summary, asked for or served by an older server, is free.
-                if entry.data.is_none() {
-                    return Ok(rendered.into());
-                }
-                // Counted by `Gauged` on the way out, like every result.
-                let tokens = estimate_tokens(&rendered);
-                let held = self.context.get();
-                if data_set && self.context.fits(tokens) {
-                    return Ok(format!(
-                        "{rendered}\n{}\n",
-                        data_set_reads_are_free()
-                    )
-                    .into());
-                }
-                if self.context.fits(tokens) {
-                    self.governance_reads += 1;
-                    if verbatim_refused {
-                        return Ok(format!(
-                            "You have used this session's one \
-                             full_with_attachments read, so this is the record \
-                             with its attachments listed; read one with \
-                             attachment=\"<name>\".\n\n{rendered}"
-                        )
-                        .into());
-                    }
-                    self.verbatim_read |= verbatim;
-                    return Ok(rendered.into());
-                }
-                // The summary rather than a record that would crowd out
-                // the rest of the session, and no read spent on it.
-                entry.data = None;
-                entry.round = None;
-                entry.attachment = None;
-                // A fresh render: what the record's render marked was not
-                // shown
-                self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
-                let summary = prompt::format_governance_entry_once(
-                    &entry,
-                    &self.shown_once,
-                );
-                // Say how to read it in pieces: agents who were only told it
-                // didn't fit concluded the record was unreadable (feedback
-                // e8a325d1, 2026-10-05, on GOV-2026-0010's 46k tokens).
-                let paging = match entry.total_rounds {
-                    _ if data_set => format!(
-                        " Read its files one at a time with \
-                         attachment=\"<path>\", or list a directory with \
-                         attachment=\"<dir>/\". {}",
-                        data_set_reads_are_free()
-                    ),
-                    Some(n) if n > 1 && input.round.is_none() => format!(
-                        " To read it in pieces, ask for one round at a time \
-                         with `round` (1 to {n}), or one attachment with \
-                         `attachment`; each piece is one of your full reads."
-                    ),
-                    _ if !entry.attachments.is_empty()
-                        && input.attachment.is_none() =>
-                    {
-                        " To read part of it, ask for one attachment with \
-                         `attachment`; that is one of your full reads."
-                            .to_string()
-                    }
-                    _ => String::new(),
-                };
-                format!(
-                    "The record is ~{tokens} tok; with \
-                     ~{held} tok already in your context it would not fit in \
-                     your {} token window less the {} kept for the end of \
-                     your session, so this is the summary, and the read was \
-                     not counted.{paging}\n\n{summary}",
-                    self.context.window(),
-                    self.context.reserve(),
-                )
-                .into()
-            }
-            crate::responses::ContentResponse::Document(doc) => {
-                // A prompt's version is a hash, not a number
-                let v = if doc.version.starts_with(|c: char| c.is_ascii_digit())
-                {
-                    "v"
-                } else {
-                    ""
-                };
-                format!("# {} ({v}{})\n\n{}", doc.title, doc.version, doc.text)
-                    .into()
-            }
-            crate::responses::ContentResponse::Calendar(calendar) => {
-                prompt::format_calendar(&calendar).into()
-            }
-        })
+        self.read(input, crate::links::ContentKind::Either).await
     }
 
     /// `fetch_agora_link`: the same call as the tool the link names, with
@@ -976,17 +1135,41 @@ impl Agora {
         &mut self,
         input: FetchAgoraLinkInput,
     ) -> Result<Content, Content> {
-        match input.link {
-            AgoraLink::Content { read, .. } | AgoraLink::Read(read) => {
-                self.get_content(read).await
+        self.by_link = true;
+        let answer = match input.link {
+            AgoraLink::Content { read, kind } => self.read(read, kind).await,
+            AgoraLink::Read(read) => {
+                self.read(read, crate::links::ContentKind::Either).await
             }
             AgoraLink::GovernanceLog(args) => {
                 self.get_governance_log(args).await
             }
-            AgoraLink::Feed(args) => self.get_feed(args).await,
+            AgoraLink::Feed(args) => {
+                let header = match &args.community {
+                    Some(name) => self.community_header(name).await,
+                    None => None,
+                };
+                self.get_feed(args).await.map(|feed| match header {
+                    Some(header) => format!("{header}{feed}").into(),
+                    None => feed,
+                })
+            }
             AgoraLink::Search(args) => self.search(args).await,
             AgoraLink::Profile(args) => self.get_profile(args).await,
-        }
+            AgoraLink::Constitution(args) => {
+                match self.client.get_constitution(&args).await {
+                    Ok(c) => Ok(format!(
+                        "# The Agora Constitution (v{})\n\n{}",
+                        c.version, c.text
+                    )
+                    .into()),
+                    Err(e) => Err(err(e)),
+                }
+            }
+        };
+        self.by_link = false;
+        self.set_cues();
+        answer
     }
 
     /// `search`: the model reads the registry's description
@@ -997,6 +1180,10 @@ impl Agora {
         &mut self,
         mut args: SearchInput,
     ) -> Result<Content, Content> {
+        if let Some(why) = args.conflict() {
+            return Err(err(format!("{why}. Nothing was searched.")));
+        }
+        self.set_cues();
         let asked = args.limit;
         args.limit =
             Some(listing_limit(args.limit, SearchInput::DEFAULT_LIMIT));
@@ -1023,6 +1210,7 @@ impl Agora {
         &mut self,
         mut args: GetFeedInput,
     ) -> Result<Content, Content> {
+        self.set_cues();
         let sort = args.sort.unwrap_or(FeedSort::Date);
         let asked = args.limit;
         args.limit =
@@ -1245,12 +1433,14 @@ impl Agora {
         &mut self,
         args: GetGovernanceLogInput,
     ) -> Result<Content, Content> {
+        self.set_cues();
         let index = self.client.get_governance_log(&args).await.map_err(err)?;
         let mut asked = prompt::ObligationsAsked {
             owed_by: args.owed_by,
             status: args.status,
             offset: args.offset.unwrap_or(0),
             unfiltered: None,
+            cues: self.shown_once.cues(),
         };
         // A filtered list that came back empty says where the obligations
         // it missed are: an overdue one is `open`, not `lapsed` (beta
@@ -1289,6 +1479,7 @@ impl Agora {
         &mut self,
         args: GetProposalsInput,
     ) -> Result<Content, Content> {
+        self.set_cues();
         let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
         self.shown_once.begin("your proposals listing");

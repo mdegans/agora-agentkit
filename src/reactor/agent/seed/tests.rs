@@ -2144,6 +2144,11 @@ async fn get_content_passes_version_and_attachment() {
             })),
         );
         body["attachment"] = serde_json::json!("clerk-thread-summary.md");
+        body["attachments"] = serde_json::json!([{
+            "name": "clerk-thread-summary.md",
+            "note": "the Clerk's summary",
+            "bytes": 18,
+        }]);
         then.status(200).json_body(body);
     });
 
@@ -2623,7 +2628,7 @@ async fn index_proposals_summaries_and_failures_are_free() {
     );
     assert!(
         rendered.contains(
-            "fetch_agora_link(\"agora://gov/GOV-2026-0006\") reads them all"
+            "get_content(\"GOV-2026-0006\") reads the record with all of them"
         ),
         "a summary says how to read the rest: {rendered}"
     );
@@ -5625,4 +5630,278 @@ async fn a_link_makes_the_call_it_names() {
         "{rendered}"
     );
     assert!(rendered.contains("agora://post/7ad26ccd"), "{rendered}");
+}
+
+/// What can't be what was asked is refused before anything is read or
+/// spent: options in conflict, a missing attachment, a round past the last;
+/// and a read by link points in links, with the full reads left (beta round
+/// of 0.112.0)
+#[tokio::test]
+async fn a_read_spends_nothing_on_what_was_not_asked() {
+    let server = MockServer::start();
+    let listed = serde_json::json!([{
+        "name": "clerk-reads",
+        "note": "what the Clerk read",
+        "bytes": 3000,
+    }]);
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| {
+                !has_param(req, "detail")
+                    && !has_param(req, "round")
+                    && !has_param(req, "attachment")
+            });
+        let mut body =
+            governance_content("GOV-2026-0006", Some(two_round_record()));
+        body["attachments"] = listed.clone();
+        then.status(200).json_body(body);
+    });
+    // The server answers a missing attachment with an empty part of the
+    // record, and lists the real ones
+    let missing = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("attachment", "notes.md");
+        let mut body = governance_content(
+            "GOV-2026-0006",
+            Some(serde_json::json!({"attachments": []})),
+        );
+        body["attachment"] = "notes.md".into();
+        body["attachments"] = listed.clone();
+        body["summary"] = "Summary omitted on a paged read.".into();
+        then.status(200).json_body(body);
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        let mut body = governance_content("GOV-2026-0006", None);
+        body["attachments"] = listed.clone();
+        body["round_bytes"] = serde_json::json!([600, 900, 1200]);
+        then.status(200).json_body(body);
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+
+    // In conflict: nothing is sent
+    agent
+        .handle(link("agora://gov/GOV-2026-0006?detail=summary&round=2"))
+        .await
+        .unwrap();
+    assert!(
+        transcript(&agent).contains("detail=summary reads the summary alone")
+    );
+    assert_eq!(record.calls() + summary.calls() + missing.calls(), 0);
+
+    // A missing attachment: the real ones, as links, and no read spent
+    agent
+        .handle(link("agora://gov/GOV-2026-0006/notes.md"))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "GOV-2026-0006 has no attachment \"notes.md\". Its attachments: \
+             agora://gov/GOV-2026-0006/clerk-reads (~1k tok). Nothing was \
+             read, and no full read was spent."
+        ),
+        "{rendered}"
+    );
+    // ... nor marked its stand-in summary shown
+    agent
+        .handle(link("agora://gov/GOV-2026-0006?detail=summary"))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("The Council ratified v0.2 four to one."));
+    assert!(!rendered.contains("in your context already"), "{rendered}");
+    // The summary points at the rounds by link, with sizes and the reads left
+    assert!(
+        rendered.contains(
+            "This decision has 3 deliberation rounds, ~900 tok in all: \
+             `agora://gov/GOV-2026-0006` reads the record with all of them, \
+             and one round reads alone; each uses a full read, 2 left this \
+             session. Rounds: `agora://gov/GOV-2026-0006?round=1` (~200 tok)"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "- `agora://gov/GOV-2026-0006/clerk-reads` — what the Clerk read"
+        ),
+        "{rendered}"
+    );
+
+    // Two full reads, each saying how many are left
+    for left in [1, 0] {
+        agent
+            .handle(link("agora://gov/GOV-2026-0006"))
+            .await
+            .unwrap();
+        assert!(
+            transcript(&agent).contains(&format!(
+                "(That was a full read: {left} of 2 left this session.)"
+            )),
+            "{}",
+            transcript(&agent)
+        );
+    }
+    assert_eq!(record.calls(), 2);
+    // Spent: a round past the last is still refused as such, and the
+    // summary says nothing of reading the rounds
+    agent
+        .handle(link("agora://gov/GOV-2026-0006?round=9"))
+        .await
+        .unwrap();
+    assert!(
+        transcript(&agent).contains(
+            "round=9: GOV-2026-0006 has 3 deliberation round(s), 1 to 3."
+        ),
+        "{}",
+        transcript(&agent)
+    );
+    agent
+        .handle(link("agora://gov/GOV-2026-0006?round=2"))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("this is the summary, not round 2"),
+        "{rendered}"
+    );
+    let after = rendered.rsplit("not round 2").next().unwrap();
+    assert!(!after.contains("deliberation rounds,"), "{after}");
+    assert!(after.contains("your full reads are spent"), "{after}");
+}
+
+/// A link of the other kind is served and says what it is; the form of a
+/// link is said in full once; a community's link says what it is; the
+/// Constitution's says the prompt holds it (beta round of 0.112.0)
+#[tokio::test]
+async fn a_link_says_what_it_read() {
+    let server = MockServer::start();
+    let id = Uuid::new_v4();
+    server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/");
+        then.status(200).json_body(post_content(id));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/social/feed");
+        then.status(200).json_body(serde_json::json!([]));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/social/communities");
+        then.status(200).json_body(serde_json::json!([{
+            "id": Uuid::new_v4(),
+            "name": "tech",
+            "display_name": "Technology",
+            "description": "Machines and the people who argue about them.",
+            "member_count": 12,
+        }]));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+    agent
+        .handle(link(&format!("agora://comment/{id}")))
+        .await
+        .unwrap();
+    assert!(
+        transcript(&agent).contains(&format!(
+            "This id is a post's, not a comment's: its link is agora://post/{id}."
+        )),
+        "{}",
+        transcript(&agent)
+    );
+    for _ in 0..2 {
+        agent.handle(link("agora://nowhere/x")).await.unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered.matches(crate::links::FORM).count(),
+        1,
+        "{rendered}"
+    );
+    assert!(rendered.contains(crate::links::FORM_AGAIN), "{rendered}");
+    agent.handle(link("agora://community/tech")).await.unwrap();
+    assert!(
+        transcript(&agent).contains(
+            "## Technology (tech)\nMachines and the people who argue about \
+             them.\n12 member(s)\n\nNo posts in tech."
+        ),
+        "{}",
+        transcript(&agent)
+    );
+    agent
+        .handle(link("agora://search?q=x&mode=semantic&offset=5"))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("offset is for a keyword search"));
+}
+
+/// The Constitution read again says the prompt holds it; a document whose
+/// text has its own title is not given a second (beta round of 0.112.0)
+#[tokio::test]
+async fn documents_read_once_titled() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/constitution");
+        then.status(200).json_body(serde_json::json!({
+            "type": "document",
+            "document": "constitution",
+            "title": "The Agora Constitution",
+            "version": "0.5",
+            "text": "Article I.",
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/prompts");
+        then.status(200).json_body(serde_json::json!({
+            "type": "document",
+            "document": "prompts",
+            "title": "Agora's Model Prompts",
+            "version": "sha256:0123456789abcdef",
+            "text": "# Agora's Model Prompts\n\nThe index.",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for l in ["agora://gov/constitution", "agora://gov/prompts"] {
+        agent
+            .handle(tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": l }),
+            ))
+            .await
+            .unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "(Your system prompt holds this text already: the Constitution as \
+             Agora served it at the start of this session.)\n\n# The Agora \
+             Constitution (v0.5)\n\nArticle I."
+        ),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("# Agora's Model Prompts").count(), 1);
+    assert!(rendered.contains("(Version sha256:0123456789abcdef.)"));
 }

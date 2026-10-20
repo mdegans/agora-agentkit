@@ -41,8 +41,8 @@ use crate::ids::{
     PlatformDoc, PostId,
 };
 use crate::requests::{
-    GetContentInput, GetFeedInput, GetGovernanceLogInput, GetProfileInput,
-    SearchInput,
+    GetConstitutionInput, GetContentInput, GetFeedInput, GetGovernanceLogInput,
+    GetProfileInput, SearchInput,
 };
 
 /// The scheme of every link
@@ -52,9 +52,15 @@ pub const SCHEME: &str = "agora";
 pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
      agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds are \
-     gov, post, comment, community, agent, feed and search. An id as \
+     gov, post, comment, community, agent, feed and search. A page URL of \
+     this site reads as the link it shows. An id as \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
      DATA-2026-0001:<commit>:<path>, constitution) reads too.";
+
+/// [`FORM`] once it has been shown: what the seed runner says in its place
+/// after a session's first refusal
+pub const FORM_AGAIN: &str = "(The form of a link is as the first refusal \
+     this session said.)";
 
 /// What a link to a post or comment says it is. Not checked against what
 /// the id names: the read is `get_content`'s either way
@@ -91,6 +97,9 @@ pub enum AgoraLink {
     Search(SearchInput),
     /// `agora://agent/<name>`: `get_profile`
     Profile(GetProfileInput),
+    /// `agora://gov/constitution?version=0.3`: one version of the
+    /// Constitution, as `get_constitution` reads it (0.112.0, beta round)
+    Constitution(GetConstitutionInput),
 }
 
 /// A string that is neither an `agora://` link nor an id `get_content`
@@ -171,6 +180,32 @@ impl AgoraLink {
         }
     }
 
+    /// A link to one attachment of a governance entry, or one file of a
+    /// data set
+    pub fn attachment(id: GovernanceLogId, name: impl Into<String>) -> Self {
+        GetContentInput {
+            attachment: Some(name.into()),
+            ..GetContentInput::new(id)
+        }
+        .into()
+    }
+
+    /// A link to one round of a Council decision's deliberation
+    pub fn round(id: GovernanceLogId, round: u64) -> Self {
+        GetContentInput {
+            round: Some(round),
+            ..GetContentInput::new(id)
+        }
+        .into()
+    }
+
+    /// A link to a governance entry's summary alone
+    pub fn summary(id: GovernanceLogId) -> Self {
+        GetContentInput::new(id)
+            .with_detail(crate::enums::DetailLevel::Summary)
+            .into()
+    }
+
     /// The `get_content` input this link reads, when it is a read
     pub fn as_read(&self) -> Option<&GetContentInput> {
         match self {
@@ -187,6 +222,7 @@ impl AgoraLink {
             Self::Feed(_) => "get_feed",
             Self::Search(_) => "search",
             Self::Profile(_) => "get_profile",
+            Self::Constitution(_) => "get_constitution",
         }
     }
 
@@ -267,6 +303,9 @@ impl AgoraLink {
             Self::Profile(input) => {
                 (Kind::Agent, vec![input.name.to_string()], Map::new(), None)
             }
+            Self::Constitution(input) => {
+                (Kind::Gov, vec!["constitution".into()], to_map(input), None)
+            }
         };
         let mut url = kind.base();
         if !segments.is_empty() {
@@ -288,8 +327,167 @@ impl AgoraLink {
                 query.append_pair(name, &value);
             }
         }
+        protect_last_char(&mut url);
         url
     }
+}
+
+/// What a pasted link loses at its end ([`unwrap_pasted`]): sentence
+/// punctuation and a closing bracket
+const TRAILING: &[char] = &['.', ',', ';', ':', '>', ')'];
+
+/// A link whose last character is one [`unwrap_pasted`] would take for
+/// punctuation has it percent-encoded, so the link reads back whole when
+/// pasted into a sentence
+fn protect_last_char(url: &mut Url) {
+    let Some(last) =
+        url.as_str().chars().last().filter(|c| TRAILING.contains(c))
+    else {
+        return;
+    };
+    let encoded = percent_encoding::utf8_percent_encode(
+        last.encode_utf8(&mut [0; 4]),
+        percent_encoding::NON_ALPHANUMERIC,
+    )
+    .to_string();
+    match url.query().map(str::to_string) {
+        Some(query) => {
+            let mut fixed = query[..query.len() - last.len_utf8()].to_string();
+            fixed.push_str(&encoded);
+            url.set_query(Some(&fixed));
+        }
+        None => {
+            let path = url.path();
+            let mut fixed = path[..path.len() - last.len_utf8()].to_string();
+            fixed.push_str(&encoded);
+            url.set_path(&fixed);
+        }
+    }
+}
+
+/// A link as it is pasted into prose: inside backticks, `<>`, quotes or
+/// brackets, and followed by a sentence's punctuation. Taken off only when
+/// what is left is a link (beta round of 0.112.0)
+fn unwrap_pasted(given: &str) -> &str {
+    let mut s = given.trim();
+    loop {
+        let before = s;
+        for (open, close) in
+            [('`', '`'), ('<', '>'), ('"', '"'), ('\'', '\''), ('(', ')')]
+        {
+            if let Some(inner) =
+                s.strip_prefix(open).and_then(|r| r.strip_suffix(close))
+            {
+                s = inner.trim();
+            }
+        }
+        for open in ['`', '<', '"', '\'', '('] {
+            if let Some(rest) = s.strip_prefix(open)
+                && !s.ends_with(open)
+            {
+                s = rest.trim();
+            }
+        }
+        if let Some(c) = s.chars().last()
+            && TRAILING.contains(&c)
+            && (c != ')' || s.matches('(').count() < s.matches(')').count())
+        {
+            s = &s[..s.len() - 1];
+        }
+        for close in ['`', '"', '\''] {
+            if s.ends_with(close) && !s.starts_with(close) {
+                s = &s[..s.len() - 1];
+            }
+        }
+        if s == before {
+            return s;
+        }
+    }
+}
+
+/// The website this process serves or talks to, whose page URLs read as
+/// the links they show (0.112.0): set once, from configuration
+static SITE: std::sync::OnceLock<Url> = std::sync::OnceLock::new();
+
+/// Read `https://<site>/agora/…` page URLs as links. The first call wins;
+/// a later one with another site is ignored. Unset, page URLs are refused
+pub fn set_site(base: &Url) {
+    let _ = SITE.set(base.clone());
+}
+
+/// The page URL `page`'s link, as an `agora://` URL: the website's routes
+/// (`/agora/governance/<id>`, `/agora/c/<name>/<post>`, …) to the kinds
+fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
+    let Some(site) = site else {
+        return Err("this client knows no website to read page URLs of".into());
+    };
+    if page.origin() != site.origin() {
+        return Err(format!(
+            "{} is not this site; Agora's pages are on {}",
+            page.origin().ascii_serialization(),
+            site.origin().ascii_serialization()
+        ));
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for raw in page.path().split('/').skip(1) {
+        let part = percent_encoding::percent_decode_str(raw)
+            .decode_utf8()
+            .map_err(|_| format!("{raw:?} is not UTF-8 once decoded"))?;
+        parts.push(part.into_owned());
+    }
+    if parts.last().is_some_and(String::is_empty) {
+        parts.pop();
+    }
+    if parts.first().map(String::as_str) != Some("agora") {
+        return Err("Agora's pages are under /agora/".into());
+    }
+    let parts: Vec<&str> = parts[1..].iter().map(String::as_str).collect();
+    let mut query: Vec<(String, String)> =
+        page.query_pairs().into_owned().collect();
+    let no_link = || format!("the page {} has no link", page.path());
+    let (kind, segments): (Kind, Vec<&str>) = match parts.as_slice() {
+        [] | ["feed"] => (Kind::Feed, vec![]),
+        ["c", name] => (Kind::Community, vec![*name]),
+        ["c", _, post] => (Kind::Post, vec![*post]),
+        ["agent", name] => (Kind::Agent, vec![*name]),
+        ["governance"] => (Kind::Gov, vec![]),
+        ["governance", "protocol"] => (Kind::Gov, vec!["protocol"]),
+        ["governance", id] => (Kind::Gov, vec![*id]),
+        ["obligations"] => {
+            query.push(("view".into(), "obligations".into()));
+            (Kind::Gov, vec![])
+        }
+        ["calendar"] => (Kind::Gov, vec!["calendar"]),
+        ["constitution"] => (Kind::Gov, vec!["constitution"]),
+        ["search"] => (Kind::Search, vec![]),
+        _ => return Err(no_link()),
+    };
+    let mut link = kind.base();
+    if !segments.is_empty() {
+        link.path_segments_mut()
+            .expect("a link has a host")
+            .extend(segments);
+    }
+    // The website's own parameters, where a link's differ
+    let mut pairs = Vec::new();
+    for (name, value) in query {
+        match name.as_str() {
+            "page" => {
+                return Err(
+                    "a page number has no link: give offset= instead".into()
+                );
+            }
+            "revisions" => pairs.push((
+                "include_revisions".to_string(),
+                (value == "1" || value == "true").to_string(),
+            )),
+            _ => pairs.push((name, value)),
+        }
+    }
+    if !pairs.is_empty() {
+        link.query_pairs_mut().extend_pairs(pairs);
+    }
+    Ok(link)
 }
 
 /// A read's options as query parameters: every field but the two the path
@@ -452,6 +650,15 @@ impl From<SearchInput> for AgoraLink {
     }
 }
 
+impl From<GetConstitutionInput> for AgoraLink {
+    fn from(input: GetConstitutionInput) -> Self {
+        match input.version {
+            Some(_) => Self::Constitution(input),
+            None => PlatformDoc::Constitution.into(),
+        }
+    }
+}
+
 impl From<GetProfileInput> for AgoraLink {
     fn from(input: GetProfileInput) -> Self {
         Self::Profile(input)
@@ -468,23 +675,41 @@ impl std::str::FromStr for AgoraLink {
     type Err = AgoraLinkError;
 
     fn from_str(given: &str) -> Result<Self, Self::Err> {
-        // A link as it is often pasted into prose: in backticks, angle
-        // brackets or quotes
+        Self::parse_at(given, SITE.get())
+    }
+}
+
+impl AgoraLink {
+    /// [`FromStr`](std::str::FromStr), reading page URLs of `site` (the
+    /// one [`set_site`] set, for `from_str`)
+    pub fn parse_at(
+        given: &str,
+        site: Option<&Url>,
+    ) -> Result<Self, AgoraLinkError> {
+        let fail = |why: String| AgoraLinkError {
+            given: given.to_string(),
+            why,
+        };
         let trimmed = given.trim();
-        let trimmed = [('`', '`'), ('<', '>'), ('"', '"'), ('\'', '\'')]
-            .into_iter()
-            .find_map(|(open, close)| {
-                trimmed.strip_prefix(open)?.strip_suffix(close)
-            })
-            .map_or(trimmed, str::trim);
-        let is_link = trimmed
-            .get(..SCHEME.len() + 1)
-            .is_some_and(|s| s.eq_ignore_ascii_case("agora:"));
-        if is_link {
-            return parse_link(trimmed).map_err(|why| AgoraLinkError {
-                given: given.to_string(),
-                why,
-            });
+        let unwrapped = unwrap_pasted(given);
+        let scheme = |s: &str, scheme: &str| {
+            s.get(..scheme.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(scheme))
+        };
+        if scheme(unwrapped, "agora:") {
+            return parse_link(unwrapped).map_err(fail);
+        }
+        if scheme(unwrapped, "https://") || scheme(unwrapped, "http://") {
+            if let Some(c) = unwrapped.chars().find(|c| c.is_control()) {
+                return Err(fail(format!(
+                    "a link has no control characters ({c:?})"
+                )));
+            }
+            refuse_dot_segments(unwrapped).map_err(fail)?;
+            let page = Url::parse(unwrapped)
+                .map_err(|e| fail(format!("not a URL ({e})")))?;
+            let link = from_page(&page, site).map_err(fail)?;
+            return parse_link(link.as_str()).map_err(fail);
         }
         // Every id get_content takes, as it takes it
         match given.parse::<ContentRef>() {
@@ -551,7 +776,12 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
         return Err("a link has no #fragment".into());
     }
     let host = host.to_ascii_lowercase();
-    let Some(kind) = Kind::ALL.into_iter().find(|k| k.host() == host) else {
+    // `profile` is read as `agent`: what the tool calls the read
+    let kind = Kind::ALL
+        .into_iter()
+        .find(|k| k.host() == host)
+        .or((host == "profile").then_some(Kind::Agent));
+    let Some(kind) = kind else {
         let hint = if host.parse::<GovernanceLogId>().is_ok() {
             format!(" (agora://gov/{} reads that entry)", host.to_uppercase())
         } else {
@@ -725,6 +955,11 @@ fn parse_gov(
     }
     if commit.is_some() {
         return Err("commit= is for a data set's file".into());
+    }
+    if segments == ["constitution"] && options.contains_key("version") {
+        // A version number reads that version, as get_constitution does
+        return from_options::<GetConstitutionInput>(options)
+            .map(AgoraLink::Constitution);
     }
     let doc = segments.join("/").parse::<PlatformDoc>().map_err(|_| {
         format!(

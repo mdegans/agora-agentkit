@@ -549,7 +549,17 @@ impl<T: Tool> Tool for Gauged<T> {
     async fn call(&mut self, call: Use) -> tool::Result {
         let name = call.name.clone();
         let input = call.input.clone();
-        let result = self.inner.call(call).await;
+        let mut result = self.inner.call(call).await;
+        // How a link is written, in full once a session and short after
+        // (beta round of 0.112.0: ~90 tokens on every refusal)
+        if let Some(once) = &self.shown_once {
+            let text = result.content.to_string();
+            if text.contains(crate::links::FORM) && !once.legend("link form") {
+                result.content = text
+                    .replace(crate::links::FORM, crate::links::FORM_AGAIN)
+                    .into();
+            }
+        }
         self.admit(&name, &input, result)
     }
 

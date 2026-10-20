@@ -1286,6 +1286,18 @@ pub struct SearchInput {
 }
 
 impl SearchInput {
+    /// Why this search cannot be what was asked, if it cannot: `offset`
+    /// is keyword-only (0.112.0, beta round)
+    pub fn conflict(&self) -> Option<String> {
+        (self.mode == Some(SearchMode::Semantic)
+            && self.offset.is_some_and(|o| o > 0))
+        .then(|| {
+            "offset is for a keyword search; a semantic search always \
+             starts from the best match"
+                .into()
+        })
+    }
+
     /// The server's default page size
     pub const DEFAULT_LIMIT: u32 = 25;
     /// The server's largest page
@@ -1888,6 +1900,110 @@ pub struct FetchAgoraLinkInput {
     /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
     /// tool it names
     pub link: crate::links::AgoraLink,
+}
+
+impl GetContentInput {
+    /// Why this read cannot be what was asked, if it cannot: options that
+    /// contradict each other or the kind of thing read, or a
+    /// `comment_budget` out of its bounds. Checked before a read is made,
+    /// so none is spent on it (beta round of 0.112.0: `detail=summary`
+    /// beside `round=2` spent a full read on the round)
+    pub fn conflict(&self) -> Option<String> {
+        use crate::enums::DetailLevel;
+        let given = |name: &'static str, is: bool| is.then_some(name);
+        let parts: Vec<&str> = [
+            given("round", self.round.is_some()),
+            given("attachment", self.attachment.is_some()),
+            given("lines", self.lines.is_some()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if let Some(budget) = self.comment_budget
+            && !(Self::MIN_COMMENT_BUDGET..=Self::MAX_COMMENT_BUDGET)
+                .contains(&budget)
+        {
+            return Some(format!(
+                "comment_budget={budget} is out of its bounds, {} to {}",
+                Self::MIN_COMMENT_BUDGET,
+                Self::MAX_COMMENT_BUDGET
+            ));
+        }
+        match &self.id {
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => {
+                let mut asked = parts.clone();
+                asked.extend(given("version", self.version.is_some()));
+                if !asked.is_empty() {
+                    return Some(format!(
+                        "{} is for a governance entry or a data set's file; \
+                         a post or comment takes detail and comment_budget",
+                        asked.join(", ")
+                    ));
+                }
+            }
+            ContentRef::Document(_) => {
+                let mut asked = parts.clone();
+                asked.extend(given("detail", self.detail.is_some()));
+                asked.extend(given("version", self.version.is_some()));
+                asked.extend(given(
+                    "comment_budget",
+                    self.comment_budget.is_some(),
+                ));
+                if !asked.is_empty() {
+                    return Some(format!(
+                        "a document is read whole, so it takes no {}",
+                        asked.join(", ")
+                    ));
+                }
+            }
+            ContentRef::Governance(id) => {
+                let data = id.prefix() == crate::ids::GovernanceLogPrefix::Data;
+                if data && self.round.is_some() {
+                    return Some(
+                        "a data set has no rounds; read its files one at a \
+                         time"
+                            .into(),
+                    );
+                }
+                if self.lines.is_some() && !(data && self.attachment.is_some())
+                {
+                    return Some(
+                        "lines is for a data set's file: give the file too"
+                            .into(),
+                    );
+                }
+                match self.detail {
+                    Some(DetailLevel::Summary) if !parts.is_empty() => {
+                        return Some(format!(
+                            "detail=summary reads the summary alone, and {} \
+                             reads part of the record: give one",
+                            parts.join(" and ")
+                        ));
+                    }
+                    Some(DetailLevel::FullWithAttachments)
+                        if !parts.is_empty() =>
+                    {
+                        return Some(format!(
+                            "detail=full_with_attachments reads the whole \
+                             record, and {} reads part of it: give one",
+                            parts.join(" and ")
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            ContentRef::DataCitation(_) => {
+                if self.round.is_some() || self.detail.is_some() {
+                    return Some(
+                        "a data set's file takes lines and comment_budget, \
+                         not round or detail"
+                            .into(),
+                    );
+                }
+            }
+        }
+        None
+    }
 }
 
 /// A [`DataCitation`](crate::govlog::DataCitation) id given with

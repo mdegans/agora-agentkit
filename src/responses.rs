@@ -2632,6 +2632,71 @@ pub struct GovernanceEntryResponse {
     pub data_set: Option<DataSetView>,
 }
 
+impl GovernanceEntryResponse {
+    /// Why the part of `entry` a read asked for is not there, if it is not:
+    /// a round past its last, or an attachment it does not have (beta round of
+    /// 0.112.0: a missing part was read as an empty one, the whole record
+    /// served and a full read spent). `by_link` names the attachments by
+    /// their links
+    pub fn missing_part(
+        &self,
+        round: Option<u64>,
+        attachment: Option<&str>,
+        by_link: bool,
+    ) -> Option<String> {
+        let entry = self;
+        if let Some(n) = round {
+            match entry.total_rounds {
+                Some(total) if (1..=total).contains(&n) => {}
+                Some(total) => {
+                    return Some(format!(
+                        "round={n}: {} has {total} deliberation round(s), 1 to \
+                         {total}.",
+                        entry.id
+                    ));
+                }
+                None => {
+                    return Some(format!(
+                        "round={n}: {} has no deliberation rounds.",
+                        entry.id
+                    ));
+                }
+            }
+        }
+        let name = attachment?;
+        if entry.attachments.iter().any(|a| a.name == name) {
+            return None;
+        }
+        if entry.attachments.is_empty() {
+            return Some(format!(
+                "{} has no attachments, so none is {name:?}.",
+                entry.id
+            ));
+        }
+        let listed = entry
+            .attachments
+            .iter()
+            .map(|a| {
+                let size = crate::threads::about_tokens(a.bytes);
+                if by_link {
+                    let link = crate::links::AgoraLink::attachment(
+                        entry.id.clone(),
+                        a.name.clone(),
+                    );
+                    format!("{link} ({size})")
+                } else {
+                    format!("{:?} ({size})", a.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "{} has no attachment {name:?}. Its attachments: {listed}.",
+            entry.id
+        ))
+    }
+}
+
 /// A data set's files as a read shows them: no hashes (those are in the
 /// record, `detail="full_with_attachments"`, and each file read's header),
 /// rolled up by directory when one line per file would not fit (0.91)

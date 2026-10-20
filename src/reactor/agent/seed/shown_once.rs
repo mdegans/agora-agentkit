@@ -59,6 +59,21 @@ struct Inner {
     /// showed it again)
     summaries: HashMap<GovernanceLogId, Shown>,
     pending_summaries: Vec<(GovernanceLogId, Shown)>,
+    /// How the result being rendered points at further reads (0.112.0)
+    cues: Cues,
+}
+
+/// How a result points at further reads: in `agora://` links when it was
+/// asked for by one, and with the full governance reads left, where a read
+/// it points to would spend one (beta round of 0.112.0). Set by the tool
+/// before it renders; not a record of what was shown
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Cues {
+    /// The result was asked for by `fetch_agora_link`: its pointers are
+    /// links
+    pub links: bool,
+    /// Full governance reads left this session, when the tool counts them
+    pub full_reads_left: Option<u64>,
 }
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
@@ -75,6 +90,16 @@ impl ShownOnce {
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
         inner.read = read.into();
+    }
+
+    /// How the result about to be rendered points at further reads
+    pub fn set_cues(&self, cues: Cues) {
+        self.0.write().expect("shown-once lock").cues = cues;
+    }
+
+    /// See [`Cues`]
+    pub fn cues(&self) -> Cues {
+        self.0.read().expect("shown-once lock").cues
     }
 
     /// Where `id`'s summary was shown this session, if it was

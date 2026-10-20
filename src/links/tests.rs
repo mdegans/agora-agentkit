@@ -4,6 +4,7 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::enums::{DetailLevel, FeedSort, GovernanceLogEntryType};
+use crate::requests::GetConstitutionInput;
 
 fn link(s: &str) -> AgoraLink {
     s.parse().unwrap_or_else(|e| panic!("{s:?}: {e}"))
@@ -269,10 +270,7 @@ fn content_names_its_kind_or_says_either() {
 #[test]
 fn refusals_say_why_and_show_both_forms() {
     for (bad, why) in [
-        (
-            "https://subliminal.technology/agora/feed",
-            "scheme is \"https\"",
-        ),
+        ("https://example.invalid/agora/feed", "is not an Agora link"),
         ("ftp://x", "scheme is \"ftp\""),
         ("agora:gov/GOV-2026-0006", "two slashes"),
         ("agora://gov/DATA-2026-0001/../secrets", "no \"..\" parts"),
@@ -583,4 +581,177 @@ fn a_link_pasted_in_prose_reads_without_its_wrapping() {
     ] {
         assert_eq!(link(s), link("agora://post/7ad26ccd"), "{s}");
     }
+}
+
+#[test]
+fn a_pasted_link_reads_without_its_punctuation() {
+    for s in [
+        "agora://post/7ad26ccd.",
+        "agora://post/7ad26ccd,",
+        "agora://post/7ad26ccd;",
+        "agora://post/7ad26ccd:",
+        "(agora://post/7ad26ccd)",
+        "agora://post/7ad26ccd).",
+        "<agora://post/7ad26ccd>.",
+        "`agora://post/7ad26ccd`,",
+        "\"agora://post/7ad26ccd.\"",
+    ] {
+        assert_eq!(link(s), link("agora://post/7ad26ccd"), "{s}");
+    }
+    // A balanced bracket is the link's own
+    let l = link("agora://search?q=(a)");
+    assert_eq!(l, AgoraLink::Search(SearchInput::new("(a)")));
+    // What would be taken for punctuation is written encoded
+    for q in ["end.", "a)", "x;", "y:"] {
+        let l = AgoraLink::Search(SearchInput::new(q));
+        let written = l.to_string();
+        assert!(!written.ends_with(TRAILING), "{written}");
+        assert_eq!(link(&written), l, "{written}");
+        assert_eq!(link(&format!("{written}.")), l, "{written}.");
+    }
+    let file = AgoraLink::from(DataCitation {
+        set: "DATA-2026-0001".parse().unwrap(),
+        commit: None,
+        path: "notes.".parse().unwrap(),
+        lines: None,
+    });
+    assert_eq!(link(&file.to_string()), file, "{file}");
+}
+
+#[test]
+fn profile_reads_as_agent() {
+    assert_eq!(
+        link("agora://profile/claude-opus"),
+        link("agora://agent/claude-opus")
+    );
+    assert_eq!(
+        link("agora://profile/claude-opus").to_string(),
+        "agora://agent/claude-opus"
+    );
+}
+
+#[test]
+fn a_constitution_version_reads_that_version() {
+    let l = link("agora://gov/constitution?version=0.3");
+    assert_eq!(
+        l,
+        AgoraLink::Constitution(GetConstitutionInput {
+            version: Some("0.3".into())
+        })
+    );
+    assert_eq!(l.to_string(), "agora://gov/constitution?version=0.3");
+    assert_eq!(l.tool(), "get_constitution");
+}
+
+#[test]
+fn page_urls_of_this_site_read_as_their_links() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let at = |s: &str| {
+        AgoraLink::parse_at(s, Some(&site))
+            .unwrap_or_else(|e| panic!("{s}: {e}"))
+    };
+    let base = "https://subliminal.technology/agora";
+    for (page, as_link) in [
+        ("/governance/GOV-2026-0006", "agora://gov/GOV-2026-0006"),
+        ("/governance/protocol", "agora://gov/protocol"),
+        (
+            "/governance?type=council_decision",
+            "agora://gov?type=council_decision",
+        ),
+        (
+            "/governance/GOV-2026-0006?version=original",
+            "agora://gov/GOV-2026-0006?version=original",
+        ),
+        (
+            "/governance?revisions=1",
+            "agora://gov?include_revisions=true",
+        ),
+        ("/constitution", "agora://gov/constitution"),
+        ("/calendar", "agora://gov/calendar"),
+        (
+            "/obligations?status=open",
+            "agora://gov?status=open&view=obligations",
+        ),
+        ("/c/meta-governance", "agora://community/meta-governance"),
+        (
+            "/c/meta-governance/3f1a2b4c-0000-4000-8000-000000000001",
+            "agora://post/3f1a2b4c-0000-4000-8000-000000000001",
+        ),
+        ("/agent/claude-opus", "agora://agent/claude-opus"),
+        ("/search?q=voting", "agora://search?q=voting"),
+        ("/feed?sort=active", "agora://feed?sort=active"),
+        ("/", "agora://feed"),
+    ] {
+        let page = format!("{base}{page}");
+        assert_eq!(at(&page), link(as_link), "{page}");
+    }
+    assert_eq!(at(&format!("<{base}/feed>.")), link("agora://feed"));
+    for (page, why) in [
+        ("https://example.com/agora/feed", "is not this site"),
+        ("https://subliminal.technology/agora/feed?page=2", "offset="),
+        ("https://subliminal.technology/agora/account", "has no link"),
+        ("https://subliminal.technology/other", "under /agora/"),
+        (
+            "https://subliminal.technology/agora/c/x/../../account",
+            "no \"..\" parts",
+        ),
+    ] {
+        let e = AgoraLink::parse_at(page, Some(&site))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(why), "{page}: {e}");
+    }
+}
+
+#[test]
+fn reads_that_cannot_be_what_was_asked_are_refused() {
+    for (s, why) in [
+        (
+            "agora://gov/GOV-2026-0016?detail=summary&round=2",
+            "detail=summary reads the summary alone",
+        ),
+        (
+            "agora://gov/GOV-2026-0016/clerk-reads?detail=full_with_attachments",
+            "reads the whole record",
+        ),
+        (
+            "agora://gov/GOV-2026-0016?lines=1-5",
+            "lines is for a data set's file",
+        ),
+        ("agora://gov/DATA-2026-0001?round=1", "no rounds"),
+        (
+            "agora://gov/prompts?detail=summary",
+            "a document is read whole",
+        ),
+        (
+            "agora://post/7ad26ccd?comment_budget=1",
+            "out of its bounds, 4096 to 262144",
+        ),
+        (
+            "agora://gov/DATA-2026-0001/a.md?round=2",
+            "not round or detail",
+        ),
+    ] {
+        let why_not = link(s).as_read().unwrap().conflict();
+        assert!(
+            why_not.as_deref().is_some_and(|w| w.contains(why)),
+            "{s}: {why_not:?}"
+        );
+    }
+    for s in [
+        "agora://gov/GOV-2026-0016?round=2",
+        "agora://gov/GOV-2026-0016/clerk-reads",
+        "agora://gov/GOV-2026-0016?detail=summary",
+        "agora://gov/DATA-2026-0001/a.md?lines=1-5",
+        "agora://post/7ad26ccd?detail=summary&comment_budget=8192",
+        "agora://gov/constitution",
+    ] {
+        assert_eq!(link(s).as_read().unwrap().conflict(), None, "{s}");
+    }
+    let AgoraLink::Search(search) =
+        link("agora://search?q=x&mode=semantic&offset=25")
+    else {
+        panic!()
+    };
+    assert!(search.conflict().unwrap().contains("keyword"));
 }
