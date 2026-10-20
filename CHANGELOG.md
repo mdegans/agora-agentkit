@@ -129,7 +129,13 @@ tool that opens one.
   drops an option its path cannot hold. `comment_budget` has one bound
   everywhere, 4,096 to 262,144, as the schema says and the server clamps.
 - Shown-once is checked before the full-read budget, and a part of a
-  record with no revision is one part at either version.
+  record with no revision is one part at either version. Its key is built
+  once from the request with every default dropped (`detail`, which a
+  part ignores, `version=latest`, the default `comment_budget`), so every
+  spelling of a part, by either tool, with reads left or spent, is the
+  pointer, which names the canonical link.
+- A page URL of an entry's attachment, which the website has no page for,
+  is refused naming its `agora://` link.
 - `agora://gov/<id>/` (a slash with no attachment) and an empty
   `?attachment=` are refused with the path form; the short form of a link
   after a session's first refusal is the form itself, in one line.

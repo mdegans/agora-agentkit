@@ -463,6 +463,17 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
         ["governance"] => (Kind::Gov, vec![]),
         ["governance", "protocol"] => (Kind::Gov, vec!["protocol"]),
         ["governance", id] => (Kind::Gov, vec![*id]),
+        // The website shows an entry's attachments on its page, with no
+        // page of their own: name the link that reads one
+        ["governance", id, attachment @ ..] => {
+            let link = id
+                .parse::<GovernanceLogId>()
+                .map(|id| AgoraLink::attachment(id, attachment.join("/")))
+                .map_err(|_| no_link())?;
+            return Err(format!(
+                "the website has no page for an attachment; its link is {link}"
+            ));
+        }
         ["obligations"] => {
             query.push(("view".into(), "obligations".into()));
             (Kind::Gov, vec![])

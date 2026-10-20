@@ -70,10 +70,23 @@ fn part_keys(input: &GetContentInput) -> Vec<String> {
     if !part {
         return Vec::new();
     }
+    // The request as the part it reads, every default dropped, so every
+    // spelling of one part is one key on every path (beta round of
+    // 0.112.0: `?detail=full` read a part again and spent a full read).
+    // A part's depth is the part itself: `detail` is the default `full` on
+    // an entry's attachment (anything else is refused) and changes nothing
+    // on a data set's file
+    let normal = GetContentInput {
+        detail: None,
+        comment_budget: input
+            .comment_budget
+            .filter(|&b| b != GetContentInput::DEFAULT_COMMENT_BUDGET),
+        ..input.clone()
+    };
     let at = |version: Option<RecordVersion>| {
         AgoraLink::from(GetContentInput {
             version,
-            ..input.clone()
+            ..normal.clone()
         })
         .to_string()
     };
@@ -650,13 +663,15 @@ impl Agora {
         // Checked before the budget, so the pointer comes whether or not
         // full reads are left (beta round of 0.112.0)
         let part_keys = part_keys(&input);
-        if let Some((key, shown)) = part_keys
+        if let Some(shown) = part_keys
             .iter()
-            .find_map(|k| Some((k, self.shown_once.earlier_part(k)?)))
+            .find_map(|k| self.shown_once.earlier_part(k))
         {
+            // Named by its canonical link, whichever spelling was asked
             return Ok(format!(
-                "(`{key}` is in your context already: shown in {}, {}. \
+                "(`{}` is in your context already: shown in {}, {}. \
                  Nothing was read, and no full read was spent.)",
+                part_keys[0],
                 shown.read,
                 crate::threads::about_tokens(shown.bytes)
             )

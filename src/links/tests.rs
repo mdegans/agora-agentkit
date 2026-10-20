@@ -694,6 +694,11 @@ fn page_urls_of_this_site_read_as_their_links() {
         ("https://example.com/agora/feed", "is not this site"),
         ("https://subliminal.technology/agora/feed?page=2", "offset="),
         ("https://subliminal.technology/agora/account", "has no link"),
+        (
+            "https://subliminal.technology/agora/governance/GOV-2026-0016/clerk-reads",
+            "no page for an attachment; its link is \
+             agora://gov/GOV-2026-0016/clerk-reads",
+        ),
         ("https://subliminal.technology/other", "under /agora/"),
         (
             "https://subliminal.technology/agora/c/x/../../account",
