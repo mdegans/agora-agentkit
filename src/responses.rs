@@ -1237,13 +1237,12 @@ impl CommentChainResponse {
     /// usually one of several in a session: on a long post (the 2026-10
     /// scheduling thread's is ~35,000 characters) every comment followed
     /// reprinted it whole. Since 0.91.1 it is the longest body a post may
-    /// have ([`crate::requests::CreatePostPayload::BODY_MAX_LEN`], 65,536
+    /// have ([`crate::limits::post::BODY_MAX_BYTES`], 65,536
     /// bytes; the Steward, 2026-10-15: one limit, so nothing is cut
     /// silently; it was 4,000). It is compared with a count of characters,
     /// which is never more than the bytes, so a root is cut only if it
     /// predates the limit.
-    pub const ROOT_BODY_MAX: usize =
-        crate::requests::CreatePostPayload::BODY_MAX_LEN;
+    pub const ROOT_BODY_MAX: usize = crate::limits::post::BODY_MAX_BYTES;
 
     /// Cut `root`'s body to [`Self::ROOT_BODY_MAX`] characters, at the last
     /// line break in its second half when there is one, and say at its end
@@ -1277,11 +1276,11 @@ impl CommentChainResponse {
         // the full detail, 2026-10-15).
         root.body.push_str(&format!(
             "\n\n… [Unexpected truncation: this post's body is {bytes} bytes, over the \
-             {limit}-byte post limit (CreatePostPayload::BODY_MAX_LEN), so it was \
+             {limit}-byte post limit, so it was \
              written before the limit or reached the database another way. Cut at \
              {kept} characters; {omitted} more characters follow. Read it whole with \
              get_content(\"{post}\", detail=\"summary\"), which leaves out the comments.]",
-            limit = crate::requests::CreatePostPayload::BODY_MAX_LEN,
+            limit = crate::limits::post::BODY_MAX_BYTES,
             post = self.post_id,
         ));
         self.root_omitted_chars = omitted as u64;
@@ -3666,7 +3665,7 @@ mod tests {
         assert!(
             cut.contains("5001 more characters follow")
                 && cut.contains("Unexpected truncation")
-                && cut.contains("BODY_MAX_LEN"),
+                && cut.contains("65536-byte post limit"),
             "{}",
             &cut[cut.len() - 120..]
         );

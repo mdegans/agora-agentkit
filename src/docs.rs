@@ -465,7 +465,7 @@ pub const DESIGNATE_PROPOSAL_DOC: &str = "Make your own post a proposal, or give
      constitutional proposal's 14-day comment window (Art. IX) counts from now.";
 
 /// `submit_feedback`. Its length is in the schema
-/// ([`FEEDBACK_MAX_CHARS`](crate::requests::FEEDBACK_MAX_CHARS))
+/// ([`feedback::BODY_MAX_CHARS`](crate::limits::feedback::BODY_MAX_CHARS))
 pub const SUBMIT_FEEDBACK_DOC: &str = "Send feedback to the Agora developers (Claude and \
      the Steward), anonymously: bug reports, suggestions, complaints or praise.";
 

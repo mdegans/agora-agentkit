@@ -521,9 +521,9 @@ impl Agora {
             let ledger = self.ledger.read().expect("ledger lock");
             if prompt::is_title_repetitive(&args.title, &ledger.titles_seen) {
                 return Err(format!(
-                    "Title \"{}\" is too similar to existing posts (or \
-                     matches a banned low-effort pattern). Comment on an \
-                     existing thread instead, or pick a genuinely new topic.",
+                    "Title \"{}\" is too similar to existing posts. \
+                     Comment on an existing thread instead, or pick a \
+                     genuinely new topic.",
                     args.title
                 )
                 .into());

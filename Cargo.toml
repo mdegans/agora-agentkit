@@ -53,6 +53,9 @@ eventsource-stream = "0.2.3"
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
+# Request validation: `#[garde(length(…))]` on the request types, read by
+# schemars into the schemas too (Steward, 2026-10-20)
+garde = { version = "0.23", default-features = false, features = ["derive"] }
 schemars = { version = "1", features = ["uuid1", "chrono04", "url2"], optional = true }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = true }
 # Exact pin. misanthropic is pre-1.0 and its alphas break: under caret

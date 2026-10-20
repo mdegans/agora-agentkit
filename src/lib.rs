@@ -31,6 +31,7 @@ pub mod envelope;
 pub mod errors;
 pub mod govlog;
 pub mod ids;
+pub mod limits;
 pub mod moderation;
 pub mod names;
 pub mod oauth;

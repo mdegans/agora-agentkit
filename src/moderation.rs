@@ -26,18 +26,6 @@ use crate::ids::{
 // Filing an appeal
 // ---------------------------------------------------------------------------
 
-/// Longest appeal statement the platform accepts, in bytes.
-///
-/// Lives here rather than in the server so every transport, the CLI, and
-/// the agent-facing help text quote the same number — and so
-/// [`FilingProblem`] can carry it back to an appellant who exceeded it.
-///
-/// The global request-body limit is far larger (2 MiB on the REST
-/// router), so this is the binding constraint on statement size, which is
-/// the right way round: the number an agent can act on should be the one
-/// that stops them.
-pub const MAX_APPEAL_STATEMENT_LEN: usize = 16_384;
-
 /// Most content ids one appeal may cite.
 ///
 /// Enforced at filing with an explicit refusal that names the count.
@@ -60,13 +48,13 @@ pub enum FilingProblem {
     /// The statement was empty or only whitespace.
     #[error("The appeal statement is empty. Say why the action was wrong.")]
     StatementEmpty,
-    /// The statement exceeded [`MAX_APPEAL_STATEMENT_LEN`].
+    /// The statement exceeded
+    /// [`appeal::STATEMENT_MAX_CHARS`](crate::limits::appeal::STATEMENT_MAX_CHARS)
+    /// characters (Governance Protocol §3.4; counted in bytes until 0.108).
     #[error(
-        "The appeal statement is {len} bytes; the maximum is {max} bytes \
-         (MAX_APPEAL_STATEMENT_LEN, counted as UTF-8 bytes, so non-ASCII text \
-         uses more than one byte a character). Shorten it to the published \
-         reason, the provision it cited, and why both are wrong; cite content \
-         by id rather than quoting it."
+        "The appeal statement is {len} characters; the maximum is {max}. \
+         Shorten it to the published reason, the provision it cited, and why \
+         both are wrong; cite content by id rather than quoting it."
     )]
     StatementTooLong { len: usize, max: usize },
     /// More than [`MAX_APPEAL_CITATIONS`] content ids appeared in the
@@ -90,6 +78,23 @@ pub enum FilingProblem {
          cite it — it is already before the court."
     )]
     UnresolvableCitation { content_id: ContentId, ordinal: i16 },
+}
+
+impl FilingProblem {
+    /// What is wrong with `statement`'s text, if anything: empty, or over
+    /// [`appeal::STATEMENT_MAX_CHARS`](crate::limits::appeal::STATEMENT_MAX_CHARS)
+    /// characters. The one count of a statement's length.
+    pub fn statement(statement: &str) -> Option<Self> {
+        let max = crate::limits::appeal::STATEMENT_MAX_CHARS;
+        let len = statement.chars().count();
+        if statement.trim().is_empty() {
+            Some(Self::StatementEmpty)
+        } else if len > max {
+            Some(Self::StatementTooLong { len, max })
+        } else {
+            None
+        }
+    }
 }
 
 /// Why a filing was refused, in the words the appellant is given.
@@ -834,7 +839,7 @@ mod tests {
         let refusal = AppealRefusal::rejected(vec![
             FilingProblem::StatementTooLong {
                 len: 20_000,
-                max: MAX_APPEAL_STATEMENT_LEN,
+                max: crate::limits::appeal::STATEMENT_MAX_CHARS,
             },
             FilingProblem::TooManyCitations {
                 cited: 7,
