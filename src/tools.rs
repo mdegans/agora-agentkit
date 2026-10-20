@@ -143,6 +143,9 @@ pub fn tool_input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
 ///   becomes one flat `enum`.
 ///   The property's own description says what the values mean; the
 ///   variants' are their Rust docs;
+/// - a byte-counted limit (`"x-unit": "bytes"`) leaves `maxLength`, which
+///   JSON Schema counts in characters, for the description: "(at most
+///   65536 bytes)";
 /// - non-standard integer `format`s (`uint32`, `int64` …) and
 ///   `"default": null` go: they say nothing a model can use.
 ///
@@ -284,6 +287,22 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
             )
         {
             map.remove("format");
+        }
+        // A limit counted in bytes (`x-unit`, beside a garde
+        // `length(bytes)`): JSON Schema's `maxLength` counts characters,
+        // so the bound goes into the description, with its unit
+        if map.get("x-unit").and_then(Value::as_str) == Some("bytes") {
+            map.remove("x-unit");
+            if let Some(max) = map.remove("maxLength").and_then(|m| m.as_u64())
+            {
+                let bound = byte_bound(max);
+                let text = match map.get("description").and_then(Value::as_str)
+                {
+                    Some(d) => format!("{d} ({bound})"),
+                    None => format!("({bound})"),
+                };
+                map.insert("description".into(), text.into());
+            }
         }
         let required: Vec<String> = map
             .get("required")
@@ -429,6 +448,20 @@ pub fn developer_text_in(value: &serde_json::Value, path: &str) -> Vec<String> {
         _ => {}
     }
     out
+}
+
+/// How [`model_facing_schema`] states a limit counted in bytes, in a
+/// property's description: "at most 65536 bytes"
+pub fn byte_bound(max: u64) -> String {
+    format!("at most {max} bytes")
+}
+
+/// The byte limit a description states ([`byte_bound`], in parentheses at
+/// its end), for a surface that reads bounds back
+pub fn stated_byte_bound(description: &str) -> Option<u64> {
+    let rest = description.strip_suffix(" bytes)")?;
+    let at = rest.rfind("(at most ")?;
+    rest[at + "(at most ".len()..].parse().ok()
 }
 
 /// Every way `schema` breaks agora's rules for a strict tool or response
@@ -674,7 +707,9 @@ mod tests {
                     {"type": "integer", "const": 1},
                     {"type": "integer", "const": -1}
                 ]},
-                "f": {"anyOf": [{"const": 1}, {"const": "x"}]}
+                "f": {"anyOf": [{"const": 1}, {"const": "x"}]},
+                "g": {"type": "string", "maxLength": 300, "x-unit": "bytes"},
+                "h": {"type": "string", "maxLength": 9}
             },
             "required": ["d"]
         });
@@ -689,11 +724,21 @@ mod tests {
                     "c": {"type": "integer"},
                     "d": {"type": ["string", "null"]},
                     "e": {"type": "integer", "enum": [1, -1]},
-                    "f": {"anyOf": [{"const": 1}, {"const": "x"}]}
+                    "f": {"anyOf": [{"const": 1}, {"const": "x"}]},
+                    "g": {"type": "string", "description": "(at most 300 bytes)"},
+                    "h": {"type": "string", "maxLength": 9}
                 },
                 "required": ["d"]
             })
         );
+    }
+
+    #[test]
+    fn a_byte_bound_reads_back() {
+        let text = format!("Markdown supported ({})", byte_bound(65_536));
+        assert_eq!(stated_byte_bound(&text), Some(65_536));
+        assert_eq!(stated_byte_bound("(at most 300 characters)"), None);
+        assert_eq!(stated_byte_bound("bytes)"), None);
     }
 
     #[test]
