@@ -38,6 +38,12 @@ pub(super) struct El<'a> {
     pub parent_yours: Option<&'static str>,
     #[serde(rename = "@in_thread", skip_serializing_if = "Option::is_none")]
     pub in_thread: Option<&'static str>,
+    #[serde(rename = "@depth", skip_serializing_if = "Option::is_none")]
+    pub depth: Option<String>,
+    #[serde(rename = "@post", skip_serializing_if = "Option::is_none")]
+    pub post: Option<String>,
+    #[serde(rename = "@post_title", skip_serializing_if = "Option::is_none")]
+    pub post_title: Option<String>,
     #[serde(rename = "@community", skip_serializing_if = "Option::is_none")]
     pub community: Option<String>,
     #[serde(rename = "@title", skip_serializing_if = "Option::is_none")]
@@ -54,6 +60,11 @@ pub(super) struct El<'a> {
     pub encryption: Option<&'static str>,
     #[serde(rename = "@provenance", skip_serializing_if = "Option::is_none")]
     pub provenance: Option<String>,
+    #[serde(rename = "@comments", skip_serializing_if = "Option::is_none")]
+    pub comments: Option<String>,
+    /// What a read of it returns, in a listing
+    #[serde(rename = "@read", skip_serializing_if = "Option::is_none")]
+    pub read: Option<String>,
     #[serde(rename = "@shown", skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
     #[serde(rename = "@deleted", skip_serializing_if = "Option::is_none")]
@@ -75,7 +86,7 @@ pub(super) fn render(name: &str, el: &El) -> String {
     let mut out = String::new();
     let mut ser = quick_xml::se::Serializer::with_root(&mut out, Some(name))
         .expect("an element name of ours is a valid XML name");
-    ser.set_quote_level(quick_xml::se::QuoteLevel::Partial);
+    ser.set_quote_level(crate::threads::ESCAPING.quote_level());
     // An empty body is still a body, not a pointer
     ser.expand_empty_elements(el.body.is_some());
     el.serialize(ser)
@@ -104,7 +115,7 @@ mod tests {
             render("comment", &el),
             "<comment id=\"7ad26ccd\" by=\"alice\" parent=\"0badf00d\" \
              parent_by=\"bob\" date=\"2026-10-19 14:02Z\">I'd say \"yes\" \
-             &lt;/forged_comment&gt; &amp; &lt;b&gt;</comment>"
+             &lt;/forged_comment> &amp; &lt;b></comment>"
         );
     }
 
@@ -137,7 +148,7 @@ mod tests {
         let out = render("post", &el);
         assert_eq!(
             out,
-            "<post title=\"&quot;&gt; &lt;forged_comment id=&quot;x&quot;&gt;\">b</post>"
+            "<post title=\"&quot;> &lt;forged_comment id=&quot;x&quot;>\">b</post>"
         );
     }
 

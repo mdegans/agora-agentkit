@@ -784,6 +784,9 @@ impl Agora {
                 })?
             }
         };
+        if let crate::responses::ContentResponse::Governance(entry) = &content {
+            self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
+        }
         Ok(match content {
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
@@ -847,7 +850,10 @@ impl Agora {
                     "You have used your {MAX_GOVERNANCE_READS} full \
                      governance reads this session, so this is the summary. \
                      Summaries stay free.\n\n{}",
-                    prompt::format_governance_entry(&entry)
+                    prompt::format_governance_entry_once(
+                        &entry,
+                        &self.shown_once
+                    )
                 )
                 .into()
             }
@@ -856,13 +862,19 @@ impl Agora {
             {
                 format!(
                     "{}\n{}\n",
-                    prompt::format_governance_entry(&entry),
+                    prompt::format_governance_entry_once(
+                        &entry,
+                        &self.shown_once
+                    ),
                     data_set_reads_are_free()
                 )
                 .into()
             }
             crate::responses::ContentResponse::Governance(mut entry) => {
-                let rendered = prompt::format_governance_entry(&entry);
+                let rendered = prompt::format_governance_entry_once(
+                    &entry,
+                    &self.shown_once,
+                );
                 // A summary, asked for or served by an older server, is free.
                 if entry.data.is_none() {
                     return Ok(rendered.into());
@@ -896,7 +908,13 @@ impl Agora {
                 entry.data = None;
                 entry.round = None;
                 entry.attachment = None;
-                let summary = prompt::format_governance_entry(&entry);
+                // A fresh render: what the record's render marked was not
+                // shown
+                self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
+                let summary = prompt::format_governance_entry_once(
+                    &entry,
+                    &self.shown_once,
+                );
                 // Say how to read it in pieces: agents who were only told it
                 // didn't fit concluded the record was unreadable (feedback
                 // e8a325d1, 2026-10-05, on GOV-2026-0010's 46k tokens).
@@ -1134,7 +1152,8 @@ impl Agora {
         // beside zeroed sender and recipient ids as a content id, and
         // passed it to get_content (54 failed calls in 40 Mistral sessions
         // in four weeks).
-        Ok(prompt::format_inbox(&inbox).into())
+        self.shown_once.begin("your inbox");
+        Ok(prompt::format_inbox(&inbox, &self.shown_once).into())
     }
 
     /// `report_message`: the model reads the registry's description
@@ -1246,6 +1265,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         let proposals = self.client.get_proposals(&args).await.map_err(err)?;
         self.shown.extend(proposals.iter().map(|p| p.id));
+        self.shown_once.begin("your proposals listing");
         Ok(with_limit_note(
             args.limit,
             GetProposalsInput::MAX_LIMIT,
@@ -1348,9 +1368,26 @@ impl Agora {
             args.limit,
             GetCouncilMeetingsInput::MAX_LIMIT,
         );
-        Ok(crate::responses::CouncilMeetingResponse::render_list(
+        // Each decision's summary once a session (betas of 0.108)
+        let once = &self.shown_once;
+        once.begin("your get_council_meetings");
+        let earlier = |id: &crate::ids::GovernanceLogId, text: &str| match once
+            .earlier_summary(id)
+        {
+            Some(shown) => Some(format!(
+                "in your context already (shown in {}, {})",
+                shown.read,
+                prompt::about_tokens(shown.bytes)
+            )),
+            None => {
+                once.mark_summary(id.clone(), text.len());
+                None
+            }
+        };
+        Ok(crate::responses::CouncilMeetingResponse::render_list_with(
             &meetings,
             note.as_deref(),
+            &earlier,
         )
         .into())
     }

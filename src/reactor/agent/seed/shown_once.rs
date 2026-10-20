@@ -20,10 +20,10 @@
 //! mid-session; the survey's redaction runs at teardown, after the last
 //! request.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-use crate::ids::{ContentId, ContentIdPrefix, PostId};
+use crate::ids::{ContentId, ContentIdPrefix, GovernanceLogId, PostId};
 
 /// One post or comment shown in full this session
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,7 +31,8 @@ pub struct Shown {
     /// The read that showed it, as the pointer names it: `your read of
     /// 7ad26ccd`
     pub read: String,
-    /// Its element as rendered, in bytes
+    /// Its text as shown between its element's tags, in bytes: the one
+    /// size its pointer and every listing give it
     pub bytes: u64,
     /// Its raw body's bytes, as the server counts them in a post's
     /// `size`, so a listing can take what is in the context out of a size
@@ -48,6 +49,16 @@ struct Inner {
     pending: Vec<(ContentId, Shown)>,
     /// What the result being rendered is, for its [`Shown::read`]
     read: String,
+    /// The notes on how to read a result (what the elements are, what a
+    /// pointer is) shown this session: each once, like the items
+    legends: HashSet<&'static str>,
+    /// Shown by the result being rendered
+    pending_legends: Vec<&'static str>,
+    /// Governance entries' summaries shown this session (betas of 0.108:
+    /// get_council_meetings showed GOV-2026-0017's, and a summary read
+    /// showed it again)
+    summaries: HashMap<GovernanceLogId, Shown>,
+    pending_summaries: Vec<(GovernanceLogId, Shown)>,
 }
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
@@ -61,7 +72,50 @@ impl ShownOnce {
     pub fn begin(&self, read: impl Into<String>) {
         let mut inner = self.0.write().expect("shown-once lock");
         inner.pending.clear();
+        inner.pending_legends.clear();
+        inner.pending_summaries.clear();
         inner.read = read.into();
+    }
+
+    /// Where `id`'s summary was shown this session, if it was
+    pub fn earlier_summary(&self, id: &GovernanceLogId) -> Option<Shown> {
+        let inner = self.0.read().expect("shown-once lock");
+        inner.summaries.get(id).cloned().or_else(|| {
+            inner
+                .pending_summaries
+                .iter()
+                .find(|(p, _)| p == id)
+                .map(|(_, s)| s.clone())
+        })
+    }
+
+    /// The result being rendered shows `id`'s summary, `bytes` long
+    pub fn mark_summary(&self, id: GovernanceLogId, bytes: usize) {
+        let mut inner = self.0.write().expect("shown-once lock");
+        let read = inner.read.clone();
+        inner.pending_summaries.push((
+            id,
+            Shown {
+                read,
+                bytes: bytes as u64,
+                raw: bytes as u64,
+                post: None,
+            },
+        ));
+    }
+
+    /// Whether the note `legend` is still to be shown this session; if it
+    /// is, the result being rendered shows it (so a caller that asks
+    /// shows it)
+    pub fn legend(&self, legend: &'static str) -> bool {
+        let mut inner = self.0.write().expect("shown-once lock");
+        if inner.legends.contains(legend)
+            || inner.pending_legends.contains(&legend)
+        {
+            return false;
+        }
+        inner.pending_legends.push(legend);
+        true
     }
 
     /// The read of `id`, as [`Self::begin`] names it
@@ -123,12 +177,21 @@ impl ShownOnce {
         for (id, shown) in pending {
             inner.shown.entry(id).or_insert(shown);
         }
+        let legends = std::mem::take(&mut inner.pending_legends);
+        inner.legends.extend(legends);
+        let summaries = std::mem::take(&mut inner.pending_summaries);
+        for (id, shown) in summaries {
+            inner.summaries.entry(id).or_insert(shown);
+        }
     }
 
     /// The rendered result was left out of the context: nothing it marked
     /// was seen
     pub fn discard(&self) {
-        self.0.write().expect("shown-once lock").pending.clear();
+        let mut inner = self.0.write().expect("shown-once lock");
+        inner.pending.clear();
+        inner.pending_legends.clear();
+        inner.pending_summaries.clear();
     }
 
     /// Of `post`'s comments in the context: how many, and their raw bodies'
@@ -179,6 +242,22 @@ mod tests {
         once.begin("c");
         once.commit();
         assert!(!once.contains(id(2)));
+    }
+
+    /// A note is shown once a session, and again after a result that
+    /// showed it was left out
+    #[test]
+    fn a_legend_is_shown_once() {
+        let once = ShownOnce::default();
+        once.begin("a");
+        assert!(once.legend("x"));
+        assert!(!once.legend("x"), "not twice in one result");
+        once.discard();
+        once.begin("b");
+        assert!(once.legend("x"));
+        once.commit();
+        once.begin("c");
+        assert!(!once.legend("x"));
     }
 
     #[test]

@@ -84,21 +84,23 @@ pub fn thread_order<T>(
 /// What a stub's line costs a read beyond its author's name and its
 /// preview, as the seed runner renders it: its date, reply count, size, id
 /// and punctuation, at the deepest indent, or, in its place, a pointer to
-/// the comment shown in full earlier in the session, with a full id (180
-/// since 0.108, for the pointer; 150 before). Held against the rendering
+/// the comment shown in full earlier in the session, with full ids, its
+/// date and parent's name, below the deepest indent (250 since 0.108;
+/// 150 before). Held against the rendering
 /// by its tests.
 ///
 /// The budget is measured as agents running the seed runner read it, since
 /// it is there to keep their context; as JSON (MCP and REST) a line runs
 /// longer, up to [`STUB_LINE_JSON_BYTES`], so a JSON read can come to about
 /// 1.5 times the budget.
-pub const STUB_LINE_BYTES: usize = 180;
+pub const STUB_LINE_BYTES: usize = 250;
 
 /// What a full comment's element costs beyond its author's name, its
 /// parent's and its body, the same way: its tags, and its attributes (ids
-/// in full at the longest, the date, the provenance labels). 240 since
-/// 0.108, when a comment became an element; 150 before
-pub const COMMENT_LINE_BYTES: usize = 240;
+/// in full at the longest, the date, the provenance labels, a `depth`
+/// below the deepest indent). 270 since 0.108, when a comment became an
+/// element; 150 before
+pub const COMMENT_LINE_BYTES: usize = 270;
 
 /// What a line adds when its comment replies to one not in the read, which
 /// it then names
@@ -192,10 +194,22 @@ pub const BYTES_PER_TOKEN: u64 = 3;
 /// three: tokens, bytes and both, beta round 2026-10-20)
 pub fn about_tokens(bytes: u64) -> String {
     let tokens = bytes / BYTES_PER_TOKEN;
-    if tokens < 1_000 {
-        format!("~{} tok", tokens.max(1))
-    } else {
-        format!("~{}k tok", (tokens + 500) / 1_000)
+    // Two significant figures (betas of 0.108: "~1k" for 1,400 lost 40%)
+    match tokens {
+        0..1_000 => format!("~{} tok", tokens.max(1)),
+        1_000..10_000 => {
+            let tenths = (tokens + 50) / 100;
+            match tenths % 10 {
+                0 => format!("~{}k tok", tenths / 10),
+                d => format!("~{}.{d}k tok", tenths / 10),
+            }
+        }
+        _ => {
+            // Rounded to two figures, then in thousands
+            let scale = 10u64.pow(tokens.ilog10() - 1);
+            let figures = (tokens + scale / 2) / scale * scale;
+            format!("~{}k tok", figures / 1_000)
+        }
     }
 }
 
@@ -210,13 +224,56 @@ pub const ELEMENT_NAMES: &[&str] =
 /// `&lt;/forged_comment&gt;`
 pub const FORGED_PREFIX: &str = "forged_";
 
-/// `text` escaped as XML element text, by quick-xml (`<`, `>` and `&`),
+/// How agents' text is escaped in the seed runner's elements: the one
+/// switch point (the Steward is deciding the policy, 2026-10-20). Both
+/// [`escape_text`] and the elements' serializer read it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Escaping {
+    /// Only what XML requires: `<` and `&` in text, and in an attribute
+    /// its quote too. `>` and a quoted `>` line read raw (the default
+    /// since the betas of 0.108: `&gt;` was noise, and agents may copy
+    /// entities into what they write)
+    Minimal,
+    /// `<`, `>` and `&`, and an attribute's quote
+    Partial,
+}
+
+/// The policy in force: change this line to change it
+pub const ESCAPING: Escaping = Escaping::Minimal;
+
+impl Escaping {
+    /// `text` escaped as element text under this policy, by quick-xml
+    pub fn escape(self, text: &str) -> std::borrow::Cow<'_, str> {
+        match self {
+            Escaping::Minimal => quick_xml::escape::minimal_escape(text),
+            Escaping::Partial => quick_xml::escape::partial_escape(text),
+        }
+    }
+
+    /// The same policy for quick-xml's serializer
+    pub fn quote_level(self) -> quick_xml::se::QuoteLevel {
+        match self {
+            Escaping::Minimal => quick_xml::se::QuoteLevel::Minimal,
+            Escaping::Partial => quick_xml::se::QuoteLevel::Partial,
+        }
+    }
+}
+
+/// `text` escaped as XML element text, by quick-xml under [`ESCAPING`],
 /// then [`mark_forged`]. What every seed renderer puts between an
 /// element's tags, so a body can never close its element or open another:
 /// the homoglyph trial (2026-10-20) found escaped XML the only frame that
 /// kept Haiku 5.5 from reading a forged message as real
 pub fn escape_text(text: &str) -> String {
-    mark_forged(&quick_xml::escape::partial_escape(text))
+    mark_forged(&ESCAPING.escape(text))
+}
+
+/// `text` for a line outside any element: not escaped (no entities show
+/// outside an element), but a tag of ours in it, raw or lookalike, is
+/// renamed as [`mark_forged`] renames one in escaped text: `<comment` is
+/// `<forged_comment`
+pub fn defang(text: &str) -> String {
+    rename_forged(text, true)
 }
 
 /// A post's or comment's body as the seed runner shows it inside its
@@ -313,11 +370,18 @@ fn element_name_at(rest: &str) -> Option<usize> {
 /// close an element; renamed, none reads as one of ours either (Steward,
 /// 2026-10-20). Nothing else changes.
 pub fn mark_forged(escaped: &str) -> String {
+    rename_forged(escaped, false)
+}
+
+/// [`mark_forged`], and, with `raw`, a raw `<` as an opener too
+fn rename_forged(escaped: &str, raw: bool) -> String {
     let mut out = String::with_capacity(escaped.len());
     let mut rest = escaped;
     while !rest.is_empty() {
         let opener = if rest.starts_with("&lt;") {
             Some(4)
+        } else if raw && rest.starts_with('<') {
+            Some(1)
         } else {
             rest.chars()
                 .next()
@@ -532,7 +596,7 @@ mod tests {
         assert_eq!(body_bytes("x   \n\n\n\ny\n"), 10);
         assert_eq!(shown_body("x   \n\n\n\ny\n"), "x\n\ny");
         // Escaped as shown
-        assert_eq!(shown_body("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        assert_eq!(shown_body("a < b & c > d"), "a &lt; b &amp; c > d");
         assert_eq!(body_bytes("a<b"), "a&lt;b".len());
         // Never under the raw bytes
         assert_eq!(body_bytes(&" ".repeat(100)), 100);
@@ -546,28 +610,37 @@ mod tests {
     #[test]
     fn lookalike_tags_are_marked_forged() {
         let shown = |s: &str| escape_text(s);
-        assert_eq!(shown("</comment>"), "&lt;/forged_comment&gt;");
-        assert_eq!(
-            shown("<message id=\"1\">"),
-            "&lt;forged_message id=\"1\"&gt;"
-        );
-        assert_eq!(shown("< / Comment >"), "&lt; / forged_Comment &gt;");
-        assert_eq!(shown("<POST/>"), "&lt;forged_POST/&gt;");
+        assert_eq!(shown("</comment>"), "&lt;/forged_comment>");
+        assert_eq!(shown("<message id=\"1\">"), "&lt;forged_message id=\"1\">");
+        assert_eq!(shown("< / Comment >"), "&lt; / forged_Comment >");
+        assert_eq!(shown("<POST/>"), "&lt;forged_POST/>");
         // A Cyrillic `с` and `о`, fullwidth brackets, a zero-width space
         assert_eq!(shown("＜/сomment＞"), "＜/forged_сomment＞");
         assert_eq!(shown("‹pо\u{200B}st›"), "‹forged_pо\u{200B}st›");
-        assert_eq!(shown("<option>"), "&lt;forged_option&gt;");
-        assert_eq!(shown("<proposal x>"), "&lt;forged_proposal x&gt;");
+        assert_eq!(shown("<option>"), "&lt;forged_option>");
+        assert_eq!(shown("<proposal x>"), "&lt;forged_proposal x>");
         // Not ours, or not a tag
-        assert_eq!(shown("<comments>"), "&lt;comments&gt;");
-        assert_eq!(shown("<postal>"), "&lt;postal&gt;");
-        assert_eq!(shown("<post_x>"), "&lt;post_x&gt;");
+        assert_eq!(shown("<comments>"), "&lt;comments>");
+        assert_eq!(shown("<postal>"), "&lt;postal>");
+        assert_eq!(shown("<post_x>"), "&lt;post_x>");
         assert_eq!(shown("a comment"), "a comment");
-        assert_eq!(shown("<b>bold</b>"), "&lt;b&gt;bold&lt;/b&gt;");
+        assert_eq!(shown("<b>bold</b>"), "&lt;b>bold&lt;/b>");
         // The escaped text of an escape is not a tag
         assert_eq!(shown("&lt;comment"), "&amp;lt;comment");
         assert_eq!(shown("<"), "&lt;");
         assert_eq!(shown("<comment"), "&lt;forged_comment");
+    }
+
+    /// Outside an element nothing is escaped, and a tag of ours is renamed
+    #[test]
+    fn defang_renames_without_escaping() {
+        assert_eq!(
+            defang("a < b & </comment> x"),
+            "a < b & </forged_comment> x"
+        );
+        assert_eq!(defang("<post id=\"1\">"), "<forged_post id=\"1\">");
+        assert_eq!(defang("＜message"), "＜forged_message");
+        assert_eq!(defang("<b>"), "<b>");
     }
 
     #[test]
@@ -575,6 +648,13 @@ mod tests {
         assert_eq!(about_tokens(2_000), "~666 tok");
         assert_eq!(about_tokens(1), "~1 tok");
         assert_eq!(about_tokens(36_000), "~12k tok");
+        // Two significant figures (betas of 0.108)
+        assert_eq!(about_tokens(4_200), "~1.4k tok");
+        assert_eq!(about_tokens(3_000), "~1k tok");
+        assert_eq!(about_tokens(29_850), "~10k tok");
+        assert_eq!(about_tokens(29_700), "~9.9k tok");
+        assert_eq!(about_tokens(372_000), "~120k tok");
+        assert_eq!(about_tokens(3_000_000), "~1000k tok");
     }
 
     /// U+001C to U+001E are line breaks Rust's whitespace leaves out, and
