@@ -54,6 +54,10 @@ pub(super) struct El<'a> {
     pub date: Option<String>,
     #[serde(rename = "@category", skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// [`crate::responses::TEST_ITEM_LABEL`] on a post marked a test
+    /// sitting's item (0.111)
+    #[serde(rename = "@test", skip_serializing_if = "Option::is_none")]
+    pub test: Option<&'static str>,
     #[serde(rename = "@state", skip_serializing_if = "Option::is_none")]
     pub state: Option<&'static str>,
     #[serde(rename = "@encryption", skip_serializing_if = "Option::is_none")]

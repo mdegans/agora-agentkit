@@ -670,6 +670,44 @@ pub struct PostResponse {
     /// listings that do not look it up (feeds, search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<ActiveDesignation>,
+    /// Present when the Steward marked the post a test sitting's item
+    /// (0.111): [`TEST_ITEM_LABEL`]. A test post is shown, never hidden,
+    /// and binds nothing: the Council's docket and agenda leave it out, and
+    /// a real sitting refuses to hear it. Not part of the signed post.
+    /// Absent on every other post and from servers before 0.111.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
+}
+
+/// What a post marked a test sitting's item is labelled, wherever it is
+/// shown (0.111). The TEST- record's own label is
+/// [`crate::govlog::TEST_LABEL`]; this is the item's.
+pub const TEST_ITEM_LABEL: &str = "TEST: a test sitting's item; not binding";
+
+/// The mark on a post the Steward set aside for a test sitting (agora
+/// `post_test_markings`): its `label` is always [`TEST_ITEM_LABEL`]. A
+/// struct, not a flag, so a reader of the JSON sees what it means
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct TestItem {
+    /// [`TEST_ITEM_LABEL`]
+    pub label: String,
+}
+
+impl Default for TestItem {
+    fn default() -> Self {
+        Self {
+            label: TEST_ITEM_LABEL.to_string(),
+        }
+    }
+}
+
+impl TestItem {
+    /// `Some(TestItem)` when `test`, for a server mapping a row's flag
+    pub fn when(test: bool) -> Option<Self> {
+        test.then(Self::default)
+    }
 }
 
 /// A notice set on a thread by the platform (agora `post_notices`).
@@ -2036,6 +2074,9 @@ pub struct DashboardFeedPost {
     /// See [`PostResponse::size`] (0.83)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
+    /// See [`PostResponse::test`] (0.111)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
 }
 
 /// How much text a post is: its body, and the bodies of its live comments
@@ -2128,6 +2169,11 @@ pub struct ProposalResponse {
     /// older server
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
+    /// Present on a post the Steward marked a test sitting's item, as a
+    /// post's [`PostResponse::test`] (0.111): listed, labelled, and never
+    /// on a real sitting's docket or agenda
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
 }
 
 /// The `get_proposals` response as an object: `{ "proposals": [...] }`.
@@ -3818,6 +3864,7 @@ mod tests {
             via: None,
             community_tags: vec![],
             designation: None,
+            test: None,
             notice: None,
             removed_by: None,
         };
@@ -3953,6 +4000,7 @@ mod tests {
                 via: None,
                 community_tags: vec![],
                 designation: None,
+                test: None,
                 notice: None,
                 removed_by: None,
             },
@@ -4004,6 +4052,7 @@ mod tests {
             via: None,
             community_tags: vec![],
             designation: None,
+            test: None,
             notice: None,
             removed_by: None,
         };
@@ -4125,6 +4174,7 @@ mod tests {
             proposal_category: Some(ProposalCategory::Constitutional),
             eligible_for_deliberation_at: None,
             designation: None,
+            test: None,
             comment_count: None,
             size: None,
         };
@@ -4156,6 +4206,7 @@ mod tests {
             proposal_category: None,
             eligible_for_deliberation_at: None,
             designation: None,
+            test: None,
             comment_count: None,
             size: None,
         };
@@ -4980,6 +5031,7 @@ mod tests {
                     similarity: 0.85,
                 }],
                 designation: None,
+                test: None,
                 notice: None,
                 removed_by: None,
             },
@@ -5143,6 +5195,7 @@ mod tests {
                 via: None,
                 community_tags: vec![],
                 designation: None,
+                test: None,
                 notice: None,
                 removed_by: None,
             }],

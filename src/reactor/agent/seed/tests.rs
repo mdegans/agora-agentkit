@@ -2943,6 +2943,7 @@ fn listed_post(
         via: None,
         community_tags: vec![],
         designation: None,
+        test: None,
         notice: None,
         removed_by: None,
     }
@@ -5093,6 +5094,7 @@ fn a_proposal_body_cannot_forge_a_proposal() {
         proposal_category: None,
         eligible_for_deliberation_at: None,
         designation: None,
+        test: None,
         comment_count: None,
         size: None,
     };
@@ -5142,6 +5144,7 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
             proposal_category: None,
             eligible_for_deliberation_at: None,
             designation: None,
+            test: None,
             comment_count: size.map(|_| 3),
             size,
         }
@@ -5200,6 +5203,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
         proposal_category: None,
         eligible_for_deliberation_at: None,
         designation: None,
+        test: None,
         comment_count: Some(0),
         size: Some(crate::responses::ReadSize {
             body_bytes: 30_000,
@@ -5538,4 +5542,83 @@ async fn an_empty_lapsed_list_points_to_the_overdue_one() {
         "{rendered}"
     );
     assert!(!rendered.contains("owed_by"), "{rendered}");
+}
+
+/// A post the Steward marked a test sitting's item is labelled on its
+/// element wherever it is shown: a read, a listing and the proposals list
+/// (0.111). The label is ours, whatever text the server sent with it
+#[test]
+fn a_test_item_is_labelled_in_a_read_a_listing_and_the_proposals() {
+    use crate::responses::{TEST_ITEM_LABEL, TestItem};
+    let attr = format!(" test=\"{TEST_ITEM_LABEL}\"");
+    let mut post: crate::responses::PostResponse =
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "agent_id": uuid::Uuid::new_v4(),
+            "agent_name": "steward",
+            "community_id": uuid::Uuid::new_v4(),
+            "community_name": "meta-governance",
+            "title": "TEST: scheduling the witness test's hearing",
+            "body": "A test of the witness toolset.",
+            "test": {"label": "anything a server says"},
+        }))
+        .expect("a post with a test mark");
+    assert!(post.test.is_some());
+    let read = super::prompt::format_post(
+        &crate::responses::PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: post.clone(),
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        },
+        &"viewer".parse().unwrap(),
+    );
+    assert!(read.contains(&attr), "{read}");
+    assert!(!read.contains("anything a server says"), "{read}");
+
+    let proposal = crate::responses::ProposalResponse {
+        id: post.id,
+        title: post.title.clone(),
+        body: post.body.clone(),
+        agent_name: "steward".parse().unwrap(),
+        created_at: chrono::Utc::now(),
+        proposal_category: Some(crate::enums::ProposalCategory::Routine),
+        eligible_for_deliberation_at: None,
+        designation: None,
+        test: TestItem::when(true),
+        comment_count: None,
+        size: None,
+    };
+    let listed = super::prompt::format_proposals(
+        &[proposal],
+        &super::ShownOnce::default(),
+    );
+    assert!(listed.contains(&attr), "{listed}");
+
+    // An unmarked post carries no attribute, and its JSON no field
+    post.test = TestItem::when(false);
+    let read = super::prompt::format_post(
+        &crate::responses::PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: post.clone(),
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        },
+        &"viewer".parse().unwrap(),
+    );
+    assert!(!read.contains(" test=\""), "{read}");
+    let json = serde_json::to_value(&post).unwrap();
+    assert!(json.get("test").is_none(), "{json}");
+    assert_eq!(
+        serde_json::to_value(TestItem::default()).unwrap(),
+        serde_json::json!({"label": TEST_ITEM_LABEL})
+    );
 }
