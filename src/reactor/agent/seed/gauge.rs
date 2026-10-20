@@ -965,11 +965,11 @@ mod tests {
         );
         // A citation without its commit is offered without one (0.110.0)
         let pinned = note(serde_json::json!({
-            "id": "DATA-2026-0001:votes/raw.json:500-3000"
+            "id": "DATA-2026-0001:/votes/raw.json:500-3000"
         }))
         .await;
         assert!(
-            pinned.contains("id=\"DATA-2026-0001:votes/raw.json:500-758\""),
+            pinned.contains("id=\"DATA-2026-0001:/votes/raw.json:500-758\""),
             "{pinned}"
         );
         let listing = note(serde_json::json!({

@@ -5,40 +5,39 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 ## 0.110.0 (2026-10-20)
 
 A data set's file may be cited without its commit, for the one the set
-pins: `DATA-2026-0001:<path>` and `DATA-2026-0001:<path>:110-300` read as
-`get_content` ids beside the canonical `DATA-2026-0001:<commit>:<path>[:110-300]`,
-which reads as before.
+pins, with the path written from the root after a `/` (Steward,
+2026-10-20): `DATA-2026-0001:/<path>` and `DATA-2026-0001:/<path>:110-300`
+read as `get_content` ids beside the canonical
+`DATA-2026-0001:<commit>:<path>[:110-300]`, which reads as before.
 
 - Breaking: `DataCitation.commit` is an `Option<GitCommitPrefix>`; `None`
   is a citation without one. Code that read it as a `GitCommitPrefix`
-  stops compiling (no agora or agora-agents code does). `GetContentInput::split_citation` returns `None` for such a
-  citation, as for a read of the set's own id: the server reads the set
-  as it stands, at the commit it pins, and the file read's `commit` says
-  which.
-- The grammar: after `DATA-…:` (no space), the text up to the next `:` is
-  the commit when it is 7 to 40 hex digits; anything else (a `/`, a `.`,
-  `a`, `cafe`, 41 digits) starts the path, so
-  `DATA-2026-0001:abcdef1/file.md` is that file at the pinned commit. An
-  empty commit (`DATA-2026-0001::x.md`) is one left out. A path whose text
-  before its first `:` is 7 to 40 hex digits, or a root file named only
-  with them, is cited with its commit. `DATA-2026-0001: the votes` (an id,
-  `: ` and prose) is still refused. A range is still the canonical
+  stops compiling (no agora or agora-agents code does).
+  `GetContentInput::split_citation` returns `None` for such a citation,
+  as for a read of the set's own id: the server reads the set as it
+  stands, at the commit it pins, and the file read's `commit` says which.
+- The grammar: after `DATA-…:` comes either `<commit>:<path>` (the commit
+  7 to 40 hex digits) or `/<path>`. Nothing else parses, so a path is
+  never taken for a commit: `DATA-2026-0001:/abcdef1/file.md` and
+  `…:/abcdef1:file.md` are paths. A range is still the canonical
   `<from>-<to>` or `<from>-` after the last `:`, so paths keep their
-  colons.
-- `Display` writes a commit-less citation without one (it round-trips);
+  colons. After the `/` the path is taken as written (`//x`, `/./x`,
+  `/../x`, `\`, control characters refused, as `DataFilePath` always
+  has); after a commit it is read leniently as before.
+- Changed refusals: anything else after `DATA-…:` (`89fe7c:x`, a path
+  without its `/`, `::x`, `: the votes`, an empty rest) is
+  `DataCitationError::Commit`, whose message now says "if `X` was meant as
+  a commit, it must be 7 to 40 hex digits; a path cited without a commit
+  starts with `/`" and names both forms (`DataCitation::FORM`).
+- `Display` writes a commit-less citation with its `/` (it round-trips);
   `DataCitation::at(commit)` gives the canonical form once the commit is
   known, and `reads_at(&GitCommitId)` is true for a matching or absent
-  commit.
-- `CONTENT_REF_PATTERN` makes the commit optional
-  (`DATA-…:([0-9a-f]{7,40}:)?.+`), and the `ContentRef` schema's
-  description says it may be left out (one clause; no tool description
-  changed). The seed runner's offer of a range that fits keeps the
-  citation as it was given.
-- `DataCitation::commit_hint()`: for a commit-less citation whose path
-  starts like a malformed commit (4+ hex digits but not 7 to 40, or 7 to
-  41 characters with one non-hex), the words a server adds to its "no
-  such file": "if `X` was meant as a commit, it must be 7 to 40 hex
-  digits".
+  commit. The parse is in one place (`DataCitation::from_str`): the
+  scheme may change with the `get_content` consolidation.
+- `CONTENT_REF_PATTERN`: `DATA-…:([0-9a-f]{7,40}:|/).+`, and the
+  `ContentRef` schema's description names the commit-less form (one
+  clause; no tool description changed). The seed runner's offer of a
+  range that fits keeps the citation as it was given.
 - `DataFileContent::citation(set)`: the canonical citation of what a read
   served (short commit, path, the lines served). The seed runner's file
   header now says "Cite the file as DATA-…:<commit>:<path>." on a whole
