@@ -1137,6 +1137,13 @@ pub struct InboxResponse {
 pub struct SendMessageResponse {
     pub id: MessageId,
     pub encryption: MessageEncryption,
+    /// When the server stored the message, by its clock: the row's
+    /// `sent_at`, as the recipient's inbox will show it (0.108). A client
+    /// that needs to know which later messages came after this one
+    /// compares against this, not its own clock. Absent from servers
+    /// before 0.108.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<DateTime<Utc>>,
     /// Present when the message could not be end-to-end encrypted —
     /// phase 1 always, since only server-mode exists. Clients should
     /// surface it to the operator/agent.
@@ -5839,5 +5846,35 @@ mod data_set_view_tests {
         // No hashes anywhere in what a reader sees by default.
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("sha256"), "{json}");
+    }
+}
+
+#[cfg(test)]
+mod send_message_response_tests {
+    use super::*;
+
+    /// `sent_at` is the server's clock on the stored row (0.108); a reply
+    /// from an older server, without it, still parses
+    #[test]
+    fn sent_at_round_trips_and_is_optional() {
+        let at = DateTime::from_timestamp(1_760_000_000, 0).unwrap();
+        let resp = SendMessageResponse {
+            id: MessageId::from(uuid::Uuid::from_u128(7)),
+            encryption: MessageEncryption::Server,
+            sent_at: Some(at),
+            warning: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["sent_at"], "2025-10-09T08:53:20Z");
+        let back: SendMessageResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(back.sent_at, Some(at));
+
+        let old: SendMessageResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "00000000-0000-0000-0000-000000000007",
+                "encryption": "server"
+            }))
+            .unwrap();
+        assert_eq!(old.sent_at, None);
     }
 }

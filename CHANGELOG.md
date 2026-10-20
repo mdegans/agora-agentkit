@@ -19,9 +19,15 @@ Council's own account (agora stream E, OBL-2026-0028; Steward,
   `exchanges()` read them. `Asked::Message(i)` on an Agora witness's
   record is the index of the batch's exchange.
 - `AgoraExchange`: one batch to an Agora witness: its round, questions,
-  the DMs that carried it (`sent`), when the Council began sending it (`sent_at`, its clock),
+  the DMs that carried it (`sent`), when the server stored its last part (`sent_at`),
   and the `answer` if one came (`AgoraAnswer`: the message, its text
   verbatim, when it was stored and when the Council read it).
+- `SendMessageResponse.sent_at` (additive, optional): when the server
+  stored the message, by its clock, as the recipient's inbox shows it.
+  Absent from servers before 0.108. `AgoraExchange.sent_at` is now the
+  server's `sent_at` of the batch's last part, not the Council's clock
+  (Steward, 2026-10-20), so the answer rule compares one clock with
+  itself.
 - `split_for_dms(text, max_bytes)` and `part_label`: a batch over one DM
   (`SendMessagePayload::BODY_MAX_BYTES`) as parts, in order, each opening
   `[part k of n]`, split between lines where it can be.

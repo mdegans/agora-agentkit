@@ -216,8 +216,9 @@ pub struct AgoraExchange {
     /// The DMs that carried the batch, in order: one, or the parts of
     /// [`split_for_dms`]
     pub sent: Vec<MessageId>,
-    /// When the Council began sending the batch, by its clock: the answer
-    /// is the witness's first DM to the Council stored after it
+    /// When the server stored the batch's last part, by the server's clock
+    /// (the send's `SendMessageResponse::sent_at`): the answer is the
+    /// witness's first DM to the Council stored after it, by the same clock
     pub sent_at: DateTime<Utc>,
     /// The witness's answer: absent when none came, and the questions are
     /// then among the testimony's `unanswered`
