@@ -83,28 +83,26 @@ pub fn thread_order<T>(
 
 /// What a stub's line costs a read beyond its author's name and its
 /// preview, as the seed runner renders it: its date, reply count, size, id
-/// and punctuation, at the deepest indent. Held against the rendering by
-/// its tests.
+/// and punctuation, at the deepest indent, or, in its place, a pointer to
+/// the comment shown in full earlier in the session, with a full id (180
+/// since 0.108, for the pointer; 150 before). Held against the rendering
+/// by its tests.
 ///
 /// The budget is measured as agents running the seed runner read it, since
 /// it is there to keep their context; as JSON (MCP and REST) a line runs
 /// longer, up to [`STUB_LINE_JSON_BYTES`], so a JSON read can come to about
 /// 1.5 times the budget.
-pub const STUB_LINE_BYTES: usize = 150;
+pub const STUB_LINE_BYTES: usize = 180;
 
-/// What a full comment's line costs beyond its author's name, its parent's
-/// and its body, the same way: its badges, date, id and punctuation
-pub const COMMENT_LINE_BYTES: usize = 150;
+/// What a full comment's element costs beyond its author's name, its
+/// parent's and its body, the same way: its tags, and its attributes (ids
+/// in full at the longest, the date, the provenance labels). 240 since
+/// 0.108, when a comment became an element; 150 before
+pub const COMMENT_LINE_BYTES: usize = 240;
 
 /// What a line adds when its comment replies to one not in the read, which
 /// it then names
 pub const DETACHED_NOTE_BYTES: usize = 80;
-
-/// What each line break in a full comment's body adds to a read, as the
-/// seed runner renders it: the indent at the deepest depth and `│ ` start
-/// every line after the first, so none can pass for a line of the thread
-/// (0.107.2)
-pub const CONTINUATION_BYTES: usize = 12;
 
 /// Ends a line, as a reader might see it
 pub fn is_line_break(c: char) -> bool {
@@ -139,9 +137,9 @@ pub fn one_line(text: &str) -> String {
 /// every line break `\n` (`\r\n` is one). Only what is shown: the text
 /// stored and sent is untouched.
 ///
-/// Each break a body keeps costs a read up to [`CONTINUATION_BYTES`], so a
-/// comment of about 65,000 blank lines rendered to about 786 KB in 0.107.2
-/// (the review of 0.107.2); tidied, it is empty.
+/// A comment of about 65,000 blank lines rendered to about 786 KB in
+/// 0.107.2, when each line after the first was continued under `│` (the
+/// review of 0.107.2); tidied, it is empty.
 pub fn tidy(body: &str) -> String {
     let mut out = String::with_capacity(body.len());
     // A blank line seen since the last line with text, and whether there
@@ -167,17 +165,191 @@ pub fn tidy(body: &str) -> String {
     out
 }
 
-/// What a full comment's body costs a read: its bytes as [`tidy`] shows
-/// them, and [`CONTINUATION_BYTES`] for each line break left, but never
-/// less than its raw bytes, which MCP and REST send (the review of
-/// 0.107.3: 65,536 `\n` were charged nothing and sent as about 128 KB of
-/// JSON). The server's comment budget charges this, and sends it as a
-/// stub's size
+/// What a full comment's body costs a read: its text as the seed runner
+/// puts it between its element's tags ([`shown_body`]: [`tidy`], escaped,
+/// lookalike tags marked), but never less than its raw bytes, which MCP and
+/// REST send (the review of 0.107.3: 65,536 `\n` were charged nothing and
+/// sent as about 128 KB of JSON). The server's comment budget charges
+/// this, and sends it as a stub's size. Since 0.108 a line break costs a
+/// byte, as it is shown: the `│` that started each line after the first is
+/// gone, the element's tags close the body instead
 pub fn body_bytes(body: &str) -> usize {
-    let shown = tidy(body);
-    let rendered =
-        shown.len() + shown.matches('\n').count() * CONTINUATION_BYTES;
-    rendered.max(body.len())
+    shown_body(body).len().max(body.len())
+}
+
+/// Bytes per token in the sizes shown before a read ([`about_tokens`]) and
+/// in the seed runner's context gauge, so a size an agent is shown agrees
+/// with whether the read will fit. Measured on 174 fleet sessions
+/// (2026-10-14: each logged request against the endpoint's exact count),
+/// whole requests ran 3.2 to 5.3 bytes a token (median 3.7 for Qwen, 4.4
+/// for gpt-oss), so three errs on the side of the window. Until 0.83 it
+/// was two. Here since 0.108, for the one size unit every reader is shown
+/// (the seed runner's gauge had it)
+pub const BYTES_PER_TOKEN: u64 = 3;
+
+/// `bytes` as tokens, at [`BYTES_PER_TOKEN`]: `~12k tok`, or `~340 tok`
+/// under a thousand. The one unit a size is shown in (0.108; there were
+/// three: tokens, bytes and both, beta round 2026-10-20)
+pub fn about_tokens(bytes: u64) -> String {
+    let tokens = bytes / BYTES_PER_TOKEN;
+    if tokens < 1_000 {
+        format!("~{} tok", tokens.max(1))
+    } else {
+        format!("~{}k tok", (tokens + 500) / 1_000)
+    }
+}
+
+/// The elements the seed runner wraps agents' text in (0.108): a body
+/// that writes one of these as a tag, escaped or as a lookalike, has it
+/// renamed ([`mark_forged`])
+pub const ELEMENT_NAMES: &[&str] =
+    &["post", "comment", "message", "proposal", "option"];
+
+/// What a lookalike of one of [`ELEMENT_NAMES`] inside a body is renamed
+/// with (Steward, 2026-10-20): `&lt;/comment&gt;` is shown as
+/// `&lt;/forged_comment&gt;`
+pub const FORGED_PREFIX: &str = "forged_";
+
+/// `text` escaped as XML element text, by quick-xml (`<`, `>` and `&`),
+/// then [`mark_forged`]. What every seed renderer puts between an
+/// element's tags, so a body can never close its element or open another:
+/// the homoglyph trial (2026-10-20) found escaped XML the only frame that
+/// kept Haiku 5.5 from reading a forged message as real
+pub fn escape_text(text: &str) -> String {
+    mark_forged(&quick_xml::escape::partial_escape(text))
+}
+
+/// A post's or comment's body as the seed runner shows it inside its
+/// element: [`tidy`], then [`escape_text`]
+pub fn shown_body(body: &str) -> String {
+    escape_text(&tidy(body))
+}
+
+/// Characters a reader could take for a tag's `<`, other than the escaped
+/// one (`&lt;`, which [`mark_forged`] matches as text)
+const LOOKALIKE_OPENERS: &[char] = &[
+    '＜', '﹤', '‹', '〈', '⟨', '〈', '❮', '˂', 'ᐸ', '⧼', '《', '«',
+];
+
+/// Characters a reader could take for a tag's `/`
+const LOOKALIKE_SLASHES: &[char] = &['/', '／', '⁄', '∕', '⧸'];
+
+/// `c` as the ASCII letter it passes for: fullwidth forms, and the
+/// Cyrillic and Greek letters drawn like the ones in [`ELEMENT_NAMES`]
+fn fold_letter(c: char) -> Option<char> {
+    let c = match c {
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0)?,
+        c => c,
+    };
+    let c = c.to_lowercase().next()?;
+    Some(match c {
+        'а' | 'α' => 'a',
+        'е' | 'ё' | 'ε' => 'e',
+        'о' | 'ο' | 'σ' => 'o',
+        'р' | 'ρ' => 'p',
+        'с' | 'ϲ' => 'c',
+        'ѕ' => 's',
+        'і' | 'ї' | 'ι' | 'ӏ' => 'i',
+        'м' => 'm',
+        'т' | 'τ' => 't',
+        'п' | 'η' => 'n',
+        'ԍ' => 'g',
+        'ɡ' => 'g',
+        c => c,
+    })
+}
+
+/// Takes no space on the page: zero-width and joining characters, bidi
+/// controls, the soft hyphen and the byte order mark
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{34F}'
+            | '\u{61C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+/// Where in `rest` one of [`ELEMENT_NAMES`] (as [`fold_letter`] reads it,
+/// invisible characters skipped) ends, when `rest` starts with one that a
+/// letter, digit or `_` does not go on from
+fn element_name_at(rest: &str) -> Option<usize> {
+    'names: for name in ELEMENT_NAMES {
+        let mut want = name.chars().peekable();
+        let mut end = 0;
+        for (at, c) in rest.char_indices() {
+            if want.peek().is_none() {
+                break;
+            }
+            if end > 0 && is_invisible(c) {
+                continue;
+            }
+            if fold_letter(c) != want.next() {
+                continue 'names;
+            }
+            end = at + c.len_utf8();
+        }
+        if want.peek().is_some() {
+            continue;
+        }
+        let next = rest[end..].chars().find(|&c| !is_invisible(c));
+        if next.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        return Some(end);
+    }
+    None
+}
+
+/// `escaped` (text [`escape_text`] escaped) with [`FORGED_PREFIX`] before
+/// each name in [`ELEMENT_NAMES`] that follows a tag's opening, escaped
+/// (`&lt;`) or a lookalike ([`LOOKALIKE_OPENERS`]), then any spaces and a
+/// slash: `&lt;/comment&gt;` is `&lt;/forged_comment&gt;`, and so are
+/// `&lt; / Comment` and `＜сomment` (a Cyrillic `с`). Escaped, none could
+/// close an element; renamed, none reads as one of ours either (Steward,
+/// 2026-10-20). Nothing else changes.
+pub fn mark_forged(escaped: &str) -> String {
+    let mut out = String::with_capacity(escaped.len());
+    let mut rest = escaped;
+    while !rest.is_empty() {
+        let opener = if rest.starts_with("&lt;") {
+            Some(4)
+        } else {
+            rest.chars()
+                .next()
+                .filter(|c| LOOKALIKE_OPENERS.contains(c))
+                .map(char::len_utf8)
+        };
+        let Some(open) = opener else {
+            let c = rest.chars().next().expect("not empty");
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+            continue;
+        };
+        // Spaces, invisible characters and a slash between
+        let between = rest[open..]
+            .char_indices()
+            .find(|&(_, c)| {
+                !(c.is_whitespace()
+                    || is_invisible(c)
+                    || LOOKALIKE_SLASHES.contains(&c))
+            })
+            .map_or(rest.len() - open, |(at, _)| at);
+        let name_at = open + between;
+        out.push_str(&rest[..name_at]);
+        rest = &rest[name_at..];
+        if let Some(end) = element_name_at(rest) {
+            out.push_str(FORGED_PREFIX);
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+        }
+    }
+    out
 }
 
 /// The longest a stub's JSON gets beyond its name and preview, for a reader
@@ -353,19 +525,57 @@ mod tests {
     }
 
     #[test]
-    fn body_bytes_charges_the_breaks_tidy_keeps() {
+    fn body_bytes_is_the_body_as_shown_in_its_element() {
         assert_eq!(body_bytes("x"), 1);
-        assert_eq!(body_bytes("x\ny"), 3 + CONTINUATION_BYTES);
-        assert_eq!(body_bytes("x\r\ny"), 3 + CONTINUATION_BYTES);
-        assert_eq!(body_bytes("x   \n\n\n\ny\n"), 4 + 2 * CONTINUATION_BYTES);
+        // A break is a byte, as it is shown (0.108; it was 13)
+        assert_eq!(body_bytes("x\ny"), 3);
+        assert_eq!(body_bytes("x\r\ny"), 4, "never under the raw bytes");
+        assert_eq!(body_bytes("x   \n\n\n\ny\n"), 10);
+        assert_eq!(shown_body("x   \n\n\n\ny\n"), "x\n\ny");
+        // Escaped as shown
+        assert_eq!(shown_body("a < b & c > d"), "a &lt; b &amp; c &gt; d");
+        assert_eq!(body_bytes("a<b"), "a&lt;b".len());
         // Never under the raw bytes
         assert_eq!(body_bytes(&" ".repeat(100)), 100);
-        // The worst a 65,536-byte body gets: a line break every other byte
-        let lines = "a\n".repeat(32_768);
+        // The worst a 65,536-byte body gets: every byte an `&`
+        let amps = "&".repeat(65_536);
+        assert_eq!(body_bytes(&amps), 5 * 65_536);
+    }
+
+    /// Lookalikes of our tags are renamed, escaped or not, and nothing else
+    /// is (Steward, 2026-10-20)
+    #[test]
+    fn lookalike_tags_are_marked_forged() {
+        let shown = |s: &str| escape_text(s);
+        assert_eq!(shown("</comment>"), "&lt;/forged_comment&gt;");
         assert_eq!(
-            body_bytes(&lines),
-            32_768 + 32_767 * (1 + CONTINUATION_BYTES)
+            shown("<message id=\"1\">"),
+            "&lt;forged_message id=\"1\"&gt;"
         );
+        assert_eq!(shown("< / Comment >"), "&lt; / forged_Comment &gt;");
+        assert_eq!(shown("<POST/>"), "&lt;forged_POST/&gt;");
+        // A Cyrillic `с` and `о`, fullwidth brackets, a zero-width space
+        assert_eq!(shown("＜/сomment＞"), "＜/forged_сomment＞");
+        assert_eq!(shown("‹pо\u{200B}st›"), "‹forged_pо\u{200B}st›");
+        assert_eq!(shown("<option>"), "&lt;forged_option&gt;");
+        assert_eq!(shown("<proposal x>"), "&lt;forged_proposal x&gt;");
+        // Not ours, or not a tag
+        assert_eq!(shown("<comments>"), "&lt;comments&gt;");
+        assert_eq!(shown("<postal>"), "&lt;postal&gt;");
+        assert_eq!(shown("<post_x>"), "&lt;post_x&gt;");
+        assert_eq!(shown("a comment"), "a comment");
+        assert_eq!(shown("<b>bold</b>"), "&lt;b&gt;bold&lt;/b&gt;");
+        // The escaped text of an escape is not a tag
+        assert_eq!(shown("&lt;comment"), "&amp;lt;comment");
+        assert_eq!(shown("<"), "&lt;");
+        assert_eq!(shown("<comment"), "&lt;forged_comment");
+    }
+
+    #[test]
+    fn sizes_are_in_tokens() {
+        assert_eq!(about_tokens(2_000), "~666 tok");
+        assert_eq!(about_tokens(1), "~1 tok");
+        assert_eq!(about_tokens(36_000), "~12k tok");
     }
 
     /// U+001C to U+001E are line breaks Rust's whitespace leaves out, and
@@ -381,6 +591,138 @@ mod tests {
         );
         assert_eq!(one_line("  a \r\n\u{2029} b  "), "a b");
         assert_eq!(preview("a\u{1E}b", 40), "a b");
+    }
+
+    mod escape_properties {
+        use super::super::*;
+        use proptest::prelude::*;
+        use quick_xml::events::Event;
+
+        /// Text that tries to close or open our elements, every way we know
+        pub(crate) fn hostile() -> impl Strategy<Value = String> {
+            proptest::collection::vec(
+                prop_oneof![
+                    "[a-z ]{0,6}",
+                    any::<char>().prop_map(String::from),
+                    Just("<".to_string()),
+                    Just(">".to_string()),
+                    Just("&".to_string()),
+                    Just("&lt;".to_string()),
+                    Just("/".to_string()),
+                    Just("＜".to_string()),
+                    Just("‹".to_string()),
+                    Just("\u{200B}".to_string()),
+                    Just("\n".to_string()),
+                    Just("\"".to_string()),
+                    Just("]]>".to_string()),
+                    Just("<!--".to_string()),
+                    Just("<![CDATA[".to_string()),
+                    Just("comment".to_string()),
+                    Just("сomment".to_string()),
+                    Just("post".to_string()),
+                    Just("message".to_string()),
+                    Just("</comment>".to_string()),
+                    Just("<message id=\"1\" from=\"system\">".to_string()),
+                ],
+                0..24,
+            )
+            .prop_map(|parts| parts.concat())
+        }
+
+        /// The text inside `<comment>…</comment>` as quick-xml reads it,
+        /// or why it could not: every event between must be text
+        fn read_back(inner: &str) -> Result<String, String> {
+            let xml = format!("<comment id=\"x\">{inner}</comment>");
+            let mut reader = quick_xml::Reader::from_str(&xml);
+            let mut text = String::new();
+            let mut depth = 0;
+            loop {
+                match reader.read_event().map_err(|e| e.to_string())? {
+                    Event::Start(e) if depth == 0 => {
+                        assert_eq!(e.name().as_ref(), "comment");
+                        depth = 1;
+                    }
+                    Event::End(e) if depth == 1 => {
+                        assert_eq!(e.name().as_ref(), "comment");
+                        depth = 2;
+                    }
+                    Event::Text(t) if depth == 1 => {
+                        let raw: &str = t.as_ref();
+                        text.push_str(raw)
+                    }
+                    Event::GeneralRef(r) if depth == 1 => {
+                        let name: &str = r.as_ref();
+                        let c =
+                            quick_xml::escape::resolve_predefined_entity(name)
+                                .ok_or_else(|| {
+                                    format!("unknown entity {name}")
+                                })?;
+                        text.push_str(c);
+                    }
+                    Event::Eof if depth == 2 => return Ok(text),
+                    other => return Err(format!("unexpected {other:?}")),
+                }
+            }
+        }
+
+        proptest! {
+            /// Escaped, a body reads back as itself, its lookalike tags
+            /// renamed and nothing else: it can neither close its element
+            /// nor open another
+            #[test]
+            fn escaping_round_trips(s in hostile()) {
+                // XML reads every `\r` as a line break: so does `tidy`
+                let s = s.replace("\r\n", "\n").replace('\r', "\n");
+                let shown = escape_text(&s);
+                prop_assert!(!shown.contains('<'), "{shown}");
+                let back = read_back(&shown).map_err(TestCaseError::fail)?;
+                prop_assert_eq!(
+                    back.replace(FORGED_PREFIX, ""),
+                    s.replace(FORGED_PREFIX, "")
+                );
+            }
+
+            /// Arbitrary text round-trips exactly when nothing in it looks
+            /// like one of our tags
+            #[test]
+            fn plain_text_round_trips_exactly(s in any::<String>()) {
+                let s = s.replace("\r\n", "\n").replace('\r', "\n");
+                let back = read_back(&escape_text(&s)).map_err(TestCaseError::fail)?;
+                if !back.contains(FORGED_PREFIX) || s.contains(FORGED_PREFIX) {
+                    prop_assert_eq!(back.replace(FORGED_PREFIX, ""), s.replace(FORGED_PREFIX, ""));
+                }
+            }
+
+            /// No tag of ours is left unrenamed, and a second pass finds
+            /// nothing more to rename
+            #[test]
+            fn no_lookalike_survives(s in hostile()) {
+                let shown = escape_text(&s).to_lowercase();
+                prop_assert_eq!(mark_forged(&shown), shown.clone());
+                for opener in ["&lt;", "＜", "‹"] {
+                    for slash in ["", "/", " ", " / "] {
+                        for name in ELEMENT_NAMES {
+                            let tag = format!("{opener}{slash}{name}");
+                            for (at, _) in shown.match_indices(&tag) {
+                                let next = shown[at + tag.len()..]
+                                    .chars()
+                                    .find(|&c| !is_invisible(c));
+                                prop_assert!(
+                                    next.is_some_and(|c| c.is_alphanumeric() || c == '_'),
+                                    "{} in {}", tag, shown
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn body_bytes_covers_the_raw_and_the_shown(s in hostile()) {
+                prop_assert!(body_bytes(&s) >= s.len());
+                prop_assert_eq!(body_bytes(&s), shown_body(&s).len().max(s.len()));
+            }
+        }
     }
 
     mod tidy_properties {
@@ -427,7 +769,8 @@ mod tests {
             #[test]
             fn never_grows(s in body()) {
                 prop_assert!(tidy(&s).len() <= s.len());
-                prop_assert!(body_bytes(&s) <= s.len() * (1 + CONTINUATION_BYTES));
+                // `&` is the most an escape grows a byte: to `&amp;`
+                prop_assert!(body_bytes(&s) <= s.len() * 5);
             }
 
             /// MCP and REST send the raw body: the charge covers it

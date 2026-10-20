@@ -166,8 +166,9 @@ impl ContextGauge {
 }
 
 /// Bytes per token in [`estimate_tokens`], and in the sizes shown before a
-/// read, so a size an agent is shown agrees with whether it will fit
-pub const BYTES_PER_TOKEN: u64 = 3;
+/// read, so a size an agent is shown agrees with whether it will fit. One
+/// copy, in [`crate::threads`] since 0.108, with the sizes it is shown in
+pub use crate::threads::BYTES_PER_TOKEN;
 
 /// A rough token count for `text`: a token for every three bytes. Measured
 /// on 174 fleet sessions (2026-10-14: each logged request against the
@@ -189,6 +190,9 @@ pub struct Gauged<T> {
     context: ContextGauge,
     /// Whose session this is, for the log when a result is left out
     agent_id: Option<AgentId>,
+    /// What each result showed in full, committed when it is seated and
+    /// discarded when it is left out (0.108)
+    shown_once: Option<super::ShownOnce>,
 }
 
 impl<T> Gauged<T> {
@@ -197,7 +201,16 @@ impl<T> Gauged<T> {
             inner,
             context,
             agent_id: None,
+            shown_once: None,
         }
+    }
+
+    /// Commit what each result showed in full to `shown_once` when it is
+    /// seated, and discard it when the result is left out: an agent never
+    /// saw a result replaced by a note, so a later read shows it in full
+    pub fn with_shown_once(mut self, shown_once: super::ShownOnce) -> Self {
+        self.shown_once = Some(shown_once);
+        self
     }
 
     /// Name the agent in the log when a result is left out (0.94: the
@@ -220,7 +233,13 @@ impl<T> Gauged<T> {
         let tokens = estimate_tokens(&text);
         if self.context.fits(tokens) {
             self.context.add(tokens);
+            if let Some(once) = &self.shown_once {
+                once.commit();
+            }
             return result;
+        }
+        if let Some(once) = &self.shown_once {
+            once.discard();
         }
         let held = self.context.get();
         let room = self.context.room();
@@ -241,21 +260,19 @@ impl<T> Gauged<T> {
         // cannot crowd out the session's end (review of 0.89)
         let note = if self.context.refuse() == 0 {
             format!(
-                "This result is ~{tokens} tok ({} KB); with ~{held} tok \
-                 already in your context (this turn's other results included), \
-                 it would not fit in your {} token window less the {} kept for \
-                 the end of your session, so it was left out. About {room} \
-                 tokens are left for results this turn. {}",
-                text.len() / 1024,
+                "This result is ~{tokens} tok; with ~{held} tok already in \
+                 your context (this turn's other results included), it would \
+                 not fit in your {} token window less the {} kept for the end \
+                 of your session, so it was left out. About {room} tokens are \
+                 left for results this turn. {}",
                 self.context.window(),
                 self.context.reserve(),
                 instead(call, room, &text, &requested),
             )
         } else {
             format!(
-                "Left out too: ~{tokens} tok ({} KB), which would not \
-                 fit either (see the first note this turn).",
-                text.len() / 1024
+                "Left out too: ~{tokens} tok, which would not fit either \
+                 (see the first note this turn)."
             )
         };
         self.context.add(estimate_tokens(&note));
@@ -446,9 +463,9 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
     // The whole read first: seed agents should prefer it (Steward,
     // 2026-10-19), and a fresh turn has the room this one lacks
     format!(
-        "Read it whole in a fresh turn (about {bytes} bytes), or {range} now \
-         (about {fit} lines, at this read's {per_line} bytes per line).",
-        bytes = text.len(),
+        "Read it whole in a fresh turn ({tokens}), or {range} now (about \
+         {fit} lines).",
+        tokens = crate::threads::about_tokens(text.len() as u64),
     )
 }
 
@@ -580,11 +597,67 @@ mod tests {
         assert!(second.is_error);
         assert_eq!(second.tool_use_id, "toolu_1", "still answers the call");
         let note = second.content.to_string();
-        assert!(note.contains("~10000 tok (29 KB)"), "{note}");
+        assert!(note.contains("~10000 tok;"), "{note}");
         assert!(note.contains("~20000 tok already"), "{note}");
         assert!(note.contains("less the 32768 kept for the end"), "{note}");
         assert!(note.contains("smaller limit"), "{note}");
         assert!(gauge.get() > 20_000 && gauge.get() < 20_200, "the note");
+    }
+
+    /// A tool that marks an item shown each call, as a post read does
+    struct Marks {
+        len: usize,
+        once: super::super::ShownOnce,
+        id: crate::ids::ContentId,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for Marks {
+        fn name(&self) -> &str {
+            "marks"
+        }
+
+        fn definitions(&self) -> Vec<MethodDef> {
+            Vec::new()
+        }
+
+        async fn call(&mut self, call: Use) -> tool::Result {
+            self.once.begin("your read of 7ad26ccd");
+            self.once.mark(self.id, self.len, None);
+            tool::Result::new(call.id, "x".repeat(self.len))
+        }
+    }
+
+    /// What a seated result showed is shown; what a result left out
+    /// showed is not, since the agent never saw it (0.108)
+    #[tokio::test]
+    async fn a_result_left_out_marks_nothing_shown() {
+        let once = super::super::ShownOnce::default();
+        let id = crate::ids::ContentId::from(uuid::Uuid::from_u128(7));
+        let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        gauge.set(10_000);
+        let mut big = Gauged::new(
+            Marks {
+                len: 90_000,
+                once: once.clone(),
+                id,
+            },
+            gauge.clone(),
+        )
+        .with_shown_once(once.clone());
+        assert!(big.call(call("get_content")).await.is_error);
+        assert!(!once.contains(id));
+        let mut small = Gauged::new(
+            Marks {
+                len: 300,
+                once: once.clone(),
+                id,
+            },
+            gauge.clone(),
+        )
+        .with_shown_once(once.clone());
+        assert!(!small.call(call("get_content")).await.is_error);
+        assert_eq!(once.earlier(id).unwrap().bytes, 300);
     }
 
     /// The fleet's settings (131k window, act and phase 16,384, so the
@@ -868,9 +941,8 @@ mod tests {
         // The whole read first, in one sentence (Steward, 2026-10-19)
         assert!(
             whole.contains(
-                "Read it whole in a fresh turn (about 180000 bytes), or \
-                 lines=\"1-259\" now (about 259 lines, at this read's 100 \
-                 bytes per line)."
+                "Read it whole in a fresh turn (~60k tok), or \
+                 lines=\"1-259\" now (about 259 lines)."
             ),
             "{whole}"
         );

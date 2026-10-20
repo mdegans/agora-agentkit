@@ -190,6 +190,9 @@ pub struct Agora {
     context: ContextGauge,
     /// Ids shown this session, for resolving short ids
     shown: ShownIds,
+    /// Posts and comments shown in full this session, so none is shown
+    /// twice (0.108; committed by [`super::Gauged`])
+    shown_once: super::ShownOnce,
     /// Deletions, restores and erasures spent this session (see
     /// [`MAX_TRASH_WRITES`])
     trash_writes: usize,
@@ -218,6 +221,7 @@ impl Agora {
             verbatim_read: false,
             context: ContextGauge::default(),
             shown: ShownIds::default(),
+            shown_once: super::ShownOnce::default(),
             trash_writes: 0,
             trash_listed: ShownIds::default(),
         }
@@ -226,6 +230,13 @@ impl Agora {
     /// Resolve short ids against `shown` first (see [`ShownIds`])
     pub fn with_shown_ids(mut self, shown: ShownIds) -> Self {
         self.shown = shown;
+        self
+    }
+
+    /// Show each post and comment once a session, with `shown_once`: the
+    /// same set the [`super::Gauged`] around this tool commits to
+    pub fn with_shown_once(mut self, shown_once: super::ShownOnce) -> Self {
+        self.shown_once = shown_once;
         self
     }
 
@@ -366,8 +377,11 @@ impl Agora {
         let crate::responses::ContentResponse::Post(thread) = read.ok()? else {
             return None;
         };
-        let (lines, listed) =
-            prompt::summary_comment_index(&thread, &self.agent_name)?;
+        let (lines, listed) = prompt::summary_comment_index(
+            &thread,
+            &self.agent_name,
+            &self.shown_once,
+        )?;
         // The ids the lines show, and only those, so a short one resolves
         self.shown
             .extend(listed.iter().map(|&c| ContentId::from(c)));
@@ -794,10 +808,14 @@ impl Agora {
                 } else {
                     None
                 };
+                self.shown_once.begin(super::ShownOnce::read_of_content(
+                    ContentId::from(post.post.id),
+                ));
                 prompt::format_post_with_index(
                     &post,
                     &self.agent_name,
                     index.as_deref(),
+                    &self.shown_once,
                 )
                 .into()
             }
@@ -810,7 +828,19 @@ impl Agora {
                         chain.post_id,
                         chain.chain.iter().map(|c| c.id),
                     );
-                prompt::format_comment_chain(&chain, &self.agent_name).into()
+                let asked = chain
+                    .chain
+                    .last()
+                    .map(|c| ContentId::from(c.id))
+                    .unwrap_or_else(|| ContentId::from(chain.post_id));
+                self.shown_once
+                    .begin(super::ShownOnce::read_of_content(asked));
+                prompt::format_comment_chain(
+                    &chain,
+                    &self.agent_name,
+                    &self.shown_once,
+                )
+                .into()
             }
             crate::responses::ContentResponse::Governance(entry) if capped => {
                 format!(
@@ -892,12 +922,11 @@ impl Agora {
                     _ => String::new(),
                 };
                 format!(
-                    "The record is ~{tokens} tok ({} KB); with \
+                    "The record is ~{tokens} tok; with \
                      ~{held} tok already in your context it would not fit in \
                      your {} token window less the {} kept for the end of \
                      your session, so this is the summary, and the read was \
                      not counted.{paging}\n\n{summary}",
-                    rendered.len() / 1024,
                     self.context.window(),
                     self.context.reserve(),
                 )
@@ -936,7 +965,12 @@ impl Agora {
         Ok(with_limit_note(
             asked,
             MAX_LISTING,
-            prompt::format_search(&found, &args.query, &self.agent_name),
+            prompt::format_search(
+                &found,
+                &args.query,
+                &self.agent_name,
+                &self.shown_once,
+            ),
         )
         .into())
     }
@@ -963,6 +997,7 @@ impl Agora {
                 args.community.as_ref(),
                 sort,
                 &self.agent_name,
+                &self.shown_once,
             ),
         )
         .into())
@@ -1214,7 +1249,7 @@ impl Agora {
         Ok(with_limit_note(
             args.limit,
             GetProposalsInput::MAX_LIMIT,
-            prompt::format_proposals(&proposals),
+            prompt::format_proposals(&proposals, &self.shown_once),
         )
         .into())
     }
