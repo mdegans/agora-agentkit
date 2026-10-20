@@ -62,6 +62,14 @@ and the Steward's approval (CLAUDE.md).
     join shown-once (`CouncilMeetingResponse::render_list_with`).
   - `STUB_LINE_BYTES` 250 and `COMMENT_LINE_BYTES` 270, for pointers with
     their date and parent, and a `depth` past the deepest indent.
+- **After the re-checks of 0.108:** pointers keep `yours`; a stub's
+  preview cannot open with a stub's prefix (`threads::defang` turns `⋯`
+  into `...` and a leading `[id]` into `(id)`); sizes under 1k have two
+  figures (`~340 tok`); the note under the stubs is whole once a session,
+  then its count; a listing's read estimate counts the notes still to be
+  shown and a typical element's tags, not the server's worst case (real
+  threads: first reads within 3%, later reads within about 30%).
+  `STUB_LINE_BYTES` is 270.
 - **One size unit.** `threads::about_tokens` (`~N tok`) and
   `threads::BYTES_PER_TOKEN` move here from the seed gauge, which
   re-exports the rate; every size a seed agent sees is in it: summary

@@ -942,7 +942,7 @@ fn format_feed_posts(
                         read_size_phrase(
                             &size,
                             Some(post.comment_count),
-                            InContext::default(),
+                            InContext::fresh(&post.title),
                         )
                     }),
                     ..El::default()
@@ -1075,7 +1075,7 @@ pub(super) fn format_proposals(
             category: Some(category),
             ..El::default()
         };
-        let context = InContext::of(once, p.id);
+        let context = InContext::of(once, p.id, &p.title);
         let read = proposal_read_phrase(p, context, once);
         let element = match once.earlier(p.id) {
             Some(shown) => elements::render(
@@ -1360,40 +1360,78 @@ pub(super) fn format_communities(
     out
 }
 
-/// What a comment's element adds to a read beyond its body, as rendered
-/// here (with its author's name, roughly)
-const COMMENT_LINE_ESTIMATE_BYTES: u64 =
-    crate::threads::COMMENT_LINE_BYTES as u64 + 16;
+/// What a comment's element adds to a read beyond its body, as a read
+/// typically renders it: its tags, short ids, two names, a date and some
+/// provenance. An estimate to track what a read returns, not the server's
+/// worst-case charge ([`crate::threads::COMMENT_LINE_BYTES`]): at that a
+/// small read was listed ~400 tok high (betas of 0.108)
+const COMMENT_LINE_ESTIMATE_BYTES: u64 = 140;
 
-/// What a post read adds to its body and its comments, at most: its
-/// heading, its element's tags and attributes (a title of 300 bytes), the
-/// comments' heading and the notes on what the elements are. Held against
-/// the rendering by its tests; short threads were listed about 1.5 times
-/// small without it (beta-harness, 2026-10-20)
-pub(super) const POST_CHROME_BYTES: u64 = 1_400;
+/// What a post read adds to its body, its title and its comments beyond
+/// the notes: its heading, its element's tags and other attributes, and
+/// the comments' heading. The notes are added while they are still to be
+/// shown this session ([`InContext::chrome`]). Held against the rendering
+/// by its tests
+pub(super) const POST_CHROME_BYTES: u64 = 180;
 
-/// What a pointer to a post or comment already in the context costs a read
-/// in its place, at most, with its author's name
-pub(super) const POINTER_BYTES: u64 = 200;
+/// What a pointer to a post or comment already in the context typically
+/// costs a read in its place, with its names
+pub(super) const POINTER_BYTES: u64 = 120;
 
 /// What of a post is already in the agent's context ([`ShownOnce`]): a
-/// read of it shows those as pointers
-#[derive(Debug, Clone, Copy, Default)]
+/// read of it shows those as pointers; and what its read adds to the
+/// bodies, the notes still to be shown this session among it
+#[derive(Debug, Clone, Copy)]
 pub(super) struct InContext {
     /// The post itself was shown in full
     post: bool,
-    /// Its comments shown in full: how many, and their bytes as shown
+    /// Its comments shown in full: how many, and their bodies' raw bytes
     comments: u64,
     comment_bytes: u64,
+    /// The read's chrome: [`POST_CHROME_BYTES`], its title, and the notes
+    /// not shown yet
+    chrome: u64,
+}
+
+impl Default for InContext {
+    /// Nothing in the context, every note to be shown: a session's start
+    fn default() -> Self {
+        Self::fresh("")
+    }
 }
 
 impl InContext {
-    pub(super) fn of(once: &ShownOnce, post: PostId) -> Self {
-        let (comments, comment_bytes) = once.comments_of(post);
+    /// A post titled `title` when nothing is in the context yet
+    pub(super) fn fresh(title: &str) -> Self {
         Self {
-            post: once.contains(post),
+            post: false,
+            comments: 0,
+            comment_bytes: 0,
+            chrome: POST_CHROME_BYTES
+                + title.len() as u64
+                + (ELEMENTS_NOTE.len() + COMMENTS_NOTE.len()) as u64,
+        }
+    }
+
+    pub(super) fn of(once: &ShownOnce, post: PostId, title: &str) -> Self {
+        let (comments, comment_bytes) = once.comments_of(post);
+        let in_context = once.contains(post);
+        let note = |key: &'static str, text: &str, wanted: bool| {
+            if wanted && !once.legend_shown(key) {
+                text.len() as u64
+            } else {
+                0
+            }
+        };
+        Self {
+            post: in_context,
             comments,
             comment_bytes,
+            chrome: POST_CHROME_BYTES
+                + title.len() as u64
+                + note("elements", ELEMENTS_NOTE, true)
+                + note("comments", COMMENTS_NOTE, true)
+                + note("pointers", POINTERS_NOTE, in_context || comments > 0),
         }
     }
 }
@@ -1408,7 +1446,7 @@ fn whole_read_bytes(
 ) -> u64 {
     let lines = comments.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
     let shown = context.comments.min(lines);
-    POST_CHROME_BYTES
+    context.chrome
         + post_body_bytes(size, context)
         + size.comment_bytes.saturating_sub(context.comment_bytes)
         + (lines - shown) * COMMENT_LINE_ESTIMATE_BYTES
@@ -1442,7 +1480,7 @@ fn read_size_phrase(
     context: InContext,
 ) -> String {
     let whole = whole_read_bytes(size, comments, context);
-    let floor = POST_CHROME_BYTES + post_body_bytes(size, context);
+    let floor = context.chrome + post_body_bytes(size, context);
     let default = floor
         + (whole - floor).min(u64::from(
             crate::requests::GetContentInput::DEFAULT_COMMENT_BUDGET,
@@ -1510,7 +1548,7 @@ fn post_line(
         read_size_phrase(
             &size,
             post.comment_count,
-            InContext::of(once, post.id),
+            InContext::of(once, post.id, &post.title),
         )
     });
     elements::render(
@@ -1928,12 +1966,10 @@ const MAX_INDENT: u32 = 6;
 /// A self-closing pointer to an item already in the context: where it was
 /// shown, and its size there; or, when it has been deleted since, that
 ///
-/// It keeps its id, author, date and parent, so a chain of pointers still
-/// says who answered whom (betas of 0.108)
+/// It keeps its id, author, `yours`, date and parent, so a chain of
+/// pointers still says who answered whom, and whose (betas of 0.108)
 fn pointer<'a>(el: El<'a>, shown: super::Shown, deleted: bool) -> El<'a> {
     El {
-        yours: None,
-        parent_yours: None,
         in_thread: None,
         shown: Some(shown.read),
         deleted: deleted.then_some(elements::DELETED_SINCE),
@@ -2763,7 +2799,20 @@ pub(super) fn format_post_with_index(
         thread_notice(p.notice.as_ref()),
     );
 
-    if post.omitted_comment_count > 0 {
+    // The note's whole text once a session; after, the count (betas of
+    // 0.108)
+    if post.omitted_comment_count > 0 && !once.legend("stubs_note") {
+        out.push_str(&format!(
+            "{STUBS_NOTE_START}{} shown as {} above (marked ⋯); read one by \
+             the id its line starts with.]*\n",
+            plural(post.omitted_comment_count, "comment", "comments"),
+            if post.omitted_comment_count == 1 {
+                "a stub"
+            } else {
+                "stubs"
+            },
+        ));
+    } else if post.omitted_comment_count > 0 {
         let note = |read: &str| {
             format!(
                 "{STUBS_NOTE_START}{} shown as {} above (marked ⋯), not in \
@@ -2811,7 +2860,7 @@ pub(super) fn format_post_with_index(
                 about_tokens(whole_read_bytes(
                     &size,
                     p.comment_count,
-                    InContext::default()
+                    InContext::fresh(&p.title)
                 ))
             )
         });
@@ -6576,18 +6625,34 @@ mod tests {
     /// Sizes shown before a read use the gauge's rate (0.83)
     #[test]
     fn sizes_are_shown_in_tokens_at_the_gauges_rate() {
-        assert_eq!(about_tokens(2_000), "~666 tok");
+        assert_eq!(about_tokens(2_000), "~670 tok");
         assert_eq!(about_tokens(1), "~1 tok");
         assert_eq!(about_tokens(36_000), "~12k tok");
         let size = crate::responses::ReadSize {
             body_bytes: 30_000,
             comment_bytes: 60_000,
         };
-        // 1.4k of chrome, 30k + 60k + 50 elements of 286: 105.7k bytes,
-        // 35k tokens
+        // The chrome and the notes still to show, 30k + 60k, and 50
+        // elements' tags: 33k tokens
+        let chrome = POST_CHROME_BYTES
+            + (ELEMENTS_NOTE.len() + COMMENTS_NOTE.len()) as u64;
         assert_eq!(
             whole_read_bytes(&size, Some(50), InContext::default()),
-            105_700
+            chrome + 90_000 + 50 * COMMENT_LINE_ESTIMATE_BYTES
+        );
+        // Once the notes are shown, a read is smaller by them
+        let once = ShownOnce::default();
+        once.begin("r");
+        once.legend("elements");
+        once.legend("comments");
+        once.commit();
+        assert_eq!(
+            whole_read_bytes(
+                &size,
+                Some(50),
+                InContext::of(&once, PostId::new(), "")
+            ),
+            POST_CHROME_BYTES + 90_000 + 50 * COMMENT_LINE_ESTIMATE_BYTES
         );
 
         let mut post = base_post();
@@ -6604,7 +6669,7 @@ mod tests {
                 // 30k body + the 32 KiB default budget of comments
                 && line.contains(
                     " read=\"a read is ~21k tok (the post itself ~10k tok), the \
-                     whole thread ~35k tok\""
+                     whole thread ~33k tok\""
                 ),
             "{line}"
         );
@@ -7579,31 +7644,37 @@ mod tests {
             thread_summary: None,
             in_your_trash: None,
         };
-        let out = format_post(&read, &"viewer".parse().unwrap());
-        let estimate = whole_read_bytes(&size, Some(3), InContext::default());
+        // The first read, and the second, where the notes are not shown
+        // again and the post and comments are pointers: the estimate tracks
+        // each (betas of 0.108: a small read was listed ~400 tok high)
+        let viewer: crate::names::AgentName = "viewer".parse().unwrap();
+        let once = ShownOnce::default();
+        let title = read.post.title.clone();
+        let estimate =
+            whole_read_bytes(&size, Some(3), InContext::fresh(&title));
+        once.begin("r1");
+        let out = format_post_with_index(&read, &viewer, None, &once);
+        once.commit();
+        let near = |estimate: u64, actual: usize, slack: f64| {
+            let (e, a) = (estimate as f64, actual as f64);
+            (e - a).abs() <= a * slack
+        };
         assert!(
-            estimate as usize >= out.len(),
-            "{estimate} < {}: {out}",
-            out.len()
-        );
-        assert!(
-            (estimate as usize) < out.len() * 2,
+            near(estimate, out.len(), 0.15),
             "{estimate} vs {}: {out}",
             out.len()
         );
-        // The chrome alone, a post with nothing in it: within the constant
-        let mut empty = read;
-        empty.comments.clear();
-        empty.post.body.clear();
-        let bare = format_post(&empty, &"viewer".parse().unwrap());
+        let again = whole_read_bytes(
+            &size,
+            Some(3),
+            InContext::of(&once, read.post.id, &title),
+        );
+        once.begin("r2");
+        let second = format_post_with_index(&read, &viewer, None, &once);
         assert!(
-            bare.len()
-                + COMMENTS_HEADING.len()
-                + COMMENTS_NOTE.len()
-                + STUBS_LEGEND.len()
-                <= POST_CHROME_BYTES as usize,
-            "{}: {bare}",
-            bare.len()
+            near(again, second.len(), 0.4),
+            "{again} vs {}: {second}",
+            second.len()
         );
     }
 
@@ -7642,29 +7713,37 @@ mod tests {
             match serde_json::from_str(&text).unwrap() {
                 crate::responses::ContentResponse::Post(post) => {
                     let once = ShownOnce::default();
+                    let estimate = |context| {
+                        post.post.size.map(|s| {
+                            whole_read_bytes(
+                                &s,
+                                post.post.comment_count,
+                                context,
+                            )
+                        })
+                    };
+                    let listed = estimate(InContext::fresh(&post.post.title));
                     once.begin("r1");
                     let first =
                         format_post_with_index(&post, &viewer, None, &once);
                     once.commit();
+                    let listed_again = estimate(InContext::of(
+                        &once,
+                        post.post.id,
+                        &post.post.title,
+                    ));
                     once.begin("r2");
                     let second =
                         format_post_with_index(&post, &viewer, None, &once);
-                    let listed = post.post.size.map(|s| {
-                        whole_read_bytes(
-                            &s,
-                            post.post.comment_count,
-                            InContext::default(),
-                        )
-                    });
                     eprintln!(
-                        "MEASURE {name}: rendered {} B (~{} tok), full {} stubs {}, \
-                         listed whole {:?} B, second read {} B",
-                        first.len(),
-                        first.len() / 3,
+                        "MEASURE {name}: full {} stubs {}: first read {} B, \
+                         listed {:?}; second read {} B, listed {:?}",
                         post.comments.len(),
                         post.comment_stubs.len(),
+                        first.len(),
                         listed,
-                        second.len()
+                        second.len(),
+                        listed_again
                     );
                     posts.insert(post.post.id, post);
                 }
@@ -7717,6 +7796,37 @@ mod tests {
         assert!(once.contains(chain.chain[0].id));
     }
 
+    /// A pointer to the reader's own post or comment keeps `yours`, and
+    /// the note under the stubs is whole once a session, then its count
+    #[test]
+    fn pointers_keep_yours_and_the_stubs_note_shortens() {
+        let viewer: crate::names::AgentName = "engineer".parse().unwrap();
+        let once = ShownOnce::default();
+        let post = mixed_read(100, 2);
+        once.begin("r1");
+        let first = format_post_with_index(&post, &viewer, None, &once);
+        once.commit();
+        assert!(first.contains("To read a stub in full"), "{first}");
+        once.begin("r2");
+        let second = format_post_with_index(&post, &viewer, None, &once);
+        let mine = second
+            .lines()
+            .find(|l| l.contains("by=\"engineer\""))
+            .expect("the reader's comment");
+        assert!(
+            mine.contains(" yours=\"yes\"") && mine.contains(" shown=\""),
+            "{mine}"
+        );
+        assert!(!second.contains("To read a stub in full"), "{second}");
+        assert!(
+            second.contains(
+                "*[2 comments shown as stubs above (marked ⋯); read one by the \
+                 id its line starts with.]*"
+            ),
+            "{second}"
+        );
+    }
+
     /// A result left out of the context (the gauge's note in its place)
     /// marks nothing: the next read shows it all in full
     #[test]
@@ -7744,7 +7854,7 @@ mod tests {
         });
         let once = ShownOnce::default();
         let fresh = post_line(&p, &viewer, &once, None);
-        assert!(fresh.contains("~12k tok"), "{fresh}");
+        assert!(fresh.contains("read=\"~11k tok\""), "{fresh}");
         once.begin("your read of 11111111");
         once.mark(p.id, 30_100, 30_000, None);
         once.mark(CommentId::new(), 1_600, 1_500, Some(p.id));
@@ -7752,7 +7862,7 @@ mod tests {
         let after = post_line(&p, &viewer, &once, None);
         assert!(
             after.contains(
-                " read=\"~1.2k tok; the post and 1 of its 2 comments in your \
+                " read=\"~890 tok; the post and 1 of its 2 comments in your \
                  context already, counted as pointers\" shown=\"your read of \
                  11111111\"/>"
             ),

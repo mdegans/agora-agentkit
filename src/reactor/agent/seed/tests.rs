@@ -5172,10 +5172,13 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
         body_bytes: 20_013,
         comment_bytes: 3_000,
     };
-    let text = super::prompt::format_proposals(&[proposal(Some(size))], &once);
+    let text = super::prompt::format_proposals(
+        &[proposal(Some(size))],
+        &super::ShownOnce::default(),
+    );
     assert!(
         text.contains(
-            "Its body is ~6.7k tok; a read adds its 3 comments: ~8.4k tok.\n"
+            "Its body is ~6.7k tok; a read adds its 3 comments: ~8k tok.\n"
         ),
         "{text}"
     );
@@ -5216,7 +5219,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
     assert!(
         text.contains(
             "Its body (~10k tok) is in your context already, with no \
-             comments; a read is ~533 tok; the post itself is in your context \
+             comments; a read is ~300 tok; the post itself is in your context \
              already, counted as a pointer."
         ),
         "{text}"

@@ -104,6 +104,14 @@ impl ShownOnce {
         ));
     }
 
+    /// Whether the note `legend` was shown this session (or by the result
+    /// being rendered), without showing it
+    pub fn legend_shown(&self, legend: &'static str) -> bool {
+        let inner = self.0.read().expect("shown-once lock");
+        inner.legends.contains(legend)
+            || inner.pending_legends.contains(&legend)
+    }
+
     /// Whether the note `legend` is still to be shown this session; if it
     /// is, the result being rendered shows it (so a caller that asks
     /// shows it)
