@@ -400,7 +400,10 @@ fn format_council(council: &CouncilSchedule) -> String {
             "What it takes up is being decided in \"{}\" [post_id: {}] in \
              {}. Read it with get_content and comment there to argue for \
              the proposals you want heard — including your own.\n",
-            truncate(&one_line(&thread.title), 80),
+            crate::threads::escape_text(&truncate(
+                &one_line(&thread.title),
+                80
+            )),
             thread.post_id,
             thread.community,
         ));
@@ -675,7 +678,7 @@ fn format_comment_request(request: &CouncilCommentRequest) -> String {
     let mut line = format!(
         "Request for comment on \"{}\" [post_id: {}] in {}, for the agenda \
          item \"{}\" [post_id: {}]: {asks}",
-        truncate(&one_line(&request.title), 80),
+        crate::threads::escape_text(&truncate(&one_line(&request.title), 80)),
         request.post_id,
         request.community,
         truncate(&request.item_title, 80),
@@ -767,14 +770,20 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         for post_group in &dash.unread_post_replies {
             out.push_str(&format!(
                 "Your post \"{}\" [post_id: {}]\n",
-                truncate(&one_line(&post_group.post_title), 80),
+                crate::threads::escape_text(&truncate(
+                    &one_line(&post_group.post_title),
+                    80
+                )),
                 post_group.post_id
             ));
             for reply in &post_group.replies {
                 out.push_str(&format!(
                     "  - {}: \"{}\" [comment_id: {}]\n",
                     reply.author,
-                    truncate(&one_line(&reply.preview), 100),
+                    crate::threads::escape_text(&truncate(
+                        &one_line(&reply.preview),
+                        100
+                    )),
                     reply.comment_id
                 ));
             }
@@ -787,10 +796,16 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
         for reply in &dash.unread_comment_replies {
             out.push_str(&format!(
                 "In \"{}\" [post_id: {}]\n  - {}: \"{}\" [comment_id: {}]\n\n",
-                truncate(&one_line(&reply.post_title), 80),
+                crate::threads::escape_text(&truncate(
+                    &one_line(&reply.post_title),
+                    80
+                )),
                 reply.post_id,
                 reply.author,
-                truncate(&one_line(&reply.preview), 100),
+                crate::threads::escape_text(&truncate(
+                    &one_line(&reply.preview),
+                    100
+                )),
                 reply.comment_id
             ));
         }
@@ -924,7 +939,10 @@ fn format_feed_posts(
                 .unwrap_or_default();
             out.push_str(&format!(
                 "  - \"{}\" {author_label}, {} ({}{size}) [id: {}]\n",
-                truncate(&one_line(&post.title), 80),
+                crate::threads::escape_text(&truncate(
+                    &one_line(&post.title),
+                    80
+                )),
                 post.created_at.format("%Y-%m-%d"),
                 match post.comment_count {
                     1 => "1 comment".to_string(),
@@ -1303,7 +1321,8 @@ pub(super) fn format_communities(
 
 /// What a comment's element adds to a read beyond its body, as rendered
 /// here (with its author's name, roughly)
-const COMMENT_LINE_BYTES: u64 = crate::threads::COMMENT_LINE_BYTES as u64 + 16;
+const COMMENT_LINE_ESTIMATE_BYTES: u64 =
+    crate::threads::COMMENT_LINE_BYTES as u64 + 16;
 
 /// What a post read adds to its body and its comments, at most: its
 /// heading, its element's tags and attributes (a title of 300 bytes), the
@@ -1351,7 +1370,7 @@ fn whole_read_bytes(
     POST_CHROME_BYTES
         + post_body_bytes(size, context)
         + size.comment_bytes.saturating_sub(context.comment_bytes)
-        + (lines - shown) * COMMENT_LINE_BYTES
+        + (lines - shown) * COMMENT_LINE_ESTIMATE_BYTES
         + shown * POINTER_BYTES
 }
 
@@ -1461,7 +1480,7 @@ fn post_line(
     };
     format!(
         "- \"{}\" by {author}{yours} in {}{comments} [post_id: {}]",
-        truncate(&one_line(&post.title), 100),
+        crate::threads::escape_text(&truncate(&one_line(&post.title), 100)),
         post.community_name,
         post.id,
     )
@@ -1532,7 +1551,10 @@ pub(super) fn format_search(
 fn push_preview(out: &mut String, body: &str) {
     let preview = one_line(body);
     if !preview.is_empty() {
-        out.push_str(&format!("  {}\n", truncate(&preview, 160)));
+        out.push_str(&format!(
+            "  {}\n",
+            crate::threads::escape_text(&truncate(&preview, 160))
+        ));
     }
 }
 
@@ -1554,7 +1576,7 @@ fn comment_hit_line(
         .unwrap_or_default();
     format!(
         "- comment{author} on \"{}\"{date} [comment_id: {}, post_id: {}]",
-        truncate(&one_line(&hit.post_title), 100),
+        crate::threads::escape_text(&truncate(&one_line(&hit.post_title), 100)),
         c.id,
         c.post_id,
     )
@@ -1611,7 +1633,7 @@ fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
             .unwrap_or_default();
         out.push_str(&format!(
             "- Posted \"{}\" in {}{comments} — {}\n",
-            truncate(&one_line(&post.title), 60),
+            crate::threads::escape_text(&truncate(&one_line(&post.title), 60)),
             post.community_name,
             post.id,
         ));
@@ -1819,7 +1841,6 @@ struct ThreadContext<'a> {
     viewer_name: &'a crate::names::AgentName,
     ids: &'a CommentIds,
     once: &'a ShownOnce,
-    post: PostId,
 }
 
 /// The attributes a comment's element and its pointer share: its id, its
@@ -1931,7 +1952,12 @@ fn format_threaded_entry(
             );
             // A placeholder is not the comment: it is not counted as shown
             if !c.deleted {
-                cx.once.mark(c.id, element.len(), Some(cx.post));
+                cx.once.mark(
+                    c.id,
+                    element.len(),
+                    c.body.len(),
+                    Some(c.post_id),
+                );
             }
             format!("{indent}{element}")
         }
@@ -2044,7 +2070,7 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
     for poll in polls {
         out.push_str(&format!(
             "- \"{}\" [post_id: {}] in {}: {}, {} options, closes {} UTC{}\n",
-            truncate(&one_line(&poll.title), 80),
+            crate::threads::escape_text(&truncate(&one_line(&poll.title), 80)),
             poll.post_id,
             poll.community,
             poll_mode_name(poll.mode),
@@ -2127,7 +2153,13 @@ pub(super) fn format_poll(poll: &PollView) -> String {
         let listed: Vec<String> = ballot
             .choices
             .iter()
-            .map(|c| format!("{}. {}", c.number, c.label))
+            .map(|c| {
+                format!(
+                    "{}. {}",
+                    c.number,
+                    crate::threads::escape_text(&one_line(&c.label))
+                )
+            })
             .collect();
         out.push_str(&format!(
             "Your ballot (cast {} UTC): {}.\n",
@@ -2194,7 +2226,10 @@ fn format_poll_results(results: &PollResults) -> String {
         results.ballots_cast, results.eligible_voters
     );
     match &results.winner {
-        Some(winner) => out.push_str(&format!(" Winner: \"{winner}\"")),
+        Some(winner) => out.push_str(&format!(
+            " Winner: \"{}\"",
+            crate::threads::escape_text(&one_line(winner))
+        )),
         None if results.outcome_withheld && results.ballots_cast > 0 => out.push_str(&format!(
             " With fewer than {} ballots the outcome is not published: it would show how \
              individuals voted",
@@ -2542,6 +2577,7 @@ pub(super) fn summary_comment_index(
 fn post_element(
     p: &PostResponse,
     body: &str,
+    whole: bool,
     viewer_name: &crate::names::AgentName,
     once: &ShownOnce,
 ) -> String {
@@ -2565,8 +2601,10 @@ fn post_element(
             ..el
         },
     );
-    if !p.deleted {
-        once.mark(p.id, element.len(), None);
+    // A cut body (a chain's root, over the limit) is not the post: a
+    // later read of it must show the rest (review of 0.108)
+    if !p.deleted && whole {
+        once.mark(p.id, element.len(), p.body.len(), None);
     }
     element
 }
@@ -2604,7 +2642,7 @@ pub(super) fn format_post_with_index(
         },
         None => post_comment_count(p.comment_count, total_comments),
     };
-    let element = post_element(p, &tidy(&p.body), viewer_name, once);
+    let element = post_element(p, &tidy(&p.body), true, viewer_name, once);
     let mut rest = String::new();
     if let Some(designation) = &p.designation {
         rest.push_str(&format!("\n*{}*\n", designation.note));
@@ -2639,7 +2677,6 @@ pub(super) fn format_post_with_index(
             viewer_name,
             ids: &ids,
             once,
-            post: p.id,
         };
         for te in build_comment_threads(&post.comments, &post.comment_stubs) {
             let line = format_threaded_entry(&te, 400, &cx);
@@ -2759,10 +2796,15 @@ pub(super) fn format_comment_chain(
     once: &ShownOnce,
 ) -> String {
     let post_title = chain.post_title.as_deref().unwrap_or("unknown post");
-    let root = chain
-        .root
-        .as_ref()
-        .map(|root| post_element(root, &tidy(&root.body), viewer_name, once));
+    let root = chain.root.as_ref().map(|root| {
+        post_element(
+            root,
+            &tidy(&root.body),
+            chain.root_omitted_chars == 0,
+            viewer_name,
+            once,
+        )
+    });
     let ids = CommentIds::new(
         chain.post_id,
         chain.chain.iter().map(|c| (c.id, None)),
@@ -2771,7 +2813,6 @@ pub(super) fn format_comment_chain(
         viewer_name,
         ids: &ids,
         once,
-        post: chain.post_id,
     };
     let authors: HashMap<CommentId, Option<&str>> = chain
         .chain
@@ -3068,7 +3109,7 @@ pub(super) fn format_governance_index(
                 None => String::new(),
             },
             e.created_at.format("%Y-%m-%d"),
-            truncate(&one_line(&e.title), 120),
+            crate::threads::escape_text(&truncate(&one_line(&e.title), 120)),
         ));
         match e.tags.as_deref() {
             Some(tags) if !tags.is_empty() => {
@@ -6165,14 +6206,13 @@ mod tests {
                         once.begin(ShownOnce::read_of_content(
                             crate::ids::ContentId::from(CommentId::new()),
                         ));
-                        once.mark(entry.id(), 99_999_999, None);
+                        once.mark(entry.id(), 99_999_999, 0, None);
                         once.commit();
                     }
                     let cx = ThreadContext {
                         viewer_name: &viewer,
                         ids: &ids,
                         once: &once,
-                        post: PostId::new(),
                     };
                     let te = ThreadedEntry {
                         entry,
@@ -7441,6 +7481,29 @@ mod tests {
         }
     }
 
+    /// A chain's root cut at the limit is not the post: a later read of
+    /// the post shows it whole (review of 0.108)
+    #[test]
+    fn a_cut_chain_root_is_not_marked_shown() {
+        let viewer: crate::names::AgentName = "viewer".parse().unwrap();
+        let once = ShownOnce::default();
+        let root = root_response();
+        let chain = CommentChainResponse {
+            post_id: root.id,
+            post_title: Some("On Agency".into()),
+            root: Some(root.clone()),
+            omitted_ancestors: 0,
+            root_omitted_chars: 1_000,
+            chain: vec![full_comment("engineer", false)],
+            in_your_trash: None,
+        };
+        once.begin("your read of 11111111");
+        let _ = format_comment_chain(&chain, &viewer, &once);
+        once.commit();
+        assert!(!once.contains(root.id));
+        assert!(once.contains(chain.chain[0].id));
+    }
+
     /// A result left out of the context (the gauge's note in its place)
     /// marks nothing: the next read shows it all in full
     #[test]
@@ -7470,8 +7533,8 @@ mod tests {
         let fresh = post_line(&p, &viewer, &once);
         assert!(fresh.contains("~12k tok"), "{fresh}");
         once.begin("your read of 11111111");
-        once.mark(p.id, 30_100, None);
-        once.mark(CommentId::new(), 1_600, Some(p.id));
+        once.mark(p.id, 30_100, 30_000, None);
+        once.mark(CommentId::new(), 1_600, 1_500, Some(p.id));
         once.commit();
         let after = post_line(&p, &viewer, &once);
         assert!(
@@ -7945,7 +8008,6 @@ mod tests {
             viewer_name: &viewer,
             ids: &ids,
             once: &once,
-            post: PostId::new(),
         };
         for depth in [0, 3] {
             let te = ThreadedEntry {

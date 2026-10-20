@@ -33,6 +33,10 @@ pub struct Shown {
     pub read: String,
     /// Its element as rendered, in bytes
     pub bytes: u64,
+    /// Its raw body's bytes, as the server counts them in a post's
+    /// `size`, so a listing can take what is in the context out of a size
+    /// the server sent
+    pub raw: u64,
     /// For a comment, the post it is on
     pub post: Option<PostId>,
 }
@@ -90,11 +94,13 @@ impl ShownOnce {
         self.earlier(id).is_some()
     }
 
-    /// The result being rendered shows `id` in full, `bytes` long
+    /// The result being rendered shows `id` in full, `bytes` long, its
+    /// body `raw` bytes as stored
     pub fn mark(
         &self,
         id: impl Into<ContentId>,
         bytes: usize,
+        raw: usize,
         post: Option<PostId>,
     ) {
         let mut inner = self.0.write().expect("shown-once lock");
@@ -104,6 +110,7 @@ impl ShownOnce {
             Shown {
                 read,
                 bytes: bytes as u64,
+                raw: raw as u64,
                 post,
             },
         ));
@@ -124,15 +131,15 @@ impl ShownOnce {
         self.0.write().expect("shown-once lock").pending.clear();
     }
 
-    /// Of `post`'s comments in the context: how many, and their bytes as
-    /// they were shown
+    /// Of `post`'s comments in the context: how many, and their raw bodies'
+    /// bytes, as the server counts them in the post's `size`
     pub fn comments_of(&self, post: PostId) -> (u64, u64) {
         let inner = self.0.read().expect("shown-once lock");
         inner
             .shown
             .values()
             .filter(|s| s.post == Some(post))
-            .fold((0, 0), |(n, b), s| (n + 1, b + s.bytes))
+            .fold((0, 0), |(n, b), s| (n + 1, b + s.raw))
     }
 }
 
@@ -149,7 +156,7 @@ mod tests {
     fn marked_items_are_shown_once_committed() {
         let once = ShownOnce::default();
         once.begin("your read of 00000000");
-        once.mark(id(1), 100, None);
+        once.mark(id(1), 100, 100, None);
         // In the same result already: never twice in one
         assert!(once.contains(id(1)));
         once.commit();
@@ -163,12 +170,12 @@ mod tests {
     fn a_discarded_result_marks_nothing() {
         let once = ShownOnce::default();
         once.begin("a");
-        once.mark(id(1), 100, None);
+        once.mark(id(1), 100, 100, None);
         once.discard();
         assert!(!once.contains(id(1)));
         // Nor does a result that was never committed or discarded
         once.begin("b");
-        once.mark(id(2), 1, None);
+        once.mark(id(2), 1, 1, None);
         once.begin("c");
         once.commit();
         assert!(!once.contains(id(2)));
@@ -178,10 +185,10 @@ mod tests {
     fn the_first_showing_is_kept() {
         let once = ShownOnce::default();
         once.begin("first");
-        once.mark(id(1), 10, None);
+        once.mark(id(1), 10, 10, None);
         once.commit();
         once.begin("second");
-        once.mark(id(1), 20, None);
+        once.mark(id(1), 20, 20, None);
         once.commit();
         assert_eq!(once.earlier(id(1)).unwrap().read, "first");
     }
@@ -191,9 +198,9 @@ mod tests {
         let once = ShownOnce::default();
         let post = PostId::from(Uuid::from_u128(9));
         once.begin("r");
-        once.mark(id(1), 10, Some(post));
-        once.mark(id(2), 30, Some(post));
-        once.mark(id(3), 50, None);
+        once.mark(id(1), 10, 10, Some(post));
+        once.mark(id(2), 30, 30, Some(post));
+        once.mark(id(3), 50, 50, None);
         once.commit();
         assert_eq!(once.comments_of(post), (2, 40));
     }

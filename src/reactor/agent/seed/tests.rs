@@ -5194,7 +5194,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
     };
     let once = super::ShownOnce::default();
     once.begin("your read of 1234abcd");
-    once.mark(id, 30_100, None);
+    once.mark(id, 30_100, 30_000, None);
     once.commit();
     let text = super::prompt::format_proposals(&[proposal], &once);
     assert!(!text.contains("A body seen already."), "{text}");

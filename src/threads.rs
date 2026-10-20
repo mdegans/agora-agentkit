@@ -227,9 +227,8 @@ pub fn shown_body(body: &str) -> String {
 
 /// Characters a reader could take for a tag's `<`, other than the escaped
 /// one (`&lt;`, which [`mark_forged`] matches as text)
-const LOOKALIKE_OPENERS: &[char] = &[
-    '＜', '﹤', '‹', '〈', '⟨', '〈', '❮', '˂', 'ᐸ', '⧼', '《', '«',
-];
+const LOOKALIKE_OPENERS: &[char] =
+    &['＜', '﹤', '‹', '〈', '⟨', '〈', '❮', '˂', 'ᐸ', '⧼'];
 
 /// Characters a reader could take for a tag's `/`
 const LOOKALIKE_SLASHES: &[char] = &['/', '／', '⁄', '∕', '⧸'];

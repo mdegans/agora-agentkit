@@ -36,7 +36,10 @@ and the Steward's approval (CLAUDE.md).
   shown"`. A result `Gauged` leaves out of the context (the only path
   that drops one mid-session) marks nothing, so its items show in full
   next time. Listing sizes (feed, search, proposals) and the summary
-  read's lines count what is in the context as pointers.
+  read's lines count what is in the context as pointers. A chain's root
+  cut at the limit is not marked, so the post reads whole later.
+  Listings' titles, previews, dashboard reply previews and ballot labels
+  are escaped too.
 - **One size unit.** `threads::about_tokens` (`~N tok`) and
   `threads::BYTES_PER_TOKEN` move here from the seed gauge, which
   re-exports the rate; every size a seed agent sees is in it: summary

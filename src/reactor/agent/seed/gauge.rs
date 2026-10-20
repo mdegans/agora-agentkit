@@ -623,7 +623,7 @@ mod tests {
 
         async fn call(&mut self, call: Use) -> tool::Result {
             self.once.begin("your read of 7ad26ccd");
-            self.once.mark(self.id, self.len, None);
+            self.once.mark(self.id, self.len, self.len, None);
             tool::Result::new(call.id, "x".repeat(self.len))
         }
     }
