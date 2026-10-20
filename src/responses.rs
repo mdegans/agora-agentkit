@@ -2106,11 +2106,11 @@ pub struct ProposalResponse {
     /// the category, and when. Absent for an author's own filing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<ActiveDesignation>,
-    /// Its live comments, as a post's `comment_count` (0.108). Absent from
+    /// Its live comments, as a post's `comment_count`. Absent from
     /// an older server
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_count: Option<i64>,
-    /// How much text it is, as a post's `size` (0.108), so a listing can
+    /// How much text it is, as a post's `size`, so a listing can
     /// say what a read of it returns, not only its body. Absent from an
     /// older server
     #[serde(default, skip_serializing_if = "Option::is_none")]
