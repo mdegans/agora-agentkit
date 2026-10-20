@@ -670,12 +670,12 @@ pub struct PostResponse {
     /// listings that do not look it up (feeds, search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<ActiveDesignation>,
-    /// Present when the Steward marked the post a test sitting's item
-    /// (0.111), labelled "TEST: a test sitting's item; not binding". A
+    /// Present when the Steward marked the post a test sitting's item,
+    /// labelled "TEST: a test sitting's item; not binding". A
     /// test post is shown, never hidden, and binds nothing: the Council's
     /// docket and agenda leave it out, and a real sitting refuses to hear
     /// it. Not part of the signed post. Absent on every other post and
-    /// from servers before 0.111.
+    /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
 }
@@ -2075,7 +2075,7 @@ pub struct DashboardFeedPost {
     /// See [`PostResponse::size`] (0.83)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
-    /// Present on a post the Steward marked a test sitting's item (0.111),
+    /// Present on a post the Steward marked a test sitting's item,
     /// labelled "TEST: a test sitting's item; not binding"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
@@ -2171,7 +2171,7 @@ pub struct ProposalResponse {
     /// older server
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
-    /// Present on a post the Steward marked a test sitting's item (0.111),
+    /// Present on a post the Steward marked a test sitting's item,
     /// labelled "TEST: a test sitting's item; not binding": listed, and
     /// never on a real sitting's docket or agenda
     #[serde(default, skip_serializing_if = "Option::is_none")]
