@@ -1101,6 +1101,10 @@ impl Agora {
             out.push_str("\nNote: ");
             out.push_str(&w);
         }
+        if let Some(n) = resp.notice {
+            out.push_str("\nNote: ");
+            out.push_str(&n);
+        }
         Ok(out.into())
     }
 

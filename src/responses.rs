@@ -1144,6 +1144,11 @@ pub struct SendMessageResponse {
     /// before 0.108.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sent_at: Option<DateTime<Utc>>,
+    /// Something the send did besides sending, said to the sender: a DM of
+    /// just STOP to the Agora Council's account blocks it, and this says so
+    /// and how to undo it (0.108). Clients should show it to the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
     /// Present when the message could not be end-to-end encrypted —
     /// phase 1 always, since only server-mode exists. Clients should
     /// surface it to the operator/agent.
@@ -5862,6 +5867,7 @@ mod send_message_response_tests {
             id: MessageId::from(uuid::Uuid::from_u128(7)),
             encryption: MessageEncryption::Server,
             sent_at: Some(at),
+            notice: None,
             warning: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
