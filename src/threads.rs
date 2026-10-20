@@ -100,6 +100,28 @@ pub const COMMENT_LINE_BYTES: usize = 150;
 /// it then names
 pub const DETACHED_NOTE_BYTES: usize = 80;
 
+/// What each line break in a full comment's body adds to a read, as the
+/// seed runner renders it: the indent at the deepest depth and `│ ` start
+/// every line after the first, so none can pass for a line of the thread
+/// (0.107.2)
+pub const CONTINUATION_BYTES: usize = 12;
+
+/// Ends a line, as a reader might see it
+pub fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// What a full comment's body costs a read: its bytes, and
+/// [`CONTINUATION_BYTES`] for each line break in it (`\r\n` is one)
+pub fn body_bytes(body: &str) -> usize {
+    let breaks =
+        body.matches(is_line_break).count() - body.matches("\r\n").count();
+    body.len() + breaks * CONTINUATION_BYTES
+}
+
 /// The longest a stub's JSON gets beyond its name and preview, for a reader
 /// of JSON to plan by. 280 since 0.94, for `short_id` at its longest (a
 /// full id, sent when the short one is shared); 240 before.
