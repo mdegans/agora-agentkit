@@ -820,6 +820,20 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
             return Err(format!("{name}= is given twice"));
         }
     }
+    // An empty value is refused, never read as absent: `?round=` read the
+    // whole record and spent a full read (beta round of 0.112.0). Tool
+    // calls keep reading "" as absent (`serde_forgiving`); a link is
+    // written, not filled in
+    if let Some(name) = options
+        .iter()
+        .find(|(_, v)| v.as_str().is_some_and(|v| v.trim().is_empty()))
+        .map(|(name, _)| name.clone())
+    {
+        return Err(format!(
+            "{name}= is empty: give it {}, or leave it out",
+            option_values(&name)
+        ));
+    }
 
     let none_after = |what: &str, n: usize| -> Result<(), String> {
         if segments.len() > n {
@@ -990,10 +1004,39 @@ fn refuse_path_fields(
     fields: &[&str],
 ) -> Result<(), String> {
     match fields.iter().find(|f| options.contains_key(**f)) {
+        Some(&"attachment") => Err("an attachment is named in the path, \
+             agora://gov/<id>/<attachment>, not by attachment="
+            .into()),
+        Some(&"id") => {
+            Err("the path names what to read, not id=; leave it out".into())
+        }
         Some(field) => Err(format!(
             "the path says what {field}= would; leave {field}= out"
         )),
         None => Ok(()),
+    }
+}
+
+/// What an option's value may be, for the refusal of an empty one
+fn option_values(name: &str) -> String {
+    match name {
+        "detail" => "summary, full or full_with_attachments".into(),
+        "round" => "a round's number, from 1".into(),
+        "version" => "latest or original (for the Constitution, a version \
+                      number like 0.3)"
+            .into(),
+        "comment_budget" => format!(
+            "a number of bytes, {} to {} for a post or comment, 1 to {} for \
+             a data set's file",
+            GetContentInput::MIN_COMMENT_BUDGET,
+            GetContentInput::MAX_COMMENT_BUDGET,
+            GetContentInput::MAX_COMMENT_BUDGET
+        ),
+        "lines" => "a range of lines like 110-300, 110- or 110".into(),
+        "commit" => "7 to 40 hex digits of the data set's commit".into(),
+        "q" | "query" => "the words to look for".into(),
+        "limit" | "offset" => "a number".into(),
+        _ => "a value".into(),
     }
 }
 
@@ -1005,6 +1048,30 @@ fn read_input(
     attachment: Option<String>,
 ) -> Result<GetContentInput, String> {
     refuse_path_fields(&options, &["id", "attachment"])?;
+    // Only the options this kind of read takes, named as its list
+    let target = crate::requests::ReadTarget::of(&id);
+    let allowed = target.options();
+    if let Some(name) = options
+        .keys()
+        .find(|k| !allowed.iter().any(|o| o.name() == k.as_str()))
+    {
+        let takes = match allowed {
+            [] => "no options".to_string(),
+            _ => allowed
+                .iter()
+                .map(|o| o.name())
+                .chain(
+                    (target == crate::requests::ReadTarget::DataSet)
+                        .then_some("commit"),
+                )
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        return Err(format!(
+            "{name} does not apply to {}, which takes {takes}",
+            target.noun()
+        ));
+    }
     options.insert("id".into(), Value::String(id.to_string()));
     if let Some(a) = attachment {
         options.insert("attachment".into(), Value::String(a));

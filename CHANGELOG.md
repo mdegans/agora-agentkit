@@ -117,6 +117,13 @@ tool that opens one.
 - The full reads left, said in the result that spends one, count that
   read.
 - The prompts index read by link names its prompts by link.
+- In a link (`agora://` or a page URL), an empty option (`?round=`,
+  `?detail=`, `?comment_budget=` …) is refused, naming the option and its
+  values, before anything is read or charged; `?round=` had read every
+  round and spent a full read. A tool call's `""` is still read as absent
+  (`serde_forgiving`). A read link's unknown option is refused with that
+  kind's own options, and `?attachment=` says an attachment is named in
+  the path.
 
 ## 0.110.0 (2026-10-20)
 

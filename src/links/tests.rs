@@ -297,14 +297,14 @@ fn refusals_say_why_and_show_both_forms() {
             "for a data set's file",
         ),
         ("agora://gov/DATA-2026-0001/x.md?commit=xyz", "not a commit"),
-        ("agora://gov/GOV-2026-0006?bogus=1", "unknown field `bogus`"),
+        ("agora://gov/GOV-2026-0006?bogus=1", "bogus does not apply"),
         (
             "agora://gov/GOV-2026-0006?id=GOV-2026-0007",
-            "leave id= out",
+            "the path names what to read, not id=",
         ),
         (
             "agora://gov/GOV-2026-0006?attachment=x",
-            "leave attachment= out",
+            "an attachment is named in the path",
         ),
         ("agora://gov/GOV-2026-0006?round=a", "round"),
         ("agora://gov/GOV-2026-0006?round=1&round=2", "given twice"),
@@ -456,6 +456,10 @@ fn any_link() -> impl Strategy<Value = AgoraLink> {
         });
     let entry = (gov_id(), prop::option::of(segment()), options()).prop_map(
         |(id, attachment, (detail, round, _))| {
+            // A data set has no rounds
+            let round = round.filter(|_| {
+                id.prefix() != crate::ids::GovernanceLogPrefix::Data
+            });
             AgoraLink::from(GetContentInput {
                 detail,
                 round,
@@ -733,7 +737,7 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         ),
         (
             "agora://gov/DATA-2026-0001/a.md?round=2",
-            "round does not apply to a data set's cited file",
+            "round does not apply to a data set",
         ),
         (
             "agora://post/7ad26ccd?round=2",
@@ -753,7 +757,11 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
             "out of its bounds here, 1 to 262144",
         ),
     ] {
-        let why_not = link(s).as_read().unwrap().conflict();
+        // Refused as the link is read, or as the read is checked
+        let why_not = match s.parse::<AgoraLink>() {
+            Ok(l) => l.as_read().unwrap().conflict(),
+            Err(e) => Some(e.to_string()),
+        };
         assert!(
             why_not.as_deref().is_some_and(|w| w.contains(why)),
             "{s}: {why_not:?}"
@@ -839,5 +847,86 @@ fn every_kind_takes_exactly_its_options() {
                 }
             }
         }
+    }
+}
+
+/// An empty value in a link is refused with what it may be, never read as
+/// absent (beta round of 0.112.0: `?round=` read every round)
+#[test]
+fn an_empty_option_is_refused() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    for (s, why) in [
+        (
+            "agora://gov/GOV-2026-0016?round=",
+            "round= is empty: give it a round's number",
+        ),
+        (
+            "agora://gov/GOV-2026-0016?detail=",
+            "detail= is empty: give it summary, full",
+        ),
+        (
+            "agora://gov/GOV-2026-0016?version=",
+            "version= is empty: give it latest or original",
+        ),
+        ("agora://gov/constitution?version=", "version= is empty"),
+        (
+            "agora://post/7ad26ccd?comment_budget=",
+            "comment_budget= is empty: give it a number of bytes, 4096",
+        ),
+        ("agora://gov/DATA-2026-0001/a.md?lines=", "lines= is empty"),
+        (
+            "agora://gov/DATA-2026-0001/a.md?commit=",
+            "commit= is empty",
+        ),
+        ("agora://search?q=", "q= is empty"),
+        ("agora://gov?type=", "type= is empty"),
+        ("agora://feed?sort=%20", "sort= is empty"),
+        (
+            "https://subliminal.technology/agora/governance/GOV-2026-0016?version=",
+            "version= is empty",
+        ),
+    ] {
+        let e = AgoraLink::parse_at(s, Some(&site)).unwrap_err().to_string();
+        assert!(e.contains(why), "{s}: {e}");
+        assert!(e.contains("or leave it out"), "{s}: {e}");
+    }
+}
+
+/// A read link's unknown or path-named option is refused with that kind's
+/// own list
+#[test]
+fn a_read_link_names_its_kinds_options() {
+    for (s, why) in [
+        (
+            "agora://gov/GOV-2026-0016?bogus=1",
+            "bogus does not apply to a governance entry, which takes detail, \
+             round, attachment, version",
+        ),
+        (
+            "agora://gov/GOV-2026-0016?comment_budget=8192",
+            "comment_budget does not apply to a governance entry, which \
+             takes detail, round, attachment, version",
+        ),
+        (
+            "agora://gov/DATA-2026-0001?bogus=1",
+            "which takes detail, attachment, version, comment_budget, lines, \
+             commit",
+        ),
+        (
+            "agora://post/7ad26ccd?round=1",
+            "round does not apply to a post or comment, which takes detail, \
+             comment_budget",
+        ),
+        (
+            "agora://gov/calendar?detail=summary",
+            "detail does not apply to a document, which takes no options",
+        ),
+        (
+            "agora://gov/GOV-2026-0016?attachment=clerk-reads",
+            "an attachment is named in the path, agora://gov/<id>/<attachment>",
+        ),
+    ] {
+        let e = refused(s);
+        assert!(e.contains(why), "{s}: {e}");
     }
 }

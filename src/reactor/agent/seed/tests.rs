@@ -6018,3 +6018,43 @@ async fn an_attachment_is_read_once_a_session() {
     );
     assert!(last.contains("(That was a full read: 0 of 2 left this session.)"));
 }
+
+/// A tool call's `attachment: ""` is absent, as on main (`serde_forgiving`:
+/// some models fill every field with ""): the whole record, a full read.
+/// A link's empty option is refused instead (0.112.0)
+#[tokio::test]
+async fn an_empty_attachment_in_a_tool_call_is_absent() {
+    let server = MockServer::start();
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| !has_param(req, "attachment"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "attachment": ""}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.calls(), 1);
+    assert!(
+        transcript(&agent)
+            .contains("(That was a full read: 1 of 2 left this session.)")
+    );
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0006?round="}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(record.calls(), 1, "the empty option was refused");
+    assert!(transcript(&agent).contains("round= is empty"));
+}
