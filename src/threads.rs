@@ -110,7 +110,8 @@ pub const CONTINUATION_BYTES: usize = 12;
 pub fn is_line_break(c: char) -> bool {
     matches!(
         c,
-        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{1C}'
+            ..='\u{1E}' | '\u{85}' | '\u{2028}' | '\u{2029}'
     )
 }
 
