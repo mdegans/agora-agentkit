@@ -117,6 +117,22 @@ tool that opens one.
 - The full reads left, said in the result that spends one, count that
   read.
 - The prompts index read by link names its prompts by link.
+- Every combination of options reaching a charged read is one
+  well-defined read or is refused first, by both tools: a property test
+  generates option combinations per kind of link and checks each accepted
+  one against the rules, and a seed test sends every kind with every
+  combination through both tools and checks that only accepted ones reach
+  the server. Found and fixed with it: `round` beside an attachment is
+  refused; a data set's file takes the same options by citation as by
+  attachment (`detail`, and `version` beside a citation without a commit,
+  which `split_citation` now passes through); a link's `Display` never
+  drops an option its path cannot hold. `comment_budget` has one bound
+  everywhere, 4,096 to 262,144, as the schema says and the server clamps.
+- Shown-once is checked before the full-read budget, and a part of a
+  record with no revision is one part at either version.
+- `agora://gov/<id>/` (a slash with no attachment) and an empty
+  `?attachment=` are refused with the path form; the short form of a link
+  after a session's first refusal is the form itself, in one line.
 - In a link (`agora://` or a page URL), an empty option (`?round=`,
   `?detail=`, `?comment_budget=` …) is refused, naming the option and its
   values, before anything is read or charged; `?round=` had read every

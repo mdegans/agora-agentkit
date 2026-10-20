@@ -59,6 +59,35 @@ fn data_set_reads_are_free() -> String {
     )
 }
 
+/// The keys a part read is shown once by: its canonical link (`latest`
+/// written as no version), then the same part at the other version, which
+/// is the same text when the record has no revision. Empty for a read that
+/// is not of a part (0.112.0)
+fn part_keys(input: &GetContentInput) -> Vec<String> {
+    use crate::enums::RecordVersion;
+    let part = input.attachment.is_some()
+        || matches!(input.id, ContentRef::DataCitation(_));
+    if !part {
+        return Vec::new();
+    }
+    let at = |version: Option<RecordVersion>| {
+        AgoraLink::from(GetContentInput {
+            version,
+            ..input.clone()
+        })
+        .to_string()
+    };
+    let asked = match input.version {
+        Some(RecordVersion::Latest) | None => None,
+        Some(RecordVersion::Original) => Some(RecordVersion::Original),
+    };
+    let other = match asked {
+        None => Some(RecordVersion::Original),
+        Some(_) => None,
+    };
+    vec![at(asked), at(other)]
+}
+
 /// `text` with each `get_content("<id>")` it names written as the id's
 /// link, and the template `get_content("prompt:<name>")` as
 /// `agora://gov/prompts/<name>` (0.112.0)
@@ -615,6 +644,24 @@ impl Agora {
         let full = input.id.is_governance()
             && !data_set
             && input.detail != Some(DetailLevel::Summary);
+        // A part of a record (an attachment, a data set's file or lines
+        // of one) shown this session is pointed at, not read again: it is
+        // in the context, and a second read would spend another full read.
+        // Checked before the budget, so the pointer comes whether or not
+        // full reads are left (beta round of 0.112.0)
+        let part_keys = part_keys(&input);
+        if let Some((key, shown)) = part_keys
+            .iter()
+            .find_map(|k| Some((k, self.shown_once.earlier_part(k)?)))
+        {
+            return Ok(format!(
+                "(`{key}` is in your context already: shown in {}, {}. \
+                 Nothing was read, and no full read was spent.)",
+                shown.read,
+                crate::threads::about_tokens(shown.bytes)
+            )
+            .into());
+        }
         let capped = full && !self.can_read_governance_record();
         // One verbatim read per session; a second gets the record without
         // the attachment bodies, and says so.
@@ -648,25 +695,6 @@ impl Agora {
         // A server without the signed route answers a bare 404 or 405;
         // that read is retried unsigned, while a real "no such post"
         // (Agora's JSON error) goes back to the model as is.
-        // A part of a record (an attachment, a data set's file or lines
-        // of one) shown this session is pointed at, not read again: it is
-        // in the context, and a second read would spend another full read
-        // (beta round of 0.112.0)
-        let part_link = (!capped
-            && (input.attachment.is_some()
-                || matches!(input.id, ContentRef::DataCitation(_))))
-        .then(|| AgoraLink::from(input.clone()).to_string());
-        if let Some(link) = &part_link
-            && let Some(shown) = self.shown_once.earlier_part(link)
-        {
-            return Ok(format!(
-                "(`{link}` is in your context already: shown in {}, {}. \
-                 Nothing was read, and no full read was spent.)",
-                shown.read,
-                crate::threads::about_tokens(shown.bytes)
-            )
-            .into());
-        }
         let content = match &input.id {
             ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
                 .client
@@ -701,7 +729,12 @@ impl Agora {
             self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
             // Marked with the part's own size; a read that is left out, or
             // served as the summary instead, begins afresh and marks nothing
-            if let Some(link) = part_link {
+            if !capped && !part_keys.is_empty() {
+                // With no revision, the original is the latest: one part
+                let revised = !entry.revisions.is_empty()
+                    || entry.amendments.iter().any(|a| {
+                        a.kind == crate::enums::AmendmentKind::Revision
+                    });
                 let bytes = match &entry.data_file {
                     Some(file) => file.text.len() as u64,
                     None => entry
@@ -710,7 +743,14 @@ impl Agora {
                         .find(|a| Some(&a.name) == entry.attachment.as_ref())
                         .map_or(0, |a| a.bytes),
                 };
-                self.shown_once.mark_part(link, bytes as usize);
+                let keys = if revised {
+                    part_keys[..1].to_vec()
+                } else {
+                    part_keys.clone()
+                };
+                for key in keys {
+                    self.shown_once.mark_part(key, bytes as usize);
+                }
             }
         }
         Ok(match content {

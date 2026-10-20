@@ -6017,6 +6017,32 @@ async fn an_attachment_is_read_once_a_session() {
         "{last}"
     );
     assert!(last.contains("(That was a full read: 0 of 2 left this session.)"));
+    // The reads are spent, and the attachment, at either version of a
+    // record with no revision, is still pointed at, not "the summary"
+    for l in [
+        "agora://gov/GOV-2026-0006/clerk-reads",
+        "agora://gov/GOV-2026-0006/clerk-reads?version=original",
+    ] {
+        agent
+            .handle(tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": l }),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(attachment.calls(), 1);
+    let rendered = transcript(&agent);
+    assert!(!rendered.contains("this is the summary"), "{rendered}");
+    assert_eq!(
+        rendered
+            .matches(
+                "is in your context already: shown in your read of GOV-2026-0006"
+            )
+            .count(),
+        3,
+        "{rendered}"
+    );
 }
 
 /// A tool call's `attachment: ""` is absent, as on main (`serde_forgiving`:
@@ -6057,4 +6083,82 @@ async fn an_empty_attachment_in_a_tool_call_is_absent() {
         .unwrap();
     assert_eq!(record.calls(), 1, "the empty option was refused");
     assert!(transcript(&agent).contains("round= is empty"));
+}
+
+/// Every kind of read with every combination of options, by both tools:
+/// a request goes out only for a combination the rules accept; anything
+/// else is refused first, nothing read or charged (beta round of 0.112.0)
+#[tokio::test]
+async fn only_an_accepted_read_reaches_the_server() {
+    use crate::requests::{ReadOption, ReadTarget};
+    let server = MockServer::start();
+    let any = server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/");
+        let mut body =
+            governance_content("GOV-2026-0006", Some(two_round_record()));
+        body["attachments"] = serde_json::json!([
+            {"name": "a.md", "note": "an attachment", "bytes": 10}
+        ]);
+        then.status(200).json_body(body);
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 2_000,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let ids = [
+        "7ad26ccd",
+        "GOV-2026-0006",
+        "DATA-2026-0001",
+        "DATA-2026-0001:/votes/index.md",
+        "constitution",
+    ];
+    for id in ids {
+        for mask in 0u32..(1 << ReadOption::ALL.len()) {
+            let mut input = serde_json::json!({ "id": id });
+            for (i, option) in ReadOption::ALL.iter().enumerate() {
+                if mask & (1 << i) == 0 {
+                    continue;
+                }
+                input[option.name()] = match option {
+                    ReadOption::Detail => "full".into(),
+                    ReadOption::Round => 1.into(),
+                    ReadOption::Attachment => "a.md".into(),
+                    ReadOption::Version => "original".into(),
+                    ReadOption::CommentBudget => 8192.into(),
+                    ReadOption::Lines => "1-2".into(),
+                };
+            }
+            let read: crate::requests::GetContentInput =
+                serde_json::from_value(input.clone()).unwrap();
+            let accepted = read.conflict().is_none();
+            let link = crate::links::AgoraLink::from(read.clone()).to_string();
+            for (tool, call) in [
+                ("get_content", input.clone()),
+                ("fetch_agora_link", serde_json::json!({ "link": link })),
+            ] {
+                let before = any.calls();
+                agent.handle(tool_use_message(tool, call)).await.unwrap();
+                let went = any.calls() > before;
+                let last = transcript(&agent);
+                let pointed = last
+                    .rsplit("Error:")
+                    .next()
+                    .is_some_and(|t| t.contains("in your context already"));
+                assert!(
+                    !went || accepted,
+                    "{tool} {input}: a refused read reached the server \
+                     ({:?})",
+                    ReadTarget::of(&read.id)
+                );
+                assert!(
+                    went || !accepted || pointed,
+                    "{tool} {input}: an accepted read never went out"
+                );
+            }
+        }
+    }
 }

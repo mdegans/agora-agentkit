@@ -754,7 +754,7 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         ),
         (
             "agora://gov/DATA-2026-0001/a.md?comment_budget=999999",
-            "out of its bounds here, 1 to 262144",
+            "out of its bounds here, 4096 to 262144",
         ),
     ] {
         // Refused as the link is read, or as the read is checked
@@ -929,4 +929,115 @@ fn a_read_link_names_its_kinds_options() {
         let e = refused(s);
         assert!(e.contains(why), "{s}: {e}");
     }
+}
+
+/// What a read may be, restated here from the Steward's rules rather than
+/// read from `ReadTarget`, so the property below checks the code against
+/// the rules and not against itself
+fn exactly_one_read(read: &GetContentInput) -> Result<(), String> {
+    use crate::requests::ReadTarget as T;
+    let allowed: &[&str] = match T::of(&read.id) {
+        T::Content => &["detail", "comment_budget"],
+        T::Entry => &["detail", "round", "attachment", "version"],
+        T::DataSet => {
+            &["detail", "attachment", "version", "comment_budget", "lines"]
+        }
+        T::CitedFile => &["detail", "version", "comment_budget", "lines"],
+        T::Document => &[],
+    };
+    for o in read.options() {
+        if !allowed.contains(&o.name()) {
+            return Err(format!("{} on {:?}", o.name(), T::of(&read.id)));
+        }
+    }
+    if let Some(b) = read.comment_budget
+        && !(4096..=262_144).contains(&b)
+    {
+        return Err(format!("comment_budget={b}"));
+    }
+    if T::of(&read.id) == T::Entry {
+        let parts = usize::from(read.round.is_some())
+            + usize::from(read.attachment.is_some());
+        if parts > 1 {
+            return Err("round and attachment".into());
+        }
+        if parts == 1 && !matches!(read.detail, None | Some(DetailLevel::Full))
+        {
+            return Err(format!("{:?} with a part", read.detail));
+        }
+        if read.attachment.as_deref().is_some_and(str::is_empty) {
+            return Err("an empty attachment".into());
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    /// Every combination of options on every kind of read link either is
+    /// refused (as the link is read, or as the read is checked, before any
+    /// read is made) or is exactly one well-defined read
+    #[test]
+    fn a_read_link_is_one_read_or_refused(
+        target in 0usize..5,
+        options in prop::collection::vec(
+            (
+                prop::sample::select(vec![
+                    "detail", "round", "attachment", "version",
+                    "comment_budget", "lines", "commit", "bogus",
+                ]),
+                prop::sample::select(vec![
+                    "", " ", "summary", "full", "full_with_attachments",
+                    "1", "3", "0", "-1", "4095", "4096", "8192", "262144",
+                    "262145", "999999", "latest", "original", "0.3",
+                    "1-5", "110-", "abc1234", "clerk-reads", "x/y.md",
+                ]),
+            ),
+            0..5,
+        ),
+        slash in any::<bool>(),
+    ) {
+        let (base, path): (&str, &[&str]) = match target {
+            0 => ("agora://post", &["7ad26ccd"]),
+            1 => ("agora://gov", &["GOV-2026-0016"]),
+            2 => ("agora://gov", &["DATA-2026-0001"]),
+            3 => ("agora://gov", &["DATA-2026-0001", "votes", "index.md"]),
+            _ => ("agora://gov", &["constitution"]),
+        };
+        let mut url = Url::parse(base).unwrap();
+        {
+            let mut segments = url.path_segments_mut().unwrap();
+            segments.extend(path);
+            if slash {
+                segments.push("");
+            }
+        }
+        if !options.is_empty() {
+            url.query_pairs_mut().extend_pairs(options.iter().copied());
+        }
+        if let Ok(link) = url.as_str().parse::<AgoraLink>()
+            && let Some(read) = link.as_read()
+            && read.conflict().is_none()
+        {
+            exactly_one_read(read)
+                .map_err(|e| TestCaseError::fail(format!("{url}: {e}")))?;
+        }
+    }
+}
+
+#[test]
+fn a_slash_with_no_attachment_is_refused() {
+    let e = refused("agora://gov/GOV-2026-0016/");
+    assert!(e.contains("names no attachment"), "{e}");
+    let e = refused("agora://gov/GOV-2026-0016?attachment=");
+    assert!(e.contains("agora://gov/<id>/<attachment>"), "{e}");
+    let e = refused("agora://gov/GOV-2026-0016?round=1&attachment=x");
+    assert!(e.contains("an attachment is named in the path"), "{e}");
+    let both = link("agora://gov/GOV-2026-0016/clerk-reads?round=1");
+    assert!(
+        both.as_read()
+            .unwrap()
+            .conflict()
+            .unwrap()
+            .contains("give one")
+    );
 }

@@ -1861,7 +1861,12 @@ impl GetContentInput {
         let given: Vec<&'static str> = [
             ("attachment", self.attachment.is_some()),
             ("lines", self.lines.is_some() && citation.lines.is_some()),
-            ("version", self.version.is_some()),
+            // A commit picks the version; without one, `version` reads
+            // the set's original or latest as for the set's own id (0.112.0)
+            (
+                "version",
+                self.version.is_some() && citation.commit.is_some(),
+            ),
         ]
         .into_iter()
         .filter_map(|(name, given)| given.then_some(name))
@@ -1990,23 +1995,21 @@ impl ReadTarget {
             ReadTarget::DataSet => {
                 &[Detail, Attachment, Version, CommentBudget, Lines]
             }
-            // The citation names its file and version; `lines` only
-            // beside one without a range (`split_citation`)
-            ReadTarget::CitedFile => &[CommentBudget, Lines],
+            // As a data set's file read by attachment, so both forms of
+            // one read take the same options; `lines` only beside a
+            // citation without a range, `version` only beside one without
+            // a commit (`split_citation`)
+            ReadTarget::CitedFile => &[Detail, Version, CommentBudget, Lines],
             ReadTarget::Document => &[],
         }
     }
 
-    /// The bounds of `comment_budget` on it: a post's comments from the
-    /// floor up, a data file's bytes from one
+    /// The bounds of `comment_budget`, wherever it is taken: one copy, the
+    /// schema's and the server's (which budgets a data file as it does a
+    /// post's comments)
     pub fn comment_budget_bounds(self) -> std::ops::RangeInclusive<u32> {
-        match self {
-            ReadTarget::Content => {
-                GetContentInput::MIN_COMMENT_BUDGET
-                    ..=GetContentInput::MAX_COMMENT_BUDGET
-            }
-            _ => 1..=GetContentInput::MAX_COMMENT_BUDGET,
-        }
+        GetContentInput::MIN_COMMENT_BUDGET
+            ..=GetContentInput::MAX_COMMENT_BUDGET
     }
 }
 
@@ -2069,6 +2072,20 @@ impl GetContentInput {
                 ));
             }
         }
+        if let ContentRef::DataCitation(c) = &self.id {
+            if self.version.is_some() && c.commit.is_some() {
+                return Some(
+                    "a citation's commit picks the version read: leave version \
+                     out, or the commit"
+                        .into(),
+                );
+            }
+            if self.lines.is_some() && c.lines.is_some() {
+                return Some(
+                    "the citation names its lines: leave lines out".into(),
+                );
+            }
+        }
         // A part of an entry's record, and a depth that is not a part
         if target == ReadTarget::Entry {
             let parts: Vec<&str> = [
@@ -2078,6 +2095,13 @@ impl GetContentInput {
             .into_iter()
             .filter_map(|(n, given)| given.then_some(n))
             .collect();
+            if parts.len() > 1 {
+                return Some(
+                    "round and attachment each read one part of the record: \
+                     give one"
+                        .into(),
+                );
+            }
             match self.detail {
                 Some(DetailLevel::Summary) if !parts.is_empty() => {
                     return Some(format!(

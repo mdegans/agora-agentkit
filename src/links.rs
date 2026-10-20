@@ -59,8 +59,8 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
 
 /// [`FORM`] once it has been shown: what the seed runner says in its place
 /// after a session's first refusal
-pub const FORM_AGAIN: &str = "(The form of a link is as the first refusal \
-     this session said.)";
+pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
+     the kinds are gov, post, comment, community, agent, feed and search.";
 
 /// What a link to a post or comment says it is. Not checked against what
 /// the id names: the read is `get_content`'s either way
@@ -235,7 +235,11 @@ impl AgoraLink {
                     ContentKind::Comment => Kind::Comment,
                     ContentKind::Either => Kind::Content,
                 };
-                (kind, vec![read.id.to_string()], read_options(read), None)
+                // A post's path holds no attachment: one given is written
+                // as an option, which reads back refused, never dropped
+                let mut options = to_map(read);
+                options.remove("id");
+                (kind, vec![read.id.to_string()], options, None)
             }
             Self::Read(read) => {
                 let mut options = read_options(read);
@@ -265,7 +269,13 @@ impl AgoraLink {
                             .chain(c.path.as_str().split('/').map(String::from))
                             .collect()
                     }
-                    ContentRef::Document(doc) => doc_segments(doc),
+                    ContentRef::Document(doc) => {
+                        if let Some(a) = &read.attachment {
+                            options
+                                .insert("attachment".into(), a.clone().into());
+                        }
+                        doc_segments(doc)
+                    }
                     // Not built by this module, but `Read` is public
                     ContentRef::Content(_) | ContentRef::ContentPrefix(_) => {
                         return Self::Content {
@@ -552,12 +562,14 @@ fn alias_in(
 /// `get_content`'s input in the form a link names it: a data set's file
 /// (not a directory) as its [`DataCitation`], with its `lines`. The read is
 /// the same: [`GetContentInput::split_citation`] turns it back. A read
-/// with `version` is left as it is, since a citation takes none.
+/// with `version` or `detail` is left as it is, since a citation takes
+/// neither: the same read is then accepted or refused by both tools.
 fn canonical_read(mut read: GetContentInput) -> GetContentInput {
     match &mut read.id {
         ContentRef::Governance(set)
             if set.prefix() == GovernanceLogPrefix::Data
-                && read.version.is_none() =>
+                && read.version.is_none()
+                && read.detail.is_none() =>
         {
             let path = read
                 .attachment
@@ -829,6 +841,11 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
         .find(|(_, v)| v.as_str().is_some_and(|v| v.trim().is_empty()))
         .map(|(name, _)| name.clone())
     {
+        if name == "attachment" {
+            return Err("attachment= is empty, and an attachment is named in \
+                 the path, agora://gov/<id>/<attachment>, not by attachment="
+                .into());
+        }
         return Err(format!(
             "{name}= is empty: give it {}, or leave it out",
             option_values(&name)
@@ -934,6 +951,14 @@ fn parse_gov(
         ));
     }
     if let Ok(id) = first.parse::<GovernanceLogId>() {
+        // A slash with no attachment after it names none: refused, as an
+        // empty attachment= is (beta round of 0.112.0)
+        if directory && rest.is_empty() {
+            return Err(format!(
+                "agora://gov/{id}/ names no attachment: name one, \
+                 agora://gov/{id}/<attachment>, or leave the slash off"
+            ));
+        }
         // A path may end in `:1-5`: a file can be named so, and refusing
         // it would leave a file no link reads (the proptest of 0.112.0)
         let attachment = (!rest.is_empty()).then(|| {
@@ -1025,13 +1050,11 @@ fn option_values(name: &str) -> String {
         "version" => "latest or original (for the Constitution, a version \
                       number like 0.3)"
             .into(),
-        "comment_budget" => format!(
-            "a number of bytes, {} to {} for a post or comment, 1 to {} for \
-             a data set's file",
-            GetContentInput::MIN_COMMENT_BUDGET,
-            GetContentInput::MAX_COMMENT_BUDGET,
-            GetContentInput::MAX_COMMENT_BUDGET
-        ),
+        "comment_budget" => {
+            let bounds =
+                crate::requests::ReadTarget::Content.comment_budget_bounds();
+            format!("a number of bytes, {} to {}", bounds.start(), bounds.end())
+        }
         "lines" => "a range of lines like 110-300, 110- or 110".into(),
         "commit" => "7 to 40 hex digits of the data set's commit".into(),
         "q" | "query" => "the words to look for".into(),
