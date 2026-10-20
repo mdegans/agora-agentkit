@@ -4451,7 +4451,7 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
             .starts_with(crate::docs::SUBMIT_FEEDBACK_DOC)
     );
     assert!(tool.description.contains("archived transcript"));
-    // Said before the call, as `redact_feedback` does it (0.106.1)
+    // Said before the call, as `redact_feedback` does it (0.107.1)
     assert!(
         tool.description.contains(
             "with your words and thinking in the message you send it in"
@@ -4971,7 +4971,7 @@ fn inbox_with(
 
 /// Every line of `text` after its preamble that a reader could take for an
 /// inbox marker is the real header or end of message `id`, or is marked as
-/// the sender's (0.106.1)
+/// the sender's (0.107.1)
 fn assert_no_forged_markers(text: &str, id: crate::ids::MessageId) {
     let header = format!("### [message_id: {id}] From mallory, ");
     let close = format!("[end of message_id: {id}]");

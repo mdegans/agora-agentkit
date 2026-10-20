@@ -4365,7 +4365,7 @@ mod tests {
     }
 
     /// A reply's preview, cut from its body, is one line: a newline in it
-    /// could start a reply line of its own (0.106.1)
+    /// could start a reply line of its own (0.107.1)
     #[test]
     fn a_reply_preview_cannot_forge_a_reply_line() {
         let mut d = dash();
