@@ -224,6 +224,11 @@ pub struct AgoraExchange {
     /// then among the testimony's `unanswered`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<AgoraAnswer>,
+    /// The witness's other direct messages to the Council stored after the
+    /// batch (and before its next one), in order: a second message, or one
+    /// that came after the wait ran out. On the record, never the answer
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub late: Vec<AgoraAnswer>,
 }
 
 /// An Agora witness's answer to a batch: its first direct message to the
@@ -962,6 +967,12 @@ mod tests {
                         sent_at: at("2026-10-25T10:03:00Z"),
                         received_at: at("2026-10-25T10:03:01Z"),
                     }),
+                    late: vec![AgoraAnswer {
+                        message: message(14),
+                        text: "And one more thing.".into(),
+                        sent_at: at("2026-10-25T10:04:00Z"),
+                        received_at: at("2026-10-25T10:04:01Z"),
+                    }],
                 },
                 AgoraExchange {
                     round: 2,
@@ -969,6 +980,7 @@ mod tests {
                     sent: vec![message(12), message(13)],
                     sent_at: at("2026-10-25T11:00:00Z"),
                     answer: None,
+                    late: Vec::new(),
                 },
             ],
             vec![Unanswered {
@@ -982,6 +994,8 @@ mod tests {
         let json = serde_json::to_value(&t).unwrap();
         assert!(json["record"].is_array(), "{json}");
         assert!(json["record"][1].get("answer").is_none(), "{json}");
+        assert!(json["record"][1].get("late").is_none(), "none, no key");
+        assert_eq!(json["record"][0]["late"][0]["text"], "And one more thing.");
         assert_eq!(
             json["record"][0]["answer"]["message"],
             "00000000-0000-0000-0000-00000000000b"

@@ -31,6 +31,9 @@ Council's own account (agora stream E, OBL-2026-0028; Steward,
 - `Client::with_http(url, http)`: a client over a `reqwest::Client` of the
   caller's building (the Council's reaches the server over a Unix
   socket).
+- `AgoraExchange.late`: the witness's other DMs to the Council after the
+  batch (a second message, or one past the wait), on the record and never
+  the answer; absent when there are none.
 - `split_for_dms(text, max_bytes)` and `part_label`: a batch over one DM
   (`SendMessagePayload::BODY_MAX_BYTES`) as parts, in order, each opening
   `[part k of n]`, split between lines where it can be.
