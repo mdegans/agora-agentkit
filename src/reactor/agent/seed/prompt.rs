@@ -2703,10 +2703,6 @@ pub(super) fn summary_comment_index(
     Some((out, listed))
 }
 
-/// A post as its element: whole, a placeholder for one removed, or a
-/// pointer when it is in the context already ([`ShownOnce`]); the whole
-/// one is marked shown. `body` is what to show of it (a chain's root is
-/// cut)
 /// A test sitting's item's `test` attribute: always
 /// [`crate::responses::TEST_ITEM_LABEL`], whatever the server sent as its
 /// label, so a server cannot write its own text into it
@@ -2716,6 +2712,10 @@ fn test_label(
     test.map(|_| crate::responses::TEST_ITEM_LABEL)
 }
 
+/// A post as its element: whole, a placeholder for one removed, or a
+/// pointer when it is in the context already ([`ShownOnce`]); the whole
+/// one is marked shown. `body` is what to show of it (a chain's root is
+/// cut)
 fn post_element(
     p: &PostResponse,
     body: &str,
