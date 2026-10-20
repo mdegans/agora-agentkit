@@ -1919,7 +1919,14 @@ impl GetContentInput {
         .into_iter()
         .flatten()
         .collect();
+        // A post's comments are budgeted from the floor up; a data set's
+        // file may be read by fewer bytes
+        let post = matches!(
+            self.id,
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_)
+        );
         if let Some(budget) = self.comment_budget
+            && post
             && !(Self::MIN_COMMENT_BUDGET..=Self::MAX_COMMENT_BUDGET)
                 .contains(&budget)
         {

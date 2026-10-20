@@ -64,7 +64,8 @@ tool that opens one.
   `GetContentInput::conflict()` refuses options that contradict each other
   or the kind read (`detail=summary` beside `round`, `lines` without a
   data set's file, `round` on a data set, options on a document or on a
-  post's `version`) and a `comment_budget` outside 4,096 to 262,144;
+  post's `version`) and a post read's `comment_budget` outside 4,096 to
+  262,144 (a data set's file may still be read by fewer bytes);
   `SearchInput::conflict()` refuses `offset` on a semantic search. The seed
   runner and the server both check them.
 - `GovernanceEntryResponse::missing_part`: a round past the last or an
