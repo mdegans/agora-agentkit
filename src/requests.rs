@@ -2072,20 +2072,8 @@ impl GetContentInput {
                 ));
             }
         }
-        if let ContentRef::DataCitation(c) = &self.id {
-            if self.version.is_some() && c.commit.is_some() {
-                return Some(
-                    "a citation's commit picks the version read: leave version \
-                     out, or the commit"
-                        .into(),
-                );
-            }
-            if self.lines.is_some() && c.lines.is_some() {
-                return Some(
-                    "the citation names its lines: leave lines out".into(),
-                );
-            }
-        }
+        // A citation beside the `lines` or `version` it settles itself is
+        // refused by `split_citation`, the one copy of that rule
         // A part of an entry's record, and a depth that is not a part
         if target == ReadTarget::Entry {
             let parts: Vec<&str> = [
