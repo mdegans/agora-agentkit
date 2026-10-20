@@ -2,6 +2,41 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.107.0 (2026-10-19)
+
+The event stream's SSE parser moves to `eventsource-stream`, behind a
+framer that keeps the size caps, with property tests over the parser and
+the subscription. Lands after 0.106.0 (agentkit#198, tool descriptions).
+
+- `SseParser` reads fields with `eventsource-stream` (0.2.3, the version
+  misanthropic brings in). A framer of ours ahead of it splits lines
+  (`\n`, `\r\n`, `\r`, across chunks), strips a leading BOM, and passes
+  on only whole frames under the caps, since `eventsource-stream` buffers
+  without limit. Public types are unchanged.
+- A frame with a line over `MAX_LINE_BYTES` is now dropped whole, where
+  the line was cut short before: a cut `id:` can no longer become a
+  cursor. `MAX_FRAME_BYTES` counts every line of a frame, not only its
+  data. New `SseParser::take_dropped` (`DroppedFrame`, `SseCap`) reports
+  each drop; `EventStream` logs it as a `warn` with the sizes.
+- Read as the WHATWG format says: `SseFrame::event` is `message` for a
+  frame with data and no `event:`; `SseFrame::id` is the stream's last
+  id, carried over from an earlier frame; an empty `id:` resets it; a
+  frame of only an `id:` is no longer returned (it never moved a cursor);
+  a leading BOM is skipped. A frame of only `retry:` is still returned.
+- `EventSubscription`: an event that fails its signature check no longer
+  moves `last_event_id`, so a reconnect never resumes from a forged
+  frame's id. A genuine event for another agent still does.
+- `EventSubscription`: a stream the server closes within
+  `HEALTHY_STREAM` (5 s) having returned nothing counts as a failed
+  connect and is backed off from; a server or proxy that answers 200 and
+  hangs up was reconnected to in a tight loop. One that lasted resets the
+  count, and a reconnect waits the longer of the backoff and `retry:`, not
+  both.
+- `SseParser` hands `eventsource-stream` one line at a time (given a whole
+  frame of short lines it copies the rest after every line: 1.7 s for one
+  capped frame in a debug build), and primes it so it never strips a BOM
+  past the stream's start.
+
 ## 0.106.0 (2026-10-19)
 
 Tool descriptions and schemas a model reads, halved and cleaned (the

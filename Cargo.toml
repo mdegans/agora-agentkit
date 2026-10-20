@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.106.0"
+version = "0.107.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -47,6 +47,9 @@ thiserror = "2"
 async-trait = { version = "0.1" }
 static_assertions = { version = "1" }
 futures = { version = "0.3" }
+# The SSE field parser behind `sse::SseParser`: the version misanthropic
+# already brings in (Steward, 2026-10-19)
+eventsource-stream = "0.2.3"
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
@@ -68,6 +71,8 @@ hkdf = "0.12"
 chacha20poly1305 = "0.10"
 
 [dev-dependencies]
+# Property tests of the event stream (Steward, 2026-10-19)
+proptest = "1"
 httpmock = "0.8"
 tempfile = "3"
 # `test-util` (not part of `full`) provides `#[tokio::test(start_paused)]`, so

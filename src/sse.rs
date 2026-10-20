@@ -299,20 +299,23 @@ impl NotificationSettings {
     }
 }
 
-/// The longest line [`SseParser`] keeps: far past any event (a frame's
-/// data is a few hundred bytes); the rest of a longer line is dropped
+/// The longest line [`SseParser`] reads: far past any event (a frame's
+/// data is a few hundred bytes). A frame with a longer line is dropped
+/// whole, so a cut-off `id:` never becomes a cursor
 pub const MAX_LINE_BYTES: usize = 64 * 1024;
 
-/// The most `data:` one frame keeps, all lines joined; a frame past it is
+/// The most one frame may hold, every line counted; a longer frame is
 /// dropped whole
 pub const MAX_FRAME_BYTES: usize = 256 * 1024;
 
 /// One Server-Sent Events frame, as read off the wire
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SseFrame {
-    /// `id:`, if the frame had one
+    /// The stream's last event id: this frame's `id:`, or the last one
+    /// before it on the same connection
     pub id: Option<String>,
-    /// `event:`, if the frame had one
+    /// `event:`; `message` for a frame with data and no `event:`, as the
+    /// WHATWG format says
     pub event: Option<String>,
     /// Every `data:` line, joined with `\n`
     pub data: String,
@@ -320,109 +323,273 @@ pub struct SseFrame {
     pub retry: Option<u64>,
 }
 
+type Feed = futures::channel::mpsc::UnboundedReceiver<
+    Result<String, std::convert::Infallible>,
+>;
+
 /// An incremental Server-Sent Events reader: feed it bytes as they arrive
 /// and take whole frames out.
 ///
-/// Follows the WHATWG event-stream format: lines end in `\n`, `\r\n` or
-/// `\r`; a blank line ends a frame; a line beginning `:` is a comment (a
-/// keep-alive) and is skipped; a frame with no `data:` is dispatched only
-/// for its `id:` or `retry:`, and otherwise dropped.
-#[derive(Debug, Default)]
+/// The fields are read by [`eventsource_stream`]. In front of it a framer
+/// of ours splits lines (`\n`, `\r\n` or `\r`, even split across chunks),
+/// strips a leading BOM, holds a frame until its blank line, and drops
+/// whole any frame past [`MAX_LINE_BYTES`] or [`MAX_FRAME_BYTES`]:
+/// `eventsource_stream` buffers without limit, so nothing reaches it but
+/// whole frames under the caps. Invalid UTF-8 is replaced, not refused.
+///
+/// A frame with data is returned. One without is returned only for its
+/// `retry:`, which `eventsource_stream` would otherwise drop; its `id:`
+/// carries over to the next frame.
 pub struct SseParser {
-    buffer: Vec<u8>,
-    frame: SseFrame,
-    has_data: bool,
-    has_field: bool,
-    /// This frame's data passed [`MAX_FRAME_BYTES`]: it is dropped
-    oversize: bool,
-    /// The last byte consumed was a `\r`, so a `\n` that follows belongs
-    /// to the same line ending
-    after_cr: bool,
+    framer: Framer,
+    feed: futures::channel::mpsc::UnboundedSender<
+        Result<String, std::convert::Infallible>,
+    >,
+    events: eventsource_stream::EventStream<Feed>,
+    /// The most bytes handed to `eventsource_stream` at once
+    #[cfg(test)]
+    longest_fed: usize,
+}
+
+impl std::fmt::Debug for SseParser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SseParser")
+            .field("framer", &self.framer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SseParser {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SseParser {
     pub fn new() -> Self {
-        Self::default()
+        let (feed, rx) = futures::channel::mpsc::unbounded();
+        let mut parser = Self {
+            framer: Framer::default(),
+            feed,
+            events: eventsource_stream::EventStream::new(rx),
+            #[cfg(test)]
+            longest_fed: 0,
+        };
+        // `eventsource_stream` strips a BOM from the first text it is given,
+        // wherever in the stream that is (after blank lines the framer does
+        // not pass on, say). The framer strips the real one; this comment
+        // is that first text, so it strips nothing else
+        parser.send(":\n".to_owned());
+        parser.drain(&mut Vec::new());
+        parser
+    }
+
+    fn send(&mut self, line: String) {
+        #[cfg(test)]
+        {
+            self.longest_fed = self.longest_fed.max(line.len());
+        }
+        if self.feed.unbounded_send(Ok(line)).is_err() {
+            // The receiver is ours and lives as long as the sender
+            unreachable!("the parser's own feed closed");
+        }
     }
 
     /// Consume `bytes`; return every frame they complete, in order
     pub fn push(&mut self, bytes: &[u8]) -> Vec<SseFrame> {
         let mut frames = Vec::new();
-        for &b in bytes {
-            if self.after_cr {
-                self.after_cr = false;
-                if b == b'\n' {
-                    continue;
-                }
+        for text in self.framer.push(bytes) {
+            let retry = retry_of(&text);
+            let before = frames.len();
+            // A line at a time: `eventsource_stream` copies what is left of
+            // its buffer after every line it reads, so a whole frame of
+            // short lines at once would cost time quadratic in its lines
+            for line in text.split_inclusive('\n') {
+                self.send(line.to_owned());
+                self.drain(&mut frames);
             }
-            match b {
-                b'\n' | b'\r' => {
-                    self.after_cr = b == b'\r';
-                    let line = std::mem::take(&mut self.buffer);
-                    if let Some(frame) = self.line(&line) {
-                        frames.push(frame);
-                    }
-                }
-                // A line longer than any event: drop it rather than grow
-                // without bound on a hostile or broken server's stream.
-                _ if self.buffer.len() >= MAX_LINE_BYTES => {}
-                _ => self.buffer.push(b),
+            if frames.len() == before
+                && let Some(ms) = retry
+            {
+                frames.push(SseFrame {
+                    retry: Some(ms),
+                    ..Default::default()
+                });
             }
         }
         frames
     }
 
-    fn line(&mut self, line: &[u8]) -> Option<SseFrame> {
-        if line.is_empty() {
-            let frame = std::mem::take(&mut self.frame);
-            let oversize = std::mem::take(&mut self.oversize);
-            let dispatch = !oversize && self.has_data
-                || (self.has_field
-                    && (frame.id.is_some() || frame.retry.is_some()));
-            self.has_data = false;
-            self.has_field = false;
-            return dispatch.then_some(frame);
-        }
-        if line[0] == b':' {
-            return None;
-        }
-        let line = String::from_utf8_lossy(line);
-        let (field, value) = match line.split_once(':') {
-            Some((field, value)) => {
-                (field, value.strip_prefix(' ').unwrap_or(value))
-            }
-            None => (line.as_ref(), ""),
-        };
-        match field {
-            "data" => {
-                if self.frame.data.len() + value.len() + 1 > MAX_FRAME_BYTES {
-                    self.oversize = true;
-                    self.frame.data.clear();
-                } else if !self.oversize {
-                    if self.has_data {
-                        self.frame.data.push('\n');
-                    }
-                    self.frame.data.push_str(value);
+    /// Every event `eventsource_stream` has ready. The feed holds only
+    /// what was sent, so it is never polled past what is there
+    fn drain(&mut self, frames: &mut Vec<SseFrame>) {
+        use futures::Stream;
+        use std::task::{Context, Poll};
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        loop {
+            match std::pin::Pin::new(&mut self.events).poll_next(&mut cx) {
+                Poll::Ready(Some(Ok(event))) => frames.push(SseFrame {
+                    id: (!event.id.is_empty()).then_some(event.id),
+                    event: Some(event.event),
+                    data: event.data,
+                    retry: event.retry.map(|d| d.as_millis() as u64),
+                }),
+                // Whole lines of valid UTF-8 always parse, so this is not
+                // reached; a parser that errs once errs on the same input
+                // again, so it starts over rather than loop
+                Poll::Ready(Some(Err(_))) => {
+                    let framer = std::mem::take(&mut self.framer);
+                    *self = Self::new();
+                    self.framer = framer;
+                    return;
                 }
-                self.has_data = true;
+                Poll::Ready(None) | Poll::Pending => return,
             }
-            "id" if !value.contains('\0') => {
-                self.frame.id = Some(value.to_owned());
-                self.has_field = true;
-            }
-            "event" => {
-                self.frame.event = Some(value.to_owned());
-                self.has_field = true;
-            }
-            "retry" => {
-                if let Ok(ms) = value.parse() {
-                    self.frame.retry = Some(ms);
-                    self.has_field = true;
+        }
+    }
+
+    /// The frames dropped for their size since the last call
+    pub fn take_dropped(&mut self) -> Vec<DroppedFrame> {
+        std::mem::take(&mut self.framer.dropped)
+    }
+
+    /// Bytes held between calls: never more than the caps
+    #[cfg(test)]
+    fn buffered(&self) -> usize {
+        self.framer.line.capacity() + self.framer.frame.capacity()
+    }
+}
+
+/// The last valid `retry:` among whole `\n`-ended lines
+fn retry_of(text: &str) -> Option<u64> {
+    text.lines().rev().find_map(|line| {
+        let value = line.strip_prefix("retry:")?;
+        value.strip_prefix(' ').unwrap_or(value).parse().ok()
+    })
+}
+
+const BOM: &[u8] = "\u{feff}".as_bytes();
+
+/// Which cap a dropped frame passed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SseCap {
+    /// [`MAX_LINE_BYTES`]
+    Line,
+    /// [`MAX_FRAME_BYTES`]
+    Frame,
+}
+
+/// A frame [`SseParser`] dropped for its size
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DroppedFrame {
+    pub cap: SseCap,
+    /// The frame's bytes up to its blank line, line endings counted one
+    /// each
+    pub bytes: usize,
+}
+
+/// Bytes in, whole frames under the caps out: each its lines ended in
+/// `\n`, then the blank line
+#[derive(Debug, Default)]
+struct Framer {
+    line: Vec<u8>,
+    /// The current line has had a byte, kept or not
+    line_seen: bool,
+    frame: Vec<u8>,
+    /// Bytes of the current frame read so far, kept or not
+    frame_bytes: usize,
+    /// The cap the current frame passed: everything up to its blank line
+    /// is dropped
+    spoiled: Option<SseCap>,
+    dropped: Vec<DroppedFrame>,
+    /// The last byte was a `\r`, so a `\n` next ends the same line
+    after_cr: bool,
+    /// How much of a leading BOM has been read; past it once any other
+    /// byte comes
+    bom: usize,
+    started: bool,
+}
+
+impl Framer {
+    fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        for &b in bytes {
+            if !self.started {
+                if b == BOM[self.bom] {
+                    self.bom += 1;
+                    self.started = self.bom == BOM.len();
+                    continue;
+                }
+                self.started = true;
+                for &p in &BOM[..self.bom] {
+                    self.byte(p, &mut out);
                 }
             }
-            _ => {}
+            self.byte(b, &mut out);
         }
-        None
+        out
+    }
+
+    fn byte(&mut self, b: u8, out: &mut Vec<String>) {
+        if std::mem::take(&mut self.after_cr) && b == b'\n' {
+            return;
+        }
+        match b {
+            b'\n' | b'\r' => {
+                self.after_cr = b == b'\r';
+                self.end_line(out);
+            }
+            _ => {
+                self.line_seen = true;
+                self.frame_bytes = self.frame_bytes.saturating_add(1);
+                if self.spoiled.is_some() {
+                } else if self.line.len() >= MAX_LINE_BYTES {
+                    self.spoil(SseCap::Line);
+                } else {
+                    self.line.push(b);
+                }
+            }
+        }
+    }
+
+    /// Drop the frame, and free what it held
+    fn spoil(&mut self, cap: SseCap) {
+        self.spoiled = Some(cap);
+        self.line = Vec::new();
+        self.frame = Vec::new();
+    }
+
+    fn end_line(&mut self, out: &mut Vec<String>) {
+        if !std::mem::take(&mut self.line_seen) {
+            let mut frame = std::mem::take(&mut self.frame);
+            let bytes = std::mem::take(&mut self.frame_bytes);
+            match self.spoiled.take() {
+                // Bounded for a reader that never takes them
+                Some(cap) if self.dropped.len() < 64 => {
+                    self.dropped.push(DroppedFrame { cap, bytes })
+                }
+                Some(_) => {}
+                None if !frame.is_empty() => {
+                    frame.push(b'\n');
+                    out.push(String::from_utf8_lossy(&frame).into_owned());
+                }
+                None => {}
+            }
+            return;
+        }
+        self.frame_bytes = self.frame_bytes.saturating_add(1);
+        let line = std::mem::take(&mut self.line);
+        if self.spoiled.is_some() {
+            return;
+        }
+        if self.frame.len() + line.len() + 1 > MAX_FRAME_BYTES {
+            self.spoil(SseCap::Frame);
+            return;
+        }
+        self.frame.extend_from_slice(&line);
+        self.frame.push(b'\n');
+        self.line = line;
+        self.line.clear();
     }
 }
 
@@ -600,7 +767,8 @@ mod tests {
                 retry: None,
             }]
         );
-        // CRLF line endings, split between chunks, and a bare `retry:`
+        // CRLF line endings, split between chunks, and a bare `retry:`.
+        // The id carries over, as the WHATWG format says
         let frames = p.push(b"retry: 3000\r");
         assert!(frames.is_empty());
         let frames = p.push(b"\n\r\ndata:x\r\n\r\n");
@@ -612,20 +780,333 @@ mod tests {
                     ..Default::default()
                 },
                 SseFrame {
+                    id: Some("1".into()),
+                    event: Some("message".into()),
                     data: "x".into(),
-                    ..Default::default()
+                    retry: None,
                 },
             ]
         );
         // A frame of nothing but unknown fields is dropped
         assert!(p.push(b"foo: bar\n\n").is_empty());
-        // A frame whose data lines add up past the cap is dropped whole,
-        // and the next frame reads as usual
+        assert!(p.take_dropped().is_empty());
+        // A frame whose lines add up past the cap is dropped whole, and
+        // the next frame reads as usual
         let line = format!("data: {}\n", "x".repeat(MAX_LINE_BYTES - 16));
         let mut big = line.repeat(MAX_FRAME_BYTES / line.len() + 2);
         big.push_str("\ndata: after\n\n");
         let frames = p.push(big.as_bytes());
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "after");
+        let dropped = p.take_dropped();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].cap, SseCap::Frame);
+        assert_eq!(dropped[0].bytes, big.len() - "\ndata: after\n\n".len());
+    }
+
+    /// A frame with a line past the cap is dropped whole, its `id:` with
+    /// it, even when the line arrives in pieces; the stream reads on
+    #[test]
+    fn an_overlong_line_drops_its_frame_whole_across_chunks() {
+        let mut p = SseParser::new();
+        assert_eq!(p.push(b"id: before\ndata: a\n\n").len(), 1);
+        let long = "y".repeat(MAX_LINE_BYTES + 1);
+        let wire =
+            format!("id: cut\ndata: {long}\ndata: tail\n\ndata: next\n\n");
+        let mut frames = Vec::new();
+        for piece in wire.as_bytes().chunks(4093) {
+            frames.extend(p.push(piece));
+            assert!(p.buffered() <= 2 * (MAX_LINE_BYTES + MAX_FRAME_BYTES));
+        }
+        assert_eq!(
+            frames,
+            vec![SseFrame {
+                id: Some("before".into()),
+                event: Some("message".into()),
+                data: "next".into(),
+                retry: None,
+            }],
+            "the cut frame's id never becomes the stream's"
+        );
+        assert_eq!(
+            p.take_dropped(),
+            vec![DroppedFrame {
+                cap: SseCap::Line,
+                bytes: "id: cut\n".len()
+                    + "data: ".len()
+                    + long.len()
+                    + 1
+                    + "data: tail\n".len(),
+            }]
+        );
+        // A line exactly at the cap is kept
+        let at = "z".repeat(MAX_LINE_BYTES - "data: ".len());
+        let frames = p.push(format!("data: {at}\n\n").as_bytes());
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, at);
+    }
+
+    #[test]
+    fn a_bom_comments_and_an_empty_id_are_read_as_the_format_says() {
+        let mut p = SseParser::new();
+        let mut frames = Vec::new();
+        // A BOM split across chunks
+        for piece in [&b"\xEF"[..], b"\xBB", b"\xBFid: 1\ndata: a\n\n"] {
+            frames.extend(p.push(piece));
+        }
+        frames.extend(p.push(b":c\n: keep-alive\n\nid\ndata: b\n\n"));
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].id.as_deref(), Some("1"));
+        assert_eq!(frames[1].id, None, "an empty id resets it");
+        // A BOM later on is not one: it is part of the field name
+        assert!(p.push("\u{feff}data: c\n\n".as_bytes()).is_empty());
+        // Invalid UTF-8 is replaced, not refused
+        let frames = p.push(b"data: \xFF\xFE ok\n\n");
+        assert_eq!(frames[0].data, "\u{fffd}\u{fffd} ok");
+    }
+
+    /// A BOM anywhere but the very start is part of a field name, even
+    /// after blank lines; an id with a NUL is ignored, an empty one resets
+    #[test]
+    fn a_late_bom_and_odd_ids_read_as_the_format_says() {
+        let mut p = SseParser::new();
+        assert!(p.push("\n\n\u{feff}data: x\n\n".as_bytes()).is_empty());
+        let frames = p.push(b"id: 1\ndata: a\n\nid: n\0ul\ndata: b\n\n");
+        assert_eq!(frames[1].id.as_deref(), Some("1"), "a NUL id is ignored");
+        let frames = p.push(b"id:\ndata: c\n\n");
+        assert_eq!(frames[0].id, None);
+    }
+
+    /// A frame of the most short lines the caps allow reaches
+    /// `eventsource_stream` a line at a time: given it whole, it copies
+    /// the rest of the frame after every line
+    #[test]
+    fn a_frame_of_many_short_lines_is_cheap() {
+        for line in [":\n", "data\n", "x\n"] {
+            let mut wire = line.repeat((MAX_FRAME_BYTES - 64) / line.len());
+            wire.push_str("data: end\n\n");
+            let mut p = SseParser::new();
+            let started = std::time::Instant::now();
+            let frames = p.push(wire.as_bytes());
+            let took = started.elapsed();
+            assert_eq!(frames.len(), 1, "{line:?}");
+            assert!(
+                p.longest_fed <= MAX_LINE_BYTES + 1,
+                "{line:?}: fed {} bytes at once",
+                p.longest_fed
+            );
+            // Loose: a whole frame at once took 1.7 s in a debug build
+            assert!(
+                took < std::time::Duration::from_secs(5),
+                "{line:?}: {took:?}"
+            );
+        }
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// A frame to write: its lines, and what reading it yields
+        #[derive(Debug, Clone)]
+        struct Spec {
+            comment_before: Option<String>,
+            id: Option<String>,
+            event: Option<String>,
+            data: Vec<String>,
+            retry: Option<u64>,
+            /// It carries a line past the cap: dropped whole
+            oversize: bool,
+        }
+
+        fn spec() -> impl Strategy<Value = Spec> {
+            (
+                proptest::option::of("[^\r\n]{0,20}"),
+                proptest::option::of("[A-Za-z0-9_-]{1,12}"),
+                proptest::option::of("[a-z_]{1,12}"),
+                proptest::collection::vec("[^\r\n]{0,40}", 0..4),
+                proptest::option::of(any::<u64>()),
+                proptest::bool::weighted(0.08),
+            )
+                .prop_map(
+                    |(comment_before, id, event, data, retry, oversize)| Spec {
+                        comment_before,
+                        id,
+                        event,
+                        data,
+                        retry,
+                        oversize,
+                    },
+                )
+        }
+
+        fn lines(spec: &Spec) -> Vec<String> {
+            let mut lines = Vec::new();
+            if let Some(c) = &spec.comment_before {
+                lines.push(format!(":{c}"));
+            }
+            if let Some(id) = &spec.id {
+                lines.push(format!("id: {id}"));
+            }
+            if let Some(e) = &spec.event {
+                lines.push(format!("event: {e}"));
+            }
+            for d in &spec.data {
+                lines.push(format!("data: {d}"));
+            }
+            if spec.oversize {
+                lines.push(format!("data: {}", "o".repeat(MAX_LINE_BYTES)));
+            }
+            if let Some(r) = spec.retry {
+                lines.push(format!("retry: {r}"));
+            }
+            lines
+        }
+
+        /// What reading `specs` yields
+        fn model(specs: &[Spec]) -> Vec<SseFrame> {
+            let mut id = None;
+            let mut out = Vec::new();
+            for spec in specs.iter().filter(|s| !s.oversize) {
+                if spec.id.is_some() {
+                    id = spec.id.clone();
+                }
+                if !spec.data.is_empty() {
+                    out.push(SseFrame {
+                        id: id.clone(),
+                        event: Some(
+                            spec.event.clone().unwrap_or("message".into()),
+                        ),
+                        data: spec.data.join("\n"),
+                        retry: spec.retry,
+                    });
+                } else if spec.retry.is_some() {
+                    out.push(SseFrame {
+                        retry: spec.retry,
+                        ..Default::default()
+                    });
+                }
+            }
+            out
+        }
+
+        /// `specs` on the wire, each line ended by the next of `endings`
+        /// (0 `\n`, 1 `\r`, 2 `\r\n`); a blank line after a `\r` cannot
+        /// end in a lone `\n`, which would make one ending of the two
+        fn wire(specs: &[Spec], endings: &[u8], bom: bool) -> Vec<u8> {
+            let mut out = Vec::new();
+            if bom {
+                out.extend_from_slice(BOM);
+            }
+            let mut endings = endings.iter().cycle();
+            let mut after_cr = false;
+            let mut end = |out: &mut Vec<u8>, blank: bool| {
+                let mut e = *endings.next().unwrap_or(&0);
+                if blank && after_cr && e == 0 {
+                    e = 1;
+                }
+                after_cr = e == 1;
+                out.extend_from_slice(match e {
+                    0 => b"\n",
+                    1 => b"\r",
+                    _ => b"\r\n",
+                });
+            };
+            for spec in specs {
+                for line in lines(spec) {
+                    out.extend_from_slice(line.as_bytes());
+                    end(&mut out, false);
+                }
+                end(&mut out, true);
+            }
+            out
+        }
+
+        fn read(wire: &[u8], cuts: &[usize]) -> (Vec<SseFrame>, usize) {
+            let mut cuts: Vec<usize> =
+                cuts.iter().map(|c| c % (wire.len() + 1)).collect();
+            cuts.sort();
+            let mut p = SseParser::new();
+            let mut frames = Vec::new();
+            let mut at = 0;
+            let mut held = 0;
+            for cut in cuts.into_iter().chain([wire.len()]) {
+                frames.extend(p.push(&wire[at..cut]));
+                held = held.max(p.buffered());
+                at = cut;
+            }
+            (frames, held)
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(512))]
+
+            /// However a valid stream is cut into chunks, and whatever its
+            /// line endings, it reads as the frames it was written from
+            #[test]
+            fn chunk_boundaries_never_change_the_frames(
+                specs in proptest::collection::vec(spec(), 0..12),
+                endings in proptest::collection::vec(0u8..3, 1..16),
+                bom in any::<bool>(),
+                cuts in proptest::collection::vec(any::<usize>(), 0..24),
+            ) {
+                let wire = wire(&specs, &endings, bom);
+                let expected = model(&specs);
+                prop_assert_eq!(&read(&wire, &[]).0, &expected);
+                prop_assert_eq!(&read(&wire, &cuts).0, &expected);
+                // One byte at a time
+                let every: Vec<usize> = (0..wire.len()).collect();
+                prop_assert_eq!(&read(&wire, &every).0, &expected);
+            }
+
+            /// Garbage never panics, never holds more than the caps, and
+            /// never yields a frame bigger than one could be
+            #[test]
+            fn garbage_never_panics_or_grows_past_the_caps(
+                runs in proptest::collection::vec(
+                    (
+                        prop_oneof![
+                            any::<u8>(),
+                            Just(b'\n'),
+                            Just(b'\r'),
+                            Just(b':'),
+                            Just(b'x'),
+                        ],
+                        prop_oneof![1usize..8, 1usize..400_000],
+                    ),
+                    0..10,
+                ),
+                noise in proptest::collection::vec(any::<u8>(), 0..512),
+                prefixes in proptest::collection::vec(
+                    prop_oneof![
+                        Just(&b"data: "[..]),
+                        Just(&b"id: "[..]),
+                        Just(&b"retry: 9"[..]),
+                        Just(&b"\r\n\r\n"[..]),
+                        Just(&b"\xEF\xBB\xBF"[..]),
+                        Just(&b"\xFF"[..]),
+                    ],
+                    0..10,
+                ),
+                cuts in proptest::collection::vec(any::<usize>(), 0..32),
+            ) {
+                let mut wire = Vec::new();
+                for (i, (byte, n)) in runs.iter().enumerate() {
+                    if let Some(p) = prefixes.get(i) {
+                        wire.extend_from_slice(p);
+                    }
+                    wire.extend(std::iter::repeat_n(*byte, *n));
+                    wire.extend_from_slice(&noise);
+                }
+                let (frames, held) = read(&wire, &cuts);
+                prop_assert!(held <= 2 * (MAX_LINE_BYTES + MAX_FRAME_BYTES));
+                for f in frames {
+                    prop_assert!(f.data.len() <= 3 * MAX_FRAME_BYTES);
+                    prop_assert!(
+                        f.id.as_ref().is_none_or(|id| id.len() <= MAX_LINE_BYTES)
+                    );
+                }
+            }
+        }
     }
 }
