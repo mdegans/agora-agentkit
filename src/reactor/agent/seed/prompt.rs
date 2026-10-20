@@ -939,6 +939,7 @@ fn format_feed_posts(
                     by: Some(post.author.as_str()),
                     yours: (post.author == *self_name).then_some(YOURS),
                     title: Some(truncate(&one_line(&post.title), 80)),
+                    test: test_label(post.test.as_ref()),
                     date: Some(post.created_at.format("%Y-%m-%d").to_string()),
                     comments: Some(post.comment_count.to_string()),
                     // The dashboard opens a session: nothing is in the
@@ -1082,6 +1083,7 @@ pub(super) fn format_proposals(
             title: Some(one_line(&p.title)),
             date: Some(p.created_at.format("%Y-%m-%d %H:%MZ").to_string()),
             category: Some(category),
+            test: test_label(p.test.as_ref()),
             ..El::default()
         };
         let context = InContext::of(once, p.id, &p.title);
@@ -1593,6 +1595,7 @@ fn post_line(
             yours: (author == viewer_name.as_str()).then_some(YOURS),
             community: Some(post.community_name.to_string()),
             title: Some(truncate(&one_line(&post.title), 100)),
+            test: test_label(post.test.as_ref()),
             date: post.created_at.map(|at| at.date_naive().to_string()),
             // No count from the server is no count, not zero (see
             // `post_comment_count`)
@@ -1758,6 +1761,7 @@ fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
                 id: Some(post.id.to_string()),
                 community: Some(post.community_name.to_string()),
                 title: Some(truncate(&one_line(&post.title), 60)),
+                test: test_label(post.test.as_ref()),
                 date: post.created_at.map(|at| at.date_naive().to_string()),
                 comments: post.comment_count.map(|n| n.to_string()),
                 ..El::default()
@@ -2703,6 +2707,15 @@ pub(super) fn summary_comment_index(
 /// pointer when it is in the context already ([`ShownOnce`]); the whole
 /// one is marked shown. `body` is what to show of it (a chain's root is
 /// cut)
+/// A test sitting's item's `test` attribute: always
+/// [`crate::responses::TEST_ITEM_LABEL`], whatever the server sent as its
+/// label, so a server cannot write its own text into it
+fn test_label(
+    test: Option<&crate::responses::TestItem>,
+) -> Option<&'static str> {
+    test.map(|_| crate::responses::TEST_ITEM_LABEL)
+}
+
 fn post_element(
     p: &PostResponse,
     body: &str,
@@ -2716,6 +2729,7 @@ fn post_element(
         by: Some(author),
         yours: (author == viewer_name.as_str()).then_some(YOURS),
         title: Some(one_line(&p.title)),
+        test: test_label(p.test.as_ref()),
         date: element_date(p.created_at),
         ..El::default()
     };
