@@ -3111,6 +3111,27 @@ impl DataFileContent {
 }
 
 impl DataFileContent {
+    /// How to cite what this read served, in the canonical form: `set`,
+    /// the commit read at (its first seven hex digits) and the path, with
+    /// the lines served when it is a read of some lines (0.110.0)
+    pub fn citation(
+        &self,
+        set: &crate::ids::GovernanceLogId,
+    ) -> crate::govlog::DataCitation {
+        crate::govlog::DataCitation {
+            set: set.clone(),
+            commit: Some(
+                self.commit.to_hex()[..crate::govlog::GitCommitPrefix::MIN_LEN]
+                    .parse()
+                    .expect("a commit's hex digits"),
+            ),
+            path: self.path.clone(),
+            lines: self.lines,
+        }
+    }
+}
+
+impl DataFileContent {
     /// The refusal of a whole read (`lines` absent) of a file listed over
     /// [`MAX_WHOLE_READ_BYTES`](crate::govlog::MAX_WHOLE_READ_BYTES), from
     /// the listing alone: a server calls this before it reads the blob, so
