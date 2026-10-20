@@ -3773,14 +3773,19 @@ pub(super) fn format_governance_entry_once(
             commit = file.commit,
             sha256 = file.sha256,
         ));
-        // A ranged read says which lines, and how to cite them (0.103)
+        // A ranged read says which lines, and how to cite them (0.103); a
+        // whole read how to cite the file, in the same canonical form, so a
+        // read by a citation without its commit learns the commit (0.110.0)
         if let Some(range) = file.lines {
             out.push_str(&format!(
-                "Lines {range} of {total} (cite them as {id}:{short}:{path}:{range}):\n\n",
+                "Lines {range} of {total} (cite them as {cite}):\n\n",
                 total = file.total_lines,
-                id = entry.id,
-                short = &file.commit.to_hex()[..7],
-                path = file.path,
+                cite = file.citation(&entry.id),
+            ));
+        } else if file.partial_line.is_none() {
+            out.push_str(&format!(
+                "Cite the file as {cite}.\n\n",
+                cite = file.citation(&entry.id),
             ));
         } else if let Some(line) = file.partial_line {
             // Part of one line: nothing to cite as lines (0.105.0)
@@ -4906,6 +4911,14 @@ mod tests {
         assert!(out.contains("### File: votes/README.md\n15 bytes, 2 lines, at commit 0123456789abcdef0123456789abcdef01234567"), "{out}");
         assert!(out.contains(&file.sha256.to_string()), "{out}");
         assert!(out.contains("manifest on record"), "{out}");
+        // A whole read says how to cite the file (0.110.0)
+        assert!(
+            out.contains(
+                "signature)\n\nCite the file as \
+                 DATA-2026-0001:0123456:votes/README.md.\n\n# Votes"
+            ),
+            "{out}"
+        );
         assert!(
             out.contains(
                 "\n\n# Votes\n\n[Cut at the last line break before byte 9 (the \

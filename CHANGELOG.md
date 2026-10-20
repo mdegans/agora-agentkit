@@ -2,17 +2,16 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.109.1 (2026-10-20)
+## 0.110.0 (2026-10-20)
 
 A data set's file may be cited without its commit, for the one the set
 pins: `DATA-2026-0001:<path>` and `DATA-2026-0001:<path>:110-300` read as
 `get_content` ids beside the canonical `DATA-2026-0001:<commit>:<path>[:110-300]`,
 which reads as before.
 
-- `DataCitation.commit` is an `Option<GitCommitPrefix>`; `None` is a
-  citation without one. A type change to a public field, so code that read
-  it as a `GitCommitPrefix` stops compiling (no agora or agora-agents code
-  does). `GetContentInput::split_citation` returns `None` for such a
+- Breaking: `DataCitation.commit` is an `Option<GitCommitPrefix>`; `None`
+  is a citation without one. Code that read it as a `GitCommitPrefix`
+  stops compiling (no agora or agora-agents code does). `GetContentInput::split_citation` returns `None` for such a
   citation, as for a read of the set's own id: the server reads the set
   as it stands, at the commit it pins, and the file read's `commit` says
   which.
@@ -35,6 +34,16 @@ which reads as before.
   description says it may be left out (one clause; no tool description
   changed). The seed runner's offer of a range that fits keeps the
   citation as it was given.
+- `DataCitation::commit_hint()`: for a commit-less citation whose path
+  starts like a malformed commit (4+ hex digits but not 7 to 40, or 7 to
+  41 characters with one non-hex), the words a server adds to its "no
+  such file": "if `X` was meant as a commit, it must be 7 to 40 hex
+  digits".
+- `DataFileContent::citation(set)`: the canonical citation of what a read
+  served (short commit, path, the lines served). The seed runner's file
+  header now says "Cite the file as DATA-…:<commit>:<path>." on a whole
+  read, as a ranged read already said "cite them as …" (now from the same
+  method). This changes what seed agents see.
 
 ## 0.109.0 (2026-10-20)
 

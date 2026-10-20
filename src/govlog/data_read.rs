@@ -289,7 +289,7 @@ impl From<GitCommitId> for GitCommitPrefix {
 /// lines of it: `DATA-2026-0001:<commit>:<path>:110-300`, or without the
 /// range for the whole file (0.103). The commit may be left out,
 /// `DATA-2026-0001:<path>` or `DATA-2026-0001:<path>:110-300`, for the
-/// commit the set pins as it stands (0.109.1).
+/// commit the set pins as it stands (0.110.0).
 ///
 /// `get_content` takes one as its `id` and reads that file (and those
 /// lines). The commit is a prefix of at least seven hex digits of the
@@ -320,7 +320,7 @@ pub struct DataCitation {
     /// A `DATA-…` id
     pub set: GovernanceLogId,
     /// The commit cited, or `None` for the one the set pins as it stands
-    /// (0.109.1)
+    /// (0.110.0)
     pub commit: Option<GitCommitPrefix>,
     pub path: DataFilePath,
     pub lines: Option<LineRange>,
@@ -362,13 +362,44 @@ impl DataCitation {
     }
 
     /// `true` when this citation reads at `commit`: it names a prefix of
-    /// it, or no commit at all (0.109.1)
+    /// it, or no commit at all (0.110.0)
     pub fn reads_at(&self, commit: &GitCommitId) -> bool {
         self.commit.as_ref().is_none_or(|c| c.matches(commit))
     }
 
+    /// For a citation without a commit whose path starts like a commit
+    /// gone wrong (all hex digits but not 7 to 40 of them, or 7 to 41
+    /// characters with one that is not a hex digit), what a server adds to
+    /// the "no such file" it answers: that `X` is read as a path, and how a
+    /// commit is written (0.110.0). Runs of fewer than four hex digits
+    /// (`a`, `cafe`'s shorter kin) are taken for path text and get none.
+    pub fn commit_hint(&self) -> Option<String> {
+        if self.commit.is_some() {
+            return None;
+        }
+        let path = self.path.as_str();
+        let head = &path[..path.find([':', '/']).unwrap_or(path.len())];
+        let len = head.chars().count();
+        let hex = head.chars().filter(char::is_ascii_hexdigit).count();
+        let wrong_length = hex == len
+            && len >= 4
+            && !(GitCommitPrefix::MIN_LEN..=GitCommitPrefix::MAX_LEN)
+                .contains(&len);
+        let one_off = (GitCommitPrefix::MIN_LEN..=GitCommitPrefix::MAX_LEN + 1)
+            .contains(&len)
+            && hex + 1 == len;
+        (wrong_length || one_off).then(|| {
+            format!(
+                "it was read as a path; if `{head}` was meant as a commit, it \
+                 must be {min} to {max} hex digits",
+                min = GitCommitPrefix::MIN_LEN,
+                max = GitCommitPrefix::MAX_LEN,
+            )
+        })
+    }
+
     /// This citation naming `commit`, its canonical form once the commit a
-    /// commit-less one read at is known (0.109.1)
+    /// commit-less one read at is known (0.110.0)
     pub fn at(self, commit: impl Into<GitCommitPrefix>) -> Self {
         Self {
             commit: Some(commit.into()),
@@ -394,7 +425,7 @@ impl std::str::FromStr for DataCitation {
             .ok_or_else(|| DataCitationError::NotDataSet(head.to_string()))?;
         // A commit is 7 to 40 hex digits, so any other text before the next
         // `:` (a `/`, a `.`, a short hex word like `a` or `cafe`) is the
-        // path, read at the pinned commit (0.109.1)
+        // path, read at the pinned commit (0.110.0)
         let is_hex = |t: &str| t.trim().parse::<GitCommitPrefix>().is_ok();
         let (commit, rest) = match rest.split_once(':') {
             // `DATA-2026-0001::<path>`: an empty commit is one left out
@@ -404,7 +435,7 @@ impl std::str::FromStr for DataCitation {
             }
             // A citation is written without a space after the id; an id,
             // `: ` and prose is not one (`DATA-2026-0001: the votes`), and
-            // is refused as before 0.109.1
+            // is refused as before 0.110.0
             _ if rest.starts_with(char::is_whitespace) => {
                 return Err(DataCitationError::Commit(rest.trim().to_string()));
             }
@@ -611,7 +642,7 @@ mod tests {
             DataCitationError::NotDataSet(_)
         ));
         // Six hex digits or 41 are not a commit, so they start a path
-        // (0.109.1); the server finds no such file
+        // (0.110.0); the server finds no such file
         assert_eq!(
             "DATA-2026-0001:89fe7c:x"
                 .parse::<DataCitation>()
@@ -754,6 +785,37 @@ mod tests {
             "DATA-2026-0001:89fe7c6aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:votes/ballots.csv:110-300"
         );
         assert_eq!((pinned.path, pinned.lines), (c.path, c.lines));
+    }
+
+    #[test]
+    fn a_path_that_looks_like_a_bad_commit_gets_a_hint() {
+        let hint = |s: &str| s.parse::<DataCitation>().unwrap().commit_hint();
+        for (written, head) in [
+            ("DATA-2026-0001:89fe7c:x.md", "89fe7c"),
+            ("DATA-2026-0001:89fe7c6g:x.md", "89fe7c6g"),
+            ("DATA-2026-0001:89fe7cz/x.md", "89fe7cz"),
+            (
+                &format!("DATA-2026-0001:{}:x.md", "a".repeat(41)),
+                &"a".repeat(41),
+            ),
+        ] {
+            let text = hint(written).unwrap_or_else(|| panic!("{written}"));
+            assert!(
+                text.contains(&format!(
+                    "if `{head}` was meant as a commit, it must be 7 to 40 hex digits"
+                )),
+                "{text}"
+            );
+        }
+        for none in [
+            "DATA-2026-0001:votes/ballots.csv",
+            "DATA-2026-0001:a:b.txt",
+            "DATA-2026-0001:abcdef1/file.md",
+            "DATA-2026-0001:README.md",
+            "DATA-2026-0001:89fe7c6:x.md",
+        ] {
+            assert_eq!(hint(none), None, "{none}");
+        }
     }
 
     #[test]

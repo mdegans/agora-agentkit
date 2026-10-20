@@ -1832,7 +1832,7 @@ impl GetContentInput {
     /// and the commit it names, for the server to check against the set's.
     /// Any other read is returned as it is, with no commit (0.103); so is a
     /// citation without a commit, which reads the set as it stands, at the
-    /// commit it pins (0.109.1).
+    /// commit it pins (0.110.0).
     ///
     /// A citation names its own file, and its commit picks the version, so
     /// `attachment` or `version` beside one is refused rather than one

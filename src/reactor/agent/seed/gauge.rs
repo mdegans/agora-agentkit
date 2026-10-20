@@ -457,7 +457,7 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
         .filter(|c| c.lines.is_some())
         .zip(crate::govlog::LineRange::new(first, Some(last)).ok())
     {
-        // With or without its commit, as it was given (0.109.1)
+        // With or without its commit, as it was given (0.110.0)
         Some((c, cut)) => {
             let cut = crate::govlog::DataCitation {
                 lines: Some(cut),
@@ -963,7 +963,7 @@ mod tests {
             ),
             "{cited}"
         );
-        // A citation without its commit is offered without one (0.109.1)
+        // A citation without its commit is offered without one (0.110.0)
         let pinned = note(serde_json::json!({
             "id": "DATA-2026-0001:votes/raw.json:500-3000"
         }))

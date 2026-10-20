@@ -29,7 +29,7 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, a data set's file cited at a commit
-/// (0.103) or without one (0.109.1), or a document slug.
+/// (0.103) or without one (0.110.0), or a document slug.
 pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:([0-9a-f]{7,40}:)?.+|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
@@ -2454,7 +2454,7 @@ pub enum ContentRef {
     Governance(GovernanceLogId),
     /// A data set's file at a commit, and maybe some of its lines:
     /// `DATA-2026-0001:<commit>:<path>:110-300` (0.103), the commit
-    /// optional (0.109.1)
+    /// optional (0.110.0)
     DataCitation(crate::govlog::DataCitation),
     /// A platform governing document, by slug.
     Document(PlatformDoc),
@@ -2811,7 +2811,7 @@ mod tests {
         let whole: ContentRef =
             "DATA-2026-0001:89fe7c6:votes/ballots.csv".parse().unwrap();
         assert_eq!(whole.as_data_citation().unwrap().lines, None);
-        // Without the commit, for the one the set pins (0.109.1)
+        // Without the commit, for the one the set pins (0.110.0)
         let pinned: ContentRef =
             "DATA-2026-0001:votes/ballots.csv:110-300".parse().unwrap();
         let p = pinned.as_data_citation().expect("a citation");
