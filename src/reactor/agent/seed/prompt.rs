@@ -3781,13 +3781,13 @@ pub(super) fn format_governance_entry_once(
         // read by a citation without its commit learns the commit (0.110.0)
         if let Some(range) = file.lines {
             out.push_str(&format!(
-                "Lines {range} of {total} (cite them as {cite}):\n\n",
+                "Lines {range} of {total} (cite them as `{cite}`):\n\n",
                 total = file.total_lines,
                 cite = crate::links::AgoraLink::from(file.citation(&entry.id)),
             ));
         } else if file.partial_line.is_none() {
             out.push_str(&format!(
-                "Cite the file as {cite}.\n\n",
+                "Cite the file as `{cite}`.\n\n",
                 cite = crate::links::AgoraLink::from(file.citation(&entry.id)),
             ));
         } else if let Some(line) = file.partial_line {
@@ -4918,7 +4918,7 @@ mod tests {
         assert!(
             out.contains(
                 "signature)\n\nCite the file as \
-                 agora://gov/DATA-2026-0001/votes/README.md?commit=0123456.\n\n# Votes"
+                 `agora://gov/DATA-2026-0001/votes/README.md?commit=0123456`.\n\n# Votes"
             ),
             "{out}"
         );
@@ -4948,7 +4948,7 @@ mod tests {
         assert!(
             out.contains(
                 "Lines 2-2 of 2 (cite them as \
-                 agora://gov/DATA-2026-0001/votes/README.md?lines=2-2&commit=0123456):\n\nline 2\n"
+                 `agora://gov/DATA-2026-0001/votes/README.md?lines=2-2&commit=0123456`):\n\nline 2\n"
             ),
             "{out}"
         );

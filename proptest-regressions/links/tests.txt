@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2a7094abcca5feeb6501649846aff52a4d70f06735ed9bd9707b126b0f272928 # shrinks to l = Read(GetContentInput { id: DataCitation(DataCitation { set: GovernanceLogId("DATA-2026-0001"), commit: None, path: DataFilePath(":1"), lines: None }), detail: None, round: None, attachment: None, version: None, comment_budget: None, lines: None })

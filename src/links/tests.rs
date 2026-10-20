@@ -316,6 +316,15 @@ fn refusals_say_why_and_show_both_forms() {
         ("agora://gov?type=nonsense", "entry_type"),
         ("DATA-2026-0001:xyz:votes", "not a data set citation"),
         ("hello there", "neither an agora:// link nor an id"),
+        (
+            "agora://gov/DATA-2026-0001/a/.\t./b.md",
+            "no control characters",
+        ),
+        ("agora://search?q=a\tb", "no control characters"),
+        (
+            "agora://gov/DATA-2026-0001:abcdef1:votes/index.md",
+            "agora://gov/DATA-2026-0001/<path>?lines",
+        ),
     ] {
         let text = refused(bad);
         assert!(text.contains(why), "{bad:?}: {text}");
@@ -562,4 +571,16 @@ proptest! {
 fn get_content_points_a_link_to_fetch_agora_link() {
     let e = "agora://post/7ad26ccd".parse::<ContentRef>().unwrap_err();
     assert!(e.to_string().contains("fetch_agora_link"), "{e}");
+}
+
+#[test]
+fn a_link_pasted_in_prose_reads_without_its_wrapping() {
+    for s in [
+        "`agora://post/7ad26ccd`",
+        "<agora://post/7ad26ccd>",
+        "\"agora://post/7ad26ccd\"",
+        " 'agora://post/7ad26ccd' ",
+    ] {
+        assert_eq!(link(s), link("agora://post/7ad26ccd"), "{s}");
+    }
 }

@@ -267,7 +267,7 @@ impl<T> Gauged<T> {
                  left for results this turn. {}",
                 self.context.window(),
                 self.context.reserve(),
-                instead(requested.tool(call), room, &text, &requested),
+                requested.advice(call, room, &text),
             )
         } else {
             format!(
@@ -361,7 +361,25 @@ impl Requested {
     fn tool<'a>(&self, call: &'a str) -> &'a str {
         self.link.as_ref().map_or(call, |(_, tool)| tool)
     }
+
+    /// [`instead`], for the tool the call stands for; a read by link is
+    /// told that the options named go in the link (the review of 0.112.0)
+    fn advice(&self, call: &str, room: u64, text: &str) -> String {
+        let tool = self.tool(call);
+        let advice = instead(tool, room, text, self);
+        if self.link.is_some() && tool == "get_content" && !self.is_data_file()
+        {
+            format!("{advice} {LINK_OPTIONS}")
+        } else {
+            advice
+        }
+    }
 }
+
+/// What a refused read by link is told about the options [`instead`] names
+const LINK_OPTIONS: &str = "With fetch_agora_link these are options in the \
+     link (…?detail=summary, …?comment_budget=<bytes>, …?round=<n>), and an \
+     attachment is the last part of its path.";
 
 /// What a refused `get_content` should try instead, as one sentence or
 /// two (0.94). `text` is the refused result and `asked` the call's
@@ -1053,5 +1071,26 @@ mod tests {
         assert_eq!(gauge.reserve(), CLOSING_RESERVE_MIN);
         let budgets = ContextGauge::new(64_000, 40_000);
         assert_eq!(budgets.reserve(), 40_000);
+    }
+
+    /// A read refused by link is told its options go in the link
+    #[test]
+    fn a_refused_link_read_names_link_options() {
+        let by_link = Requested::of(
+            "fetch_agora_link",
+            &serde_json::json!({"link": "agora://gov/GOV-2026-0016"}),
+        );
+        assert_eq!(by_link.tool("fetch_agora_link"), "get_content");
+        let advice = by_link.advice("fetch_agora_link", 1_000, "x");
+        assert!(advice.ends_with(LINK_OPTIONS), "{advice}");
+        let by_id = Requested::of(
+            "get_content",
+            &serde_json::json!({"id": "GOV-2026-0016"}),
+        );
+        assert!(
+            !by_id
+                .advice("get_content", 1_000, "x")
+                .contains(LINK_OPTIONS)
+        );
     }
 }

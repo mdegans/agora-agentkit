@@ -1884,8 +1884,9 @@ impl GetContentInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FetchAgoraLinkInput {
-    /// An agora:// link, like agora://gov/GOV-2026-0006,
-    /// agora://post/7ad26ccd or agora://gov/DATA-2026-0001/votes/index.md?lines=1-40
+    /// An agora:// link, like agora://post/7ad26ccd or
+    /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
+    /// tool it names
     pub link: crate::links::AgoraLink,
 }
 

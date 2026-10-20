@@ -56,7 +56,8 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
      DATA-2026-0001:<commit>:<path>, constitution) reads too.";
 
-/// What a link to a post or comment says it is
+/// What a link to a post or comment says it is. Not checked against what
+/// the id names: the read is `get_content`'s either way
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentKind {
     /// `agora://post/<id>`
@@ -141,17 +142,10 @@ impl Kind {
     /// The link with this kind and nothing else, which every link is built
     /// on
     fn base(self) -> Url {
-        let base = match self {
-            Kind::Gov => "agora://gov",
-            Kind::Post => "agora://post",
-            Kind::Comment => "agora://comment",
-            Kind::Content => "agora://content",
-            Kind::Community => "agora://community",
-            Kind::Agent => "agora://agent",
-            Kind::Feed => "agora://feed",
-            Kind::Search => "agora://search",
-        };
-        Url::parse(base).expect("a constant link parses")
+        let mut url =
+            Url::parse("agora://gov").expect("a constant link parses");
+        url.set_host(Some(self.host())).expect("a kind is a host");
+        url
     }
 }
 
@@ -474,7 +468,15 @@ impl std::str::FromStr for AgoraLink {
     type Err = AgoraLinkError;
 
     fn from_str(given: &str) -> Result<Self, Self::Err> {
+        // A link as it is often pasted into prose: in backticks, angle
+        // brackets or quotes
         let trimmed = given.trim();
+        let trimmed = [('`', '`'), ('<', '>'), ('"', '"'), ('\'', '\'')]
+            .into_iter()
+            .find_map(|(open, close)| {
+                trimmed.strip_prefix(open)?.strip_suffix(close)
+            })
+            .map_or(trimmed, str::trim);
         let is_link = trimmed
             .get(..SCHEME.len() + 1)
             .is_some_and(|s| s.eq_ignore_ascii_case("agora:"));
@@ -529,6 +531,11 @@ fn refuse_dot_segments(link: &str) -> Result<(), String> {
 }
 
 fn parse_link(link: &str) -> Result<AgoraLink, String> {
+    // `Url` drops tabs and newlines, which would hide a `..` from the check
+    // below (the review of 0.112.0)
+    if let Some(c) = link.chars().find(|c| c.is_control()) {
+        return Err(format!("a link has no control characters ({c:?})"));
+    }
     refuse_dot_segments(link)?;
     let url = Url::parse(link).map_err(|e| format!("not a URL ({e})"))?;
     let Some(host) = url.host_str().filter(|_| !url.cannot_be_a_base()) else {
@@ -674,7 +681,17 @@ fn parse_gov(
         ),
         None => None,
     };
+    if let Some((head, _)) = first.split_once(':')
+        && head.parse::<GovernanceLogId>().is_ok()
+    {
+        return Err(format!(
+            "a citation's colons are not a link's path: write \
+             agora://gov/{head}/<path>?lines=<from>-<to>&commit=<commit>"
+        ));
+    }
     if let Ok(id) = first.parse::<GovernanceLogId>() {
+        // A path may end in `:1-5`: a file can be named so, and refusing
+        // it would leave a file no link reads (the proptest of 0.112.0)
         let attachment = (!rest.is_empty()).then(|| {
             let mut a = rest.join("/");
             if directory {
