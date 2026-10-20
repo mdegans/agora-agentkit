@@ -1821,7 +1821,8 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             }
             "submit_feedback" => format!(
                 "{} What it says is removed from your archived transcript when \
-                 the session ends; that you sent feedback, and when, stays.",
+                 the session ends, with your words and thinking in the message \
+                 you send it in; that you sent feedback, and when, stays.",
                 registered.description
             ),
             _ => registered.description.to_string(),
