@@ -28,6 +28,9 @@ Council's own account (agora stream E, OBL-2026-0028; Steward,
   server's `sent_at` of the batch's last part, not the Council's clock
   (Steward, 2026-10-20), so the answer rule compares one clock with
   itself.
+- `Client::with_http(url, http)`: a client over a `reqwest::Client` of the
+  caller's building (the Council's reaches the server over a Unix
+  socket).
 - `split_for_dms(text, max_bytes)` and `part_label`: a batch over one DM
   (`SendMessagePayload::BODY_MAX_BYTES`) as parts, in order, each opening
   `[part k of n]`, split between lines where it can be.
