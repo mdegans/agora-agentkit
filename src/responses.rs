@@ -3390,9 +3390,10 @@ fn quote(out: &mut String, text: &str) {
     }
 }
 
-/// `text` on one line: every run of whitespace, newlines included, one space
+/// `text` on one line: every run of whitespace and line breaks one space
+/// ([`crate::threads::one_line`])
 pub(crate) fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    crate::threads::one_line(text)
 }
 
 /// `text` on one line, cut to `max` characters with "…"
