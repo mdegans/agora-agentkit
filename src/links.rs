@@ -199,6 +199,17 @@ impl AgoraLink {
         .into()
     }
 
+    /// A link to a governance entry's summary and what each of its
+    /// revisions changed: the free way to see them
+    pub fn history(id: GovernanceLogId) -> Self {
+        GetContentInput {
+            history: Some(crate::requests::History::All),
+            ..GetContentInput::new(id)
+                .with_detail(crate::enums::DetailLevel::Summary)
+        }
+        .into()
+    }
+
     /// A link to a governance entry's summary alone
     pub fn summary(id: GovernanceLogId) -> Self {
         GetContentInput::new(id)

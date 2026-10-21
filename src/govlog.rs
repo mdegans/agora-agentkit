@@ -1576,6 +1576,266 @@ pub fn apply_patch(
     Ok(out)
 }
 
+/// One operation of a [`Revision`]'s patch, with the value it replaced or
+/// removed: what a reader of the revision needs to see it changed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct Change {
+    pub kind: ChangeKind,
+    /// RFC 6901 pointer to what changed
+    pub path: String,
+    /// Where a `move` or `copy` took it from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// What was there before, when anything was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<serde_json::Value>,
+    /// What is there after, unless it was removed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<serde_json::Value>,
+    /// `before` and `after` were left out, this many bytes of them: more
+    /// than [`MAX_CHANGE_BYTES`], a record's worth, which a history does not
+    /// hand over free
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_bytes: Option<u64>,
+}
+
+/// Most of one [`Change`]'s values a history shows, in bytes of JSON
+pub const MAX_CHANGE_BYTES: usize = 2_048;
+/// Most of a [`ChangeHistory`]'s changes, in bytes of JSON
+pub const MAX_HISTORY_BYTES: usize = 16_384;
+
+/// What a read with `history` shows of a record's revisions
+/// ([`GetContentInput::history`](crate::requests::GetContentInput::history)):
+/// each asked for, oldest first, replayed from the original. The server and
+/// the seed runner build it the same way ([`Self::build`])
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ChangeHistory {
+    /// How many revisions the record has
+    pub total: u64,
+    /// The index of the first one listed, from 0
+    pub first: u64,
+    /// The ones asked for that replayed, oldest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<RevisionChanges>,
+    /// Why the history stops short, when it does
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
+}
+
+/// One revision in a [`ChangeHistory`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct RevisionChanges {
+    /// The amendment that revised the record
+    pub id: GovernanceLogId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Change>,
+    /// Its changes were left out, this many bytes of them: past
+    /// [`MAX_HISTORY_BYTES`] for the history
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_bytes: Option<u64>,
+    /// It also set the record's [`BLIND_KEY`], the random salt that keeps
+    /// a redacted value from being guessed by its hash: not content, so not
+    /// among `changes`
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blind: bool,
+}
+
+impl ChangeHistory {
+    /// The history of a record stored as `original`, revised by
+    /// `revisions` in chain order (dated by `dated`), `history` of them,
+    /// held to [`MAX_CHANGE_BYTES`] and [`MAX_HISTORY_BYTES`]
+    /// A revision `shown` (a reader holds its changes already, and is
+    /// pointed at them) costs the budget nothing
+    pub fn build(
+        original: &serde_json::Value,
+        revisions: &[(GovernanceLogId, Revision)],
+        dated: impl Fn(&GovernanceLogId) -> Option<DateTime<Utc>>,
+        shown: impl Fn(&GovernanceLogId) -> bool,
+        history: crate::requests::History,
+    ) -> Self {
+        let total = revisions.len();
+        let (changes, error) =
+            revision_changes(original, revisions.iter().map(|(_, r)| r));
+        let first = total - history.count(total);
+        let broken = error.map(|e| {
+            format!(
+                "{} does not apply to the version before it ({e})",
+                revisions[changes.len()].0
+            )
+        });
+        let mut budget = MAX_HISTORY_BYTES;
+        let listed = revisions
+            .iter()
+            .zip(changes)
+            .skip(first)
+            .map(|((id, _), changes)| {
+                let blind_path = format!("/{BLIND_KEY}");
+                let is_blind = |c: &Change| {
+                    c.path == blind_path
+                        || c.path.starts_with(&format!("{blind_path}/"))
+                };
+                let blind = changes.iter().any(is_blind);
+                let changes: Vec<Change> = changes
+                    .into_iter()
+                    .filter(|c| !is_blind(c))
+                    .map(Change::capped)
+                    .collect();
+                let bytes = serde_json::to_vec(&changes).map_or(0, |v| v.len());
+                // Only what is printed is charged (review of 0.113.0)
+                let fits = shown(id) || bytes <= budget;
+                if fits && !shown(id) {
+                    budget -= bytes;
+                }
+                RevisionChanges {
+                    id: id.clone(),
+                    created_at: dated(id),
+                    changes: if fits { changes } else { Vec::new() },
+                    omitted_bytes: (!fits).then_some(bytes as u64),
+                    blind,
+                }
+            })
+            .collect();
+        Self {
+            total: total as u64,
+            first: first as u64,
+            revisions: listed,
+            broken,
+        }
+    }
+
+    /// No history, for a reason: the revisions could not be read
+    pub fn unreadable(total: usize, why: String) -> Self {
+        Self {
+            total: total as u64,
+            broken: Some(why),
+            ..Self::default()
+        }
+    }
+}
+
+impl Change {
+    /// Its values left out when they are over [`MAX_CHANGE_BYTES`]; a
+    /// removal's always, since what it removed is no longer the record's
+    /// (betas of 0.113.0: removed text was echoed whole)
+    fn capped(self) -> Self {
+        let bytes = |v: &Option<serde_json::Value>| {
+            v.as_ref()
+                .and_then(|v| serde_json::to_vec(v).ok())
+                .map_or(0, |v| v.len())
+        };
+        let total = bytes(&self.before) + bytes(&self.after);
+        if total <= MAX_CHANGE_BYTES && self.kind != ChangeKind::Removed {
+            return self;
+        }
+        Self {
+            before: None,
+            after: None,
+            omitted_bytes: Some(total as u64),
+            ..self
+        }
+    }
+}
+
+/// What a [`Change`] did: its patch operation, `test` aside
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Added,
+    Replaced,
+    Removed,
+    Moved,
+    Copied,
+}
+
+/// What each of `revisions` changed, replayed over `original` in chain
+/// order, a [`Change`] per operation (`test`s change nothing). Stops at
+/// the first that does not apply: the changes so far, and its error
+pub fn revision_changes<'a>(
+    original: &serde_json::Value,
+    revisions: impl IntoIterator<Item = &'a Revision>,
+) -> (Vec<Vec<Change>>, Option<ReviseError>) {
+    use json_patch::PatchOperation as Op;
+    let mut current = original.clone();
+    let mut out = Vec::new();
+    for revision in revisions {
+        let mut changes = Vec::new();
+        for op in &revision.patch.0 {
+            let at = |p: &json_patch::jsonptr::Pointer| {
+                current.pointer(p.as_str()).cloned()
+            };
+            // An add into an object replaces what is there; into an array
+            // it inserts, replacing nothing
+            let replaced = |p: &json_patch::jsonptr::Pointer| {
+                let parent = p.parent().map_or("", |q| q.as_str());
+                current
+                    .pointer(parent)
+                    .filter(|v| v.is_object())
+                    .and_then(|_| at(p))
+            };
+            let change = match op {
+                Op::Test(_) => None,
+                Op::Add(a) => Some(Change {
+                    kind: ChangeKind::Added,
+                    path: a.path.to_string(),
+                    from: None,
+                    before: replaced(&a.path),
+                    after: Some(a.value.clone()),
+                    omitted_bytes: None,
+                }),
+                Op::Replace(r) => Some(Change {
+                    kind: ChangeKind::Replaced,
+                    path: r.path.to_string(),
+                    from: None,
+                    before: at(&r.path),
+                    after: Some(r.value.clone()),
+                    omitted_bytes: None,
+                }),
+                Op::Remove(r) => Some(Change {
+                    kind: ChangeKind::Removed,
+                    path: r.path.to_string(),
+                    from: None,
+                    before: at(&r.path),
+                    after: None,
+                    omitted_bytes: None,
+                }),
+                Op::Move(m) => Some(Change {
+                    kind: ChangeKind::Moved,
+                    path: m.path.to_string(),
+                    from: Some(m.from.to_string()),
+                    before: replaced(&m.path),
+                    after: at(&m.from),
+                    omitted_bytes: None,
+                }),
+                Op::Copy(c) => Some(Change {
+                    kind: ChangeKind::Copied,
+                    path: c.path.to_string(),
+                    from: Some(c.from.to_string()),
+                    before: replaced(&c.path),
+                    after: at(&c.from),
+                    omitted_bytes: None,
+                }),
+            };
+            match apply_patch(&current, &json_patch::Patch(vec![op.clone()])) {
+                Ok(next) => current = next,
+                Err(e) => return (out, Some(e)),
+            }
+            changes.extend(change);
+        }
+        out.push(changes);
+    }
+    (out, None)
+}
+
 /// An entry's latest version: its stored `data` with each revision's
 /// patch applied in chain order. A redaction rebases them (see
 /// [`AmendmentDraft::redaction`]), so an error means the history is
@@ -3331,6 +3591,126 @@ pub fn verify_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn revision(patch: serde_json::Value) -> Revision {
+        Revision {
+            patch: serde_json::from_value(patch).unwrap(),
+            duplicates: Vec::new(),
+            resulting_data_hash: "0".repeat(64).parse().unwrap(),
+        }
+    }
+
+    /// Each revision's changes, with what each replaced, replayed in chain
+    /// order: the second sees what the first left
+    #[test]
+    fn revision_changes_replay_in_order() {
+        let original = serde_json::json!({
+            "landmark": "no", "tags": ["a"], "old": 3, "obj": {"k": 1},
+        });
+        let revisions = [
+            revision(serde_json::json!([
+                {"op": "test", "path": "/landmark", "value": "no"},
+                {"op": "replace", "path": "/landmark", "value": "yes"},
+                {"op": "add", "path": "/tags/1", "value": "b"},
+                {"op": "add", "path": "/obj/k", "value": 2},
+            ])),
+            revision(serde_json::json!([
+                {"op": "replace", "path": "/landmark", "value": "maybe"},
+                {"op": "remove", "path": "/old"},
+                {"op": "move", "from": "/tags/0", "path": "/first"},
+            ])),
+        ];
+        let (changes, error) = revision_changes(&original, &revisions);
+        assert!(error.is_none());
+        let c = |kind,
+                 path: &str,
+                 before: Option<serde_json::Value>,
+                 after: Option<serde_json::Value>| Change {
+            kind,
+            path: path.into(),
+            from: None,
+            before,
+            after,
+            omitted_bytes: None,
+        };
+        use ChangeKind as K;
+        assert_eq!(
+            changes[0],
+            vec![
+                c(
+                    K::Replaced,
+                    "/landmark",
+                    Some("no".into()),
+                    Some("yes".into())
+                ),
+                // Into an array: inserted, nothing replaced
+                c(K::Added, "/tags/1", None, Some("b".into())),
+                // Into an object: what was there is what it replaced
+                c(K::Added, "/obj/k", Some(1.into()), Some(2.into())),
+            ]
+        );
+        assert_eq!(
+            changes[1],
+            vec![
+                c(
+                    K::Replaced,
+                    "/landmark",
+                    Some("yes".into()),
+                    Some("maybe".into())
+                ),
+                c(K::Removed, "/old", Some(3.into()), None),
+                Change {
+                    from: Some("/tags/0".into()),
+                    ..c(K::Moved, "/first", None, Some("a".into()))
+                },
+            ]
+        );
+        // One that does not apply stops the history there
+        let broken = [
+            revisions[0].clone(),
+            revision(serde_json::json!([
+                {"op": "replace", "path": "/nowhere", "value": 1},
+            ])),
+        ];
+        let (changes, error) = revision_changes(&original, &broken);
+        assert_eq!(changes.len(), 1);
+        assert!(error.is_some());
+    }
+
+    /// Review of 0.113.0: a revision a reader holds costs the history's
+    /// budget nothing, so the ones after it still fit
+    #[test]
+    fn a_shown_revision_costs_the_budget_nothing() {
+        let big = |n: usize| {
+            revision(serde_json::json!([
+                {"op": "add", "path": format!("/r{n}"), "value": "x".repeat(1_900)}
+            ]))
+        };
+        let revisions: Vec<_> = (0..12)
+            .map(|n| {
+                (format!("AMD-2026-{:04}", n + 1).parse().unwrap(), big(n))
+            })
+            .collect();
+        let build = |shown: &dyn Fn(&GovernanceLogId) -> bool| {
+            ChangeHistory::build(
+                &serde_json::json!({}),
+                &revisions,
+                |_| None,
+                shown,
+                crate::requests::History::All,
+            )
+        };
+        let left_out = |h: &ChangeHistory| {
+            h.revisions
+                .iter()
+                .filter(|r| r.omitted_bytes.is_some())
+                .count()
+        };
+        assert!(left_out(&build(&|_| false)) > 0);
+        let first_four: Vec<GovernanceLogId> =
+            revisions[..4].iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(left_out(&build(&|id| first_four.contains(id))), 0);
+    }
 
     #[test]
     fn pointer_tokens_escape_and_unescape() {

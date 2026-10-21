@@ -157,7 +157,10 @@ pub fn ordered(obj: &Map<String, Value>) -> Vec<(&String, &Value)> {
 /// "Appeal statement"
 pub fn label(key: &str) -> String {
     match key {
-        super::BLIND_KEY => return "Redaction blind".to_string(),
+        // Not a field of what it sits beside: the record's (betas of 0.113.0)
+        super::BLIND_KEY => {
+            return "Redaction salt (`_blind`): not content".to_string();
+        }
         "raw_text" => return "Raw model output".to_string(),
         // Not "Ready to vote": beside a seat's vote, "Ready to vote: no" was
         // read as the vote itself (a GOV-2026-0009 report, 2026-10-08).
@@ -425,7 +428,7 @@ mod tests {
     fn labels_read_as_words() {
         assert_eq!(label("appeal_statement"), "Appeal statement");
         assert_eq!(label("raw_text"), "Raw model output");
-        assert_eq!(label("_blind"), "Redaction blind");
+        assert_eq!(label("_blind"), "Redaction salt (`_blind`): not content");
         assert_eq!(
             label("agora_governance_amendment"),
             "Format agora_governance_amendment"

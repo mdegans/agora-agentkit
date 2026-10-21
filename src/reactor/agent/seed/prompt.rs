@@ -27,6 +27,7 @@ use crate::threads::tidy;
 
 use super::ShownOnce;
 use super::elements::{self, El};
+use super::shown_once::text_key;
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
 /// (not arguments) so a callsite that forgets a section is a compile error, not
@@ -3277,8 +3278,22 @@ pub(super) fn format_governance_index(
         out.push_str(&line);
         out.push('\n');
     }
+    // A data set's reads are free (betas of 0.113.0)
+    let all_free = !entries.is_empty()
+        && entries.iter().all(|e| {
+            e.entry_type == crate::enums::GovernanceLogEntryType::DataSet
+        });
+    let any_free = entries
+        .iter()
+        .any(|e| e.entry_type == crate::enums::GovernanceLogEntryType::DataSet);
     let left = match asked.cues.full_reads_left {
+        _ if all_free => {
+            " (free: a data set's reads use no full read)".to_string()
+        }
         Some(0) => " (your full reads are spent this session)".to_string(),
+        Some(n) if any_free => format!(
+            " (a full read, {n} left this session; a DATA entry's is free)"
+        ),
         Some(n) => format!(" (a full read, {n} left this session)"),
         None => String::new(),
     };
@@ -3661,10 +3676,24 @@ pub(super) fn format_governance_entry_once(
     // citations) are shown once a session, like its summary: a later read
     // of it points at them (Steward, 2026-10-21; a beta was sent ~2.2k tok
     // of them again on each round it read)
-    let mut notes = String::new();
+    let cues = once.cues();
+    // What it owes now is shown again whenever it has changed since it was
+    // shown: keyed on the status as rendered (Steward, 2026-10-21)
     if let Some(o) = &entry.obligation {
-        notes.push_str(&format!("**Now**: {}\n", format_obligation(o)));
+        let now = format!("**Now**: {}\n", format_obligation(o));
+        let key = format!("status of {}: {now}", entry.id);
+        match once.earlier_part(&key) {
+            Some(shown) => out.push_str(&format!(
+                "(What it owes now is unchanged since {}.)\n",
+                shown.read
+            )),
+            None => {
+                once.mark_part(key, now.len());
+                out.push_str(&now);
+            }
+        }
     }
+    let mut notes = String::new();
     for a in &entry.amendments {
         notes.push_str(&format!(
             "**{} {} ({})**: {}{}{}\n",
@@ -3681,10 +3710,14 @@ pub(super) fn format_governance_entry_once(
                 None => String::new(),
             },
             match a.kind {
-                AmendmentKind::Revision => {
-                    " — the original is readable with version=\"original\""
-                }
-                _ => "",
+                AmendmentKind::Revision if cues.links => format!(
+                    " — `{}` shows what it changed",
+                    crate::links::AgoraLink::history(entry.id.clone())
+                ),
+                AmendmentKind::Revision => " — detail=\"summary\" with \
+                    history=true shows what it changed, free"
+                    .to_string(),
+                _ => String::new(),
             },
         ));
     }
@@ -3715,13 +3748,16 @@ pub(super) fn format_governance_entry_once(
         ));
     }
     if !notes.is_empty() {
+        // By content: the same notes at either version are shown once
+        // (betas of 0.113.0)
+        // By what they say, not how a tool words them: both tools share it
         let key = format!(
-            "notes of {} {}",
+            "notes of {} {:x}",
             entry.id,
-            match entry.version {
-                Some(RecordVersion::Original) => "original",
-                _ => "latest",
-            }
+            text_key(&format!(
+                "{:?}{:?}{:?}",
+                entry.amendments, entry.obligations, entry.cited_by
+            ))
         );
         match once.earlier_part(&key) {
             Some(shown) => out.push_str(&format!(
@@ -3768,7 +3804,6 @@ pub(super) fn format_governance_entry_once(
             }
         ));
     }
-    let cues = once.cues();
     let entry_link = crate::links::AgoraLink::from(entry.id.clone());
     // A part of a record (a round, an attachment, a data set's file) is
     // served without the summary: the server sends a note in its place,
@@ -3796,7 +3831,23 @@ pub(super) fn format_governance_entry_once(
                 entry.id
             )
         };
-        match once.earlier_summary(&entry.id) {
+        // A part whose record carries a summary not yet shown shows it
+        // there: no word here that it is not repeated (betas of 0.113.0)
+        let carried = entry
+            .data
+            .as_ref()
+            .and_then(|d| d.pointer("/summary/text"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| {
+                once.earlier_summary(&entry.id, Some(t)).is_none()
+            });
+        // The summary of this version: a revised record's other version may
+        // have another (review of 0.113.0)
+        match once.earlier_summary_at(
+            &entry.id,
+            entry.version_label().unwrap_or("latest"),
+        ) {
+            _ if carried => {}
             Some(shown) => out.push_str(&format!(
                 "\n(Its summary is in your context already: shown in {}, {}.)\n",
                 shown.read,
@@ -3812,24 +3863,57 @@ pub(super) fn format_governance_entry_once(
             out.push_str(&format!("\n{fault}\n"));
         }
     }
-    let earlier = entry
+    // A summary asked for by name is shown again: the reader's copy may
+    // have been trimmed (Steward, 2026-10-21)
+    // Asked for by name it is shown, unless this turn showed it (betas of
+    // 0.113.0: a later turn's context may have been trimmed, this one's not)
+    // The paragraphs shown are pointed at; any not shown print (betas of
+    // 0.113.0: a summary is never taken as seen for what was not)
+    let seen = entry
         .summary
         .as_deref()
         .filter(|_| !part)
-        .and_then(|_| once.earlier_summary(&entry.id));
+        .and_then(|s| once.summary_seen(&entry.id, s))
+        .filter(|(shown, _)| !cues.summary_asked || shown.turn == once.turn());
+    // Marked for what this read shows: all of it, or the rest after what
+    // was shown
     if let Some(s) = entry.summary.as_deref()
-        && earlier.is_none()
         && !part
     {
-        once.mark_summary(entry.id.clone(), s.len());
+        let from = seen.as_ref().map_or(0, |(_, end)| *end);
+        let whole = super::shown_once::summary_text(s).len();
+        if from < whole {
+            once.mark_summary_from(
+                entry.id.clone(),
+                entry.version_label(),
+                s,
+                from,
+            );
+        }
     }
+    let rest = |s: &str, end: usize| {
+        let t = super::shown_once::summary_text(s);
+        t[end..].trim().to_string()
+    };
     match entry.summary.as_deref().filter(|_| !part) {
         _ if part => {}
-        Some(_) if let Some(shown) = earlier => out.push_str(&format!(
-            "\n(Its summary is in your context already: shown in {}, {}.)\n",
-            shown.read,
-            about_tokens(shown.bytes)
-        )),
+        Some(s) if let Some((shown, end)) = &seen => {
+            let tail = rest(s, *end);
+            if tail.is_empty() {
+                out.push_str(&format!(
+                    "\n(Its summary is in your context already: shown in {}, \
+                     {}.)\n",
+                    shown.read,
+                    about_tokens(shown.bytes)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n(Its summary's first part is in your context already: \
+                     shown in {}. Then:)\n\n{tail}\n",
+                    shown.read
+                ));
+            }
+        }
         Some(s) => match &entry.summary_authorship {
             Some(by) => out.push_str(&format!(
                 "\n**Summary** ({}; signed with the record):\n\n{s}\n",
@@ -3844,7 +3928,7 @@ pub(super) fn format_governance_entry_once(
     }
 
     if let Some(view) = &entry.data_set {
-        out.push_str(&format_data_set_view(view, cues.links));
+        out.push_str(&format_data_set_view(view, &entry.id, cues, once));
     }
     // Each round's size before it is read, as attachments have theirs: a
     // beta read an 83 KB round with nothing to say it would be (2026-10-19)
@@ -3901,19 +3985,37 @@ pub(super) fn format_governance_entry_once(
             )
         });
     }
-    if !entry.attachments.is_empty() && entry.attachment.is_none() {
-        let budget = if can_read {
-            spends.clone()
-        } else {
-            "your full reads are spent this session".to_string()
-        };
-        out.push_str(&if cues.links {
-            format!("\nAttachments ({budget}):\n")
-        } else {
-            format!("\nAttachments (read one with attachment=\"<name>\"; {budget}):\n")
+    // Listed once a session, like the notes (Steward, 2026-10-21: each
+    // spent-read fallback reprinted it, ~300-700 tok)
+    let listing = format!(
+        "attachments of {} {:x}",
+        entry.id,
+        text_key(&format!("{:?}", entry.attachments))
+    );
+    let listed = (!entry.attachments.is_empty() && entry.attachment.is_none())
+        .then(|| once.earlier_part(&listing));
+    if let Some(Some(shown)) = &listed {
+        out.push_str(&format!(
+            "\n(Its attachments are listed in your context already: shown in \
+             {}, {}.)\n",
+            shown.read,
+            about_tokens(shown.bytes)
+        ));
+    }
+    if let Some(None) = listed {
+        let start = out.len();
+        out.push_str(&match (can_read, cues.links) {
+            (false, _) => {
+                "\nAttachments (your full reads are spent this session):\n"
+                    .to_string()
+            }
+            (true, true) => format!("\nAttachments ({spends}):\n"),
+            (true, false) => format!(
+                "\nAttachments (read one with attachment=\"<name>\"; {spends}):\n"
+            ),
         });
         for a in &entry.attachments {
-            let name = if cues.links {
+            let name = if cues.links && can_read {
                 format!(
                     "`{}`",
                     crate::links::AgoraLink::attachment(
@@ -3930,6 +4032,7 @@ pub(super) fn format_governance_entry_once(
                 about_tokens(a.bytes)
             ));
         }
+        once.mark_part(listing, out.len() - start);
     }
 
     // An attachment is markdown written for reading; hand it over as
@@ -3986,16 +4089,11 @@ pub(super) fn format_governance_entry_once(
                 total = file.total_lines,
             ));
         }
-        if let Some(asked) = &file.asked {
+        if file.asked.is_some() {
+            // A short path is meant to work: said as a note, not an error
+            // (betas of 0.113.0)
             out.push_str(&format!(
-                "({} is not a path from the repository root; \
-                 it resolved to {path}, the only match under a top directory. \
-                 Cite it by that path.)\n\n",
-                if cues.links {
-                    format!("The path {asked:?}")
-                } else {
-                    format!("attachment={asked:?}")
-                },
+                "(Read as {path}; cite it by that path.)\n\n",
                 path = file.path,
             ));
         }
@@ -4020,7 +4118,7 @@ pub(super) fn format_governance_entry_once(
         // read said the summary was in context, then printed it again)
         let earlier = in_record
             .filter(|_| part)
-            .and_then(|_| once.earlier_summary(&entry.id));
+            .and_then(|t| once.earlier_summary(&entry.id, Some(t)));
         if shown {
             let mut data = data.clone();
             data["summary"]["text"] = "(the summary above)".into();
@@ -4036,7 +4134,11 @@ pub(super) fn format_governance_entry_once(
             out.push_str(&render_record(&data));
         } else {
             if let Some(text) = in_record.filter(|_| part) {
-                once.mark_summary(entry.id.clone(), text.len());
+                once.mark_summary(
+                    entry.id.clone(),
+                    entry.version_label(),
+                    text,
+                );
             }
             out.push_str(&render_record(data));
         }
@@ -4058,18 +4160,344 @@ pub(super) fn format_governance_entry_once(
     out
 }
 
+/// A string shown on one line: short and without a newline
+fn inline_text(s: &str) -> bool {
+    s.len() <= 160 && !s.contains('\n')
+}
+
+/// A value as a change shows it: a string in quotes, anything else as
+/// compact JSON
+fn change_value(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("{s:?}"),
+        other => other.to_string(),
+    }
+}
+
+/// The lines of `before` and `after` that differ, the lines both share at
+/// either end left out and counted
+fn line_diff(before: &str, after: &str) -> String {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let lines = |n: usize| if n == 1 { "line" } else { "lines" };
+    let mut out = String::new();
+    if head > 0 {
+        out.push_str(&format!("  ({head} {} unchanged before)\n", lines(head)));
+    }
+    for line in &old[head..old.len() - tail] {
+        out.push_str(&format!("  - {line}\n"));
+    }
+    for line in &new[head..new.len() - tail] {
+        out.push_str(&format!("  + {line}\n"));
+    }
+    if tail > 0 {
+        out.push_str(&format!("  ({tail} {} unchanged after)\n", lines(tail)));
+    }
+    out
+}
+
+/// A revision's changes, a line each, removals of one field from many
+/// places as one line (betas of 0.113.0: twenty `raw_text` removals)
+fn format_changes(changes: &[crate::govlog::Change], data_set: bool) -> String {
+    use crate::govlog::ChangeKind;
+    /// Removals of one field from at least this many places are one line
+    const GROUP: usize = 3;
+    let field = |c: &crate::govlog::Change| {
+        (c.kind == ChangeKind::Removed)
+            .then(|| c.path.rsplit('/').next().unwrap_or_default().to_string())
+    };
+    let mut out = String::new();
+    let mut grouped: Vec<String> = Vec::new();
+    for c in changes {
+        if let Some(name) = field(c) {
+            let same: Vec<&crate::govlog::Change> = changes
+                .iter()
+                .filter(|o| field(o).as_deref() == Some(name.as_str()))
+                .collect();
+            if same.len() >= GROUP {
+                if !grouped.contains(&name) {
+                    let bytes: u64 =
+                        same.iter().map(|o| o.omitted_bytes.unwrap_or(0)).sum();
+                    out.push_str(&format!(
+                        "- `{name}` removed from {} places, {}\n",
+                        same.len(),
+                        about_tokens(bytes)
+                    ));
+                    grouped.push(name);
+                }
+                continue;
+            }
+        }
+        out.push_str(&format_change(c, data_set));
+    }
+    out
+}
+
+/// One change of a revision, as a line; one whose values were left out
+/// says so
+fn format_change(c: &crate::govlog::Change, data_set: bool) -> String {
+    match c.omitted_bytes {
+        Some(bytes) if c.kind == crate::govlog::ChangeKind::Removed => {
+            format!("- `{}` removed, {}\n", c.path, about_tokens(bytes))
+        }
+        Some(bytes) => format!(
+            "- `{}` changed, {} of it: too long to show here; the record \
+             shows it{}\n",
+            c.path,
+            about_tokens(bytes),
+            // A data set's reads are free
+            if data_set { "" } else { " (a full read)" }
+        ),
+        None => format_change_whole(c),
+    }
+}
+
+/// One change of a revision, as a line (or a line diff, for long text)
+fn format_change_whole(c: &crate::govlog::Change) -> String {
+    use crate::govlog::ChangeKind as K;
+    use serde_json::Value;
+    let path = &c.path;
+    let from = c.from.as_deref().unwrap_or_default();
+    match (c.kind, &c.before, &c.after) {
+        (K::Moved | K::Copied, before, _) => format!(
+            "- `{path}` {} from `{from}`{}\n",
+            if c.kind == K::Moved {
+                "moved"
+            } else {
+                "copied"
+            },
+            match before {
+                Some(b) => format!(", replacing {}", change_value(b)),
+                None => String::new(),
+            }
+        ),
+        (_, Some(Value::String(b)), Some(Value::String(a)))
+            if !(inline_text(b) && inline_text(a)) =>
+        {
+            format!("- `{path}` changed:\n{}", line_diff(b, a))
+        }
+        (_, Some(b), Some(a)) => {
+            format!("- `{path}`: {} → {}\n", change_value(b), change_value(a))
+        }
+        (_, None, Some(Value::String(a))) if !inline_text(a) => {
+            format!("- `{path}` added:\n{}", line_diff("", a))
+        }
+        (_, None, Some(a)) => {
+            format!("- `{path}` added: {}\n", change_value(a))
+        }
+        (_, Some(Value::String(b)), None) if !inline_text(b) => {
+            format!("- `{path}` removed:\n{}", line_diff(b, ""))
+        }
+        (_, Some(b), None) => {
+            format!("- `{path}` removed (was {})\n", change_value(b))
+        }
+        (_, None, None) => format!("- `{path}` removed\n"),
+    }
+}
+
+/// The shown-once key of a part's text (a round, an attachment, a data
+/// set's file), whatever version or spelling read it: the same text is one
+/// part (betas of 0.113.0, B1: a round its revision did not touch, read
+/// at the other version, spent a full read)
+pub(super) fn part_content_key(
+    entry: &GovernanceEntryResponse,
+) -> Option<String> {
+    let body = if let Some(file) = &entry.data_file {
+        format!("file {} {}", file.path, file.text)
+    } else if let Some(name) = &entry.attachment {
+        let content = entry
+            .data
+            .as_ref()?
+            .get("attachments")?
+            .as_array()?
+            .iter()
+            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(name))?
+            .get("content")?
+            .to_string();
+        format!("attachment {name} {content}")
+    } else {
+        let n = entry.round?;
+        let data = entry.data.as_ref()?;
+        let decision = crate::govlog::decision_data(entry.entry_type, data)
+            .unwrap_or(data);
+        format!("round {n} {}", decision.get("rounds")?)
+    };
+    Some(format!("content of {} {:x}", entry.id, text_key(&body)))
+}
+
+/// What a part's pointer says the revisions change beside it, from the
+/// record's history: the changes outside the part, by path and values, so a
+/// reader holding the other version's header learns what differs (H1,
+/// betas of 0.113.0)
+pub(super) fn changes_beside(
+    history: &crate::govlog::ChangeHistory,
+    entry: &GovernanceEntryResponse,
+) -> String {
+    if history.total == 0 {
+        return "it has no revisions.".to_string();
+    }
+    if history.broken.is_some() {
+        return "its revisions change other parts of the record: \
+                history=true shows them."
+            .to_string();
+    }
+    // The part's own paths: unchanged, or its text would differ
+    let inside = |path: &str| match (entry.round, &entry.attachment) {
+        (Some(n), _) => {
+            let at = format!("/rounds/{}", n.saturating_sub(1));
+            path.starts_with(&at) || path.starts_with(&format!("/inner{at}"))
+        }
+        (None, Some(_)) => path.starts_with("/attachments/"),
+        _ => path.starts_with("/files"),
+    };
+    let changes: Vec<String> = history
+        .revisions
+        .iter()
+        .flat_map(|r| &r.changes)
+        .filter(|c| !inside(&c.path))
+        .map(|c| match (&c.before, &c.after) {
+            (Some(b), Some(a))
+                if c.omitted_bytes.is_none()
+                    && b.to_string().len() + a.to_string().len() < 120 =>
+            {
+                format!("`{}`: {b} → {a}", c.path)
+            }
+            _ => format!("`{}`", c.path),
+        })
+        .collect();
+    match changes.as_slice() {
+        [] => "its revisions change nothing in it.".to_string(),
+        [..] if changes.len() > 6 => format!(
+            "its revisions change nothing in it, but {} other fields of the \
+             record: history=true shows them.",
+            changes.len()
+        ),
+        _ => format!(
+            "its revisions change nothing in it, but change {} beside it.",
+            changes.join(", ")
+        ),
+    }
+}
+
+/// The shown-once key of a revision's changes
+pub(super) fn changes_key(id: &crate::ids::GovernanceLogId) -> String {
+    format!("changes of {id}")
+}
+
+/// What each revision a read asked for changed, oldest first; one shown
+/// earlier this session is pointed at
+pub(super) fn format_revision_history(
+    history: &crate::govlog::ChangeHistory,
+    amendments: &[crate::govlog::AmendmentNotice],
+    data_set: bool,
+    once: &ShownOnce,
+) -> String {
+    if history.total == 0 {
+        // Its other amendments are not revisions of the signed record, but
+        // a reader should not be told it was never changed (betas of
+        // 0.113.0: a replaced summary, a correction)
+        let others: Vec<String> = amendments
+            .iter()
+            .filter(|a| a.kind != AmendmentKind::Revision)
+            .map(|a| format!("{} ({})", a.id, a.kind))
+            .collect();
+        return match others.as_slice() {
+            [] => "\n(It has no revisions: this is its only version.)\n".into(),
+            _ => format!(
+                "\n(The signed record has no revisions; it was amended \
+                 otherwise by {}, as listed with it.)\n",
+                others.join(", ")
+            ),
+        };
+    }
+    let shown = history.revisions.len() as u64;
+    let (from, to) = (history.first + 1, history.first + shown);
+    let mut out = match shown {
+        0 => String::new(),
+        _ if shown == history.total => format!(
+            "\n**What each of its {} revisions changed**, from the original:\n",
+            history.total
+        ),
+        1 => format!(
+            "\n**What revision {from} of {} changed**:\n",
+            history.total
+        ),
+        _ => format!(
+            "\n**What revisions {from} to {to} of {} changed**, oldest first:\n",
+            history.total
+        ),
+    };
+    for r in &history.revisions {
+        let id = &r.id;
+        let key = changes_key(id);
+        let date = r
+            .created_at
+            .map(|t| format!(" ({})", t.format("%Y-%m-%d")))
+            .unwrap_or_default();
+        if let Some(bytes) = r.omitted_bytes {
+            out.push_str(&format!(
+                "\n{id}{date}: not shown, {}: this result holds as much \
+                 history as it can; history=<n> reads fewer\n",
+                about_tokens(bytes)
+            ));
+            continue;
+        }
+        if let Some(shown) = once.earlier_part(&key) {
+            out.push_str(&format!(
+                "\n{id}{date}: in your context already, shown in {}, {}.\n",
+                shown.read,
+                about_tokens(shown.bytes)
+            ));
+            continue;
+        }
+        let mut text = format!("\n{id}{date}:\n");
+        if r.changes.is_empty() && !r.blind {
+            text.push_str("- nothing (its patch only checks values)\n");
+        }
+        text.push_str(&format_changes(&r.changes, data_set));
+        if r.blind {
+            text.push_str(
+                "- its redaction salt (`_blind`) was set: not content\n",
+            );
+        }
+        once.mark_part(key, text.len());
+        out.push_str(&text);
+    }
+    if let Some(why) = &history.broken {
+        out.push_str(&format!("\n(The history stops here: {why}.)\n"));
+    }
+    out
+}
+
 /// A data set's files as [`format_governance_entry`] shows them: the
 /// index first, then the listing, never the hashes
 fn format_data_set_view(
     view: &crate::responses::DataSetView,
-    links: bool,
+    id: &crate::ids::GovernanceLogId,
+    cues: super::Cues,
+    once: &ShownOnce,
 ) -> String {
+    let links = cues.links;
     // `how_to_read` opens with "Read this first", once (0.91.4)
+    let size = |bytes: u64| {
+        if bytes >= 1_000_000 {
+            format!("{:.1} MB", bytes as f64 / 1e6)
+        } else {
+            about_tokens(bytes)
+        }
+    };
     let mut out = format!(
-        "\n**Data set**: {files} files, {bytes} bytes, in the repository {repo} at \
+        "\n**Data set**: {files} files, {bytes}, in the repository {repo} at \
          commit {commit}.\n{how_to_read}\n",
         files = view.files,
-        bytes = view.bytes,
+        bytes = size(view.bytes),
         repo = view.repo,
         commit = view.commit,
         how_to_read = view.how_to_read,
@@ -4080,22 +4508,84 @@ fn format_data_set_view(
              is a listing.)\n"
         ));
     }
-    if let (Some(asked), Some(dir)) = (&view.asked, &view.directory) {
-        out.push_str(&format!(
-            "\n{} is not a path from the repository root; it \
-             resolved to {dir}, the only match under a top directory.\n",
-            if links {
-                format!("The path {asked:?}")
-            } else {
-                format!("attachment={asked:?}")
+    if let (Some(_), Some(dir)) = (&view.asked, &view.directory) {
+        out.push_str(&format!("\n(Read as {dir}.)\n"));
+    }
+    // The default read: the root's files to start with, and a line per
+    // directory; a directory's own read lists its files (betas of 0.113.0)
+    if view.directory.is_none() {
+        let key = format!(
+            "files of {id} {:x}",
+            text_key(&format!("{:?}", view.listing))
+        );
+        if let Some(shown) = once.earlier_part(&key) {
+            out.push_str(&format!(
+                "\n(Its files are listed in your context already: shown in {}, \
+                 {}.)\n",
+                shown.read,
+                about_tokens(shown.bytes)
+            ));
+            return out;
+        }
+        let start_at = out.len();
+        let top = view.top_level();
+        if !top.start.is_empty() {
+            out.push_str("\nStart with:\n");
+            for line in &top.start {
+                let name = if links {
+                    format!(
+                        "`{}`",
+                        crate::links::AgoraLink::attachment(
+                            id.clone(),
+                            line.path.clone()
+                        )
+                    )
+                } else {
+                    line.path.clone()
+                };
+                out.push_str(&match &line.note {
+                    Some(note) => {
+                        format!("- {name} — {note} ({})\n", size(line.bytes))
+                    }
+                    None => format!("- {name} ({})\n", size(line.bytes)),
+                });
             }
-        ));
+        }
+        if !top.directories.is_empty() {
+            out.push_str(&if links {
+                "\nDirectories (each link lists its files):\n".to_string()
+            } else {
+                "\nDirectories (attachment=\"<dir>/\" lists one's files):\n"
+                    .to_string()
+            });
+            for d in &top.directories {
+                let name = if links {
+                    format!(
+                        "`{}`",
+                        crate::links::AgoraLink::attachment(
+                            id.clone(),
+                            d.path.clone()
+                        )
+                    )
+                } else {
+                    d.path.clone()
+                };
+                out.push_str(&format!(
+                    "- {name} — {} files, {}\n",
+                    d.files,
+                    size(d.bytes)
+                ));
+            }
+        }
+        once.mark_part(key, out.len() - start_at);
+        return out;
     }
     out.push_str(&match &view.directory {
         Some(dir) => format!("\nFiles under {dir}:\n"),
         None => "\nFiles:\n".to_string(),
     });
-    for line in &view.listing {
+    // One level: a directory in it is one line (betas of 0.113.0)
+    for line in &view.one_level() {
         out.push_str(&match (&line.note, line.path.ends_with('/')) {
             (_, true) => format!(
                 "- {} — {} files ({} bytes)\n",
@@ -4388,6 +4878,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
 
         let out = format_governance_entry(&entry);
@@ -4450,6 +4941,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -4466,7 +4958,7 @@ mod tests {
         // first, as a sitting's listing that showed it does
         let once = ShownOnce::default();
         once.begin("your get_council_meetings");
-        once.mark_summary(entry.id.clone(), text.len());
+        once.mark_summary(entry.id.clone(), None, text);
         once.commit();
         once.begin("your read of GOV-2026-0014");
         let again = format_governance_entry_once(&entry, &once);
@@ -4528,6 +5020,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
 
         let out = format_governance_entry(&entry);
@@ -4632,6 +5125,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -4845,7 +5339,10 @@ mod tests {
         at("**Constitutional refs:** Art. IV § 2; Art. V");
         at("**Proof signed at:** 1700000000 (2023-11-14 22:13:20 UTC)");
         at("**Ready:** yes");
-        assert!(at("**Outcome:**") < at("**Redaction blind:** `abab"));
+        assert!(
+            at("**Outcome:**")
+                < at("**Redaction salt (`_blind`): not content:** `abab")
+        );
         assert!(!out.contains('{'), "no JSON:\n{out}");
     }
 
@@ -4953,11 +5450,13 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
             out.contains(
-                "removed — the original is readable with version=\"original\""
+                "removed — detail=\"summary\" with history=true shows what it \
+                 changed, free"
             ),
             "{out}"
         );
@@ -5011,6 +5510,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
         let out = format_governance_entry(&entry);
         assert!(out.contains("attachment=\"<name>\""), "{out}");
@@ -5088,6 +5588,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: DataSetView::of(&set, None, 32_768),
+            history: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -5097,7 +5598,9 @@ mod tests {
         // Once (beta round, 2026-10-15: it was said twice, two ways)
         assert_eq!(out.matches("first").count(), 2, "{out}");
         assert!(
-            out.contains("- votes/README.md — Read me first (15 bytes)"),
+            out.contains(
+                "Start with:\n- votes/README.md — Read me first (~5 tok)"
+            ),
             "{out}"
         );
         assert!(!out.contains(&file.sha256.to_string()), "{out}");
@@ -5203,7 +5706,7 @@ mod tests {
         }
         let out = format_governance_entry(&entry);
         let note = out
-            .find("attachment=\"README.md\" is not a path from the repository root; it resolved to votes/README.md")
+            .find("(Read as votes/README.md; cite it by that path.)")
             .expect(&out);
         assert!(note < out.find("# Votes").unwrap(), "{out}");
     }
@@ -6142,6 +6645,7 @@ mod tests {
             obligations: vec![obligation_listing(1)],
             data_file: None,
             data_set: None,
+            history: None,
         };
         let out = format_governance_entry(&entry);
         assert!(
@@ -9063,5 +9567,608 @@ mod tests {
         fresh.begin("b");
         let summary = format_governance_entry_once(&base, &fresh);
         assert!(summary.contains("\nTHE_SUMMARY\n"), "{summary}");
+    }
+}
+
+/// Shown once, and revision history: the follow-ups to the beta round of
+/// 0.112.0 (Steward, 2026-10-21)
+#[cfg(test)]
+mod shown_once_followups {
+    use super::super::Cues;
+    use super::*;
+    use crate::responses::GovernanceEntryResponse;
+
+    fn entry(extra: serde_json::Value) -> GovernanceEntryResponse {
+        let mut v = serde_json::json!({
+            "id": "GOV-2026-0017",
+            "entry_type": "council_decision",
+            "title": "A decision",
+            "created_at": "2026-10-01T00:00:00Z",
+            "summary": "SUMMARY_TEXT",
+            "attachments": [
+                {"name": "clerk-reads", "note": "what the Clerk read", "bytes": 3000}
+            ],
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    fn revised(version: &str) -> GovernanceEntryResponse {
+        entry(serde_json::json!({
+            "version": version,
+            "amendments": [{
+                "id": "AMD-2026-0004", "kind": "revision", "basis": "x",
+                "note": "Landmark corrected", "created_at": "2026-10-02T00:00:00Z",
+            }],
+        }))
+    }
+
+    /// Render `e` as the tool does: begun as its read, then committed
+    fn shown(e: &GovernanceEntryResponse, once: &ShownOnce) -> String {
+        once.begin(ShownOnce::read_of_entry(e));
+        let out = format_governance_entry_once(e, once);
+        once.commit();
+        out
+    }
+
+    #[test]
+    fn the_attachment_list_is_shown_once() {
+        let once = ShownOnce::default();
+        let first = shown(&entry(serde_json::json!({})), &once);
+        assert!(first.contains("- clerk-reads — what the Clerk read"));
+        let second = shown(&entry(serde_json::json!({})), &once);
+        assert!(!second.contains("clerk-reads"), "{second}");
+        assert!(
+            second.contains(
+                "(Its attachments are listed in your context already: shown \
+                 in your read of GOV-2026-0017, ~"
+            ),
+            "{second}"
+        );
+        // An unrevised record's list is one, at either version
+        let original =
+            shown(&entry(serde_json::json!({"version": "original"})), &once);
+        assert!(!original.contains("clerk-reads"), "{original}");
+        // A discarded result marked nothing
+        let fresh = ShownOnce::default();
+        fresh.begin("a");
+        format_governance_entry_once(&entry(serde_json::json!({})), &fresh);
+        fresh.discard();
+        assert!(
+            shown(&entry(serde_json::json!({})), &fresh)
+                .contains("- clerk-reads")
+        );
+    }
+
+    #[test]
+    fn spent_reads_list_attachments_without_inviting_a_read() {
+        for links in [false, true] {
+            let once = ShownOnce::default();
+            once.set_cues(Cues {
+                links,
+                full_reads_left: Some(0),
+                summary_asked: false,
+            });
+            let out = shown(&entry(serde_json::json!({})), &once);
+            assert!(
+                out.contains(
+                    "Attachments (your full reads are spent this session):\n\
+                     - clerk-reads — what the Clerk read"
+                ),
+                "{out}"
+            );
+            assert!(!out.contains("read one"), "{out}");
+            assert!(!out.contains("agora://gov/GOV-2026-0017/"), "{out}");
+        }
+    }
+
+    #[test]
+    fn a_stub_names_the_version_it_points_to() {
+        let once = ShownOnce::default();
+        shown(&revised("original"), &once);
+        let again = shown(&revised("original"), &once);
+        assert!(
+            again.contains("shown in your read of GOV-2026-0017 (original)"),
+            "{again}"
+        );
+        // The latest's notes and list are the same text: pointed at, by
+        // the read that showed them (betas of 0.113.0)
+        let latest = shown(&revised("latest"), &once);
+        assert!(!latest.contains("**Amended by AMD-2026-0004"), "{latest}");
+        assert!(!latest.contains("- clerk-reads"), "{latest}");
+        assert!(
+            latest.contains(
+                "(Its attachments are listed in your context already: shown \
+                 in your read of GOV-2026-0017 (original)"
+            ),
+            "{latest}"
+        );
+        // A part's read names the part too
+        let mut round = revised("latest");
+        round.round = Some(2);
+        assert_eq!(
+            ShownOnce::read_of_entry(&round),
+            "your read of GOV-2026-0017 round 2 (latest)"
+        );
+        // A record with one text names none
+        assert_eq!(
+            ShownOnce::read_of_entry(&entry(serde_json::json!({}))),
+            "your read of GOV-2026-0017"
+        );
+    }
+
+    #[test]
+    fn a_summary_asked_for_is_shown_again() {
+        let once = ShownOnce::default();
+        shown(&entry(serde_json::json!({})), &once);
+        // Implicitly: the pointer
+        let implicit = shown(&entry(serde_json::json!({})), &once);
+        assert!(!implicit.contains("SUMMARY_TEXT"), "{implicit}");
+        assert!(implicit.contains("Its summary is in your context already"));
+        // By name: the summary
+        once.set_cues(Cues {
+            summary_asked: true,
+            ..Cues::default()
+        });
+        // In a later turn: the copy may have been trimmed
+        once.next_turn();
+        once.begin("your second read");
+        let asked =
+            format_governance_entry_once(&entry(serde_json::json!({})), &once);
+        once.commit();
+        assert!(asked.contains("SUMMARY_TEXT"), "{asked}");
+        // A later pointer names the latest showing
+        once.set_cues(Cues::default());
+        let later = shown(&entry(serde_json::json!({})), &once);
+        assert!(later.contains("shown in your second read"), "{later}");
+    }
+
+    #[test]
+    fn what_it_owes_now_is_shown_again_when_it_changed() {
+        let obligation = |status: &str| {
+            entry(serde_json::json!({
+                "id": "OBL-2026-0003",
+                "entry_type": "obligation",
+                "obligation": {
+                    "id": "OBL-2026-0003", "kind": "task", "owed_by": "staff",
+                    "status": status, "text": "Ship the history option",
+                    "created_at": "2026-10-01T00:00:00Z",
+                },
+            }))
+        };
+        let once = ShownOnce::default();
+        let first = shown(&obligation("open"), &once);
+        assert!(first.contains("**Now**:"), "{first}");
+        let same = shown(&obligation("open"), &once);
+        assert!(!same.contains("**Now**:"), "{same}");
+        assert!(
+            same.contains(
+                "(What it owes now is unchanged since your read of \
+                 OBL-2026-0003.)"
+            ),
+            "{same}"
+        );
+        let changed = shown(&obligation("discharged"), &once);
+        assert!(changed.contains("**Now**:"), "{changed}");
+    }
+
+    #[test]
+    fn a_revision_points_at_its_history() {
+        let out = format_governance_entry(&revised("latest"));
+        assert!(
+            out.contains(
+                "Landmark corrected — detail=\"summary\" with history=true \
+                 shows what it changed, free"
+            ),
+            "{out}"
+        );
+        let once = ShownOnce::default();
+        once.set_cues(Cues {
+            links: true,
+            ..Cues::default()
+        });
+        let out = format_governance_entry_once(&revised("latest"), &once);
+        assert!(
+            out.contains(
+                "— `agora://gov/GOV-2026-0017?detail=summary&history=true` \
+                 shows what it changed"
+            ),
+            "{out}"
+        );
+    }
+
+    fn revision(patch: serde_json::Value) -> crate::govlog::Revision {
+        crate::govlog::Revision {
+            patch: serde_json::from_value(patch).unwrap(),
+            duplicates: Vec::new(),
+            resulting_data_hash: "0".repeat(64).parse().unwrap(),
+        }
+    }
+
+    fn built(
+        original: serde_json::Value,
+        patches: Vec<serde_json::Value>,
+        history: crate::requests::History,
+    ) -> crate::govlog::ChangeHistory {
+        let revisions: Vec<_> = patches
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                (
+                    format!("AMD-2026-{:04}", i + 4).parse().unwrap(),
+                    revision(p),
+                )
+            })
+            .collect();
+        crate::govlog::ChangeHistory::build(
+            &original,
+            &revisions,
+            |id| {
+                (id.as_str() == "AMD-2026-0004")
+                    .then(|| "2026-10-02T00:00:00Z".parse().unwrap())
+            },
+            |_| false,
+            history,
+        )
+    }
+
+    #[test]
+    fn a_history_shows_each_change_once() {
+        use crate::requests::History;
+        let original = serde_json::json!({
+            "landmark": "no", "tags": ["a"], "old": 3, "text": "a\nb\nc\nd",
+        });
+        let patches = vec![
+            serde_json::json!([
+                {"op": "replace", "path": "/landmark", "value": "yes"},
+                {"op": "add", "path": "/tags/1", "value": "x"},
+                {"op": "remove", "path": "/old"},
+            ]),
+            serde_json::json!([
+                {"op": "replace", "path": "/text", "value": "a\nB\nc\nd"},
+            ]),
+        ];
+        let once = ShownOnce::default();
+        once.begin("your read of GOV-2026-0017 (latest)");
+        let out = format_revision_history(
+            &built(original.clone(), patches.clone(), History::All),
+            &[],
+            false,
+            &once,
+        );
+        once.commit();
+        assert!(
+            out.contains("What each of its 2 revisions changed"),
+            "{out}"
+        );
+        assert!(out.contains("AMD-2026-0004 (2026-10-02):"), "{out}");
+        assert!(out.contains("- `/landmark`: \"no\" → \"yes\""), "{out}");
+        assert!(out.contains("- `/tags/1` added: \"x\""), "{out}");
+        // A removal names its size, never the text it removed
+        assert!(out.contains("- `/old` removed, ~1 tok"), "{out}");
+        assert!(
+            out.contains(
+                "- `/text` changed:\n  (1 line unchanged before)\n  - b\n  \
+                 + B\n  (2 lines unchanged after)"
+            ),
+            "{out}"
+        );
+        // Again, and only the last one: pointed at
+        once.begin("r2");
+        let last = built(
+            original.clone(),
+            patches.clone(),
+            History::Last(std::num::NonZeroU32::new(1).unwrap()),
+        );
+        let again = format_revision_history(&last, &[], false, &once);
+        assert!(again.contains("What revision 2 of 2 changed**:"), "{again}");
+        assert!(
+            again.contains(
+                "AMD-2026-0005: in your context already, shown in your read \
+                 of GOV-2026-0017 (latest)"
+            ),
+            "{again}"
+        );
+        assert!(!again.contains("+ B"), "{again}");
+        // One that does not replay stops the history there
+        let broken = built(
+            original,
+            vec![
+                patches[0].clone(),
+                serde_json::json!([{"op": "remove", "path": "/nowhere"}]),
+            ],
+            History::All,
+        );
+        let out =
+            format_revision_history(&broken, &[], false, &ShownOnce::default());
+        assert!(out.contains("What revision 1 of 2 changed"), "{out}");
+        assert!(out.contains(
+            "(The history stops here: AMD-2026-0005 does not apply to the \
+             version before it"
+        ));
+        let none = format_revision_history(
+            &crate::govlog::ChangeHistory::default(),
+            &[],
+            false,
+            &once,
+        );
+        assert!(none.contains("It has no revisions"));
+    }
+
+    /// A history hands over no record's worth free: a long change says it
+    /// is too long, and the history stops adding them past its budget
+    #[test]
+    fn a_history_holds_no_record() {
+        let patches = (0..26)
+            .map(|n| {
+                serde_json::json!([
+                    {"op": "add", "path": format!("/rounds/{n}"),
+                     "value": {"rationale": "x".repeat(5_000)}},
+                    {"op": "replace", "path": "/tally",
+                     "value": "b".repeat(800 + n)},
+                ])
+            })
+            .collect();
+        let history = built(
+            serde_json::json!({"rounds": [], "tally": "a".repeat(800)}),
+            patches,
+            crate::requests::History::All,
+        );
+        let once = ShownOnce::default();
+        once.begin("r");
+        let out = format_revision_history(&history, &[], false, &once);
+        assert!(!out.contains(&"x".repeat(100)), "the round was shown");
+        assert!(out.contains("- `/rounds/0` changed, ~"), "{out}");
+        assert!(out.contains("of it: too long to show here"), "{out}");
+        assert!(out.contains("this result holds as much history as it can"));
+        assert!(
+            out.len() < crate::govlog::MAX_HISTORY_BYTES + 4_096,
+            "{}",
+            out.len()
+        );
+    }
+
+    /// Betas of 0.113.0: a data set's default read lists the files to
+    /// start with and one line per directory, once a session; a
+    /// directory's read lists its files
+    #[test]
+    fn a_data_sets_default_read_is_its_top_level() {
+        use crate::responses::{DataSetLine, DataSetView};
+        let line = |path: &str, bytes: u64, note: Option<&str>| DataSetLine {
+            path: path.into(),
+            files: 1,
+            bytes,
+            note: note.map(Into::into),
+        };
+        let mut listing = vec![
+            line("README.md", 4_000, Some("Read this first")),
+            line(
+                "transcripts/index.md",
+                2_000,
+                Some("The sitting's transcript"),
+            ),
+        ];
+        for n in 0..128 {
+            listing.push(line(&format!("wire/{n:03}.json"), 20_000, None));
+        }
+        let view: DataSetView = serde_json::from_value(serde_json::json!({
+            "repo": "agora-data",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+            "files": 130, "bytes": 2_566_000, "index": "README.md",
+            "listing": listing, "how_to_read": "Read this first: attachment=\"README.md\".",
+        }))
+        .unwrap();
+        let mut entry = entry(serde_json::json!({
+            "id": "DATA-2026-0011", "entry_type": "data_set", "attachments": [],
+        }));
+        entry.data_set = Some(view.clone());
+        let once = ShownOnce::default();
+        once.set_cues(Cues {
+            links: true,
+            ..Cues::default()
+        });
+        let out = shown(&entry, &once);
+        assert!(
+            out.contains(
+                "Start with:\n- `agora://gov/DATA-2026-0011/README.md` — Read this \
+                 first (~1.3k tok)\n- `agora://gov/DATA-2026-0011/transcripts/index.md` \
+                 — The sitting's transcript"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "- `agora://gov/DATA-2026-0011/wire/` — 128 files, 2.6 MB"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("wire/000.json"), "{out}");
+        assert!(out.len() < 2_000, "{}", out.len());
+        let again = shown(&entry, &once);
+        assert!(again.contains("Its files are listed in your context already"));
+        // A directory's read: every file
+        let mut dir = entry.clone();
+        let mut wire = view;
+        wire.directory = Some("wire/".into());
+        dir.data_set = Some(wire);
+        assert!(shown(&dir, &once).contains("wire/000.json"));
+    }
+
+    /// Betas of 0.113.0: a revision's `_blind` is named for what it is,
+    /// never as content; a record amended but not revised says so
+    #[test]
+    fn a_history_names_the_blind_and_other_amendments() {
+        let history = built(
+            serde_json::json!({"landmark": "no"}),
+            vec![serde_json::json!([
+                {"op": "replace", "path": "/landmark", "value": "yes"},
+                {"op": "add", "path": "/_blind", "value": "4ce22432"},
+            ])],
+            crate::requests::History::All,
+        );
+        let out = format_revision_history(
+            &history,
+            &[],
+            false,
+            &ShownOnce::default(),
+        );
+        assert!(!out.contains("4ce22432"), "{out}");
+        assert!(
+            out.contains("its redaction salt (`_blind`) was set: not content")
+        );
+        let amended = revised("latest").amendments;
+        let mut correction = amended[0].clone();
+        correction.kind = AmendmentKind::Correction;
+        correction.id = "AMD-2026-0034".parse().unwrap();
+        let out = format_revision_history(
+            &crate::govlog::ChangeHistory::default(),
+            &[correction],
+            false,
+            &ShownOnce::default(),
+        );
+        assert!(
+            out.contains(
+                "The signed record has no revisions; it was amended otherwise \
+                 by AMD-2026-0034 (correction)"
+            ),
+            "{out}"
+        );
+    }
+
+    /// Betas of 0.113.0: a part's record carrying the signed summary that
+    /// a summary read showed, with the server's notes after it, points at
+    /// it; the notes are one key whichever tool words them
+    #[test]
+    fn a_parts_summary_and_notes_shown_by_another_read_are_pointed_at() {
+        let once = ShownOnce::default();
+        let mut summary = revised("latest");
+        summary.summary = Some(
+            "SIGNED_TEXT\n\nThis record has been revised 1 time(s).".into(),
+        );
+        shown(&summary, &once);
+        let mut part = revised("original");
+        part.round = Some(2);
+        part.data = Some(
+            serde_json::json!({"summary": {"text": "SIGNED_TEXT"}, "rounds": []}),
+        );
+        once.set_cues(Cues {
+            links: true,
+            ..Cues::default()
+        });
+        let out = shown(&part, &once);
+        assert!(!out.contains("SIGNED_TEXT"), "{out}");
+        assert!(!out.contains("**Amended by"), "{out}");
+        assert!(out.contains(
+            "Its amendments, obligations and citations are in your context"
+        ));
+    }
+
+    /// Review of 0.113.0: a part read at one version is not told the summary
+    /// is in context when only the other version's was shown
+    #[test]
+    fn a_part_is_not_pointed_at_the_other_versions_summary() {
+        let once = ShownOnce::default();
+        shown(&revised("original"), &once);
+        let mut part = revised("latest");
+        part.round = Some(1);
+        part.summary = None;
+        let out = shown(&part, &once);
+        assert!(
+            !out.contains("Its summary is in your context already"),
+            "{out}"
+        );
+        assert!(out.contains("its summary is not repeated here"), "{out}");
+    }
+
+    /// Betas of 0.113.0: removals of one field from many places are one
+    /// line; a data set's too-long change does not say it costs a read
+    #[test]
+    fn removals_are_grouped_and_a_data_sets_change_is_free() {
+        use crate::govlog::{Change, ChangeKind};
+        let removed = |n: usize| Change {
+            kind: ChangeKind::Removed,
+            path: format!("/rounds/0/responses/{n}/raw_text"),
+            from: None,
+            before: None,
+            after: None,
+            omitted_bytes: Some(1_500),
+        };
+        let mut changes: Vec<Change> = (0..20).map(removed).collect();
+        changes.push(Change {
+            kind: ChangeKind::Replaced,
+            path: "/files".into(),
+            from: None,
+            before: None,
+            after: None,
+            omitted_bytes: Some(9_000),
+        });
+        let out = format_changes(&changes, true);
+        assert!(
+            out.contains("- `raw_text` removed from 20 places, ~10k tok"),
+            "{out}"
+        );
+        assert_eq!(out.matches("raw_text").count(), 1, "{out}");
+        assert!(out.contains("the record shows it\n"), "{out}");
+        assert!(!out.contains("(a full read)"), "{out}");
+        assert!(
+            format_changes(&changes[20..], false).contains("(a full read)")
+        );
+    }
+
+    /// Betas of 0.113.0: a summary is pointed at only for the paragraphs a
+    /// read showed; one not shown before prints in full, and is then shown
+    #[test]
+    fn a_summarys_unseen_paragraphs_print() {
+        let once = ShownOnce::default();
+        let mut first = entry(serde_json::json!({}));
+        first.summary =
+            Some("The Council approved it.\n\nOn the merits.".into());
+        shown(&first, &once);
+        let mut later = entry(serde_json::json!({}));
+        later.summary = Some(
+            "The Council approved it.\n\nOn the merits.\n\nOVERRULED BY \
+             GOV-2026-0020: no longer precedent."
+                .into(),
+        );
+        let out = shown(&later, &once);
+        assert!(out.contains("OVERRULED BY GOV-2026-0020"), "{out}");
+        assert!(!out.contains("On the merits."), "{out}");
+        assert!(
+            out.contains("(Its summary's first part is in your context already: shown in your read of GOV-2026-0017. Then:)"),
+            "{out}"
+        );
+        // All of it is shown now: pointed at whole, never past what was shown
+        let again = shown(&later, &once);
+        assert!(
+            again.contains("Its summary is in your context already"),
+            "{again}"
+        );
+        assert!(!again.contains("OVERRULED"), "{again}");
+    }
+
+    /// A revised record's two summaries are two: reading the original's
+    /// does not stand in for the latest's (review of 0.113.0)
+    #[test]
+    fn a_revised_records_summaries_are_two() {
+        let once = ShownOnce::default();
+        shown(&revised("original"), &once);
+        // The same text at the latest: one summary
+        let same = shown(&revised("latest"), &once);
+        assert!(!same.contains("SUMMARY_TEXT"), "{same}");
+        // Another text: shown
+        let mut changed = revised("latest");
+        changed.summary = Some("THE_REVISED_SUMMARY".into());
+        let latest = shown(&changed, &once);
+        assert!(latest.contains("THE_REVISED_SUMMARY"), "{latest}");
+        let again = shown(&changed, &once);
+        assert!(
+            again.contains(
+                "Its summary is in your context already: shown in your read \
+                 of GOV-2026-0017 (latest)"
+            ),
+            "{again}"
+        );
     }
 }

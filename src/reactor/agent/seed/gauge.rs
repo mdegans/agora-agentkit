@@ -551,14 +551,31 @@ impl<T: Tool> Tool for Gauged<T> {
         let input = call.input.clone();
         let mut result = self.inner.call(call).await;
         // How a link is written, in full once a session and short after
-        // (beta round of 0.112.0: ~90 tokens on every refusal)
-        if let Some(once) = &self.shown_once {
-            let text = result.content.to_string();
-            if text.contains(crate::links::FORM) && !once.legend("link form") {
-                result.content = text
-                    .replace(crate::links::FORM, crate::links::FORM_AGAIN)
-                    .into();
-            }
+        // (beta round of 0.112.0: ~90 tokens on every refusal). On the text
+        // as written: a `Content`'s `Display` renders Markdown
+        if let Some(once) = &self.shown_once
+            && super::tool::raw_text(&result.content)
+                .contains(crate::links::FORM)
+            && !once.legend("link form")
+        {
+            super::tool::map_text(&mut result.content, |t| {
+                t.replace(crate::links::FORM, crate::links::FORM_AGAIN)
+            });
+        }
+        // An input that did not parse is free, and says so (betas of
+        // 0.113.0: "Invalid arguments at `history`" said nothing of cost)
+        if super::tool::is_refusal(&result)
+            && !super::tool::raw_text(&result.content)
+                .ends_with(super::tool::REFUSED)
+        {
+            super::tool::append_sentence(
+                &mut result.content,
+                super::tool::REFUSED,
+            );
+        }
+        // An id read as another spelling says so, first
+        if let Some(note) = super::tool::read_as(&name, &input) {
+            super::tool::prepend_text(&mut result.content, &note);
         }
         self.admit(&name, &input, result)
     }

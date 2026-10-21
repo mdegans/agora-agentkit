@@ -1220,6 +1220,35 @@ impl GovernanceLogId {
         .then(|| format!("{prefix}-{year}-{serial:0>4}"))
     }
 
+    /// How `written` (an id, a citation or a link) wrote this id, when it
+    /// wrote it otherwise: the part of it that [`normalize`](Self::normalize)
+    /// rewrote to this id (`GOV-2026-5` for `GOV-2026-0005`)
+    pub fn rewritten_in<'a>(&self, written: &'a str) -> Option<&'a str> {
+        let whole = written.trim();
+        if whole.contains(self.as_str()) {
+            return None;
+        }
+        std::iter::once(whole)
+            .chain(whole.split(|c: char| {
+                matches!(
+                    c,
+                    '/' | '?'
+                        | '&'
+                        | '='
+                        | ':'
+                        | '#'
+                        | '`'
+                        | '"'
+                        | '\''
+                        | '<'
+                        | '>'
+                ) || c.is_whitespace()
+            }))
+            .find(|part| {
+                Self::normalize(part).as_deref() == Some(self.as_str())
+            })
+    }
+
     /// The id `{prefix}-{year}-{serial:04}`, or `None` when the year is
     /// not four digits or the serial is not 1 to 9999 (0.74)
     pub fn from_parts(
@@ -1458,6 +1487,16 @@ pub enum PlatformDoc {
 }
 
 impl PlatformDoc {
+    /// Every slug a document is read by, as written (`prompt:<name>` for
+    /// every prompt)
+    pub const SLUGS: [&'static str; 5] = [
+        "constitution",
+        "protocol",
+        "prompts",
+        "prompt:<name>",
+        "calendar",
+    ];
+
     /// The canonical wire slug.
     pub fn slug(&self) -> std::borrow::Cow<'static, str> {
         match self {
@@ -2422,11 +2461,21 @@ impl std::fmt::Display for ContentRefError {
         write!(
             f,
             "not a content reference (expected a post/comment UUID or its \
-             first eight hex digits, a GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, a data \
-             set's file as DATA-YYYY-NNNN:<commit>:<path> or \
-             DATA-YYYY-NNNN:/<path>, or a document slug \
-             like \"constitution\", \"protocol\", \"prompts\" or \
-             \"prompt:<name>\"): {:?}",
+             first eight hex digits, a governance id ({}), a data set's file \
+             as DATA-YYYY-NNNN:<commit>:<path> or DATA-YYYY-NNNN:/<path>, or \
+             a document: {}): {:?}",
+            // From the parser's own lists (betas of 0.113.0: DATA, OBL,
+            // TEST and the calendar were left out)
+            GovernanceLogPrefix::ALL
+                .iter()
+                .map(|p| format!("{p}-YYYY-NNNN"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            PlatformDoc::SLUGS
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
             self.0
         )?;
         if let Some(id) = self.leading_ref() {
@@ -2686,6 +2735,30 @@ impl schemars::JsonSchema for ContentRef {
 
 #[cfg(test)]
 mod tests {
+    /// The part of an id, citation or link that was read as another
+    /// spelling of an id, and nothing when it was written as it is
+    #[test]
+    fn rewritten_in_finds_the_spelling_read() {
+        let id: super::GovernanceLogId = "GOV-2026-0005".parse().unwrap();
+        for (written, part) in [
+            ("GOV-2026-5", Some("GOV-2026-5")),
+            ("gov-2026-0005", Some("gov-2026-0005")),
+            (" GOV 2026 5 ", Some("GOV 2026 5")),
+            ("GOV-2026.5", Some("GOV-2026.5")),
+            ("agora://gov/GOV-2026-5?round=2", Some("GOV-2026-5")),
+            ("`agora://gov/gov-2026-05/clerk-reads`", Some("gov-2026-05")),
+            ("GOV-2026-0005", None),
+            ("agora://gov/GOV-2026-0005?round=2", None),
+            ("GOV-2026-6", None),
+        ] {
+            assert_eq!(id.rewritten_in(written), part, "{written}");
+        }
+        let set: super::GovernanceLogId = "DATA-2026-0001".parse().unwrap();
+        assert_eq!(
+            set.rewritten_in("DATA-2026-1:/votes/index.md"),
+            Some("DATA-2026-1")
+        );
+    }
     use super::*;
 
     #[test]

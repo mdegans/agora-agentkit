@@ -2630,9 +2630,41 @@ pub struct GovernanceEntryResponse {
     /// read with `attachment="<dir>/"` (0.91)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_set: Option<DataSetView>,
+    /// What each revision changed, when the read asked for its `history`
+    /// (0.113.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<crate::govlog::ChangeHistory>,
 }
 
 impl GovernanceEntryResponse {
+    /// Whether the record has been revised, whichever version was served
+    pub fn is_revised(&self) -> bool {
+        !self.revisions.is_empty()
+            || self
+                .amendments
+                .iter()
+                .any(|a| a.kind == crate::enums::AmendmentKind::Revision)
+    }
+
+    /// `original` or `latest`, for a revised record: which of its two
+    /// texts this is. `None` when it has one
+    pub fn version_label(&self) -> Option<&'static str> {
+        self.is_revised().then_some(match self.version {
+            Some(RecordVersion::Original) => "original",
+            _ => "latest",
+        })
+    }
+
+    /// The revisions of the record, in chain order, whichever version was
+    /// served
+    pub fn revision_ids(&self) -> Vec<GovernanceLogId> {
+        self.amendments
+            .iter()
+            .filter(|a| a.kind == crate::enums::AmendmentKind::Revision)
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
     /// Why the part of `entry` a read asked for is not there, if it is not:
     /// a round past its last, or an attachment it does not have (beta round of
     /// 0.112.0: a missing part was read as an empty one, the whole record
@@ -2753,7 +2785,112 @@ impl DataSetLine {
     }
 }
 
+/// A data set's default read as an agent reads it ([`DataSetView::top_level`]):
+/// the files at its root to start with, and one line per directory
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DataSetTopLevel {
+    /// The index first, then the other files at the root, with their notes
+    pub start: Vec<DataSetLine>,
+    /// One per top-level directory (ending in `/`), with its files and bytes
+    pub directories: Vec<DataSetLine>,
+}
+
 impl DataSetView {
+    /// The listing at its root: the files there to start with, and every
+    /// directory rolled into one line (betas of 0.113.0: a set's 128 wire
+    /// files listed on every read, ~6k tok). The full listing is a
+    /// directory's read
+    pub fn top_level(&self) -> DataSetTopLevel {
+        /// Most files to start with: past it, the rest are in their
+        /// directories' counts
+        const START: usize = 12;
+        let index = self.index.as_str();
+        let file = |l: &DataSetLine| !l.path.ends_with('/');
+        // The index, the files at the root, then the ones with a note
+        let mut start: Vec<&DataSetLine> = self
+            .listing
+            .iter()
+            .filter(|l| {
+                file(l)
+                    && (l.path == index
+                        || !l.path.contains('/')
+                        || l.note.is_some())
+            })
+            .collect();
+        start.sort_by_key(|l| (l.path != index, l.path.contains('/')));
+        start.truncate(START);
+        let mut out = DataSetTopLevel {
+            start: start.iter().map(|l| (*l).clone()).collect(),
+            ..Default::default()
+        };
+        for line in &self.listing {
+            if out.start.iter().any(|s| s.path == line.path) {
+                continue;
+            }
+            let Some((top, _)) = line.path.split_once('/') else {
+                out.start.push(line.clone());
+                continue;
+            };
+            let dir = format!("{top}/");
+            match out.directories.iter_mut().find(|d| d.path == dir) {
+                Some(d) => {
+                    d.files += line.files;
+                    d.bytes += line.bytes;
+                }
+                None => out.directories.push(DataSetLine {
+                    path: dir,
+                    files: line.files,
+                    bytes: line.bytes,
+                    note: None,
+                }),
+            }
+        }
+        out
+    }
+
+    /// The listing one level below `directory` (the view's own, or the
+    /// root): its files, then one line per directory in it with its files
+    /// and bytes (betas of 0.113.0: a directory's read listed its 135 files
+    /// recursively)
+    pub fn one_level(&self) -> Vec<DataSetLine> {
+        let prefix = self.directory.as_deref().unwrap_or("");
+        let mut files = Vec::new();
+        let mut dirs: Vec<DataSetLine> = Vec::new();
+        for line in &self.listing {
+            let rest = line.path.strip_prefix(prefix).unwrap_or(&line.path);
+            match rest.split_once('/') {
+                Some((sub, _)) => {
+                    let dir = format!("{prefix}{sub}/");
+                    match dirs.iter_mut().find(|d| d.path == dir) {
+                        Some(d) => {
+                            d.files += line.files;
+                            d.bytes += line.bytes;
+                        }
+                        None => dirs.push(DataSetLine {
+                            path: dir,
+                            files: line.files,
+                            bytes: line.bytes,
+                            note: None,
+                        }),
+                    }
+                }
+                _ => files.push(line.clone()),
+            }
+        }
+        files.extend(dirs);
+        files
+    }
+
+    /// `set` as its default read lists it, on every surface: the
+    /// [`top_level`](Self::top_level)'s files to start with, then one line
+    /// per directory. Every file is counted; a directory's read lists them
+    pub fn top_level_of(set: &crate::govlog::DataSet) -> Option<Self> {
+        let mut view = Self::of(set, None, usize::MAX)?;
+        let top = view.top_level();
+        view.listing = top.start.into_iter().chain(top.directories).collect();
+        Some(view)
+    }
+
     /// The one sentence that names a set's index file, in
     /// [`how_to_read`](Self::how_to_read) and in a server's summary of the
     /// entry; a read that carries both says it once (0.91.4)
@@ -4153,6 +4290,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         });
         let json = serde_json::to_value(&resp).unwrap();
         // Additive third arm on the same tagged enum: the `post` and
@@ -4411,6 +4549,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
         let value = serde_json::to_value(&entry).unwrap();
         // `data` is `skip_serializing_if` — a summary read must not carry
@@ -4564,6 +4703,7 @@ mod tests {
             obligations: Vec::new(),
             data_file: None,
             data_set: None,
+            history: None,
         };
         let record = entry.council_decision().unwrap().unwrap();
         assert_eq!(record.rounds.len(), 3);
@@ -5826,6 +5966,43 @@ mod data_file_tests {
 mod data_set_view_tests {
     use super::DataSetView;
     use crate::govlog::{DATA_SET_VERSION, DataFile, DataSet};
+
+    /// The default read: the index to start with, every file counted in
+    /// its top directory, nothing per file (betas of 0.113.0)
+    #[test]
+    fn the_top_level_starts_with_the_index_and_counts_the_rest() {
+        let view = DataSetView::top_level_of(&set(300, 7)).unwrap();
+        let paths: Vec<&str> =
+            view.listing.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(paths, ["votes/README.md", "votes/"]);
+        assert_eq!(view.listing[1].files, 300);
+        assert_eq!(view.files, 301);
+        // Idempotent: the runner's top level of the server's is the same
+        let again = view.top_level();
+        assert_eq!(
+            again
+                .start
+                .into_iter()
+                .chain(again.directories)
+                .collect::<Vec<_>>(),
+            view.listing
+        );
+    }
+
+    /// Betas of 0.113.0: a directory's read lists one level, a line per
+    /// directory in it
+    #[test]
+    fn a_directory_lists_one_level() {
+        let view =
+            DataSetView::of(&set(30, 3), Some("votes/"), 262_144).unwrap();
+        let lines = view.one_level();
+        let paths: Vec<&str> = lines.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["votes/README.md", "votes/d00/", "votes/d01/", "votes/d02/"]
+        );
+        assert_eq!(lines[1].files, 10);
+    }
 
     /// `n` files over `dirs` directories, plus a README, sorted
     fn set(n: usize, dirs: usize) -> DataSet {

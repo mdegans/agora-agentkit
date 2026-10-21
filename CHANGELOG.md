@@ -2,6 +2,178 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.113.0 (2026-10-21)
+
+Cost and clarity follow-ups to 0.112.0's beta round (Steward,
+2026-10-21).
+
+- Breaking: `GetContentInput` has a `history` field (`Option<History>`):
+  what each revision of the record changed, oldest first. `true`
+  (`History::All`) is every revision, back to the original; a count n
+  (`History::Last`) the last n; `false`, `""` and `null` are none. Its
+  schema is inline, `{"type": ["boolean", "integer"]}`, with no `$ref`
+  and no `pattern`. A link carries it as `?history=true` or
+  `?history=2`; `AgoraLink::history(id)` is
+  `agora://gov/<id>?detail=summary&history=true`. Code that builds
+  `GetContentInput` by a struct literal without `..` stops compiling.
+  - The allow-list (`ReadOption::History`) takes it on an entry and a
+    data set, nowhere else. `conflict()` refuses it beside `round`,
+    `attachment` or `lines` (a part of the record) and beside
+    `version=original` (the history walks from the original to the
+    latest); `0` does not parse.
+  - The diffs ride with whatever the read shows: the summary with
+    `detail=summary` (free), the latest record otherwise (a full read, as
+    before). The server takes no `history` yet and sends no diff, so the
+    seed runner never sends it: it reads the original
+    (`version=original`, `detail=full_with_attachments`) and each
+    revision's amendment, replays the patches
+    (`govlog::revision_changes`, a `govlog::Change` per operation with
+    the value it replaced) and shows each change as `path: old → new`, or
+    the changed lines of a long text. These reads are not charged. A
+    history that does not replay says where it stops, and its heading
+    names the revisions it shows ("What revisions 2 to 3 of 5 changed").
+    A revision's changes are shown once a session; a later history points
+    at them.
+  - A history hands over no record's worth free: a change over 2 KiB as
+    rendered says it is too long to show and that the record shows it (a
+    full read), and one result holds at most 16 KiB of changes, saying
+    what it left out. A failed read of the original or a revision is
+    logged (`agent_id`, `entry`, `id`, `error`).
+  - A revision's amendment note now points at the free history
+    (`detail="summary" with history=true shows what it changed, free`, or
+    its link), not at `version="original"`.
+- An id read as another spelling says so first, in either tool, on a read
+  or a refusal: "Read GOV-2026-5 as GOV-2026-0005."
+  (`GovernanceLogId::rewritten_in`, from the call as sent.) A spelling
+  that differs only in case gets no note. `is_refusal` looks past the
+  note, so a server's range refusal by a rewritten id is still free.
+- Shown once:
+  - An entry's attachment list is listed once a session, like its notes,
+    by one key (the entry, and the version only when it has two); a
+    spent-read fallback points at it.
+  - With the full reads spent, the list says so and names the attachments
+    without inviting a read, and without links.
+  - A pointer names the read it points to with its part and version, when
+    the record has two: "shown in your read of GOV-2026-0017 (original)"
+    (`ShownOnce::read_of_entry`).
+  - A summary asked for with `detail=summary` is shown again (the
+    reader's copy may have been trimmed); only repeats it did not ask for
+    are pointed at, and a pointer names the latest showing
+    (`Cues::summary_asked`). A history read's summary is not one asked
+    for. A revised record's summaries, at latest and at original, are
+    two (`ShownOnce::earlier_summary` and `mark_summary` take the
+    version).
+  - What an obligation owes now (the "Now" line) is keyed on its
+    rendered status: shown again when it has changed, and otherwise
+    "(What it owes now is unchanged since …)".
+- Refusals: the mark is now "Refused; nothing was charged." (a missing
+  part's refusal has looked the entry up, so "Nothing was read" was not
+  true); a free refused turn says "(Every call was refused; this turn
+  doesn't count.)". `tool::REFUSED` and `is_refusal` are the one copy, and
+  every refusal is still a free turn.
+- `GovernanceEntryResponse::is_revised`, `version_label` and
+  `revision_ids`.
+- For the server: `govlog::ChangeHistory::build` (the one builder, the
+  runner's and the server's), `RevisionChanges`, `Change::omitted_bytes`,
+  `MAX_CHANGE_BYTES`, `MAX_HISTORY_BYTES`, and
+  `GovernanceEntryResponse::history`, which a server that takes `history`
+  fills. `requests::AsSent<T>`: an input beside the JSON it was sent as,
+  its schema `T`'s, for `GetContentInput::read_as` (the note's one copy).
+
+- `requests::REFUSED`, "Refused; nothing was charged.": the one mark a
+  read refused for its options ends with, the seed runner's and the
+  server's validation errors alike. `DataSetView::top_level_of`: a set's
+  default listing as every surface serves it.
+
+### The betas of 0.113.0
+
+- A round is a part, shown once like an attachment: read again by any
+  spelling, at either version, with full reads left or spent, it is the
+  pointer, and no full read is spent (R1: a second `round=3
+  version=original` read spent one and showed the round again).
+- Second betas round, and the review of #209:
+  - A summary is shown once by its text and by each of its leading
+    paragraphs, so a record's own copy of the signed summary is pointed at
+    after a read that showed it with the server's notes after it. A part
+    read is pointed at its own version's summary only
+    (`ShownOnce::earlier_summary_at`; `mark_summary` takes the version).
+  - A history read's summary is pointed at when it is in context (an
+    earlier call, the same turn's too); a summary asked for alone is
+    always shown.
+  - A directory's read lists one level: its files and a line per
+    directory in it (`DataSetView::one_level`).
+  - A data set's too-long change does not say it costs a full read.
+  - An entry's notes are keyed by what they say, not how a tool words
+    them: get_content and fetch_agora_link share the key.
+  - The free-refusal tail starts a sentence ("count from 1. Refused; …").
+  - Removals of one field from three places or more are one line:
+    "`raw_text` removed from 20 places, ~10k tok".
+  - `ChangeHistory::build` charges its budget only for what it prints; a
+    revision the reader holds (`shown`) costs nothing. The runner caches
+    what history reads fetch, per session in memory, so a second history
+    fetches nothing again. Every revision's patch is still needed for the
+    last n's changes: the server serves no version between the original
+    and the latest.
+- Third betas round:
+  - A part (a round, an attachment, a data set's file) is also keyed by
+    its text (`part_content_key`): the same text read at the other
+    version is the pointer, naming the read that showed it, free, before
+    the budget; with the reads spent it is looked up to compare only when
+    its other version was shown (B1).
+  - A data set's summary is one with or without its "Read this first"
+    sentence, and its pointers one size (`shown_once::summary_text`).
+  - get_governance_log's footer says a data set's reads are free.
+  - A summary asked for alone is pointed at when this turn already showed
+    it; in a later turn it is shown (`ShownOnce::turn`, counted per
+    response).
+  - A bad id's refusal lists every series and document the parser reads,
+    from `GovernanceLogPrefix::ALL` and `PlatformDoc::SLUGS`.
+  - `_blind` reads "Redaction salt (`_blind`): not content" in a record.
+  - A short data-file path says "(Read as <path>; cite it by that path.)",
+    not that it is not a path.
+- Before merge:
+  - A part's pointer across versions says what the revisions change
+    beside the part, from the record's history: "its revisions change
+    nothing in it, but change `/landmark`: false → true beside it" (H1:
+    a reader of the original's header was told nothing changed).
+  - A summary is pointed at for the leading paragraphs a read showed;
+    any paragraph not shown before prints in full ("Its summary's first
+    part is in your context already: shown in … Then:"), and a read marks
+    only what it showed (`ShownOnce::summary_seen`, `mark_summary_from`).
+    So a reads-spent fallback, a summary+history read or a DATA entry's
+    `version=original` repeats only the server's notes that differ.
+  - The flaky `serde_forgiving::tests::coercions_warn_when_the_feature_is_on`
+    (1 run in 8, from 0.87): another test's thread could cache a callsite's
+    interest as "never"; the test rebuilds the interest cache under its
+    subscriber. A test race, not the runner's.
+- `round=0` is refused by `conflict()`. A round or attachment the server
+  refuses with a 400 is looked up without it and refused for what is
+  missing: a free turn, not a counted one.
+- An input that does not parse ("Invalid arguments …") ends "Refused;
+  nothing was charged." like every other refusal.
+- A data set's default read lists the files to start with (the index,
+  the files at the root, those with a note; at most 12) and one line per
+  top-level directory with its file count and size (`DataSetView::top_level`),
+  once a session; a directory's read lists its files. Sizes read in tok,
+  or MB from 1 MB.
+- Shown once by content: an entry's notes, attachment list and summary
+  are keyed by their text, so the same text at either version is shown
+  once (`ShownOnce::earlier_summary` and `mark_summary` take the text). A
+  part whose record carries a summary not yet shown no longer says it is
+  not repeated.
+- A summary asked for with `detail=summary` is always shown, a history
+  read's too.
+- A history names a removal and its size, never the removed text. A
+  revision's `_blind` (the record's redaction salt, `govlog::BLIND_KEY`)
+  is not listed as a change; the revision says it set it, "not content"
+  (`RevisionChanges::blind`). A record with no revisions but other
+  amendments says so, naming them.
+- The note for an id read as another spelling, the link-form shortening,
+  and the free-refusal tail edit the result's text blocks as written:
+  through `Content`'s `Display`, misanthropic's `markdown` feature
+  escaped them (`\[council_decision\]`, `\|`). `is_refusal` reads them as
+  written too.
+
 ## 0.112.0 (2026-10-20)
 
 `agora://` links (Steward, 2026-10-20): the path after `/agora/` on the

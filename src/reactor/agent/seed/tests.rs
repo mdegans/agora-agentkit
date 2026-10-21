@@ -5724,8 +5724,8 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
     assert!(
         rendered.contains(
             "GOV-2026-0006 has no attachment \"notes.md\". Its attachments: \
-             agora://gov/GOV-2026-0006/clerk-reads (~1k tok). Nothing was \
-             read, and no full read was spent."
+             agora://gov/GOV-2026-0006/clerk-reads (~1k tok). Refused; \
+             nothing was charged."
         ),
         "{rendered}"
     );
@@ -5793,7 +5793,12 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
     );
     let after = rendered.rsplit("not round 2").next().unwrap();
     assert!(!after.contains("deliberation rounds,"), "{after}");
-    assert!(after.contains("your full reads are spent"), "{after}");
+    // Its attachments were listed by the reads before: shown once
+    assert!(
+        after.contains("Its attachments are listed in your context already"),
+        "{after}"
+    );
+    assert!(!after.contains("clerk-reads"), "{after}");
 }
 
 /// A link of the other kind is served and says what it is; the form of a
@@ -6130,6 +6135,7 @@ async fn only_an_accepted_read_reaches_the_server() {
                     ReadOption::Version => "original".into(),
                     ReadOption::CommentBudget => 8192.into(),
                     ReadOption::Lines => "1-2".into(),
+                    ReadOption::History => true.into(),
                 };
             }
             let read: crate::requests::GetContentInput =
@@ -6478,17 +6484,14 @@ async fn an_entrys_notes_once_and_a_revised_entrys_two_versions() {
         transcript(&agent)
     );
     let rendered = transcript(&agent);
-    assert_eq!(rendered.matches("WHAT_THE_CLERK_READ").count(), 2);
-    assert_eq!(
-        rendered
-            .matches("is in your context already: shown in")
-            .count(),
-        2
-    );
-    // The notes: once for latest, once for the original's own
+    // The original's text is the latest's: one part (betas of 0.113.0, B1)
+    assert_eq!(rendered.matches("WHAT_THE_CLERK_READ").count(), 1);
+    assert_eq!(rendered.matches("is in your context already").count(), 3);
+    // The notes: the same at either version, so shown once (betas of
+    // 0.113.0: they were shown again for the original)
     assert_eq!(
         rendered.matches("A_LONG_AMENDMENT_NOTE").count(),
-        2,
+        1,
         "{rendered}"
     );
 }
@@ -6568,4 +6571,948 @@ async fn the_pause_cap_is_not_undone_by_a_refused_turn() {
         "{:?}",
         agent.phase
     );
+}
+
+/// A revised entry as the server serves it at `version`: two revisions,
+/// AMD-2026-0004 and -0005, listed with its amendments
+fn revised_entry(
+    version: &str,
+    data: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut body = governance_content("GOV-2026-0017", data);
+    body["version"] = version.into();
+    body["amendments"] = serde_json::json!([
+        {"id": "AMD-2026-0004", "kind": "revision", "basis": "x",
+         "note": "Landmark corrected", "created_at": "2026-10-02T00:00:00Z"},
+        {"id": "AMD-2026-0005", "kind": "revision", "basis": "x",
+         "note": "Text fixed", "created_at": "2026-10-03T00:00:00Z"},
+    ]);
+    if version == "latest" {
+        body["revisions"] =
+            serde_json::json!(["AMD-2026-0004", "AMD-2026-0005"]);
+    }
+    body
+}
+
+/// An amendment entry whose record revises with `patch`
+fn revision_entry(id: &str, patch: serde_json::Value) -> serde_json::Value {
+    let mut body = governance_content(
+        id,
+        Some(serde_json::json!({
+            "agora_governance_amendment": 2,
+            "target": "GOV-2026-0017",
+            "kind": "revision",
+            "revision": {"patch": patch, "resulting_data_hash": "0".repeat(64)},
+        })),
+    );
+    body["entry_type"] = "amendment".into();
+    body
+}
+
+/// `history` shows what each revision changed, from the original and the
+/// revisions' patches, never sending `history` to the server; with
+/// `detail=summary` no full read is spent. A contradicting one is refused
+/// before anything is read, and the turn is free (Steward, 2026-10-21)
+#[tokio::test]
+async fn history_shows_what_each_revision_changed() {
+    let server = MockServer::start();
+    let sent_history = server.mock(|when, then| {
+        when.method(GET)
+            .path_includes("/agora/api/content/")
+            .is_true(|req| has_param(req, "history"));
+        then.status(500);
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("detail", "summary");
+        then.status(200).json_body(revised_entry("latest", None));
+    });
+    let original = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("version", "original")
+            .query_param("detail", "full_with_attachments");
+        then.status(200).json_body(revised_entry(
+            "original",
+            Some(serde_json::json!({
+                "landmark": "no",
+                "text": "one\ntwo\nthree\nfour",
+            })),
+        ));
+    });
+    let first = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/AMD-2026-0004");
+        then.status(200).json_body(revision_entry(
+            "AMD-2026-0004",
+            serde_json::json!([
+                {"op": "replace", "path": "/landmark", "value": "yes"}
+            ]),
+        ));
+    });
+    let second = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/AMD-2026-0005");
+        then.status(200).json_body(revision_entry(
+            "AMD-2026-0005",
+            serde_json::json!([
+                {"op": "replace", "path": "/text", "value": "one\nTWO\nthree\nfour"}
+            ]),
+        ));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({
+                "id": "GOV-2026-0017", "detail": "summary", "history": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    for want in [
+        "What each of its 2 revisions changed**, from the original:",
+        "AMD-2026-0004 (2026-10-02):\n- `/landmark`: \"no\" → \"yes\"",
+        "AMD-2026-0005 (2026-10-03):\n- `/text` changed:\n  (1 line unchanged \
+         before)\n  - two\n  + TWO\n  (2 lines unchanged after)",
+    ] {
+        assert!(rendered.contains(want), "{want}\n{rendered}");
+    }
+    assert!(!rendered.contains("That was a full read"), "{rendered}");
+    assert_eq!(summary.calls(), 1);
+    assert_eq!(original.calls(), 1);
+    assert_eq!((first.calls(), second.calls()), (1, 1));
+
+    // The last one by link: shown already, so pointed at
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({
+                "link": "agora://gov/GOV-2026-0017?detail=summary&history=1",
+            }),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "What revision 2 of 2 changed**:\n\n\
+             AMD-2026-0005 (2026-10-03): in your context already, shown in \
+             your read of GOV-2026-0017 (latest)"
+        ),
+        "{rendered}"
+    );
+
+    // Contradicting: refused, nothing sent, the turn free
+    let calls =
+        || summary.calls() + original.calls() + first.calls() + second.calls();
+    let before = calls();
+    for bad in [
+        serde_json::json!({"id": "GOV-2026-0017", "history": true, "version": "original"}),
+        serde_json::json!({"id": "GOV-2026-0017", "history": 2, "round": 1}),
+        serde_json::json!({"id": "GOV-2026-0017", "history": 0}),
+    ] {
+        let control = agent
+            .handle(tool_use_message("get_content", bad.clone()))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Continue, "{bad}");
+        assert!(
+            transcript(&agent).ends_with(super::REFUSED_TURN_FREE)
+                || transcript(&agent).contains(super::REFUSED_TURN_FREE),
+            "{bad}"
+        );
+    }
+    assert_eq!(calls(), before, "a refused history read sent nothing");
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 28 });
+    assert_eq!(sent_history.calls(), 0);
+    let rendered = transcript(&agent);
+    assert!(rendered.contains(
+        "history walks the revisions from the original to the latest, and \
+         version=original reads the original alone: give one. Refused; \
+         nothing was charged."
+    ));
+}
+
+/// An id read as another spelling says so first, by either tool, on a
+/// read and on a refusal (which stays free); one written canonically does
+/// not (Steward, 2026-10-21)
+#[tokio::test]
+async fn a_rewritten_id_says_how_it_was_read() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let last = |agent: &SeedAgent| {
+        let all = transcript(agent);
+        all.rsplit("start").next().unwrap_or_default().to_string()
+    };
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "gov-2026-6", "detail": "summary"}),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        transcript(&agent)
+            .contains("Read gov-2026-6 as GOV-2026-0006.\n\n## GOV-2026-0006"),
+        "{}",
+        last(&agent)
+    );
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-6?detail=summary"}),
+        ))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("Read GOV-2026-6 as GOV-2026-0006."));
+    // A refusal: the note, and still free
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-6", "detail": "summary", "round": 2}),
+        ))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).ends_with(super::REFUSED_TURN_FREE));
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 28 });
+    let notes = transcript(&agent).matches("as GOV-2026-0006.").count();
+    assert_eq!(notes, 3);
+    // Canonical: no note
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "detail": "summary"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(transcript(&agent).matches("as GOV-2026-0006.").count(), 3);
+}
+
+/// A summary asked for by name is shown each time; one a later read would
+/// repeat is pointed at, naming the latest showing (Steward, 2026-10-21)
+#[tokio::test]
+async fn a_summary_asked_for_is_shown_each_time() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    for _ in 0..2 {
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006", "detail": "summary"}),
+            ))
+            .await
+            .unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered
+            .matches("The Council ratified v0.2 four to one.")
+            .count(),
+        2,
+        "{rendered}"
+    );
+}
+
+/// The missing-attachment refusal has looked the entry up: it says nothing
+/// was charged, not that nothing was read, and is a free turn
+#[tokio::test]
+async fn a_missing_attachment_is_refused_free_and_truthfully() {
+    let server = MockServer::start();
+    let lookup = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/GOV-2026-0006");
+        let mut body = governance_content("GOV-2026-0006", None);
+        body["attachments"] = serde_json::json!([
+            {"name": "clerk-reads", "note": "what the Clerk read", "bytes": 3000}
+        ]);
+        then.status(200).json_body(body);
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "attachment": "notes.md"}),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert_eq!(lookup.calls(), 1, "the entry was looked up");
+    assert!(
+        rendered.contains(&format!(
+            "\"clerk-reads\" (~1k tok). {}",
+            super::tool::REFUSED
+        )),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Nothing was read"), "{rendered}");
+    assert!(rendered.ends_with(super::REFUSED_TURN_FREE));
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 30 });
+}
+
+/// The server's refusal of a range, read by a rewritten id, still opens
+/// with "Invalid arguments" under the note: a free turn (review of 0.113.0)
+#[tokio::test]
+async fn a_refused_range_by_a_rewritten_id_is_free() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/");
+        then.status(400).json_body(serde_json::json!({
+            "error": format!(
+                "{}line 9 is past the end (5 lines)",
+                crate::govlog::LineRange::INVALID
+            ),
+        }));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "DATA-2026-1:/a.md", "lines": "9-"}),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "Read DATA-2026-1 as DATA-2026-0001.\n\nInvalid arguments at `lines`"
+        ),
+        "{rendered}"
+    );
+    assert!(rendered.ends_with(super::REFUSED_TURN_FREE), "{rendered}");
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 30 });
+}
+
+/// A history read's summary is its frame: in context from an earlier
+/// call, it is pointed at (betas of 0.113.0: printed twice in one turn)
+#[tokio::test]
+async fn a_history_read_by_name_shows_its_summary() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    for link in [
+        "agora://gov/GOV-2026-0006?detail=summary",
+        "agora://gov/GOV-2026-0006?detail=summary&history=true",
+    ] {
+        agent
+            .handle(tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": link }),
+            ))
+            .await
+            .unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered
+            .matches("The Council ratified v0.2 four to one.")
+            .count(),
+        1,
+        "{rendered}"
+    );
+    assert!(rendered.contains("It has no revisions"), "{rendered}");
+}
+
+/// Betas of 0.113.0: `round=0` is refused before anything is sent; a round
+/// the server refuses as missing is refused free, saying what there is;
+/// an input that does not parse says nothing was charged
+#[tokio::test]
+async fn refused_rounds_and_inputs_are_free_and_say_so() {
+    let server = MockServer::start();
+    let refused_round = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "9");
+        then.status(400).json_body(serde_json::json!({
+            "error": "round=9: GOV-2026-0017 has 3 deliberation round(s), 1 to 3."
+        }));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0017", None));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    for (call, want) in [
+        (
+            serde_json::json!({"id": "GOV-2026-0017", "round": 0}),
+            "round=0: rounds count from 1. Refused; nothing was charged.",
+        ),
+        (
+            serde_json::json!({"id": "GOV-2026-0017", "round": 9}),
+            "round=9: GOV-2026-0017 has 3 deliberation round(s), 1 to 3. \
+             Refused; nothing was charged.",
+        ),
+        (
+            serde_json::json!({"id": "GOV-2026-0017", "history": 0}),
+            "give true, false or a count from 1",
+        ),
+    ] {
+        agent
+            .handle(tool_use_message("get_content", call.clone()))
+            .await
+            .unwrap();
+        let rendered = transcript(&agent);
+        assert!(rendered.contains(want), "{call}: {rendered}");
+        assert!(rendered.ends_with(super::REFUSED_TURN_FREE), "{call}");
+    }
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains("count from 1. Refused; nothing was charged."),
+        "{rendered}"
+    );
+    assert_eq!(refused_round.calls(), 1);
+    assert_eq!(summary.calls(), 1, "looked up for what is there");
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 30 });
+}
+
+/// Betas of 0.113.0: in one turn, a history read and then a summary asked
+/// for by name both show the summary, and no pointer names a later call
+#[tokio::test]
+async fn an_explicit_summary_shows_in_a_turn_with_a_history_read() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let turn: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_a", "name": "fetch_agora_link",
+             "input": {"link": "agora://gov/GOV-2026-0006?detail=summary&history=true"}},
+            {"type": "tool_use", "id": "toolu_b", "name": "get_content",
+             "input": {"id": "GOV-2026-0006", "detail": "summary"}},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    agent.handle(turn).await.unwrap();
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered
+            .matches("The Council ratified v0.2 four to one.")
+            .count(),
+        1,
+        "{rendered}"
+    );
+}
+
+/// Betas of 0.113.0: a read by a rewritten id is the same read, as written,
+/// with the note before it
+#[tokio::test]
+async fn a_rewritten_id_reads_exactly_as_the_id() {
+    let body = {
+        let mut b = governance_content("GOV-2026-0005", None);
+        b["summary"] =
+            "| a | b |\n|---|---|\n| [x] | y |\n\n* one\n* two".into();
+        b
+    };
+    let mut results = Vec::new();
+    for id in ["GOV-2026-0005", "GOV-2026-5"] {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/agora/api/content/GOV-2026-0005");
+            then.status(200).json_body(body.clone());
+        });
+        let mut agent = agent(
+            &server,
+            SeedConfig {
+                max_rounds: 30,
+                ..quiet_config()
+            },
+        );
+        seat_start(&mut agent);
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": id, "detail": "summary"}),
+            ))
+            .await
+            .unwrap();
+        results.push(transcript(&agent));
+    }
+    assert_eq!(
+        results[1].replacen("Read GOV-2026-5 as GOV-2026-0005.\n\n", "", 1),
+        results[0]
+    );
+    assert!(results[1].contains("| [x] | y |"), "{}", results[1]);
+}
+
+/// Betas of 0.113.0 (R1): a round read again, at `version=original`, by
+/// any spelling and either tool, with full reads left and with them spent,
+/// is the pointer: nothing is read again or spent
+#[tokio::test]
+async fn a_round_read_again_is_the_pointer_at_either_version() {
+    let server = MockServer::start();
+    let revised = |body: &mut serde_json::Value, version: &str| {
+        body["version"] = version.into();
+        body["amendments"] = serde_json::json!([
+            {"id": "AMD-2026-0004", "kind": "revision", "basis": "x",
+             "note": "N", "created_at": "2026-10-02T00:00:00Z"}
+        ]);
+        body["round_bytes"] = serde_json::json!([100, 200, 3000]);
+    };
+    let round = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "3")
+            .query_param("version", "original");
+        let mut body = governance_content(
+            "GOV-2026-0017",
+            Some(serde_json::json!({"rounds": [
+                {"number": 3, "responses": [{"role": "lawyer", "vote": "yes",
+                 "rationale": "THIRD_ROUND_ORIGINAL"}]}
+            ]})),
+        );
+        body["round"] = 3.into();
+        revised(&mut body, "original");
+        then.status(200).json_body(body);
+    });
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| !has_param(req, "round"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let other = server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/");
+        then.status(500);
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 200,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let get = |v: serde_json::Value| tool_use_message("get_content", v);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+    let spellings = || {
+        vec![
+            get(
+                serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"}),
+            ),
+            get(
+                serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original", "detail": "full"}),
+            ),
+            get(
+                serde_json::json!({"id": "gov-2026-17", "round": "3", "version": "original"}),
+            ),
+            link("agora://gov/GOV-2026-0017?round=3&version=original"),
+            link(
+                "agora://gov/GOV-2026-0017?version=original&round=3&detail=full",
+            ),
+        ]
+    };
+    agent
+        .handle(get(serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"})))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("1 of 2 left this session"));
+    for call in spellings() {
+        agent.handle(call).await.unwrap();
+    }
+    assert_eq!(round.calls(), 1, "{}", transcript(&agent));
+    // Spend the other full read; the round is still the pointer
+    agent
+        .handle(get(serde_json::json!({"id": "GOV-2026-0006"})))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("0 of 2 left this session"));
+    for call in spellings() {
+        agent.handle(call).await.unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert_eq!(round.calls(), 1, "{rendered}");
+    assert_eq!(record.calls(), 1);
+    assert_eq!(other.calls(), 0, "{rendered}");
+    assert_eq!(rendered.matches("THIRD_ROUND_ORIGINAL").count(), 1);
+    assert_eq!(rendered.matches("That was a full read").count(), 2);
+    assert_eq!(
+        rendered
+            .matches("`agora://gov/GOV-2026-0017?round=3&version=original` is in your context already")
+            .count(),
+        10,
+        "{rendered}"
+    );
+}
+
+/// Betas of 0.113.0: a summary asked for by name, then a history read in
+/// the same turn: the history points at the summary; and a second history
+/// read fetches nothing again (review of 0.113.0)
+#[tokio::test]
+async fn a_history_after_its_summary_points_at_it_and_fetches_once() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("detail", "summary");
+        then.status(200).json_body(revised_entry("latest", None));
+    });
+    let original = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("version", "original");
+        then.status(200).json_body(revised_entry(
+            "original",
+            Some(serde_json::json!({"landmark": "no", "text": "t"})),
+        ));
+    });
+    let amendments = server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/AMD-");
+        then.status(200).json_body(revision_entry(
+            "AMD-2026-0004",
+            serde_json::json!([{"op": "test", "path": "/landmark", "value": "no"}]),
+        ));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let turn: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_a", "name": "get_content",
+             "input": {"id": "GOV-2026-0017", "detail": "summary"}},
+            {"type": "tool_use", "id": "toolu_b", "name": "get_content",
+             "input": {"id": "GOV-2026-0017", "detail": "summary", "history": true}},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    agent.handle(turn).await.unwrap();
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered
+            .matches("The Council ratified v0.2 four to one.")
+            .count(),
+        1,
+        "{rendered}"
+    );
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0017", "detail": "summary", "history": 1}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(original.calls(), 1, "cached for the session");
+    assert_eq!(amendments.calls(), 2, "each revision once");
+}
+
+/// Betas of 0.113.0 (B1): a round whose text is the same at both versions
+/// is one part: read at one version and then the other, either order,
+/// with full reads left and spent, the second is the pointer and free
+#[tokio::test]
+async fn a_round_the_same_at_both_versions_is_one_part() {
+    for (first, second) in [("original", "latest"), ("latest", "original")] {
+        let server = MockServer::start();
+        let round_body = |version: &str| {
+            let mut body = governance_content(
+                "GOV-2026-0017",
+                Some(serde_json::json!({"rounds": [
+                    {"number": 3, "responses": [{"role": "lawyer", "vote": "yes",
+                     "rationale": "THE_SAME_ROUND"}]}
+                ]})),
+            );
+            body["round"] = 3.into();
+            body["version"] = version.into();
+            body["amendments"] = serde_json::json!([
+                {"id": "AMD-2026-0033", "kind": "revision", "basis": "x",
+                 "note": "Landmark", "created_at": "2026-10-02T00:00:00Z"}
+            ]);
+            body["round_bytes"] = serde_json::json!([10, 10, 3000]);
+            body
+        };
+        let original = server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/GOV-2026-0017")
+                .query_param("round", "3")
+                .query_param("version", "original");
+            then.status(200).json_body(round_body("original"));
+        });
+        let latest = server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/GOV-2026-0017")
+                .query_param("round", "3")
+                .is_true(|req| !has_param(req, "version"));
+            then.status(200).json_body(round_body("latest"));
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/agora/api/content/GOV-2026-0006");
+            then.status(200).json_body(governance_content(
+                "GOV-2026-0006",
+                Some(two_round_record()),
+            ));
+        });
+        let mut agent = agent(
+            &server,
+            SeedConfig {
+                max_rounds: 30,
+                ..quiet_config()
+            },
+        );
+        seat_start(&mut agent);
+        let read = |version: &str| {
+            let mut v = serde_json::json!({"id": "GOV-2026-0017", "round": 3});
+            if version == "original" {
+                v["version"] = "original".into();
+            }
+            tool_use_message("get_content", v)
+        };
+        agent.handle(read(first)).await.unwrap();
+        agent.handle(read(second)).await.unwrap();
+        // Spend the other read: still the pointer, at either version
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .unwrap();
+        agent.handle(read(second)).await.unwrap();
+        agent.handle(read(first)).await.unwrap();
+        let rendered = transcript(&agent);
+        assert_eq!(
+            rendered.matches("THE_SAME_ROUND").count(),
+            1,
+            "{first} then {second}: {rendered}"
+        );
+        assert_eq!(rendered.matches("That was a full read").count(), 2);
+        assert!(
+            rendered.contains(
+                "the same text: shown in your read of GOV-2026-0017 round 3"
+            ),
+            "{rendered}"
+        );
+        assert!(original.calls() <= 2 && latest.calls() <= 2);
+    }
+}
+
+/// Betas of 0.113.0: a data set's summary is one, read alone or with its
+/// listing (which drops its "Read this first" sentence), and its pointers
+/// give one size
+#[test]
+fn a_data_sets_summary_is_one_with_or_without_its_listing() {
+    let once = super::ShownOnce::default();
+    let id: crate::ids::GovernanceLogId = "DATA-2026-0018".parse().unwrap();
+    once.begin("your read of DATA-2026-0018");
+    once.mark_summary(
+        id.clone(),
+        None,
+        "Data set, compiled by c.\n\nd\n\n3 files. Read this first: attachment=\"README.md\".",
+    );
+    once.commit();
+    let shown = once
+        .earlier_summary(&id, Some("Data set, compiled by c.\n\nd\n\n3 files."))
+        .expect("the same summary");
+    assert_eq!(
+        shown.bytes,
+        "Data set, compiled by c.\n\nd\n\n3 files.".len() as u64
+    );
+}
+
+/// Betas of 0.113.0: an id that is none says every kind `get_content`
+/// reads, from the parser's own lists
+#[test]
+fn a_bad_id_names_every_kind() {
+    let e = "nonsense"
+        .parse::<crate::ids::ContentRef>()
+        .unwrap_err()
+        .to_string();
+    for p in crate::ids::GovernanceLogPrefix::ALL {
+        assert!(e.contains(&format!("{p}-YYYY-NNNN")), "{e}");
+    }
+    for slug in crate::ids::PlatformDoc::SLUGS {
+        assert!(e.contains(&format!("{slug:?}")), "{e}");
+    }
+    // Every slug but the template parses as a document
+    for slug in crate::ids::PlatformDoc::SLUGS
+        .iter()
+        .filter(|s| !s.contains('<'))
+    {
+        assert!(slug.parse::<crate::ids::PlatformDoc>().is_ok(), "{slug}");
+    }
+}
+
+/// Betas of 0.113.0 (H1): a round the same at both versions points at the
+/// earlier read and says what the revisions change beside it, here the
+/// landmark that read's header showed at the other version
+#[tokio::test]
+async fn a_cross_version_pointer_names_what_changed_beside_the_part() {
+    let server = MockServer::start();
+    let amendments = serde_json::json!([
+        {"id": "AMD-2026-0033", "kind": "revision", "basis": "x",
+         "note": "Landmark", "created_at": "2026-10-02T00:00:00Z"}
+    ]);
+    let round = serde_json::json!({"number": 3, "responses": [
+        {"role": "lawyer", "vote": "yes", "rationale": "THE_SAME_ROUND"}]});
+    let round_body = |version: &str, landmark: bool| {
+        let mut body = governance_content(
+            "GOV-2026-0017",
+            Some(
+                serde_json::json!({"landmark": landmark, "rounds": [round.clone()]}),
+            ),
+        );
+        body["round"] = 3.into();
+        body["version"] = version.into();
+        body["amendments"] = amendments.clone();
+        body["round_bytes"] = serde_json::json!([10, 10, 3000]);
+        body
+    };
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "3")
+            .query_param("version", "original");
+        then.status(200).json_body(round_body("original", false));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "3")
+            .is_true(|req| !has_param(req, "version"));
+        then.status(200).json_body(round_body("latest", true));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("detail", "full_with_attachments")
+            .query_param("version", "original");
+        let mut body = governance_content(
+            "GOV-2026-0017",
+            Some(serde_json::json!({"landmark": false, "rounds": [
+                {"number": 1}, {"number": 2}, round.clone()]})),
+        );
+        body["amendments"] = amendments.clone();
+        then.status(200).json_body(body);
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/AMD-2026-0033");
+        then.status(200).json_body(revision_entry(
+            "AMD-2026-0033",
+            serde_json::json!([{"op": "replace", "path": "/landmark", "value": true}]),
+        ));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    for call in [
+        serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"}),
+        serde_json::json!({"id": "GOV-2026-0017", "round": 3}),
+    ] {
+        agent
+            .handle(tool_use_message("get_content", call))
+            .await
+            .unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "its revisions change nothing in it, but change `/landmark`: \
+             false → true beside it. Nothing was charged."
+        ),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("THE_SAME_ROUND").count(), 1);
 }

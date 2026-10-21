@@ -417,6 +417,8 @@ impl RetryAfter for SeedError {
 
 /// See the [module docs](self)
 pub struct SeedAgent {
+    /// What this session showed the agent, and in which turn (in memory only)
+    shown_once: ShownOnce,
     id: AgentId,
     state: SeedState,
     tools: ToolBox,
@@ -466,14 +468,15 @@ pub struct SeedAgent {
 /// for help, should never run out of a session's worth of them
 pub const MAX_FREE_REFUSED_TURNS: usize = 5;
 
-/// Said after a turn whose every call was refused before anything was read
+/// Said after a turn whose every call was refused ([`tool::REFUSED`] says
+/// what a refusal charged)
 const REFUSED_TURN_FREE: &str =
-    "(Refused before anything was read; this turn doesn't count.)";
+    "(Every call was refused; this turn doesn't count.)";
 /// Said after such a turn past [`MAX_FREE_REFUSED_TURNS`] in a row
 fn refused_turn_counted() -> String {
     format!(
-        "(Refused before anything was read; after {MAX_FREE_REFUSED_TURNS} \
-         such turns in a row, this one counted as a round.)"
+        "(Every call was refused; after {MAX_FREE_REFUSED_TURNS} such turns \
+         in a row, this one counted as a round.)"
     )
 }
 
@@ -1389,13 +1392,14 @@ impl Agent for SeedAgent {
         let tools = ToolBox::flat().add(
             Gauged::new(agora, context.clone())
                 .for_agent(id)
-                .with_shown_once(shown_once),
+                .with_shown_once(shown_once.clone()),
         );
 
         let phase = Phase::Acting {
             rounds_left: ctx.config.max_rounds,
         };
         Ok(Self {
+            shown_once,
             id,
             state,
             tools,
@@ -1671,6 +1675,8 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        // One response, one turn: what a turn showed is in its context
+        self.shown_once.next_turn();
         self.context.record(&response.usage);
         match self.phase {
             Phase::Acting { rounds_left } => {

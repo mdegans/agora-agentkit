@@ -40,6 +40,8 @@ pub struct Shown {
     pub raw: u64,
     /// For a comment, the post it is on
     pub post: Option<PostId>,
+    /// The turn that showed it ([`ShownOnce::turn`])
+    pub turn: u64,
 }
 
 #[derive(Debug, Default)]
@@ -57,8 +59,14 @@ struct Inner {
     /// Governance entries' summaries shown this session (betas of 0.108:
     /// get_council_meetings showed GOV-2026-0017's, and a summary read
     /// showed it again)
-    summaries: HashMap<GovernanceLogId, Shown>,
-    pending_summaries: Vec<(GovernanceLogId, Shown)>,
+    /// By id and the text's [`text_key`]: one text is one summary across
+    /// versions, and a revised record's two texts are two (betas of 0.113.0)
+    summaries: HashMap<(GovernanceLogId, u64), Shown>,
+    pending_summaries: Vec<((GovernanceLogId, u64), Shown)>,
+    /// The same, by id and version (`latest` for a record with one text),
+    /// for a part read, which carries no summary to key by
+    summaries_at: HashMap<(GovernanceLogId, &'static str), Shown>,
+    pending_summaries_at: Vec<((GovernanceLogId, &'static str), Shown)>,
     /// Parts of governance records shown this session (an attachment, a
     /// data set's file or lines of one), by the read's canonical link
     /// (0.112.0, beta round)
@@ -66,6 +74,8 @@ struct Inner {
     pending_parts: Vec<(String, Shown)>,
     /// How the result being rendered points at further reads (0.112.0)
     cues: Cues,
+    /// The agent's turns this session, counted by the tool's `on_turn`
+    turn: u64,
 }
 
 /// How a result points at further reads: in `agora://` links when it was
@@ -79,6 +89,36 @@ pub struct Cues {
     pub links: bool,
     /// Full governance reads left this session, when the tool counts them
     pub full_reads_left: Option<u64>,
+    /// The read asked for a summary by name (`detail=summary`): it is shown,
+    /// even if it was shown before
+    pub summary_asked: bool,
+}
+
+/// A key for `text` by its content, so the same text is one key whatever
+/// read or version showed it (betas of 0.113.0). `DefaultHasher::new` is
+/// keyed the same in every process; nothing here outlives the session
+pub fn text_key(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.trim().hash(&mut h);
+    h.finish()
+}
+
+/// A summary as shown once: without the "Read this first" sentence a
+/// data set's summary carries or not, as its read has a listing or not
+/// (betas of 0.113.0: one summary was two, and its two pointers two sizes)
+pub fn summary_text(text: &str) -> String {
+    const OPEN: &str = "Read this first: attachment=\"";
+    let Some(at) = text.find(OPEN) else {
+        return text.trim().to_string();
+    };
+    let Some(end) = text[at + OPEN.len()..].find("\".") else {
+        return text.trim().to_string();
+    };
+    let end = at + OPEN.len() + end + 2;
+    format!("{}{}", text[..at].trim_end(), &text[end..])
+        .trim()
+        .to_string()
 }
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
@@ -94,6 +134,7 @@ impl ShownOnce {
         inner.pending.clear();
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
+        inner.pending_summaries_at.clear();
         inner.pending_parts.clear();
         inner.read = read.into();
     }
@@ -114,6 +155,7 @@ impl ShownOnce {
     pub fn mark_part(&self, link: String, bytes: usize) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
+        let turn = inner.turn;
         inner.pending_parts.push((
             link,
             Shown {
@@ -121,8 +163,19 @@ impl ShownOnce {
                 bytes: bytes as u64,
                 raw: bytes as u64,
                 post: None,
+                turn,
             },
         ));
+    }
+
+    /// A new turn of the agent's begins
+    pub fn next_turn(&self) {
+        self.0.write().expect("shown-once lock").turn += 1;
+    }
+
+    /// The turn this is, from 0
+    pub fn turn(&self) -> u64 {
+        self.0.read().expect("shown-once lock").turn
     }
 
     /// How the result about to be rendered points at further reads
@@ -135,31 +188,117 @@ impl ShownOnce {
         self.0.read().expect("shown-once lock").cues
     }
 
-    /// Where `id`'s summary was shown this session, if it was
-    pub fn earlier_summary(&self, id: &GovernanceLogId) -> Option<Shown> {
+    /// Where `id`'s summary `text` was shown this session, if it was; with
+    /// no text, where any of its summaries was
+    pub fn earlier_summary(
+        &self,
+        id: &GovernanceLogId,
+        text: Option<&str>,
+    ) -> Option<Shown> {
+        let key = text.map(|t| text_key(&summary_text(t)));
+        let wanted = |k: &(GovernanceLogId, u64)| {
+            k.0 == *id && key.is_none_or(|key| k.1 == key)
+        };
         let inner = self.0.read().expect("shown-once lock");
-        inner.summaries.get(id).cloned().or_else(|| {
-            inner
-                .pending_summaries
-                .iter()
-                .find(|(p, _)| p == id)
-                .map(|(_, s)| s.clone())
+        inner
+            .pending_summaries
+            .iter()
+            .find(|(k, _)| wanted(k))
+            .map(|(_, s)| s.clone())
+            .or_else(|| {
+                inner
+                    .summaries
+                    .iter()
+                    .find(|(k, _)| wanted(k))
+                    .map(|(_, s)| s.clone())
+            })
+    }
+
+    /// How much of `id`'s summary `text` was shown this session: the
+    /// longest run of its leading paragraphs a read showed, and where.
+    /// Never more than was shown (betas of 0.113.0): the rest is the
+    /// reader's to read. Its offset is into [`summary_text`]`(text)`
+    pub fn summary_seen(
+        &self,
+        id: &GovernanceLogId,
+        text: &str,
+    ) -> Option<(Shown, usize)> {
+        let t = summary_text(text);
+        let mut ends: Vec<usize> = t
+            .match_indices("\n\n")
+            .map(|(at, _)| at)
+            .chain(std::iter::once(t.len()))
+            .collect();
+        ends.reverse();
+        ends.into_iter().find_map(|end| {
+            self.earlier_summary(id, Some(&t[..end])).map(|s| (s, end))
         })
     }
 
-    /// The result being rendered shows `id`'s summary, `bytes` long
-    pub fn mark_summary(&self, id: GovernanceLogId, bytes: usize) {
+    /// Where `id`'s summary at `version` was shown this session, if it was
+    pub fn earlier_summary_at(
+        &self,
+        id: &GovernanceLogId,
+        version: &'static str,
+    ) -> Option<Shown> {
+        let key = (id.clone(), version);
+        let inner = self.0.read().expect("shown-once lock");
+        inner
+            .pending_summaries_at
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, s)| s.clone())
+            .or_else(|| inner.summaries_at.get(&key).cloned())
+    }
+
+    /// The result being rendered shows `id`'s summary `text`. Each of its
+    /// leading paragraphs counts as shown too: a served summary is the
+    /// signed one with the server's notes after it, and a record's own
+    /// copy is the signed one alone (betas of 0.113.0)
+    /// `version` is which of a revised record's texts it is (`None` for
+    /// one text, or the latest)
+    pub fn mark_summary(
+        &self,
+        id: GovernanceLogId,
+        version: Option<&'static str>,
+        text: &str,
+    ) {
+        self.mark_summary_from(id, version, text, 0)
+    }
+
+    /// [`Self::mark_summary`] for a result that showed `text` from offset
+    /// `from` (into [`summary_text`]) on, the rest pointed at: its leading
+    /// paragraphs keep the reads that showed them
+    pub fn mark_summary_from(
+        &self,
+        id: GovernanceLogId,
+        version: Option<&'static str>,
+        text: &str,
+        from: usize,
+    ) {
+        let text = &summary_text(text);
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
-        inner.pending_summaries.push((
-            id,
-            Shown {
-                read,
-                bytes: bytes as u64,
-                raw: bytes as u64,
-                post: None,
-            },
-        ));
+        let turn = inner.turn;
+        let shown = Shown {
+            read,
+            bytes: text.len() as u64,
+            raw: text.len() as u64,
+            post: None,
+            turn,
+        };
+        inner
+            .pending_summaries_at
+            .push(((id.clone(), version.unwrap_or("latest")), shown.clone()));
+        let ends = text
+            .match_indices("\n\n")
+            .map(|(at, _)| at)
+            .chain(std::iter::once(text.len()));
+        for end in ends.filter(|&end| end > from) {
+            inner
+                .pending_summaries
+                .push(((id.clone(), text_key(&text[..end])), shown.clone()));
+        }
     }
 
     /// Whether the note `legend` was shown this session (or by the result
@@ -187,6 +326,24 @@ impl ShownOnce {
     /// The read of `id`, as [`Self::begin`] names it
     pub fn read_of(id: impl std::fmt::Display) -> String {
         format!("your read of {id}")
+    }
+
+    /// The read of a governance entry, as a pointer names it: its part,
+    /// and which version, when the record has two (`your read of
+    /// GOV-2026-0017 (original)`)
+    pub fn read_of_entry(
+        entry: &crate::responses::GovernanceEntryResponse,
+    ) -> String {
+        let mut read = Self::read_of(&entry.id);
+        if let Some(n) = entry.round {
+            read.push_str(&format!(" round {n}"));
+        } else if let Some(a) = &entry.attachment {
+            read.push_str(&format!(" {a:?}"));
+        }
+        if let Some(version) = entry.version_label() {
+            read.push_str(&format!(" ({version})"));
+        }
+        read
     }
 
     /// The read of `id`, by its short form
@@ -225,6 +382,7 @@ impl ShownOnce {
     ) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
+        let turn = inner.turn;
         inner.pending.push((
             id.into(),
             Shown {
@@ -232,6 +390,7 @@ impl ShownOnce {
                 bytes: bytes as u64,
                 raw: raw as u64,
                 post,
+                turn,
             },
         ));
     }
@@ -245,9 +404,15 @@ impl ShownOnce {
         }
         let legends = std::mem::take(&mut inner.pending_legends);
         inner.legends.extend(legends);
+        // The latest showing: a summary is shown again only when asked
+        // for by name, and a later pointer names that read
         let summaries = std::mem::take(&mut inner.pending_summaries);
         for (id, shown) in summaries {
-            inner.summaries.entry(id).or_insert(shown);
+            inner.summaries.insert(id, shown);
+        }
+        let summaries = std::mem::take(&mut inner.pending_summaries_at);
+        for (id, shown) in summaries {
+            inner.summaries_at.insert(id, shown);
         }
         let parts = std::mem::take(&mut inner.pending_parts);
         for (link, shown) in parts {
@@ -262,6 +427,7 @@ impl ShownOnce {
         inner.pending.clear();
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
+        inner.pending_summaries_at.clear();
         inner.pending_parts.clear();
     }
 
