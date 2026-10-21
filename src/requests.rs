@@ -1444,8 +1444,7 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub lines: Option<crate::govlog::LineRange>,
-    /// What each revision of the record changed, oldest first: true for
-    /// all of them, or how many of the last
+    /// What each revision changed: `true` for all, or how many of the last
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
