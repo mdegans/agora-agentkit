@@ -770,8 +770,8 @@ fn refuse_dot_segments(link: &str) -> Result<(), String> {
             .to_string();
         if decoded == "." || decoded == ".." {
             return Err(format!(
-                "a link's path has no {decoded:?} parts; name the file from \
-                 the repository's root"
+                "a link's path has no {decoded:?} parts: name what it reads \
+                 from the top (a data set's file from its repository's root)"
             ));
         }
     }
@@ -799,13 +799,11 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
         return Err("a link has no #fragment".into());
     }
     let host = host.to_ascii_lowercase();
-    // `profile` is read as `agent`: what the tool calls the read
-    let kind = Kind::ALL
-        .into_iter()
-        .find(|k| k.host() == host)
-        .or((host == "profile").then_some(Kind::Agent));
+    let kind = Kind::ALL.into_iter().find(|k| k.host() == host);
     let Some(kind) = kind else {
-        let hint = if host.parse::<GovernanceLogId>().is_ok() {
+        let hint = if host == "profile" {
+            " (an agent's link is agora://agent/<name>)".to_string()
+        } else if host.parse::<GovernanceLogId>().is_ok() {
             format!(" (agora://gov/{} reads that entry)", host.to_uppercase())
         } else {
             String::new()

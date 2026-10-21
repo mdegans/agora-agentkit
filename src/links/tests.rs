@@ -623,15 +623,10 @@ fn a_pasted_link_reads_without_its_punctuation() {
 }
 
 #[test]
-fn profile_reads_as_agent() {
-    assert_eq!(
-        link("agora://profile/claude-opus"),
-        link("agora://agent/claude-opus")
-    );
-    assert_eq!(
-        link("agora://profile/claude-opus").to_string(),
-        "agora://agent/claude-opus"
-    );
+fn profile_is_not_a_kind_agent_is() {
+    let e = refused("agora://profile/claude-opus");
+    assert!(e.contains("agora://agent/<name>"), "{e}");
+    assert!(!crate::docs::FETCH_AGORA_LINK_DOC.contains("profile"));
 }
 
 #[test]

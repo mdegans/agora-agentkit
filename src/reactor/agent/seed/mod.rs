@@ -453,6 +453,44 @@ pub struct SeedAgent {
     last_failure: Option<String>,
     /// The current closing phase's `max_tokens` before any clamp
     phase_budget: u32,
+    /// Acting turns in a row whose every call was refused for its input
+    /// before anything was read ([`MAX_FREE_REFUSED_TURNS`])
+    refused_streak: usize,
+}
+
+/// Turns in a row whose every call was refused for its input, before
+/// anything was read or charged, that do not count against the session's
+/// rounds (Steward, 2026-10-21). The next counts, as a round and as a
+/// stall; any turn with a call that was not refused resets the streak.
+/// Not a cap per session: an agent correcting its input, or one day asking
+/// for help, should never run out of a session's worth of them
+pub const MAX_FREE_REFUSED_TURNS: usize = 5;
+
+/// Said after a turn whose every call was refused before anything was read
+const REFUSED_TURN_FREE: &str =
+    "(Refused before anything was read; this turn doesn't count.)";
+/// Said after such a turn past [`MAX_FREE_REFUSED_TURNS`] in a row
+const REFUSED_TURN_COUNTED: &str = "(Refused before anything was read; \
+     after 5 such turns in a row, this one counted as a round.)";
+
+/// Whether the last message holds tool results and every one is a
+/// refusal of its call's input ([`tool::is_refusal`])
+fn every_call_refused(prompt: &Prompt) -> bool {
+    use misanthropic::prompt::message::{Block, Role};
+    let Some(last) = prompt.messages.last().filter(|m| m.role == Role::User)
+    else {
+        return false;
+    };
+    let mut results = last.content.iter().filter_map(|b| match b {
+        Block::ToolResult { result } => Some(result),
+        _ => None,
+    });
+    let mut any = false;
+    let every = results.all(|r| {
+        any = true;
+        tool::is_refusal(r)
+    });
+    any && every
 }
 
 /// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
@@ -1370,6 +1408,7 @@ impl Agent for SeedAgent {
             contact_request: None,
             hold_survey: false,
             pauses: 0,
+            refused_streak: 0,
             context,
             shown,
             phase_failures: 0,
@@ -1681,9 +1720,28 @@ impl Agent for SeedAgent {
                         self.seat_unrun_calls(response)?;
                         return self.begin_reflect();
                     }
-                    let left = rounds_left - 1;
+                    let mut left = rounds_left - 1;
                     self.phase = Phase::Acting { rounds_left: left };
-                    let control = default_handle(self, response).await?;
+                    let mut control = default_handle(self, response).await?;
+                    // A turn whose every call was refused for its input is
+                    // free, up to MAX_FREE_REFUSED_TURNS in a row: the round
+                    // is given back, and it is not a stall
+                    let mut refused_note = None;
+                    if every_call_refused(&self.state.prompt) {
+                        self.refused_streak += 1;
+                        if self.refused_streak <= MAX_FREE_REFUSED_TURNS {
+                            left = rounds_left;
+                            self.phase = Phase::Acting { rounds_left: left };
+                            if control == Control::Stalled {
+                                control = Control::Continue;
+                            }
+                            refused_note = Some(REFUSED_TURN_FREE);
+                        } else {
+                            refused_note = Some(REFUSED_TURN_COUNTED);
+                        }
+                    } else {
+                        self.refused_streak = 0;
+                    }
                     // Said with the round's results, so the agent knows
                     // before it plans the next one (bridge test agents,
                     // 2026-10-13: round 10 of 10 gave no sign it was the
@@ -1696,11 +1754,15 @@ impl Agent for SeedAgent {
                         self.state.prompt.messages.last().is_some_and(|m| {
                             m.role == misanthropic::prompt::message::Role::User
                         });
+                    let notice = match (refused_note, rounds_notice(left)) {
+                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                        (a, b) => a.or(b).map(str::to_string),
+                    };
                     if let (
                         Control::Continue | Control::Stalled,
                         Some(notice),
                         true,
-                    ) = (&control, rounds_notice(left), results_seated)
+                    ) = (&control, notice, results_seated)
                     {
                         seat_user(&mut self.state.prompt, notice)
                             .map_err(|e| SeedError::Prompt(e.to_string()))?;

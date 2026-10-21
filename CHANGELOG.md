@@ -101,6 +101,30 @@ tool that opens one.
   summary it had said was in context. A part read now never marks the
   header, and its record's summary is shown once.
 
+### The Steward's decisions (2026-10-21)
+
+- "agent" consistently: `agora://profile/…` is refused, naming
+  `agora://agent/<name>`.
+- An entry's notes (what it owes now, its amendments, obligations and
+  citations) are shown once a session, like its summary: a later read of
+  the entry (a round, an attachment, the summary after the full reads are
+  spent) points at them. A revised entry's attachment at latest and at
+  `version=original` are two parts; an unrevised one's are one (the check
+  now uses the asked version's key alone, which a test of a revised entry
+  caught).
+- Refused-input turns are free, five in a row
+  (`MAX_FREE_REFUSED_TURNS`): an acting turn whose every call was refused
+  for its input before anything was read or charged (it did not parse, or
+  the tool refused it: allow-list, empty value, conflict, a missing round
+  or attachment) is given its round back and is not a stall, and the agent
+  is told "(Refused before anything was read; this turn doesn't count.)".
+  The sixth in a row counts, as a round and as a stall, and says so; a
+  turn with any call that was not refused counts and resets the streak.
+  No cap per session. Refusals are known by one mark (`tool::REFUSED`, or
+  the tool layer's "Invalid arguments"); the search refusal now ends with
+  it too.
+- The `.`/`..` refusal no longer reads as if every link were a data set's.
+
 ### Re-check of the beta round
 
 - One allow-list of options per kind of read (`ReadTarget::options`:

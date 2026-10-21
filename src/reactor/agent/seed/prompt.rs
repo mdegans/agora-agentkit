@@ -3657,11 +3657,16 @@ pub(super) fn format_governance_entry_once(
     } else {
         out.push_str(&format!("Standing: {}\n", entry.standing));
     }
+    // The entry's notes (what it owes now, its amendments, obligations and
+    // citations) are shown once a session, like its summary: a later read
+    // of it points at them (Steward, 2026-10-21; a beta was sent ~2.2k tok
+    // of them again on each round it read)
+    let mut notes = String::new();
     if let Some(o) = &entry.obligation {
-        out.push_str(&format!("**Now**: {}\n", format_obligation(o)));
+        notes.push_str(&format!("**Now**: {}\n", format_obligation(o)));
     }
     for a in &entry.amendments {
-        out.push_str(&format!(
+        notes.push_str(&format!(
             "**{} {} ({})**: {}{}{}\n",
             if a.kind.is_obligation() {
                 "Updated by"
@@ -3684,15 +3689,15 @@ pub(super) fn format_governance_entry_once(
         ));
     }
     if !entry.obligations.is_empty() {
-        out.push_str("Obligations this entry created:\n");
+        notes.push_str("Obligations this entry created:\n");
         for o in &entry.obligations {
-            out.push_str(&format!("- {}\n", format_obligation(o)));
+            notes.push_str(&format!("- {}\n", format_obligation(o)));
         }
     }
     // Later entries that say something about this one: a reader holding
     // only this entry otherwise has no way to know they exist.
     for c in &entry.cited_by {
-        out.push_str(&format!(
+        notes.push_str(&format!(
             "**Cited by {}** ({}, {}): {}\n",
             c.id,
             match c.relation {
@@ -3708,6 +3713,28 @@ pub(super) fn format_governance_entry_once(
             c.created_at.format("%Y-%m-%d"),
             one_line(&c.title),
         ));
+    }
+    if !notes.is_empty() {
+        let key = format!(
+            "notes of {} {}",
+            entry.id,
+            match entry.version {
+                Some(RecordVersion::Original) => "original",
+                _ => "latest",
+            }
+        );
+        match once.earlier_part(&key) {
+            Some(shown) => out.push_str(&format!(
+                "(Its amendments, obligations and citations are in your \
+                 context already: shown in {}, {}.)\n",
+                shown.read,
+                about_tokens(shown.bytes)
+            )),
+            None => {
+                once.mark_part(key, notes.len());
+                out.push_str(&notes);
+            }
+        }
     }
     match entry.version {
         Some(RecordVersion::Original) => {

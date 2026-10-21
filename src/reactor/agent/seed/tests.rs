@@ -6327,3 +6327,168 @@ async fn every_spelling_of_a_part_is_read_once() {
         "{rendered}"
     );
 }
+
+/// A turn whose every call was refused for its input is free, five in a
+/// row; the sixth counts; a turn with a call that was not refused counts
+/// and resets the streak; the agent is told which (Steward, 2026-10-21)
+#[tokio::test]
+async fn refused_turns_are_free_five_in_a_row() {
+    let server = MockServer::start();
+    let id = Uuid::new_v4();
+    server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/");
+        then.status(200).json_body(post_content(id));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 3,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let bad = || {
+        tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://nowhere/x"}),
+        )
+    };
+    let conflict = || {
+        tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "detail": "summary", "round": 2}),
+        )
+    };
+    let good = || {
+        tool_use_message(
+            "get_content",
+            serde_json::json!({"id": id.to_string()}),
+        )
+    };
+    let notes =
+        |agent: &SeedAgent, s: &str| transcript(agent).matches(s).count();
+    for i in 0..super::MAX_FREE_REFUSED_TURNS {
+        let call = if i % 2 == 0 { bad() } else { conflict() };
+        let control = agent.handle(call).await.unwrap();
+        assert_eq!(control, Control::Continue, "a free turn is no stall");
+    }
+    assert_eq!(notes(&agent, super::REFUSED_TURN_FREE), 5);
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 3 });
+    // The sixth in a row counts, and says so
+    agent.handle(bad()).await.unwrap();
+    assert_eq!(notes(&agent, super::REFUSED_TURN_COUNTED), 1);
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 2 });
+    // A read counts and resets the streak
+    agent.handle(good()).await.unwrap();
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 1 });
+    assert!(transcript(&agent).contains(super::ONE_ROUND_LEFT));
+    agent.handle(bad()).await.unwrap();
+    assert_eq!(notes(&agent, super::REFUSED_TURN_FREE), 6);
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 1 });
+    // A turn with one refused call and one read counts as a round
+    let mixed: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_a", "name": "fetch_agora_link",
+             "input": {"link": "agora://nowhere/x"}},
+            {"type": "tool_use", "id": "toolu_b", "name": "get_content",
+             "input": {"id": id.to_string()}},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    agent.handle(mixed).await.unwrap();
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 0 });
+    assert_eq!(notes(&agent, super::REFUSED_TURN_FREE), 6);
+}
+
+/// An entry's notes (amendments, obligations, citations) are shown once:
+/// a later read of it points at them; a revised entry's attachment at its
+/// latest and its original are two parts, each read (Steward, 2026-10-21)
+#[tokio::test]
+async fn an_entrys_notes_once_and_a_revised_entrys_two_versions() {
+    let server = MockServer::start();
+    let listed = serde_json::json!([{
+        "name": "clerk-reads", "note": "what the Clerk read", "bytes": 3000,
+    }]);
+    let body = |version: Option<&str>| {
+        let mut body = governance_content(
+            "GOV-2026-0006",
+            Some(serde_json::json!({"attachments": [
+                {"name": "clerk-reads", "content": "WHAT_THE_CLERK_READ"}
+            ]})),
+        );
+        body["attachment"] = "clerk-reads".into();
+        body["attachments"] = listed.clone();
+        body["amendments"] = serde_json::json!([{
+            "id": "AMD-2026-0001",
+            "kind": "revision",
+            "basis": "a typo",
+            "note": "A_LONG_AMENDMENT_NOTE",
+            "created_at": "2026-08-20T00:00:00Z",
+        }]);
+        if let Some(v) = version {
+            body["version"] = v.into();
+        }
+        body
+    };
+    let latest = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("attachment", "clerk-reads")
+            .is_true(|req| !has_param(req, "version"));
+        then.status(200).json_body(body(None));
+    });
+    let original = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("attachment", "clerk-reads")
+            .query_param("version", "original");
+        then.status(200).json_body(body(Some("original")));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 20,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    for l in [
+        "agora://gov/GOV-2026-0006/clerk-reads",
+        "agora://gov/GOV-2026-0006/clerk-reads?version=original",
+        "agora://gov/GOV-2026-0006/clerk-reads",
+        "agora://gov/GOV-2026-0006/clerk-reads?version=original",
+    ] {
+        agent
+            .handle(tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": l }),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        (latest.calls(), original.calls()),
+        (1, 1),
+        "two parts: {}",
+        transcript(&agent)
+    );
+    let rendered = transcript(&agent);
+    assert_eq!(rendered.matches("WHAT_THE_CLERK_READ").count(), 2);
+    assert_eq!(
+        rendered
+            .matches("is in your context already: shown in")
+            .count(),
+        2
+    );
+    // The notes: once for latest, once for the original's own
+    assert_eq!(
+        rendered.matches("A_LONG_AMENDMENT_NOTE").count(),
+        2,
+        "{rendered}"
+    );
+}

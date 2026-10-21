@@ -133,6 +133,21 @@ fn relink(text: &str) -> String {
     out
 }
 
+/// How a call refused for its input, before anything was read or charged,
+/// ends: the one mark [`is_refusal`] knows it by (0.112.0)
+pub(super) const REFUSED: &str =
+    "Nothing was read, and no full read was spent.";
+
+/// Whether a tool result is a refusal of the call's input made before
+/// anything was read or charged: an input that does not parse (the
+/// tool layer's "Invalid arguments"), or one this tool refused first
+/// ([`REFUSED`]). A server's error, or any read, is not one
+pub(super) fn is_refusal(result: &misanthropic::tool::Result) -> bool {
+    let text = result.content.to_string();
+    result.is_error
+        && (text.starts_with("Invalid arguments") || text.ends_with(REFUSED))
+}
+
 /// Deletions, restores and erasures allowed per session, together.
 ///
 /// Against a degenerate loop (delete, restore, delete …), not a rate on
@@ -636,9 +651,7 @@ impl Agora {
         // A read that cannot be what was asked is refused before any is
         // made, so none is spent on it (beta round of 0.112.0)
         if let Some(why) = input.conflict() {
-            return Err(err(format!(
-                "{why}. Nothing was read, and no full read was spent."
-            )));
+            return Err(err(format!("{why}. {REFUSED}")));
         }
         self.set_cues();
         // The budget is about governance attention, so it is the kind of
@@ -663,9 +676,12 @@ impl Agora {
         // Checked before the budget, so the pointer comes whether or not
         // full reads are left (beta round of 0.112.0)
         let part_keys = part_keys(&input);
+        // Its own key alone: a read of a record with no revision marks the
+        // other version's key too, and one with a revision does not (two
+        // texts, two parts)
         if let Some(shown) = part_keys
-            .iter()
-            .find_map(|k| self.shown_once.earlier_part(k))
+            .first()
+            .and_then(|k| self.shown_once.earlier_part(k))
         {
             // Named by its canonical link, whichever spelling was asked
             return Ok(format!(
@@ -737,9 +753,7 @@ impl Agora {
                     self.by_link,
                 )
             {
-                return Err(err(format!(
-                    "{missing} Nothing was read, and no full read was spent."
-                )));
+                return Err(err(format!("{missing} {REFUSED}")));
             }
             self.shown_once.begin(super::ShownOnce::read_of(&entry.id));
             // Marked with the part's own size; a read that is left out, or
@@ -1316,7 +1330,7 @@ impl Agora {
         mut args: SearchInput,
     ) -> Result<Content, Content> {
         if let Some(why) = args.conflict() {
-            return Err(err(format!("{why}. Nothing was searched.")));
+            return Err(err(format!("{why}. {REFUSED}")));
         }
         self.set_cues();
         let asked = args.limit;
