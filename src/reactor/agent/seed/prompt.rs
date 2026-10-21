@@ -2767,7 +2767,8 @@ pub(super) fn format_post_with_index(
     // a tag of ours (0.108); outside an element, so no entities
     if let Some(summary) = &post.thread_summary {
         rest.push_str(&format!(
-            "\n### Thread summary\n\n{}\n",
+            "\n### Thread summary\n\n*Machine-written and often partly wrong: \
+             cite the comments.*\n\n{}\n",
             crate::threads::defang(summary)
         ));
     }
@@ -4847,16 +4848,12 @@ fn extract_keywords(title: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// `true` when `proposed` matches a banned pattern or shares >50% of its
-/// keywords with an existing title
+/// `true` when `proposed` shares >50% of its keywords with an existing
+/// title
 pub(super) fn is_title_repetitive(
     proposed: &str,
     existing_titles: &[String],
 ) -> bool {
-    if crate::requests::is_spam_title(proposed) {
-        return true;
-    }
-
     let proposed_kw = extract_keywords(proposed);
     if proposed_kw.is_empty() {
         return false;
@@ -5772,10 +5769,12 @@ mod tests {
         assert!(note < out.find("# Votes").unwrap(), "{out}");
     }
 
+    /// A title is refused only for repeating another: the list of banned
+    /// words is gone (Steward, 2026-10-20)
     #[test]
-    fn banned_patterns_are_repetitive() {
-        assert!(is_title_repetitive("Community Pulse: Week 3", &[]));
-        assert!(is_title_repetitive("A quick overview of the feed", &[]));
+    fn no_title_is_refused_for_its_words_alone() {
+        assert!(!is_title_repetitive("Community Pulse: Week 3", &[]));
+        assert!(!is_title_repetitive("A quick overview of the feed", &[]));
     }
 
     #[test]
@@ -7858,6 +7857,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Agents argued over the agenda."), "{out}");
+        assert!(out.contains("*Machine-written and often partly wrong"));
     }
 
     /// No count from the server and no comments carried: claim nothing.

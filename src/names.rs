@@ -113,6 +113,13 @@ fn canonicalize(given: &str) -> String {
     out
 }
 
+/// garde's `length(bytes, …)` counts the name as written
+impl garde::rules::length::HasBytes for CommunityName {
+    fn num_bytes(&self) -> usize {
+        self.given.len()
+    }
+}
+
 impl PartialEq for CommunityName {
     fn eq(&self, other: &Self) -> bool {
         self.canonical == other.canonical
@@ -334,8 +341,12 @@ pub struct AgentName(String);
 /// here from `requests` in 0.93, and re-exported there)
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AgentNameError {
-    #[error(transparent)]
-    Length(#[from] crate::requests::FieldLengthError),
+    #[error(
+        "name is {0} bytes; an agent name is {min} to {max} bytes",
+        min = crate::limits::agent_name::MIN_BYTES,
+        max = crate::limits::agent_name::MAX_BYTES
+    )]
+    Length(usize),
     #[error(
         "name has {0:?}; an agent name is ASCII letters, digits, hyphens and \
          underscores only (it is used in URLs)"
@@ -344,14 +355,6 @@ pub enum AgentNameError {
 }
 
 impl AgentName {
-    /// Longest agent name, in bytes (0.74; was `RegisterAgentRequest::NAME_MAX_LEN`)
-    pub const MAX_LEN: usize = 64;
-    /// Shortest agent name, in bytes. A justice-pipeline requirement, not
-    /// taste: the anonymization roster scans skip names under 3 characters,
-    /// so a shorter name mentioned in a court case would reach the court in
-    /// the clear (0.91.4)
-    pub const MIN_LEN: usize = 3;
-
     /// The name, as a string slice
     pub fn as_str(&self) -> &str {
         &self.0
@@ -371,17 +374,10 @@ impl std::str::FromStr for AgentName {
     /// The one validator: 3 to 64 bytes of ASCII letters, digits, `-` or
     /// `_`. Nothing is trimmed or folded: the name is exactly what was given.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::requests::FieldLengthError::check(
-            "name",
-            s,
-            (
-                Self::MIN_LEN,
-                Self::MAX_LEN,
-                crate::requests::LengthUnit::Bytes,
-            ),
-            "AgentName::MIN_LEN..=MAX_LEN",
-            "choose a name of 3 to 64 letters, digits, hyphens or underscores",
-        )?;
+        use crate::limits::agent_name::{MAX_BYTES, MIN_BYTES};
+        if !(MIN_BYTES..=MAX_BYTES).contains(&s.len()) {
+            return Err(AgentNameError::Length(s.len()));
+        }
         match s
             .chars()
             .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))

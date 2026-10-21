@@ -140,7 +140,8 @@ pub fn tool_input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
 ///   and an `anyOf` of a schema and `{"type": "null"}` becomes the
 ///   schema. Leaving the property out says the same, and every input
 ///   reads `null` as absent;
-/// - an `anyOf` or `oneOf` of string constants becomes one flat `enum`.
+/// - an `anyOf` or `oneOf` of string constants, or of integer ones,
+///   becomes one flat `enum`.
 ///   The property's own description says what the values mean; the
 ///   variants' are their Rust docs;
 /// - non-standard integer `format`s (`uint32`, `int64` …) and
@@ -156,18 +157,26 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
             && v.as_object().is_some_and(|m| m.len() == 1)
     }
 
-    /// The string constants an `anyOf`/`oneOf` lists, if that is all it is
+    /// The JSON type of a constant an `enum` may flatten: a string or an
+    /// integer
+    fn constant_type(c: &Value) -> Option<&'static str> {
+        match c {
+            Value::String(_) => Some("string"),
+            Value::Number(n) if n.is_i64() || n.is_u64() => Some("integer"),
+            _ => None,
+        }
+    }
+
+    /// The constants an `anyOf`/`oneOf` lists, if that is all it is
     fn constants(alternatives: &[Value]) -> Option<Vec<Value>> {
         let mut out = Vec::new();
         for alt in alternatives {
             let map = alt.as_object()?;
             if let Some(c) = map.get("const") {
-                if !c.is_string() {
-                    return None;
-                }
+                constant_type(c)?;
                 out.push(c.clone());
             } else if let Some(Value::Array(values)) = map.get("enum") {
-                if !values.iter().all(Value::is_string) {
+                if !values.iter().all(|v| constant_type(v).is_some()) {
                     return None;
                 }
                 out.extend(values.iter().cloned());
@@ -234,9 +243,16 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
             let Some(Value::Array(alts)) = map.get(key) else {
                 continue;
             };
-            if let Some(values) = constants(alts) {
+            let Some(values) = constants(alts) else {
+                continue;
+            };
+            // One type for them all, or the union stays
+            let Some(ty) = values.first().and_then(constant_type) else {
+                continue;
+            };
+            if values.iter().all(|v| constant_type(v) == Some(ty)) {
                 map.remove(key);
-                map.insert("type".into(), "string".into());
+                map.insert("type".into(), ty.into());
                 map.insert("enum".into(), Value::Array(values));
             }
         }
@@ -550,6 +566,34 @@ mod tests {
         }
     }
 
+    /// No Postgres name reaches a tool schema: no `_enum` type, no column
+    /// function, no migration (Steward, 2026-10-20). An enum's doc comment
+    /// is the description of a field with none of its own, so its twin's
+    /// name goes in a `//` comment
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn tool_schemas_carry_no_postgres_names() {
+        const POSTGRES: &[&str] = &[
+            "_enum",
+            "octet_length",
+            "char_length",
+            "btrim",
+            "TIMESTAMPTZ",
+            "migration",
+            "pg_",
+        ];
+        let mut found = Vec::new();
+        for tool in AGENT_TOOLS {
+            let text = (tool.input_schema)().to_string();
+            for name in POSTGRES {
+                if text.contains(name) {
+                    found.push(format!("{}: {name}", tool.name));
+                }
+            }
+        }
+        assert_eq!(found, Vec::<String>::new());
+    }
+
     /// `get_governance_log`'s obligation filters are in its tool schema:
     /// `view=obligations` is the one way to the list (Steward, 2026-10-19:
     /// no new read tools)
@@ -654,7 +698,12 @@ mod tests {
                     {"type": "null"}
                 ]},
                 "c": {"type": ["integer", "null"], "format": "uint32", "default": null},
-                "d": {"type": ["string", "null"]}
+                "d": {"type": ["string", "null"]},
+                "e": {"anyOf": [
+                    {"type": "integer", "const": 1},
+                    {"type": "integer", "const": -1}
+                ]},
+                "f": {"anyOf": [{"const": 1}, {"const": "x"}]}
             },
             "required": ["d"]
         });
@@ -667,7 +716,9 @@ mod tests {
                     "a": {"type": "string", "enum": ["x", "y"]},
                     "b": {"description": "outer", "type": "string", "enum": ["p", "q"]},
                     "c": {"type": "integer"},
-                    "d": {"type": ["string", "null"]}
+                    "d": {"type": ["string", "null"]},
+                    "e": {"type": "integer", "enum": [1, -1]},
+                    "f": {"anyOf": [{"const": 1}, {"const": "x"}]}
                 },
                 "required": ["d"]
             })

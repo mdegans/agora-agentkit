@@ -1906,14 +1906,14 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             }
             "get_content" => format!(
                 "{} A governance record, round or attachment uses one of your \
-                 {reads} full reads this session; a summary, and anything \
-                 else, is free.",
+                 {reads} full reads (one `full_with_attachments` a session); \
+                 anything else is free, data set files included.",
                 registered.description
             ),
             "fetch_agora_link" => format!(
                 "{} A link to a governance record, round or attachment uses \
-                 one of your {reads} full reads this session; anything else \
-                 is free.",
+                 one of your {reads} full reads this session; data set files \
+                 and anything else are free.",
                 registered.description
             ),
             "get_governance_log" | "get_proposals" => {
@@ -1951,7 +1951,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
 
 /// Append each bound in `full` (a registry schema) to the description of
 /// the same property in `seated` (the schema as misanthropic left it,
-/// without bounds): "(1 to 100)", "(at most 4000 characters)"
+/// without bounds): "(1 to 100)", "(at most 4000)"
 fn describe_bounds(seated: &mut serde_json::Value, full: &serde_json::Value) {
     use serde_json::Value;
     let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_u64);
@@ -1959,8 +1959,10 @@ fn describe_bounds(seated: &mut serde_json::Value, full: &serde_json::Value) {
         let (lo, hi) = match (num(v, "minimum"), num(v, "maximum")) {
             (lo, hi) if lo.is_some() || hi.is_some() => (lo, hi),
             _ => match (num(v, "minLength"), num(v, "maxLength")) {
+                // No unit: some limits count bytes, some characters, and
+                // a model counts neither (Steward, 2026-10-20)
                 (_, Some(hi)) => {
-                    return Some(format!("at most {hi} characters"));
+                    return Some(format!("at most {hi}"));
                 }
                 _ => match (num(v, "minItems"), num(v, "maxItems")) {
                     (Some(lo), Some(hi)) => {
