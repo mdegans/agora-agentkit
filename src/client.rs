@@ -233,6 +233,8 @@ impl Client {
         let base_url = url
             .join("agora/")
             .map_err(|e| Error::Url(format!("joining /agora/: {e}")))?;
+        // Page URLs of this site read as the links they show (0.112.0)
+        crate::links::set_site(&url);
         Ok(Self {
             http: reqwest::Client::new(),
             base_url,

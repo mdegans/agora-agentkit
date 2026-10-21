@@ -267,7 +267,7 @@ impl<T> Gauged<T> {
                  left for results this turn. {}",
                 self.context.window(),
                 self.context.reserve(),
-                instead(call, room, &text, &requested),
+                requested.advice(call, room, &text),
             )
         } else {
             format!(
@@ -292,6 +292,9 @@ struct Requested {
     /// `attachment` and `lines`, for a data set's file (0.103)
     attachment: Option<String>,
     lines: Option<crate::govlog::LineRange>,
+    /// The link a `fetch_agora_link` call opened, and the tool it stands
+    /// for (0.112.0)
+    link: Option<(crate::links::AgoraLink, &'static str)>,
 }
 
 impl Requested {
@@ -326,19 +329,57 @@ impl Requested {
 
 impl Requested {
     fn of(call: &str, input: &serde_json::Value) -> Self {
-        if call != "get_content" {
-            return Self::default();
-        }
-        serde_json::from_value::<GetContentInput>(input.clone())
-            .map(|i| Self {
-                target: Some(i.id),
-                comment_budget: i.comment_budget,
-                attachment: i.attachment,
-                lines: i.lines,
+        let read = |i: GetContentInput| Self {
+            target: Some(i.id),
+            comment_budget: i.comment_budget,
+            attachment: i.attachment,
+            lines: i.lines,
+            link: None,
+        };
+        match call {
+            "get_content" => {
+                serde_json::from_value::<GetContentInput>(input.clone())
+                    .map(read)
+                    .unwrap_or_default()
+            }
+            "fetch_agora_link" => serde_json::from_value::<
+                crate::requests::FetchAgoraLinkInput,
+            >(input.clone())
+            .map(|i| {
+                let tool = i.link.tool();
+                Self {
+                    link: Some((i.link.clone(), tool)),
+                    ..i.link.as_read().cloned().map(read).unwrap_or_default()
+                }
             })
-            .unwrap_or_default()
+            .unwrap_or_default(),
+            _ => Self::default(),
+        }
+    }
+
+    /// The tool the call stands for: a link's, or the call's own
+    fn tool<'a>(&self, call: &'a str) -> &'a str {
+        self.link.as_ref().map_or(call, |(_, tool)| tool)
+    }
+
+    /// [`instead`], for the tool the call stands for; a read by link is
+    /// told that the options named go in the link (the review of 0.112.0)
+    fn advice(&self, call: &str, room: u64, text: &str) -> String {
+        let tool = self.tool(call);
+        let advice = instead(tool, room, text, self);
+        if self.link.is_some() && tool == "get_content" && !self.is_data_file()
+        {
+            format!("{advice} {LINK_OPTIONS}")
+        } else {
+            advice
+        }
     }
 }
+
+/// What a refused read by link is told about the options [`instead`] names
+const LINK_OPTIONS: &str = "With fetch_agora_link these are options in the \
+     link (…?detail=summary, …?comment_budget=<bytes>, …?round=<n>), and an \
+     attachment is the last part of its path.";
 
 /// What a refused `get_content` should try instead, as one sentence or
 /// two (0.94). `text` is the refused result and `asked` the call's
@@ -450,6 +491,25 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
     let last = first + fit - 1;
     // A citation with its own range takes no `lines=`: offer the citation
     // with this range in it instead (the review of 0.103)
+    // Asked by a link: the link with this range (0.112.0)
+    if let Some(read) =
+        requested.link.as_ref().and_then(|(link, _)| link.as_read())
+        && let Ok(cut) = crate::govlog::LineRange::new(first, Some(last))
+    {
+        let mut read = read.clone();
+        match &mut read.id {
+            ContentRef::DataCitation(c) if c.lines.is_some() => {
+                c.lines = Some(cut)
+            }
+            _ => read.lines = Some(cut),
+        }
+        return format!(
+            "Read it whole in a fresh turn ({tokens}), or \
+             link=\"{link}\" now (about {fit} lines).",
+            tokens = crate::threads::about_tokens(text.len() as u64),
+            link = crate::links::AgoraLink::from(read),
+        );
+    }
     let range = match requested
         .target
         .as_ref()
@@ -489,7 +549,17 @@ impl<T: Tool> Tool for Gauged<T> {
     async fn call(&mut self, call: Use) -> tool::Result {
         let name = call.name.clone();
         let input = call.input.clone();
-        let result = self.inner.call(call).await;
+        let mut result = self.inner.call(call).await;
+        // How a link is written, in full once a session and short after
+        // (beta round of 0.112.0: ~90 tokens on every refusal)
+        if let Some(once) = &self.shown_once {
+            let text = result.content.to_string();
+            if text.contains(crate::links::FORM) && !once.legend("link form") {
+                result.content = text
+                    .replace(crate::links::FORM, crate::links::FORM_AGAIN)
+                    .into();
+            }
+        }
         self.admit(&name, &input, result)
     }
 
@@ -1011,5 +1081,26 @@ mod tests {
         assert_eq!(gauge.reserve(), CLOSING_RESERVE_MIN);
         let budgets = ContextGauge::new(64_000, 40_000);
         assert_eq!(budgets.reserve(), 40_000);
+    }
+
+    /// A read refused by link is told its options go in the link
+    #[test]
+    fn a_refused_link_read_names_link_options() {
+        let by_link = Requested::of(
+            "fetch_agora_link",
+            &serde_json::json!({"link": "agora://gov/GOV-2026-0016"}),
+        );
+        assert_eq!(by_link.tool("fetch_agora_link"), "get_content");
+        let advice = by_link.advice("fetch_agora_link", 1_000, "x");
+        assert!(advice.ends_with(LINK_OPTIONS), "{advice}");
+        let by_id = Requested::of(
+            "get_content",
+            &serde_json::json!({"id": "GOV-2026-0016"}),
+        );
+        assert!(
+            !by_id
+                .advice("get_content", 1_000, "x")
+                .contains(LINK_OPTIONS)
+        );
     }
 }

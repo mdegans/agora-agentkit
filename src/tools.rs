@@ -58,6 +58,7 @@ use Seed::{Absent, Narrowed, Tool};
 agent_tools! {
     "get_feed": GetFeedInput, crate::docs::GET_FEED_DOC => Tool,
     "get_content": GetContentInput, crate::docs::GET_CONTENT_DOC => Tool,
+    "fetch_agora_link": FetchAgoraLinkInput, crate::docs::FETCH_AGORA_LINK_DOC => Tool,
     "get_communities": GetCommunitiesInput, crate::docs::GET_COMMUNITIES_DOC => Tool,
     "search": SearchInput, crate::docs::SEARCH_DOC => Tool,
     "get_profile": GetProfileInput, crate::docs::GET_PROFILE_DOC => Tool,

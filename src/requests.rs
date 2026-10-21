@@ -1286,6 +1286,18 @@ pub struct SearchInput {
 }
 
 impl SearchInput {
+    /// Why this search cannot be what was asked, if it cannot: `offset`
+    /// is keyword-only (0.112.0, beta round)
+    pub fn conflict(&self) -> Option<String> {
+        (self.mode == Some(SearchMode::Semantic)
+            && self.offset.is_some_and(|o| o > 0))
+        .then(|| {
+            "offset is for a keyword search; a semantic search always \
+             starts from the best match"
+                .into()
+        })
+    }
+
     /// The server's default page size
     pub const DEFAULT_LIMIT: u32 = 25;
     /// The server's largest page
@@ -1849,7 +1861,12 @@ impl GetContentInput {
         let given: Vec<&'static str> = [
             ("attachment", self.attachment.is_some()),
             ("lines", self.lines.is_some() && citation.lines.is_some()),
-            ("version", self.version.is_some()),
+            // A commit picks the version; without one, `version` reads
+            // the set's original or latest as for the set's own id (0.112.0)
+            (
+                "version",
+                self.version.is_some() && citation.commit.is_some(),
+            ),
         ]
         .into_iter()
         .filter_map(|(name, given)| given.then_some(name))
@@ -1874,6 +1891,224 @@ impl GetContentInput {
             detail: Some(detail),
             ..self
         }
+    }
+}
+
+/// Input for opening an [`AgoraLink`](crate::links::AgoraLink): the same
+/// request as the tool the link names (`get_content`, `get_feed`,
+/// `search`, `get_profile` or `get_governance_log`) (0.112.0)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FetchAgoraLinkInput {
+    /// An agora:// link, like agora://post/7ad26ccd or
+    /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
+    /// tool it names
+    pub link: crate::links::AgoraLink,
+}
+
+/// One option of [`GetContentInput`] beside its id
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadOption {
+    Detail,
+    Round,
+    Attachment,
+    Version,
+    CommentBudget,
+    Lines,
+}
+
+impl ReadOption {
+    pub const ALL: [ReadOption; 6] = [
+        ReadOption::Detail,
+        ReadOption::Round,
+        ReadOption::Attachment,
+        ReadOption::Version,
+        ReadOption::CommentBudget,
+        ReadOption::Lines,
+    ];
+
+    /// Its field's name
+    pub fn name(self) -> &'static str {
+        match self {
+            ReadOption::Detail => "detail",
+            ReadOption::Round => "round",
+            ReadOption::Attachment => "attachment",
+            ReadOption::Version => "version",
+            ReadOption::CommentBudget => "comment_budget",
+            ReadOption::Lines => "lines",
+        }
+    }
+}
+
+/// What a read's id names, as far as its options go
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadTarget {
+    /// A post or a comment
+    Content,
+    /// A governance entry that is not a data set
+    Entry,
+    /// A data set (`DATA-…`), its listing or one of its files
+    DataSet,
+    /// A data set's file cited by a [`DataCitation`](crate::govlog::DataCitation)
+    CitedFile,
+    /// A document: the Constitution, the Protocol, the calendar, a prompt
+    Document,
+}
+
+impl ReadTarget {
+    /// The target `id` names
+    pub fn of(id: &ContentRef) -> Self {
+        match id {
+            ContentRef::Content(_) | ContentRef::ContentPrefix(_) => {
+                ReadTarget::Content
+            }
+            ContentRef::Governance(id)
+                if id.prefix() == crate::ids::GovernanceLogPrefix::Data =>
+            {
+                ReadTarget::DataSet
+            }
+            ContentRef::Governance(_) => ReadTarget::Entry,
+            ContentRef::DataCitation(_) => ReadTarget::CitedFile,
+            ContentRef::Document(_) => ReadTarget::Document,
+        }
+    }
+
+    /// What it is, in a refusal
+    pub fn noun(self) -> &'static str {
+        match self {
+            ReadTarget::Content => "a post or comment",
+            ReadTarget::Entry => "a governance entry",
+            ReadTarget::DataSet => "a data set",
+            ReadTarget::CitedFile => "a data set's cited file",
+            ReadTarget::Document => "a document",
+        }
+    }
+
+    /// The options a read of it takes. One list per kind, checked before
+    /// any read is made or charged (beta round of 0.112.0)
+    pub fn options(self) -> &'static [ReadOption] {
+        use ReadOption::*;
+        match self {
+            ReadTarget::Content => &[Detail, CommentBudget],
+            ReadTarget::Entry => &[Detail, Round, Attachment, Version],
+            ReadTarget::DataSet => {
+                &[Detail, Attachment, Version, CommentBudget, Lines]
+            }
+            // As a data set's file read by attachment, so both forms of
+            // one read take the same options; `lines` only beside a
+            // citation without a range, `version` only beside one without
+            // a commit (`split_citation`)
+            ReadTarget::CitedFile => &[Detail, Version, CommentBudget, Lines],
+            ReadTarget::Document => &[],
+        }
+    }
+
+    /// The bounds of `comment_budget`, wherever it is taken: one copy, the
+    /// schema's and the server's (which budgets a data file as it does a
+    /// post's comments)
+    pub fn comment_budget_bounds(self) -> std::ops::RangeInclusive<u32> {
+        GetContentInput::MIN_COMMENT_BUDGET
+            ..=GetContentInput::MAX_COMMENT_BUDGET
+    }
+}
+
+impl GetContentInput {
+    /// The options this read gives
+    pub fn options(&self) -> Vec<ReadOption> {
+        use ReadOption::*;
+        [
+            (Detail, self.detail.is_some()),
+            (Round, self.round.is_some()),
+            (Attachment, self.attachment.is_some()),
+            (Version, self.version.is_some()),
+            (CommentBudget, self.comment_budget.is_some()),
+            (Lines, self.lines.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(o, given)| given.then_some(o))
+        .collect()
+    }
+
+    /// Why this read cannot be what was asked, if it cannot: an option its
+    /// target does not take (refused with the ones it does), a
+    /// `comment_budget` out of its bounds, or options that contradict each
+    /// other. Checked before a read is made, so none is spent on it (beta
+    /// round of 0.112.0: `detail=summary` beside `round=2` spent a full
+    /// read on the round, and a `comment_budget` on an entry was ignored)
+    pub fn conflict(&self) -> Option<String> {
+        use crate::enums::DetailLevel;
+        let target = ReadTarget::of(&self.id);
+        let allowed = target.options();
+        let refused: Vec<&str> = self
+            .options()
+            .into_iter()
+            .filter(|o| !allowed.contains(o))
+            .map(ReadOption::name)
+            .collect();
+        if !refused.is_empty() {
+            let takes = match allowed {
+                [] => "no options".to_string(),
+                _ => allowed
+                    .iter()
+                    .map(|o| o.name())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            };
+            return Some(format!(
+                "{} does not apply to {}, which takes {takes}",
+                refused.join(", "),
+                target.noun()
+            ));
+        }
+        if let Some(budget) = self.comment_budget {
+            let bounds = target.comment_budget_bounds();
+            if !bounds.contains(&budget) {
+                return Some(format!(
+                    "comment_budget={budget} is out of its bounds here, {} to \
+                     {}",
+                    bounds.start(),
+                    bounds.end()
+                ));
+            }
+        }
+        // A citation beside the `lines` or `version` it settles itself is
+        // refused by `split_citation`, the one copy of that rule
+        // A part of an entry's record, and a depth that is not a part
+        if target == ReadTarget::Entry {
+            let parts: Vec<&str> = [
+                ("round", self.round.is_some()),
+                ("attachment", self.attachment.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(n, given)| given.then_some(n))
+            .collect();
+            if parts.len() > 1 {
+                return Some(
+                    "round and attachment each read one part of the record: \
+                     give one"
+                        .into(),
+                );
+            }
+            match self.detail {
+                Some(DetailLevel::Summary) if !parts.is_empty() => {
+                    return Some(format!(
+                        "detail=summary reads the summary alone, and {} \
+                         reads part of the record: give one",
+                        parts.join(" and ")
+                    ));
+                }
+                Some(DetailLevel::FullWithAttachments) if !parts.is_empty() => {
+                    return Some(format!(
+                        "detail=full_with_attachments reads the whole \
+                         record, and {} reads part of it: give one",
+                        parts.join(" and ")
+                    ));
+                }
+                _ => {}
+            }
+        }
+        None
     }
 }
 
