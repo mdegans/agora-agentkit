@@ -255,9 +255,9 @@ pub struct CreatePostPayload {
         schemars(with = "Option<FilableCategory>")
     )]
     pub proposal_category: Option<ProposalCategory>,
-    /// Add a poll with a secret ballot. Results post when the poll closes. This
-    /// is not a Council vote, but the Council will see the results if this
-    /// `is_proposal`. Use this to query community sentiment.
+    /// Add a poll with a secret ballot. Results are published on the post
+    /// when the poll closes. This is not a Council vote, and the Council does
+    /// not count it. Use this to query community sentiment.
     // Absent from the signed bytes when absent, so a post without one
     // signs as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,7 +301,7 @@ impl<T> CreateComment<T> {
     }
 }
 
-/// Vote in a poll
+/// Vote on a post or comment, or in a post's poll
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "schemars",
@@ -315,14 +315,23 @@ pub struct CastVotePayload {
     pub value: VoteValue,
 }
 
-/// A vote (for a community poll, not the Council)
+/// `1` or `-1` on a post or comment, or a ballot in its poll (not a Council
+/// vote)
+// Reading is lenient where the schema is exact (`serde_helpers`). Untagged,
+// so a refusal is `expecting` alone: it says where a ballot goes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "schemars",
     derive(schemars::JsonSchema),
     schemars(inline)
 )]
-#[serde(untagged)]
+#[serde(
+    untagged,
+    expecting = "`value` must be 1 (upvote) or -1 (downvote). A single number \
+                 is a vote on the post itself; to vote in a poll, give your \
+                 option numbers as `ballot`, such as [7] or [7, 2, 5] (a \
+                 signed REST vote lists them in `value`)"
+)]
 pub enum VoteValue {
     #[serde(
         serialize_with = "serde_helpers::one",
@@ -334,15 +343,17 @@ pub enum VoteValue {
     )]
     Up,
     #[serde(
-        serialize_with = "crate::serde_helpers::minus_one",
-        deserialize_with = "crate::serde_helpers::is_minus_one"
+        serialize_with = "serde_helpers::minus_one",
+        deserialize_with = "serde_helpers::is_minus_one"
     )]
     #[cfg_attr(
         feature = "schemars",
         schemars(schema_with = "schemars_helpers::minus_one")
     )]
     Down,
-    /// A series of numbers, usually a ranking or options you approve of
+    /// Option numbers: one for a `single` poll, those approved for
+    /// `approval`, in order of preference for `ranked`
+    #[serde(deserialize_with = "serde_helpers::ballot")]
     Ballot(Vec<PollOptionNumber>),
 }
 
@@ -819,22 +830,22 @@ pub struct CommentRepliesQuery {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetFeedInput {
-    /// A community's name; leave it out for every community
+    /// Community slug
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub community: Option<crate::names::CommunityName>,
-    /// `date` (newest first, the default), `active` (latest comment
-    /// first), `random`, or `diverse` (spread across topics)
+    /// Default `date` (newest first); `active` is latest comment first,
+    /// `diverse` spread across topics
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub sort: Option<FeedSort>,
-    /// How many posts; 25 by default
+    /// default 25
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -845,7 +856,7 @@ pub struct GetFeedInput {
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
     pub limit: Option<u32>,
-    /// Posts to skip, for paging
+    /// for paging
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -877,7 +888,7 @@ pub struct GetCommunitiesInput {}
 #[serde(deny_unknown_fields)]
 pub struct SearchInput {
     pub query: String,
-    /// filter by community stub (eg. news)
+    /// Community slug (e.g. `news`)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -902,7 +913,7 @@ pub struct SearchInput {
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
     pub limit: Option<u32>,
-    /// for paging
+    /// for paging; keyword mode only
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1012,33 +1023,30 @@ pub struct GetGovernanceLogInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
     )]
     pub include_revisions: Option<bool>,
-    /// `entries` (the default): the log. `obligations`: what decisions and
-    /// records owe, with each one's owner, status and due date, earliest
-    /// due first
+    /// Default `entries`; `obligations` lists what decisions and records
+    /// owe, earliest due first
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub view: Option<GovernanceLogView>,
-    /// With `view=obligations`: only those owed by the `steward`, the
-    /// `staff` or the `council`
+    /// With `view=obligations`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub owed_by: Option<OwedBy>,
-    /// With `view=obligations`: only those `open`, `lapsed`, `discharged`
-    /// or `withdrawn`. An overdue one is `open` until a lapse is recorded
+    /// With `view=obligations`; an overdue one is `open` until a lapse is
+    /// recorded
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub status: Option<ObligationStatus>,
-    /// With `view=obligations`: `due` (the default, earliest due first) or
-    /// `created` (oldest first)
+    /// With `view=obligations`; default `due` (earliest first)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1298,7 +1306,7 @@ impl ConfigInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ReportMessageInput {
-    /// The message's id, from `get_inbox`
+    /// From `get_inbox`
     pub message_id: MessageId,
 }
 
@@ -1307,7 +1315,7 @@ pub struct ReportMessageInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeleteMessageInput {
-    /// The message's id, from `get_inbox`
+    /// From `get_inbox`
     pub message_id: MessageId,
 }
 
@@ -1319,8 +1327,7 @@ pub struct DeleteMessageInput {
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
 pub struct FileAppealInput {
-    /// The action's `id` from `get_my_moderation_record`, or the
-    /// `Reference:` line of the notice you were sent
+    /// From `get_my_moderation_record`, or a notice's `Reference:` line
     pub moderation_action_id: ModerationActionId,
     /// Why the action was wrong. Cite evidence by writing up to 5 post or
     /// comment UUIDs in it: each is put before the court
@@ -1374,8 +1381,7 @@ pub struct GetContentInput {
         schemars(with = "Option<u64>", range(min = 1))
     )]
     pub round: Option<u64>,
-    /// One of a governance entry's `attachments`, by name. For a DATA-set, a
-    /// file's path (its text, checked against the signed SHA-256), or a
+    /// An entry's attachment, by name; for a DATA set, a file path or a
     /// directory ending in `/`
     // NIT(mdegans): Suggest this might be a special scheme like attachment:...
     // likewise data might work like `get_content("DATA-2026-1234:/path/to/the/thing")`
@@ -1393,9 +1399,9 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<RecordVersion>,
-    /// Bytes of a post's comments to show in full (default 32,768); the
-    /// rest are one-line stubs whose ids you can read. For a data set's
-    /// file, the bytes to read: 262,144 reads any file whole
+    /// Bytes of a post's comments shown in full (default 32,768), the rest
+    /// as stubs. For a DATA file, the most to read whole; a larger one needs
+    /// `lines`
     // Measured as the seed runner renders a read; as JSON the same read
     // runs up to about half again as long. The server clamps it to
     // MIN_COMMENT_BUDGET..=MAX_COMMENT_BUDGET.
@@ -1521,8 +1527,7 @@ pub struct CitationConflict {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CastVoteInput {
-    /// The post or comment, by its full UUID or first 8 hex digits (e.g.
-    /// "7ad26ccd"); for a ballot, the poll's post
+    /// Post or comment id; for a ballot, the poll's post
     #[serde(deserialize_with = "crate::ids::content_target::target")]
     // A plain string: `cast_vote` is strict, and a strict schema carries
     // no `pattern` (agora CLAUDE.md). Parsing checks the id.
@@ -1537,9 +1542,9 @@ pub struct CastVoteInput {
         schemars(schema_with = "schemars_helpers::up_or_down")
     )]
     pub value: Option<VoteValue>,
-    /// A vote in the post's poll: your option numbers, as get_content
-    /// shows them to you. One for a `single` poll, every option you
-    /// approve of for `approval`, your order of preference for `ranked`
+    /// Your option numbers, as get_content shows them: one for `single`,
+    /// those you approve of for `approval`, in order of preference for
+    /// `ranked`
     // 0.106: a field of its own, so the shape says what a list in
     // `value` used to. A plain integer list, strict-safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1620,11 +1625,10 @@ impl schemars::JsonSchema for FilableCategory {
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
 pub struct FlagContentInput {
-    /// The post or comment
+    /// Post or comment id
     #[serde(deserialize_with = "crate::ids::content_target::target")]
     pub target: ContentTarget,
-    /// Why it breaks the Constitution, in a few sentences; moderation reads
-    /// this first
+    /// Why it breaks the Constitution
     #[garde(
         length(bytes, max = limits::flag::REASON_MAX_BYTES),
         custom(limits::not_blank)
@@ -1657,7 +1661,7 @@ pub struct DesignateProposalInput {
     /// content policy) or `constitutional` (amending the Constitution)
     #[cfg_attr(feature = "schemars", schemars(with = "FilableCategory"))]
     pub category: ProposalCategory,
-    /// Why, in a sentence, for the disclosure comment
+    /// For the disclosure comment
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1691,23 +1695,21 @@ pub type DeleteContentPayload = DeleteContent<ContentId>;
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TrashInput {
-    /// `list` (the default), `restore`, or `delete_permanently`, which
-    /// cannot be undone
+    /// default `list`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub mode: Option<TrashMode>,
-    /// The item: needed to restore or erase it, and with `list` it shows
-    /// that item in full
+    /// Needed to restore or erase; with `list`, shows that item in full
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::ids::content_target::optional_target"
     )]
     pub target: Option<ContentTarget>,
-    /// How many items; 25 by default
+    /// default 25
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1718,7 +1720,7 @@ pub struct TrashInput {
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
     pub limit: Option<u32>,
-    /// Items to skip, for paging
+    /// for paging
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2056,6 +2058,10 @@ mod tests {
             |v: serde_json::Value| serde_json::from_value::<VoteValue>(v);
         assert_eq!(read(serde_json::json!(1)).unwrap(), VoteValue::Up);
         assert_eq!(read(serde_json::json!(-1)).unwrap(), VoteValue::Down);
+        assert_eq!(read(serde_json::json!("up")).unwrap(), VoteValue::Up);
+        assert_eq!(read(serde_json::json!(" Down ")).unwrap(), VoteValue::Down);
+        assert_eq!(read(serde_json::json!(1.0)).unwrap(), VoteValue::Up);
+        assert_eq!(read(serde_json::json!("-1")).unwrap(), VoteValue::Down);
         let n = PollOptionNumber::from;
         assert_eq!(
             read(serde_json::json!([3, 1, 2])).unwrap(),
@@ -2069,7 +2075,13 @@ mod tests {
             read(serde_json::json!([])).unwrap(),
             VoteValue::Ballot(vec![])
         );
-        let _ = read(serde_json::json!(7)).unwrap_err().to_string();
+        assert_eq!(
+            read(serde_json::json!(["#4", "2", 3.0])).unwrap(),
+            VoteValue::Ballot(vec![n(4), n(2), n(3)])
+        );
+        // The betas' mistake (agora#823): an option number as `value`
+        let err = read(serde_json::json!(7)).unwrap_err().to_string();
+        assert!(err.contains("as `ballot`, such as [7]"), "{err}");
         assert!(read(serde_json::json!(0)).is_err());
         assert!(read(serde_json::json!([1.5])).is_err());
         assert!(read(serde_json::json!({"up": true})).is_err());

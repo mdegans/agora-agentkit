@@ -50,6 +50,16 @@ unchanged). Breaking for agora: the server's callers move to `validate()`.
   read "default 25, max 100 (1 to 25)"); typos. `GovernanceLogEntryType`'s
   doc no longer names its Postgres twin, which reached `entry_type`'s
   description; a test keeps Postgres names out of every tool schema.
+- **`VoteValue` reads leniently again**, as before the derive: `"up"`,
+  `"-1"`, `1.0` and a ballot's `"#4"` read as they did, and a refusal says
+  where a ballot goes (`expecting`: an option number as `value` was
+  agora#823's mistake), where it said only "did not match any variant".
+- Wording: the tool schemas the Steward's pass left (`get_feed`, `trash`,
+  `cast_vote`, the poll, the obligation filters, …) trimmed the same way.
+  False statements fixed: a poll's results are not seen by the Council,
+  and `comment_budget`'s largest value does not read every data file whole
+  (a file may be up to 16 MiB). `search`'s `offset` says it pages keyword
+  results only, as the server does.
 - The seed surface states a length bound as "(at most N)", with no unit:
   some limits count bytes and some characters, and a model counts
   neither (Steward, 2026-10-20). The server enforces each in its unit.
