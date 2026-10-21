@@ -2848,6 +2848,16 @@ impl DataSetView {
         out
     }
 
+    /// `set` as its default read lists it, on every surface: the
+    /// [`top_level`](Self::top_level)'s files to start with, then one line
+    /// per directory. Every file is counted; a directory's read lists them
+    pub fn top_level_of(set: &crate::govlog::DataSet) -> Option<Self> {
+        let mut view = Self::of(set, None, usize::MAX)?;
+        let top = view.top_level();
+        view.listing = top.start.into_iter().chain(top.directories).collect();
+        Some(view)
+    }
+
     /// The one sentence that names a set's index file, in
     /// [`how_to_read`](Self::how_to_read) and in a server's summary of the
     /// entry; a read that carries both says it once (0.91.4)
@@ -5923,6 +5933,28 @@ mod data_file_tests {
 mod data_set_view_tests {
     use super::DataSetView;
     use crate::govlog::{DATA_SET_VERSION, DataFile, DataSet};
+
+    /// The default read: the index to start with, every file counted in
+    /// its top directory, nothing per file (betas of 0.113.0)
+    #[test]
+    fn the_top_level_starts_with_the_index_and_counts_the_rest() {
+        let view = DataSetView::top_level_of(&set(300, 7)).unwrap();
+        let paths: Vec<&str> =
+            view.listing.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(paths, ["votes/README.md", "votes/"]);
+        assert_eq!(view.listing[1].files, 300);
+        assert_eq!(view.files, 301);
+        // Idempotent: the runner's top level of the server's is the same
+        let again = view.top_level();
+        assert_eq!(
+            again
+                .start
+                .into_iter()
+                .chain(again.directories)
+                .collect::<Vec<_>>(),
+            view.listing
+        );
+    }
 
     /// `n` files over `dirs` directories, plus a README, sorted
     fn set(n: usize, dirs: usize) -> DataSet {

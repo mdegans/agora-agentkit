@@ -136,7 +136,7 @@ fn relink(text: &str) -> String {
 /// How a call refused for its input, before anything was charged, ends:
 /// the one mark [`is_refusal`] knows it by. A missing part's refusal has
 /// looked the entry up, so it says nothing of what was read
-pub(super) const REFUSED: &str = "Refused; nothing was charged.";
+pub(super) const REFUSED: &str = crate::requests::REFUSED;
 
 /// "Read GOV-2026-5 as GOV-2026-0005." ([`GetContentInput::read_as`]),
 /// from a `get_content` or `fetch_agora_link` call's input as sent

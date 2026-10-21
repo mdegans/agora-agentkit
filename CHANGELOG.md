@@ -80,6 +80,11 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
   fills. `requests::AsSent<T>`: an input beside the JSON it was sent as,
   its schema `T`'s, for `GetContentInput::read_as` (the note's one copy).
 
+- `requests::REFUSED`, "Refused; nothing was charged.": the one mark a
+  read refused for its options ends with, the seed runner's and the
+  server's validation errors alike. `DataSetView::top_level_of`: a set's
+  default listing as every surface serves it.
+
 ### The betas of 0.113.0
 
 - `round=0` is refused by `conflict()`. A round or attachment the server

@@ -1822,6 +1822,11 @@ pub struct GetContentInput {
     pub history: Option<History>,
 }
 
+/// How a read refused for its options, before anything was charged, ends,
+/// on every surface: the seed runner and the server's validation errors
+/// alike, so a client knows the refusal was free (betas of 0.113.0)
+pub const REFUSED: &str = "Refused; nothing was charged.";
+
 /// Which revisions' changes a read shows ([`GetContentInput::history`]):
 /// `false` is none, and is no history at all
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
