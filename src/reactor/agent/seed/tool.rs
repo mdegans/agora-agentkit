@@ -556,7 +556,6 @@ impl Agora {
         self.shown_once.set_cues(super::Cues {
             links: self.by_link,
             full_reads_left: Some(self.full_reads_left()),
-            summary_asked: false,
         });
     }
 
@@ -867,10 +866,6 @@ impl Agora {
         // Shown here, from the original and the revisions' patches: the
         // server takes no `history`
         let history = input.history.take();
-        // Asked for by name, it is shown; a history read's summary is its
-        // frame, pointed at when it is in context (betas of 0.113.0)
-        let summary_asked =
-            input.detail == Some(DetailLevel::Summary) && history.is_none();
         self.set_cues();
         // The budget is about governance attention, so it is the kind of
         // id and the depth that spend it, not the tool that was called.
@@ -1057,10 +1052,6 @@ impl Agora {
             }
             self.shown_once
                 .begin(super::ShownOnce::read_of_entry(entry));
-            self.shown_once.set_cues(super::Cues {
-                summary_asked,
-                ..self.shown_once.cues()
-            });
             // Marked with the part's own size; a read that is left out, or
             // served as the summary instead, begins afresh and marks nothing
             if !capped && !part_keys.is_empty() {
@@ -1236,7 +1227,6 @@ impl Agora {
                         full_reads_left: Some(
                             self.full_reads_left().saturating_sub(1),
                         ),
-                        summary_asked,
                     });
                 }
                 let rendered = with_history(

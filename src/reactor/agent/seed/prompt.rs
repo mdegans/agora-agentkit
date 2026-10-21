@@ -3773,7 +3773,8 @@ pub(super) fn format_governance_entry_once(
         }
     }
     match entry.version {
-        Some(RecordVersion::Original) => {
+        // A record with no revision says so in its summary's note
+        Some(RecordVersion::Original) if entry.is_revised() => {
             out.push_str("Read as originally signed, before any revision.\n")
         }
         _ if !entry.revisions.is_empty() && entry.data.is_some() => {
@@ -3863,64 +3864,30 @@ pub(super) fn format_governance_entry_once(
             out.push_str(&format!("\n{fault}\n"));
         }
     }
-    // A summary asked for by name is shown again: the reader's copy may
-    // have been trimmed (Steward, 2026-10-21)
-    // Asked for by name it is shown, unless this turn showed it (betas of
-    // 0.113.0: a later turn's context may have been trimmed, this one's not)
-    // The paragraphs shown are pointed at; any not shown print (betas of
-    // 0.113.0: a summary is never taken as seen for what was not)
-    let seen = entry
-        .summary
-        .as_deref()
-        .filter(|_| !part)
-        .and_then(|s| once.summary_seen(&entry.id, s))
-        .filter(|(shown, _)| !cues.summary_asked || shown.turn == once.turn());
-    // Marked for what this read shows: all of it, or the rest after what
-    // was shown
-    if let Some(s) = entry.summary.as_deref()
-        && !part
-    {
-        let from = seen.as_ref().map_or(0, |(_, end)| *end);
-        let whole = super::shown_once::summary_text(s).len();
-        if from < whole {
-            once.mark_summary_from(
-                entry.id.clone(),
-                entry.version_label(),
-                s,
-                from,
-            );
-        }
-    }
-    let rest = |s: &str, end: usize| {
-        let t = super::shown_once::summary_text(s);
-        t[end..].trim().to_string()
-    };
+    // Shown once by its paragraphs, on every read that shows it: those
+    // printed before are pointed at, naming the reads that printed them,
+    // and the rest print. A read in this session's context is never
+    // trimmed, so a summary asked for by name is pointed at too (Steward,
+    // 2026-10-21, second iteration)
     match entry.summary.as_deref().filter(|_| !part) {
         _ if part => {}
-        Some(s) if let Some((shown, end)) = &seen => {
-            let tail = rest(s, *end);
-            if tail.is_empty() {
-                out.push_str(&format!(
-                    "\n(Its summary is in your context already: shown in {}, \
-                     {}.)\n",
-                    shown.read,
-                    about_tokens(shown.bytes)
-                ));
-            } else {
-                out.push_str(&format!(
-                    "\n(Its summary's first part is in your context already: \
-                     shown in {}. Then:)\n\n{tail}\n",
-                    shown.read
-                ));
+        Some(s) => {
+            let (text, printed) =
+                summary_with_pointers(&once.summary_seen(&entry.id, s));
+            once.mark_paragraphs(
+                entry.id.clone(),
+                entry.version_label(),
+                printed.iter().map(String::as_str),
+            );
+            match (&entry.summary_authorship, printed.is_empty()) {
+                (_, true) => out.push_str(&format!("\n{text}\n")),
+                (Some(by), false) => out.push_str(&format!(
+                    "\n**Summary** ({}; signed with the record):\n\n{text}\n",
+                    by.sentence()
+                )),
+                (None, false) => out.push_str(&format!("\n{text}\n")),
             }
         }
-        Some(s) => match &entry.summary_authorship {
-            Some(by) => out.push_str(&format!(
-                "\n**Summary** ({}; signed with the record):\n\n{s}\n",
-                by.sentence()
-            )),
-            None => out.push_str(&format!("\n{s}\n")),
-        },
         None => out.push_str(
             "\n(No summary yet — this entry\'s precedent summary has not \
              been written.)\n",
@@ -4110,38 +4077,65 @@ pub(super) fn format_governance_entry_once(
         out.push_str("\n### Record\n\n");
         // The signed summary was served above; once is enough
         let in_record = data.pointer("/summary/text").and_then(|t| t.as_str());
-        let shown = !part
+        let above = !part
             && entry.summary_authorship.is_some()
             && in_record == entry.summary.as_deref();
-        // A part of the record carries the summary the header left out:
-        // shown once, like the header's (beta round of 0.112.0: a round
-        // read said the summary was in context, then printed it again)
-        let earlier = in_record
-            .filter(|_| part)
-            .and_then(|t| once.earlier_summary(&entry.id, Some(t)));
-        if shown {
-            let mut data = data.clone();
+        let mut data = data.clone();
+        // The record's copy of its summary, shown once by its paragraphs
+        // like the header's, on every read (second iteration of 0.113.0)
+        if above {
             data["summary"]["text"] = "(the summary above)".into();
-            out.push_str(&render_record(&data));
-        } else if let Some(earlier) = earlier {
-            let mut data = data.clone();
-            data["summary"]["text"] = format!(
-                "(in your context already: shown in {}, {})",
-                earlier.read,
-                about_tokens(earlier.bytes)
-            )
-            .into();
-            out.push_str(&render_record(&data));
-        } else {
-            if let Some(text) = in_record.filter(|_| part) {
-                once.mark_summary(
-                    entry.id.clone(),
-                    entry.version_label(),
-                    text,
-                );
-            }
-            out.push_str(&render_record(data));
+        } else if let Some(t) = in_record {
+            let (text, printed) =
+                summary_with_pointers(&once.summary_seen(&entry.id, t));
+            once.mark_paragraphs(
+                entry.id.clone(),
+                entry.version_label(),
+                printed.iter().map(String::as_str),
+            );
+            data["summary"]["text"] = text.into();
         }
+        // A part's record carries the record's other fields beside it:
+        // shown once by their text (a round 2 read reprinted what round 3
+        // had shown)
+        let mut header_note = String::new();
+        if part && let Some(obj) = data.as_object_mut() {
+            // The summary is shown once by its paragraphs, above
+            const PARTS: [&str; 4] =
+                ["rounds", "attachments", "inner", "summary"];
+            let header: serde_json::Map<String, serde_json::Value> = obj
+                .iter()
+                .filter(|(k, _)| !PARTS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !header.is_empty() {
+                let text =
+                    serde_json::Value::Object(header.clone()).to_string();
+                let key = format!(
+                    "record header of {} {:x}",
+                    entry.id,
+                    text_key(&text)
+                );
+                match once.earlier_part(&key) {
+                    Some(shown) => {
+                        obj.retain(|k, _| PARTS.contains(&k.as_str()));
+                        header_note = format!(
+                            "(Its record's other fields are in your context \
+                             already: shown in {}, {}.)\n\n",
+                            shown.read,
+                            about_tokens(shown.bytes)
+                        );
+                    }
+                    None => {
+                        let shown =
+                            render_record(&serde_json::Value::Object(header));
+                        once.mark_part(key, shown.len());
+                    }
+                }
+            }
+        }
+        out.push_str(&header_note);
+        out.push_str(&render_record(&data));
     }
 
     // Say how much there was, or is, when the reader did not ask for one
@@ -4177,8 +4171,25 @@ fn change_value(v: &serde_json::Value) -> String {
 /// The lines of `before` and `after` that differ, the lines both share at
 /// either end left out and counted
 fn line_diff(before: &str, after: &str) -> String {
-    let old: Vec<&str> = before.lines().collect();
-    let new: Vec<&str> = after.lines().collect();
+    // Prose on few lines is compared by sentence: one removed sentence is
+    // one line, not the whole paragraph twice (second iteration of 0.113.0)
+    let few = before.lines().count() <= 2 && after.lines().count() <= 2;
+    let units = |s: &'_ str| -> Vec<String> {
+        if few {
+            s.split_inclusive(". ")
+                .map(|u| u.trim().to_string())
+                .filter(|u| !u.is_empty())
+                .collect()
+        } else {
+            s.lines().map(str::to_string).collect()
+        }
+    };
+    let (old, new) = (units(before), units(after));
+    let unit = if few {
+        ("sentence", "sentences")
+    } else {
+        ("line", "lines")
+    };
     let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
     let tail = old[head..]
         .iter()
@@ -4186,7 +4197,7 @@ fn line_diff(before: &str, after: &str) -> String {
         .zip(new[head..].iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
-    let lines = |n: usize| if n == 1 { "line" } else { "lines" };
+    let lines = |n: usize| if n == 1 { unit.0 } else { unit.1 };
     let mut out = String::new();
     if head > 0 {
         out.push_str(&format!("  ({head} {} unchanged before)\n", lines(head)));
@@ -4330,6 +4341,56 @@ pub(super) fn part_content_key(
         format!("round {n} {}", decision.get("rounds")?)
     };
     Some(format!("content of {} {:x}", entry.id, text_key(&body)))
+}
+
+/// A summary as a read shows it: each run of paragraphs shown before as
+/// one pointer, naming the reads that printed them and their size, the rest
+/// in full; and the paragraphs it prints. All shown: the one pointer
+pub(super) fn summary_with_pointers(
+    seen: &[(String, Option<super::Shown>)],
+) -> (String, Vec<String>) {
+    if !seen.is_empty() && seen.iter().all(|(_, s)| s.is_some()) {
+        let all =
+            super::Shown::joined(seen.iter().filter_map(|(_, s)| s.as_ref()));
+        return (
+            format!(
+                "(Its summary is in your context already: shown in {}, {}.)",
+                all.read,
+                about_tokens(all.bytes)
+            ),
+            Vec::new(),
+        );
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut printed = Vec::new();
+    let mut run: Vec<&super::Shown> = Vec::new();
+    let flush = |run: &mut Vec<&super::Shown>, parts: &mut Vec<String>| {
+        if run.is_empty() {
+            return;
+        }
+        let all = super::Shown::joined(run.iter().copied());
+        parts.push(format!(
+            "({} of its paragraphs here {} in your context already: shown in \
+             {}, {}.)",
+            run.len(),
+            if run.len() == 1 { "is" } else { "are" },
+            all.read,
+            about_tokens(all.bytes)
+        ));
+        run.clear();
+    };
+    for (para, shown) in seen {
+        match shown {
+            Some(s) => run.push(s),
+            None => {
+                flush(&mut run, &mut parts);
+                parts.push(para.clone());
+                printed.push(para.clone());
+            }
+        }
+    }
+    flush(&mut run, &mut parts);
+    (parts.join("\n\n"), printed)
 }
 
 /// What a part's pointer says the revisions change beside it, from the
@@ -9649,7 +9710,6 @@ mod shown_once_followups {
             once.set_cues(Cues {
                 links,
                 full_reads_left: Some(0),
-                summary_asked: false,
             });
             let out = shown(&entry(serde_json::json!({})), &once);
             assert!(
@@ -9699,30 +9759,49 @@ mod shown_once_followups {
         );
     }
 
+    /// Second iteration of 0.113.0: a summary is shown once by its
+    /// paragraphs on every read, a summary-only read too; a pointer names
+    /// the read that printed each paragraph, never one that pointed
     #[test]
-    fn a_summary_asked_for_is_shown_again() {
+    fn a_summary_points_only_at_the_reads_that_printed_it() {
         let once = ShownOnce::default();
-        shown(&entry(serde_json::json!({})), &once);
-        // Implicitly: the pointer
-        let implicit = shown(&entry(serde_json::json!({})), &once);
-        assert!(!implicit.contains("SUMMARY_TEXT"), "{implicit}");
-        assert!(implicit.contains("Its summary is in your context already"));
-        // By name: the summary
-        once.set_cues(Cues {
-            summary_asked: true,
-            ..Cues::default()
-        });
-        // In a later turn: the copy may have been trimmed
-        once.next_turn();
-        once.begin("your second read");
-        let asked =
-            format_governance_entry_once(&entry(serde_json::json!({})), &once);
+        let mut first = entry(serde_json::json!({}));
+        first.summary = Some("A_ONE\n\nA_TWO".into());
+        once.begin("your read of GOV-2026-0017 round 3 (original)");
+        format_governance_entry_once(&first, &once);
         once.commit();
-        assert!(asked.contains("SUMMARY_TEXT"), "{asked}");
-        // A later pointer names the latest showing
-        once.set_cues(Cues::default());
-        let later = shown(&entry(serde_json::json!({})), &once);
-        assert!(later.contains("shown in your second read"), "{later}");
+        // A later read that adds a note: the two paragraphs pointed at,
+        // the note printed
+        let mut noted = first.clone();
+        noted.summary = Some("A_ONE\n\nA_TWO\n\nNOTE_THREE".into());
+        once.begin("your read of GOV-2026-0017 (latest)");
+        let out = format_governance_entry_once(&noted, &once);
+        once.commit();
+        assert!(out.contains("NOTE_THREE"), "{out}");
+        assert!(!out.contains("A_ONE"), "{out}");
+        assert!(
+            out.contains(
+                "(2 of its paragraphs here are in your context already: \
+                 shown in your read of GOV-2026-0017 round 3 (original)"
+            ),
+            "{out}"
+        );
+        // Again: the pointer names both reads, each for what it printed,
+        // never the second for the first's text
+        once.begin("r3");
+        let again = format_governance_entry_once(&noted, &once);
+        assert!(
+            again.contains(
+                "shown in your read of GOV-2026-0017 round 3 (original) and \
+                 your read of GOV-2026-0017 (latest)"
+            ),
+            "{again}"
+        );
+        // Its size is the paragraphs', from one place
+        let size = about_tokens(
+            ("A_ONE".len() + "A_TWO".len() + "NOTE_THREE".len()) as u64,
+        );
+        assert!(again.contains(&format!("{size}.)")), "{again}");
     }
 
     #[test]
@@ -10136,7 +10215,10 @@ mod shown_once_followups {
         assert!(out.contains("OVERRULED BY GOV-2026-0020"), "{out}");
         assert!(!out.contains("On the merits."), "{out}");
         assert!(
-            out.contains("(Its summary's first part is in your context already: shown in your read of GOV-2026-0017. Then:)"),
+            out.contains(
+                "(2 of its paragraphs here are in your context already: shown \
+                 in your read of GOV-2026-0017"
+            ),
             "{out}"
         );
         // All of it is shown now: pointed at whole, never past what was shown
@@ -10146,6 +10228,37 @@ mod shown_once_followups {
             "{again}"
         );
         assert!(!again.contains("OVERRULED"), "{again}");
+    }
+
+    /// Second iteration of 0.113.0: a long one-line text's diff is its
+    /// changed sentences; a part's record header is shown once
+    #[test]
+    fn a_prose_diff_is_by_sentence_and_a_record_header_once() {
+        let before = "One. Two is removed. Three. Four. Five. Six.";
+        let after = "One. Three. Four. Five. Six.";
+        let diff = line_diff(before, after);
+        assert!(diff.contains("  - Two is removed."), "{diff}");
+        assert!(!diff.contains("Four"), "{diff}");
+        assert!(diff.contains("(1 sentence unchanged before)"), "{diff}");
+        let once = ShownOnce::default();
+        let round = |n: u64| {
+            let mut e = entry(serde_json::json!({}));
+            e.round = Some(n);
+            e.data = Some(serde_json::json!({
+                "title": "HEADER_TITLE", "outcome": "approved",
+                "rounds": [{"number": n, "responses": []}],
+            }));
+            e
+        };
+        let three = shown(&round(3), &once);
+        assert!(three.contains("HEADER_TITLE"), "{three}");
+        let two = shown(&round(2), &once);
+        assert!(!two.contains("HEADER_TITLE"), "{two}");
+        assert!(
+            two.contains(
+                "Its record's other fields are in your context already"
+            )
+        );
     }
 
     /// A revised record's two summaries are two: reading the original's
