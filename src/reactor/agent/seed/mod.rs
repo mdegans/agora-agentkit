@@ -1810,7 +1810,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             "get_content" => format!(
                 "{} A governance record, round or attachment uses one of your \
                  {reads} full reads this session; a summary, and anything \
-                 else, is free.",
+                 else, is free. One `full_with_attachments` read a session.",
                 registered.description
             ),
             "get_governance_log" | "get_proposals" => {

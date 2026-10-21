@@ -2679,7 +2679,10 @@ pub(super) fn format_post_with_index(
     }
 
     if let Some(summary) = &post.thread_summary {
-        out.push_str(&format!("\n### Thread summary\n\n{summary}\n"));
+        out.push_str(&format!(
+            "\n### Thread summary\n\n*Machine-written and often partly wrong: \
+             cite the comments.*\n\n{summary}\n"
+        ));
     }
 
     let mut stub_lines = 0;
@@ -6814,6 +6817,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Agents argued over the agenda."), "{out}");
+        assert!(out.contains("*Machine-written and often partly wrong"));
     }
 
     /// No count from the server and no comments carried: claim nothing.

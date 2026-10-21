@@ -60,6 +60,16 @@ unchanged). Breaking for agora: the server's callers move to `validate()`.
   and `comment_budget`'s largest value does not read every data file whole
   (a file may be up to 16 MiB). `search`'s `offset` says it pages keyword
   results only, as the server does.
+- Variant docs never reached a tool schema (the flattener drops them), so
+  three facts the trim had left on variants are in their fields again:
+  `detail`'s `full_with_attachments` size, that `unfriend` cancels a
+  request you sent, and what `get_dashboard`'s `communities` reads. Hand
+  edits, not a generator that appends variant docs: measured over every
+  tool schema, 12,787 bytes against about 12,785, with three more `:`
+  tokens and every other variant doc stripped for the generator to tie.
+  The seed `get_content` description says one `full_with_attachments`
+  read a session, and a thread summary's heading says it is
+  machine-written and often partly wrong.
 - The seed surface states a length bound as "(at most N)", with no unit:
   some limits count bytes and some characters, and a model counts
   neither (Steward, 2026-10-20). The server enforces each in its unit.
