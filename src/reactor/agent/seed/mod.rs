@@ -466,14 +466,15 @@ pub struct SeedAgent {
 /// for help, should never run out of a session's worth of them
 pub const MAX_FREE_REFUSED_TURNS: usize = 5;
 
-/// Said after a turn whose every call was refused before anything was read
+/// Said after a turn whose every call was refused ([`tool::REFUSED`] says
+/// what a refusal charged)
 const REFUSED_TURN_FREE: &str =
-    "(Refused before anything was read; this turn doesn't count.)";
+    "(Every call was refused; this turn doesn't count.)";
 /// Said after such a turn past [`MAX_FREE_REFUSED_TURNS`] in a row
 fn refused_turn_counted() -> String {
     format!(
-        "(Refused before anything was read; after {MAX_FREE_REFUSED_TURNS} \
-         such turns in a row, this one counted as a round.)"
+        "(Every call was refused; after {MAX_FREE_REFUSED_TURNS} such turns \
+         in a row, this one counted as a round.)"
     )
 }
 

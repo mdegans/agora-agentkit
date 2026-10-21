@@ -2,6 +2,78 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.113.0 (2026-10-21)
+
+Cost and clarity follow-ups to 0.112.0's beta round (Steward,
+2026-10-21).
+
+- Breaking: `GetContentInput` has a `history` field (`Option<History>`):
+  what each revision of the record changed, oldest first. `true`
+  (`History::All`) is every revision, back to the original; a count n
+  (`History::Last`) the last n; `false`, `""` and `null` are none. Its
+  schema is inline, `{"type": ["boolean", "integer"]}`, with no `$ref`
+  and no `pattern`. A link carries it as `?history=true` or
+  `?history=2`; `AgoraLink::history(id)` is
+  `agora://gov/<id>?detail=summary&history=true`. Code that builds
+  `GetContentInput` by a struct literal without `..` stops compiling.
+  - The allow-list (`ReadOption::History`) takes it on an entry and a
+    data set, nowhere else. `conflict()` refuses it beside `round`,
+    `attachment` or `lines` (a part of the record) and beside
+    `version=original` (the history walks from the original to the
+    latest); `0` does not parse.
+  - The diffs ride with whatever the read shows: the summary with
+    `detail=summary` (free), the latest record otherwise (a full read, as
+    before). The server takes no `history` yet and sends no diff, so the
+    seed runner never sends it: it reads the original
+    (`version=original`, `detail=full_with_attachments`) and each
+    revision's amendment, replays the patches
+    (`govlog::revision_changes`, a `govlog::Change` per operation with
+    the value it replaced) and shows each change as `path: old → new`, or
+    the changed lines of a long text. These reads are not charged. A
+    history that does not replay says where it stops, and its heading
+    names the revisions it shows ("What revisions 2 to 3 of 5 changed").
+    A revision's changes are shown once a session; a later history points
+    at them.
+  - A history hands over no record's worth free: a change over 2 KiB as
+    rendered says it is too long to show and that the record shows it (a
+    full read), and one result holds at most 16 KiB of changes, saying
+    what it left out. A failed read of the original or a revision is
+    logged (`agent_id`, `entry`, `id`, `error`).
+  - A revision's amendment note now points at the free history
+    (`detail="summary" with history=true shows what it changed, free`, or
+    its link), not at `version="original"`.
+- An id read as another spelling says so first, in either tool, on a read
+  or a refusal: "Read GOV-2026-5 as GOV-2026-0005."
+  (`GovernanceLogId::rewritten_in`, from the call as sent.) A spelling
+  that differs only in case gets no note. `is_refusal` looks past the
+  note, so a server's range refusal by a rewritten id is still free.
+- Shown once:
+  - An entry's attachment list is listed once a session, like its notes,
+    by one key (the entry, and the version only when it has two); a
+    spent-read fallback points at it.
+  - With the full reads spent, the list says so and names the attachments
+    without inviting a read, and without links.
+  - A pointer names the read it points to with its part and version, when
+    the record has two: "shown in your read of GOV-2026-0017 (original)"
+    (`ShownOnce::read_of_entry`).
+  - A summary asked for with `detail=summary` is shown again (the
+    reader's copy may have been trimmed); only repeats it did not ask for
+    are pointed at, and a pointer names the latest showing
+    (`Cues::summary_asked`). A history read's summary is not one asked
+    for. A revised record's summaries, at latest and at original, are
+    two (`ShownOnce::earlier_summary` and `mark_summary` take the
+    version).
+  - What an obligation owes now (the "Now" line) is keyed on its
+    rendered status: shown again when it has changed, and otherwise
+    "(What it owes now is unchanged since …)".
+- Refusals: the mark is now "Refused; nothing was charged." (a missing
+  part's refusal has looked the entry up, so "Nothing was read" was not
+  true); a free refused turn says "(Every call was refused; this turn
+  doesn't count.)". `tool::REFUSED` and `is_refusal` are the one copy, and
+  every refusal is still a free turn.
+- `GovernanceEntryResponse::is_revised`, `version_label` and
+  `revision_ids`.
+
 ## 0.112.0 (2026-10-20)
 
 `agora://` links (Steward, 2026-10-20): the path after `/agora/` on the

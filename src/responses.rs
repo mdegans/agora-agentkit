@@ -2633,6 +2633,34 @@ pub struct GovernanceEntryResponse {
 }
 
 impl GovernanceEntryResponse {
+    /// Whether the record has been revised, whichever version was served
+    pub fn is_revised(&self) -> bool {
+        !self.revisions.is_empty()
+            || self
+                .amendments
+                .iter()
+                .any(|a| a.kind == crate::enums::AmendmentKind::Revision)
+    }
+
+    /// `original` or `latest`, for a revised record: which of its two
+    /// texts this is. `None` when it has one
+    pub fn version_label(&self) -> Option<&'static str> {
+        self.is_revised().then_some(match self.version {
+            Some(RecordVersion::Original) => "original",
+            _ => "latest",
+        })
+    }
+
+    /// The revisions of the record, in chain order, whichever version was
+    /// served
+    pub fn revision_ids(&self) -> Vec<GovernanceLogId> {
+        self.amendments
+            .iter()
+            .filter(|a| a.kind == crate::enums::AmendmentKind::Revision)
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
     /// Why the part of `entry` a read asked for is not there, if it is not:
     /// a round past its last, or an attachment it does not have (beta round of
     /// 0.112.0: a missing part was read as an empty one, the whole record

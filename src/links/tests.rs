@@ -813,6 +813,9 @@ fn every_kind_takes_exactly_its_options() {
                 }
                 ReadOption::CommentBudget => read.comment_budget = Some(8192),
                 ReadOption::Lines => read.lines = Some("1-2".parse().unwrap()),
+                ReadOption::History => {
+                    read.history = Some(crate::requests::History::All)
+                }
             }
             let allowed = target.options().contains(&option);
             match read.conflict() {
@@ -900,17 +903,17 @@ fn a_read_link_names_its_kinds_options() {
         (
             "agora://gov/GOV-2026-0016?bogus=1",
             "bogus does not apply to a governance entry, which takes detail, \
-             round, attachment, version",
+             round, attachment, version, history",
         ),
         (
             "agora://gov/GOV-2026-0016?comment_budget=8192",
             "comment_budget does not apply to a governance entry, which \
-             takes detail, round, attachment, version",
+             takes detail, round, attachment, version, history",
         ),
         (
             "agora://gov/DATA-2026-0001?bogus=1",
             "which takes detail, attachment, version, comment_budget, lines, \
-             commit",
+             history, commit",
         ),
         (
             "agora://post/7ad26ccd?round=1",
@@ -1039,5 +1042,72 @@ fn a_slash_with_no_attachment_is_refused() {
             .conflict()
             .unwrap()
             .contains("give one")
+    );
+}
+
+/// `?history=true` and `?history=<n>` read as `get_content`'s `history`,
+/// print back, and an empty, zero or contradicting one is refused
+#[test]
+fn a_link_carries_history() {
+    use crate::requests::History;
+    for (s, want) in [
+        ("agora://gov/GOV-2026-0017?history=true", History::All),
+        (
+            "agora://gov/GOV-2026-0017?detail=summary&history=2",
+            History::Last(std::num::NonZeroU32::new(2).unwrap()),
+        ),
+    ] {
+        let r = read(s);
+        assert_eq!(r.history, Some(want), "{s}");
+        assert_eq!(link(s).to_string(), s);
+    }
+    assert_eq!(
+        read("agora://gov/GOV-2026-0017?history=false").history,
+        None
+    );
+    assert_eq!(
+        AgoraLink::history("GOV-2026-0017".parse().unwrap()).to_string(),
+        "agora://gov/GOV-2026-0017?detail=summary&history=true"
+    );
+    assert!(refused("agora://gov/GOV-2026-0017?history=").contains("history"));
+    assert!(
+        refused("agora://gov/GOV-2026-0017?history=0")
+            .contains("give true, false or a count from 1")
+    );
+    assert!(
+        refused("agora://post/7ad26ccd?history=true")
+            .contains("history does not apply to a post or comment")
+    );
+    // Contradictions parse, and are refused by `conflict` before a read,
+    // as a tool call's are
+    assert!(
+        read("agora://gov/GOV-2026-0017?history=true&version=original")
+            .conflict()
+            .unwrap()
+            .contains("version=original reads the original alone")
+    );
+}
+
+/// `history` is inline in get_content's schema: a boolean or a count, no
+/// `$ref` in the schema, no `pattern` on it
+#[cfg(feature = "schemars")]
+#[test]
+fn history_is_inline_in_the_schema() {
+    let tool = crate::tools::agent_tool("get_content").unwrap();
+    let schema = (tool.input_schema)();
+    let text = schema.to_string();
+    assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
+    let history = &schema["properties"]["history"];
+    assert!(history.get("pattern").is_none(), "{history}");
+    assert_eq!(
+        history["type"],
+        serde_json::json!(["boolean", "integer"]),
+        "{history}"
+    );
+    assert!(
+        history["description"]
+            .as_str()
+            .unwrap()
+            .contains("revision")
     );
 }

@@ -1576,6 +1576,109 @@ pub fn apply_patch(
     Ok(out)
 }
 
+/// One operation of a [`Revision`]'s patch, with the value it replaced or
+/// removed: what a reader of the revision needs to see it changed
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Change {
+    pub kind: ChangeKind,
+    /// RFC 6901 pointer to what changed
+    pub path: String,
+    /// Where a `move` or `copy` took it from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// What was there before, when anything was
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<serde_json::Value>,
+    /// What is there after, unless it was removed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<serde_json::Value>,
+}
+
+/// What a [`Change`] did: its patch operation, `test` aside
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Added,
+    Replaced,
+    Removed,
+    Moved,
+    Copied,
+}
+
+/// What each of `revisions` changed, replayed over `original` in chain
+/// order, a [`Change`] per operation (`test`s change nothing). Stops at
+/// the first that does not apply: the changes so far, and its error
+pub fn revision_changes<'a>(
+    original: &serde_json::Value,
+    revisions: impl IntoIterator<Item = &'a Revision>,
+) -> (Vec<Vec<Change>>, Option<ReviseError>) {
+    use json_patch::PatchOperation as Op;
+    let mut current = original.clone();
+    let mut out = Vec::new();
+    for revision in revisions {
+        let mut changes = Vec::new();
+        for op in &revision.patch.0 {
+            let at = |p: &json_patch::jsonptr::Pointer| {
+                current.pointer(p.as_str()).cloned()
+            };
+            // An add into an object replaces what is there; into an array
+            // it inserts, replacing nothing
+            let replaced = |p: &json_patch::jsonptr::Pointer| {
+                let parent = p.parent().map_or("", |q| q.as_str());
+                current
+                    .pointer(parent)
+                    .filter(|v| v.is_object())
+                    .and_then(|_| at(p))
+            };
+            let change = match op {
+                Op::Test(_) => None,
+                Op::Add(a) => Some(Change {
+                    kind: ChangeKind::Added,
+                    path: a.path.to_string(),
+                    from: None,
+                    before: replaced(&a.path),
+                    after: Some(a.value.clone()),
+                }),
+                Op::Replace(r) => Some(Change {
+                    kind: ChangeKind::Replaced,
+                    path: r.path.to_string(),
+                    from: None,
+                    before: at(&r.path),
+                    after: Some(r.value.clone()),
+                }),
+                Op::Remove(r) => Some(Change {
+                    kind: ChangeKind::Removed,
+                    path: r.path.to_string(),
+                    from: None,
+                    before: at(&r.path),
+                    after: None,
+                }),
+                Op::Move(m) => Some(Change {
+                    kind: ChangeKind::Moved,
+                    path: m.path.to_string(),
+                    from: Some(m.from.to_string()),
+                    before: replaced(&m.path),
+                    after: at(&m.from),
+                }),
+                Op::Copy(c) => Some(Change {
+                    kind: ChangeKind::Copied,
+                    path: c.path.to_string(),
+                    from: Some(c.from.to_string()),
+                    before: replaced(&c.path),
+                    after: at(&c.from),
+                }),
+            };
+            match apply_patch(&current, &json_patch::Patch(vec![op.clone()])) {
+                Ok(next) => current = next,
+                Err(e) => return (out, Some(e)),
+            }
+            changes.extend(change);
+        }
+        out.push(changes);
+    }
+    (out, None)
+}
+
 /// An entry's latest version: its stored `data` with each revision's
 /// patch applied in chain order. A redaction rebases them (see
 /// [`AmendmentDraft::redaction`]), so an error means the history is
@@ -3331,6 +3434,90 @@ pub fn verify_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn revision(patch: serde_json::Value) -> Revision {
+        Revision {
+            patch: serde_json::from_value(patch).unwrap(),
+            duplicates: Vec::new(),
+            resulting_data_hash: "0".repeat(64).parse().unwrap(),
+        }
+    }
+
+    /// Each revision's changes, with what each replaced, replayed in chain
+    /// order: the second sees what the first left
+    #[test]
+    fn revision_changes_replay_in_order() {
+        let original = serde_json::json!({
+            "landmark": "no", "tags": ["a"], "old": 3, "obj": {"k": 1},
+        });
+        let revisions = [
+            revision(serde_json::json!([
+                {"op": "test", "path": "/landmark", "value": "no"},
+                {"op": "replace", "path": "/landmark", "value": "yes"},
+                {"op": "add", "path": "/tags/1", "value": "b"},
+                {"op": "add", "path": "/obj/k", "value": 2},
+            ])),
+            revision(serde_json::json!([
+                {"op": "replace", "path": "/landmark", "value": "maybe"},
+                {"op": "remove", "path": "/old"},
+                {"op": "move", "from": "/tags/0", "path": "/first"},
+            ])),
+        ];
+        let (changes, error) = revision_changes(&original, &revisions);
+        assert!(error.is_none());
+        let c = |kind,
+                 path: &str,
+                 before: Option<serde_json::Value>,
+                 after: Option<serde_json::Value>| Change {
+            kind,
+            path: path.into(),
+            from: None,
+            before,
+            after,
+        };
+        use ChangeKind as K;
+        assert_eq!(
+            changes[0],
+            vec![
+                c(
+                    K::Replaced,
+                    "/landmark",
+                    Some("no".into()),
+                    Some("yes".into())
+                ),
+                // Into an array: inserted, nothing replaced
+                c(K::Added, "/tags/1", None, Some("b".into())),
+                // Into an object: what was there is what it replaced
+                c(K::Added, "/obj/k", Some(1.into()), Some(2.into())),
+            ]
+        );
+        assert_eq!(
+            changes[1],
+            vec![
+                c(
+                    K::Replaced,
+                    "/landmark",
+                    Some("yes".into()),
+                    Some("maybe".into())
+                ),
+                c(K::Removed, "/old", Some(3.into()), None),
+                Change {
+                    from: Some("/tags/0".into()),
+                    ..c(K::Moved, "/first", None, Some("a".into()))
+                },
+            ]
+        );
+        // One that does not apply stops the history there
+        let broken = [
+            revisions[0].clone(),
+            revision(serde_json::json!([
+                {"op": "replace", "path": "/nowhere", "value": 1},
+            ])),
+        ];
+        let (changes, error) = revision_changes(&original, &broken);
+        assert_eq!(changes.len(), 1);
+        assert!(error.is_some());
+    }
 
     #[test]
     fn pointer_tokens_escape_and_unescape() {

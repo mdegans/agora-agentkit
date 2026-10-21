@@ -560,6 +560,10 @@ impl<T: Tool> Tool for Gauged<T> {
                     .into();
             }
         }
+        // An id read as another spelling says so, first
+        if let Some(note) = super::tool::read_as(&name, &input) {
+            result.content = format!("{note}\n\n{}", result.content).into();
+        }
         self.admit(&name, &input, result)
     }
 

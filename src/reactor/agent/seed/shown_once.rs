@@ -57,8 +57,10 @@ struct Inner {
     /// Governance entries' summaries shown this session (betas of 0.108:
     /// get_council_meetings showed GOV-2026-0017's, and a summary read
     /// showed it again)
-    summaries: HashMap<GovernanceLogId, Shown>,
-    pending_summaries: Vec<(GovernanceLogId, Shown)>,
+    /// By id and version (`latest` for a record with one text): a
+    /// revised record's two summaries are two
+    summaries: HashMap<(GovernanceLogId, &'static str), Shown>,
+    pending_summaries: Vec<((GovernanceLogId, &'static str), Shown)>,
     /// Parts of governance records shown this session (an attachment, a
     /// data set's file or lines of one), by the read's canonical link
     /// (0.112.0, beta round)
@@ -79,6 +81,9 @@ pub struct Cues {
     pub links: bool,
     /// Full governance reads left this session, when the tool counts them
     pub full_reads_left: Option<u64>,
+    /// The read asked for a summary by name (`detail=summary`): it is shown,
+    /// even if it was shown before
+    pub summary_asked: bool,
 }
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
@@ -135,24 +140,35 @@ impl ShownOnce {
         self.0.read().expect("shown-once lock").cues
     }
 
-    /// Where `id`'s summary was shown this session, if it was
-    pub fn earlier_summary(&self, id: &GovernanceLogId) -> Option<Shown> {
+    /// Where `id`'s summary at `version` was shown this session, if it was
+    pub fn earlier_summary(
+        &self,
+        id: &GovernanceLogId,
+        version: &'static str,
+    ) -> Option<Shown> {
+        let key = (id.clone(), version);
         let inner = self.0.read().expect("shown-once lock");
-        inner.summaries.get(id).cloned().or_else(|| {
+        inner.summaries.get(&key).cloned().or_else(|| {
             inner
                 .pending_summaries
                 .iter()
-                .find(|(p, _)| p == id)
+                .find(|(p, _)| *p == key)
                 .map(|(_, s)| s.clone())
         })
     }
 
-    /// The result being rendered shows `id`'s summary, `bytes` long
-    pub fn mark_summary(&self, id: GovernanceLogId, bytes: usize) {
+    /// The result being rendered shows `id`'s summary at `version`, `bytes`
+    /// long
+    pub fn mark_summary(
+        &self,
+        id: GovernanceLogId,
+        version: &'static str,
+        bytes: usize,
+    ) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
         inner.pending_summaries.push((
-            id,
+            (id, version),
             Shown {
                 read,
                 bytes: bytes as u64,
@@ -187,6 +203,24 @@ impl ShownOnce {
     /// The read of `id`, as [`Self::begin`] names it
     pub fn read_of(id: impl std::fmt::Display) -> String {
         format!("your read of {id}")
+    }
+
+    /// The read of a governance entry, as a pointer names it: its part,
+    /// and which version, when the record has two (`your read of
+    /// GOV-2026-0017 (original)`)
+    pub fn read_of_entry(
+        entry: &crate::responses::GovernanceEntryResponse,
+    ) -> String {
+        let mut read = Self::read_of(&entry.id);
+        if let Some(n) = entry.round {
+            read.push_str(&format!(" round {n}"));
+        } else if let Some(a) = &entry.attachment {
+            read.push_str(&format!(" {a:?}"));
+        }
+        if let Some(version) = entry.version_label() {
+            read.push_str(&format!(" ({version})"));
+        }
+        read
     }
 
     /// The read of `id`, by its short form
@@ -245,9 +279,11 @@ impl ShownOnce {
         }
         let legends = std::mem::take(&mut inner.pending_legends);
         inner.legends.extend(legends);
+        // The latest showing: a summary is shown again only when asked
+        // for by name, and a later pointer names that read
         let summaries = std::mem::take(&mut inner.pending_summaries);
         for (id, shown) in summaries {
-            inner.summaries.entry(id).or_insert(shown);
+            inner.summaries.insert(id, shown);
         }
         let parts = std::mem::take(&mut inner.pending_parts);
         for (link, shown) in parts {

@@ -1812,6 +1812,113 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub lines: Option<crate::govlog::LineRange>,
+    /// What each revision of the record changed, oldest first: true for
+    /// all of them, or how many of the last
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "History::forgiving"
+    )]
+    pub history: Option<History>,
+}
+
+/// Which revisions' changes a read shows ([`GetContentInput::history`]):
+/// `false` is none, and is no history at all
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum History {
+    /// `true`: every revision's, back to the original
+    All,
+    /// A count: the last n revisions'
+    Last(std::num::NonZeroU32),
+}
+
+impl History {
+    /// The revisions of `total` it shows, the last of them
+    pub fn count(self, total: usize) -> usize {
+        match self {
+            History::All => total,
+            History::Last(n) => total.min(n.get() as usize),
+        }
+    }
+
+    /// `true`, `false`, a count from 1, or each as a string (as a link's
+    /// query carries them); `""` and `null` are absent, as
+    /// [`forgiving_option`](crate::serde_forgiving::forgiving_option) reads them
+    fn forgiving<'de, D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Self>, D::Error> {
+        use serde::de::Error;
+        use serde_json::Value;
+        let count = |n: u64| {
+            u32::try_from(n)
+                .ok()
+                .and_then(std::num::NonZeroU32::new)
+                .map(|n| Some(History::Last(n)))
+                .ok_or_else(|| {
+                    D::Error::custom(format!(
+                        "history={n}: give true, false or a count from 1"
+                    ))
+                })
+        };
+        match Option::<Value>::deserialize(d)? {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
+            Some(Value::Bool(true)) => Ok(Some(History::All)),
+            Some(Value::Number(n)) => match n.as_u64() {
+                Some(n) => count(n),
+                None => Err(D::Error::custom(format!(
+                    "history={n}: give true, false or a count from 1"
+                ))),
+            },
+            Some(Value::String(s)) => match s.trim() {
+                "" | "null" | "false" => Ok(None),
+                "true" => Ok(Some(History::All)),
+                t => match t.parse::<u64>() {
+                    Ok(n) => count(n),
+                    Err(_) => Err(D::Error::custom(format!(
+                        "history={s:?}: give true, false or a count from 1"
+                    ))),
+                },
+            },
+            Some(other) => Err(D::Error::custom(format!(
+                "history={other}: give true, false or a count from 1"
+            ))),
+        }
+    }
+}
+
+impl Serialize for History {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            History::All => s.serialize_bool(true),
+            History::Last(n) => s.serialize_u32(n.get()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for History {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        Self::forgiving(d)?.ok_or_else(|| {
+            serde::de::Error::custom("history=false is no history")
+        })
+    }
+}
+
+// Inline, no `$ref`, no `pattern`: a boolean or a count
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for History {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "History".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({ "type": ["boolean", "integer"] })
+    }
 }
 
 impl GetContentInput {
@@ -1836,6 +1943,7 @@ impl GetContentInput {
             version: None,
             comment_budget: None,
             lines: None,
+            history: None,
         }
     }
 
@@ -1916,16 +2024,18 @@ pub enum ReadOption {
     Version,
     CommentBudget,
     Lines,
+    History,
 }
 
 impl ReadOption {
-    pub const ALL: [ReadOption; 6] = [
+    pub const ALL: [ReadOption; 7] = [
         ReadOption::Detail,
         ReadOption::Round,
         ReadOption::Attachment,
         ReadOption::Version,
         ReadOption::CommentBudget,
         ReadOption::Lines,
+        ReadOption::History,
     ];
 
     /// Its field's name
@@ -1937,6 +2047,7 @@ impl ReadOption {
             ReadOption::Version => "version",
             ReadOption::CommentBudget => "comment_budget",
             ReadOption::Lines => "lines",
+            ReadOption::History => "history",
         }
     }
 }
@@ -1991,9 +2102,9 @@ impl ReadTarget {
         use ReadOption::*;
         match self {
             ReadTarget::Content => &[Detail, CommentBudget],
-            ReadTarget::Entry => &[Detail, Round, Attachment, Version],
+            ReadTarget::Entry => &[Detail, Round, Attachment, Version, History],
             ReadTarget::DataSet => {
-                &[Detail, Attachment, Version, CommentBudget, Lines]
+                &[Detail, Attachment, Version, CommentBudget, Lines, History]
             }
             // As a data set's file read by attachment, so both forms of
             // one read take the same options; `lines` only beside a
@@ -2024,6 +2135,7 @@ impl GetContentInput {
             (Version, self.version.is_some()),
             (CommentBudget, self.comment_budget.is_some()),
             (Lines, self.lines.is_some()),
+            (History, self.history.is_some()),
         ]
         .into_iter()
         .filter_map(|(o, given)| given.then_some(o))
@@ -2074,6 +2186,32 @@ impl GetContentInput {
         }
         // A citation beside the `lines` or `version` it settles itself is
         // refused by `split_citation`, the one copy of that rule
+        // History is of the whole record, from the original to the latest
+        if self.history.is_some() {
+            let parts: Vec<&str> = [
+                ("round", self.round.is_some()),
+                ("attachment", self.attachment.is_some()),
+                ("lines", self.lines.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(n, given)| given.then_some(n))
+            .collect();
+            if !parts.is_empty() {
+                return Some(format!(
+                    "history is what each revision changed in the whole \
+                     record, and {} reads part of it: give one",
+                    parts.join(" and ")
+                ));
+            }
+            if self.version == Some(crate::enums::RecordVersion::Original) {
+                return Some(
+                    "history walks the revisions from the original to the \
+                     latest, and version=original reads the original alone: \
+                     give one"
+                        .into(),
+                );
+            }
+        }
         // A part of an entry's record, and a depth that is not a part
         if target == ReadTarget::Entry {
             let parts: Vec<&str> = [
@@ -2540,6 +2678,112 @@ pub const FLAGS_PER_HOUR: i64 = 20;
 
 #[cfg(test)]
 mod tests {
+
+    /// `history` takes true, false or a count from 1, as a tool call or a
+    /// link's query carries them; false is no history, 0 and the rest are
+    /// refused
+    #[test]
+    fn history_reads_a_bool_or_a_count() {
+        use super::History;
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<GetContentInput>(serde_json::json!({
+                "id": "GOV-2026-0017", "history": v,
+            }))
+            .map(|r| r.history)
+        };
+        let two = History::Last(std::num::NonZeroU32::new(2).unwrap());
+        for (given, want) in [
+            (serde_json::json!(true), Some(History::All)),
+            (serde_json::json!("true"), Some(History::All)),
+            (serde_json::json!(false), None),
+            (serde_json::json!("false"), None),
+            (serde_json::json!(""), None),
+            (serde_json::json!(null), None),
+            (serde_json::json!(2), Some(two)),
+            (serde_json::json!(" 2 "), Some(two)),
+        ] {
+            assert_eq!(read(given.clone()).unwrap(), want, "{given}");
+        }
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!("0"),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("all"),
+            serde_json::json!([1]),
+        ] {
+            let e = read(bad.clone()).unwrap_err().to_string();
+            assert!(e.contains("give true, false or a count from 1"), "{e}");
+        }
+        // Absent from what is sent when not given: an older server, which
+        // refuses unknown fields, still takes every other read
+        let plain = GetContentInput::new(
+            "GOV-2026-0017".parse::<crate::ids::ContentRef>().unwrap(),
+        );
+        assert!(!serde_json::to_string(&plain).unwrap().contains("history"));
+        assert_eq!(serde_json::to_value(History::All).unwrap(), true);
+        assert_eq!(serde_json::to_value(two).unwrap(), 2);
+        assert_eq!(History::All.count(3), 3);
+        assert_eq!(two.count(3), 2);
+        assert_eq!(two.count(1), 1);
+    }
+
+    /// `history` is of a whole record from its original: beside a part, or
+    /// beside `version=original`, it is refused; on a post or a document
+    /// it does not apply
+    #[test]
+    fn history_beside_what_contradicts_it_is_refused() {
+        let with = |extra: serde_json::Value| {
+            let mut v = extra;
+            v["history"] = true.into();
+            serde_json::from_value::<GetContentInput>(v)
+                .unwrap()
+                .conflict()
+        };
+        for (read, why) in [
+            (
+                serde_json::json!({"id": "GOV-2026-0017", "round": 2}),
+                "history is what each revision changed in the whole record, \
+                 and round reads part of it: give one",
+            ),
+            (
+                serde_json::json!({"id": "GOV-2026-0017", "attachment": "a.md"}),
+                "and attachment reads part of it",
+            ),
+            (
+                serde_json::json!({"id": "DATA-2026-0001", "attachment": "a.md", "lines": "1-2"}),
+                "and attachment and lines reads part of it",
+            ),
+            (
+                serde_json::json!({"id": "GOV-2026-0017", "version": "original"}),
+                "version=original reads the original alone: give one",
+            ),
+            (
+                serde_json::json!({"id": "7ad26ccd"}),
+                "history does not apply to a post or comment",
+            ),
+            (
+                serde_json::json!({"id": "constitution"}),
+                "history does not apply to a document",
+            ),
+            (
+                serde_json::json!({"id": "DATA-2026-0001:/votes/index.md"}),
+                "history does not apply to a data set's cited file",
+            ),
+        ] {
+            let got = with(read.clone()).unwrap_or_default();
+            assert!(got.contains(why), "{read}: {got}");
+        }
+        for read in [
+            serde_json::json!({"id": "GOV-2026-0017"}),
+            serde_json::json!({"id": "GOV-2026-0017", "detail": "summary"}),
+            serde_json::json!({"id": "GOV-2026-0017", "version": "latest"}),
+            serde_json::json!({"id": "GOV-2026-0017", "detail": "full_with_attachments"}),
+            serde_json::json!({"id": "DATA-2026-0001"}),
+        ] {
+            assert_eq!(with(read.clone()), None, "{read}");
+        }
+    }
 
     /// `communities` is optional and absent from what a 0.95 runner sends
     /// when unset, so a 0.94 server (which refuses unknown fields) still
