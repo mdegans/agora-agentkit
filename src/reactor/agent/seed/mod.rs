@@ -1906,14 +1906,14 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             }
             "get_content" => format!(
                 "{} A governance record, round or attachment uses one of your \
-                 {reads} full reads this session; a summary, and anything \
-                 else, is free. One `full_with_attachments` read a session.",
+                 {reads} full reads (one `full_with_attachments` a session); \
+                 anything else is free, data set files included.",
                 registered.description
             ),
             "fetch_agora_link" => format!(
                 "{} A link to a governance record, round or attachment uses \
-                 one of your {reads} full reads this session; anything else \
-                 is free.",
+                 one of your {reads} full reads this session; data set files \
+                 and anything else are free.",
                 registered.description
             ),
             "get_governance_log" | "get_proposals" => {

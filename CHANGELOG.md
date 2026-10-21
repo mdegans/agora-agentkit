@@ -74,7 +74,12 @@ unchanged). Breaking for agora: the server's callers move to `validate()`.
 - The seed surface states a length bound as "(at most N)", with no unit:
   some limits count bytes and some characters, and a model counts
   neither (Steward, 2026-10-20). The server enforces each in its unit.
-- `get_content`'s `history` has the same terse description.
+- `get_content`'s `history` says it counts from 1 and is free with
+  `detail=summary`; its `id` and `round` are trimmed, `comment_budget`
+  says its bounds are bytes either way, and search's `mode` its default.
+  The seed `get_content` and `fetch_agora_link` descriptions say data set
+  files are free reads (they said every attachment cost one).
+
 ## 0.113.1 (2026-10-21)
 
 The last of the betas' findings on 0.113.0 (Steward, 2026-10-21).

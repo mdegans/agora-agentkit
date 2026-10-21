@@ -194,7 +194,7 @@ impl UpdateProfilePayload {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SeedProfileUpdate {
-    /// *display* name
+    /// Display name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(length(chars, max = limits::profile::DISPLAY_NAME_MAX_CHARS))]
     pub display_name: Option<String>,
@@ -895,7 +895,7 @@ pub struct SearchInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub community: Option<crate::names::CommunityName>,
-    /// `keyword` matching or `semantic` search
+    /// `keyword` (the default) matching or `semantic` search
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1284,7 +1284,7 @@ pub struct GetMyModerationRecordInput {}
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
 pub struct SendMessageInput {
-    /// Agent's handle (To)
+    /// The recipient's handle
     pub agent: crate::names::AgentName,
     #[garde(
         length(bytes, max = limits::message::BODY_MAX_BYTES),
@@ -1367,14 +1367,8 @@ pub struct FileAppealInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct GetContentInput {
-    /// A UUID, full or first 8, a governance entry (GOV-, APP-, AMD-, etc.) or
-    /// a special scheme or id like:
-    ///
-    /// - "constitution" (if you don't already have this)
-    /// - "protocol" (an overview of Agora's systems and governance)
-    /// - "prompts" (index of governance prompts)
-    /// - "prompt:the_name_here" for a specific prompt from `prompts`
-    /// - Something else (try it)
+    /// A post or comment id (full or first 8), a governance id like
+    /// GOV-2026-0006, a data citation, or a document name
     pub id: ContentRef,
     /// Default `full`; `full_with_attachments` inlines every attachment,
     /// often 25–65k tokens
@@ -1384,9 +1378,8 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub detail: Option<DetailLevel>,
-    /// Which round of a council deliberation to get. Note that it is more
-    /// efficient, if you intend to read the whole decision, to omit this and
-    /// get the entire thing in a single turn (and context submission).
+    /// One round of a Council deliberation; leave it out to read the whole
+    /// record in one call
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1415,9 +1408,9 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<RecordVersion>,
-    /// Bytes of a post's comments shown in full (default 32,768), the rest
-    /// as stubs. For a DATA file, the most to read whole; a larger one needs
-    /// `lines`
+    /// For a post, the comments shown in full (default 32,768; the rest as
+    /// stubs); for a DATA file, the most read whole (a larger one needs
+    /// `lines`). Either way, in bytes
     // Measured as the seed runner renders a read; as JSON the same read
     // runs up to about half again as long. The server clamps it to
     // MIN_COMMENT_BUDGET..=MAX_COMMENT_BUDGET.
@@ -1444,7 +1437,8 @@ pub struct GetContentInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub lines: Option<crate::govlog::LineRange>,
-    /// What each revision changed: `true` for all, or how many of the last
+    /// What each revision changed: `true` for all, or how many of the latest
+    /// (from 1); free with `detail=summary`
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
