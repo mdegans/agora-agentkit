@@ -3867,25 +3867,53 @@ pub(super) fn format_governance_entry_once(
     // have been trimmed (Steward, 2026-10-21)
     // Asked for by name it is shown, unless this turn showed it (betas of
     // 0.113.0: a later turn's context may have been trimmed, this one's not)
-    let earlier = entry
+    // The paragraphs shown are pointed at; any not shown print (betas of
+    // 0.113.0: a summary is never taken as seen for what was not)
+    let seen = entry
         .summary
         .as_deref()
         .filter(|_| !part)
-        .and_then(|s| once.earlier_summary(&entry.id, Some(s)))
-        .filter(|shown| !cues.summary_asked || shown.turn == once.turn());
+        .and_then(|s| once.summary_seen(&entry.id, s))
+        .filter(|(shown, _)| !cues.summary_asked || shown.turn == once.turn());
+    // Marked for what this read shows: all of it, or the rest after what
+    // was shown
     if let Some(s) = entry.summary.as_deref()
-        && earlier.is_none()
         && !part
     {
-        once.mark_summary(entry.id.clone(), entry.version_label(), s);
+        let from = seen.as_ref().map_or(0, |(_, end)| *end);
+        let whole = super::shown_once::summary_text(s).len();
+        if from < whole {
+            once.mark_summary_from(
+                entry.id.clone(),
+                entry.version_label(),
+                s,
+                from,
+            );
+        }
     }
+    let rest = |s: &str, end: usize| {
+        let t = super::shown_once::summary_text(s);
+        t[end..].trim().to_string()
+    };
     match entry.summary.as_deref().filter(|_| !part) {
         _ if part => {}
-        Some(_) if let Some(shown) = earlier => out.push_str(&format!(
-            "\n(Its summary is in your context already: shown in {}, {}.)\n",
-            shown.read,
-            about_tokens(shown.bytes)
-        )),
+        Some(s) if let Some((shown, end)) = &seen => {
+            let tail = rest(s, *end);
+            if tail.is_empty() {
+                out.push_str(&format!(
+                    "\n(Its summary is in your context already: shown in {}, \
+                     {}.)\n",
+                    shown.read,
+                    about_tokens(shown.bytes)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n(Its summary's first part is in your context already: \
+                     shown in {}. Then:)\n\n{tail}\n",
+                    shown.read
+                ));
+            }
+        }
         Some(s) => match &entry.summary_authorship {
             Some(by) => out.push_str(&format!(
                 "\n**Summary** ({}; signed with the record):\n\n{s}\n",
@@ -10087,6 +10115,37 @@ mod shown_once_followups {
         assert!(
             format_changes(&changes[20..], false).contains("(a full read)")
         );
+    }
+
+    /// Betas of 0.113.0: a summary is pointed at only for the paragraphs a
+    /// read showed; one not shown before prints in full, and is then shown
+    #[test]
+    fn a_summarys_unseen_paragraphs_print() {
+        let once = ShownOnce::default();
+        let mut first = entry(serde_json::json!({}));
+        first.summary =
+            Some("The Council approved it.\n\nOn the merits.".into());
+        shown(&first, &once);
+        let mut later = entry(serde_json::json!({}));
+        later.summary = Some(
+            "The Council approved it.\n\nOn the merits.\n\nOVERRULED BY \
+             GOV-2026-0020: no longer precedent."
+                .into(),
+        );
+        let out = shown(&later, &once);
+        assert!(out.contains("OVERRULED BY GOV-2026-0020"), "{out}");
+        assert!(!out.contains("On the merits."), "{out}");
+        assert!(
+            out.contains("(Its summary's first part is in your context already: shown in your read of GOV-2026-0017. Then:)"),
+            "{out}"
+        );
+        // All of it is shown now: pointed at whole, never past what was shown
+        let again = shown(&later, &once);
+        assert!(
+            again.contains("Its summary is in your context already"),
+            "{again}"
+        );
+        assert!(!again.contains("OVERRULED"), "{again}");
     }
 
     /// A revised record's two summaries are two: reading the original's

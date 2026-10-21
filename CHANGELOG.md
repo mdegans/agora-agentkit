@@ -136,9 +136,12 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
     beside the part, from the record's history: "its revisions change
     nothing in it, but change `/landmark`: false → true beside it" (H1:
     a reader of the original's header was told nothing changed).
-  - A summary whose shown copy is most of it (at least 60%, a paragraph
-    boundary), the rest the server's notes, is pointed at: a reads-spent
-    fallback, a summary+history read, a DATA entry's `version=original`.
+  - A summary is pointed at for the leading paragraphs a read showed;
+    any paragraph not shown before prints in full ("Its summary's first
+    part is in your context already: shown in … Then:"), and a read marks
+    only what it showed (`ShownOnce::summary_seen`, `mark_summary_from`).
+    So a reads-spent fallback, a summary+history read or a DATA entry's
+    `version=original` repeats only the server's notes that differ.
   - The flaky `serde_forgiving::tests::coercions_warn_when_the_feature_is_on`
     (1 run in 8, from 0.87): another test's thread could cache a callsite's
     interest as "never"; the test rebuilds the interest cache under its

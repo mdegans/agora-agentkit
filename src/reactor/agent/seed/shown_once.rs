@@ -195,20 +195,9 @@ impl ShownOnce {
         id: &GovernanceLogId,
         text: Option<&str>,
     ) -> Option<Shown> {
-        // The text, or most of it: a summary whose shown copy is the same
-        // but for the server's notes after it, which a reads-spent read or
-        // the other version adds (betas of 0.113.0)
-        let keys: Option<Vec<u64>> = text.map(|t| {
-            let t = summary_text(t);
-            t.match_indices("\n\n")
-                .map(|(at, _)| at)
-                .filter(|&at| at * 10 >= t.len() * 6)
-                .map(|at| text_key(&t[..at]))
-                .chain(std::iter::once(text_key(&t)))
-                .collect()
-        });
-        let wanted = |key: &(GovernanceLogId, u64)| {
-            key.0 == *id && keys.as_ref().is_none_or(|ks| ks.contains(&key.1))
+        let key = text.map(|t| text_key(&summary_text(t)));
+        let wanted = |k: &(GovernanceLogId, u64)| {
+            k.0 == *id && key.is_none_or(|key| k.1 == key)
         };
         let inner = self.0.read().expect("shown-once lock");
         inner
@@ -223,6 +212,27 @@ impl ShownOnce {
                     .find(|(k, _)| wanted(k))
                     .map(|(_, s)| s.clone())
             })
+    }
+
+    /// How much of `id`'s summary `text` was shown this session: the
+    /// longest run of its leading paragraphs a read showed, and where.
+    /// Never more than was shown (betas of 0.113.0): the rest is the
+    /// reader's to read. Its offset is into [`summary_text`]`(text)`
+    pub fn summary_seen(
+        &self,
+        id: &GovernanceLogId,
+        text: &str,
+    ) -> Option<(Shown, usize)> {
+        let t = summary_text(text);
+        let mut ends: Vec<usize> = t
+            .match_indices("\n\n")
+            .map(|(at, _)| at)
+            .chain(std::iter::once(t.len()))
+            .collect();
+        ends.reverse();
+        ends.into_iter().find_map(|end| {
+            self.earlier_summary(id, Some(&t[..end])).map(|s| (s, end))
+        })
     }
 
     /// Where `id`'s summary at `version` was shown this session, if it was
@@ -253,6 +263,19 @@ impl ShownOnce {
         version: Option<&'static str>,
         text: &str,
     ) {
+        self.mark_summary_from(id, version, text, 0)
+    }
+
+    /// [`Self::mark_summary`] for a result that showed `text` from offset
+    /// `from` (into [`summary_text`]) on, the rest pointed at: its leading
+    /// paragraphs keep the reads that showed them
+    pub fn mark_summary_from(
+        &self,
+        id: GovernanceLogId,
+        version: Option<&'static str>,
+        text: &str,
+        from: usize,
+    ) {
         let text = &summary_text(text);
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
@@ -271,7 +294,7 @@ impl ShownOnce {
             .match_indices("\n\n")
             .map(|(at, _)| at)
             .chain(std::iter::once(text.len()));
-        for end in ends {
+        for end in ends.filter(|&end| end > from) {
             inner
                 .pending_summaries
                 .push(((id.clone(), text_key(&text[..end])), shown.clone()));
