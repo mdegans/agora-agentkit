@@ -114,6 +114,23 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
     fetches nothing again. Every revision's patch is still needed for the
     last n's changes: the server serves no version between the original
     and the latest.
+- Third betas round:
+  - A part (a round, an attachment, a data set's file) is also keyed by
+    its text (`part_content_key`): the same text read at the other
+    version is the pointer, naming the read that showed it, free, before
+    the budget; with the reads spent it is looked up to compare only when
+    its other version was shown (B1).
+  - A data set's summary is one with or without its "Read this first"
+    sentence, and its pointers one size (`shown_once::summary_text`).
+  - get_governance_log's footer says a data set's reads are free.
+  - A summary asked for alone is pointed at when this turn already showed
+    it; in a later turn it is shown (`ShownOnce::turn`, counted per
+    response).
+  - A bad id's refusal lists every series and document the parser reads,
+    from `GovernanceLogPrefix::ALL` and `PlatformDoc::SLUGS`.
+  - `_blind` reads "Redaction salt (`_blind`): not content" in a record.
+  - A short data-file path says "(Read as <path>; cite it by that path.)",
+    not that it is not a path.
 - `round=0` is refused by `conflict()`. A round or attachment the server
   refuses with a 400 is looked up without it and refused for what is
   missing: a free turn, not a counted one.

@@ -6484,13 +6484,9 @@ async fn an_entrys_notes_once_and_a_revised_entrys_two_versions() {
         transcript(&agent)
     );
     let rendered = transcript(&agent);
-    assert_eq!(rendered.matches("WHAT_THE_CLERK_READ").count(), 2);
-    assert_eq!(
-        rendered
-            .matches("is in your context already: shown in")
-            .count(),
-        2
-    );
+    // The original's text is the latest's: one part (betas of 0.113.0, B1)
+    assert_eq!(rendered.matches("WHAT_THE_CLERK_READ").count(), 1);
+    assert_eq!(rendered.matches("is in your context already").count(), 3);
     // The notes: the same at either version, so shown once (betas of
     // 0.113.0: they were shown again for the original)
     assert_eq!(
@@ -7078,7 +7074,7 @@ async fn an_explicit_summary_shows_in_a_turn_with_a_history_read() {
         rendered
             .matches("The Council ratified v0.2 four to one.")
             .count(),
-        2,
+        1,
         "{rendered}"
     );
 }
@@ -7297,4 +7293,139 @@ async fn a_history_after_its_summary_points_at_it_and_fetches_once() {
         .unwrap();
     assert_eq!(original.calls(), 1, "cached for the session");
     assert_eq!(amendments.calls(), 2, "each revision once");
+}
+
+/// Betas of 0.113.0 (B1): a round whose text is the same at both versions
+/// is one part: read at one version and then the other, either order,
+/// with full reads left and spent, the second is the pointer and free
+#[tokio::test]
+async fn a_round_the_same_at_both_versions_is_one_part() {
+    for (first, second) in [("original", "latest"), ("latest", "original")] {
+        let server = MockServer::start();
+        let round_body = |version: &str| {
+            let mut body = governance_content(
+                "GOV-2026-0017",
+                Some(serde_json::json!({"rounds": [
+                    {"number": 3, "responses": [{"role": "lawyer", "vote": "yes",
+                     "rationale": "THE_SAME_ROUND"}]}
+                ]})),
+            );
+            body["round"] = 3.into();
+            body["version"] = version.into();
+            body["amendments"] = serde_json::json!([
+                {"id": "AMD-2026-0033", "kind": "revision", "basis": "x",
+                 "note": "Landmark", "created_at": "2026-10-02T00:00:00Z"}
+            ]);
+            body["round_bytes"] = serde_json::json!([10, 10, 3000]);
+            body
+        };
+        let original = server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/GOV-2026-0017")
+                .query_param("round", "3")
+                .query_param("version", "original");
+            then.status(200).json_body(round_body("original"));
+        });
+        let latest = server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/GOV-2026-0017")
+                .query_param("round", "3")
+                .is_true(|req| !has_param(req, "version"));
+            then.status(200).json_body(round_body("latest"));
+        });
+        server.mock(|when, then| {
+            when.method(GET).path("/agora/api/content/GOV-2026-0006");
+            then.status(200).json_body(governance_content(
+                "GOV-2026-0006",
+                Some(two_round_record()),
+            ));
+        });
+        let mut agent = agent(
+            &server,
+            SeedConfig {
+                max_rounds: 30,
+                ..quiet_config()
+            },
+        );
+        seat_start(&mut agent);
+        let read = |version: &str| {
+            let mut v = serde_json::json!({"id": "GOV-2026-0017", "round": 3});
+            if version == "original" {
+                v["version"] = "original".into();
+            }
+            tool_use_message("get_content", v)
+        };
+        agent.handle(read(first)).await.unwrap();
+        agent.handle(read(second)).await.unwrap();
+        // Spend the other read: still the pointer, at either version
+        agent
+            .handle(tool_use_message(
+                "get_content",
+                serde_json::json!({"id": "GOV-2026-0006"}),
+            ))
+            .await
+            .unwrap();
+        agent.handle(read(second)).await.unwrap();
+        agent.handle(read(first)).await.unwrap();
+        let rendered = transcript(&agent);
+        assert_eq!(
+            rendered.matches("THE_SAME_ROUND").count(),
+            1,
+            "{first} then {second}: {rendered}"
+        );
+        assert_eq!(rendered.matches("That was a full read").count(), 2);
+        assert!(
+            rendered.contains(
+                "the same text: shown in your read of GOV-2026-0017 round 3"
+            ),
+            "{rendered}"
+        );
+        assert!(original.calls() <= 2 && latest.calls() <= 2);
+    }
+}
+
+/// Betas of 0.113.0: a data set's summary is one, read alone or with its
+/// listing (which drops its "Read this first" sentence), and its pointers
+/// give one size
+#[test]
+fn a_data_sets_summary_is_one_with_or_without_its_listing() {
+    let once = super::ShownOnce::default();
+    let id: crate::ids::GovernanceLogId = "DATA-2026-0018".parse().unwrap();
+    once.begin("your read of DATA-2026-0018");
+    once.mark_summary(
+        id.clone(),
+        None,
+        "Data set, compiled by c.\n\nd\n\n3 files. Read this first: attachment=\"README.md\".",
+    );
+    once.commit();
+    let shown = once
+        .earlier_summary(&id, Some("Data set, compiled by c.\n\nd\n\n3 files."))
+        .expect("the same summary");
+    assert_eq!(
+        shown.bytes,
+        "Data set, compiled by c.\n\nd\n\n3 files.".len() as u64
+    );
+}
+
+/// Betas of 0.113.0: an id that is none says every kind `get_content`
+/// reads, from the parser's own lists
+#[test]
+fn a_bad_id_names_every_kind() {
+    let e = "nonsense"
+        .parse::<crate::ids::ContentRef>()
+        .unwrap_err()
+        .to_string();
+    for p in crate::ids::GovernanceLogPrefix::ALL {
+        assert!(e.contains(&format!("{p}-YYYY-NNNN")), "{e}");
+    }
+    for slug in crate::ids::PlatformDoc::SLUGS {
+        assert!(e.contains(&format!("{slug:?}")), "{e}");
+    }
+    // Every slug but the template parses as a document
+    for slug in crate::ids::PlatformDoc::SLUGS
+        .iter()
+        .filter(|s| !s.contains('<'))
+    {
+        assert!(slug.parse::<crate::ids::PlatformDoc>().is_ok(), "{slug}");
+    }
 }

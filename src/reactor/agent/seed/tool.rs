@@ -912,6 +912,8 @@ impl Agora {
             .into());
         }
         let capped = full && !self.can_read_governance_record();
+        // The part as asked, before a spent budget narrows the read
+        let asked_input = input.clone();
         // One verbatim read per session; a second gets the record without
         // the attachment bodies, and says so.
         let verbatim = full
@@ -995,6 +997,48 @@ impl Agora {
                 }
             }
         };
+        // B1 (betas of 0.113.0): the same text as a part shown at the other
+        // version is the pointer, free, whether reads are left or not. With
+        // them spent, the part is looked up only when its other version was
+        // shown, to compare
+        let same = match &content {
+            crate::responses::ContentResponse::Governance(entry)
+                if !part_keys.is_empty() && !capped =>
+            {
+                prompt::part_content_key(entry)
+            }
+            _ if capped
+                && part_keys
+                    .get(1)
+                    .and_then(|k| self.shown_once.earlier_part(k))
+                    .is_some() =>
+            {
+                match self.client.get_content(&asked_input).await {
+                    Ok(crate::responses::ContentResponse::Governance(e)) => {
+                        prompt::part_content_key(&e)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(shown) =
+            same.as_ref().and_then(|k| self.shown_once.earlier_part(k))
+        {
+            // This spelling is the pointer from now on, read no more
+            self.shown_once.begin(shown.read.clone());
+            self.shown_once
+                .mark_part(part_keys[0].clone(), shown.bytes as usize);
+            return Ok(format!(
+                "(`{}` is in your context already, the same text: shown in \
+                 {}, {}; its revisions change nothing in it. Nothing was \
+                 charged.)",
+                part_keys[0],
+                shown.read,
+                crate::threads::about_tokens(shown.bytes)
+            )
+            .into());
+        }
         if let crate::responses::ContentResponse::Governance(entry) = &content {
             if !data_set
                 && let Some(missing) = entry.missing_part(
@@ -1037,6 +1081,9 @@ impl Agora {
                     part_keys.clone()
                 };
                 for key in keys {
+                    self.shown_once.mark_part(key, bytes as usize);
+                }
+                if let Some(key) = same.clone() {
                     self.shown_once.mark_part(key, bytes as usize);
                 }
             }

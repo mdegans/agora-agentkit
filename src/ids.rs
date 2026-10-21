@@ -1487,6 +1487,16 @@ pub enum PlatformDoc {
 }
 
 impl PlatformDoc {
+    /// Every slug a document is read by, as written (`prompt:<name>` for
+    /// every prompt)
+    pub const SLUGS: [&'static str; 5] = [
+        "constitution",
+        "protocol",
+        "prompts",
+        "prompt:<name>",
+        "calendar",
+    ];
+
     /// The canonical wire slug.
     pub fn slug(&self) -> std::borrow::Cow<'static, str> {
         match self {
@@ -2451,11 +2461,21 @@ impl std::fmt::Display for ContentRefError {
         write!(
             f,
             "not a content reference (expected a post/comment UUID or its \
-             first eight hex digits, a GOV-YYYY-NNNN / APP-YYYY-NNNN governance id, a data \
-             set's file as DATA-YYYY-NNNN:<commit>:<path> or \
-             DATA-YYYY-NNNN:/<path>, or a document slug \
-             like \"constitution\", \"protocol\", \"prompts\" or \
-             \"prompt:<name>\"): {:?}",
+             first eight hex digits, a governance id ({}), a data set's file \
+             as DATA-YYYY-NNNN:<commit>:<path> or DATA-YYYY-NNNN:/<path>, or \
+             a document: {}): {:?}",
+            // From the parser's own lists (betas of 0.113.0: DATA, OBL,
+            // TEST and the calendar were left out)
+            GovernanceLogPrefix::ALL
+                .iter()
+                .map(|p| format!("{p}-YYYY-NNNN"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            PlatformDoc::SLUGS
+                .iter()
+                .map(|s| format!("{s:?}"))
+                .collect::<Vec<_>>()
+                .join(", "),
             self.0
         )?;
         if let Some(id) = self.leading_ref() {

@@ -3278,8 +3278,22 @@ pub(super) fn format_governance_index(
         out.push_str(&line);
         out.push('\n');
     }
+    // A data set's reads are free (betas of 0.113.0)
+    let all_free = !entries.is_empty()
+        && entries.iter().all(|e| {
+            e.entry_type == crate::enums::GovernanceLogEntryType::DataSet
+        });
+    let any_free = entries
+        .iter()
+        .any(|e| e.entry_type == crate::enums::GovernanceLogEntryType::DataSet);
     let left = match asked.cues.full_reads_left {
+        _ if all_free => {
+            " (free: a data set's reads use no full read)".to_string()
+        }
         Some(0) => " (your full reads are spent this session)".to_string(),
+        Some(n) if any_free => format!(
+            " (a full read, {n} left this session; a DATA entry's is free)"
+        ),
         Some(n) => format!(" (a full read, {n} left this session)"),
         None => String::new(),
     };
@@ -3851,11 +3865,14 @@ pub(super) fn format_governance_entry_once(
     }
     // A summary asked for by name is shown again: the reader's copy may
     // have been trimmed (Steward, 2026-10-21)
+    // Asked for by name it is shown, unless this turn showed it (betas of
+    // 0.113.0: a later turn's context may have been trimmed, this one's not)
     let earlier = entry
         .summary
         .as_deref()
-        .filter(|_| !part && !cues.summary_asked)
-        .and_then(|s| once.earlier_summary(&entry.id, Some(s)));
+        .filter(|_| !part)
+        .and_then(|s| once.earlier_summary(&entry.id, Some(s)))
+        .filter(|shown| !cues.summary_asked || shown.turn == once.turn());
     if let Some(s) = entry.summary.as_deref()
         && earlier.is_none()
         && !part
@@ -4044,16 +4061,11 @@ pub(super) fn format_governance_entry_once(
                 total = file.total_lines,
             ));
         }
-        if let Some(asked) = &file.asked {
+        if file.asked.is_some() {
+            // A short path is meant to work: said as a note, not an error
+            // (betas of 0.113.0)
             out.push_str(&format!(
-                "({} is not a path from the repository root; \
-                 it resolved to {path}, the only match under a top directory. \
-                 Cite it by that path.)\n\n",
-                if cues.links {
-                    format!("The path {asked:?}")
-                } else {
-                    format!("attachment={asked:?}")
-                },
+                "(Read as {path}; cite it by that path.)\n\n",
                 path = file.path,
             ));
         }
@@ -4262,6 +4274,36 @@ fn format_change_whole(c: &crate::govlog::Change) -> String {
     }
 }
 
+/// The shown-once key of a part's text (a round, an attachment, a data
+/// set's file), whatever version or spelling read it: the same text is one
+/// part (betas of 0.113.0, B1: a round its revision did not touch, read
+/// at the other version, spent a full read)
+pub(super) fn part_content_key(
+    entry: &GovernanceEntryResponse,
+) -> Option<String> {
+    let body = if let Some(file) = &entry.data_file {
+        format!("file {} {}", file.path, file.text)
+    } else if let Some(name) = &entry.attachment {
+        let content = entry
+            .data
+            .as_ref()?
+            .get("attachments")?
+            .as_array()?
+            .iter()
+            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(name))?
+            .get("content")?
+            .to_string();
+        format!("attachment {name} {content}")
+    } else {
+        let n = entry.round?;
+        let data = entry.data.as_ref()?;
+        let decision = crate::govlog::decision_data(entry.entry_type, data)
+            .unwrap_or(data);
+        format!("round {n} {}", decision.get("rounds")?)
+    };
+    Some(format!("content of {} {:x}", entry.id, text_key(&body)))
+}
+
 /// The shown-once key of a revision's changes
 pub(super) fn changes_key(id: &crate::ids::GovernanceLogId) -> String {
     format!("changes of {id}")
@@ -4384,16 +4426,8 @@ fn format_data_set_view(
              is a listing.)\n"
         ));
     }
-    if let (Some(asked), Some(dir)) = (&view.asked, &view.directory) {
-        out.push_str(&format!(
-            "\n{} is not a path from the repository root; it \
-             resolved to {dir}, the only match under a top directory.\n",
-            if links {
-                format!("The path {asked:?}")
-            } else {
-                format!("attachment={asked:?}")
-            }
-        ));
+    if let (Some(_), Some(dir)) = (&view.asked, &view.directory) {
+        out.push_str(&format!("\n(Read as {dir}.)\n"));
     }
     // The default read: the root's files to start with, and a line per
     // directory; a directory's own read lists its files (betas of 0.113.0)
@@ -5223,7 +5257,10 @@ mod tests {
         at("**Constitutional refs:** Art. IV § 2; Art. V");
         at("**Proof signed at:** 1700000000 (2023-11-14 22:13:20 UTC)");
         at("**Ready:** yes");
-        assert!(at("**Outcome:**") < at("**Redaction blind:** `abab"));
+        assert!(
+            at("**Outcome:**")
+                < at("**Redaction salt (`_blind`): not content:** `abab")
+        );
         assert!(!out.contains('{'), "no JSON:\n{out}");
     }
 
@@ -5587,7 +5624,7 @@ mod tests {
         }
         let out = format_governance_entry(&entry);
         let note = out
-            .find("attachment=\"README.md\" is not a path from the repository root; it resolved to votes/README.md")
+            .find("(Read as votes/README.md; cite it by that path.)")
             .expect(&out);
         assert!(note < out.find("# Votes").unwrap(), "{out}");
     }
@@ -9593,6 +9630,8 @@ mod shown_once_followups {
             summary_asked: true,
             ..Cues::default()
         });
+        // In a later turn: the copy may have been trimmed
+        once.next_turn();
         once.begin("your second read");
         let asked =
             format_governance_entry_once(&entry(serde_json::json!({})), &once);

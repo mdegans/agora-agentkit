@@ -40,6 +40,8 @@ pub struct Shown {
     pub raw: u64,
     /// For a comment, the post it is on
     pub post: Option<PostId>,
+    /// The turn that showed it ([`ShownOnce::turn`])
+    pub turn: u64,
 }
 
 #[derive(Debug, Default)]
@@ -72,6 +74,8 @@ struct Inner {
     pending_parts: Vec<(String, Shown)>,
     /// How the result being rendered points at further reads (0.112.0)
     cues: Cues,
+    /// The agent's turns this session, counted by the tool's `on_turn`
+    turn: u64,
 }
 
 /// How a result points at further reads: in `agora://` links when it was
@@ -98,6 +102,23 @@ pub fn text_key(text: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.trim().hash(&mut h);
     h.finish()
+}
+
+/// A summary as shown once: without the "Read this first" sentence a
+/// data set's summary carries or not, as its read has a listing or not
+/// (betas of 0.113.0: one summary was two, and its two pointers two sizes)
+pub fn summary_text(text: &str) -> String {
+    const OPEN: &str = "Read this first: attachment=\"";
+    let Some(at) = text.find(OPEN) else {
+        return text.trim().to_string();
+    };
+    let Some(end) = text[at + OPEN.len()..].find("\".") else {
+        return text.trim().to_string();
+    };
+    let end = at + OPEN.len() + end + 2;
+    format!("{}{}", text[..at].trim_end(), &text[end..])
+        .trim()
+        .to_string()
 }
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
@@ -134,6 +155,7 @@ impl ShownOnce {
     pub fn mark_part(&self, link: String, bytes: usize) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
+        let turn = inner.turn;
         inner.pending_parts.push((
             link,
             Shown {
@@ -141,8 +163,19 @@ impl ShownOnce {
                 bytes: bytes as u64,
                 raw: bytes as u64,
                 post: None,
+                turn,
             },
         ));
+    }
+
+    /// A new turn of the agent's begins
+    pub fn next_turn(&self) {
+        self.0.write().expect("shown-once lock").turn += 1;
+    }
+
+    /// The turn this is, from 0
+    pub fn turn(&self) -> u64 {
+        self.0.read().expect("shown-once lock").turn
     }
 
     /// How the result about to be rendered points at further reads
@@ -163,7 +196,8 @@ impl ShownOnce {
         text: Option<&str>,
     ) -> Option<Shown> {
         let wanted = |key: &(GovernanceLogId, u64)| {
-            key.0 == *id && text.is_none_or(|t| key.1 == text_key(t.trim_end()))
+            key.0 == *id
+                && text.is_none_or(|t| key.1 == text_key(&summary_text(t)))
         };
         let inner = self.0.read().expect("shown-once lock");
         inner
@@ -208,13 +242,16 @@ impl ShownOnce {
         version: Option<&'static str>,
         text: &str,
     ) {
+        let text = &summary_text(text);
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
+        let turn = inner.turn;
         let shown = Shown {
             read,
             bytes: text.len() as u64,
             raw: text.len() as u64,
             post: None,
+            turn,
         };
         inner
             .pending_summaries_at
@@ -311,6 +348,7 @@ impl ShownOnce {
     ) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
+        let turn = inner.turn;
         inner.pending.push((
             id.into(),
             Shown {
@@ -318,6 +356,7 @@ impl ShownOnce {
                 bytes: bytes as u64,
                 raw: raw as u64,
                 post,
+                turn,
             },
         ));
     }
