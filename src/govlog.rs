@@ -1579,6 +1579,8 @@ pub fn apply_patch(
 /// One operation of a [`Revision`]'s patch, with the value it replaced or
 /// removed: what a reader of the revision needs to see it changed
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct Change {
     pub kind: ChangeKind,
     /// RFC 6901 pointer to what changed
@@ -1592,10 +1594,154 @@ pub struct Change {
     /// What is there after, unless it was removed
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<serde_json::Value>,
+    /// `before` and `after` were left out, this many bytes of them: more
+    /// than [`MAX_CHANGE_BYTES`], a record's worth, which a history does not
+    /// hand over free
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_bytes: Option<u64>,
+}
+
+/// Most of one [`Change`]'s values a history shows, in bytes of JSON
+pub const MAX_CHANGE_BYTES: usize = 2_048;
+/// Most of a [`ChangeHistory`]'s changes, in bytes of JSON
+pub const MAX_HISTORY_BYTES: usize = 16_384;
+
+/// What a read with `history` shows of a record's revisions
+/// ([`GetContentInput::history`](crate::requests::GetContentInput::history)):
+/// each asked for, oldest first, replayed from the original. The server and
+/// the seed runner build it the same way ([`Self::build`])
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ChangeHistory {
+    /// How many revisions the record has
+    pub total: u64,
+    /// The index of the first one listed, from 0
+    pub first: u64,
+    /// The ones asked for that replayed, oldest first
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revisions: Vec<RevisionChanges>,
+    /// Why the history stops short, when it does
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
+}
+
+/// One revision in a [`ChangeHistory`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct RevisionChanges {
+    /// The amendment that revised the record
+    pub id: GovernanceLogId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Change>,
+    /// Its changes were left out, this many bytes of them: past
+    /// [`MAX_HISTORY_BYTES`] for the history
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_bytes: Option<u64>,
+    /// It also set the record's [`BLIND_KEY`], the random salt that keeps
+    /// a redacted value from being guessed by its hash: not content, so not
+    /// among `changes`
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blind: bool,
+}
+
+impl ChangeHistory {
+    /// The history of a record stored as `original`, revised by
+    /// `revisions` in chain order (dated by `dated`), `history` of them,
+    /// held to [`MAX_CHANGE_BYTES`] and [`MAX_HISTORY_BYTES`]
+    pub fn build(
+        original: &serde_json::Value,
+        revisions: &[(GovernanceLogId, Revision)],
+        dated: impl Fn(&GovernanceLogId) -> Option<DateTime<Utc>>,
+        history: crate::requests::History,
+    ) -> Self {
+        let total = revisions.len();
+        let (changes, error) =
+            revision_changes(original, revisions.iter().map(|(_, r)| r));
+        let first = total - history.count(total);
+        let broken = error.map(|e| {
+            format!(
+                "{} does not apply to the version before it ({e})",
+                revisions[changes.len()].0
+            )
+        });
+        let mut budget = MAX_HISTORY_BYTES;
+        let listed = revisions
+            .iter()
+            .zip(changes)
+            .skip(first)
+            .map(|((id, _), changes)| {
+                let blind_path = format!("/{BLIND_KEY}");
+                let is_blind = |c: &Change| {
+                    c.path == blind_path
+                        || c.path.starts_with(&format!("{blind_path}/"))
+                };
+                let blind = changes.iter().any(is_blind);
+                let changes: Vec<Change> = changes
+                    .into_iter()
+                    .filter(|c| !is_blind(c))
+                    .map(Change::capped)
+                    .collect();
+                let bytes = serde_json::to_vec(&changes).map_or(0, |v| v.len());
+                let fits = bytes <= budget;
+                budget = budget.saturating_sub(bytes);
+                RevisionChanges {
+                    id: id.clone(),
+                    created_at: dated(id),
+                    changes: if fits { changes } else { Vec::new() },
+                    omitted_bytes: (!fits).then_some(bytes as u64),
+                    blind,
+                }
+            })
+            .collect();
+        Self {
+            total: total as u64,
+            first: first as u64,
+            revisions: listed,
+            broken,
+        }
+    }
+
+    /// No history, for a reason: the revisions could not be read
+    pub fn unreadable(total: usize, why: String) -> Self {
+        Self {
+            total: total as u64,
+            broken: Some(why),
+            ..Self::default()
+        }
+    }
+}
+
+impl Change {
+    /// Its values left out when they are over [`MAX_CHANGE_BYTES`]; a
+    /// removal's always, since what it removed is no longer the record's
+    /// (betas of 0.113.0: removed text was echoed whole)
+    fn capped(self) -> Self {
+        let bytes = |v: &Option<serde_json::Value>| {
+            v.as_ref()
+                .and_then(|v| serde_json::to_vec(v).ok())
+                .map_or(0, |v| v.len())
+        };
+        let total = bytes(&self.before) + bytes(&self.after);
+        if total <= MAX_CHANGE_BYTES && self.kind != ChangeKind::Removed {
+            return self;
+        }
+        Self {
+            before: None,
+            after: None,
+            omitted_bytes: Some(total as u64),
+            ..self
+        }
+    }
 }
 
 /// What a [`Change`] did: its patch operation, `test` aside
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     Added,
@@ -1638,6 +1784,7 @@ pub fn revision_changes<'a>(
                     from: None,
                     before: replaced(&a.path),
                     after: Some(a.value.clone()),
+                    omitted_bytes: None,
                 }),
                 Op::Replace(r) => Some(Change {
                     kind: ChangeKind::Replaced,
@@ -1645,6 +1792,7 @@ pub fn revision_changes<'a>(
                     from: None,
                     before: at(&r.path),
                     after: Some(r.value.clone()),
+                    omitted_bytes: None,
                 }),
                 Op::Remove(r) => Some(Change {
                     kind: ChangeKind::Removed,
@@ -1652,6 +1800,7 @@ pub fn revision_changes<'a>(
                     from: None,
                     before: at(&r.path),
                     after: None,
+                    omitted_bytes: None,
                 }),
                 Op::Move(m) => Some(Change {
                     kind: ChangeKind::Moved,
@@ -1659,6 +1808,7 @@ pub fn revision_changes<'a>(
                     from: Some(m.from.to_string()),
                     before: replaced(&m.path),
                     after: at(&m.from),
+                    omitted_bytes: None,
                 }),
                 Op::Copy(c) => Some(Change {
                     kind: ChangeKind::Copied,
@@ -1666,6 +1816,7 @@ pub fn revision_changes<'a>(
                     from: Some(c.from.to_string()),
                     before: replaced(&c.path),
                     after: at(&c.from),
+                    omitted_bytes: None,
                 }),
             };
             match apply_patch(&current, &json_patch::Patch(vec![op.clone()])) {
@@ -3474,6 +3625,7 @@ mod tests {
             from: None,
             before,
             after,
+            omitted_bytes: None,
         };
         use ChangeKind as K;
         assert_eq!(

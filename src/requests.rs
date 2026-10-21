@@ -1933,6 +1933,21 @@ impl GetContentInput {
 }
 
 impl GetContentInput {
+    /// How [`Self::read_as`]'s note opens
+    pub const READ_AS: &'static str = "Read ";
+
+    /// "Read GOV-2026-5 as GOV-2026-0005.": what `written` (the id or link
+    /// as sent) wrote of the governance id this reads, when it was
+    /// rewritten to read it; nothing for a spelling that differs only in
+    /// case (Steward, 2026-10-21)
+    pub fn read_as(&self, written: &str) -> Option<String> {
+        let id = self.id.as_governance().or(self.id.data_set())?;
+        let part = id
+            .rewritten_in(written)
+            .filter(|p| !p.trim().eq_ignore_ascii_case(id.as_str()))?;
+        Some(format!("{}{part} as {id}.", Self::READ_AS))
+    }
+
     /// The default read of `id`: every option left to the server
     pub fn new(id: impl Into<ContentRef>) -> Self {
         Self {
@@ -1999,6 +2014,74 @@ impl GetContentInput {
             detail: Some(detail),
             ..self
         }
+    }
+}
+
+/// A tool's input beside the JSON it was sent as, for what the typed input
+/// no longer holds (an id's spelling, [`GetContentInput::read_as`]). Its
+/// schema is `T`'s
+#[derive(Debug, Clone, PartialEq)]
+pub struct AsSent<T> {
+    pub sent: serde_json::Value,
+    pub input: T,
+}
+
+impl<'de, T: serde::de::DeserializeOwned> Deserialize<'de> for AsSent<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let sent = serde_json::Value::deserialize(d)?;
+        let input = T::deserialize(&sent).map_err(serde::de::Error::custom)?;
+        Ok(Self { sent, input })
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl<T: schemars::JsonSchema> schemars::JsonSchema for AsSent<T> {
+    fn inline_schema() -> bool {
+        T::inline_schema()
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        T::schema_name()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        T::schema_id()
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        T::json_schema(generator)
+    }
+}
+
+/// An input built in code, sent as it serializes
+impl<T: Serialize> From<T> for AsSent<T> {
+    fn from(input: T) -> Self {
+        Self {
+            sent: serde_json::to_value(&input).unwrap_or_default(),
+            input,
+        }
+    }
+}
+
+impl AsSent<GetContentInput> {
+    /// [`GetContentInput::read_as`], from the `id` as sent
+    pub fn read_as(&self) -> Option<String> {
+        self.input.read_as(self.sent.get("id")?.as_str()?)
+    }
+}
+
+impl AsSent<FetchAgoraLinkInput> {
+    /// [`GetContentInput::read_as`] of the read the link names, from the
+    /// `link` as sent
+    pub fn read_as(&self) -> Option<String> {
+        self.input
+            .link
+            .as_read()?
+            .read_as(self.sent.get("link")?.as_str()?)
     }
 }
 
@@ -2172,6 +2255,9 @@ impl GetContentInput {
                 refused.join(", "),
                 target.noun()
             ));
+        }
+        if self.round == Some(0) {
+            return Some("round=0: rounds count from 1".into());
         }
         if let Some(budget) = self.comment_budget {
             let bounds = target.comment_budget_bounds();
@@ -2726,6 +2812,50 @@ mod tests {
         assert_eq!(History::All.count(3), 3);
         assert_eq!(two.count(3), 2);
         assert_eq!(two.count(1), 1);
+    }
+
+    /// The input as sent keeps the spelling of its id, and its schema is
+    /// the input's own
+    #[test]
+    fn as_sent_reads_the_id_as_written() {
+        let sent: AsSent<GetContentInput> = serde_json::from_value(
+            serde_json::json!({"id": "GOV-2026-5", "detail": "summary"}),
+        )
+        .unwrap();
+        assert_eq!(
+            sent.read_as().as_deref(),
+            Some("Read GOV-2026-5 as GOV-2026-0005.")
+        );
+        let link: AsSent<FetchAgoraLinkInput> = serde_json::from_value(
+            serde_json::json!({"link": "agora://gov/gov-2026-5/clerk-reads"}),
+        )
+        .unwrap();
+        assert_eq!(
+            link.read_as().as_deref(),
+            Some("Read gov-2026-5 as GOV-2026-0005.")
+        );
+        for quiet in ["GOV-2026-0005", "gov-2026-0005", "7ad26ccd"] {
+            let sent: AsSent<GetContentInput> =
+                serde_json::from_value(serde_json::json!({"id": quiet}))
+                    .unwrap();
+            assert_eq!(sent.read_as(), None, "{quiet}");
+        }
+        // Refused as the input itself is
+        assert!(
+            serde_json::from_value::<AsSent<GetContentInput>>(
+                serde_json::json!({"id": "GOV-2026-5", "bogus": 1})
+            )
+            .is_err()
+        );
+        #[cfg(feature = "schemars")]
+        assert_eq!(
+            serde_json::to_value(schemars::schema_for!(
+                AsSent<GetContentInput>
+            ))
+            .unwrap(),
+            serde_json::to_value(schemars::schema_for!(GetContentInput))
+                .unwrap()
+        );
     }
 
     /// `history` is of a whole record from its original: beside a part, or

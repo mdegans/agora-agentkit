@@ -57,10 +57,10 @@ struct Inner {
     /// Governance entries' summaries shown this session (betas of 0.108:
     /// get_council_meetings showed GOV-2026-0017's, and a summary read
     /// showed it again)
-    /// By id and version (`latest` for a record with one text): a
-    /// revised record's two summaries are two
-    summaries: HashMap<(GovernanceLogId, &'static str), Shown>,
-    pending_summaries: Vec<((GovernanceLogId, &'static str), Shown)>,
+    /// By id and the text's [`text_key`]: one text is one summary across
+    /// versions, and a revised record's two texts are two (betas of 0.113.0)
+    summaries: HashMap<(GovernanceLogId, u64), Shown>,
+    pending_summaries: Vec<((GovernanceLogId, u64), Shown)>,
     /// Parts of governance records shown this session (an attachment, a
     /// data set's file or lines of one), by the read's canonical link
     /// (0.112.0, beta round)
@@ -84,6 +84,16 @@ pub struct Cues {
     /// The read asked for a summary by name (`detail=summary`): it is shown,
     /// even if it was shown before
     pub summary_asked: bool,
+}
+
+/// A key for `text` by its content, so the same text is one key whatever
+/// read or version showed it (betas of 0.113.0). `DefaultHasher::new` is
+/// keyed the same in every process; nothing here outlives the session
+pub fn text_key(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
@@ -140,39 +150,41 @@ impl ShownOnce {
         self.0.read().expect("shown-once lock").cues
     }
 
-    /// Where `id`'s summary at `version` was shown this session, if it was
+    /// Where `id`'s summary `text` was shown this session, if it was; with
+    /// no text, where any of its summaries was
     pub fn earlier_summary(
         &self,
         id: &GovernanceLogId,
-        version: &'static str,
+        text: Option<&str>,
     ) -> Option<Shown> {
-        let key = (id.clone(), version);
+        let wanted = |key: &(GovernanceLogId, u64)| {
+            key.0 == *id && text.is_none_or(|t| key.1 == text_key(t))
+        };
         let inner = self.0.read().expect("shown-once lock");
-        inner.summaries.get(&key).cloned().or_else(|| {
-            inner
-                .pending_summaries
-                .iter()
-                .find(|(p, _)| *p == key)
-                .map(|(_, s)| s.clone())
-        })
+        inner
+            .pending_summaries
+            .iter()
+            .find(|(k, _)| wanted(k))
+            .map(|(_, s)| s.clone())
+            .or_else(|| {
+                inner
+                    .summaries
+                    .iter()
+                    .find(|(k, _)| wanted(k))
+                    .map(|(_, s)| s.clone())
+            })
     }
 
-    /// The result being rendered shows `id`'s summary at `version`, `bytes`
-    /// long
-    pub fn mark_summary(
-        &self,
-        id: GovernanceLogId,
-        version: &'static str,
-        bytes: usize,
-    ) {
+    /// The result being rendered shows `id`'s summary `text`
+    pub fn mark_summary(&self, id: GovernanceLogId, text: &str) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
         inner.pending_summaries.push((
-            (id, version),
+            (id, text_key(text)),
             Shown {
                 read,
-                bytes: bytes as u64,
-                raw: bytes as u64,
+                bytes: text.len() as u64,
+                raw: text.len() as u64,
                 post: None,
             },
         ));

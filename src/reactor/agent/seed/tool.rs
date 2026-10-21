@@ -138,51 +138,80 @@ fn relink(text: &str) -> String {
 /// looked the entry up, so it says nothing of what was read
 pub(super) const REFUSED: &str = "Refused; nothing was charged.";
 
-/// "Read GOV-2026-5 as GOV-2026-0005.": what a `get_content` id or a
-/// `fetch_agora_link` link wrote of the governance id it reads, when the
-/// id was rewritten to read it (Steward, 2026-10-21). From the call's
-/// input as sent, since the typed input holds only the canonical id
+/// "Read GOV-2026-5 as GOV-2026-0005." ([`GetContentInput::read_as`]),
+/// from a `get_content` or `fetch_agora_link` call's input as sent
 pub(super) fn read_as(tool: &str, input: &serde_json::Value) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Id {
-        id: String,
-    }
-    #[derive(Deserialize)]
-    struct Link {
-        link: String,
-    }
-    let (written, read) = match tool {
+    use crate::requests::AsSent;
+    match tool {
         "get_content" => {
-            let written = serde_json::from_value::<Id>(input.clone()).ok()?.id;
-            let read: GetContentInput =
-                serde_json::from_value(input.clone()).ok()?;
-            (written, read)
+            serde_json::from_value::<AsSent<GetContentInput>>(input.clone())
+                .ok()?
+                .read_as()
         }
         "fetch_agora_link" => {
-            let written =
-                serde_json::from_value::<Link>(input.clone()).ok()?.link;
-            let link: FetchAgoraLinkInput =
-                serde_json::from_value(input.clone()).ok()?;
-            (written, link.link.as_read()?.clone())
+            serde_json::from_value::<AsSent<FetchAgoraLinkInput>>(input.clone())
+                .ok()?
+                .read_as()
         }
-        _ => return None,
-    };
-    let id = read.id.as_governance().or(read.id.data_set())?;
-    // A spelling that differs only in case reads as written
-    let part = id
-        .rewritten_in(&written)
-        .filter(|p| !p.trim().eq_ignore_ascii_case(id.as_str()))?;
-    Some(format!("{READ_AS}{part} as {id}."))
+        _ => None,
+    }
 }
 
-/// How [`read_as`]'s note opens
-const READ_AS: &str = "Read ";
+/// A result's text blocks as written, joined by blank lines. Never the
+/// `Content`'s `Display`, which renders Markdown (escaping it) under
+/// misanthropic's `markdown` feature (betas of 0.113.0: `\[council_decision\]`)
+pub(super) fn raw_text(content: &Content) -> String {
+    use misanthropic::prompt::message::Block;
+    content
+        .0
+        .iter()
+        .filter_map(|b| match b {
+            Block::Text { text, .. } => Some(text.to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Each of a result's text blocks through `f`, in place: its other blocks,
+/// and its text as written, untouched
+pub(super) fn map_text(content: &mut Content, f: impl Fn(&str) -> String) {
+    use misanthropic::prompt::message::Block;
+    for block in content.0.iter_mut() {
+        if let Block::Text { text, .. } = block {
+            *text = f(text).into();
+        }
+    }
+}
+
+/// ` {tail}` after a result's text, in its last text block
+pub(super) fn append_text(content: &mut Content, tail: &str) {
+    use misanthropic::prompt::message::Block;
+    if let Some(text) = content.0.iter_mut().rev().find_map(|b| match b {
+        Block::Text { text, .. } => Some(text),
+        _ => None,
+    }) {
+        *text = format!("{text} {tail}").into();
+    }
+}
+
+/// `note` before a result's text, in its first text block
+pub(super) fn prepend_text(content: &mut Content, note: &str) {
+    use misanthropic::prompt::message::Block;
+    match content.0.iter_mut().find_map(|b| match b {
+        Block::Text { text, .. } => Some(text),
+        _ => None,
+    }) {
+        Some(text) => *text = format!("{note}\n\n{text}").into(),
+        None => content.0.insert(0, Block::from(note.to_string())),
+    }
+}
 
 /// `text` without a leading [`read_as`] note
 fn without_read_as(text: &str) -> &str {
     match text.split_once("\n\n") {
         Some((note, rest))
-            if note.starts_with(READ_AS)
+            if note.starts_with(GetContentInput::READ_AS)
                 && note.contains(" as ")
                 && note.ends_with('.')
                 && !note.contains('\n') =>
@@ -198,7 +227,7 @@ fn without_read_as(text: &str) -> &str {
 /// tool layer's "Invalid arguments"), or one this tool refused first
 /// ([`REFUSED`]). A server's error, or any read, is not one
 pub(super) fn is_refusal(result: &misanthropic::tool::Result) -> bool {
-    let all = result.content.to_string();
+    let all = raw_text(&result.content);
     let text = without_read_as(&all);
     result.is_error
         && (text.starts_with("Invalid arguments") || text.ends_with(REFUSED))
@@ -517,20 +546,21 @@ impl Agora {
 
     /// What each of `entry`'s revisions changed, `history` of them: its
     /// original and each revision's patch read from the server (free, as
-    /// the read they ride with is) and replayed here. The server sends no
-    /// diff, so this is the one way to show one without a second full read
+    /// the read they ride with is) and replayed here, as the server
+    /// replays them ([`crate::govlog::ChangeHistory::build`]). A server
+    /// before 0.113.0 refuses `history`, so it is never sent
     async fn revision_history(
         &self,
         entry: &crate::responses::GovernanceEntryResponse,
         history: crate::requests::History,
-    ) -> prompt::RevisionHistory {
+    ) -> crate::govlog::ChangeHistory {
         use crate::enums::{DetailLevel, RecordVersion};
+        use crate::govlog::ChangeHistory;
         use crate::responses::ContentResponse;
         let ids = entry.revision_ids();
-        let mut out = prompt::RevisionHistory {
-            total: ids.len(),
-            ..Default::default()
-        };
+        if ids.is_empty() {
+            return ChangeHistory::default();
+        }
         let failed = |id: &crate::ids::GovernanceLogId, error: String| {
             tracing::warn!(
                 agent_id = %self.agent_id,
@@ -539,10 +569,11 @@ impl Agora {
                 error,
                 "a revision history could not be read"
             );
+            ChangeHistory::unreadable(
+                ids.len(),
+                format!("{id} could not be read"),
+            )
         };
-        if ids.is_empty() {
-            return out;
-        }
         let read = |id: crate::ids::GovernanceLogId| {
             GetContentInput::new(ContentRef::Governance(id))
         };
@@ -554,15 +585,10 @@ impl Agora {
         let original = match self.client.get_content(&original).await {
             Ok(ContentResponse::Governance(e)) => e.data,
             Ok(_) => None,
-            Err(e) => {
-                failed(&entry.id, e.to_string());
-                None
-            }
+            Err(e) => return failed(&entry.id, e.to_string()),
         };
         let Some(original) = original else {
-            out.broken =
-                Some(format!("{}'s original could not be read", entry.id));
-            return out;
+            return failed(&entry.id, "no record".into());
         };
         /// An amendment's record, as far as a revision goes
         #[derive(Deserialize)]
@@ -571,51 +597,33 @@ impl Agora {
         }
         let mut revisions = Vec::with_capacity(ids.len());
         for id in &ids {
-            let revision =
-                match self.client.get_content(&read(id.clone())).await {
-                    Ok(ContentResponse::Governance(e)) => e
-                        .data
-                        .and_then(|d| serde_json::from_value::<Revised>(d).ok())
-                        .and_then(|r| r.revision),
-                    Ok(_) => None,
-                    Err(e) => {
-                        failed(id, e.to_string());
-                        None
+            match self.client.get_content(&read(id.clone())).await {
+                Ok(ContentResponse::Governance(e)) => match e
+                    .data
+                    .and_then(|d| serde_json::from_value::<Revised>(d).ok())
+                    .and_then(|r| r.revision)
+                {
+                    Some(r) => revisions.push((id.clone(), r)),
+                    None => {
+                        return failed(id, "no revision in its record".into());
                     }
-                };
-            match revision {
-                Some(r) => revisions.push(r),
-                None => {
-                    out.broken = Some(format!("{id} could not be read"));
-                    break;
-                }
+                },
+                Ok(_) => return failed(id, "not a governance entry".into()),
+                Err(e) => return failed(id, e.to_string()),
             }
         }
-        let (changes, error) =
-            crate::govlog::revision_changes(&original, &revisions);
-        if let Some(e) = error {
-            out.broken = Some(format!(
-                "{} does not apply to the version before it ({e})",
-                ids[changes.len()]
-            ));
-        }
-        // The ones asked for, of those that replayed
-        out.first = ids.len() - history.count(ids.len());
-        let first = out.first;
-        out.shown = ids
-            .into_iter()
-            .zip(changes)
-            .skip(first)
-            .map(|(id, changes)| {
-                let at = entry
+        ChangeHistory::build(
+            &original,
+            &revisions,
+            |id| {
+                entry
                     .amendments
                     .iter()
-                    .find(|a| a.id == id)
-                    .map(|a| a.created_at);
-                (id, at, changes)
-            })
-            .collect();
-        out
+                    .find(|a| a.id == *id)
+                    .map(|a| a.created_at)
+            },
+            history,
+        )
     }
 
     /// The community header a community's link reads with its feed: its
@@ -816,9 +824,8 @@ impl Agora {
         // Shown here, from the original and the revisions' patches: the
         // server takes no `history`
         let history = input.history.take();
-        // A history read's summary is the history's frame, not asked for
-        let summary_asked =
-            input.detail == Some(DetailLevel::Summary) && history.is_none();
+        // Asked for by name, it is shown, history or not (betas of 0.113.0)
+        let summary_asked = input.detail == Some(DetailLevel::Summary);
         self.set_cues();
         // The budget is about governance attention, so it is the kind of
         // id and the depth that spend it, not the tool that was called.
@@ -906,9 +913,41 @@ impl Agora {
             ContentRef::Governance(_)
             | ContentRef::DataCitation(_)
             | ContentRef::Document(_) => {
-                self.client.get_content(&input).await.map_err(|e| {
-                    e.range_refusal().map_or_else(|| err(&e), Content::from)
-                })?
+                match self.client.get_content(&input).await {
+                    Ok(content) => content,
+                    // A part the server refused (a round past the last): looked
+                    // up without it, and refused here for what is missing, free
+                    // (betas of 0.113.0: the server's 400 counted the turn)
+                    Err(e)
+                        if !data_set
+                            && (asked_round.is_some()
+                                || asked_attachment.is_some())
+                            && matches!(&e, crate::client::Error::Status { status, .. }
+                            if *status == reqwest::StatusCode::BAD_REQUEST) =>
+                    {
+                        let whole = GetContentInput::new(input.id.clone())
+                            .with_detail(DetailLevel::Summary);
+                        if let Ok(
+                            crate::responses::ContentResponse::Governance(
+                                entry,
+                            ),
+                        ) = self.client.get_content(&whole).await
+                            && let Some(missing) = entry.missing_part(
+                                asked_round,
+                                asked_attachment.as_deref(),
+                                self.by_link,
+                            )
+                        {
+                            return Err(err(format!("{missing} {REFUSED}")));
+                        }
+                        return Err(err(&e));
+                    }
+                    Err(e) => {
+                        return Err(e
+                            .range_refusal()
+                            .map_or_else(|| err(&e), Content::from));
+                    }
+                }
             }
         };
         if let crate::responses::ContentResponse::Governance(entry) = &content {
@@ -952,17 +991,20 @@ impl Agora {
         }
         let history = match (&content, history) {
             (crate::responses::ContentResponse::Governance(entry), Some(h)) => {
-                Some(self.revision_history(entry, h).await)
+                Some((
+                    self.revision_history(entry, h).await,
+                    entry.amendments.clone(),
+                ))
             }
             _ => None,
         };
         // Rendered after the entry, into the same result
         let with_history =
             |rendered: String, once: &super::ShownOnce| match &history {
-                Some(h) => {
+                Some((h, amendments)) => {
                     format!(
                         "{rendered}{}",
-                        prompt::format_revision_history(h, once)
+                        prompt::format_revision_history(h, amendments, once)
                     )
                 }
                 None => rendered,
@@ -1937,7 +1979,7 @@ impl Agora {
         let once = &self.shown_once;
         once.begin("your get_council_meetings");
         let earlier = |id: &crate::ids::GovernanceLogId, text: &str| match once
-            .earlier_summary(id, "latest")
+            .earlier_summary(id, Some(text))
         {
             Some(shown) => Some(format!(
                 "in your context already (shown in {}, {})",
@@ -1945,7 +1987,7 @@ impl Agora {
                 prompt::about_tokens(shown.bytes)
             )),
             None => {
-                once.mark_summary(id.clone(), "latest", text.len());
+                once.mark_summary(id.clone(), text);
                 None
             }
         };

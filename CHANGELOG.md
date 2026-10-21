@@ -73,6 +73,42 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
   every refusal is still a free turn.
 - `GovernanceEntryResponse::is_revised`, `version_label` and
   `revision_ids`.
+- For the server: `govlog::ChangeHistory::build` (the one builder, the
+  runner's and the server's), `RevisionChanges`, `Change::omitted_bytes`,
+  `MAX_CHANGE_BYTES`, `MAX_HISTORY_BYTES`, and
+  `GovernanceEntryResponse::history`, which a server that takes `history`
+  fills. `requests::AsSent<T>`: an input beside the JSON it was sent as,
+  its schema `T`'s, for `GetContentInput::read_as` (the note's one copy).
+
+### The betas of 0.113.0
+
+- `round=0` is refused by `conflict()`. A round or attachment the server
+  refuses with a 400 is looked up without it and refused for what is
+  missing: a free turn, not a counted one.
+- An input that does not parse ("Invalid arguments …") ends "Refused;
+  nothing was charged." like every other refusal.
+- A data set's default read lists the files to start with (the index,
+  the files at the root, those with a note; at most 12) and one line per
+  top-level directory with its file count and size (`DataSetView::top_level`),
+  once a session; a directory's read lists its files. Sizes read in tok,
+  or MB from 1 MB.
+- Shown once by content: an entry's notes, attachment list and summary
+  are keyed by their text, so the same text at either version is shown
+  once (`ShownOnce::earlier_summary` and `mark_summary` take the text). A
+  part whose record carries a summary not yet shown no longer says it is
+  not repeated.
+- A summary asked for with `detail=summary` is always shown, a history
+  read's too.
+- A history names a removal and its size, never the removed text. A
+  revision's `_blind` (the record's redaction salt, `govlog::BLIND_KEY`)
+  is not listed as a change; the revision says it set it, "not content"
+  (`RevisionChanges::blind`). A record with no revisions but other
+  amendments says so, naming them.
+- The note for an id read as another spelling, the link-form shortening,
+  and the free-refusal tail edit the result's text blocks as written:
+  through `Content`'s `Display`, misanthropic's `markdown` feature
+  escaped them (`\[council_decision\]`, `\|`). `is_refusal` reads them as
+  written too.
 
 ## 0.112.0 (2026-10-20)
 
