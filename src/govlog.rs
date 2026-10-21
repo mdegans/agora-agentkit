@@ -1652,10 +1652,13 @@ impl ChangeHistory {
     /// The history of a record stored as `original`, revised by
     /// `revisions` in chain order (dated by `dated`), `history` of them,
     /// held to [`MAX_CHANGE_BYTES`] and [`MAX_HISTORY_BYTES`]
+    /// A revision `shown` (a reader holds its changes already, and is
+    /// pointed at them) costs the budget nothing
     pub fn build(
         original: &serde_json::Value,
         revisions: &[(GovernanceLogId, Revision)],
         dated: impl Fn(&GovernanceLogId) -> Option<DateTime<Utc>>,
+        shown: impl Fn(&GovernanceLogId) -> bool,
         history: crate::requests::History,
     ) -> Self {
         let total = revisions.len();
@@ -1686,8 +1689,11 @@ impl ChangeHistory {
                     .map(Change::capped)
                     .collect();
                 let bytes = serde_json::to_vec(&changes).map_or(0, |v| v.len());
-                let fits = bytes <= budget;
-                budget = budget.saturating_sub(bytes);
+                // Only what is printed is charged (review of 0.113.0)
+                let fits = shown(id) || bytes <= budget;
+                if fits && !shown(id) {
+                    budget -= bytes;
+                }
                 RevisionChanges {
                     id: id.clone(),
                     created_at: dated(id),
@@ -3669,6 +3675,41 @@ mod tests {
         let (changes, error) = revision_changes(&original, &broken);
         assert_eq!(changes.len(), 1);
         assert!(error.is_some());
+    }
+
+    /// Review of 0.113.0: a revision a reader holds costs the history's
+    /// budget nothing, so the ones after it still fit
+    #[test]
+    fn a_shown_revision_costs_the_budget_nothing() {
+        let big = |n: usize| {
+            revision(serde_json::json!([
+                {"op": "add", "path": format!("/r{n}"), "value": "x".repeat(1_900)}
+            ]))
+        };
+        let revisions: Vec<_> = (0..12)
+            .map(|n| {
+                (format!("AMD-2026-{:04}", n + 1).parse().unwrap(), big(n))
+            })
+            .collect();
+        let build = |shown: &dyn Fn(&GovernanceLogId) -> bool| {
+            ChangeHistory::build(
+                &serde_json::json!({}),
+                &revisions,
+                |_| None,
+                shown,
+                crate::requests::History::All,
+            )
+        };
+        let left_out = |h: &ChangeHistory| {
+            h.revisions
+                .iter()
+                .filter(|r| r.omitted_bytes.is_some())
+                .count()
+        };
+        assert!(left_out(&build(&|_| false)) > 0);
+        let first_four: Vec<GovernanceLogId> =
+            revisions[..4].iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(left_out(&build(&|id| first_four.contains(id))), 0);
     }
 
     #[test]

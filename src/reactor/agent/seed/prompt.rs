@@ -3736,7 +3736,15 @@ pub(super) fn format_governance_entry_once(
     if !notes.is_empty() {
         // By content: the same notes at either version are shown once
         // (betas of 0.113.0)
-        let key = format!("notes of {} {:x}", entry.id, text_key(&notes));
+        // By what they say, not how a tool words them: both tools share it
+        let key = format!(
+            "notes of {} {:x}",
+            entry.id,
+            text_key(&format!(
+                "{:?}{:?}{:?}",
+                entry.amendments, entry.obligations, entry.cited_by
+            ))
+        );
         match once.earlier_part(&key) {
             Some(shown) => out.push_str(&format!(
                 "(Its amendments, obligations and citations are in your \
@@ -3819,7 +3827,12 @@ pub(super) fn format_governance_entry_once(
             .is_some_and(|t| {
                 once.earlier_summary(&entry.id, Some(t)).is_none()
             });
-        match once.earlier_summary(&entry.id, None) {
+        // The summary of this version: a revised record's other version may
+        // have another (review of 0.113.0)
+        match once.earlier_summary_at(
+            &entry.id,
+            entry.version_label().unwrap_or("latest"),
+        ) {
             _ if carried => {}
             Some(shown) => out.push_str(&format!(
                 "\n(Its summary is in your context already: shown in {}, {}.)\n",
@@ -3847,7 +3860,7 @@ pub(super) fn format_governance_entry_once(
         && earlier.is_none()
         && !part
     {
-        once.mark_summary(entry.id.clone(), s);
+        once.mark_summary(entry.id.clone(), entry.version_label(), s);
     }
     match entry.summary.as_deref().filter(|_| !part) {
         _ if part => {}
@@ -4081,7 +4094,11 @@ pub(super) fn format_governance_entry_once(
             out.push_str(&render_record(&data));
         } else {
             if let Some(text) = in_record.filter(|_| part) {
-                once.mark_summary(entry.id.clone(), text);
+                once.mark_summary(
+                    entry.id.clone(),
+                    entry.version_label(),
+                    text,
+                );
             }
             out.push_str(&render_record(data));
         }
@@ -4146,18 +4163,57 @@ fn line_diff(before: &str, after: &str) -> String {
     out
 }
 
+/// A revision's changes, a line each, removals of one field from many
+/// places as one line (betas of 0.113.0: twenty `raw_text` removals)
+fn format_changes(changes: &[crate::govlog::Change], data_set: bool) -> String {
+    use crate::govlog::ChangeKind;
+    /// Removals of one field from at least this many places are one line
+    const GROUP: usize = 3;
+    let field = |c: &crate::govlog::Change| {
+        (c.kind == ChangeKind::Removed)
+            .then(|| c.path.rsplit('/').next().unwrap_or_default().to_string())
+    };
+    let mut out = String::new();
+    let mut grouped: Vec<String> = Vec::new();
+    for c in changes {
+        if let Some(name) = field(c) {
+            let same: Vec<&crate::govlog::Change> = changes
+                .iter()
+                .filter(|o| field(o).as_deref() == Some(name.as_str()))
+                .collect();
+            if same.len() >= GROUP {
+                if !grouped.contains(&name) {
+                    let bytes: u64 =
+                        same.iter().map(|o| o.omitted_bytes.unwrap_or(0)).sum();
+                    out.push_str(&format!(
+                        "- `{name}` removed from {} places, {}\n",
+                        same.len(),
+                        about_tokens(bytes)
+                    ));
+                    grouped.push(name);
+                }
+                continue;
+            }
+        }
+        out.push_str(&format_change(c, data_set));
+    }
+    out
+}
+
 /// One change of a revision, as a line; one whose values were left out
 /// says so
-fn format_change(c: &crate::govlog::Change) -> String {
+fn format_change(c: &crate::govlog::Change, data_set: bool) -> String {
     match c.omitted_bytes {
         Some(bytes) if c.kind == crate::govlog::ChangeKind::Removed => {
             format!("- `{}` removed, {}\n", c.path, about_tokens(bytes))
         }
         Some(bytes) => format!(
             "- `{}` changed, {} of it: too long to show here; the record \
-             shows it (a full read)\n",
+             shows it{}\n",
             c.path,
-            about_tokens(bytes)
+            about_tokens(bytes),
+            // A data set's reads are free
+            if data_set { "" } else { " (a full read)" }
         ),
         None => format_change_whole(c),
     }
@@ -4206,11 +4262,17 @@ fn format_change_whole(c: &crate::govlog::Change) -> String {
     }
 }
 
+/// The shown-once key of a revision's changes
+pub(super) fn changes_key(id: &crate::ids::GovernanceLogId) -> String {
+    format!("changes of {id}")
+}
+
 /// What each revision a read asked for changed, oldest first; one shown
 /// earlier this session is pointed at
 pub(super) fn format_revision_history(
     history: &crate::govlog::ChangeHistory,
     amendments: &[crate::govlog::AmendmentNotice],
+    data_set: bool,
     once: &ShownOnce,
 ) -> String {
     if history.total == 0 {
@@ -4250,7 +4312,7 @@ pub(super) fn format_revision_history(
     };
     for r in &history.revisions {
         let id = &r.id;
-        let key = format!("changes of {id}");
+        let key = changes_key(id);
         let date = r
             .created_at
             .map(|t| format!(" ({})", t.format("%Y-%m-%d")))
@@ -4275,9 +4337,7 @@ pub(super) fn format_revision_history(
         if r.changes.is_empty() && !r.blind {
             text.push_str("- nothing (its patch only checks values)\n");
         }
-        for c in &r.changes {
-            text.push_str(&format_change(c));
-        }
+        text.push_str(&format_changes(&r.changes, data_set));
         if r.blind {
             text.push_str(
                 "- its redaction salt (`_blind`) was set: not content\n",
@@ -4408,7 +4468,8 @@ fn format_data_set_view(
         Some(dir) => format!("\nFiles under {dir}:\n"),
         None => "\nFiles:\n".to_string(),
     });
-    for line in &view.listing {
+    // One level: a directory in it is one line (betas of 0.113.0)
+    for line in &view.one_level() {
         out.push_str(&match (&line.note, line.path.ends_with('/')) {
             (_, true) => format!(
                 "- {} — {} files ({} bytes)\n",
@@ -4781,7 +4842,7 @@ mod tests {
         // first, as a sitting's listing that showed it does
         let once = ShownOnce::default();
         once.begin("your get_council_meetings");
-        once.mark_summary(entry.id.clone(), text);
+        once.mark_summary(entry.id.clone(), None, text);
         once.commit();
         once.begin("your read of GOV-2026-0014");
         let again = format_governance_entry_once(&entry, &once);
@@ -9627,6 +9688,7 @@ mod shown_once_followups {
                 (id.as_str() == "AMD-2026-0004")
                     .then(|| "2026-10-02T00:00:00Z".parse().unwrap())
             },
+            |_| false,
             history,
         )
     }
@@ -9652,6 +9714,7 @@ mod shown_once_followups {
         let out = format_revision_history(
             &built(original.clone(), patches.clone(), History::All),
             &[],
+            false,
             &once,
         );
         once.commit();
@@ -9678,7 +9741,7 @@ mod shown_once_followups {
             patches.clone(),
             History::Last(std::num::NonZeroU32::new(1).unwrap()),
         );
-        let again = format_revision_history(&last, &[], &once);
+        let again = format_revision_history(&last, &[], false, &once);
         assert!(again.contains("What revision 2 of 2 changed**:"), "{again}");
         assert!(
             again.contains(
@@ -9697,7 +9760,8 @@ mod shown_once_followups {
             ],
             History::All,
         );
-        let out = format_revision_history(&broken, &[], &ShownOnce::default());
+        let out =
+            format_revision_history(&broken, &[], false, &ShownOnce::default());
         assert!(out.contains("What revision 1 of 2 changed"), "{out}");
         assert!(out.contains(
             "(The history stops here: AMD-2026-0005 does not apply to the \
@@ -9706,6 +9770,7 @@ mod shown_once_followups {
         let none = format_revision_history(
             &crate::govlog::ChangeHistory::default(),
             &[],
+            false,
             &once,
         );
         assert!(none.contains("It has no revisions"));
@@ -9732,7 +9797,7 @@ mod shown_once_followups {
         );
         let once = ShownOnce::default();
         once.begin("r");
-        let out = format_revision_history(&history, &[], &once);
+        let out = format_revision_history(&history, &[], false, &once);
         assert!(!out.contains(&"x".repeat(100)), "the round was shown");
         assert!(out.contains("- `/rounds/0` changed, ~"), "{out}");
         assert!(out.contains("of it: too long to show here"), "{out}");
@@ -9822,7 +9887,12 @@ mod shown_once_followups {
             ])],
             crate::requests::History::All,
         );
-        let out = format_revision_history(&history, &[], &ShownOnce::default());
+        let out = format_revision_history(
+            &history,
+            &[],
+            false,
+            &ShownOnce::default(),
+        );
         assert!(!out.contains("4ce22432"), "{out}");
         assert!(
             out.contains("its redaction salt (`_blind`) was set: not content")
@@ -9834,6 +9904,7 @@ mod shown_once_followups {
         let out = format_revision_history(
             &crate::govlog::ChangeHistory::default(),
             &[correction],
+            false,
             &ShownOnce::default(),
         );
         assert!(
@@ -9842,6 +9913,86 @@ mod shown_once_followups {
                  by AMD-2026-0034 (correction)"
             ),
             "{out}"
+        );
+    }
+
+    /// Betas of 0.113.0: a part's record carrying the signed summary that
+    /// a summary read showed, with the server's notes after it, points at
+    /// it; the notes are one key whichever tool words them
+    #[test]
+    fn a_parts_summary_and_notes_shown_by_another_read_are_pointed_at() {
+        let once = ShownOnce::default();
+        let mut summary = revised("latest");
+        summary.summary = Some(
+            "SIGNED_TEXT\n\nThis record has been revised 1 time(s).".into(),
+        );
+        shown(&summary, &once);
+        let mut part = revised("original");
+        part.round = Some(2);
+        part.data = Some(
+            serde_json::json!({"summary": {"text": "SIGNED_TEXT"}, "rounds": []}),
+        );
+        once.set_cues(Cues {
+            links: true,
+            ..Cues::default()
+        });
+        let out = shown(&part, &once);
+        assert!(!out.contains("SIGNED_TEXT"), "{out}");
+        assert!(!out.contains("**Amended by"), "{out}");
+        assert!(out.contains(
+            "Its amendments, obligations and citations are in your context"
+        ));
+    }
+
+    /// Review of 0.113.0: a part read at one version is not told the summary
+    /// is in context when only the other version's was shown
+    #[test]
+    fn a_part_is_not_pointed_at_the_other_versions_summary() {
+        let once = ShownOnce::default();
+        shown(&revised("original"), &once);
+        let mut part = revised("latest");
+        part.round = Some(1);
+        part.summary = None;
+        let out = shown(&part, &once);
+        assert!(
+            !out.contains("Its summary is in your context already"),
+            "{out}"
+        );
+        assert!(out.contains("its summary is not repeated here"), "{out}");
+    }
+
+    /// Betas of 0.113.0: removals of one field from many places are one
+    /// line; a data set's too-long change does not say it costs a read
+    #[test]
+    fn removals_are_grouped_and_a_data_sets_change_is_free() {
+        use crate::govlog::{Change, ChangeKind};
+        let removed = |n: usize| Change {
+            kind: ChangeKind::Removed,
+            path: format!("/rounds/0/responses/{n}/raw_text"),
+            from: None,
+            before: None,
+            after: None,
+            omitted_bytes: Some(1_500),
+        };
+        let mut changes: Vec<Change> = (0..20).map(removed).collect();
+        changes.push(Change {
+            kind: ChangeKind::Replaced,
+            path: "/files".into(),
+            from: None,
+            before: None,
+            after: None,
+            omitted_bytes: Some(9_000),
+        });
+        let out = format_changes(&changes, true);
+        assert!(
+            out.contains("- `raw_text` removed from 20 places, ~10k tok"),
+            "{out}"
+        );
+        assert_eq!(out.matches("raw_text").count(), 1, "{out}");
+        assert!(out.contains("the record shows it\n"), "{out}");
+        assert!(!out.contains("(a full read)"), "{out}");
+        assert!(
+            format_changes(&changes[20..], false).contains("(a full read)")
         );
     }
 

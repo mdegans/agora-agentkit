@@ -568,7 +568,10 @@ impl<T: Tool> Tool for Gauged<T> {
             && !super::tool::raw_text(&result.content)
                 .ends_with(super::tool::REFUSED)
         {
-            super::tool::append_text(&mut result.content, super::tool::REFUSED);
+            super::tool::append_sentence(
+                &mut result.content,
+                super::tool::REFUSED,
+            );
         }
         // An id read as another spelling says so, first
         if let Some(note) = super::tool::read_as(&name, &input) {

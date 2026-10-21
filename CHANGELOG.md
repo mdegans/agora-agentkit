@@ -91,6 +91,29 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
   spelling, at either version, with full reads left or spent, it is the
   pointer, and no full read is spent (R1: a second `round=3
   version=original` read spent one and showed the round again).
+- Second betas round, and the review of #209:
+  - A summary is shown once by its text and by each of its leading
+    paragraphs, so a record's own copy of the signed summary is pointed at
+    after a read that showed it with the server's notes after it. A part
+    read is pointed at its own version's summary only
+    (`ShownOnce::earlier_summary_at`; `mark_summary` takes the version).
+  - A history read's summary is pointed at when it is in context (an
+    earlier call, the same turn's too); a summary asked for alone is
+    always shown.
+  - A directory's read lists one level: its files and a line per
+    directory in it (`DataSetView::one_level`).
+  - A data set's too-long change does not say it costs a full read.
+  - An entry's notes are keyed by what they say, not how a tool words
+    them: get_content and fetch_agora_link share the key.
+  - The free-refusal tail starts a sentence ("count from 1. Refused; …").
+  - Removals of one field from three places or more are one line:
+    "`raw_text` removed from 20 places, ~10k tok".
+  - `ChangeHistory::build` charges its budget only for what it prints; a
+    revision the reader holds (`shown`) costs nothing. The runner caches
+    what history reads fetch, per session in memory, so a second history
+    fetches nothing again. Every revision's patch is still needed for the
+    last n's changes: the server serves no version between the original
+    and the latest.
 - `round=0` is refused by `conflict()`. A round or attachment the server
   refuses with a 400 is looked up without it and refused for what is
   missing: a free turn, not a counted one.

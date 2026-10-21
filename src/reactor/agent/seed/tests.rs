@@ -6933,8 +6933,8 @@ async fn a_refused_range_by_a_rewritten_id_is_free() {
     assert_eq!(agent.phase, Phase::Acting { rounds_left: 30 });
 }
 
-/// A summary asked for by name is shown, a history read's too (betas of
-/// 0.113.0: an explicit summary was stubbed)
+/// A history read's summary is its frame: in context from an earlier
+/// call, it is pointed at (betas of 0.113.0: printed twice in one turn)
 #[tokio::test]
 async fn a_history_read_by_name_shows_its_summary() {
     let server = MockServer::start();
@@ -6970,7 +6970,7 @@ async fn a_history_read_by_name_shows_its_summary() {
         rendered
             .matches("The Council ratified v0.2 four to one.")
             .count(),
-        2,
+        1,
         "{rendered}"
     );
     assert!(rendered.contains("It has no revisions"), "{rendered}");
@@ -7030,8 +7030,7 @@ async fn refused_rounds_and_inputs_are_free_and_say_so() {
     }
     let rendered = transcript(&agent);
     assert!(
-        rendered.contains("count from 1 Refused; nothing was charged.")
-            || rendered.contains("count from 1. Refused; nothing was charged."),
+        rendered.contains("count from 1. Refused; nothing was charged."),
         "{rendered}"
     );
     assert_eq!(refused_round.calls(), 1);
@@ -7228,4 +7227,74 @@ async fn a_round_read_again_is_the_pointer_at_either_version() {
         10,
         "{rendered}"
     );
+}
+
+/// Betas of 0.113.0: a summary asked for by name, then a history read in
+/// the same turn: the history points at the summary; and a second history
+/// read fetches nothing again (review of 0.113.0)
+#[tokio::test]
+async fn a_history_after_its_summary_points_at_it_and_fetches_once() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("detail", "summary");
+        then.status(200).json_body(revised_entry("latest", None));
+    });
+    let original = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("version", "original");
+        then.status(200).json_body(revised_entry(
+            "original",
+            Some(serde_json::json!({"landmark": "no", "text": "t"})),
+        ));
+    });
+    let amendments = server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/AMD-");
+        then.status(200).json_body(revision_entry(
+            "AMD-2026-0004",
+            serde_json::json!([{"op": "test", "path": "/landmark", "value": "no"}]),
+        ));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let turn: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_a", "name": "get_content",
+             "input": {"id": "GOV-2026-0017", "detail": "summary"}},
+            {"type": "tool_use", "id": "toolu_b", "name": "get_content",
+             "input": {"id": "GOV-2026-0017", "detail": "summary", "history": true}},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    agent.handle(turn).await.unwrap();
+    let rendered = transcript(&agent);
+    assert_eq!(
+        rendered
+            .matches("The Council ratified v0.2 four to one.")
+            .count(),
+        1,
+        "{rendered}"
+    );
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0017", "detail": "summary", "history": 1}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(original.calls(), 1, "cached for the session");
+    assert_eq!(amendments.calls(), 2, "each revision once");
 }

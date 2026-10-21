@@ -61,6 +61,10 @@ struct Inner {
     /// versions, and a revised record's two texts are two (betas of 0.113.0)
     summaries: HashMap<(GovernanceLogId, u64), Shown>,
     pending_summaries: Vec<((GovernanceLogId, u64), Shown)>,
+    /// The same, by id and version (`latest` for a record with one text),
+    /// for a part read, which carries no summary to key by
+    summaries_at: HashMap<(GovernanceLogId, &'static str), Shown>,
+    pending_summaries_at: Vec<((GovernanceLogId, &'static str), Shown)>,
     /// Parts of governance records shown this session (an attachment, a
     /// data set's file or lines of one), by the read's canonical link
     /// (0.112.0, beta round)
@@ -92,7 +96,7 @@ pub struct Cues {
 pub fn text_key(text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
+    text.trim().hash(&mut h);
     h.finish()
 }
 
@@ -109,6 +113,7 @@ impl ShownOnce {
         inner.pending.clear();
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
+        inner.pending_summaries_at.clear();
         inner.pending_parts.clear();
         inner.read = read.into();
     }
@@ -158,7 +163,7 @@ impl ShownOnce {
         text: Option<&str>,
     ) -> Option<Shown> {
         let wanted = |key: &(GovernanceLogId, u64)| {
-            key.0 == *id && text.is_none_or(|t| key.1 == text_key(t))
+            key.0 == *id && text.is_none_or(|t| key.1 == text_key(t.trim_end()))
         };
         let inner = self.0.read().expect("shown-once lock");
         inner
@@ -175,19 +180,54 @@ impl ShownOnce {
             })
     }
 
-    /// The result being rendered shows `id`'s summary `text`
-    pub fn mark_summary(&self, id: GovernanceLogId, text: &str) {
+    /// Where `id`'s summary at `version` was shown this session, if it was
+    pub fn earlier_summary_at(
+        &self,
+        id: &GovernanceLogId,
+        version: &'static str,
+    ) -> Option<Shown> {
+        let key = (id.clone(), version);
+        let inner = self.0.read().expect("shown-once lock");
+        inner
+            .pending_summaries_at
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, s)| s.clone())
+            .or_else(|| inner.summaries_at.get(&key).cloned())
+    }
+
+    /// The result being rendered shows `id`'s summary `text`. Each of its
+    /// leading paragraphs counts as shown too: a served summary is the
+    /// signed one with the server's notes after it, and a record's own
+    /// copy is the signed one alone (betas of 0.113.0)
+    /// `version` is which of a revised record's texts it is (`None` for
+    /// one text, or the latest)
+    pub fn mark_summary(
+        &self,
+        id: GovernanceLogId,
+        version: Option<&'static str>,
+        text: &str,
+    ) {
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
-        inner.pending_summaries.push((
-            (id, text_key(text)),
-            Shown {
-                read,
-                bytes: text.len() as u64,
-                raw: text.len() as u64,
-                post: None,
-            },
-        ));
+        let shown = Shown {
+            read,
+            bytes: text.len() as u64,
+            raw: text.len() as u64,
+            post: None,
+        };
+        inner
+            .pending_summaries_at
+            .push(((id.clone(), version.unwrap_or("latest")), shown.clone()));
+        let ends = text
+            .match_indices("\n\n")
+            .map(|(at, _)| at)
+            .chain(std::iter::once(text.len()));
+        for end in ends {
+            inner
+                .pending_summaries
+                .push(((id.clone(), text_key(&text[..end])), shown.clone()));
+        }
     }
 
     /// Whether the note `legend` was shown this session (or by the result
@@ -297,6 +337,10 @@ impl ShownOnce {
         for (id, shown) in summaries {
             inner.summaries.insert(id, shown);
         }
+        let summaries = std::mem::take(&mut inner.pending_summaries_at);
+        for (id, shown) in summaries {
+            inner.summaries_at.insert(id, shown);
+        }
         let parts = std::mem::take(&mut inner.pending_parts);
         for (link, shown) in parts {
             inner.parts.entry(link).or_insert(shown);
@@ -310,6 +354,7 @@ impl ShownOnce {
         inner.pending.clear();
         inner.pending_legends.clear();
         inner.pending_summaries.clear();
+        inner.pending_summaries_at.clear();
         inner.pending_parts.clear();
     }
 

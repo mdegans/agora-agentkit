@@ -2848,6 +2848,39 @@ impl DataSetView {
         out
     }
 
+    /// The listing one level below `directory` (the view's own, or the
+    /// root): its files, then one line per directory in it with its files
+    /// and bytes (betas of 0.113.0: a directory's read listed its 135 files
+    /// recursively)
+    pub fn one_level(&self) -> Vec<DataSetLine> {
+        let prefix = self.directory.as_deref().unwrap_or("");
+        let mut files = Vec::new();
+        let mut dirs: Vec<DataSetLine> = Vec::new();
+        for line in &self.listing {
+            let rest = line.path.strip_prefix(prefix).unwrap_or(&line.path);
+            match rest.split_once('/') {
+                Some((sub, _)) => {
+                    let dir = format!("{prefix}{sub}/");
+                    match dirs.iter_mut().find(|d| d.path == dir) {
+                        Some(d) => {
+                            d.files += line.files;
+                            d.bytes += line.bytes;
+                        }
+                        None => dirs.push(DataSetLine {
+                            path: dir,
+                            files: line.files,
+                            bytes: line.bytes,
+                            note: None,
+                        }),
+                    }
+                }
+                _ => files.push(line.clone()),
+            }
+        }
+        files.extend(dirs);
+        files
+    }
+
     /// `set` as its default read lists it, on every surface: the
     /// [`top_level`](Self::top_level)'s files to start with, then one line
     /// per directory. Every file is counted; a directory's read lists them
@@ -5954,6 +5987,21 @@ mod data_set_view_tests {
                 .collect::<Vec<_>>(),
             view.listing
         );
+    }
+
+    /// Betas of 0.113.0: a directory's read lists one level, a line per
+    /// directory in it
+    #[test]
+    fn a_directory_lists_one_level() {
+        let view =
+            DataSetView::of(&set(30, 3), Some("votes/"), 262_144).unwrap();
+        let lines = view.one_level();
+        let paths: Vec<&str> = lines.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["votes/README.md", "votes/d00/", "votes/d01/", "votes/d02/"]
+        );
+        assert_eq!(lines[1].files, 10);
     }
 
     /// `n` files over `dirs` directories, plus a README, sorted

@@ -187,14 +187,22 @@ pub(super) fn map_text(content: &mut Content, f: impl Fn(&str) -> String) {
     }
 }
 
-/// ` {tail}` after a result's text, in its last text block
-pub(super) fn append_text(content: &mut Content, tail: &str) {
+/// The sentence `tail` after a result's text, in its last text block, the
+/// text before it ended as a sentence (betas of 0.113.0: "count from 1
+/// Refused;")
+pub(super) fn append_sentence(content: &mut Content, tail: &str) {
     use misanthropic::prompt::message::Block;
     if let Some(text) = content.0.iter_mut().rev().find_map(|b| match b {
         Block::Text { text, .. } => Some(text),
         _ => None,
     }) {
-        *text = format!("{text} {tail}").into();
+        let body = text.trim_end();
+        let stop = if body.ends_with(['.', '!', '?', ')']) {
+            ""
+        } else {
+            "."
+        };
+        *text = format!("{body}{stop} {tail}").into();
     }
 }
 
@@ -380,6 +388,10 @@ pub struct Agora {
     /// The call being answered came by `fetch_agora_link`: its pointers
     /// are links (0.112.0)
     by_link: bool,
+    /// What `history` reads have fetched this session, by id: originals'
+    /// records and revisions' patches, so a second history fetches nothing
+    /// again (review of 0.113.0). In memory only, gone with the session
+    history_cache: HashMap<crate::ids::GovernanceLogId, serde_json::Value>,
 }
 
 impl Agora {
@@ -406,6 +418,7 @@ impl Agora {
             trash_writes: 0,
             trash_listed: ShownIds::default(),
             by_link: false,
+            history_cache: HashMap::new(),
         }
     }
 
@@ -553,7 +566,7 @@ impl Agora {
     /// replays them ([`crate::govlog::ChangeHistory::build`]). A server
     /// before 0.113.0 refuses `history`, so it is never sent
     async fn revision_history(
-        &self,
+        &mut self,
         entry: &crate::responses::GovernanceEntryResponse,
         history: crate::requests::History,
     ) -> crate::govlog::ChangeHistory {
@@ -585,13 +598,24 @@ impl Agora {
             ..read(entry.id.clone())
                 .with_detail(DetailLevel::FullWithAttachments)
         };
-        let original = match self.client.get_content(&original).await {
-            Ok(ContentResponse::Governance(e)) => e.data,
-            Ok(_) => None,
-            Err(e) => return failed(&entry.id, e.to_string()),
-        };
-        let Some(original) = original else {
-            return failed(&entry.id, "no record".into());
+        // Every revision's patch is needed, the last n's too: the changes
+        // are replayed from the original, and the server serves no version
+        // in between
+        let mut fetched: Vec<(crate::ids::GovernanceLogId, serde_json::Value)> =
+            Vec::new();
+        let original = match self.history_cache.get(&entry.id) {
+            Some(data) => data.clone(),
+            None => match self.client.get_content(&original).await {
+                Ok(ContentResponse::Governance(e)) => match e.data {
+                    Some(data) => {
+                        fetched.push((entry.id.clone(), data.clone()));
+                        data
+                    }
+                    None => return failed(&entry.id, "no record".into()),
+                },
+                Ok(_) => return failed(&entry.id, "no record".into()),
+                Err(e) => return failed(&entry.id, e.to_string()),
+            },
         };
         /// An amendment's record, as far as a revision goes
         #[derive(Deserialize)]
@@ -600,22 +624,33 @@ impl Agora {
         }
         let mut revisions = Vec::with_capacity(ids.len());
         for id in &ids {
-            match self.client.get_content(&read(id.clone())).await {
-                Ok(ContentResponse::Governance(e)) => match e
-                    .data
-                    .and_then(|d| serde_json::from_value::<Revised>(d).ok())
-                    .and_then(|r| r.revision)
-                {
-                    Some(r) => revisions.push((id.clone(), r)),
-                    None => {
-                        return failed(id, "no revision in its record".into());
+            let data = match self.history_cache.get(id) {
+                Some(data) => Some(data.clone()),
+                None => {
+                    match self.client.get_content(&read(id.clone())).await {
+                        Ok(ContentResponse::Governance(e)) => {
+                            if let Some(d) = &e.data {
+                                fetched.push((id.clone(), d.clone()));
+                            }
+                            e.data
+                        }
+                        Ok(_) => {
+                            return failed(id, "not a governance entry".into());
+                        }
+                        Err(e) => return failed(id, e.to_string()),
                     }
-                },
-                Ok(_) => return failed(id, "not a governance entry".into()),
-                Err(e) => return failed(id, e.to_string()),
+                }
+            };
+            match data
+                .and_then(|d| serde_json::from_value::<Revised>(d).ok())
+                .and_then(|r| r.revision)
+            {
+                Some(r) => revisions.push((id.clone(), r)),
+                None => return failed(id, "no revision in its record".into()),
             }
         }
-        ChangeHistory::build(
+        let once = self.shown_once.clone();
+        let built = ChangeHistory::build(
             &original,
             &revisions,
             |id| {
@@ -625,8 +660,13 @@ impl Agora {
                     .find(|a| a.id == *id)
                     .map(|a| a.created_at)
             },
+            // One the agent was shown is a pointer, and costs the budget
+            // nothing (review of 0.113.0)
+            |id| once.earlier_part(&prompt::changes_key(id)).is_some(),
             history,
-        )
+        );
+        self.history_cache.extend(fetched);
+        built
     }
 
     /// The community header a community's link reads with its feed: its
@@ -827,8 +867,10 @@ impl Agora {
         // Shown here, from the original and the revisions' patches: the
         // server takes no `history`
         let history = input.history.take();
-        // Asked for by name, it is shown, history or not (betas of 0.113.0)
-        let summary_asked = input.detail == Some(DetailLevel::Summary);
+        // Asked for by name, it is shown; a history read's summary is its
+        // frame, pointed at when it is in context (betas of 0.113.0)
+        let summary_asked =
+            input.detail == Some(DetailLevel::Summary) && history.is_none();
         self.set_cues();
         // The budget is about governance attention, so it is the kind of
         // id and the depth that spend it, not the tool that was called.
@@ -1014,7 +1056,9 @@ impl Agora {
                 Some((h, amendments)) => {
                     format!(
                         "{rendered}{}",
-                        prompt::format_revision_history(h, amendments, once)
+                        prompt::format_revision_history(
+                            h, amendments, data_set, once
+                        )
                     )
                 }
                 None => rendered,
@@ -1997,7 +2041,7 @@ impl Agora {
                 prompt::about_tokens(shown.bytes)
             )),
             None => {
-                once.mark_summary(id.clone(), text);
+                once.mark_summary(id.clone(), None, text);
                 None
             }
         };
