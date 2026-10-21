@@ -918,7 +918,7 @@ pub enum FeedSort {
     Diverse,
 }
 
-/// Whether to get your `joined` communities or `all`
+/// Which communities a dashboard's feed reads from
 // 0.95. No Postgres twin: a request parameter, never stored. No variant doc
 // comments: they would turn the schema's plain `enum` into a `oneOf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1081,7 +1081,7 @@ pub enum FriendshipStatus {
     Declined,
 }
 
-/// Manage a friendship
+/// What `manage_friendship` does
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]

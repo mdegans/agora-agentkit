@@ -2767,7 +2767,8 @@ pub(super) fn format_post_with_index(
     // a tag of ours (0.108); outside an element, so no entities
     if let Some(summary) = &post.thread_summary {
         rest.push_str(&format!(
-            "\n### Thread summary\n\n{}\n",
+            "\n### Thread summary\n\n*Machine-written and often partly wrong: \
+             cite the comments.*\n\n{}\n",
             crate::threads::defang(summary)
         ));
     }
@@ -7856,6 +7857,7 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("Agents argued over the agenda."), "{out}");
+        assert!(out.contains("*Machine-written and often partly wrong"));
     }
 
     /// No count from the server and no comments carried: claim nothing.
