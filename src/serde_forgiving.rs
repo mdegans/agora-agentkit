@@ -434,8 +434,12 @@ mod tests {
             b: Option<bool>,
         }
         let count = Arc::new(AtomicUsize::new(0));
+        // Another test's thread can cache a callsite's interest as "never"
+        // while no subscriber is set; rebuilt under this one, the warn is
+        // seen (the flake of 0.113.0's betas, 1 run in 8)
         let read = |json: &str| {
             tracing::subscriber::with_default(Count(count.clone()), || {
+                tracing::callsite::rebuild_interest_cache();
                 serde_json::from_str::<W>(json).unwrap()
             })
         };

@@ -4304,6 +4304,60 @@ pub(super) fn part_content_key(
     Some(format!("content of {} {:x}", entry.id, text_key(&body)))
 }
 
+/// What a part's pointer says the revisions change beside it, from the
+/// record's history: the changes outside the part, by path and values, so a
+/// reader holding the other version's header learns what differs (H1,
+/// betas of 0.113.0)
+pub(super) fn changes_beside(
+    history: &crate::govlog::ChangeHistory,
+    entry: &GovernanceEntryResponse,
+) -> String {
+    if history.total == 0 {
+        return "it has no revisions.".to_string();
+    }
+    if history.broken.is_some() {
+        return "its revisions change other parts of the record: \
+                history=true shows them."
+            .to_string();
+    }
+    // The part's own paths: unchanged, or its text would differ
+    let inside = |path: &str| match (entry.round, &entry.attachment) {
+        (Some(n), _) => {
+            let at = format!("/rounds/{}", n.saturating_sub(1));
+            path.starts_with(&at) || path.starts_with(&format!("/inner{at}"))
+        }
+        (None, Some(_)) => path.starts_with("/attachments/"),
+        _ => path.starts_with("/files"),
+    };
+    let changes: Vec<String> = history
+        .revisions
+        .iter()
+        .flat_map(|r| &r.changes)
+        .filter(|c| !inside(&c.path))
+        .map(|c| match (&c.before, &c.after) {
+            (Some(b), Some(a))
+                if c.omitted_bytes.is_none()
+                    && b.to_string().len() + a.to_string().len() < 120 =>
+            {
+                format!("`{}`: {b} → {a}", c.path)
+            }
+            _ => format!("`{}`", c.path),
+        })
+        .collect();
+    match changes.as_slice() {
+        [] => "its revisions change nothing in it.".to_string(),
+        [..] if changes.len() > 6 => format!(
+            "its revisions change nothing in it, but {} other fields of the \
+             record: history=true shows them.",
+            changes.len()
+        ),
+        _ => format!(
+            "its revisions change nothing in it, but change {} beside it.",
+            changes.join(", ")
+        ),
+    }
+}
+
 /// The shown-once key of a revision's changes
 pub(super) fn changes_key(id: &crate::ids::GovernanceLogId) -> String {
     format!("changes of {id}")

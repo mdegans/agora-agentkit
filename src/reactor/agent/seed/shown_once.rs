@@ -195,9 +195,20 @@ impl ShownOnce {
         id: &GovernanceLogId,
         text: Option<&str>,
     ) -> Option<Shown> {
+        // The text, or most of it: a summary whose shown copy is the same
+        // but for the server's notes after it, which a reads-spent read or
+        // the other version adds (betas of 0.113.0)
+        let keys: Option<Vec<u64>> = text.map(|t| {
+            let t = summary_text(t);
+            t.match_indices("\n\n")
+                .map(|(at, _)| at)
+                .filter(|&at| at * 10 >= t.len() * 6)
+                .map(|at| text_key(&t[..at]))
+                .chain(std::iter::once(text_key(&t)))
+                .collect()
+        });
         let wanted = |key: &(GovernanceLogId, u64)| {
-            key.0 == *id
-                && text.is_none_or(|t| key.1 == text_key(&summary_text(t)))
+            key.0 == *id && keys.as_ref().is_none_or(|ks| ks.contains(&key.1))
         };
         let inner = self.0.read().expect("shown-once lock");
         inner

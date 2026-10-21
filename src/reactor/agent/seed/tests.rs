@@ -7429,3 +7429,90 @@ fn a_bad_id_names_every_kind() {
         assert!(slug.parse::<crate::ids::PlatformDoc>().is_ok(), "{slug}");
     }
 }
+
+/// Betas of 0.113.0 (H1): a round the same at both versions points at the
+/// earlier read and says what the revisions change beside it, here the
+/// landmark that read's header showed at the other version
+#[tokio::test]
+async fn a_cross_version_pointer_names_what_changed_beside_the_part() {
+    let server = MockServer::start();
+    let amendments = serde_json::json!([
+        {"id": "AMD-2026-0033", "kind": "revision", "basis": "x",
+         "note": "Landmark", "created_at": "2026-10-02T00:00:00Z"}
+    ]);
+    let round = serde_json::json!({"number": 3, "responses": [
+        {"role": "lawyer", "vote": "yes", "rationale": "THE_SAME_ROUND"}]});
+    let round_body = |version: &str, landmark: bool| {
+        let mut body = governance_content(
+            "GOV-2026-0017",
+            Some(
+                serde_json::json!({"landmark": landmark, "rounds": [round.clone()]}),
+            ),
+        );
+        body["round"] = 3.into();
+        body["version"] = version.into();
+        body["amendments"] = amendments.clone();
+        body["round_bytes"] = serde_json::json!([10, 10, 3000]);
+        body
+    };
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "3")
+            .query_param("version", "original");
+        then.status(200).json_body(round_body("original", false));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "3")
+            .is_true(|req| !has_param(req, "version"));
+        then.status(200).json_body(round_body("latest", true));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("detail", "full_with_attachments")
+            .query_param("version", "original");
+        let mut body = governance_content(
+            "GOV-2026-0017",
+            Some(serde_json::json!({"landmark": false, "rounds": [
+                {"number": 1}, {"number": 2}, round.clone()]})),
+        );
+        body["amendments"] = amendments.clone();
+        then.status(200).json_body(body);
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/AMD-2026-0033");
+        then.status(200).json_body(revision_entry(
+            "AMD-2026-0033",
+            serde_json::json!([{"op": "replace", "path": "/landmark", "value": true}]),
+        ));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    for call in [
+        serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"}),
+        serde_json::json!({"id": "GOV-2026-0017", "round": 3}),
+    ] {
+        agent
+            .handle(tool_use_message("get_content", call))
+            .await
+            .unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "its revisions change nothing in it, but change `/landmark`: \
+             false → true beside it. Nothing was charged."
+        ),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("THE_SAME_ROUND").count(), 1);
+}

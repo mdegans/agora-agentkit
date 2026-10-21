@@ -1005,7 +1005,7 @@ impl Agora {
             crate::responses::ContentResponse::Governance(entry)
                 if !part_keys.is_empty() && !capped =>
             {
-                prompt::part_content_key(entry)
+                prompt::part_content_key(entry).map(|k| (k, entry.clone()))
             }
             _ if capped
                 && part_keys
@@ -1015,24 +1015,30 @@ impl Agora {
             {
                 match self.client.get_content(&asked_input).await {
                     Ok(crate::responses::ContentResponse::Governance(e)) => {
-                        prompt::part_content_key(&e)
+                        prompt::part_content_key(&e).map(|k| (k, e.clone()))
                     }
                     _ => None,
                 }
             }
             _ => None,
         };
-        if let Some(shown) =
-            same.as_ref().and_then(|k| self.shown_once.earlier_part(k))
-        {
+        if let Some((shown, entry)) = same.as_ref().and_then(|(k, e)| {
+            self.shown_once.earlier_part(k).map(|s| (s, e.clone()))
+        }) {
+            // What the revisions change beside the part, which the earlier
+            // read's header showed at its own version (H1, betas of
+            // 0.113.0: "change nothing" while the landmark had changed)
+            let history = self
+                .revision_history(&entry, crate::requests::History::All)
+                .await;
+            let beside = prompt::changes_beside(&history, &entry);
             // This spelling is the pointer from now on, read no more
             self.shown_once.begin(shown.read.clone());
             self.shown_once
                 .mark_part(part_keys[0].clone(), shown.bytes as usize);
             return Ok(format!(
                 "(`{}` is in your context already, the same text: shown in \
-                 {}, {}; its revisions change nothing in it. Nothing was \
-                 charged.)",
+                 {}, {}; {beside} Nothing was charged.)",
                 part_keys[0],
                 shown.read,
                 crate::threads::about_tokens(shown.bytes)
@@ -1083,7 +1089,7 @@ impl Agora {
                 for key in keys {
                     self.shown_once.mark_part(key, bytes as usize);
                 }
-                if let Some(key) = same.clone() {
+                if let Some((key, _)) = same.clone() {
                     self.shown_once.mark_part(key, bytes as usize);
                 }
             }

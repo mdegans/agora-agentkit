@@ -131,6 +131,18 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
   - `_blind` reads "Redaction salt (`_blind`): not content" in a record.
   - A short data-file path says "(Read as <path>; cite it by that path.)",
     not that it is not a path.
+- Before merge:
+  - A part's pointer across versions says what the revisions change
+    beside the part, from the record's history: "its revisions change
+    nothing in it, but change `/landmark`: false → true beside it" (H1:
+    a reader of the original's header was told nothing changed).
+  - A summary whose shown copy is most of it (at least 60%, a paragraph
+    boundary), the rest the server's notes, is pointed at: a reads-spent
+    fallback, a summary+history read, a DATA entry's `version=original`.
+  - The flaky `serde_forgiving::tests::coercions_warn_when_the_feature_is_on`
+    (1 run in 8, from 0.87): another test's thread could cache a callsite's
+    interest as "never"; the test rebuilds the interest cache under its
+    subscriber. A test race, not the runner's.
 - `round=0` is refused by `conflict()`. A round or attachment the server
   refuses with a 400 is looked up without it and refused for what is
   missing: a free turn, not a counted one.
