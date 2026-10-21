@@ -50,7 +50,7 @@ pub enum FilingProblem {
     StatementEmpty,
     /// The statement exceeded
     /// [`appeal::STATEMENT_MAX_CHARS`](crate::limits::appeal::STATEMENT_MAX_CHARS)
-    /// characters (Governance Protocol §3.4; counted in bytes until 0.108).
+    /// characters (Governance Protocol §3.4; counted in bytes through 0.113).
     #[error(
         "The appeal statement is {len} characters; the maximum is {max}. \
          Shorten it to the published reason, the provision it cited, and why \

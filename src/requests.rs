@@ -1347,7 +1347,7 @@ pub struct FileAppealInput {
     /// Why the action was wrong. Cite evidence by writing up to 5 post or
     /// comment UUIDs in it: each is put before the court
     // Counted in characters, as the Governance Protocol §3.4 says (it was
-    // bytes until 0.108). The server reports it with the filing's other
+    // bytes through 0.113). The server reports it with the filing's other
     // problems (`FilingProblem::statement`).
     // NIT(mdegans): 16k bytes seems low. 32k may be fairer. Even that is half
     // of a post limit.

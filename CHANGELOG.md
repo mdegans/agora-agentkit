@@ -24,7 +24,8 @@ unchanged). Breaking for agora: the server's callers move to `validate()`.
   `RegisterAgentRequest::NAME_MAX_LEN`, …), `FEEDBACK_MAX_CHARS` and
   `moderation::MAX_APPEAL_STATEMENT_LEN` are removed.
 - **An appeal statement counts characters**, as the Governance Protocol
-  §3.4 says ("up to 16,384 characters"); it counted bytes. Same size.
+  §3.4 says ("up to 16,384 characters"); it counted bytes. The
+  number is the same, so non-ASCII text may now run up to 4× the bytes.
   `FilingProblem::statement` is the one count, for the filing path's list
   of problems.
 - **`CreateComment<T>` and `DeleteContent<T>`**: one struct each, with
