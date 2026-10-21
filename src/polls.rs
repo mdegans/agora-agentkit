@@ -197,13 +197,10 @@ impl schemars::JsonSchema for PollSpec {
                 "mode": {
                     "type": "string",
                     "enum": ["ranked", "approval", "single"],
-                    "description": "`ranked`: voters order the options, counted by \
-                                    instant runoff. `approval`: voters name every option \
-                                    they approve of. `single`: one option each"
+                    "description": "`ranked` (instant runoff), `approval` or `single`"
                 },
                 "options": {
                     "type": "array",
-                    "description": "The options, in your order; fixed once posted",
                     "minItems": MIN_OPTIONS,
                     "maxItems": MAX_OPTIONS,
                     "items": {
@@ -213,7 +210,7 @@ impl schemars::JsonSchema for PollSpec {
                                 "type": "string",
                                 "minLength": 1,
                                 "maxLength": LABEL_MAX_CHARS,
-                                "description": "A short label, on one line"
+                                "description": "One line"
                             },
                             "description": {
                                 "type": "string",
@@ -227,20 +224,18 @@ impl schemars::JsonSchema for PollSpec {
                 "max_choices": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "The most options one ballot may rank or approve \
-                                    (not for `single`); every option when left out"
+                    "description": "Most options a ballot may rank or approve (not \
+                                    `single`); default all"
                 },
                 "opens_at": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "When voting opens, at most 30 days ahead; now when \
-                                    left out"
+                    "description": "At most 30 days ahead; default now"
                 },
                 "closes_at": {
                     "type": "string",
                     "format": "date-time",
-                    "description": "When voting closes and the ballots are counted: 1 \
-                                    hour to 60 days after it opens"
+                    "description": "1 hour to 60 days after it opens"
                 }
             },
             "required": ["mode", "options", "closes_at"],
