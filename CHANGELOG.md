@@ -2,6 +2,29 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.113.1 (2026-10-21)
+
+The last of the betas' findings on 0.113.0 (Steward, 2026-10-21).
+
+- A summary is shown once by its paragraphs, on every read that shows
+  it: a summary read alone, the default record read, a part's record, a
+  history, a reads-spent fallback, by either tool. A paragraph printed
+  before is pointed at; a run of them is one pointer naming the reads
+  that printed them, and their size from the paragraphs themselves; the
+  rest print (`ShownOnce::summary_seen`, `mark_paragraphs`,
+  `Shown::joined`, `summary_paragraphs`). A read marks only the
+  paragraphs it printed, so no pointer names a read that printed a
+  pointer.
+- A summary asked for by name is pointed at like any other: a result in
+  the session's context is never trimmed (the 0.113.0 rule that showed it
+  again in a later turn, `Cues::summary_asked`, is gone).
+- A part's record header (its fields beside the round or attachment) is
+  shown once by its text.
+- A diff of prose on one or two lines compares sentences, not lines: one
+  removed sentence is one line.
+- "Read as originally signed, before any revision" only for a record that
+  has a revision.
+
 ## 0.113.0 (2026-10-21)
 
 Cost and clarity follow-ups to 0.112.0's beta round (Steward,

@@ -89,9 +89,6 @@ pub struct Cues {
     pub links: bool,
     /// Full governance reads left this session, when the tool counts them
     pub full_reads_left: Option<u64>,
-    /// The read asked for a summary by name (`detail=summary`): it is shown,
-    /// even if it was shown before
-    pub summary_asked: bool,
 }
 
 /// A key for `text` by its content, so the same text is one key whatever
@@ -102,6 +99,40 @@ pub fn text_key(text: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.trim().hash(&mut h);
     h.finish()
+}
+
+/// A summary's paragraphs as shown once: split at blank lines, each
+/// trimmed, empty ones dropped. Each is keyed, and sized, by its
+/// [`summary_text`], and printed as written
+pub fn summary_paragraphs(text: &str) -> Vec<String> {
+    text.split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+impl Shown {
+    /// Several showings as one pointer: the reads in order, once each, and
+    /// their bytes added up
+    pub fn joined<'a>(shown: impl IntoIterator<Item = &'a Shown>) -> Shown {
+        let mut reads: Vec<&str> = Vec::new();
+        let (mut bytes, mut turn) = (0, 0);
+        for s in shown {
+            if !reads.contains(&s.read.as_str()) {
+                reads.push(&s.read);
+            }
+            bytes += s.bytes;
+            turn = turn.max(s.turn);
+        }
+        Shown {
+            read: reads.join(" and "),
+            bytes,
+            raw: bytes,
+            post: None,
+            turn,
+        }
+    }
 }
 
 /// A summary as shown once: without the "Read this first" sentence a
@@ -188,51 +219,73 @@ impl ShownOnce {
         self.0.read().expect("shown-once lock").cues
     }
 
-    /// Where `id`'s summary `text` was shown this session, if it was; with
-    /// no text, where any of its summaries was
+    /// Where the paragraph `para` of `id`'s summary was shown, if it was
+    fn paragraph_shown(
+        &self,
+        id: &GovernanceLogId,
+        para: &str,
+    ) -> Option<Shown> {
+        let key = (id.clone(), text_key(&summary_text(para)));
+        let inner = self.0.read().expect("shown-once lock");
+        inner
+            .pending_summaries
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, s)| s.clone())
+            .or_else(|| inner.summaries.get(&key).cloned())
+    }
+
+    /// Each paragraph of `id`'s summary `text` ([`summary_paragraphs`]),
+    /// with where it was shown, if it was. A summary is shown once by its
+    /// paragraphs: what a read printed, and only that, is marked
+    /// (Steward, 2026-10-21)
+    pub fn summary_seen(
+        &self,
+        id: &GovernanceLogId,
+        text: &str,
+    ) -> Vec<(String, Option<Shown>)> {
+        summary_paragraphs(text)
+            .into_iter()
+            .map(|p| {
+                let shown = self.paragraph_shown(id, &p);
+                (p, shown)
+            })
+            .collect()
+    }
+
+    /// Where every paragraph of `id`'s summary `text` was shown, as one:
+    /// the reads that printed them and their bytes. `None` unless all
+    /// were. With no text, where any paragraph of any of its summaries was
     pub fn earlier_summary(
         &self,
         id: &GovernanceLogId,
         text: Option<&str>,
     ) -> Option<Shown> {
-        let key = text.map(|t| text_key(&summary_text(t)));
-        let wanted = |k: &(GovernanceLogId, u64)| {
-            k.0 == *id && key.is_none_or(|key| k.1 == key)
-        };
-        let inner = self.0.read().expect("shown-once lock");
-        inner
-            .pending_summaries
-            .iter()
-            .find(|(k, _)| wanted(k))
-            .map(|(_, s)| s.clone())
-            .or_else(|| {
+        match text {
+            Some(text) => {
+                let seen = self.summary_seen(id, text);
+                if seen.is_empty() || seen.iter().any(|(_, s)| s.is_none()) {
+                    return None;
+                }
+                Some(Shown::joined(seen.iter().filter_map(|(_, s)| s.as_ref())))
+            }
+            None => {
+                let inner = self.0.read().expect("shown-once lock");
                 inner
-                    .summaries
+                    .pending_summaries
                     .iter()
-                    .find(|(k, _)| wanted(k))
+                    .find(|((k, _), _)| k == id)
                     .map(|(_, s)| s.clone())
-            })
-    }
-
-    /// How much of `id`'s summary `text` was shown this session: the
-    /// longest run of its leading paragraphs a read showed, and where.
-    /// Never more than was shown (betas of 0.113.0): the rest is the
-    /// reader's to read. Its offset is into [`summary_text`]`(text)`
-    pub fn summary_seen(
-        &self,
-        id: &GovernanceLogId,
-        text: &str,
-    ) -> Option<(Shown, usize)> {
-        let t = summary_text(text);
-        let mut ends: Vec<usize> = t
-            .match_indices("\n\n")
-            .map(|(at, _)| at)
-            .chain(std::iter::once(t.len()))
-            .collect();
-        ends.reverse();
-        ends.into_iter().find_map(|end| {
-            self.earlier_summary(id, Some(&t[..end])).map(|s| (s, end))
-        })
+                    .or_else(|| {
+                        inner
+                            .summaries
+                            .iter()
+                            .find(|((k, _), _)| k == id)
+                            .map(|(_, s)| s.clone())
+                    })
+            }
+        }
     }
 
     /// Where `id`'s summary at `version` was shown this session, if it was
@@ -251,53 +304,50 @@ impl ShownOnce {
             .or_else(|| inner.summaries_at.get(&key).cloned())
     }
 
-    /// The result being rendered shows `id`'s summary `text`. Each of its
-    /// leading paragraphs counts as shown too: a served summary is the
-    /// signed one with the server's notes after it, and a record's own
-    /// copy is the signed one alone (betas of 0.113.0)
-    /// `version` is which of a revised record's texts it is (`None` for
-    /// one text, or the latest)
+    /// The result being rendered prints all of `id`'s summary `text`
+    /// (`version`: which of a revised record's texts, `None` for one or the
+    /// latest)
     pub fn mark_summary(
         &self,
         id: GovernanceLogId,
         version: Option<&'static str>,
         text: &str,
     ) {
-        self.mark_summary_from(id, version, text, 0)
+        let paras = summary_paragraphs(text);
+        self.mark_paragraphs(id, version, paras.iter().map(String::as_str));
     }
 
-    /// [`Self::mark_summary`] for a result that showed `text` from offset
-    /// `from` (into [`summary_text`]) on, the rest pointed at: its leading
-    /// paragraphs keep the reads that showed them
-    pub fn mark_summary_from(
+    /// The result being rendered prints these paragraphs of `id`'s
+    /// summary, and points at the rest: only these are marked, by this
+    /// read, so a pointer never names a read for text it did not print
+    pub fn mark_paragraphs<'a>(
         &self,
         id: GovernanceLogId,
         version: Option<&'static str>,
-        text: &str,
-        from: usize,
+        paras: impl IntoIterator<Item = &'a str>,
     ) {
-        let text = &summary_text(text);
         let mut inner = self.0.write().expect("shown-once lock");
         let read = inner.read.clone();
         let turn = inner.turn;
-        let shown = Shown {
-            read,
-            bytes: text.len() as u64,
-            raw: text.len() as u64,
+        let shown = |bytes: usize| Shown {
+            read: read.clone(),
+            bytes: bytes as u64,
+            raw: bytes as u64,
             post: None,
             turn,
         };
-        inner
-            .pending_summaries_at
-            .push(((id.clone(), version.unwrap_or("latest")), shown.clone()));
-        let ends = text
-            .match_indices("\n\n")
-            .map(|(at, _)| at)
-            .chain(std::iter::once(text.len()));
-        for end in ends.filter(|&end| end > from) {
+        let mut total = 0;
+        for p in paras {
+            let p = summary_text(p);
+            total += p.len();
             inner
                 .pending_summaries
-                .push(((id.clone(), text_key(&text[..end])), shown.clone()));
+                .push(((id.clone(), text_key(&p)), shown(p.len())));
+        }
+        if total > 0 {
+            inner
+                .pending_summaries_at
+                .push(((id, version.unwrap_or("latest")), shown(total)));
         }
     }
 
