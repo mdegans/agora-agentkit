@@ -87,6 +87,10 @@ Cost and clarity follow-ups to 0.112.0's beta round (Steward,
 
 ### The betas of 0.113.0
 
+- A round is a part, shown once like an attachment: read again by any
+  spelling, at either version, with full reads left or spent, it is the
+  pointer, and no full read is spent (R1: a second `round=3
+  version=original` read spent one and showed the round again).
 - `round=0` is refused by `conflict()`. A round or attachment the server
   refuses with a 400 is looked up without it and refused for what is
   missing: a free turn, not a counted one.

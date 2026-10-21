@@ -7124,3 +7124,108 @@ async fn a_rewritten_id_reads_exactly_as_the_id() {
     );
     assert!(results[1].contains("| [x] | y |"), "{}", results[1]);
 }
+
+/// Betas of 0.113.0 (R1): a round read again, at `version=original`, by
+/// any spelling and either tool, with full reads left and with them spent,
+/// is the pointer: nothing is read again or spent
+#[tokio::test]
+async fn a_round_read_again_is_the_pointer_at_either_version() {
+    let server = MockServer::start();
+    let revised = |body: &mut serde_json::Value, version: &str| {
+        body["version"] = version.into();
+        body["amendments"] = serde_json::json!([
+            {"id": "AMD-2026-0004", "kind": "revision", "basis": "x",
+             "note": "N", "created_at": "2026-10-02T00:00:00Z"}
+        ]);
+        body["round_bytes"] = serde_json::json!([100, 200, 3000]);
+    };
+    let round = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0017")
+            .query_param("round", "3")
+            .query_param("version", "original");
+        let mut body = governance_content(
+            "GOV-2026-0017",
+            Some(serde_json::json!({"rounds": [
+                {"number": 3, "responses": [{"role": "lawyer", "vote": "yes",
+                 "rationale": "THIRD_ROUND_ORIGINAL"}]}
+            ]})),
+        );
+        body["round"] = 3.into();
+        revised(&mut body, "original");
+        then.status(200).json_body(body);
+    });
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| !has_param(req, "round"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let other = server.mock(|when, then| {
+        when.method(GET).path_includes("/agora/api/content/");
+        then.status(500);
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 200,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    let get = |v: serde_json::Value| tool_use_message("get_content", v);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+    let spellings = || {
+        vec![
+            get(
+                serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"}),
+            ),
+            get(
+                serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original", "detail": "full"}),
+            ),
+            get(
+                serde_json::json!({"id": "gov-2026-17", "round": "3", "version": "original"}),
+            ),
+            link("agora://gov/GOV-2026-0017?round=3&version=original"),
+            link(
+                "agora://gov/GOV-2026-0017?version=original&round=3&detail=full",
+            ),
+        ]
+    };
+    agent
+        .handle(get(serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"})))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("1 of 2 left this session"));
+    for call in spellings() {
+        agent.handle(call).await.unwrap();
+    }
+    assert_eq!(round.calls(), 1, "{}", transcript(&agent));
+    // Spend the other full read; the round is still the pointer
+    agent
+        .handle(get(serde_json::json!({"id": "GOV-2026-0006"})))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("0 of 2 left this session"));
+    for call in spellings() {
+        agent.handle(call).await.unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert_eq!(round.calls(), 1, "{rendered}");
+    assert_eq!(record.calls(), 1);
+    assert_eq!(other.calls(), 0, "{rendered}");
+    assert_eq!(rendered.matches("THIRD_ROUND_ORIGINAL").count(), 1);
+    assert_eq!(rendered.matches("That was a full read").count(), 2);
+    assert_eq!(
+        rendered
+            .matches("`agora://gov/GOV-2026-0017?round=3&version=original` is in your context already")
+            .count(),
+        10,
+        "{rendered}"
+    );
+}

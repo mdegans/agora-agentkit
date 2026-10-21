@@ -65,7 +65,10 @@ fn data_set_reads_are_free() -> String {
 /// is not of a part (0.112.0)
 fn part_keys(input: &GetContentInput) -> Vec<String> {
     use crate::enums::RecordVersion;
+    // A round is a part too (betas of 0.113.0: a second round=3
+    // version=original read spent a full read and showed the round again)
     let part = input.attachment.is_some()
+        || input.round.is_some()
         || matches!(input.id, ContentRef::DataCitation(_));
     if !part {
         return Vec::new();
@@ -971,9 +974,16 @@ impl Agora {
             if !capped && !part_keys.is_empty() {
                 // With no revision, the original is the latest: one part
                 let revised = entry.is_revised();
-                let bytes = match &entry.data_file {
-                    Some(file) => file.text.len() as u64,
-                    None => entry
+                let round = entry
+                    .round
+                    .and_then(|n| {
+                        entry.round_bytes.get((n as usize).checked_sub(1)?)
+                    })
+                    .copied();
+                let bytes = match (&entry.data_file, round) {
+                    (Some(file), _) => file.text.len() as u64,
+                    (None, Some(bytes)) => bytes,
+                    (None, None) => entry
                         .attachments
                         .iter()
                         .find(|a| Some(&a.name) == entry.attachment.as_ref())
