@@ -470,8 +470,12 @@ pub const MAX_FREE_REFUSED_TURNS: usize = 5;
 const REFUSED_TURN_FREE: &str =
     "(Refused before anything was read; this turn doesn't count.)";
 /// Said after such a turn past [`MAX_FREE_REFUSED_TURNS`] in a row
-const REFUSED_TURN_COUNTED: &str = "(Refused before anything was read; \
-     after 5 such turns in a row, this one counted as a round.)";
+fn refused_turn_counted() -> String {
+    format!(
+        "(Refused before anything was read; after {MAX_FREE_REFUSED_TURNS} \
+         such turns in a row, this one counted as a round.)"
+    )
+}
 
 /// Whether the last message holds tool results and every one is a
 /// refusal of its call's input ([`tool::is_refusal`])
@@ -1720,6 +1724,16 @@ impl Agent for SeedAgent {
                         self.seat_unrun_calls(response)?;
                         return self.begin_reflect();
                     }
+                    // A server tool (web search, web fetch) reads and bills
+                    // whatever happens to the client calls beside it
+                    let server_tool = response.inner.content.iter().any(|b| {
+                        matches!(
+                            b,
+                            misanthropic::prompt::message::Block::ServerToolUse {
+                                ..
+                            }
+                        )
+                    });
                     let mut left = rounds_left - 1;
                     self.phase = Phase::Acting { rounds_left: left };
                     let mut control = default_handle(self, response).await?;
@@ -1727,7 +1741,13 @@ impl Agent for SeedAgent {
                     // free, up to MAX_FREE_REFUSED_TURNS in a row: the round
                     // is given back, and it is not a stall
                     let mut refused_note = None;
-                    if every_call_refused(&self.state.prompt) {
+                    // Only while still acting: a turn that ended acting (the
+                    // pause cap's reflect) is not given back
+                    let acting = matches!(self.phase, Phase::Acting { .. });
+                    if acting
+                        && !server_tool
+                        && every_call_refused(&self.state.prompt)
+                    {
                         self.refused_streak += 1;
                         if self.refused_streak <= MAX_FREE_REFUSED_TURNS {
                             left = rounds_left;
@@ -1735,9 +1755,9 @@ impl Agent for SeedAgent {
                             if control == Control::Stalled {
                                 control = Control::Continue;
                             }
-                            refused_note = Some(REFUSED_TURN_FREE);
+                            refused_note = Some(REFUSED_TURN_FREE.to_string());
                         } else {
-                            refused_note = Some(REFUSED_TURN_COUNTED);
+                            refused_note = Some(refused_turn_counted());
                         }
                     } else {
                         self.refused_streak = 0;
@@ -1756,7 +1776,7 @@ impl Agent for SeedAgent {
                         });
                     let notice = match (refused_note, rounds_notice(left)) {
                         (Some(a), Some(b)) => Some(format!("{a} {b}")),
-                        (a, b) => a.or(b).map(str::to_string),
+                        (a, b) => a.or(b.map(str::to_string)),
                     };
                     if let (
                         Control::Continue | Control::Stalled,

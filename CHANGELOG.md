@@ -120,7 +120,9 @@ tool that opens one.
   is told "(Refused before anything was read; this turn doesn't count.)".
   The sixth in a row counts, as a round and as a stall, and says so; a
   turn with any call that was not refused counts and resets the streak.
-  No cap per session. Refusals are known by one mark (`tool::REFUSED`, or
+  No cap per session. A turn with a server tool call (web search or
+  fetch) is never free, since that read and billed; nor is one that ended
+  acting (the pause cap's reflect is not undone). Refusals are known by one mark (`tool::REFUSED`, or
   the tool layer's "Invalid arguments"); the search refusal now ends with
   it too.
 - The `.`/`..` refusal no longer reads as if every link were a data set's.

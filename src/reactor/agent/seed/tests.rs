@@ -6376,7 +6376,7 @@ async fn refused_turns_are_free_five_in_a_row() {
     assert_eq!(agent.phase, Phase::Acting { rounds_left: 3 });
     // The sixth in a row counts, and says so
     agent.handle(bad()).await.unwrap();
-    assert_eq!(notes(&agent, super::REFUSED_TURN_COUNTED), 1);
+    assert_eq!(notes(&agent, &super::refused_turn_counted()), 1);
     assert_eq!(agent.phase, Phase::Acting { rounds_left: 2 });
     // A read counts and resets the streak
     agent.handle(good()).await.unwrap();
@@ -6490,5 +6490,82 @@ async fn an_entrys_notes_once_and_a_revised_entrys_two_versions() {
         rendered.matches("A_LONG_AMENDMENT_NOTE").count(),
         2,
         "{rendered}"
+    );
+}
+
+/// A turn with a server tool call is never free, its client calls refused
+/// or not: the server tool read and billed (review of 0.112.0)
+#[tokio::test]
+async fn a_turn_with_a_server_tool_counts() {
+    let server = MockServer::start();
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 3,
+            ..web_config()
+        },
+    );
+    seat_start(&mut agent);
+    let turn: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "server_tool_use", "id": "srvtoolu_a", "name": "web_search",
+             "input": {"query": "agora"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_a",
+             "content": []},
+            {"type": "tool_use", "id": "toolu_a", "name": "fetch_agora_link",
+             "input": {"link": "agora://nowhere/x"}},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "tool_use",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    agent.handle(turn).await.unwrap();
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 2 });
+    assert!(!transcript(&agent).contains(super::REFUSED_TURN_FREE));
+}
+
+/// A refused turn that the pause cap ends in reflect stays ended: the round
+/// is not given back over the reflect (review of 0.112.0)
+#[tokio::test]
+async fn the_pause_cap_is_not_undone_by_a_refused_turn() {
+    let server = MockServer::start();
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 3,
+            ..quiet_config()
+        },
+    );
+    seat_start(&mut agent);
+    // A refused turn first, so the last tool results are refusals
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://nowhere/x"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent.phase, Phase::Acting { rounds_left: 3 });
+    agent.pauses = super::MAX_PAUSES;
+    let paused: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "toolu_p", "name": "fetch_agora_link",
+             "input": {"link": "agora://nowhere/x"}},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "pause_turn",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    agent.handle(paused).await.unwrap();
+    assert!(
+        !matches!(agent.phase, Phase::Acting { .. }),
+        "{:?}",
+        agent.phase
     );
 }
