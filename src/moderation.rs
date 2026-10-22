@@ -83,7 +83,7 @@ pub enum FilingProblem {
     /// several tokens a character, like emoji
     #[error(
         "The appeal statement is too long for the court to read in full. \
-         Shorten it to the published reason, the provision it cited, and \
+         Keep it to the published reason, the provision it cited, and \
          why both are wrong; cite content by id rather than quoting it."
     )]
     StatementTooManyTokens,
@@ -112,7 +112,7 @@ pub mod redactor {
     /// headroom. It lets a full-length statement in these scripts (16,384
     /// characters, 32,768 tokens counted) fit with room for the reason and
     /// the cited material (Steward, 2026-10-22). Not measured against
-    /// `count_tokens`
+    /// `count_tokens`; check it there before relying on the headroom
     pub const BMP_TOKENS_PER_CHAR: usize = 2;
 
     /// Tokens a character outside the Basic Multilingual Plane (four bytes
@@ -127,7 +127,17 @@ pub mod redactor {
     /// `max_tokens`: four fifths of it, the fifth left as headroom for the
     /// estimate's error
     pub const fn budget(max_tokens: u32) -> usize {
-        max_tokens as usize * 4 / 5
+        (max_tokens as u64 * 4 / 5) as usize
+    }
+
+    /// The tokens a statement may be counted as at filing, so that a
+    /// statement filed is never refused at the gate on its own account:
+    /// [`budget`] less `reserved`, the most the rest of the case may be
+    /// estimated at there (the action's published reason, the cited
+    /// material and its scaffolding, as the gate counts them). A caller
+    /// that cannot bound the rest at filing passes its worst case
+    pub const fn statement_budget(max_tokens: u32, reserved: usize) -> usize {
+        budget(max_tokens).saturating_sub(reserved)
     }
 
     /// The tokens `text` is counted as: ASCII at [`CHARS_PER_TOKEN`]
@@ -176,12 +186,24 @@ pub mod redactor {
             }
             assert!(tokens(&"\u{1F600}".repeat(max)) > budget);
         }
+
+        /// No overflow at the top of `max_tokens`, and the statement's
+        /// share is what the rest of the case leaves
+        #[test]
+        fn budgets_do_not_overflow_and_reserve_the_rest() {
+            assert_eq!(budget(u32::MAX), (u32::MAX as u64 * 4 / 5) as usize);
+            assert_eq!(statement_budget(MAX_TOKENS, 1_200), 50_000);
+            assert_eq!(statement_budget(MAX_TOKENS, 60_000), 0);
+        }
     }
 }
 
 impl FilingProblem {
     /// [`StatementTooManyTokens`](Self::StatementTooManyTokens) if
-    /// `statement` counts as more than `budget` [`redactor::tokens`]
+    /// `statement` counts as more than `budget` [`redactor::tokens`].
+    /// `budget` is the statement's share, from
+    /// [`redactor::statement_budget`], never the whole case's
+    /// [`redactor::budget`]
     pub fn statement_tokens(statement: &str, budget: usize) -> Option<Self> {
         (redactor::tokens(statement) > budget)
             .then_some(Self::StatementTooManyTokens)
@@ -972,16 +994,17 @@ mod tests {
     /// the count is an estimate, and the statement is within its
     /// character limit
     #[test]
-    fn too_many_tokens_says_to_shorten_and_names_no_number() {
+    fn too_many_tokens_says_what_to_keep_and_names_no_number() {
         let emoji =
             "\u{1F600}".repeat(crate::limits::appeal::STATEMENT_MAX_CHARS);
         assert_eq!(FilingProblem::statement(&emoji), None);
-        let budget = redactor::budget(redactor::MAX_TOKENS);
+        let budget = redactor::statement_budget(redactor::MAX_TOKENS, 10_000);
         let problem = FilingProblem::statement_tokens(&emoji, budget).unwrap();
         assert_eq!(problem, FilingProblem::StatementTooManyTokens);
         assert_eq!(FilingProblem::statement_tokens("short", budget), None);
         let text = problem.to_string();
-        assert!(text.contains("Shorten it"), "{text}");
+        assert!(text.contains("too long"), "{text}");
+        assert!(text.contains("Keep it to the published reason"), "{text}");
         assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text}");
         assert!(!text.contains("character"), "{text}");
         let json = serde_json::to_value(&problem).unwrap();

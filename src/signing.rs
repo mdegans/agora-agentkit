@@ -744,6 +744,80 @@ mod tests {
         );
     }
 
+    /// `vectors/actions/renamed_fields.json`: bodies with the old and the
+    /// new key, the bytes each signs, and a signature over them, for a
+    /// signer in another language (`tools/test_vectors.py` checks them)
+    mod renamed_fields_vector {
+        use super::*;
+        use serde_json::{Value, json};
+
+        const TIMESTAMP: i64 = 1_792_627_200;
+
+        fn path() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("vectors/actions/renamed_fields.json")
+        }
+
+        fn render() -> String {
+            let key = crate::crypto::signing_key_from_bytes(&[7u8; 32]);
+            let id = Uuid::from_u128(0x7ad26ccd_0000_4000_8000_000000000000);
+            let case = |body: Value, bytes: Vec<u8>| {
+                json!({
+                    "body": body,
+                    "canonical": String::from_utf8(bytes.clone()).unwrap(),
+                    "signature": hex::encode(
+                        crate::crypto::sign(&key, &bytes, TIMESTAMP).to_bytes()
+                    ),
+                })
+            };
+            let flag = |body: Value| {
+                let p: FlagContentPayload =
+                    serde_json::from_value(body.clone()).unwrap();
+                case(body, SignedAction::from(&p).canonical_bytes())
+            };
+            let designate = |body: Value| {
+                let p: DesignateProposalPayload =
+                    serde_json::from_value(body.clone()).unwrap();
+                case(body, SignedAction::from(&p).canonical_bytes())
+            };
+            let vector = json!({
+                "description": "0.116 renamed flag `reason` to `complaint` and designation `reason` to `note` in request bodies; the signed bytes keep `reason`. Each case's canonical bytes are the body under {\"action\": ...}, the renamed key written as `reason`, signed as SHA-256(canonical || timestamp_le_i64).",
+                "public_key": hex::encode(key.verifying_key().to_bytes()),
+                "timestamp": TIMESTAMP,
+                "renamed": {"complaint": "reason", "note": "reason"},
+                // Signed field order, which a body's need not be
+                "fields": {
+                    "flag": ["target", "reason", "constitutional_ref"],
+                    "designate_proposal": ["post_id", "category", "reason"],
+                },
+                "flag": [
+                    flag(json!({"target": id, "complaint": "spam", "constitutional_ref": "Art. V.3"})),
+                    flag(json!({"target": id, "reason": "spam", "constitutional_ref": "Art. V.3"})),
+                    flag(json!({"target": id, "complaint": "spam"})),
+                ],
+                "designate_proposal": [
+                    designate(json!({"post_id": id, "category": "policy", "note": "by mistake"})),
+                    designate(json!({"post_id": id, "category": "policy", "reason": "by mistake"})),
+                    designate(json!({"post_id": id, "category": "policy"})),
+                ],
+            });
+            serde_json::to_string_pretty(&vector).unwrap() + "\n"
+        }
+
+        #[test]
+        fn the_vector_is_what_the_generator_writes() {
+            let committed = std::fs::read_to_string(path()).unwrap();
+            assert_eq!(render(), committed, "stale; run `just vectors`");
+        }
+
+        #[test]
+        #[ignore = "writes vectors/actions; run it with `just vectors`"]
+        fn regenerate_the_vector() {
+            std::fs::create_dir_all(path().parent().unwrap()).unwrap();
+            std::fs::write(path(), render()).unwrap();
+        }
+    }
+
     #[test]
     fn flag_canonical_shape_no_target_type() {
         // New shape: {"action":"flag","target":"...","reason":"..."}

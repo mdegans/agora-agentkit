@@ -1,0 +1,77 @@
+{
+  "description": "0.116 renamed flag `reason` to `complaint` and designation `reason` to `note` in request bodies; the signed bytes keep `reason`. Each case's canonical bytes are the body under {\"action\": ...}, the renamed key written as `reason`, signed as SHA-256(canonical || timestamp_le_i64).",
+  "designate_proposal": [
+    {
+      "body": {
+        "category": "policy",
+        "note": "by mistake",
+        "post_id": "7ad26ccd-0000-4000-8000-000000000000"
+      },
+      "canonical": "{\"action\":\"designate_proposal\",\"post_id\":\"7ad26ccd-0000-4000-8000-000000000000\",\"category\":\"policy\",\"reason\":\"by mistake\"}",
+      "signature": "597b669e01b6739d9e555a348145c9ee6a6431485b4d8dd8e40271993c4ae1271c34923aed6839b99a985a44af23aba10fe698ed7fc3020d3f04a6e9448d6d09"
+    },
+    {
+      "body": {
+        "category": "policy",
+        "post_id": "7ad26ccd-0000-4000-8000-000000000000",
+        "reason": "by mistake"
+      },
+      "canonical": "{\"action\":\"designate_proposal\",\"post_id\":\"7ad26ccd-0000-4000-8000-000000000000\",\"category\":\"policy\",\"reason\":\"by mistake\"}",
+      "signature": "597b669e01b6739d9e555a348145c9ee6a6431485b4d8dd8e40271993c4ae1271c34923aed6839b99a985a44af23aba10fe698ed7fc3020d3f04a6e9448d6d09"
+    },
+    {
+      "body": {
+        "category": "policy",
+        "post_id": "7ad26ccd-0000-4000-8000-000000000000"
+      },
+      "canonical": "{\"action\":\"designate_proposal\",\"post_id\":\"7ad26ccd-0000-4000-8000-000000000000\",\"category\":\"policy\"}",
+      "signature": "3dc90ff5ded8acb49ec1b4ef60b0b579d097b826a681aaee56ec040a508c66554b0a4816e6a2c7eb669b9aaf37ff135546b78d0111b464de2a9a48baecd1690a"
+    }
+  ],
+  "fields": {
+    "designate_proposal": [
+      "post_id",
+      "category",
+      "reason"
+    ],
+    "flag": [
+      "target",
+      "reason",
+      "constitutional_ref"
+    ]
+  },
+  "flag": [
+    {
+      "body": {
+        "complaint": "spam",
+        "constitutional_ref": "Art. V.3",
+        "target": "7ad26ccd-0000-4000-8000-000000000000"
+      },
+      "canonical": "{\"action\":\"flag\",\"target\":\"7ad26ccd-0000-4000-8000-000000000000\",\"reason\":\"spam\",\"constitutional_ref\":\"Art. V.3\"}",
+      "signature": "7e88978c68c357312d9d4e354e30ae2a2e2249493896306b6352077c8b148519af27cc16b8ef353fb3959d79bcab9672b3e618c280a6ef69394b0219570c2104"
+    },
+    {
+      "body": {
+        "constitutional_ref": "Art. V.3",
+        "reason": "spam",
+        "target": "7ad26ccd-0000-4000-8000-000000000000"
+      },
+      "canonical": "{\"action\":\"flag\",\"target\":\"7ad26ccd-0000-4000-8000-000000000000\",\"reason\":\"spam\",\"constitutional_ref\":\"Art. V.3\"}",
+      "signature": "7e88978c68c357312d9d4e354e30ae2a2e2249493896306b6352077c8b148519af27cc16b8ef353fb3959d79bcab9672b3e618c280a6ef69394b0219570c2104"
+    },
+    {
+      "body": {
+        "complaint": "spam",
+        "target": "7ad26ccd-0000-4000-8000-000000000000"
+      },
+      "canonical": "{\"action\":\"flag\",\"target\":\"7ad26ccd-0000-4000-8000-000000000000\",\"reason\":\"spam\"}",
+      "signature": "4aea70bc2d8ed0e2f5b94693d6c9c67edd29bee2bb362ea29ea57ab50bf8d11efec0e0cb84800225d1aac978ddedb9538fa4a16b152fb43614d95a4555574404"
+    }
+  ],
+  "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "renamed": {
+    "complaint": "reason",
+    "note": "reason"
+  },
+  "timestamp": 1792627200
+}

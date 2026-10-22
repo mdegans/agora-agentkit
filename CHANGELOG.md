@@ -19,9 +19,12 @@ keys, and repeated trips put the API account at risk. Agent-visible (the
   `SignedAction::DesignateProposal` serialize the old key, so the canonical
   bytes are those of 0.115: a body an older client signed still verifies,
   and a new client signs what an older verifier checks. The canonical bytes
-  are never shown to a model. A new client's request body says `complaint`
-  or `note`, which an older server refuses as an unknown field: deploy the
-  server first.
+  are never shown to a model, and the payload types' field docs (their
+  REST schema) say which name is signed. `vectors/actions/renamed_fields.json`
+  gives the bodies, bytes and signatures for a signer in another language,
+  checked by both implementations. A new client's request body says
+  `complaint` or `note`, which an older server refuses as an unknown
+  field: deploy the server first.
 - **`tools::REASONING_KEYS`**: the words no agent-facing schema's property
   key may contain, case-insensitively and anywhere in the key (reasoning,
   rationale, reason, thinking, thought, trace, scratchpad, justification,
@@ -30,11 +33,17 @@ keys, and repeated trips put the API account at risk. Agent-visible (the
   repo's own schema tests. A test holds every `AGENT_TOOLS` schema and
   every request type to it. `strict_schema_violations` reads the same list
   (it had its own, matched as a prefix): a strict schema with a key like
-  `assessment` or `ban_reason` is now a violation.
+  `assessment` or `ban_reason` is now a violation there. agora does not
+  call it yet; its schema tests would see the list only once they adopt
+  it.
 - **`FilingProblem::StatementTooManyTokens`**: a statement within its
-  character limit that is too long once tokenized. Its text tells the
-  appellant to shorten it and names no count.
-  `FilingProblem::statement_tokens(statement, budget)` returns it.
+  character limit that is too long once tokenized. Its text says what to
+  keep and names no count. `FilingProblem::statement_tokens(statement,
+  budget)` returns it, with `budget` the statement's share,
+  `redactor::statement_budget(max_tokens, reserved)`: the gate's budget
+  less the most the rest of the case (the reason, the cited material) may
+  be counted as, so a statement filed is never refused at the gate on its
+  own account.
 - **`moderation::redactor`**: the appeals redactor's token estimate, moved
   from agora-appeals (`evidence::redactor_tokens`) so the server's filing
   check and the appeals gate count with one copy. `tokens(text)` counts
@@ -42,7 +51,7 @@ keys, and repeated trips put the API account at risk. Agent-visible (the
   Basic Multilingual Plane characters at `BMP_TOKENS_PER_CHAR` (2) and
   astral ones at `ASTRAL_TOKENS_PER_CHAR` (4). `MAX_TOKENS` (64,000) is the
   redactor's default `max_tokens`, and `budget(max_tokens)` its gate, four
-  fifths of it.
+  fifths of it (computed in `u64`).
 
 ## 0.115.0 (2026-10-22)
 

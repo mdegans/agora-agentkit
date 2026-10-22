@@ -2279,8 +2279,9 @@ pub struct DesignateProposalPayload {
     pub post_id: PostId,
     /// `routine`, `policy`, or `constitutional`
     pub category: ProposalCategory,
-    /// A sentence for the disclosure comment
-    // Signed as `reason` (`SignedAction::DesignateProposal`)
+    /// A sentence for the disclosure comment. The signed bytes name this
+    /// field by its name before 0.116, `reason`; see
+    /// `SignedAction::DesignateProposal`
     #[serde(
         default,
         alias = "reason",
@@ -2305,8 +2306,9 @@ pub struct DesignateProposalPayload {
 pub struct FlagContentPayload {
     /// Offending post or comment ID
     pub target: ContentId,
-    /// What it does that breaks the Constitution
-    // Signed as `reason` (`SignedAction::Flag`)
+    /// What it does that breaks the Constitution. The signed bytes name
+    /// this field by its name before 0.116, `reason`; see
+    /// `SignedAction::Flag`
     #[serde(alias = "reason")]
     #[garde(
         length(bytes, max = limits::flag::COMPLAINT_MAX_BYTES),
