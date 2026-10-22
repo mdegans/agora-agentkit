@@ -3265,7 +3265,10 @@ pub(super) fn format_governance_index(
                 None => String::new(),
             },
             e.created_at.format("%Y-%m-%d"),
-            quoted(&truncate(&one_line(&e.title), 120)),
+            quoted(&truncate(
+                &one_line(&shown_title(e.entry_type, &e.title)),
+                120
+            )),
         ));
         match e.tags.as_deref() {
             Some(tags) if !tags.is_empty() => {
@@ -3613,6 +3616,33 @@ pub(super) fn format_governance_entry(
     format_governance_entry_once(entry, &ShownOnce::default())
 }
 
+/// [`TEST_LABEL`] on a line of its own, first in any result for a test
+/// sitting's record that shows no header
+///
+/// [`TEST_LABEL`]: crate::govlog::TEST_LABEL
+pub(super) fn test_label_line(entry: &GovernanceEntryResponse) -> String {
+    match entry.entry_type {
+        crate::enums::GovernanceLogEntryType::Test => {
+            format!("{}.\n", crate::govlog::TEST_LABEL)
+        }
+        _ => String::new(),
+    }
+}
+
+/// The title a read shows: a test sitting's labelled, whatever the server
+/// sent
+fn shown_title(
+    entry_type: crate::enums::GovernanceLogEntryType,
+    title: &str,
+) -> String {
+    match entry_type {
+        crate::enums::GovernanceLogEntryType::Test => {
+            crate::govlog::TestEntry::labelled_title(title)
+        }
+        _ => title.to_string(),
+    }
+}
+
 /// [`format_governance_entry`], its summary shown once a session: one
 /// shown earlier (by get_council_meetings, or an earlier read) is said to
 /// be in the context already (betas of 0.108)
@@ -3625,7 +3655,7 @@ pub(super) fn format_governance_entry_once(
         entry.id,
         entry.entry_type,
         entry.created_at.format("%Y-%m-%d"),
-        one_line(&entry.title),
+        one_line(&shown_title(entry.entry_type, &entry.title)),
     );
     // Before anything else a reader might quote: an amended entry read as
     // if it were in force is a miscitation.
@@ -5147,6 +5177,36 @@ mod tests {
         assert!(!out.contains("not listed"), "{out}");
     }
 
+    /// A test sitting's line in the index is labelled, once, whatever
+    /// title the server sent
+    #[test]
+    fn a_test_entry_is_labelled_in_the_index() {
+        use crate::govlog::TEST_LABEL;
+        for title in ["A test".to_string(), format!("{TEST_LABEL}. A test")] {
+            let entries = vec![crate::responses::GovernanceLogIndexEntry {
+                id: "TEST-2026-0001".parse().unwrap(),
+                entry_type: crate::enums::GovernanceLogEntryType::Test,
+                title,
+                created_at: chrono::Utc::now(),
+                tags: None,
+                standing: Standing::InForce,
+                outcome: None,
+                vote_tally: None,
+                steward_veto: false,
+            }];
+            let out = format_governance_index_unfiltered(GovernanceLogIndex {
+                entries,
+                omitted: None,
+                how_to_read: String::new(),
+                omitted_obligations: None,
+                obligations: None,
+                obligations_total: None,
+                unreadable_obligations: None,
+            });
+            assert_eq!(out.matches(TEST_LABEL).count(), 1, "{out}");
+        }
+    }
+
     /// A Council decision shows its outcome beside its standing, and says
     /// what "in_force" is of: the decision, not a measure (GOV-2026-0010,
     /// which approved drafting and deferral, read as an immunity in force)
@@ -6455,7 +6515,7 @@ mod tests {
                  ### Upcoming\n\n\
                  - Around 2026-10-24: special Council sitting \"Owed items\" (1 obligation due)\n\
                  - 2026-10-31: OBL-2026-0007 due, owed by steward: \"Publish the six-month review\"\n\
-                 More with fetch_agora_link(\"agora://gov/calendar\").\n\n"
+                 More with fetch_agora_link(\"agora://calendar\").\n\n"
             ),
             "{out}"
         );

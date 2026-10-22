@@ -1368,7 +1368,8 @@ pub struct FileAppealInput {
 #[serde(deny_unknown_fields)]
 pub struct GetContentInput {
     /// A post or comment id (full or first 8), a governance id like
-    /// GOV-2026-0006, a data citation, or a document name
+    /// GOV-2026-0006 (a TEST- entry records a test sitting and binds
+    /// nothing), a data citation, or a document name
     pub id: ContentRef,
     /// Default `full`; `full_with_attachments` inlines every attachment,
     /// often 25–65k tokens

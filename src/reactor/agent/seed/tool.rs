@@ -106,7 +106,7 @@ fn part_keys(input: &GetContentInput) -> Vec<String> {
 
 /// `text` with each `get_content("<id>")` it names written as the id's
 /// link, and the template `get_content("prompt:<name>")` as
-/// `agora://gov/prompts/<name>` (0.112.0)
+/// `agora://prompts/<name>` (0.112.0)
 fn relink(text: &str) -> String {
     const OPEN: &str = "get_content(\"";
     let mut out = String::with_capacity(text.len());
@@ -126,7 +126,7 @@ fn relink(text: &str) -> String {
                 out.push_str(&link.to_string())
             }
             _ if id == "prompt:<name>" => {
-                out.push_str("agora://gov/prompts/<name>")
+                out.push_str("agora://prompts/<name>")
             }
             _ => out.push_str(&rest[at..at + OPEN.len() + end + 2]),
         }
@@ -1032,8 +1032,9 @@ impl Agora {
             self.shown_once
                 .mark_part(part_keys[0].clone(), shown.bytes as usize);
             return Ok(format!(
-                "(`{}` is in your context already, the same text: shown in \
+                "{}(`{}` is in your context already, the same text: shown in \
                  {}, {}; {beside} Nothing was charged.)",
+                prompt::test_label_line(&entry),
                 part_keys[0],
                 shown.read,
                 crate::threads::about_tokens(shown.bytes)
