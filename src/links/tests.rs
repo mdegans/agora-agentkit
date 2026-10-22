@@ -699,28 +699,51 @@ fn page_urls_of_this_site_read_as_their_links() {
     };
     let base = "https://subliminal.technology/agora";
     for (page, as_link) in [
-        ("/governance/GOV-2026-0006", "agora://gov/GOV-2026-0006"),
-        ("/governance/protocol", "agora://protocol"),
-        ("/protocol", "agora://protocol"),
-        ("/prompts", "agora://prompts"),
-        ("/prompts/tier2_reviewer", "agora://prompts/tier2_reviewer"),
+        ("/gov", "agora://gov"),
         (
-            "/governance?type=council_decision",
+            "/gov?type=council_decision",
             "agora://gov?type=council_decision",
         ),
         (
-            "/governance/GOV-2026-0006?version=original",
+            "/gov?view=obligations&status=open",
+            "agora://gov?status=open&view=obligations",
+        ),
+        ("/gov/GOV-2026-0006", "agora://gov/GOV-2026-0006"),
+        (
+            "/gov/GOV-2026-0006?version=original",
             "agora://gov/GOV-2026-0006?version=original",
         ),
         (
-            "/governance?revisions=1",
-            "agora://gov?include_revisions=true",
+            "/gov/GOV-2026-0016/clerk-reads",
+            "agora://gov/GOV-2026-0016/clerk-reads",
+        ),
+        (
+            "/gov/DATA-2026-0010/votes/index.md?lines=1-5",
+            "agora://gov/DATA-2026-0010/votes/index.md?lines=1-5",
+        ),
+        (
+            "/gov/DATA-2026-0010/transcripts/",
+            "agora://gov/DATA-2026-0010/transcripts/",
         ),
         ("/constitution", "agora://constitution"),
-        ("/calendar", "agora://calendar"),
         (
-            "/obligations?status=open",
-            "agora://gov?status=open&view=obligations",
+            "/constitution?version=0.3",
+            "agora://constitution?version=0.3",
+        ),
+        ("/protocol", "agora://protocol"),
+        ("/calendar", "agora://calendar"),
+        ("/prompts", "agora://prompts"),
+        ("/prompts/tier2_reviewer", "agora://prompts/tier2_reviewer"),
+        ("/post/7ad26ccd", "agora://post/7ad26ccd"),
+        ("/comment/7ad26ccd", "agora://comment/7ad26ccd"),
+        ("/content/7ad26ccd", "agora://content/7ad26ccd"),
+        (
+            "/content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md",
+            "agora://gov/DATA-2026-0001/votes/index.md?commit=89fe7c6",
+        ),
+        (
+            "/community/meta-governance",
+            "agora://community/meta-governance",
         ),
         ("/c/meta-governance", "agora://community/meta-governance"),
         (
@@ -731,6 +754,7 @@ fn page_urls_of_this_site_read_as_their_links() {
         ("/search?q=voting", "agora://search?q=voting"),
         ("/feed?sort=active", "agora://feed?sort=active"),
         ("/", "agora://feed"),
+        ("", "agora://feed"),
     ] {
         let page = format!("{base}{page}");
         assert_eq!(at(&page), link(as_link), "{page}");
@@ -740,15 +764,31 @@ fn page_urls_of_this_site_read_as_their_links() {
         ("https://example.com/agora/feed", "is not this site"),
         ("https://subliminal.technology/agora/feed?page=2", "offset="),
         ("https://subliminal.technology/agora/account", "has no link"),
-        (
-            "https://subliminal.technology/agora/governance/GOV-2026-0016/clerk-reads",
-            "no page for an attachment; its link is \
-             agora://gov/GOV-2026-0016/clerk-reads",
-        ),
         ("https://subliminal.technology/other", "under /agora/"),
         (
             "https://subliminal.technology/agora/c/x/../../account",
             "no \"..\" parts",
+        ),
+        // The site's pages before 0.115.0 name their links
+        (
+            "https://subliminal.technology/agora/governance/GOV-2026-0006",
+            "no longer has this page; its link is agora://gov/GOV-2026-0006",
+        ),
+        (
+            "https://subliminal.technology/agora/governance?revisions=1",
+            "its link is agora://gov?include_revisions=true",
+        ),
+        (
+            "https://subliminal.technology/agora/governance/protocol",
+            "a document's link has no gov/: this one is agora://protocol",
+        ),
+        (
+            "https://subliminal.technology/agora/obligations?status=open",
+            "its link is agora://gov?status=open&view=obligations",
+        ),
+        (
+            "https://subliminal.technology/agora/gov/calendar",
+            "this one is agora://calendar",
         ),
     ] {
         let e = AgoraLink::parse_at(page, Some(&site))

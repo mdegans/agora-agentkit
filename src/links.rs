@@ -480,8 +480,9 @@ pub fn set_site(base: &Url) {
     let _ = SITE.set(base.clone());
 }
 
-/// The page URL `page`'s link, as an `agora://` URL: the website's routes
-/// (`/agora/governance/<id>`, `/agora/c/<name>/<post>`, …) to the kinds
+/// The page URL `page`'s link, as an `agora://` URL: the site's paths are
+/// the links' (`/agora/<kind>/…?…`), and `/agora/c/<name>[/<post>]` is
+/// still served, as a redirect
 fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     let Some(site) = site else {
         return Err("this client knows no website to read page URLs of".into());
@@ -500,45 +501,34 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
             .map_err(|_| format!("{raw:?} is not UTF-8 once decoded"))?;
         parts.push(part.into_owned());
     }
-    if parts.last().is_some_and(String::is_empty) {
-        parts.pop();
-    }
     if parts.first().map(String::as_str) != Some("agora") {
         return Err("Agora's pages are under /agora/".into());
     }
     let parts: Vec<&str> = parts[1..].iter().map(String::as_str).collect();
-    let mut query: Vec<(String, String)> =
+    let query: Vec<(String, String)> =
         page.query_pairs().into_owned().collect();
-    let no_link = || format!("the page {} has no link", page.path());
-    let (kind, segments): (Kind, Vec<&str>) = match parts.as_slice() {
-        [] | ["feed"] => (Kind::Feed, vec![]),
-        ["c", name] => (Kind::Community, vec![*name]),
-        ["c", _, post] => (Kind::Post, vec![*post]),
-        ["agent", name] => (Kind::Agent, vec![*name]),
-        ["content", id] => (Kind::Content, vec![*id]),
-        ["governance"] => (Kind::Gov, vec![]),
-        ["governance", "protocol"] => (Kind::Protocol, vec![]),
-        ["governance", id] => (Kind::Gov, vec![*id]),
-        // The website shows an entry's attachments on its page, with no
-        // page of their own: name the link that reads one
-        ["governance", id, attachment @ ..] => {
-            let link = id
-                .parse::<GovernanceLogId>()
-                .map(|id| AgoraLink::attachment(id, attachment.join("/")))
-                .map_err(|_| no_link())?;
-            return Err(format!(
-                "the website has no page for an attachment; its link is {link}"
-            ));
+    if query.iter().any(|(name, _)| name == "page") {
+        return Err("a page number has no link: give offset= instead".into());
+    }
+    // A trailing `/` stays: a data set's directory
+    let (kind, segments): (Kind, &[&str]) = match parts.as_slice() {
+        [] | [""] => (Kind::Feed, &[]),
+        ["c", name] | ["c", name, ""] => {
+            (Kind::Community, std::slice::from_ref(name))
         }
-        ["obligations"] => {
-            query.push(("view".into(), "obligations".into()));
-            (Kind::Gov, vec![])
+        ["c", _, post] | ["c", _, post, ""] => {
+            (Kind::Post, std::slice::from_ref(post))
         }
-        [doc, rest @ ..] if let Some(kind) = Kind::document(doc) => {
-            (kind, rest.to_vec())
+        [kind, rest @ ..] => {
+            match Kind::ALL.into_iter().find(|k| k.host() == *kind) {
+                Some(kind) => (kind, rest),
+                None => {
+                    return Err(moved(&parts, &query).unwrap_or_else(|| {
+                        format!("the page {} has no link", page.path())
+                    }));
+                }
+            }
         }
-        ["search"] => (Kind::Search, vec![]),
-        _ => return Err(no_link()),
     };
     let mut link = kind.base();
     if !segments.is_empty() {
@@ -546,26 +536,42 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
             .expect("a link has a host")
             .extend(segments);
     }
-    // The website's own parameters, where a link's differ
-    let mut pairs = Vec::new();
-    for (name, value) in query {
-        match name.as_str() {
-            "page" => {
-                return Err(
-                    "a page number has no link: give offset= instead".into()
-                );
-            }
-            "revisions" => pairs.push((
-                "include_revisions".to_string(),
-                (value == "1" || value == "true").to_string(),
-            )),
-            _ => pairs.push((name, value)),
-        }
-    }
-    if !pairs.is_empty() {
-        link.query_pairs_mut().extend_pairs(pairs);
+    if !query.is_empty() {
+        link.query_pairs_mut().extend_pairs(query);
     }
     Ok(link)
+}
+
+/// A page the site served before its paths were the links' (0.115.0):
+/// what to say of it, naming its link
+fn moved(parts: &[&str], query: &[(String, String)]) -> Option<String> {
+    let mut link = Kind::Gov.base();
+    match parts {
+        ["governance", rest @ ..] => {
+            link.path_segments_mut()
+                .expect("a link has a host")
+                .extend(rest);
+        }
+        ["obligations"] => {
+            link.query_pairs_mut().append_pair("view", "obligations");
+        }
+        _ => return None,
+    }
+    let query = query.iter().map(|(name, value)| match name.as_str() {
+        "revisions" => (
+            "include_revisions".to_string(),
+            (value == "1" || value == "true").to_string(),
+        ),
+        _ => (name.clone(), value.clone()),
+    });
+    link.query_pairs_mut().extend_pairs(query);
+    if link.query() == Some("") {
+        link.set_query(None);
+    }
+    Some(match parse_link(link.as_str()) {
+        Ok(l) => format!("the site no longer has this page; its link is {l}"),
+        Err(e) => format!("the site no longer has this page: {e}"),
+    })
 }
 
 /// A read's options as query parameters: every field but the two the path

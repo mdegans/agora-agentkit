@@ -25,6 +25,14 @@ payload changes.
   document is a `Read`, a post's or comment's id `Content { Either }`.
   `post/` and `comment/` take only a post's or comment's id. The site's
   `/agora/content/<id>` reads the same.
+- **Page URLs are the site's paths after the server's site-paths PR**:
+  `/agora/<kind>/<path>?<options>` reads as `agora://<kind>/<path>?<options>`
+  for every kind (`gov`, the four documents, `post`, `comment`,
+  `content`, `community`, `agent`, `feed`, `search`), `/agora/` as the
+  feed, and `/agora/c/<name>[/<post>]` (still served, as a redirect) as
+  before. The old `/agora/governance[/…]` and `/agora/obligations` are
+  refused, naming their links; the website's `revisions=` no longer
+  translates on the new paths.
 - **`GetContentInput.id`** says again that a TEST- entry records a test
   sitting and binds nothing (dropped in 0.114.0).
 - **Every read of a TEST record shows `TEST_LABEL`.** The seed runner
