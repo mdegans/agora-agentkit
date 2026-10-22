@@ -561,6 +561,55 @@ proptest! {
         );
     }
 
+    /// `content/<id>` with a read's options parses as get_content reads the
+    /// same input, or is refused where get_content refuses it, and its
+    /// link prints back the same read: nothing given is dropped
+    #[test]
+    fn a_content_link_reads_its_id_and_drops_nothing(
+        set in data_id(), commit in commit(), path in data_path(),
+        lines in lines(), asked in lines(),
+        version in prop::option::of(prop::sample::select(vec![
+            crate::enums::RecordVersion::Original,
+            crate::enums::RecordVersion::Latest,
+        ])),
+    ) {
+        let c = DataCitation { set, commit, path, lines };
+        let encoded = percent_encoding::utf8_percent_encode(
+            &c.to_string(),
+            percent_encoding::NON_ALPHANUMERIC,
+        )
+        .to_string();
+        let mut url = Url::parse(&format!("agora://content/{encoded}")).unwrap();
+        if let Some(l) = asked {
+            url.query_pairs_mut().append_pair("lines", &l.to_string());
+        }
+        if let Some(v) = version {
+            url.query_pairs_mut().append_pair("version", &v.to_string());
+        }
+        // Where the citation's text reads back as itself
+        prop_assume!(ContentRef::from_str(&c.to_string()).ok()
+            == Some(ContentRef::DataCitation(c.clone())));
+        let input = GetContentInput {
+            lines: asked,
+            version,
+            ..GetContentInput::new(ContentRef::DataCitation(c))
+        };
+        match (url.as_str().parse::<AgoraLink>(), input.clone().split_citation()) {
+            (Ok(l), Ok(read)) => {
+                let back = link(&l.to_string());
+                prop_assert_eq!(&back, &l);
+                prop_assert_eq!(
+                    back.as_read().unwrap().clone().split_citation().unwrap(),
+                    read
+                );
+            }
+            (Err(_), Err(_)) => {}
+            (parsed, split) => {
+                return Err(TestCaseError::fail(format!("{url}: {parsed:?} / {split:?}")));
+            }
+        }
+    }
+
     /// Nothing panics, and anything parsed prints a link that parses back
     #[test]
     fn any_string_parses_or_is_refused(s in "agora://[a-z]{0,8}/[ -~]{0,40}") {
@@ -709,6 +758,11 @@ fn page_urls_of_this_site_read_as_their_links() {
             "agora://gov?status=open&view=obligations",
         ),
         ("/gov/GOV-2026-0006", "agora://gov/GOV-2026-0006"),
+        // A trailing slash is dropped, but for a data set's directory
+        ("/gov/GOV-2026-0006/", "agora://gov/GOV-2026-0006"),
+        ("/post/7ad26ccd/", "agora://post/7ad26ccd"),
+        ("/c/meta-governance/", "agora://community/meta-governance"),
+        ("/gov/", "agora://gov"),
         (
             "/gov/GOV-2026-0006?version=original",
             "agora://gov/GOV-2026-0006?version=original",
@@ -779,8 +833,20 @@ fn page_urls_of_this_site_read_as_their_links() {
             "its link is agora://gov?include_revisions=true",
         ),
         (
+            "https://subliminal.technology/agora/governance/GOV-2026-0006?revisions=1",
+            "its link is agora://gov/GOV-2026-0006",
+        ),
+        (
+            "https://subliminal.technology/agora/governance/obligations",
+            "its link is agora://gov?view=obligations",
+        ),
+        (
+            "https://subliminal.technology/agora/governance/GOV-2026-0006/",
+            "its link is agora://gov/GOV-2026-0006",
+        ),
+        (
             "https://subliminal.technology/agora/governance/protocol",
-            "a document's link has no gov/: this one is agora://protocol",
+            "its link is agora://protocol",
         ),
         (
             "https://subliminal.technology/agora/obligations?status=open",
@@ -1253,6 +1319,27 @@ fn content_takes_any_id_get_content_takes_as_one_segment() {
     assert_eq!(
         link("agora://content/GOV-2026-0006?round=2"),
         AgoraLink::round("GOV-2026-0006".parse().unwrap(), 2)
+    );
+    // A document takes its canonical link's options
+    assert_eq!(
+        link("agora://content/constitution?version=0.3"),
+        link("agora://constitution?version=0.3")
+    );
+    // A citation's own lines and commit are not given again
+    for s in [
+        "agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md%3A110-300?lines=1-5",
+        "agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md?version=original",
+    ] {
+        assert!(refused(s).contains("is a citation"), "{s}");
+    }
+    // Without them, the option is the read's
+    assert_eq!(
+        link(
+            "agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md?lines=1-5"
+        ),
+        link(
+            "agora://gov/DATA-2026-0001/votes/index.md?lines=1-5&commit=89fe7c6"
+        )
     );
     // post/ and comment/ keep taking only a post's or comment's id
     for s in [

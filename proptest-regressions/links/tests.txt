@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 2a7094abcca5feeb6501649846aff52a4d70f06735ed9bd9707b126b0f272928 # shrinks to l = Read(GetContentInput { id: DataCitation(DataCitation { set: GovernanceLogId("DATA-2026-0001"), commit: None, path: DataFilePath(":1"), lines: None }), detail: None, round: None, attachment: None, version: None, comment_budget: None, lines: None })
+cc 32e2f6f009be94fcdfa0f1bdb3049c0b9b10390a65fa8b6096ce2e9f9286a7dc # shrinks to set = GovernanceLogId("DATA-2026-0001"), commit = None, path = DataFilePath("A"), lines = None, asked = None, version = Some(Original)

@@ -510,15 +510,15 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     if query.iter().any(|(name, _)| name == "page") {
         return Err("a page number has no link: give offset= instead".into());
     }
-    // A trailing `/` stays: a data set's directory
+    // A trailing `/` is dropped, but for a data set's directory
+    let mut parts = parts;
+    if parts.last() == Some(&"") && !is_data_directory(&parts) {
+        parts.pop();
+    }
     let (kind, segments): (Kind, &[&str]) = match parts.as_slice() {
-        [] | [""] => (Kind::Feed, &[]),
-        ["c", name] | ["c", name, ""] => {
-            (Kind::Community, std::slice::from_ref(name))
-        }
-        ["c", _, post] | ["c", _, post, ""] => {
-            (Kind::Post, std::slice::from_ref(post))
-        }
+        [] => (Kind::Feed, &[]),
+        ["c", name] => (Kind::Community, std::slice::from_ref(name)),
+        ["c", _, post] => (Kind::Post, std::slice::from_ref(post)),
         [kind, rest @ ..] => {
             match Kind::ALL.into_iter().find(|k| k.host() == *kind) {
                 Some(kind) => (kind, rest),
@@ -545,18 +545,33 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
 /// A page the site served before its paths were the links' (0.115.0):
 /// what to say of it, naming its link
 fn moved(parts: &[&str], query: &[(String, String)]) -> Option<String> {
-    let mut link = Kind::Gov.base();
-    match parts {
-        ["governance", rest @ ..] => {
-            link.path_segments_mut()
-                .expect("a link has a host")
-                .extend(rest);
-        }
-        ["obligations"] => {
+    let mut link = match parts {
+        ["governance", "obligations"] | ["obligations"] => {
+            let mut link = Kind::Gov.base();
             link.query_pairs_mut().append_pair("view", "obligations");
+            link
+        }
+        ["governance", doc, rest @ ..] if Kind::document(doc).is_some() => {
+            let mut link = Kind::document(doc).expect("matched").base();
+            if !rest.is_empty() {
+                link.path_segments_mut()
+                    .expect("a link has a host")
+                    .extend(rest);
+            }
+            link
+        }
+        ["governance", rest @ ..] => {
+            let mut link = Kind::Gov.base();
+            if !rest.is_empty() {
+                link.path_segments_mut()
+                    .expect("a link has a host")
+                    .extend(rest);
+            }
+            link
         }
         _ => return None,
-    }
+    };
+    let bare = link.clone();
     let query = query.iter().map(|(name, value)| match name.as_str() {
         "revisions" => (
             "include_revisions".to_string(),
@@ -568,10 +583,29 @@ fn moved(parts: &[&str], query: &[(String, String)]) -> Option<String> {
     if link.query() == Some("") {
         link.set_query(None);
     }
-    Some(match parse_link(link.as_str()) {
-        Ok(l) => format!("the site no longer has this page; its link is {l}"),
-        Err(e) => format!("the site no longer has this page: {e}"),
-    })
+    // Its options as a link would take them, else the page's link alone
+    Some(
+        match (parse_link(link.as_str()), parse_link(bare.as_str())) {
+            (Ok(l), _) => {
+                format!("the site no longer has this page; its link is {l}")
+            }
+            (Err(e), Ok(l)) => format!(
+                "the site no longer has this page; its link is {l} (and of \
+             the page's options, {e})"
+            ),
+            (Err(e), Err(_)) => {
+                format!("the site no longer has this page: {e}")
+            }
+        },
+    )
+}
+
+/// A page path naming a data set's directory, whose trailing `/` is
+/// meaningful: `gov/<DATA id>/<dir>/`
+fn is_data_directory(parts: &[&str]) -> bool {
+    matches!(parts, ["gov", id, _, .., ""]
+        if id.parse::<GovernanceLogId>()
+            .is_ok_and(|id| id.prefix() == GovernanceLogPrefix::Data))
 }
 
 /// A read's options as query parameters: every field but the two the path
@@ -967,10 +1001,23 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
             let kind = match kind {
                 Kind::Post => ContentKind::Post,
                 Kind::Comment => ContentKind::Comment,
-                // Any id get_content takes, read as the canonical link
+                // Any id get_content takes, read as the canonical link, with
+                // the options that link takes
                 _ => {
-                    return read_input(options, any_id(id)?, None)
-                        .map(AgoraLink::from);
+                    let id = any_id(id)?;
+                    if let ContentRef::Document(doc) = &id {
+                        return parse_doc(&doc_segments(doc), options);
+                    }
+                    let read = read_input(options, id, None)?;
+                    // A citation names its lines and version: refused
+                    // beside them as get_content refuses, never dropped
+                    read.clone().split_citation().map_err(|e| e.to_string())?;
+                    // As its canonical link reads: a citation with a
+                    // version is its set's file at that version
+                    return match AgoraLink::from(read) {
+                        l @ AgoraLink::Content { .. } => Ok(l),
+                        l => parse_link(&l.to_string()),
+                    };
                 }
             };
             Ok(AgoraLink::Content {
