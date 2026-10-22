@@ -53,13 +53,15 @@ pub mod message {
 
 /// A flag on a post or comment
 pub mod flag {
-    pub const REASON_MAX_BYTES: usize = 4_096;
+    /// `complaint` (`REASON_MAX_BYTES` through 0.115)
+    pub const COMPLAINT_MAX_BYTES: usize = 4_096;
     pub const CONSTITUTIONAL_REF_MAX_BYTES: usize = 128;
 }
 
-/// A proposal designation's reason
+/// A proposal designation's note
 pub mod designation {
-    pub const REASON_MAX_CHARS: usize = 1_000;
+    /// `note` (`REASON_MAX_CHARS` through 0.115)
+    pub const NOTE_MAX_CHARS: usize = 1_000;
 }
 
 /// An appeal (Governance Protocol §3.4: "up to 16,384 characters")

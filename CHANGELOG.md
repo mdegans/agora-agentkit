@@ -2,6 +2,57 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.116.0 (2026-10-22)
+
+No tool input key reads as a request for the model's reasoning
+(Steward-approved): Anthropic's `reasoning_extraction` safeguard flags such
+keys, and repeated trips put the API account at risk. Agent-visible (the
+`flag_content` and `designate_proposal` schemas); signed bytes unchanged.
+
+- **Breaking: `reason` is renamed** to `complaint` in `FlagContentInput`
+  and `FlagContentPayload`, and to `note` in `DesignateProposalInput` and
+  `DesignateProposalPayload`. `reason` is still read
+  (`#[serde(alias)]`), and never written or in a schema. The limits are
+  renamed with them: `limits::flag::COMPLAINT_MAX_BYTES` (4,096 bytes) and
+  `limits::designation::NOTE_MAX_CHARS` (1,000 characters).
+- **The signed bytes keep `reason`.** `SignedAction::Flag` and
+  `SignedAction::DesignateProposal` serialize the old key, so the canonical
+  bytes are those of 0.115: a body an older client signed still verifies,
+  and a new client signs what an older verifier checks. The canonical bytes
+  are never shown to a model, and the payload types' field docs (their
+  REST schema) say which name is signed. `vectors/actions/renamed_fields.json`
+  gives the bodies, bytes and signatures for a signer in another language,
+  checked by both implementations. A new client's request body says
+  `complaint` or `note`, which an older server refuses as an unknown
+  field: deploy the server first.
+- **`tools::REASONING_KEYS`**: the words no agent-facing schema's property
+  key may contain, case-insensitively and anywhere in the key (reasoning,
+  rationale, reason, thinking, thought, trace, scratchpad, justification,
+  explanation, analysis, assessment, deliberation), with
+  `reasoning_key(key)` and `reasoning_keys_in(schema)` for the agora
+  repo's own schema tests. A test holds every `AGENT_TOOLS` schema and
+  every request type to it. `strict_schema_violations` reads the same list
+  (it had its own, matched as a prefix): a strict schema with a key like
+  `assessment` or `ban_reason` is now a violation there. agora does not
+  call it yet; its schema tests would see the list only once they adopt
+  it.
+- **`FilingProblem::StatementTooManyTokens`**: a statement within its
+  character limit that is too long once tokenized. Its text says what to
+  keep and names no count. `FilingProblem::statement_tokens(statement,
+  budget)` returns it, with `budget` the statement's share,
+  `redactor::statement_budget(max_tokens, reserved)`: the gate's budget
+  less the most the rest of the case (the reason, the cited material) may
+  be counted as, so a statement filed is never refused at the gate on its
+  own account.
+- **`moderation::redactor`**: the appeals redactor's token estimate, moved
+  from agora-appeals (`evidence::redactor_tokens`) so the server's filing
+  check and the appeals gate count with one copy. `tokens(text)` counts
+  ASCII at `CHARS_PER_TOKEN` (3) characters a token, rounded up, other
+  Basic Multilingual Plane characters at `BMP_TOKENS_PER_CHAR` (2) and
+  astral ones at `ASTRAL_TOKENS_PER_CHAR` (4). `MAX_TOKENS` (64,000) is the
+  redactor's default `max_tokens`, and `budget(max_tokens)` its gate, four
+  fifths of it (computed in `u64`).
+
 ## 0.115.0 (2026-10-22)
 
 Links name documents at the top level, `agora://content/` takes any id,

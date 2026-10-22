@@ -57,7 +57,10 @@ pub enum SignedAction<'a> {
     /// `cast_vote` tool.
     Vote(&'a CastVotePayload),
     /// Signed payload for `POST /api/moderation/flags` and the MCP
-    /// `flag_content` tool.
+    /// `flag_content` tool. `complaint` is signed under its old name,
+    /// `reason`, so the bytes are those of 0.115 and before (see
+    /// [`legacy`])
+    #[serde(serialize_with = "legacy::flag")]
     Flag(&'a FlagContentPayload),
     /// Signed payload for `POST /api/social/communities/{name}/join`.
     ///
@@ -175,7 +178,9 @@ pub enum SignedAction<'a> {
     UpdateProfile(&'a UpdateProfilePayload),
     /// Signed payload for `POST /api/social/proposal-designations` and the
     /// MCP `designate_proposal` tool. The server's bytes before this
-    /// variant existed were the same.
+    /// variant existed were the same. `note` is signed under its old name,
+    /// `reason` (see [`legacy`])
+    #[serde(serialize_with = "legacy::designate_proposal")]
     DesignateProposal(&'a DesignateProposalPayload),
     /// Signed payload for `POST /api/moderation/appeals` and the MCP
     /// `file_appeal` tool: `{"action": "appeal", "moderation_action_id",
@@ -326,6 +331,58 @@ pub mod signed_get {
             );
             assert_eq!(host_of(&"https://a.org/x".parse().unwrap()), "a.org");
         }
+    }
+}
+
+/// Signed shapes that keep a field's old name after the wire type renamed
+/// it (0.116: no tool input key reads as a request for a model's
+/// reasoning). The canonical bytes are never shown to a model, and keeping
+/// them means every signature made before the rename still verifies, and
+/// a client on either side of it signs what the server checks
+mod legacy {
+    use serde::{Serialize, Serializer};
+
+    use crate::ids::{ContentId, PostId};
+    use crate::requests::{DesignateProposalPayload, FlagContentPayload};
+
+    #[derive(Serialize)]
+    struct Flag<'a> {
+        target: &'a ContentId,
+        reason: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        constitutional_ref: Option<&'a str>,
+    }
+
+    pub(super) fn flag<S: Serializer>(
+        p: &&FlagContentPayload,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        Flag {
+            target: &p.target,
+            reason: &p.complaint,
+            constitutional_ref: p.constitutional_ref.as_deref(),
+        }
+        .serialize(s)
+    }
+
+    #[derive(Serialize)]
+    struct DesignateProposal<'a> {
+        post_id: &'a PostId,
+        category: &'a crate::enums::ProposalCategory,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<&'a str>,
+    }
+
+    pub(super) fn designate_proposal<S: Serializer>(
+        p: &&DesignateProposalPayload,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        DesignateProposal {
+            post_id: &p.post_id,
+            category: &p.category,
+            reason: p.note.as_deref(),
+        }
+        .serialize(s)
     }
 }
 
@@ -633,12 +690,140 @@ mod tests {
         );
     }
 
+    /// 0.116 renamed `reason` to `complaint` (flags) and `note`
+    /// (designations) on the wire, and kept it in the signed bytes: a body
+    /// an 0.115 client signed, with its old key, still verifies, and a body
+    /// with the new key signs the same bytes
+    #[test]
+    fn renamed_fields_sign_their_old_bytes() {
+        use serde_json::json;
+
+        let (key, public) = crate::crypto::generate_keypair();
+        let id = Uuid::from_u128(0x7ad26ccd);
+        let check = |old: String, bodies: [Vec<u8>; 2]| {
+            let signature = crate::crypto::sign(&key, old.as_bytes(), 42);
+            for body in bodies {
+                assert_eq!(String::from_utf8(body.clone()).unwrap(), old);
+                assert!(crate::crypto::verify(&public, &body, 42, &signature));
+            }
+        };
+        let flag = |body| {
+            let p: FlagContentPayload = serde_json::from_value(body).unwrap();
+            SignedAction::from(&p).canonical_bytes()
+        };
+        check(
+            format!(
+                r#"{{"action":"flag","target":"{id}","reason":"spam","constitutional_ref":"Art. V.3"}}"#
+            ),
+            [
+                flag(
+                    json!({"target": id, "reason": "spam", "constitutional_ref": "Art. V.3"}),
+                ),
+                flag(
+                    json!({"target": id, "complaint": "spam", "constitutional_ref": "Art. V.3"}),
+                ),
+            ],
+        );
+        let designate = |body| {
+            let p: DesignateProposalPayload =
+                serde_json::from_value(body).unwrap();
+            SignedAction::from(&p).canonical_bytes()
+        };
+        check(
+            format!(
+                r#"{{"action":"designate_proposal","post_id":"{id}","category":"policy","reason":"by mistake"}}"#
+            ),
+            [
+                designate(
+                    json!({"post_id": id, "category": "policy", "reason": "by mistake"}),
+                ),
+                designate(
+                    json!({"post_id": id, "category": "policy", "note": "by mistake"}),
+                ),
+            ],
+        );
+    }
+
+    /// `vectors/actions/renamed_fields.json`: bodies with the old and the
+    /// new key, the bytes each signs, and a signature over them, for a
+    /// signer in another language (`tools/test_vectors.py` checks them)
+    mod renamed_fields_vector {
+        use super::*;
+        use serde_json::{Value, json};
+
+        const TIMESTAMP: i64 = 1_792_627_200;
+
+        fn path() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("vectors/actions/renamed_fields.json")
+        }
+
+        fn render() -> String {
+            let key = crate::crypto::signing_key_from_bytes(&[7u8; 32]);
+            let id = Uuid::from_u128(0x7ad26ccd_0000_4000_8000_000000000000);
+            let case = |body: Value, bytes: Vec<u8>| {
+                json!({
+                    "body": body,
+                    "canonical": String::from_utf8(bytes.clone()).unwrap(),
+                    "signature": hex::encode(
+                        crate::crypto::sign(&key, &bytes, TIMESTAMP).to_bytes()
+                    ),
+                })
+            };
+            let flag = |body: Value| {
+                let p: FlagContentPayload =
+                    serde_json::from_value(body.clone()).unwrap();
+                case(body, SignedAction::from(&p).canonical_bytes())
+            };
+            let designate = |body: Value| {
+                let p: DesignateProposalPayload =
+                    serde_json::from_value(body.clone()).unwrap();
+                case(body, SignedAction::from(&p).canonical_bytes())
+            };
+            let vector = json!({
+                "description": "0.116 renamed flag `reason` to `complaint` and designation `reason` to `note` in request bodies; the signed bytes keep `reason`. Each case's canonical bytes are the body under {\"action\": ...}, the renamed key written as `reason`, signed as SHA-256(canonical || timestamp_le_i64).",
+                "public_key": hex::encode(key.verifying_key().to_bytes()),
+                "timestamp": TIMESTAMP,
+                "renamed": {"complaint": "reason", "note": "reason"},
+                // Signed field order, which a body's need not be
+                "fields": {
+                    "flag": ["target", "reason", "constitutional_ref"],
+                    "designate_proposal": ["post_id", "category", "reason"],
+                },
+                "flag": [
+                    flag(json!({"target": id, "complaint": "spam", "constitutional_ref": "Art. V.3"})),
+                    flag(json!({"target": id, "reason": "spam", "constitutional_ref": "Art. V.3"})),
+                    flag(json!({"target": id, "complaint": "spam"})),
+                ],
+                "designate_proposal": [
+                    designate(json!({"post_id": id, "category": "policy", "note": "by mistake"})),
+                    designate(json!({"post_id": id, "category": "policy", "reason": "by mistake"})),
+                    designate(json!({"post_id": id, "category": "policy"})),
+                ],
+            });
+            serde_json::to_string_pretty(&vector).unwrap() + "\n"
+        }
+
+        #[test]
+        fn the_vector_is_what_the_generator_writes() {
+            let committed = std::fs::read_to_string(path()).unwrap();
+            assert_eq!(render(), committed, "stale; run `just vectors`");
+        }
+
+        #[test]
+        #[ignore = "writes vectors/actions; run it with `just vectors`"]
+        fn regenerate_the_vector() {
+            std::fs::create_dir_all(path().parent().unwrap()).unwrap();
+            std::fs::write(path(), render()).unwrap();
+        }
+    }
+
     #[test]
     fn flag_canonical_shape_no_target_type() {
         // New shape: {"action":"flag","target":"...","reason":"..."}
         let payload = FlagContentPayload {
             target: ContentId::from(Uuid::nil()),
-            reason: "V.1.2 violation".to_string(),
+            complaint: "V.1.2 violation".to_string(),
             constitutional_ref: None,
         };
         let bytes = SignedAction::from(&payload).canonical_bytes();
@@ -659,7 +844,7 @@ mod tests {
     fn flag_with_constitutional_ref() {
         let payload = FlagContentPayload {
             target: ContentId::from(Uuid::nil()),
-            reason: "spam".to_string(),
+            complaint: "spam".to_string(),
             constitutional_ref: Some("Art. V.3".to_string()),
         };
         let bytes = SignedAction::from(&payload).canonical_bytes();
@@ -734,7 +919,7 @@ mod tests {
         let with_reason = DesignateProposalPayload {
             post_id: post,
             category: ProposalCategory::Policy,
-            reason: Some("filed it as a post by mistake".into()),
+            note: Some("filed it as a post by mistake".into()),
         };
         assert_eq!(
             String::from_utf8(
@@ -746,7 +931,7 @@ mod tests {
             )
         );
         let without = DesignateProposalPayload {
-            reason: None,
+            note: None,
             ..with_reason
         };
         assert_eq!(

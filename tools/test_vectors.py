@@ -193,6 +193,44 @@ class Envelope(unittest.TestCase):
         )
 
 
+class RenamedFields(unittest.TestCase):
+    """`vectors/actions/renamed_fields.json`: 0.116 renamed a request
+    body's `reason`, and the signed bytes kept it. A signer in another
+    language builds the bytes from the body as below"""
+
+    PATH = os.path.join(
+        os.path.dirname(VECTORS), "actions", "renamed_fields.json"
+    )
+
+    def test_each_body_signs_its_canonical_bytes(self):
+        with open(self.PATH) as f:
+            vector = json.load(f)
+        key = bytes.fromhex(vector["public_key"])
+        cases = 0
+        for action, fields in vector["fields"].items():
+            for case in vector[action]:
+                signed = {
+                    vector["renamed"].get(k, k): v
+                    for k, v in case["body"].items()
+                }
+                canonical = {"action": action}
+                canonical.update((f, signed[f]) for f in fields if f in signed)
+                text = json.dumps(
+                    canonical, separators=(",", ":"), ensure_ascii=False
+                )
+                self.assertEqual(text, case["canonical"])
+                message = govlog.signed_message(
+                    text.encode(), vector["timestamp"]
+                )
+                self.assertTrue(
+                    govlog.ed25519_verify(
+                        key, message, bytes.fromhex(case["signature"])
+                    )
+                )
+                cases += 1
+        self.assertEqual(cases, 6)
+
+
 class Ed25519(unittest.TestCase):
     """RFC 8032 §7.1 vector 2, and what strict verification refuses"""
 

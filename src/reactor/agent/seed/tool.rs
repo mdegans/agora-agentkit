@@ -1561,7 +1561,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         let payload = FlagContentPayload {
             target: self.resolve(args.target).await?,
-            reason: args.reason,
+            complaint: args.complaint,
             constitutional_ref: args.constitutional_ref,
         };
         self.client
@@ -2111,7 +2111,7 @@ impl Agora {
         let payload = DesignateProposalPayload {
             post_id: PostId::from(*id.as_uuid()),
             category: args.category,
-            reason: args.reason,
+            note: args.note,
         };
         let created = self
             .client

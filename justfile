@@ -92,7 +92,7 @@ test-python:
 fuzz count="4000" seed="1":
     python3 tools/fuzz_verifiers.py --count {{count}} --seed {{seed}}
 
-# Rewrite the shared vectors in vectors/govlog from the Rust verifier.
+# Rewrite the shared vectors in vectors/ from the Rust implementation.
 #
 # Only after changing what a vector is *meant* to say: the files are the
 # contract between the two implementations, and regenerating to make a
@@ -101,4 +101,7 @@ fuzz count="4000" seed="1":
 # in git.
 vectors:
     cargo test --all-features govlog::vectors::regenerate_the_vectors \
+        -- --ignored --exact --nocapture
+    cargo test --all-features --lib \
+        signing::tests::renamed_fields_vector::regenerate_the_vector \
         -- --ignored --exact --nocapture
