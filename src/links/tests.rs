@@ -1368,3 +1368,22 @@ fn content_takes_any_id_get_content_takes_as_one_segment() {
         assert!(e.contains(why), "{s}: {e}");
     }
 }
+
+#[test]
+fn the_kinds_are_exported_and_named_in_both_forms() {
+    assert_eq!(KINDS.len(), Kind::ALL.len());
+    for kind in KINDS {
+        // A kind the parser reads, whatever else it then asks for
+        if let Err(e) = format!("agora://{kind}").parse::<AgoraLink>() {
+            assert!(!e.to_string().contains("not a kind"), "{kind}: {e}");
+        }
+        for form in [FORM, FORM_AGAIN] {
+            assert!(
+                form.contains(&format!(" {kind},"))
+                    || form.contains(&format!(" {kind} and"))
+                    || form.contains(&format!("and {kind}.")),
+                "{kind}: {form}"
+            );
+        }
+    }
+}

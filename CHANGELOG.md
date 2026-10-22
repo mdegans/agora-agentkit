@@ -41,6 +41,9 @@ payload changes.
   `agora://gov?view=obligations`); the website's `revisions=` no longer
   translates on the new paths. A trailing `/` is dropped but on a data
   set's directory.
+- **`links::KINDS`**: every kind word, from the parser's own table, for
+  the site to route `/agora/<kind>/…` on (the server's `LINK_KINDS` was a
+  second copy). A test holds `FORM` and `FORM_AGAIN` to name each.
 - **`GetContentInput.id`** says again that a TEST- entry records a test
   sitting and binds nothing (dropped in 0.114.0).
 - **Every read of a TEST record shows `TEST_LABEL`.** The seed runner

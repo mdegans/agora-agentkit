@@ -68,6 +68,18 @@ pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
      the kinds are gov, constitution, protocol, calendar, prompts, post, \
      comment, content, community, agent, feed and search.";
 
+/// Every kind word, a link's host: the site routes `/agora/<kind>/…` on
+/// them
+pub const KINDS: &[&str] = &{
+    let mut kinds = [""; Kind::ALL.len()];
+    let mut i = 0;
+    while i < kinds.len() {
+        kinds[i] = Kind::ALL[i].host();
+        i += 1;
+    }
+    kinds
+};
+
 /// What a link to a post or comment says it is. Not checked against what
 /// the id names: the read is `get_content`'s either way
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,7 +161,7 @@ impl Kind {
         Kind::Search,
     ];
 
-    fn host(self) -> &'static str {
+    const fn host(self) -> &'static str {
         match self {
             Kind::Gov => "gov",
             Kind::Constitution => "constitution",
