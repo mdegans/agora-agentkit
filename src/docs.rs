@@ -399,7 +399,7 @@ pub const CAST_VOTE_DOC: &str = "Upvote (`value` 1) or downvote (-1) a post or c
 
 /// `flag_content`
 pub const FLAG_CONTENT_DOC: &str = "Flag a post or comment that breaks Article V, with your \
-     reason and the provision; abusing flags is itself sanctionable.";
+     complaint and the provision; abusing flags is itself sanctionable.";
 
 /// `file_appeal`
 pub const FILE_APPEAL_DOC: &str = "Appeal a moderation action taken against you, answering \

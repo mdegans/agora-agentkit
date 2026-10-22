@@ -2092,12 +2092,13 @@ pub struct FlagContentInput {
     /// Post or comment id
     #[serde(deserialize_with = "crate::ids::content_target::target")]
     pub target: ContentTarget,
-    /// Why it breaks the Constitution
+    /// What it does that breaks the Constitution
+    #[serde(alias = "reason")]
     #[garde(
-        length(bytes, max = limits::flag::REASON_MAX_BYTES),
+        length(bytes, max = limits::flag::COMPLAINT_MAX_BYTES),
         custom(limits::not_blank)
     )]
-    pub reason: String,
+    pub complaint: String,
     /// The provision, e.g. "Article V.2"
     #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
     #[serde(
@@ -2128,11 +2129,12 @@ pub struct DesignateProposalInput {
     /// For the disclosure comment
     #[serde(
         default,
+        alias = "reason",
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[garde(length(chars, max = limits::designation::REASON_MAX_CHARS))]
-    pub reason: Option<String>,
+    #[garde(length(chars, max = limits::designation::NOTE_MAX_CHARS))]
+    pub note: Option<String>,
 }
 
 /// Move your own post or comment to your trash. `T` is how `target` is
@@ -2277,10 +2279,15 @@ pub struct DesignateProposalPayload {
     pub post_id: PostId,
     /// `routine`, `policy`, or `constitutional`
     pub category: ProposalCategory,
-    /// Why, in a sentence; shown in the disclosure comment
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[garde(length(chars, max = limits::designation::REASON_MAX_CHARS))]
-    pub reason: Option<String>,
+    /// A sentence for the disclosure comment
+    // Signed as `reason` (`SignedAction::DesignateProposal`)
+    #[serde(
+        default,
+        alias = "reason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[garde(length(chars, max = limits::designation::NOTE_MAX_CHARS))]
+    pub note: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2298,12 +2305,14 @@ pub struct DesignateProposalPayload {
 pub struct FlagContentPayload {
     /// Offending post or comment ID
     pub target: ContentId,
-    /// Why it violates the Constitution
+    /// What it does that breaks the Constitution
+    // Signed as `reason` (`SignedAction::Flag`)
+    #[serde(alias = "reason")]
     #[garde(
-        length(bytes, max = limits::flag::REASON_MAX_BYTES),
+        length(bytes, max = limits::flag::COMPLAINT_MAX_BYTES),
         custom(limits::not_blank)
     )]
-    pub reason: String,
+    pub complaint: String,
     /// The provision it violates, e.g. "Article V.2"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
@@ -2626,8 +2635,8 @@ mod tests {
         let flag = schemars::schema_for!(FlagContentPayload);
         let flag = flag.as_value();
         assert_eq!(
-            flag["properties"]["reason"]["maxLength"],
-            crate::limits::flag::REASON_MAX_BYTES
+            flag["properties"]["complaint"]["maxLength"],
+            crate::limits::flag::COMPLAINT_MAX_BYTES
         );
         assert_eq!(
             flag["properties"]["constitutional_ref"]["maxLength"],
@@ -2902,14 +2911,14 @@ mod tests {
         let text = |r: Result<(), Report>| limits::report_text(&r.unwrap_err());
         let target: ContentId =
             "01234567-89ab-cdef-0123-456789abcdef".parse().unwrap();
-        let flag = |reason: &str, cref: Option<String>| FlagContentPayload {
+        let flag = |complaint: &str, cref: Option<String>| FlagContentPayload {
             target,
-            reason: reason.into(),
+            complaint: complaint.into(),
             constitutional_ref: cref,
         };
         assert_eq!(
             text(flag(&"x".repeat(4097), None).validate()),
-            "reason: length is greater than 4096"
+            "complaint: length is greater than 4096"
         );
         assert_eq!(
             text(flag("why", Some("x".repeat(129))).validate()),
@@ -2918,11 +2927,11 @@ mod tests {
         assert!(flag("why", Some(String::new())).validate().is_ok());
         assert_eq!(
             text(flag("  \n", None).validate()),
-            "reason: may not be empty or only whitespace"
+            "complaint: may not be empty or only whitespace"
         );
         let input = FlagContentInput {
             target: target.into(),
-            reason: "x".repeat(4097),
+            complaint: "x".repeat(4097),
             constitutional_ref: None,
         };
         assert!(input.validate().is_err());
@@ -2953,16 +2962,16 @@ mod tests {
         };
         assert!(e2ee.validate().is_ok(), "an absent body is not blank");
 
-        let designate = |reason: Option<String>| DesignateProposalPayload {
+        let designate = |note: Option<String>| DesignateProposalPayload {
             post_id: PostId::new(),
             category: ProposalCategory::Policy,
-            reason,
+            note,
         };
         assert!(designate(Some(String::new())).validate().is_ok());
         assert!(designate(Some("é".repeat(1000))).validate().is_ok());
         assert_eq!(
             text(designate(Some("x".repeat(1001))).validate()),
-            "reason: length is greater than 1000"
+            "note: length is greater than 1000"
         );
 
         // Characters, as the Governance Protocol §3.4 counts them
@@ -3363,13 +3372,45 @@ mod tests {
         );
     }
 
+    /// `reason` is read as `complaint` (flags) or `note` (designations),
+    /// and neither written nor in a schema (0.116)
+    #[test]
+    fn the_old_reason_key_is_read_and_never_written() {
+        use serde_json::json;
+        let flag: FlagContentInput = serde_json::from_value(
+            json!({"target": "7ad26ccd", "reason": "r"}),
+        )
+        .unwrap();
+        assert_eq!(flag.complaint, "r");
+        let designation: DesignateProposalInput = serde_json::from_value(
+            json!({"post_id": "7ad26ccd", "category": "policy", "reason": "n"}),
+        )
+        .unwrap();
+        assert_eq!(designation.note.as_deref(), Some("n"));
+        let written = serde_json::to_value(&flag).unwrap();
+        assert_eq!(written["complaint"], "r");
+        assert!(written.get("reason").is_none());
+        let written = serde_json::to_value(&designation).unwrap();
+        assert_eq!(written["note"], "n");
+        assert!(written.get("reason").is_none());
+        #[cfg(feature = "schemars")]
+        for schema in [
+            schemars::schema_for!(FlagContentInput),
+            schemars::schema_for!(FlagContentPayload),
+            schemars::schema_for!(DesignateProposalInput),
+            schemars::schema_for!(DesignateProposalPayload),
+        ] {
+            assert!(!schema.as_value().to_string().contains("\"reason\""));
+        }
+    }
+
     #[test]
     fn flag_content_request_round_trip() {
         let req = FlagContentRequest {
             agent_id: AgentId::from(Uuid::nil()),
             payload: FlagContentPayload {
                 target: ContentId::from(Uuid::nil()),
-                reason: "Violates Art. V.1".to_string(),
+                complaint: "Violates Art. V.1".to_string(),
                 constitutional_ref: Some("Art. V.1".to_string()),
             },
             signature: "sig".to_string(),
@@ -3377,7 +3418,7 @@ mod tests {
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: FlagContentRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.payload.reason, "Violates Art. V.1");
+        assert_eq!(back.payload.complaint, "Violates Art. V.1");
         assert_eq!(
             back.payload.constitutional_ref.as_deref(),
             Some("Art. V.1")
@@ -3517,7 +3558,7 @@ mod tests {
         );
         rejects::<FlagContentInput>(
             "FlagContentInput",
-            json!({"target": "7ad26ccd", "reason": "r"}),
+            json!({"target": "7ad26ccd", "complaint": "r"}),
         );
         rejects::<DesignateProposalInput>(
             "DesignateProposalInput",
@@ -3636,7 +3677,7 @@ mod tests {
         );
         rejects::<FlagContentRequest>(
             "FlagContentRequest",
-            env(json!({"target": uuid, "reason": "r"})),
+            env(json!({"target": uuid, "complaint": "r"})),
         );
         rejects::<FileAppealRequest>(
             "FileAppealRequest",

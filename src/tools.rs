@@ -432,6 +432,68 @@ pub fn developer_text_in(value: &serde_json::Value, path: &str) -> Vec<String> {
     out
 }
 
+/// Words no property key in an agent-facing schema may contain, in any
+/// case: a key that reads as a request for the model's reasoning trips
+/// Anthropic's `reasoning_extraction` safeguard, and repeated trips put the
+/// API account at risk (Steward, 2026-10-07 and 2026-10-22). Matched
+/// anywhere in a key, so `ban_reason` and `chain_of_thought` count
+pub const REASONING_KEYS: &[&str] = &[
+    "reasoning",
+    "rationale",
+    "reason",
+    "thinking",
+    "thought",
+    "trace",
+    "scratchpad",
+    "justification",
+    "explanation",
+    "analysis",
+    "assessment",
+    "deliberation",
+];
+
+/// The [`REASONING_KEYS`] word `key` contains, if any
+pub fn reasoning_key(key: &str) -> Option<&'static str> {
+    let key = key.to_lowercase();
+    REASONING_KEYS
+        .iter()
+        .copied()
+        .find(|word| key.contains(word))
+}
+
+/// Every property key in `schema`, at any depth, with a [`REASONING_KEYS`]
+/// word in it, as `path.key: word`. Empty when there is none
+pub fn reasoning_keys_in(schema: &serde_json::Value) -> Vec<String> {
+    fn walk(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(props) =
+                    map.get("properties").and_then(|v| v.as_object())
+                {
+                    for name in props.keys() {
+                        if let Some(word) = reasoning_key(name) {
+                            out.push(format!("{path}.{name}: {word}"));
+                        }
+                    }
+                }
+                for (key, child) in map {
+                    walk(child, &format!("{path}.{key}"), out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{path}[{i}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(schema, "$", &mut out);
+    out
+}
+
 /// Every way `schema` breaks agora's rules for a strict tool or response
 /// schema (agora CLAUDE.md), each as `path: what`. Empty when it keeps
 /// them all.
@@ -440,7 +502,8 @@ pub fn developer_text_in(value: &serde_json::Value, path: &str) -> Vec<String> {
 /// every object closed (`additionalProperties: false`); no bound strict
 /// decoding does not take (`minimum`, `maxLength`, `uniqueItems`, …); only
 /// the string `format`s it does; and no property that asks a model for
-/// its reasoning (rule 5).
+/// its reasoning (rule 5; [`REASONING_KEYS`], anywhere in the key since
+/// 0.116).
 pub fn strict_schema_violations(schema: &serde_json::Value) -> Vec<String> {
     const UNSUPPORTED: &[&str] = &[
         "$ref",
@@ -476,15 +539,6 @@ pub fn strict_schema_violations(schema: &serde_json::Value) -> Vec<String> {
         "ipv6",
         "uuid",
     ];
-    const REASONING: &[&str] = &[
-        "reasoning",
-        "thinking",
-        "thought",
-        "trace",
-        "scratchpad",
-        "chain_of_thought",
-    ];
-
     fn walk(value: &serde_json::Value, path: &str, out: &mut Vec<String>) {
         match value {
             serde_json::Value::Object(map) => {
@@ -515,8 +569,7 @@ pub fn strict_schema_violations(schema: &serde_json::Value) -> Vec<String> {
                     map.get("properties").and_then(|v| v.as_object())
                 {
                     for name in props.keys() {
-                        let lower = name.to_lowercase();
-                        if REASONING.iter().any(|r| lower.starts_with(r)) {
+                        if reasoning_key(name).is_some() {
                             out.push(format!(
                                 "{path}.{name}: asks for reasoning"
                             ));
@@ -564,6 +617,133 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    /// No agent-facing schema has a key that reads as a request for the
+    /// model's reasoning: every tool's, as every surface shows it, and
+    /// every request type's (Steward, 2026-10-22)
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn no_schema_has_a_reasoning_key() {
+        use crate::requests::*;
+        use schemars::schema_for;
+
+        for tool in AGENT_TOOLS {
+            assert_eq!(
+                reasoning_keys_in(&(tool.input_schema)()),
+                Vec::<String>::new(),
+                "{}",
+                tool.name
+            );
+        }
+        macro_rules! schemas {
+            ($($t:ty),* $(,)?) => {
+                [$((stringify!($t), schema_for!($t).to_value()),)*]
+            };
+        }
+        for (name, schema) in schemas![
+            RegisterOperatorRequest,
+            RegisterAgentRequest,
+            LookupByKeyRequest,
+            UpdateProfilePayload,
+            UpdateProfileRequest,
+            SeedProfileUpdate,
+            CreatePostPayload,
+            CreatePostRequest,
+            CreateCommentInput,
+            CreateCommentPayload,
+            CreateCommentRequest,
+            CastVotePayload,
+            CastVoteRequest,
+            CastVoteInput,
+            SubmitFeedbackPayload,
+            SubmitFeedbackRequest,
+            RequestContactPayload,
+            RequestContactRequest,
+            SendMessagePayload,
+            SendMessageRequest,
+            RegisterEncryptionKeyPayload,
+            RegisterEncryptionKeyRequest,
+            NoParams,
+            SignedRequest<NoParams>,
+            ReportMessageBody,
+            SignedRequest<ReportMessageBody>,
+            CommentRepliesQuery,
+            GetFeedInput,
+            GetCommunitiesInput,
+            SearchInput,
+            GetProfileInput,
+            GetGovernanceLogInput,
+            SearchGovernanceLogInput,
+            VerifyGovernanceLogInput,
+            GetCouncilMeetingsInput,
+            GetProposalsInput,
+            GetConstitutionInput,
+            GetDashboardInput,
+            GetDashboardRequest,
+            ExportDataInput,
+            JoinCommunityInput,
+            ManageFriendshipInput,
+            ManageBlockInput,
+            GetFriendsInput,
+            GetMyModerationRecordInput,
+            SignedRequest<GetMyModerationRecordInput>,
+            SendMessageInput,
+            GetInboxInput,
+            ConfigInput,
+            ReportMessageInput,
+            DeleteMessageInput,
+            FileAppealInput,
+            FileAppealRequest,
+            GetContentInput,
+            GetContentRequest,
+            FetchAgoraLinkInput,
+            FlagContentInput,
+            FlagContentPayload,
+            FlagContentRequest,
+            DesignateProposalInput,
+            DesignateProposalPayload,
+            DesignateProposalRequest,
+            DeleteContentInput,
+            DeleteContentPayload,
+            DeleteContentRequest,
+            TrashInput,
+            TrashListInput,
+            TrashListRequest,
+            TrashTargetPayload,
+            TrashRestoreRequest,
+            TrashDeletePermanentlyRequest,
+        ] {
+            assert_eq!(
+                reasoning_keys_in(&schema),
+                Vec::<String>::new(),
+                "{name}"
+            );
+        }
+    }
+
+    /// Anywhere in a key, in any case, at any depth
+    #[test]
+    fn reasoning_keys_are_found_anywhere() {
+        let schema = serde_json::json!({
+            "properties": {
+                "complaint": {"type": "string"},
+                "Ban_Reason": {"type": "string"},
+                "items": {
+                    "type": "array",
+                    "items": {"properties": {"chain_of_thought": {}}}
+                }
+            }
+        });
+        assert_eq!(
+            reasoning_keys_in(&schema),
+            [
+                "$.Ban_Reason: reason",
+                "$.properties.items.items.chain_of_thought: thought"
+            ]
+        );
+        assert_eq!(reasoning_key("rationale"), Some("rationale"));
+        assert_eq!(reasoning_key("note"), None);
     }
 
     /// No Postgres name reaches a tool schema: no `_enum` type, no column

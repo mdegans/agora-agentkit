@@ -78,9 +78,115 @@ pub enum FilingProblem {
          cite it — it is already before the court."
     )]
     UnresolvableCitation { content_id: ContentId, ordinal: i16 },
+    /// The statement is within its character limit and too long for the
+    /// court once tokenized ([`redactor::tokens`]): a script that takes
+    /// several tokens a character, like emoji
+    #[error(
+        "The appeal statement is too long for the court to read in full. \
+         Shorten it to the published reason, the provision it cited, and \
+         why both are wrong; cite content by id rather than quoting it."
+    )]
+    StatementTooManyTokens,
+}
+
+/// The appeals redactor's budget, and the one count of text against it.
+/// The server's filing check and the appeals pipeline's gate both count
+/// with [`tokens`], so a statement filed is one the redactor takes
+pub mod redactor {
+    /// Characters an ASCII token is counted as, rounded up.
+    ///
+    /// Three, under the usual English four: this bound protects against
+    /// truncation, and dense text (UUIDs, code) tokenizes worse than
+    /// average. Guessing high on tokens is the safe direction
+    pub const CHARS_PER_TOKEN: usize = 3;
+
+    /// Tokens a non-ASCII character in the Basic Multilingual Plane (two or
+    /// three bytes of UTF-8: accented Latin, Greek, Cyrillic, CJK, …) is
+    /// counted as.
+    ///
+    /// A token never encodes less than one byte, so a character's UTF-8
+    /// length is the strict bound (3 for CJK). Claude's tokenizers give
+    /// common accented Latin and CJK characters about a token each or
+    /// less, so two is double that, and the rare character that falls back
+    /// to its three bytes is outweighed within the gate's one-fifth
+    /// headroom. It lets a full-length statement in these scripts (16,384
+    /// characters, 32,768 tokens counted) fit with room for the reason and
+    /// the cited material (Steward, 2026-10-22). Not measured against
+    /// `count_tokens`
+    pub const BMP_TOKENS_PER_CHAR: usize = 2;
+
+    /// Tokens a character outside the Basic Multilingual Plane (four bytes
+    /// of UTF-8: emoji, historic scripts, rare CJK) is counted as: the
+    /// strict bound, its UTF-8 length
+    pub const ASTRAL_TOKENS_PER_CHAR: usize = 4;
+
+    /// The redactor's `max_tokens` unless configured otherwise
+    pub const MAX_TOKENS: u32 = 64_000;
+
+    /// The tokens a case may be estimated at for a redactor run with
+    /// `max_tokens`: four fifths of it, the fifth left as headroom for the
+    /// estimate's error
+    pub const fn budget(max_tokens: u32) -> usize {
+        max_tokens as usize * 4 / 5
+    }
+
+    /// The tokens `text` is counted as: ASCII at [`CHARS_PER_TOKEN`]
+    /// characters a token (rounded up), each other character at
+    /// [`BMP_TOKENS_PER_CHAR`] or [`ASTRAL_TOKENS_PER_CHAR`]
+    pub fn tokens(text: &str) -> usize {
+        let mut ascii = 0usize;
+        let mut other = 0usize;
+        for c in text.chars() {
+            match c.len_utf8() {
+                1 => ascii += 1,
+                4 => other += ASTRAL_TOKENS_PER_CHAR,
+                _ => other += BMP_TOKENS_PER_CHAR,
+            }
+        }
+        ascii.div_ceil(CHARS_PER_TOKEN) + other
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// ASCII at three a token, rounded up, and each other character at
+        /// its plane's bound
+        #[test]
+        fn tokens_counts_each_script_at_its_bound() {
+            assert_eq!(tokens(""), 0);
+            assert_eq!(tokens("abc"), 1);
+            assert_eq!(tokens("abcd"), 2);
+            assert_eq!(tokens("é"), 2);
+            assert_eq!(tokens("申"), 2);
+            assert_eq!(tokens("\u{1F600}"), 4);
+            assert_eq!(tokens("ab申\u{1F600}"), 1 + 2 + 4);
+        }
+
+        /// A full-length statement in a script of two-byte or three-byte
+        /// characters fits the default budget, and one of emoji does not
+        #[test]
+        fn a_full_length_statement_against_the_default_budget() {
+            let max = crate::limits::appeal::STATEMENT_MAX_CHARS;
+            let budget = budget(MAX_TOKENS);
+            assert_eq!(budget, 51_200);
+            for unit in ["申", "é", "ж"] {
+                assert_eq!(tokens(&unit.repeat(max)), 32_768);
+                assert!(tokens(&unit.repeat(max)) < budget);
+            }
+            assert!(tokens(&"\u{1F600}".repeat(max)) > budget);
+        }
+    }
 }
 
 impl FilingProblem {
+    /// [`StatementTooManyTokens`](Self::StatementTooManyTokens) if
+    /// `statement` counts as more than `budget` [`redactor::tokens`]
+    pub fn statement_tokens(statement: &str, budget: usize) -> Option<Self> {
+        (redactor::tokens(statement) > budget)
+            .then_some(Self::StatementTooManyTokens)
+    }
+
     /// What is wrong with `statement`'s text, if anything: empty, or over
     /// [`appeal::STATEMENT_MAX_CHARS`](crate::limits::appeal::STATEMENT_MAX_CHARS)
     /// characters. The one count of a statement's length.
@@ -860,6 +966,33 @@ mod tests {
         for n in ["1.", "2.", "3."] {
             assert!(rendered.contains(n), "numbered list missing {n}");
         }
+    }
+
+    /// Too many tokens says to shorten the statement, and claims no count:
+    /// the count is an estimate, and the statement is within its
+    /// character limit
+    #[test]
+    fn too_many_tokens_says_to_shorten_and_names_no_number() {
+        let emoji =
+            "\u{1F600}".repeat(crate::limits::appeal::STATEMENT_MAX_CHARS);
+        assert_eq!(FilingProblem::statement(&emoji), None);
+        let budget = redactor::budget(redactor::MAX_TOKENS);
+        let problem = FilingProblem::statement_tokens(&emoji, budget).unwrap();
+        assert_eq!(problem, FilingProblem::StatementTooManyTokens);
+        assert_eq!(FilingProblem::statement_tokens("short", budget), None);
+        let text = problem.to_string();
+        assert!(text.contains("Shorten it"), "{text}");
+        assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text}");
+        assert!(!text.contains("character"), "{text}");
+        let json = serde_json::to_value(&problem).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"problem": "statement_too_many_tokens"})
+        );
+        assert_eq!(
+            serde_json::from_value::<FilingProblem>(json).unwrap(),
+            problem
+        );
     }
 
     /// One problem reads as one problem, not "1 problems".
