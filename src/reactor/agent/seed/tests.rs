@@ -8048,6 +8048,17 @@ fn a_second_inbox_read_keeps_its_header() {
         );
     }
     assert!(first.contains("the text between the tags the sender's"));
+    // More waiting than one read returns: the rest stay unread
+    let mut more = inbox;
+    more.unread = 45;
+    let text = super::prompt::format_inbox(&more, &once);
+    assert!(
+        text.starts_with(
+            "1 message(s): 45 unread before this read, of which these are 1 \
+             (at most 40 a read;"
+        ),
+        "{text}"
+    );
     assert!(
         second.contains(
             "Each is a `<message>` element, as in your first read of the \

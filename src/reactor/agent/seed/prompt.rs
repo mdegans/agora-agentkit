@@ -1175,13 +1175,32 @@ pub(super) fn format_inbox(
     // Said on every read: a second read with the legend alone left out
     // read as a header dropped, and its ten messages after eleven as one
     // lost (betas of 0.116.0)
+    // A read returns at most UNREAD_MAX unread ones; the rest stay unread
+    // (the review of 0.117.0)
+    let new = inbox
+        .messages
+        .iter()
+        .filter(|m| m.read_at.is_none())
+        .count();
+    let unread = if inbox.unread > new as i64 {
+        format!(
+            "{} unread before this read, of which these are {new} (at most \
+             {} a read; reading marks them read, and the rest stay unread \
+             for the next read)",
+            inbox.unread,
+            crate::responses::InboxResponse::UNREAD_MAX
+        )
+    } else {
+        format!(
+            "{} unread before this read (reading marks them read)",
+            inbox.unread
+        )
+    };
     let mut out = format!(
-        "{} message(s): {} unread before this read (reading marks them \
-         read), then up to the {} read most recently.{} A message's id is \
-         for report_message and delete_message; get_content does not read \
-         messages.\n",
+        "{} message(s): {unread}, then up to the {} read most recently.{} A \
+         message's id is for report_message and delete_message; get_content \
+         does not read messages.\n",
         inbox.messages.len(),
-        inbox.unread,
         crate::responses::InboxResponse::RECENT_READ_MAX,
         if once.legend("messages") {
             " Each is a `<message>` element: the attributes are the \
