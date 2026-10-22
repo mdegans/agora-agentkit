@@ -32,11 +32,12 @@ fn legacy(id: &str) -> GetContentInput {
 #[test]
 fn the_steward_examples_parse_and_print_back() {
     for s in [
-        "agora://gov/constitution",
-        "agora://gov/protocol",
-        "agora://gov/calendar",
-        "agora://gov/prompts",
-        "agora://gov/prompts/tier2_reviewer",
+        "agora://constitution",
+        "agora://constitution?version=0.3",
+        "agora://protocol",
+        "agora://calendar",
+        "agora://prompts",
+        "agora://prompts/tier2_reviewer",
         "agora://gov/GOV-2026-0006",
         "agora://gov/APP-2026-0003",
         "agora://gov/AMD-2026-0001",
@@ -285,7 +286,7 @@ fn refusals_say_why_and_show_both_forms() {
         ("agora://c/meta", "\"c\" is not a kind of link"),
         ("agora://p/7ad26ccd", "\"p\" is not a kind of link"),
         ("agora://GOV-2026-0006", "agora://gov/GOV-2026-0006 reads"),
-        ("agora://gov/nothing", "neither a governance entry"),
+        ("agora://gov/nothing", "not a governance entry"),
         ("agora://post/xyz", "not a post's or comment's id"),
         ("agora://post", "the id is missing"),
         ("agora://post/7ad26ccd/more", "takes one id"),
@@ -631,15 +632,62 @@ fn profile_is_not_a_kind_agent_is() {
 
 #[test]
 fn a_constitution_version_reads_that_version() {
-    let l = link("agora://gov/constitution?version=0.3");
+    let l = link("agora://constitution?version=0.3");
     assert_eq!(
         l,
         AgoraLink::Constitution(GetConstitutionInput {
             version: Some("0.3".into())
         })
     );
-    assert_eq!(l.to_string(), "agora://gov/constitution?version=0.3");
+    assert_eq!(l.to_string(), "agora://constitution?version=0.3");
     assert_eq!(l.tool(), "get_constitution");
+}
+
+#[test]
+fn documents_are_top_level_and_never_under_gov() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let page = "https://subliminal.technology/agora";
+    for (slug, doc) in [
+        ("constitution", PlatformDoc::Constitution),
+        ("protocol", PlatformDoc::GovernanceProtocol),
+        ("calendar", PlatformDoc::Calendar),
+        ("prompts", PlatformDoc::Prompts),
+        (
+            "prompts/tier2_reviewer",
+            "prompt:tier2_reviewer".parse().unwrap(),
+        ),
+    ] {
+        let l = AgoraLink::from(doc);
+        let shown = format!("agora://{slug}");
+        assert_eq!(l.to_string(), shown);
+        for s in [shown.clone(), format!("{page}/{slug}")] {
+            let parsed = AgoraLink::parse_at(&s, Some(&site))
+                .unwrap_or_else(|e| panic!("{s}: {e}"));
+            assert_eq!(parsed, l, "{s}");
+            assert_eq!(parsed.to_string(), shown, "{s}");
+        }
+        // Refused under gov/, naming the link
+        let e = refused(&format!("agora://gov/{slug}"));
+        assert!(e.contains(&format!("this one is {shown}")), "{e}");
+    }
+    let versioned = AgoraLink::Constitution(GetConstitutionInput {
+        version: Some("0.3".into()),
+    });
+    for s in [
+        "agora://constitution?version=0.3",
+        "https://subliminal.technology/agora/constitution?version=0.3",
+    ] {
+        let parsed = AgoraLink::parse_at(s, Some(&site)).unwrap();
+        assert_eq!(parsed, versioned, "{s}");
+        assert_eq!(parsed.to_string(), "agora://constitution?version=0.3");
+    }
+    assert_eq!(versioned.tool(), "get_constitution");
+    assert!(
+        refused("agora://gov/constitution?version=0.3")
+            .contains("this one is agora://constitution?version=0.3")
+    );
+    assert!(refused("agora://constitution/0.3").contains("not a document"));
+    assert!(refused("agora://protocol?bogus=1").contains("bogus"));
 }
 
 #[test]
@@ -652,7 +700,10 @@ fn page_urls_of_this_site_read_as_their_links() {
     let base = "https://subliminal.technology/agora";
     for (page, as_link) in [
         ("/governance/GOV-2026-0006", "agora://gov/GOV-2026-0006"),
-        ("/governance/protocol", "agora://gov/protocol"),
+        ("/governance/protocol", "agora://protocol"),
+        ("/protocol", "agora://protocol"),
+        ("/prompts", "agora://prompts"),
+        ("/prompts/tier2_reviewer", "agora://prompts/tier2_reviewer"),
         (
             "/governance?type=council_decision",
             "agora://gov?type=council_decision",
@@ -665,8 +716,8 @@ fn page_urls_of_this_site_read_as_their_links() {
             "/governance?revisions=1",
             "agora://gov?include_revisions=true",
         ),
-        ("/constitution", "agora://gov/constitution"),
-        ("/calendar", "agora://gov/calendar"),
+        ("/constitution", "agora://constitution"),
+        ("/calendar", "agora://calendar"),
         (
             "/obligations?status=open",
             "agora://gov?status=open&view=obligations",
@@ -728,7 +779,7 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
             "round does not apply to a data set,",
         ),
         (
-            "agora://gov/prompts?detail=summary",
+            "agora://prompts?detail=summary",
             "detail does not apply to a document, which takes no options",
         ),
         (
@@ -773,7 +824,7 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         "agora://gov/GOV-2026-0016?detail=summary",
         "agora://gov/DATA-2026-0001/a.md?lines=1-5",
         "agora://post/7ad26ccd?detail=summary&comment_budget=8192",
-        "agora://gov/constitution",
+        "agora://constitution",
     ] {
         assert_eq!(link(s).as_read().unwrap().conflict(), None, "{s}");
     }
@@ -871,7 +922,7 @@ fn an_empty_option_is_refused() {
             "agora://gov/GOV-2026-0016?version=",
             "version= is empty: give it latest or original",
         ),
-        ("agora://gov/constitution?version=", "version= is empty"),
+        ("agora://constitution?version=", "version= is empty"),
         (
             "agora://post/7ad26ccd?comment_budget=",
             "comment_budget= is empty: give it a number of bytes, 4096",
@@ -921,7 +972,7 @@ fn a_read_link_names_its_kinds_options() {
              comment_budget",
         ),
         (
-            "agora://gov/calendar?detail=summary",
+            "agora://calendar?detail=summary",
             "detail does not apply to a document, which takes no options",
         ),
         (
@@ -1004,7 +1055,7 @@ proptest! {
             1 => ("agora://gov", &["GOV-2026-0016"]),
             2 => ("agora://gov", &["DATA-2026-0001"]),
             3 => ("agora://gov", &["DATA-2026-0001", "votes", "index.md"]),
-            _ => ("agora://gov", &["constitution"]),
+            _ => ("agora://constitution", &[]),
         };
         let mut url = Url::parse(base).unwrap();
         {
@@ -1110,4 +1161,83 @@ fn history_is_inline_in_the_schema() {
             .unwrap()
             .contains("revision")
     );
+}
+
+#[test]
+fn content_takes_any_id_get_content_takes_as_one_segment() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    for (encoded, canonical) in [
+        ("GOV-2026-0006", "agora://gov/GOV-2026-0006"),
+        ("TEST-2026-0001", "agora://gov/TEST-2026-0001"),
+        ("constitution", "agora://constitution"),
+        ("prompt%3Atier2_reviewer", "agora://prompts/tier2_reviewer"),
+        (
+            "DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md",
+            "agora://gov/DATA-2026-0001/votes/index.md?commit=89fe7c6",
+        ),
+        (
+            "DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md%3A110-300",
+            "agora://gov/DATA-2026-0001/votes/index.md?lines=110-300&commit=89fe7c6",
+        ),
+        ("7ad26ccd", "agora://content/7ad26ccd"),
+    ] {
+        let given = format!("agora://content/{encoded}");
+        let l = link(&given);
+        assert_eq!(l, link(canonical), "{given}");
+        assert_eq!(l.to_string(), canonical, "{given}");
+        // The same id, unencoded, as get_content takes it
+        let id = percent_encoding::percent_decode_str(encoded)
+            .decode_utf8()
+            .unwrap();
+        assert_eq!(l, link(&id), "{given}");
+        // And the site's page of it
+        let page =
+            format!("https://subliminal.technology/agora/content/{encoded}");
+        assert_eq!(
+            AgoraLink::parse_at(&page, Some(&site)).unwrap(),
+            l,
+            "{page}"
+        );
+    }
+    // A governance id is a `Read`; a citation's id is its `DataCitation`
+    assert!(matches!(
+        link("agora://content/GOV-2026-0006"),
+        AgoraLink::Read(_)
+    ));
+    let r = read("agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md");
+    let ContentRef::DataCitation(c) = &r.id else {
+        panic!("{r:?}")
+    };
+    assert_eq!(c.path.as_str(), "votes/index.md");
+    // A read's options still apply
+    assert_eq!(
+        link("agora://content/GOV-2026-0006?round=2"),
+        AgoraLink::round("GOV-2026-0006".parse().unwrap(), 2)
+    );
+    // post/ and comment/ keep taking only a post's or comment's id
+    for s in [
+        "agora://post/GOV-2026-0006",
+        "agora://comment/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md",
+    ] {
+        assert!(refused(s).contains("not a post's or comment's id"), "{s}");
+    }
+    for (s, why) in [
+        (
+            "agora://content/DATA-2026-0001:89fe7c6:votes/index.md",
+            "%2F",
+        ),
+        ("agora://content/nothing", "not an id get_content takes"),
+        (
+            "agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2F..%2Fx",
+            "no empty, `.` or `..` parts",
+        ),
+        (
+            "agora://content/GOV-2026-0006?commit=89fe7c6",
+            "data set's file",
+        ),
+        ("agora://content/GOV-2026-0006?attachment=x", "in the path"),
+    ] {
+        let e = refused(s);
+        assert!(e.contains(why), "{s}: {e}");
+    }
 }

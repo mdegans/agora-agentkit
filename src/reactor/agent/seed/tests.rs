@@ -5948,7 +5948,7 @@ async fn documents_read_once_titled() {
     });
     let mut agent = agent(&server, quiet_config());
     seat_start(&mut agent);
-    for l in ["agora://gov/constitution", "agora://gov/prompts"] {
+    for l in ["agora://constitution", "agora://prompts"] {
         agent
             .handle(tool_use_message(
                 "fetch_agora_link",
@@ -5970,9 +5970,9 @@ async fn documents_read_once_titled() {
     assert!(rendered.contains("(Version sha256:0123456789abcdef.)"));
     assert!(
         rendered.contains(
-            "Read one with `agora://gov/prompts/<name>`, e.g. \
-             `agora://gov/prompts/tier2_reviewer`; also \
-             `agora://gov/constitution`."
+            "Read one with `agora://prompts/<name>`, e.g. \
+             `agora://prompts/tier2_reviewer`; also \
+             `agora://constitution`."
         ),
         "{rendered}"
     );
@@ -7754,4 +7754,127 @@ async fn a_pointer_never_names_a_read_that_pointed() {
         !last.contains("shown in your read of GOV-2026-0017, ~"),
         "a pointer named the fallback alone: {last}"
     );
+}
+
+/// Every read of a TEST record shows [`TEST_LABEL`] in its own result:
+/// the record, a round, the same round at the other version (the
+/// pointer), an attachment, the summary and its history. Served with the
+/// label in the title, as the server does, and without
+///
+/// [`TEST_LABEL`]: crate::govlog::TEST_LABEL
+#[tokio::test]
+async fn every_read_of_a_test_record_shows_the_label() {
+    use crate::govlog::TEST_LABEL;
+    for title in [
+        format!("{TEST_LABEL}. A test of the witness toolset"),
+        "A test of the witness toolset".to_string(),
+    ] {
+        let server = MockServer::start();
+        let body = |data: Option<serde_json::Value>| {
+            let mut body = governance_content("TEST-2026-0001", None);
+            body["entry_type"] = "test".into();
+            body["title"] = title.clone().into();
+            body["summary"] =
+                format!("**{TEST_LABEL}.**\n\nApproved 5-0.").into();
+            body["total_rounds"] = 2.into();
+            body["round_bytes"] = serde_json::json!([100, 200]);
+            body["amendments"] = serde_json::json!([
+                {"id": "AMD-2026-0040", "kind": "revision", "basis": "x",
+                 "note": "N", "created_at": "2026-10-02T00:00:00Z"}
+            ]);
+            body["revisions"] = serde_json::json!(["AMD-2026-0040"]);
+            body["attachments"] = serde_json::json!([
+                {"name": "provenance.json", "note": "What ran", "bytes": 20}
+            ]);
+            if let Some(mut data) = data {
+                data["agora_test"] = 1.into();
+                data["inner_type"] = "council_decision".into();
+                body["data"] = data;
+            }
+            body
+        };
+        let round = |version: &str| {
+            let mut b = body(Some(serde_json::json!({"inner": {"rounds": [
+                {"number": 2, "responses": [{"role": "lawyer", "vote": "yes",
+                 "rationale": "SECOND_ROUND"}]}
+            ]}})));
+            b["round"] = 2.into();
+            b["version"] = version.into();
+            b
+        };
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/TEST-2026-0001")
+                .query_param("round", "2")
+                .query_param("version", "original");
+            then.status(200).json_body(round("original"));
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/TEST-2026-0001")
+                .query_param("round", "2")
+                .is_true(|req| !has_param(req, "version"));
+            then.status(200).json_body(round("latest"));
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/TEST-2026-0001")
+                .query_param("attachment", "provenance.json");
+            let mut b = body(Some(serde_json::json!({"inner": {
+                "attachments": [{"name": "provenance.json",
+                    "content": "{\"commit\":\"0000000\"}"}]
+            }})));
+            b["attachment"] = "provenance.json".into();
+            then.status(200).json_body(b);
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/TEST-2026-0001")
+                .query_param("detail", "summary");
+            then.status(200).json_body(body(None));
+        });
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/TEST-2026-0001")
+                .is_true(|req| {
+                    !has_param(req, "detail")
+                        && !has_param(req, "round")
+                        && !has_param(req, "attachment")
+                });
+            then.status(200).json_body(body(Some(serde_json::json!({
+                "inner": two_round_record()
+            }))));
+        });
+        let mut agent = agent(
+            &server,
+            SeedConfig {
+                max_rounds: 30,
+                ..quiet_config()
+            },
+        );
+        seat_start(&mut agent);
+        for input in [
+            serde_json::json!({"id": "TEST-2026-0001"}),
+            serde_json::json!({"id": "TEST-2026-0001", "round": 2}),
+            serde_json::json!({"id": "TEST-2026-0001", "round": 2,
+                               "version": "original"}),
+            serde_json::json!({"id": "TEST-2026-0001",
+                               "attachment": "provenance.json"}),
+            serde_json::json!({"id": "TEST-2026-0001", "detail": "summary"}),
+            serde_json::json!({"id": "TEST-2026-0001", "detail": "summary",
+                               "history": true}),
+        ] {
+            let before = transcript(&agent).len();
+            agent
+                .handle(tool_use_message("get_content", input.clone()))
+                .await
+                .unwrap();
+            let result = transcript(&agent)[before..].to_string();
+            assert!(result.contains(TEST_LABEL), "{title}: {input}: {result}");
+            // Once at the top, not twice in the header
+            let header: String =
+                result.lines().take(3).collect::<Vec<_>>().join("\n");
+            assert!(header.matches(TEST_LABEL).count() <= 1, "{result}");
+        }
+    }
 }

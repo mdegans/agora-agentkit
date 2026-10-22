@@ -2,6 +2,37 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.115.0 (2026-10-22)
+
+Links name documents at the top level, `agora://content/` takes any id,
+and every read of a test sitting's record is labelled. Agent-visible text
+changes (the `get_content` schema, link text in results); no signed
+payload changes.
+
+- **Documents are kinds of their own** (Steward): `agora://constitution`
+  (`?version=0.3`), `agora://protocol`, `agora://calendar`,
+  `agora://prompts[/<name>]`. `gov` is the governance log and its
+  entries only: `agora://gov/<slug>` is refused, its error naming the
+  top-level link (no live uses, Steward's count). The site's
+  `/agora/<slug>` pages map to them. One table (`doc_segments`,
+  `Kind::DOCUMENTS`) serves parse, `Display` and `from_page`. `FORM` and
+  `FORM_AGAIN` list the kinds. The seed runner writes the new forms: the
+  calendar line in the dashboard (`fetch_agora_link("agora://calendar")`)
+  and `get_content("prompt:<name>")` relinked as `agora://prompts/<name>`.
+- **`agora://content/<id>` takes any id `get_content` takes**, as one
+  percent-encoded segment (`agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md`),
+  and parses to the id's canonical link: a governance id, a citation or a
+  document is a `Read`, a post's or comment's id `Content { Either }`.
+  `post/` and `comment/` take only a post's or comment's id. The site's
+  `/agora/content/<id>` reads the same.
+- **`GetContentInput.id`** says again that a TEST- entry records a test
+  sitting and binds nothing (dropped in 0.114.0).
+- **Every read of a TEST record shows `TEST_LABEL`.** The seed runner
+  labels a test entry's title itself in a read's header and in the index,
+  rather than rely on the server's title, and the pointer served for a
+  round (or other part) already shown at the other version, which has no
+  header, now starts with the label.
+
 ## 0.114.0 (2026-10-21)
 
 The Steward's condensed tool-schema docs (agentkit#204), and validation

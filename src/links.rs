@@ -2,8 +2,8 @@
 //! website, plus query parameters that are the API's own input types.
 //!
 //! ```text
-//! agora://gov/constitution                 agora://gov/protocol
-//! agora://gov/calendar                     agora://gov/prompts[/<name>]
+//! agora://constitution[?version=0.3]      agora://protocol
+//! agora://calendar                         agora://prompts[/<name>]
 //! agora://gov/GOV-2026-0006                agora://gov/GOV-2026-0010/clerk-reads
 //! agora://gov/DATA-2026-0010/<path>?lines=586-627&commit=89fe7c6
 //! agora://gov?type=council_decision        agora://gov?view=obligations&status=open
@@ -11,10 +11,14 @@
 //! agora://agent/<name> agora://feed?sort=active agora://search?q=<words>
 //! ```
 //!
+//! `gov` is the governance log and its entries; a document is its own
+//! kind.
+//!
 //! The host is a kind word, always lowercase; ids live in the path and keep
 //! their case. A post's or comment's id is its UUID or its first eight hex
-//! digits. `agora://content/<id>` is read too, for a post or a comment
-//! alike, as `get_content` reads an id; renderers name the kind.
+//! digits. `agora://content/<id>` takes any id `get_content` takes, as one
+//! percent-encoded segment (`agora://content/DATA-2026-0001%3A89fe7c6%3Avotes%2Findex.md`),
+//! and reads as that id's canonical link; renderers name the kind.
 //!
 //! A read's options are `get_content`'s own fields (`detail`, `round`,
 //! `version`, `comment_budget`, `lines`), plus `commit` for a data set's
@@ -52,7 +56,8 @@ pub const SCHEME: &str = "agora";
 pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
      agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds are \
-     gov, post, comment, community, agent, feed and search. A page URL of \
+     gov, constitution, protocol, calendar, prompts, post, comment, content, \
+     community, agent, feed and search. A page URL of \
      this site reads as the link it shows. An id as \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
      DATA-2026-0001:<commit>:<path>, constitution) reads too.";
@@ -60,7 +65,8 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
 /// [`FORM`] once it has been shown: what the seed runner says in its place
 /// after a session's first refusal
 pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
-     the kinds are gov, post, comment, community, agent, feed and search.";
+     the kinds are gov, constitution, protocol, calendar, prompts, post, \
+     comment, content, community, agent, feed and search.";
 
 /// What a link to a post or comment says it is. Not checked against what
 /// the id names: the read is `get_content`'s either way
@@ -97,7 +103,7 @@ pub enum AgoraLink {
     Search(SearchInput),
     /// `agora://agent/<name>`: `get_profile`
     Profile(GetProfileInput),
-    /// `agora://gov/constitution?version=0.3`: one version of the
+    /// `agora://constitution?version=0.3`: one version of the
     /// Constitution, as `get_constitution` reads it (0.112.0, beta round)
     Constitution(GetConstitutionInput),
 }
@@ -114,6 +120,10 @@ pub struct AgoraLinkError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Gov,
+    Constitution,
+    Protocol,
+    Calendar,
+    Prompts,
     Post,
     Comment,
     Content,
@@ -124,8 +134,12 @@ enum Kind {
 }
 
 impl Kind {
-    const ALL: [Kind; 8] = [
+    const ALL: [Kind; 12] = [
         Kind::Gov,
+        Kind::Constitution,
+        Kind::Protocol,
+        Kind::Calendar,
+        Kind::Prompts,
         Kind::Post,
         Kind::Comment,
         Kind::Content,
@@ -138,6 +152,10 @@ impl Kind {
     fn host(self) -> &'static str {
         match self {
             Kind::Gov => "gov",
+            Kind::Constitution => "constitution",
+            Kind::Protocol => "protocol",
+            Kind::Calendar => "calendar",
+            Kind::Prompts => "prompts",
             Kind::Post => "post",
             Kind::Comment => "comment",
             Kind::Content => "content",
@@ -146,6 +164,20 @@ impl Kind {
             Kind::Feed => "feed",
             Kind::Search => "search",
         }
+    }
+
+    /// The documents' kinds: `agora://<slug>/…`. [`doc_segments`] is each
+    /// one's path
+    const DOCUMENTS: [Kind; 4] = [
+        Kind::Constitution,
+        Kind::Protocol,
+        Kind::Calendar,
+        Kind::Prompts,
+    ];
+
+    /// The kind a document's path starts with
+    fn document(slug: &str) -> Option<Kind> {
+        Self::DOCUMENTS.into_iter().find(|k| k.host() == slug)
     }
 
     /// The link with this kind and nothing else, which every link is built
@@ -239,7 +271,7 @@ impl AgoraLink {
 
     /// The link as a [`Url`]
     pub fn to_url(&self) -> Url {
-        let (kind, segments, mut options, last) = match self {
+        let (kind, segments, options, last) = match self {
             Self::Content { kind, read } => {
                 let kind = match kind {
                     ContentKind::Post => Kind::Post,
@@ -285,7 +317,8 @@ impl AgoraLink {
                             options
                                 .insert("attachment".into(), a.clone().into());
                         }
-                        doc_segments(doc)
+                        let (kind, rest) = doc_link(doc);
+                        return url_of(kind, &rest, options, None);
                     }
                     // Not built by this module, but `Read` is public
                     ContentRef::Content(_) | ContentRef::ContentPrefix(_) => {
@@ -325,32 +358,43 @@ impl AgoraLink {
                 (Kind::Agent, vec![input.name.to_string()], Map::new(), None)
             }
             Self::Constitution(input) => {
-                (Kind::Gov, vec!["constitution".into()], to_map(input), None)
+                (Kind::Constitution, vec![], to_map(input), None)
             }
         };
-        let mut url = kind.base();
-        if !segments.is_empty() {
-            url.path_segments_mut()
-                .expect("a link has a host")
-                .extend(segments.iter().map(String::as_str));
-        }
-        // `q` first, then the rest by name, `commit` last
-        let first = options.remove("q");
-        if first.is_some() || !options.is_empty() || last.is_some() {
-            let mut query = url.query_pairs_mut();
-            if let Some(q) = first {
-                query.append_pair("q", &value_str(&q));
-            }
-            for (name, value) in &options {
-                query.append_pair(name, &value_str(value));
-            }
-            if let Some((name, value)) = last {
-                query.append_pair(name, &value);
-            }
-        }
-        protect_last_char(&mut url);
-        url
+        url_of(kind, &segments, options, last)
     }
+}
+
+/// A link of `kind` with these path segments and options, `last` written
+/// last
+fn url_of(
+    kind: Kind,
+    segments: &[String],
+    mut options: Map<String, Value>,
+    last: Option<(&str, String)>,
+) -> Url {
+    let mut url = kind.base();
+    if !segments.is_empty() {
+        url.path_segments_mut()
+            .expect("a link has a host")
+            .extend(segments.iter().map(String::as_str));
+    }
+    // `q` first, then the rest by name, `commit` last
+    let first = options.remove("q");
+    if first.is_some() || !options.is_empty() || last.is_some() {
+        let mut query = url.query_pairs_mut();
+        if let Some(q) = first {
+            query.append_pair("q", &value_str(&q));
+        }
+        for (name, value) in &options {
+            query.append_pair(name, &value_str(value));
+        }
+        if let Some((name, value)) = last {
+            query.append_pair(name, &value);
+        }
+    }
+    protect_last_char(&mut url);
+    url
 }
 
 /// What a pasted link loses at its end ([`unwrap_pasted`]): sentence
@@ -471,8 +515,9 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
         ["c", name] => (Kind::Community, vec![*name]),
         ["c", _, post] => (Kind::Post, vec![*post]),
         ["agent", name] => (Kind::Agent, vec![*name]),
+        ["content", id] => (Kind::Content, vec![*id]),
         ["governance"] => (Kind::Gov, vec![]),
-        ["governance", "protocol"] => (Kind::Gov, vec!["protocol"]),
+        ["governance", "protocol"] => (Kind::Protocol, vec![]),
         ["governance", id] => (Kind::Gov, vec![*id]),
         // The website shows an entry's attachments on its page, with no
         // page of their own: name the link that reads one
@@ -489,8 +534,9 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
             query.push(("view".into(), "obligations".into()));
             (Kind::Gov, vec![])
         }
-        ["calendar"] => (Kind::Gov, vec!["calendar"]),
-        ["constitution"] => (Kind::Gov, vec!["constitution"]),
+        [doc, rest @ ..] if let Some(kind) = Kind::document(doc) => {
+            (kind, rest.to_vec())
+        }
         ["search"] => (Kind::Search, vec![]),
         _ => return Err(no_link()),
     };
@@ -531,6 +577,15 @@ fn read_options(read: &GetContentInput) -> Map<String, Value> {
     options
 }
 
+/// A document's kind and the rest of its path
+fn doc_link(doc: &PlatformDoc) -> (Kind, Vec<String>) {
+    let mut segments = doc_segments(doc);
+    let kind = Kind::document(&segments[0]).expect("every document has a kind");
+    segments.remove(0);
+    (kind, segments)
+}
+
+/// A document's path: its kind's host, then the rest
 fn doc_segments(doc: &PlatformDoc) -> Vec<String> {
     match doc {
         PlatformDoc::Constitution => vec!["constitution".into()],
@@ -882,25 +937,39 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
 
     match kind {
         Kind::Gov => parse_gov(segments, directory, options),
+        Kind::Constitution
+        | Kind::Protocol
+        | Kind::Calendar
+        | Kind::Prompts => {
+            let segments =
+                std::iter::once(host).chain(segments).collect::<Vec<_>>();
+            parse_doc(&segments, options)
+        }
         Kind::Post | Kind::Comment | Kind::Content => {
             let [id] = segments.as_slice() else {
-                return Err(match segments.len() {
-                    0 => format!("agora://{host}/<id>: the id is missing"),
+                return Err(match (segments.len(), kind) {
+                    (0, _) => format!("agora://{host}/<id>: the id is missing"),
+                    (_, Kind::Content) => "agora://content/<id> takes one \
+                         id, its `/` written %2F"
+                        .into(),
                     _ => format!("agora://{host}/<id> takes one id"),
                 });
             };
-            let id = content_id(id)?;
             if options.contains_key("commit") {
                 return Err("commit= is for a data set's file".into());
             }
             let kind = match kind {
                 Kind::Post => ContentKind::Post,
                 Kind::Comment => ContentKind::Comment,
-                _ => ContentKind::Either,
+                // Any id get_content takes, read as the canonical link
+                _ => {
+                    return read_input(options, any_id(id)?, None)
+                        .map(AgoraLink::from);
+                }
             };
             Ok(AgoraLink::Content {
                 kind,
-                read: read_input(options, id, None)?,
+                read: read_input(options, content_id(id)?, None)?,
             })
         }
         Kind::Community => {
@@ -1015,6 +1084,29 @@ fn parse_gov(
     if commit.is_some() {
         return Err("commit= is for a data set's file".into());
     }
+    // A document is its own kind, never under gov/ (Steward, 0.115.0)
+    if Kind::document(first).is_some() {
+        let link = parse_doc(&segments, options).map_or_else(
+            |_| format!("agora://{}", segments.join("/")),
+            |l| l.to_string(),
+        );
+        return Err(format!(
+            "a document's link has no gov/: this one is {link}"
+        ));
+    }
+    Err(format!(
+        "agora://gov/{} is not a governance entry (GOV-2026-0006, \
+         DATA-2026-0001, …); a document's link is agora://constitution, \
+         protocol, calendar, prompts or prompts/<name>",
+        segments.join("/")
+    ))
+}
+
+/// A document's link: `segments` start with its kind
+fn parse_doc(
+    segments: &[String],
+    options: Map<String, Value>,
+) -> Result<AgoraLink, String> {
     if segments == ["constitution"] && options.contains_key("version") {
         // A version number reads that version, as get_constitution does
         return from_options::<GetConstitutionInput>(options)
@@ -1022,9 +1114,8 @@ fn parse_gov(
     }
     let doc = segments.join("/").parse::<PlatformDoc>().map_err(|_| {
         format!(
-            "agora://gov/{} is neither a governance entry (GOV-2026-0006, \
-                 DATA-2026-0001, …) nor a document (constitution, protocol, \
-                 calendar, prompts, prompts/<name>)",
+            "agora://{} is not a document (agora://constitution, protocol, \
+             calendar, prompts or prompts/<name>)",
             segments.join("/")
         )
     })?;
@@ -1041,6 +1132,17 @@ fn content_id(id: &str) -> Result<ContentRef, String> {
             "{id:?} is not a post's or comment's id (a UUID, or its \
                  first eight hex digits, like 7ad26ccd)"
         )
+    })
+}
+
+/// Any id `get_content` takes, for `agora://content/<id>`
+fn any_id(id: &str) -> Result<ContentRef, String> {
+    id.parse().map_err(|e: crate::ids::ContentRefError| {
+        if DataCitation::is_citation_shaped(id) {
+            e.to_string()
+        } else {
+            format!("{id:?} is not an id get_content takes")
+        }
     })
 }
 
