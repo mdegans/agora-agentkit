@@ -1829,6 +1829,32 @@ impl ReadTarget {
         }
     }
 
+    /// The refusal of `refused`, options it does not take, naming the ones
+    /// it does (and `more` beside them: a link's `commit`)
+    pub fn refusal(self, refused: &str, more: &[&str]) -> String {
+        let takes: Vec<&str> = self
+            .options()
+            .iter()
+            .map(|o| o.name())
+            .chain(more.iter().copied())
+            .collect();
+        let takes = match (self, takes.as_slice()) {
+            // The Constitution's versions are a link's, not an option of
+            // get_content's (betas of 0.116.0: "takes no options" beside a
+            // working agora://constitution?version=0.3)
+            (ReadTarget::Document, []) => "no options; one version of the \
+                 Constitution is a link of its own, like \
+                 agora://constitution?version=0.3"
+                .to_string(),
+            (_, []) => "no options".to_string(),
+            (_, takes) => takes.join(", "),
+        };
+        format!(
+            "{refused} does not apply to {}, which takes {takes}",
+            self.noun()
+        )
+    }
+
     /// The bounds of `comment_budget`, wherever it is taken: one copy, the
     /// schema's and the server's (which budgets a data file as it does a
     /// post's comments)
@@ -1873,19 +1899,7 @@ impl GetContentInput {
             .map(ReadOption::name)
             .collect();
         if !refused.is_empty() {
-            let takes = match allowed {
-                [] => "no options".to_string(),
-                _ => allowed
-                    .iter()
-                    .map(|o| o.name())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            };
-            return Some(format!(
-                "{} does not apply to {}, which takes {takes}",
-                refused.join(", "),
-                target.noun()
-            ));
+            return Some(target.refusal(&refused.join(", "), &[]));
         }
         if self.round == Some(0) {
             return Some("round=0: rounds count from 1".into());

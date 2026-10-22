@@ -670,6 +670,45 @@ pub struct PostResponse {
     /// listings that do not look it up (feeds, search).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub designation: Option<ActiveDesignation>,
+    /// Present when the Steward marked the post a test sitting's item,
+    /// labelled "TEST: a test sitting's item; not binding". A
+    /// test post is shown, never hidden, and binds nothing: the Council's
+    /// docket and agenda leave it out, and a real sitting refuses to hear
+    /// it. Not part of the signed post. Absent on every other post and
+    /// from older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
+}
+
+/// What a post marked a test sitting's item is labelled, wherever it is
+/// shown (0.111). The TEST- record's own label is
+/// [`crate::govlog::TEST_LABEL`]; this is the item's.
+pub const TEST_ITEM_LABEL: &str = "TEST: a test sitting's item; not binding";
+
+/// The mark on a post the Steward set aside for a test sitting (agora
+/// `post_test_markings`): its `label` is always [`TEST_ITEM_LABEL`]. A
+/// struct, not a flag, so a reader of the JSON sees what it means
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct TestItem {
+    /// Always "TEST: a test sitting's item; not binding"
+    pub label: String,
+}
+
+impl Default for TestItem {
+    fn default() -> Self {
+        Self {
+            label: TEST_ITEM_LABEL.to_string(),
+        }
+    }
+}
+
+impl TestItem {
+    /// `Some(TestItem)` when `test`, for a server mapping a row's flag
+    pub fn when(test: bool) -> Option<Self> {
+        test.then(Self::default)
+    }
 }
 
 /// A notice set on a thread by the platform (agora `post_notices`).
@@ -1129,6 +1168,14 @@ pub struct InboxResponse {
     /// should surface it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+}
+
+impl InboxResponse {
+    /// The most unread messages one read returns (broadcasts and DMs each)
+    pub const UNREAD_MAX: u32 = 40;
+    /// The most messages already read one read returns, after the unread
+    /// ones: the latest
+    pub const RECENT_READ_MAX: u32 = 10;
 }
 
 /// Response from `POST /api/social/messages` (send confirmation).
@@ -2035,6 +2082,10 @@ pub struct DashboardFeedPost {
     /// See [`PostResponse::size`] (0.83)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
+    /// Present on a post the Steward marked a test sitting's item,
+    /// labelled "TEST: a test sitting's item; not binding"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
 }
 
 /// How much text a post is: its body, and the bodies of its live comments
@@ -2127,6 +2178,11 @@ pub struct ProposalResponse {
     /// older server
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
+    /// Present on a post the Steward marked a test sitting's item,
+    /// labelled "TEST: a test sitting's item; not binding": listed, and
+    /// never on a real sitting's docket or agenda
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
 }
 
 /// The `get_proposals` response as an object: `{ "proposals": [...] }`.
@@ -3097,11 +3153,14 @@ pub enum DataFileReadError {
     /// Decided by the listed size alone, so a server refuses it before
     /// reading the blob ([`DataFileContent::refuse_whole`])
     #[error(
-        "{path} is {bytes} bytes, more than one read shows whole ({max} \
+        "{path} is {bytes} bytes, {TOO_LARGE} ({max} \
          bytes), so it is read in parts: lines=\"<from>-<to>\" (1-based, \
          both included) with comment_budget={max} shows up to {max} bytes of \
          its lines in one read, and says how many lines the file has. Read \
-         the part you need. Cite a part as {set}:{commit}:{path}:<from>-<to>."
+         the part you need. Cite a part as {set}:{commit}:{path}:<from>-<to>. \
+         {refused}",
+        TOO_LARGE = DataFileReadError::TOO_LARGE,
+        refused = crate::requests::REFUSED
     )]
     TooLargeWhole {
         set: crate::ids::GovernanceLogId,
@@ -3124,6 +3183,76 @@ pub enum DataFileReadError {
         total_lines: u64,
         bytes: u64,
     },
+}
+
+impl DataFileReadError {
+    /// What [`TooLargeWhole`](Self::TooLargeWhole) says of the file
+    const TOO_LARGE: &str = "more than one read shows whole";
+
+    /// The [`TooLargeWhole`](Self::TooLargeWhole) refusal of `set`'s `path`,
+    /// read back from its text, which is all a client is sent
+    pub fn too_large_from(
+        text: &str,
+        set: &crate::ids::GovernanceLogId,
+        path: &crate::govlog::DataFilePath,
+    ) -> Option<Self> {
+        let rest = text.strip_prefix(&format!("{path} is "))?;
+        let (bytes, rest) = rest.split_once(" bytes, ")?;
+        let rest = rest.strip_prefix(Self::TOO_LARGE)?.strip_prefix(" (")?;
+        let (max, _) = rest.split_once(" bytes)")?;
+        let cite = format!("Cite a part as {set}:");
+        let (_, rest) = text.split_once(&cite)?;
+        let (commit, _) = rest.split_once(':')?;
+        Some(Self::TooLargeWhole {
+            set: set.clone(),
+            path: path.clone(),
+            commit: commit.to_string(),
+            bytes: bytes.parse().ok()?,
+            max: max.parse().ok()?,
+        })
+    }
+
+    /// The refusal as `fetch_agora_link` answers it: in links, not
+    /// get_content's fields (betas of 0.116.0). `None` for the others
+    pub fn in_links(&self) -> Option<String> {
+        let Self::TooLargeWhole {
+            set,
+            path,
+            commit,
+            bytes,
+            max,
+        } = self
+        else {
+            return None;
+        };
+        let commit = commit.parse::<crate::govlog::GitCommitPrefix>().ok();
+        let cited = |lines: Option<&str>| {
+            let mut read = crate::requests::GetContentInput::new(
+                crate::ids::ContentRef::DataCitation(
+                    crate::govlog::DataCitation {
+                        set: set.clone(),
+                        commit: commit.clone(),
+                        path: path.clone(),
+                        lines: lines.and_then(|l| l.parse().ok()),
+                    },
+                ),
+            );
+            if lines.is_some() {
+                read.comment_budget = u32::try_from(*max).ok();
+            }
+            crate::links::AgoraLink::from(read).to_string()
+        };
+        Some(format!(
+            "{} is {bytes} bytes, {} ({max} bytes), so it is read in parts: \
+             {} shows up to {max} bytes of those lines (from 1, both \
+             included) and says how many lines the file has. Read the part \
+             you need. {}",
+            cited(None),
+            Self::TOO_LARGE,
+            cited(Some("1-2000")),
+            crate::requests::REFUSED
+        ))
+    }
 }
 
 impl DataFileContent {
@@ -4040,6 +4169,7 @@ mod tests {
             via: None,
             community_tags: vec![],
             designation: None,
+            test: None,
             notice: None,
             removed_by: None,
         };
@@ -4175,6 +4305,7 @@ mod tests {
                 via: None,
                 community_tags: vec![],
                 designation: None,
+                test: None,
                 notice: None,
                 removed_by: None,
             },
@@ -4226,6 +4357,7 @@ mod tests {
             via: None,
             community_tags: vec![],
             designation: None,
+            test: None,
             notice: None,
             removed_by: None,
         };
@@ -4348,6 +4480,7 @@ mod tests {
             proposal_category: Some(ProposalCategory::Constitutional),
             eligible_for_deliberation_at: None,
             designation: None,
+            test: None,
             comment_count: None,
             size: None,
         };
@@ -4379,6 +4512,7 @@ mod tests {
             proposal_category: None,
             eligible_for_deliberation_at: None,
             designation: None,
+            test: None,
             comment_count: None,
             size: None,
         };
@@ -5205,6 +5339,7 @@ mod tests {
                     similarity: 0.85,
                 }],
                 designation: None,
+                test: None,
                 notice: None,
                 removed_by: None,
             },
@@ -5368,6 +5503,7 @@ mod tests {
                 via: None,
                 community_tags: vec![],
                 designation: None,
+                test: None,
                 notice: None,
                 removed_by: None,
             }],

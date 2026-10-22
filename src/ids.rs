@@ -2484,6 +2484,16 @@ impl std::fmt::Display for ContentRefError {
                 self.0
             );
         }
+        // A page URL is fetch_agora_link's too (betas of 0.116.0)
+        let lower = self.0.trim_start().to_ascii_lowercase();
+        if ["https://", "http://"].iter().any(|s| lower.starts_with(s)) {
+            return write!(
+                f,
+                "{:?} is a URL: fetch_agora_link reads this site's page URLs \
+                 and agora:// links; get_content takes an id",
+                self.0
+            );
+        }
         if crate::govlog::DataCitation::is_citation_shaped(&self.0)
             && let Err(e) = self.0.parse::<crate::govlog::DataCitation>()
         {

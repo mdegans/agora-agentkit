@@ -106,8 +106,41 @@ fn part_keys(input: &GetContentInput) -> Vec<String> {
 
 /// `text` with each `get_content("<id>")` it names written as the id's
 /// link, and the template `get_content("prompt:<name>")` as
-/// `agora://prompts/<name>` (0.112.0)
+/// `agora://prompts/<name>` (0.112.0); then each prompt named alone,
+/// `` `prompt:<name>` ``, as its link too, so the prompts' index names
+/// them in one form (betas of 0.116.0)
 fn relink(text: &str) -> String {
+    relink_prompts(&relink_calls(text))
+}
+
+/// Each `` `prompt:<name>` `` in `text` as `` `agora://prompts/<name>` ``
+fn relink_prompts(text: &str) -> String {
+    const OPEN: &str = "`prompt:";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let Some(end) = after.find('`') else {
+            out.push_str(&rest[at..]);
+            return out;
+        };
+        match after[..end].parse::<ContentRef>() {
+            Ok(id @ ContentRef::Document(_)) => out
+                .push_str(&format!("`{}`", crate::links::AgoraLink::from(id))),
+            _ if &after[..end] == "prompt:<name>" => {
+                out.push_str("`agora://prompts/<name>`")
+            }
+            _ => out.push_str(&rest[at..at + 1 + end + 1]),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The `get_content("<id>")` half of [`relink`]
+fn relink_calls(text: &str) -> String {
     const OPEN: &str = "get_content(\"";
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -135,6 +168,11 @@ fn relink(text: &str) -> String {
     out.push_str(rest);
     out
 }
+
+/// A document read longer than this, in bytes, shows its size and outline
+/// first, once a session: the default budget a post's read shows whole
+pub(super) const DOCUMENT_SIZED_BYTES: usize =
+    GetContentInput::DEFAULT_COMMENT_BUDGET as usize;
 
 /// How a call refused for its input, before anything was charged, ends:
 /// the one mark [`is_refusal`] knows it by. A missing part's refusal has
@@ -266,10 +304,11 @@ pub struct Ledger {
     /// load and dropped on the next save.
     #[serde(default)]
     pub created_comments: HashSet<CommentId>,
-    /// Titles visible at perception plus titles posted this session, for
-    /// repetition checks. Refreshed each session; never persisted.
+    /// Threads visible at perception plus those posted this session, by
+    /// title, for repetition checks. Refreshed each session; never
+    /// persisted.
     #[serde(skip)]
-    pub titles_seen: Vec<String>,
+    pub titles_seen: Vec<(PostId, String)>,
     /// The post each comment shown this session is on (0.95), so a reply
     /// to one can be counted against its post. Never persisted.
     #[serde(skip)]
@@ -392,6 +431,10 @@ pub struct Agora {
     /// records and revisions' patches, so a second history fetches nothing
     /// again (review of 0.113.0). In memory only, gone with the session
     history_cache: HashMap<crate::ids::GovernanceLogId, serde_json::Value>,
+    /// Documents over [`DOCUMENT_SIZED_BYTES`] whose outline a read showed
+    /// this session, by [`ShownOnce::document_key`](super::ShownOnce::document_key):
+    /// the next read of one shows it whole
+    sized_documents: HashSet<String>,
 }
 
 impl Agora {
@@ -419,6 +462,7 @@ impl Agora {
             trash_listed: ShownIds::default(),
             by_link: false,
             history_cache: HashMap::new(),
+            sized_documents: HashSet::new(),
         }
     }
 
@@ -985,6 +1029,9 @@ impl Agora {
                         return Err(err(&e));
                     }
                     Err(e) => {
+                        if let Some(refused) = self.too_large(&input, &e) {
+                            return Err(refused.into());
+                        }
                         return Err(e
                             .range_refusal()
                             .map_or_else(|| err(&e), Content::from));
@@ -1364,16 +1411,26 @@ impl Agora {
                     ""
                 };
                 // The Constitution is in every seed prompt already
-                // (`embedded_constitution`): say so, rather than let a read
-                // pass for news (beta round of 0.112.0)
-                let held = if input.id.as_document()
-                    == Some(&crate::ids::PlatformDoc::Constitution)
-                {
-                    "(Your system prompt holds this text already: the \
-                     Constitution as Agora served it at the start of this \
-                     session.)\n\n"
-                } else {
-                    ""
+                // (`embedded_constitution`): the same text is a pointer
+                // there ([`Self::show_document`]); say when this one is
+                // not it (beta round of 0.112.0)
+                let constitution = input.id.as_document()
+                    == Some(&crate::ids::PlatformDoc::Constitution);
+                let held = match (
+                    constitution,
+                    self.shown_once.holds_constitution(&doc.text),
+                ) {
+                    (true, None) => {
+                        "(Your system prompt holds this text already: the \
+                         Constitution as Agora served it at the start of \
+                         this session.)\n\n"
+                    }
+                    (true, Some(false)) => {
+                        "(Your system prompt holds the Constitution as Agora \
+                         served it at the start of this session; this text \
+                         is not the same.)\n\n"
+                    }
+                    _ => "",
                 };
                 // A document whose text opens with its own title is not
                 // given a second one
@@ -1384,19 +1441,19 @@ impl Agora {
                 } else {
                     doc.text.clone()
                 };
-                if text.trim_start().starts_with("# ") {
+                let shown = if text.trim_start().starts_with("# ") {
                     format!("{held}(Version {v}{}.)\n\n{text}", doc.version)
-                        .into()
                 } else {
                     format!(
                         "{held}# {} ({v}{})\n\n{text}",
                         doc.title, doc.version
                     )
-                    .into()
-                }
+                };
+                self.show_document(&input.id, &doc.text, shown)
             }
             crate::responses::ContentResponse::Calendar(calendar) => {
-                prompt::format_calendar(&calendar).into()
+                let shown = prompt::format_calendar(&calendar);
+                self.show_document(&input.id, &shown.clone(), shown)
             }
         })
     }
@@ -1427,12 +1484,12 @@ impl Agora {
         }
         {
             let ledger = self.ledger.read().expect("ledger lock");
-            if prompt::is_title_repetitive(&args.title, &ledger.titles_seen) {
-                return Err(format!(
-                    "Title \"{}\" is too similar to existing posts. \
-                     Comment on an existing thread instead, or pick a \
-                     genuinely new topic.",
-                    args.title
+            let similar =
+                prompt::similar_titles(&args.title, &ledger.titles_seen);
+            if !similar.is_empty() {
+                return Err(prompt::similar_title_refusal(
+                    &args.title,
+                    &similar,
                 )
                 .into());
             }
@@ -1448,7 +1505,7 @@ impl Agora {
         let mut ledger = self.ledger.write().expect("ledger lock");
         self.shown.insert(post_id);
         ledger.created_posts.insert(post_id);
-        ledger.titles_seen.push(args.title.clone());
+        ledger.titles_seen.push((post_id, args.title.clone()));
         let mut out = match &args.poll {
             None => format!("Post created [post_id: {post_id}]"),
             Some(poll) => format!(
@@ -1604,6 +1661,88 @@ impl Agora {
         Ok(format_moderation_record(&record).map_err(err)?.into())
     }
 
+    /// The server's refusal of a whole read of a data file too large for
+    /// one, as the tool asked answers it: in links for `fetch_agora_link`,
+    /// and marked free either way (betas of 0.116.0: an HTTP 422 in
+    /// get_content's syntax)
+    fn too_large(
+        &self,
+        input: &GetContentInput,
+        e: &crate::client::Error,
+    ) -> Option<String> {
+        use crate::responses::DataFileReadError;
+        let (set, path) = match &input.id {
+            ContentRef::DataCitation(c) => (c.set.clone(), c.path.clone()),
+            ContentRef::Governance(set) => {
+                (set.clone(), input.attachment.as_deref()?.parse().ok()?)
+            }
+            _ => return None,
+        };
+        let text = e.api_body()?.message().to_string();
+        let refused = DataFileReadError::too_large_from(&text, &set, &path)?;
+        if self.by_link {
+            return refused.in_links();
+        }
+        Some(if text.ends_with(REFUSED) {
+            text
+        } else {
+            format!("{text} {REFUSED}")
+        })
+    }
+
+    /// A document as a read shows it `shown` (its text `text`): once a
+    /// session, then a pointer, and one over [`DOCUMENT_SIZED_BYTES`] by
+    /// its size and outline first (betas of 0.116.0: the Constitution,
+    /// already in the system prompt, printed twice, and the Protocol's
+    /// ~15k tokens with no warning)
+    fn show_document(
+        &mut self,
+        id: &ContentRef,
+        text: &str,
+        shown: String,
+    ) -> Content {
+        let name = if self.by_link {
+            crate::links::AgoraLink::from(id.clone()).to_string()
+        } else {
+            id.to_string()
+        };
+        self.show_named_document(&name, text, shown)
+    }
+
+    /// [`Self::show_document`], named as the read asked for it
+    fn show_named_document(
+        &mut self,
+        name: &str,
+        text: &str,
+        shown: String,
+    ) -> Content {
+        let key = super::ShownOnce::document_key(text);
+        if let Some(earlier) = self.shown_once.earlier_part(&key) {
+            return format!(
+                "(`{name}` is in your context already, the same text: shown \
+                 in {}, {}. Nothing was read.)",
+                earlier.read,
+                crate::threads::about_tokens(earlier.bytes)
+            )
+            .into();
+        }
+        if shown.len() > DOCUMENT_SIZED_BYTES
+            && self.sized_documents.insert(key.clone())
+        {
+            return format!(
+                "(`{name}` is {} ({} bytes), so this read shows its \
+                 outline; the same read again shows it whole.)\n\n{}",
+                crate::threads::about_tokens(shown.len() as u64),
+                shown.len(),
+                prompt::outline(text)
+            )
+            .into();
+        }
+        self.shown_once.begin(super::ShownOnce::read_of(name));
+        self.shown_once.mark_part(key, shown.len());
+        shown.into()
+    }
+
     /// `get_content`: the model reads the registry's description
     /// ([`crate::tools::AGENT_TOOLS`]), seated by
     /// [`describe_tool_responses`](super::describe_tool_responses)
@@ -1646,11 +1785,15 @@ impl Agora {
             AgoraLink::Profile(args) => self.get_profile(args).await,
             AgoraLink::Constitution(args) => {
                 match self.client.get_constitution(&args).await {
-                    Ok(c) => Ok(format!(
-                        "# The Agora Constitution (v{})\n\n{}",
-                        c.version, c.text
-                    )
-                    .into()),
+                    Ok(c) => {
+                        let name =
+                            AgoraLink::Constitution(args.clone()).to_string();
+                        let shown = format!(
+                            "# The Agora Constitution (v{})\n\n{}",
+                            c.version, c.text
+                        );
+                        Ok(self.show_named_document(&name, &c.text, shown))
+                    }
                     Err(e) => Err(err(e)),
                 }
             }
@@ -1926,6 +2069,7 @@ impl Agora {
         let mut asked = prompt::ObligationsAsked {
             owed_by: args.owed_by,
             status: args.status,
+            entry_type: args.entry_type,
             offset: args.offset.unwrap_or(0),
             unfiltered: None,
             cues: self.shown_once.cues(),

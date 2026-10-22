@@ -72,6 +72,9 @@ struct Inner {
     /// (0.112.0, beta round)
     parts: HashMap<String, Shown>,
     pending_parts: Vec<(String, Shown)>,
+    /// The [`text_key`] of the Constitution the system prompt holds, once
+    /// [`ShownOnce::hold_constitution`] says
+    constitution: Option<u64>,
     /// How the result being rendered points at further reads (0.112.0)
     cues: Cues,
     /// The agent's turns this session, counted by the tool's `on_turn`
@@ -168,6 +171,37 @@ impl ShownOnce {
         inner.pending_summaries_at.clear();
         inner.pending_parts.clear();
         inner.read = read.into();
+    }
+
+    /// A document's key among the parts shown: its text's, so one text is
+    /// one document whichever link or version read it (betas of 0.116.0)
+    pub fn document_key(text: &str) -> String {
+        format!("document {}", text_key(text))
+    }
+
+    /// The system prompt holds the Constitution `text`: a read of the same
+    /// text is a pointer to it, from the session's start
+    pub fn hold_constitution(&self, text: &str) {
+        let mut inner = self.0.write().expect("shown-once lock");
+        let key = text_key(text);
+        inner.constitution = Some(key);
+        inner.parts.insert(
+            Self::document_key(text),
+            Shown {
+                read: "your system prompt".into(),
+                bytes: text.trim().len() as u64,
+                raw: text.trim().len() as u64,
+                post: None,
+                turn: 0,
+            },
+        );
+    }
+
+    /// Whether the system prompt holds a Constitution, and it is `text`:
+    /// `None` when [`Self::hold_constitution`] was never called
+    pub fn holds_constitution(&self, text: &str) -> Option<bool> {
+        let inner = self.0.read().expect("shown-once lock");
+        inner.constitution.map(|k| k == text_key(text))
     }
 
     /// Where the part of a record `link` reads was shown this session

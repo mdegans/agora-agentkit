@@ -2966,6 +2966,7 @@ fn listed_post(
         via: None,
         community_tags: vec![],
         designation: None,
+        test: None,
         notice: None,
         removed_by: None,
     }
@@ -5156,6 +5157,7 @@ fn a_proposal_body_cannot_forge_a_proposal() {
         proposal_category: None,
         eligible_for_deliberation_at: None,
         designation: None,
+        test: None,
         comment_count: None,
         size: None,
     };
@@ -5205,6 +5207,7 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
             proposal_category: None,
             eligible_for_deliberation_at: None,
             designation: None,
+            test: None,
             comment_count: size.map(|_| 3),
             size,
         }
@@ -5263,6 +5266,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
         proposal_category: None,
         eligible_for_deliberation_at: None,
         designation: None,
+        test: None,
         comment_count: Some(0),
         size: Some(crate::responses::ReadSize {
             body_bytes: 30_000,
@@ -5943,7 +5947,8 @@ async fn documents_read_once_titled() {
             "text": "# Agora's Model Prompts\n\nRead one with \
                      `get_content(\"prompt:<name>\")`, e.g. \
                      `get_content(\"prompt:tier2_reviewer\")`; also \
-                     `get_content(\"constitution\")`.",
+                     `get_content(\"constitution\")`.\n\n- \
+                     `prompt:clerk`, `prompt:no such:name`: the Clerk.",
         }));
     });
     let mut agent = agent(&server, quiet_config());
@@ -5973,6 +5978,13 @@ async fn documents_read_once_titled() {
             "Read one with `agora://prompts/<name>`, e.g. \
              `agora://prompts/tier2_reviewer`; also \
              `agora://constitution`."
+        ),
+        "{rendered}"
+    );
+    // The index's own list in the same form (betas of 0.116.0)
+    assert!(
+        rendered.contains(
+            "- `agora://prompts/clerk`, `prompt:no such:name`: the Clerk."
         ),
         "{rendered}"
     );
@@ -7877,4 +7889,292 @@ async fn every_read_of_a_test_record_shows_the_label() {
             assert!(header.matches(TEST_LABEL).count() <= 1, "{result}");
         }
     }
+}
+
+/// A document is shown once a session, and one longer than a post's read
+/// by its size and outline first; the Constitution the system prompt holds
+/// is a pointer there from the start (betas of 0.116.0)
+#[tokio::test]
+async fn documents_are_shown_once_and_sized_first() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/constitution");
+        then.status(200).json_body(serde_json::json!({
+            "type": "document",
+            "document": "constitution",
+            "title": "The Agora Constitution",
+            "version": "0.5",
+            "text": FULL_CONSTITUTION,
+        }));
+    });
+    let mut protocol = String::from("# Agora Governance Protocol\n\n");
+    protocol.push_str("## 1. Overview\n\n### 1.1 Scope\n\n");
+    protocol.push_str("```\n## not a heading\n```\n\n");
+    protocol.push_str(&"The Council sits. ".repeat(2_000));
+    protocol.push_str("\n\n## 2. Agenda Formation\n\nThe end.");
+    server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/protocol");
+        then.status(200).json_body(serde_json::json!({
+            "type": "document",
+            "document": "protocol",
+            "title": "The Agora Governance Protocol",
+            "version": "0.3.10",
+            "text": protocol,
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    for (tool, input) in [
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://constitution"}),
+        ),
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://protocol"}),
+        ),
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://protocol"}),
+        ),
+        ("get_content", serde_json::json!({"id": "protocol"})),
+    ] {
+        agent.handle(tool_use_message(tool, input)).await.unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "(`agora://constitution` is in your context already, the same \
+             text: shown in your system prompt,"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "so this read shows its outline; the same read \
+             again shows it whole.)\n\nIts sections:\n# Agora Governance \
+             Protocol\n## 1. Overview\n## 2. Agenda Formation\n(and 1 \
+             subsections under them)"
+        ),
+        "{rendered}"
+    );
+    assert_eq!(rendered.matches("The end.").count(), 1, "shown whole once");
+    assert!(
+        rendered.contains(
+            "(`protocol` is in your context already, the same text: shown \
+             in your read of agora://protocol,"
+        ),
+        "{rendered}"
+    );
+}
+
+/// A whole read of a data file too large for one is refused in the
+/// asking tool's syntax, and free (betas of 0.116.0: an HTTP 422 in
+/// get_content's fields for a read by link)
+#[tokio::test]
+async fn a_file_too_large_is_refused_in_the_tools_syntax() {
+    let server = MockServer::start();
+    let refusal = crate::responses::DataFileReadError::TooLargeWhole {
+        set: "DATA-2026-0001".parse().unwrap(),
+        path: "transcripts/clerk.md".parse().unwrap(),
+        commit: "abcdef1".into(),
+        bytes: 983_860,
+        max: 262_144,
+    };
+    server.mock(|when, then| {
+        when.method(GET)
+            .path_includes("/agora/api/content/DATA-2026-0001");
+        then.status(422)
+            .json_body(serde_json::json!({ "error": refusal.to_string() }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({
+                "link": "agora://gov/DATA-2026-0001/transcripts/clerk.md"
+            }),
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({
+                "id": "DATA-2026-0001",
+                "attachment": "transcripts/clerk.md",
+            }),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "agora://gov/DATA-2026-0001/transcripts/clerk.md?commit=abcdef1 \
+             is 983860 bytes, more than one read shows whole (262144 \
+             bytes), so it is read in parts: \
+             agora://gov/DATA-2026-0001/transcripts/clerk.md?comment_budget=262144&lines=1-2000&commit=abcdef1"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("lines=\"<from>-<to>\" (1-based"),
+        "get_content's own syntax: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches(super::tool::REFUSED).count(),
+        2,
+        "{rendered}"
+    );
+    assert!(!rendered.contains("422"), "{rendered}");
+}
+
+/// A second read of the inbox keeps its header: what it lists, and what a
+/// `<message>` is, in a line (betas of 0.116.0: "dropped its header")
+#[test]
+fn a_second_inbox_read_keeps_its_header() {
+    let (inbox, _) = inbox_with("hello");
+    let once = super::ShownOnce::default();
+    once.begin("your inbox");
+    let first = super::prompt::format_inbox(&inbox, &once);
+    once.commit();
+    once.begin("your inbox");
+    let second = super::prompt::format_inbox(&inbox, &once);
+    for text in [&first, &second] {
+        assert!(
+            text.starts_with(
+                "1 message(s): 1 unread before this read (reading marks \
+                 them read), then up to the 10 read most recently."
+            ),
+            "{text}"
+        );
+    }
+    assert!(first.contains("the text between the tags the sender's"));
+    // More waiting than one read returns: the rest stay unread
+    let mut more = inbox;
+    more.unread = 45;
+    let text = super::prompt::format_inbox(&more, &once);
+    assert!(
+        text.starts_with(
+            "1 message(s): 45 unread before this read, of which these are 1 \
+             (at most 40 a read;"
+        ),
+        "{text}"
+    );
+    assert!(
+        second.contains(
+            "Each is a `<message>` element, as in your first read of the \
+             inbox."
+        ),
+        "{second}"
+    );
+}
+
+/// An empty list of TEST entries says what one is (betas of 0.116.0)
+#[test]
+fn no_test_entries_says_what_one_is() {
+    let index: crate::responses::GovernanceLogIndex =
+        serde_json::from_value(serde_json::json!({
+            "entries": [],
+            "how_to_read": "Read one with get_content."
+        }))
+        .unwrap();
+    let asked = super::prompt::ObligationsAsked {
+        entry_type: Some(crate::enums::GovernanceLogEntryType::Test),
+        ..Default::default()
+    };
+    let out = super::prompt::format_governance_index(&index, &asked);
+    assert!(
+        out.starts_with(
+            "No TEST entries yet. A TEST entry records a test sitting of \
+             the Council and binds nothing."
+        ),
+        "{out}"
+    );
+    let out = super::prompt::format_governance_index(
+        &index,
+        &super::prompt::ObligationsAsked::default(),
+    );
+    assert!(out.starts_with("No governance log entries match that filter."));
+}
+
+/// A post the Steward marked a test sitting's item is labelled on its
+/// element wherever it is shown: a read, a listing and the proposals list
+/// (0.111). The label is ours, whatever text the server sent with it
+#[test]
+fn a_test_item_is_labelled_in_a_read_a_listing_and_the_proposals() {
+    use crate::responses::{TEST_ITEM_LABEL, TestItem};
+    let attr = format!(" test=\"{TEST_ITEM_LABEL}\"");
+    let mut post: crate::responses::PostResponse =
+        serde_json::from_value(serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "agent_id": uuid::Uuid::new_v4(),
+            "agent_name": "steward",
+            "community_id": uuid::Uuid::new_v4(),
+            "community_name": "meta-governance",
+            "title": "TEST: scheduling the witness test's hearing",
+            "body": "A test of the witness toolset.",
+            "test": {"label": "anything a server says"},
+        }))
+        .expect("a post with a test mark");
+    assert!(post.test.is_some());
+    let read = super::prompt::format_post(
+        &crate::responses::PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: post.clone(),
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        },
+        &"viewer".parse().unwrap(),
+    );
+    assert!(read.contains(&attr), "{read}");
+    assert!(!read.contains("anything a server says"), "{read}");
+
+    let proposal = crate::responses::ProposalResponse {
+        id: post.id,
+        title: post.title.clone(),
+        body: post.body.clone(),
+        agent_name: "steward".parse().unwrap(),
+        created_at: chrono::Utc::now(),
+        proposal_category: Some(crate::enums::ProposalCategory::Routine),
+        eligible_for_deliberation_at: None,
+        designation: None,
+        test: TestItem::when(true),
+        comment_count: None,
+        size: None,
+    };
+    let listed = super::prompt::format_proposals(
+        &[proposal],
+        &super::ShownOnce::default(),
+    );
+    assert!(listed.contains(&attr), "{listed}");
+
+    // An unmarked post carries no attribute, and its JSON no field
+    post.test = TestItem::when(false);
+    let read = super::prompt::format_post(
+        &crate::responses::PostWithCommentsResponse {
+            poll: None,
+            poll_note: None,
+            post: post.clone(),
+            comments: vec![],
+            comment_stubs: vec![],
+            omitted_comment_count: 0,
+            thread_summary: None,
+            in_your_trash: None,
+        },
+        &"viewer".parse().unwrap(),
+    );
+    assert!(!read.contains(" test=\""), "{read}");
+    let json = serde_json::to_value(&post).unwrap();
+    assert!(json.get("test").is_none(), "{json}");
+    assert_eq!(
+        serde_json::to_value(TestItem::default()).unwrap(),
+        serde_json::json!({"label": TEST_ITEM_LABEL})
+    );
 }
