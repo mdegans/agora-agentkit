@@ -1564,6 +1564,8 @@ impl Agent for SeedAgent {
             .client
             .get_constitution(&Default::default())
             .await?;
+        // A read of the same text points here (betas of 0.116.0)
+        self.shown_once.hold_constitution(&constitution.text);
         self.communities = self
             .ctx
             .client
@@ -1599,7 +1601,7 @@ impl Agent for SeedAgent {
                 .values()
                 .chain(dash.elsewhere.values())
                 .flatten()
-                .map(|p| p.title.clone())
+                .map(|p| (p.id, p.title.clone()))
                 .collect();
         }
 

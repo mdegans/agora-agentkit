@@ -492,6 +492,22 @@ pub fn set_site(base: &Url) {
     let _ = SITE.set(base.clone());
 }
 
+/// The site [`set_site`] set, if any
+pub fn site() -> Option<&'static Url> {
+    SITE.get()
+}
+
+/// Whether `page` is on `site`: the same origin, or `http://` on the same
+/// host as an `https://` site (betas of 0.116.0: refused as "not this site")
+fn same_site(page: &Url, site: &Url) -> bool {
+    page.origin() == site.origin()
+        || (page.scheme() == "http"
+            && site.scheme() == "https"
+            && page.host() == site.host()
+            && page.port().is_none()
+            && site.port().is_none())
+}
+
 /// The page URL `page`'s link, as an `agora://` URL: the site's paths are
 /// the links' (`/agora/<kind>/…?…`), and `/agora/c/<name>[/<post>]` is
 /// still served, as a redirect
@@ -499,7 +515,7 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     let Some(site) = site else {
         return Err("this client knows no website to read page URLs of".into());
     };
-    if page.origin() != site.origin() {
+    if !same_site(page, site) {
         return Err(format!(
             "{} is not this site; Agora's pages are on {}",
             page.origin().ascii_serialization(),
@@ -530,14 +546,18 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     let (kind, segments): (Kind, &[&str]) = match parts.as_slice() {
         [] => (Kind::Feed, &[]),
         ["c", name] => (Kind::Community, std::slice::from_ref(name)),
+        // The Constitution's machine-readable URL, which its footer names
+        // (betas of 0.116.0)
+        ["api", "constitution"] => (Kind::Constitution, &[]),
         ["c", _, post] => (Kind::Post, std::slice::from_ref(post)),
         [kind, rest @ ..] => {
             match Kind::ALL.into_iter().find(|k| k.host() == *kind) {
                 Some(kind) => (kind, rest),
                 None => {
-                    return Err(moved(&parts, &query).unwrap_or_else(|| {
-                        format!("the page {} has no link", page.path())
-                    }));
+                    return Err(moved(&parts, &query, Old::Page)
+                        .unwrap_or_else(|| {
+                            format!("the page {} has no link", page.path())
+                        }));
                 }
             }
         }
@@ -554,9 +574,39 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     Ok(link)
 }
 
-/// A page the site served before its paths were the links' (0.115.0):
-/// what to say of it, naming its link
-fn moved(parts: &[&str], query: &[(String, String)]) -> Option<String> {
+/// What [`moved`] names its link for
+#[derive(Debug, Clone, Copy)]
+enum Old {
+    /// A page the site served before its paths were the links'
+    Page,
+    /// A link written as such a page's path: `agora://governance/…`
+    Link,
+}
+
+impl Old {
+    fn said(self) -> &'static str {
+        match self {
+            Old::Page => "the site no longer has this page",
+            Old::Link => "\"governance\" is not a kind of link",
+        }
+    }
+
+    fn whose(self) -> &'static str {
+        match self {
+            Old::Page => "the page's",
+            Old::Link => "the link's",
+        }
+    }
+}
+
+/// A page the site served before its paths were the links' (0.115.0), or
+/// a link written in its shape (betas of 0.116.0): what to say of it,
+/// naming its link
+fn moved(
+    parts: &[&str],
+    query: &[(String, String)],
+    old: Old,
+) -> Option<String> {
     let mut link = match parts {
         ["governance", "obligations"] | ["obligations"] => {
             let mut link = Kind::Gov.base();
@@ -596,18 +646,37 @@ fn moved(parts: &[&str], query: &[(String, String)]) -> Option<String> {
         link.set_query(None);
     }
     // Its options as a link would take them, else the page's link alone
+    let said = old.said();
     Some(
         match (parse_link(link.as_str()), parse_link(bare.as_str())) {
-            (Ok(l), _) => {
-                format!("the site no longer has this page; its link is {l}")
-            }
+            (Ok(l), _) => format!("{said}; its link is {l}"),
             (Err(e), Ok(l)) => format!(
-                "the site no longer has this page; its link is {l} (and of \
-             the page's options, {e})"
+                "{said}; its link is {l} (and of {} options, {e})",
+                old.whose()
             ),
-            (Err(e), Err(_)) => {
-                format!("the site no longer has this page: {e}")
-            }
+            (Err(e), Err(_)) => format!("{said}: {e}"),
+        },
+    )
+}
+
+/// A link whose kind is an id get_content takes (`agora://prompt:<name>`,
+/// `agora://GOV-2026-0006`): that id's link, to name in the refusal (betas
+/// of 0.116.0: `agora://prompt:<name>` was "invalid port number")
+fn id_as_kind(link: &str) -> Option<String> {
+    let rest = link.get(SCHEME.len() + 3..)?;
+    let whole = rest.split(['?', '#']).next()?.trim_end_matches('/');
+    // The whole path an id (a citation holds `/`), else its first part
+    let first = whole.split('/').next()?;
+    [(whole, "its"), (first, "that id's")].into_iter().find_map(
+        |(id, whose)| {
+            let id = percent_encoding::percent_decode_str(id)
+                .decode_utf8()
+                .ok()?;
+            let read = id.parse::<ContentRef>().ok()?;
+            Some(format!(
+                "{id} is an id, not a kind of link: {whose} link is {}",
+                AgoraLink::from(read)
+            ))
         },
     )
 }
@@ -903,7 +972,9 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
         return Err(format!("a link has no control characters ({c:?})"));
     }
     refuse_dot_segments(link)?;
-    let url = Url::parse(link).map_err(|e| format!("not a URL ({e})"))?;
+    let url = Url::parse(link).map_err(|e| {
+        id_as_kind(link).unwrap_or_else(|| format!("not a URL ({e})"))
+    })?;
     let Some(host) = url.host_str().filter(|_| !url.cannot_be_a_base()) else {
         return Err("write it agora://<kind>/…, with two slashes".into());
     };
@@ -919,12 +990,26 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
     let host = host.to_ascii_lowercase();
     let kind = Kind::ALL.into_iter().find(|k| k.host() == host);
     let Some(kind) = kind else {
+        if host == "governance" {
+            let segments: Vec<&str> = url
+                .path_segments()
+                .map(|s| s.filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+            let parts: Vec<&str> =
+                std::iter::once("governance").chain(segments).collect();
+            let query: Vec<(String, String)> =
+                url.query_pairs().into_owned().collect();
+            if let Some(why) = moved(&parts, &query, Old::Link) {
+                return Err(why);
+            }
+        }
+        if let Some(why) = id_as_kind(link) {
+            return Err(why);
+        }
         let hint = if host == "profile" {
-            " (an agent's link is agora://agent/<name>)".to_string()
-        } else if host.parse::<GovernanceLogId>().is_ok() {
-            format!(" (agora://gov/{} reads that entry)", host.to_uppercase())
+            " (an agent's link is agora://agent/<name>)"
         } else {
-            String::new()
+            ""
         };
         return Err(format!("{host:?} is not a kind of link{hint}"));
     };
@@ -1265,22 +1350,11 @@ fn read_input(
         .keys()
         .find(|k| !allowed.iter().any(|o| o.name() == k.as_str()))
     {
-        let takes = match allowed {
-            [] => "no options".to_string(),
-            _ => allowed
-                .iter()
-                .map(|o| o.name())
-                .chain(
-                    (target == crate::requests::ReadTarget::DataSet)
-                        .then_some("commit"),
-                )
-                .collect::<Vec<_>>()
-                .join(", "),
+        let more: &[&str] = match target {
+            crate::requests::ReadTarget::DataSet => &["commit"],
+            _ => &[],
         };
-        return Err(format!(
-            "{name} does not apply to {}, which takes {takes}",
-            target.noun()
-        ));
+        return Err(target.refusal(name, more));
     }
     options.insert("id".into(), Value::String(id.to_string()));
     if let Some(a) = attachment {

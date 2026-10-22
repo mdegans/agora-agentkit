@@ -285,7 +285,35 @@ fn refusals_say_why_and_show_both_forms() {
         ("agora://nope/x", "\"nope\" is not a kind of link"),
         ("agora://c/meta", "\"c\" is not a kind of link"),
         ("agora://p/7ad26ccd", "\"p\" is not a kind of link"),
-        ("agora://GOV-2026-0006", "agora://gov/GOV-2026-0006 reads"),
+        (
+            "agora://GOV-2026-0006",
+            "is an id, not a kind of link: its link is \
+             agora://gov/GOV-2026-0006",
+        ),
+        (
+            "agora://GOV-2026-0006/clerk-reads",
+            "that id's link is agora://gov/GOV-2026-0006",
+        ),
+        // Betas of 0.116.0: "not a URL (invalid port number)"
+        (
+            "agora://prompt:tier2_reviewer",
+            "its link is agora://prompts/tier2_reviewer",
+        ),
+        (
+            "agora://governance/GOV-2026-0006?detail=summary",
+            "\"governance\" is not a kind of link; its link is \
+             agora://gov/GOV-2026-0006?detail=summary",
+        ),
+        (
+            "agora://governance/protocol",
+            "its link is agora://protocol",
+        ),
+        (
+            "agora://protocol?detail=summary",
+            "detail does not apply to a document, which takes no options; \
+             one version of the Constitution is a link of its own, like \
+             agora://constitution?version=0.3",
+        ),
         ("agora://gov/nothing", "not a governance entry"),
         ("agora://post/xyz", "not a post's or comment's id"),
         ("agora://post", "the id is missing"),
@@ -809,10 +837,23 @@ fn page_urls_of_this_site_read_as_their_links() {
         ("/feed?sort=active", "agora://feed?sort=active"),
         ("/", "agora://feed"),
         ("", "agora://feed"),
+        // The Constitution footer's URL (betas of 0.116.0)
+        (
+            "/api/constitution?version=0.2",
+            "agora://constitution?version=0.2",
+        ),
     ] {
         let page = format!("{base}{page}");
         assert_eq!(at(&page), link(as_link), "{page}");
     }
+    // The same host over http is this site too (betas of 0.116.0)
+    assert_eq!(
+        at(&format!(
+            "{}/post/7ad26ccd",
+            base.replacen("https", "http", 1)
+        )),
+        link("agora://post/7ad26ccd")
+    );
     assert_eq!(at(&format!("<{base}/feed>.")), link("agora://feed"));
     for (page, why) in [
         ("https://example.com/agora/feed", "is not this site"),
@@ -1385,5 +1426,22 @@ fn the_kinds_are_exported_and_named_in_both_forms() {
                 "{kind}: {form}"
             );
         }
+    }
+}
+
+/// A URL given get_content is fetch_agora_link's (betas of 0.116.0)
+#[test]
+fn a_url_is_not_an_id_and_says_which_tool_reads_it() {
+    for url in [
+        "https://subliminal.technology/agora/post/7ad26ccd",
+        "HTTP://example.com",
+    ] {
+        let e = url.parse::<ContentRef>().unwrap_err().to_string();
+        assert!(
+            e.contains(
+                "is a URL: fetch_agora_link reads this site's page URLs"
+            ),
+            "{e}"
+        );
     }
 }

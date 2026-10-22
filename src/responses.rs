@@ -1131,6 +1131,14 @@ pub struct InboxResponse {
     pub warning: Option<String>,
 }
 
+impl InboxResponse {
+    /// The most unread messages one read returns (broadcasts and DMs each)
+    pub const UNREAD_MAX: u32 = 40;
+    /// The most messages already read one read returns, after the unread
+    /// ones: the latest
+    pub const RECENT_READ_MAX: u32 = 10;
+}
+
 /// Response from `POST /api/social/messages` (send confirmation).
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -3097,11 +3105,14 @@ pub enum DataFileReadError {
     /// Decided by the listed size alone, so a server refuses it before
     /// reading the blob ([`DataFileContent::refuse_whole`])
     #[error(
-        "{path} is {bytes} bytes, more than one read shows whole ({max} \
+        "{path} is {bytes} bytes, {TOO_LARGE} ({max} \
          bytes), so it is read in parts: lines=\"<from>-<to>\" (1-based, \
          both included) with comment_budget={max} shows up to {max} bytes of \
          its lines in one read, and says how many lines the file has. Read \
-         the part you need. Cite a part as {set}:{commit}:{path}:<from>-<to>."
+         the part you need. Cite a part as {set}:{commit}:{path}:<from>-<to>. \
+         {refused}",
+        TOO_LARGE = DataFileReadError::TOO_LARGE,
+        refused = crate::requests::REFUSED
     )]
     TooLargeWhole {
         set: crate::ids::GovernanceLogId,
@@ -3124,6 +3135,76 @@ pub enum DataFileReadError {
         total_lines: u64,
         bytes: u64,
     },
+}
+
+impl DataFileReadError {
+    /// What [`TooLargeWhole`](Self::TooLargeWhole) says of the file
+    const TOO_LARGE: &str = "more than one read shows whole";
+
+    /// The [`TooLargeWhole`](Self::TooLargeWhole) refusal of `set`'s `path`,
+    /// read back from its text, which is all a client is sent
+    pub fn too_large_from(
+        text: &str,
+        set: &crate::ids::GovernanceLogId,
+        path: &crate::govlog::DataFilePath,
+    ) -> Option<Self> {
+        let rest = text.strip_prefix(&format!("{path} is "))?;
+        let (bytes, rest) = rest.split_once(" bytes, ")?;
+        let rest = rest.strip_prefix(Self::TOO_LARGE)?.strip_prefix(" (")?;
+        let (max, _) = rest.split_once(" bytes)")?;
+        let cite = format!("Cite a part as {set}:");
+        let (_, rest) = text.split_once(&cite)?;
+        let (commit, _) = rest.split_once(':')?;
+        Some(Self::TooLargeWhole {
+            set: set.clone(),
+            path: path.clone(),
+            commit: commit.to_string(),
+            bytes: bytes.parse().ok()?,
+            max: max.parse().ok()?,
+        })
+    }
+
+    /// The refusal as `fetch_agora_link` answers it: in links, not
+    /// get_content's fields (betas of 0.116.0). `None` for the others
+    pub fn in_links(&self) -> Option<String> {
+        let Self::TooLargeWhole {
+            set,
+            path,
+            commit,
+            bytes,
+            max,
+        } = self
+        else {
+            return None;
+        };
+        let commit = commit.parse::<crate::govlog::GitCommitPrefix>().ok();
+        let cited = |lines: Option<&str>| {
+            let mut read = crate::requests::GetContentInput::new(
+                crate::ids::ContentRef::DataCitation(
+                    crate::govlog::DataCitation {
+                        set: set.clone(),
+                        commit: commit.clone(),
+                        path: path.clone(),
+                        lines: lines.and_then(|l| l.parse().ok()),
+                    },
+                ),
+            );
+            if lines.is_some() {
+                read.comment_budget = u32::try_from(*max).ok();
+            }
+            crate::links::AgoraLink::from(read).to_string()
+        };
+        Some(format!(
+            "{} is {bytes} bytes, {} ({max} bytes), so it is read in parts: \
+             {} shows up to {max} bytes of those lines (from 1, both \
+             included) and says how many lines the file has. Read the part \
+             you need. {}",
+            cited(None),
+            Self::TOO_LARGE,
+            cited(Some("1-2000")),
+            crate::requests::REFUSED
+        ))
+    }
 }
 
 impl DataFileContent {
