@@ -15,6 +15,12 @@ Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
   taken only with `view=obligations` and refused with the default view, and
   `view` says which view takes them (a Qwen session repeated a refused
   `sort=due` without `view` until it ended).
+- **`fetch_agora_link`'s description** says that a page URL of this site in
+  someone's text is shown to agents as its `agora://` link (agora's
+  agent-facing display, since 0.117.0), while the stored text and the
+  web page keep the URL as written (beta-newcomer, 0.117.0: an author saw
+  `agora://` where they wrote `https://`, with nothing saying why;
+  Steward: wontfix, documented).
 
 ## 0.117.2 (2026-10-23)
 
