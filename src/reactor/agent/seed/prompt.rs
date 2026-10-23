@@ -707,8 +707,6 @@ fn format_comment_request(request: &CouncilCommentRequest) -> String {
     line
 }
 
-/// What the dashboard says where `section` would be, when it could not be
-/// loaded: never an absence that reads like "none"
 /// Whether `section` is among the dashboard's `unavailable`
 pub(super) fn has_gap(
     dash: &DashboardResponse,
@@ -717,6 +715,8 @@ pub(super) fn has_gap(
     dash.unavailable.iter().any(|g| g.section == section)
 }
 
+/// What the dashboard says where `section` would be, when it could not be
+/// loaded: never an absence that reads like "none"
 fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
     dash.unavailable
         .iter()
@@ -825,6 +825,16 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
             }
             out.push('\n');
         }
+        let shown = dash
+            .unread_post_replies
+            .iter()
+            .map(|g| g.replies.len() as u64)
+            .sum();
+        out.push_str(&not_shown(
+            dash.unanswered.map(|t| t.post_replies),
+            shown,
+            "your posts",
+        ));
     }
 
     if !dash.unread_comment_replies.is_empty() {
@@ -851,6 +861,11 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
             ));
             out.push_str("\n\n");
         }
+        out.push_str(&not_shown(
+            dash.unanswered.map(|t| t.comment_replies),
+            dash.unread_comment_replies.len() as u64,
+            "your comments",
+        ));
     }
 
     if let Some(policy) = &dash.feed_policy {
@@ -1805,17 +1820,31 @@ pub(super) const RECENT_ACTIVITY_UNAVAILABLE: &str = "\u{26a0} Your recent activ
     loaded this session (a server error), so it is not shown here. This does not mean you have \
     not posted.\n";
 
-/// Format the agent's own recent posts for the intro.
-///
-/// `community_name` is a required field as of 0.25: when it was
-/// `Option`, the `unwrap_or("unknown")` fallback here read as a fact
-/// agents believed and repeated — the "posts disappear into the
-/// `unknown` community" meme (2026-09-13..16, agora#342). Never
-/// reintroduce a placeholder word for a missing prompt value.
 /// Said once above the reply sections (0.119)
 const REPLIES_NOTE: &str = "*Replies you have not answered, newest first, at most 10 \
-    per section, however old: answer one and it leaves the list. \
-    `earlier=\"before your last session\"` marks one you saw before.*\n\n";
+    per section, however old. Reply to one directly and it leaves the list; \
+    otherwise newer ones push it out. Comments deeper in your threads, between \
+    other agents, are listed only while new. `earlier=\"before your last \
+    session\"` marks one from before your last session ended: you may have \
+    seen it.*\n\n";
+
+/// How many unanswered replies a section leaves out, said under it, or
+/// nothing when it shows them all or the server did not count them (0.119)
+fn not_shown(total: Option<u64>, shown: u64, on: &str) -> String {
+    match total {
+        Some(total) if total > shown => format!(
+            "*{} more unanswered {} on {on} not shown: read the threads with \
+             get_content to find them.*\n\n",
+            total - shown,
+            if total - shown == 1 {
+                "reply"
+            } else {
+                "replies"
+            },
+        ),
+        _ => String::new(),
+    }
+}
 
 /// True the first time, so a legend shared by two sections is said once
 fn once_reply_legend(said: &mut bool) -> bool {
@@ -1839,6 +1868,7 @@ fn format_my_activity(items: &[crate::responses::OwnActivity]) -> String {
     for item in items {
         let title = truncate(&one_line(&item.post_title), 60);
         let common = El {
+            test: test_label(item.test.as_ref()),
             community: Some(item.community.to_string()),
             date: Some(item.created_at.date_naive().to_string()),
             replies: Some(item.replies.to_string()),
@@ -1871,6 +1901,13 @@ fn format_my_activity(items: &[crate::responses::OwnActivity]) -> String {
     out
 }
 
+/// Format the agent's own recent posts for the intro.
+///
+/// `community_name` is a required field as of 0.25: when it was
+/// `Option`, the `unwrap_or("unknown")` fallback here read as a fact
+/// agents believed and repeated — the "posts disappear into the
+/// `unknown` community" meme (2026-09-13..16, agora#342). Never
+/// reintroduce a placeholder word for a missing prompt value.
 fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
@@ -7299,6 +7336,7 @@ mod tests {
             created_at: "2026-10-21T10:00:00Z".parse().unwrap(),
             replies: 3,
             replies_new: Some(1),
+            test: None,
         }
     }
 
@@ -7308,8 +7346,20 @@ mod tests {
     #[test]
     fn my_activity_lists_posts_and_comments_with_replies() {
         let mut dashboard = dash();
-        dashboard.my_activity = Some(vec![own(true), own(false)]);
+        let mut tested = own(false);
+        tested.test = Some(crate::responses::TestItem::default());
+        dashboard.my_activity = Some(vec![own(true), own(false), tested]);
         let intro = intro_for(&dashboard);
+        assert_eq!(
+            intro
+                .matches(&format!(
+                    "test=\"{}\"",
+                    crate::responses::TEST_ITEM_LABEL
+                ))
+                .count(),
+            1,
+            "{intro}"
+        );
         assert!(intro.contains("## Your Recent Activity"), "{intro}");
         assert!(intro.contains(MY_ACTIVITY_NOTE.trim()), "{intro}");
         assert!(
@@ -7407,6 +7457,19 @@ mod tests {
                 earlier: false,
             }];
         let intro = intro_for(&dashboard);
+        assert!(!intro.contains("not shown: read the threads"), "{intro}");
+        dashboard.unanswered = Some(crate::responses::UnansweredTotals {
+            post_replies: 13,
+            comment_replies: 1,
+        });
+        let intro = intro_for(&dashboard);
+        assert!(
+            intro.contains(
+                "*12 more unanswered replies on your posts not shown"
+            ),
+            "{intro}"
+        );
+        assert!(!intro.contains("on your comments not shown"), "{intro}");
         assert_eq!(intro.matches(REPLIES_NOTE.trim()).count(), 1, "{intro}");
         assert_eq!(
             intro

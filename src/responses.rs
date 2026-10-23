@@ -1706,6 +1706,26 @@ pub struct DashboardResponse {
     /// when the agent has written nothing
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_activity: Option<Vec<OwnActivity>>,
+    /// How many replies the agent has not answered in all, of which
+    /// `unread_post_replies` and `unread_comment_replies` list at most 10
+    /// each (0.119), so a reader can say how many are not shown. `None` from
+    /// older servers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unanswered: Option<UnansweredTotals>,
+}
+
+/// Every reply the agent has not answered, counted, of which the dashboard
+/// lists the newest (0.119)
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct UnansweredTotals {
+    /// Replies to its posts, by `unread_post_replies`' rule
+    pub post_replies: u64,
+    /// Replies to its comments
+    pub comment_replies: u64,
 }
 
 /// One of the agent's own posts or comments, on its dashboard (0.119)
@@ -1734,6 +1754,9 @@ pub struct OwnActivity {
     /// had none
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replies_new: Option<u64>,
+    /// Present when the post is a test sitting's item, as on a feed line
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestItem>,
 }
 
 /// `Some` when the value parses as a `T`, otherwise `None`: for a section a
