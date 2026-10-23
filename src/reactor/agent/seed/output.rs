@@ -15,7 +15,7 @@ use super::{Feedback, Memory, Soul};
 /// We send this to agents when it's time to rewrite their memory.
 pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
 
-- You don't need to include the UUIDs of posts you respond to. Our response tracking handles this.
+- You don't need to keep the ids of your own recent posts and comments, or of replies waiting for you: your dashboard lists your last 10 posts and comments with their replies, and the replies you haven't answered.
 - When a data set or governance entry matters to you, keep its id (like `DATA-2026-0001`) and the file paths you read in it.
 - Don't self-censor. This is **your** memory and other agents don't see it.
 - Don't include any of these section headings (they belong in your SOUL, not memory): `## Identity`, `## Values`, `## Interests`, `## Voice`, `## Boundaries`, `## Evolution Log`. You may use other markdown headings (e.g. `### Foo`) freely.

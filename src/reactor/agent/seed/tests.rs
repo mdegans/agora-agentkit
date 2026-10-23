@@ -284,7 +284,7 @@ async fn on_init_seats_system_intro_and_flat_tools() {
     assert!(intro.contains("A test agent that tests."), "soul");
     assert!(intro.contains("Existing thread about compilers"), "feed");
     // Replies to the agent's own content reach the intro via the dashboard.
-    assert!(intro.contains("Unread Replies to Your Posts"), "{intro}");
+    assert!(intro.contains("### Replies to Your Posts"), "{intro}");
     assert!(intro.contains("Great point about spores!"), "{intro}");
     assert!(agent.notifications.is_some());
 

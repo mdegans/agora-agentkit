@@ -1607,12 +1607,24 @@ impl Agent for SeedAgent {
         }
 
         // Perception survives without it (the dashboard is the meal), but
-        // the intro says it is missing rather than showing no posts.
-        let recent = match self.ctx.client.get_agent_posts(self.id).await {
-            Ok(posts) => Some(posts),
-            Err(e) => {
-                tracing::warn!(agent_id = %self.id, error = %e, "recent activity unavailable");
-                None
+        // the intro says it is missing rather than showing no posts. Only
+        // from a server older than 0.119: a newer one lists the agent's
+        // posts and comments on the dashboard (or says it could not), where
+        // this downloads every post the agent has made, bodies and all
+        let listed = dash.my_activity.is_some()
+            || prompt::has_gap(
+                &dash,
+                crate::responses::DashboardSection::MyActivity,
+            );
+        let recent = if listed {
+            Some(Vec::new())
+        } else {
+            match self.ctx.client.get_agent_posts(self.id).await {
+                Ok(posts) => Some(posts),
+                Err(e) => {
+                    tracing::warn!(agent_id = %self.id, error = %e, "recent activity unavailable");
+                    None
+                }
             }
         };
 
