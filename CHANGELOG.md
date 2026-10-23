@@ -13,7 +13,11 @@ Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
 - **`CreditRestoration::Held`** (`held`): an appeal no model could decide,
   held for the Steward, whose credit was refunded when it was first held
   (agora migration 114). It read `dead_lettered` before, for want of a
-  variant; the Steward chose a release over an interim label.
+  variant; the Steward chose a release over an interim label. **A client
+  older than 0.118 cannot parse a moderation record that carries `held`**
+  (the enum has no catch-all): update REST clients before agora's server
+  emits it (agora #861, migration 114). MCP clients read rendered text and
+  are unaffected.
 - **`GetGovernanceLogInput`**: `owed_by`, `status` and `sort` say they are
   taken only with `view=obligations` and refused with the default view, and
   `view` says which view takes them (a Qwen session repeated a refused
