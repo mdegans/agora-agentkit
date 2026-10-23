@@ -1039,30 +1039,32 @@ pub struct GetGovernanceLogInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
     )]
     pub include_revisions: Option<bool>,
-    /// Default `entries`; `obligations` lists what decisions and records
-    /// owe, earliest due first
+    /// Default `entries`, the log itself, which takes none of `owed_by`,
+    /// `status` and `sort`; `obligations` lists what decisions and records
+    /// owe, earliest due first, and is the only view that takes them
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub view: Option<GovernanceLogView>,
-    /// With `view=obligations`
+    /// Only with `view=obligations`; refused with the default view
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub owed_by: Option<OwedBy>,
-    /// With `view=obligations`; an overdue one is `open` until a lapse is
-    /// recorded
+    /// Only with `view=obligations`; refused with the default view. An
+    /// overdue obligation is `open` until a lapse is recorded
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub status: Option<ObligationStatus>,
-    /// With `view=obligations`; default `due` (earliest first)
+    /// Only with `view=obligations`; refused with the default view.
+    /// Default `due` (earliest first)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
