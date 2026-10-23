@@ -41,8 +41,9 @@ Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
   says "Lines 412-455 of 1201 (cite them as `agora://protocol?lines=412-455`)",
   is shown once a session by a key of its own, and neither is refused for
   nor marks the whole document. The calendar is served as data, so the
-  runner cuts its rendering itself and never sends its `lines` to the
-  server. Agent-visible: needs the Steward's approval before release.
+  runner cuts its rendering itself, never sends its `lines` to the
+  server, and gives those lines no citation (no link outside the session
+  reads them). Agent-visible: needs the Steward's approval before release.
 
 ## 0.117.2 (2026-10-23)
 
