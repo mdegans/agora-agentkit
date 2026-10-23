@@ -5006,13 +5006,21 @@ pub(super) fn similar_title_refusal(
     out
 }
 
-/// A document's outline: its headings of the top two levels (`#`, `##`),
-/// one a line, outside code blocks, with how many lower ones they hold
-pub(super) fn outline(text: &str) -> String {
-    let mut out = String::from("Its sections:");
+/// A document's outline: every heading outside a code fence, at every
+/// level, with its lines, from its own to the line before the next heading
+/// of the same or a higher level (or the document's last). Numbered as a
+/// read with `lines=` numbers them
+/// ([`DocumentLines`](crate::responses::DocumentLines), counted on the
+/// same text), so a model copies a section's range and never counts
+/// (Steward, 2026-10-23: the top two levels alone took a turn and gave no
+/// way to read one section)
+pub(super) fn outline(text: &str) -> Outline {
+    let total = crate::govlog::count_lines(text);
+    // (line, level, heading) of each heading, in order
+    let mut headings: Vec<(u64, usize, &str)> = Vec::new();
     let mut fenced = false;
-    let mut lower = 0;
-    for line in text.lines() {
+    for (n, line) in (1..).zip(text.split_inclusive('\n')) {
+        let line = line.trim_end_matches(['\n', '\r']);
         if line.trim_start().starts_with("```") {
             fenced = !fenced;
             continue;
@@ -5024,16 +5032,34 @@ pub(super) fn outline(text: &str) -> String {
         if level == 0 || !line[level..].starts_with(' ') {
             continue;
         }
-        if level <= 2 {
-            out.push_str(&format!("\n{}", line.trim()));
-        } else {
-            lower += 1;
-        }
+        headings.push((n, level, line.trim()));
     }
-    if lower > 0 {
-        out.push_str(&format!("\n(and {lower} subsections under them)"));
+    let mut out = String::from("Its sections, with their lines:");
+    let mut sections = Vec::with_capacity(headings.len());
+    for (i, &(from, level, heading)) in headings.iter().enumerate() {
+        let to = headings[i + 1..]
+            .iter()
+            .find(|(_, l, _)| *l <= level)
+            .map_or(total, |(next, _, _)| next - 1);
+        out.push_str(&format!("\n{heading} (lines {from}\u{2013}{to})"));
+        let range = crate::govlog::LineRange::new(from, Some(to))
+            .expect("a heading's range starts at its line");
+        sections.push((level, heading.to_string(), range));
     }
-    out
+    // The example a note gives: the first section under the title
+    let example = sections
+        .iter()
+        .find(|(level, _, _)| *level >= 2)
+        .or(sections.first())
+        .map(|(_, heading, range)| (heading.clone(), *range));
+    Outline { text: out, example }
+}
+
+/// [`outline`]'s text, and a section to show how one is read
+pub(super) struct Outline {
+    pub text: String,
+    /// A section's heading and lines, for the note's example
+    pub example: Option<(String, crate::govlog::LineRange)>,
 }
 
 /// Truncate to `max_chars`, appending `...` when clipped

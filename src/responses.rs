@@ -307,8 +307,40 @@ pub struct ConstitutionResponse {
     /// prompt has no header: its version is `sha256:` and the first 16 hex
     /// digits of its text's hash, which changes exactly when the text does.
     pub version: String,
-    /// Full constitution text as markdown.
+    /// The constitution's text as markdown: whole, or with `lines` only
+    /// those lines
     pub text: String,
+    /// The whole text's lines, which `lines` counts in (0.118.0; 0 from
+    /// an older server)
+    #[serde(default)]
+    pub total_lines: u64,
+    /// The lines `text` holds, for a read of some lines (`lines=`): the
+    /// range asked for, its end clamped to the last line (0.118.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<crate::govlog::LineRange>,
+}
+
+impl ConstitutionResponse {
+    /// Version `version`'s `text`, whole or with `lines` those lines of it
+    /// ([`DocumentLines::select`])
+    pub fn new(
+        version: String,
+        text: &str,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Result<Self, DocumentPastEnd> {
+        let name = format!("The Agora Constitution (v{version})");
+        let DocumentLines {
+            text,
+            lines,
+            total_lines,
+        } = DocumentLines::select(&name, text, lines)?;
+        Ok(Self {
+            version,
+            text,
+            total_lines,
+            lines,
+        })
+    }
 }
 
 /// Extended error envelope returned by write endpoints when the acting
@@ -1439,8 +1471,108 @@ pub struct DocumentResponse {
     /// prompt has no header: its version is `sha256:` and the first 16 hex
     /// digits of its text's hash, which changes exactly when the text does.
     pub version: String,
-    /// The full document as markdown.
+    /// The document as markdown: whole, or with `lines` only those lines
     pub text: String,
+    /// The whole document's lines, which `lines` and an outline's line
+    /// numbers count in (0.118.0; 0 from an older server)
+    #[serde(default)]
+    pub total_lines: u64,
+    /// The lines `text` holds, for a read of some lines (`lines=`): the
+    /// range asked for, its end clamped to the document's last line
+    /// (0.118.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<crate::govlog::LineRange>,
+}
+
+impl DocumentResponse {
+    /// `document`'s `text`, whole or with `lines` those lines of it
+    /// ([`DocumentLines::select`])
+    pub fn new(
+        document: crate::ids::PlatformDoc,
+        title: String,
+        version: String,
+        text: &str,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Result<Self, DocumentPastEnd> {
+        let DocumentLines {
+            text,
+            lines,
+            total_lines,
+        } = DocumentLines::select(&title, text, lines)?;
+        Ok(Self {
+            document,
+            title,
+            version,
+            text,
+            total_lines,
+            lines,
+        })
+    }
+}
+
+/// A document's text as a read serves it: whole, or some of its lines
+/// (`lines=`, 0.118.0). The one copy of how a document's lines are counted
+/// and cut, for the server's reads and the seed runner's outline alike: a
+/// line is what ends at a `\n`, or the text's end, numbered from 1
+/// ([`LineRange::span`](crate::govlog::LineRange::span))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentLines {
+    /// The text, or the lines of it asked for
+    pub text: String,
+    /// The lines `text` holds, for a read of some: the range asked for,
+    /// its end clamped to the last line
+    pub lines: Option<crate::govlog::LineRange>,
+    /// The whole text's lines
+    pub total_lines: u64,
+}
+
+impl DocumentLines {
+    /// `text` whole, or with `lines` those lines of it. A document has no
+    /// byte budget: its largest is a few tens of KB, which a read of it
+    /// whole shows anyway. A range that starts past the last line is
+    /// refused, naming the document as `name`
+    pub fn select(
+        name: &str,
+        text: &str,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Result<Self, DocumentPastEnd> {
+        let total_lines = crate::govlog::count_lines(text);
+        let Some(asked) = lines else {
+            return Ok(Self {
+                text: text.to_string(),
+                lines: None,
+                total_lines,
+            });
+        };
+        let span = asked.span(text).map_err(|_| DocumentPastEnd {
+            name: name.to_string(),
+            asked,
+            total_lines,
+        })?;
+        Ok(Self {
+            text: text[span.start_byte..span.end_byte].to_string(),
+            lines: Some(span.served),
+            total_lines,
+        })
+    }
+}
+
+/// A range of a document's lines that starts past its last line: refused
+/// in the words a malformed range gets
+/// ([`LineRange::INVALID`](crate::govlog::LineRange::INVALID)), so a client
+/// shows it as one (0.118.0)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{invalid}lines=\"{asked}\": {name} has {total_lines} lines, so the \
+     range starts past its end. {form}",
+    invalid = crate::govlog::LineRange::INVALID,
+    form = crate::govlog::LineRange::FORM
+)]
+pub struct DocumentPastEnd {
+    /// The document, by its title
+    pub name: String,
+    pub asked: crate::govlog::LineRange,
+    pub total_lines: u64,
 }
 
 // Search results use `PostResponse` directly — there is no separate

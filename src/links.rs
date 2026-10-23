@@ -931,7 +931,11 @@ impl From<GetConstitutionInput> for AgoraLink {
     fn from(input: GetConstitutionInput) -> Self {
         match input.version {
             Some(_) => Self::Constitution(input),
-            None => PlatformDoc::Constitution.into(),
+            // Its lines kept: a range of the latest is get_content's
+            None => Self::Read(GetContentInput {
+                lines: input.lines,
+                ..GetContentInput::new(PlatformDoc::Constitution)
+            }),
         }
     }
 }

@@ -32,6 +32,7 @@ use crate::requests::{
     TrashInput, TrashListInput, TrashTargetPayload, VerifyGovernanceLogInput,
 };
 
+use crate::govlog::LineRange;
 use crate::links::AgoraLink;
 use crate::requests::{FetchAgoraLinkInput, SubmitFeedbackPayload};
 use crate::responses::VoteCast;
@@ -985,6 +986,7 @@ impl Agora {
         // A server without the signed route answers a bare 404 or 405;
         // that read is retried unsigned, while a real "no such post"
         // (Agora's JSON error) goes back to the model as is.
+        let mut calendar_lines = None;
         let content = match &input.id {
             ContentRef::Content(_) | ContentRef::ContentPrefix(_) => match self
                 .client
@@ -999,6 +1001,13 @@ impl Agora {
             ContentRef::Governance(_)
             | ContentRef::DataCitation(_)
             | ContentRef::Document(_) => {
+                // The calendar is served as data and rendered here: its
+                // lines are this rendering's, cut below (0.118.0)
+                if input.id.as_document()
+                    == Some(&crate::ids::PlatformDoc::Calendar)
+                {
+                    calendar_lines = input.lines.take();
+                }
                 match self.client.get_content(&input).await {
                     Ok(content) => content,
                     // A part the server refused (a round past the last): looked
@@ -1441,6 +1450,30 @@ impl Agora {
                 } else {
                     doc.text.clone()
                 };
+                // Some of its lines: what they are of, and how to cite them
+                // (0.118.0). Not the system prompt's note: these lines are
+                // not the text it holds
+                if let Some(range) = doc.lines {
+                    let served = crate::responses::DocumentLines {
+                        text,
+                        lines: Some(range),
+                        total_lines: doc.total_lines,
+                    };
+                    let cite = AgoraLink::from(GetContentInput {
+                        lines: Some(range),
+                        ..GetContentInput::new(input.id.clone())
+                    })
+                    .to_string();
+                    let name = if self.by_link {
+                        cite.clone()
+                    } else {
+                        format!("{}, lines {range}", input.id)
+                    };
+                    let heading =
+                        format!("# {} ({v}{})", doc.title, doc.version);
+                    return Ok(self
+                        .show_document_lines(&name, &heading, &served, &cite));
+                }
                 let shown = if text.trim_start().starts_with("# ") {
                     format!("{held}(Version {v}{}.)\n\n{text}", doc.version)
                 } else {
@@ -1453,6 +1486,33 @@ impl Agora {
             }
             crate::responses::ContentResponse::Calendar(calendar) => {
                 let shown = prompt::format_calendar(&calendar);
+                // The calendar's text is this rendering, so its lines are
+                // cut here, as its outline numbers them (0.118.0)
+                if let Some(asked) = calendar_lines {
+                    let served = crate::responses::DocumentLines::select(
+                        "The Agora calendar",
+                        &shown,
+                        Some(asked),
+                    )
+                    .map_err(|e| Content::from(e.to_string()))?;
+                    let range = served.lines.expect("a read of some lines");
+                    let cite = AgoraLink::from(GetContentInput {
+                        lines: Some(range),
+                        ..GetContentInput::new(input.id.clone())
+                    })
+                    .to_string();
+                    let name = if self.by_link {
+                        cite.clone()
+                    } else {
+                        format!("{}, lines {range}", input.id)
+                    };
+                    return Ok(self.show_document_lines(
+                        &name,
+                        "# The Agora calendar",
+                        &served,
+                        &cite,
+                    ));
+                }
                 self.show_document(&input.id, &shown.clone(), shown)
             }
         })
@@ -1706,15 +1766,37 @@ impl Agora {
         } else {
             id.to_string()
         };
-        self.show_named_document(&name, text, shown)
+        let read_lines = self.lines_read(id);
+        self.show_named_document(&name, text, shown, &*read_lines)
     }
 
-    /// [`Self::show_document`], named as the read asked for it
+    /// How a read of `id`'s lines `range` is written, in the syntax of the
+    /// tool asked: its link, or get_content's arguments
+    fn lines_read(&self, id: &ContentRef) -> Box<dyn Fn(LineRange) -> String> {
+        let id = id.clone();
+        if self.by_link {
+            Box::new(move |range| {
+                crate::links::AgoraLink::from(GetContentInput {
+                    lines: Some(range),
+                    ..GetContentInput::new(id.clone())
+                })
+                .to_string()
+            })
+        } else {
+            Box::new(move |range| {
+                format!("get_content(id=\"{id}\", lines=\"{range}\")")
+            })
+        }
+    }
+
+    /// [`Self::show_document`], named as the read asked for it. `read_lines`
+    /// writes a read of some of its lines, for the outline's note
     fn show_named_document(
         &mut self,
         name: &str,
         text: &str,
         shown: String,
+        read_lines: &dyn Fn(LineRange) -> String,
     ) -> Content {
         let key = super::ShownOnce::document_key(text);
         if let Some(earlier) = self.shown_once.earlier_part(&key) {
@@ -1729,14 +1811,65 @@ impl Agora {
         if shown.len() > DOCUMENT_SIZED_BYTES
             && self.sized_documents.insert(key.clone())
         {
+            let outline = prompt::outline(text);
+            // A section read alone, by the lines the outline gives (Steward,
+            // 2026-10-23)
+            let section =
+                outline
+                    .example
+                    .map_or_else(String::new, |(heading, range)| {
+                        format!(
+                            " To read one section, give its lines: {} reads \
+                     \"{heading}\".",
+                            read_lines(range)
+                        )
+                    });
             return format!(
                 "(`{name}` is {} ({} bytes), so this read shows its \
-                 outline; the same read again shows it whole.)\n\n{}",
+                 outline; the same read again shows it whole.{section})\n\n{}",
                 crate::threads::about_tokens(shown.len() as u64),
                 shown.len(),
-                prompt::outline(text)
+                outline.text
             )
             .into();
+        }
+        self.shown_once.begin(super::ShownOnce::read_of(name));
+        self.shown_once.mark_part(key, shown.len());
+        shown.into()
+    }
+
+    /// Some lines of a document (`lines=`, 0.118.0), under `heading`: what
+    /// they are of, then `text`, the lines served. Shown once a session
+    /// like a whole document, by a key of their own: the whole document's
+    /// key neither refuses them nor is marked by them, and they are never
+    /// outlined, being what an outline asks for
+    fn show_document_lines(
+        &mut self,
+        name: &str,
+        heading: &str,
+        served: &crate::responses::DocumentLines,
+        cite: &str,
+    ) -> Content {
+        let range = served.lines.expect("a read of some lines");
+        let key = format!(
+            "{} lines {range}",
+            super::ShownOnce::document_key(&served.text)
+        );
+        if let Some(earlier) = self.shown_once.earlier_part(&key) {
+            return format!(
+                "(`{name}` is in your context already, the same text: shown \
+                 in {}, {}. Nothing was read.)",
+                earlier.read,
+                crate::threads::about_tokens(earlier.bytes)
+            )
+            .into();
+        }
+        let mut shown = format!(
+            "{heading}\n\nLines {range} of {} (cite them as `{cite}`):\n\n{}",
+            served.total_lines, served.text
+        );
+        if !shown.ends_with('\n') {
+            shown.push('\n');
         }
         self.shown_once.begin(super::ShownOnce::read_of(name));
         self.shown_once.mark_part(key, shown.len());
@@ -1788,13 +1921,43 @@ impl Agora {
                     Ok(c) => {
                         let name =
                             AgoraLink::Constitution(args.clone()).to_string();
-                        let shown = format!(
-                            "# The Agora Constitution (v{})\n\n{}",
-                            c.version, c.text
+                        let heading = format!(
+                            "# The Agora Constitution (v{})",
+                            c.version
                         );
-                        Ok(self.show_named_document(&name, &c.text, shown))
+                        if let Some(range) = c.lines {
+                            let served = crate::responses::DocumentLines {
+                                text: c.text,
+                                lines: Some(range),
+                                total_lines: c.total_lines,
+                            };
+                            Ok(self.show_document_lines(
+                                &name, &heading, &served, &name,
+                            ))
+                        } else {
+                            let shown = format!("{heading}\n\n{}", c.text);
+                            let read_lines = move |range| {
+                                AgoraLink::Constitution(
+                                    crate::requests::GetConstitutionInput {
+                                        lines: Some(range),
+                                        ..args.clone()
+                                    },
+                                )
+                                .to_string()
+                            };
+                            Ok(self.show_named_document(
+                                &name,
+                                &c.text,
+                                shown,
+                                &read_lines,
+                            ))
+                        }
                     }
-                    Err(e) => Err(err(e)),
+                    // A range past its end, in the words a malformed one
+                    // gets (0.118.0)
+                    Err(e) => Err(e
+                        .range_refusal()
+                        .map_or_else(|| err(&e), Content::from)),
                 }
             }
         };

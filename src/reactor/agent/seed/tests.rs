@@ -189,10 +189,12 @@ fn mock_perception(server: &MockServer) {
 
 /// [`mock_perception`], serving `constitution` as the text
 fn mock_perception_serving(server: &MockServer, constitution: &str) {
-    let served = crate::responses::ConstitutionResponse {
-        version: "0.5".into(),
-        text: constitution.into(),
-    };
+    let served = crate::responses::ConstitutionResponse::new(
+        "0.5".into(),
+        constitution,
+        None,
+    )
+    .expect("a whole read");
     let body = serde_json::to_string(&served).expect("serializes");
     server.mock(|when, then| {
         when.method(GET).path("/agora/api/constitution");
@@ -7953,10 +7955,14 @@ async fn documents_are_shown_once_and_sized_first() {
     );
     assert!(
         rendered.contains(
-            "so this read shows its outline; the same read \
-             again shows it whole.)\n\nIts sections:\n# Agora Governance \
-             Protocol\n## 1. Overview\n## 2. Agenda Formation\n(and 1 \
-             subsections under them)"
+            "so this read shows its outline; the same read again shows it \
+             whole. To read one section, give its lines: \
+             agora://protocol?lines=3-12 reads \"## 1. Overview\".)\n\n\
+             Its sections, with their lines:\n\
+             # Agora Governance Protocol (lines 1\u{2013}15)\n\
+             ## 1. Overview (lines 3\u{2013}12)\n\
+             ### 1.1 Scope (lines 5\u{2013}12)\n\
+             ## 2. Agenda Formation (lines 13\u{2013}15)"
         ),
         "{rendered}"
     );
@@ -7965,6 +7971,245 @@ async fn documents_are_shown_once_and_sized_first() {
         rendered.contains(
             "(`protocol` is in your context already, the same text: shown \
              in your read of agora://protocol,"
+        ),
+        "{rendered}"
+    );
+}
+
+/// The Protocol of [`documents_are_shown_once_and_sized_first`]: 15
+/// lines, over [`DOCUMENT_SIZED_BYTES`](super::tool::DOCUMENT_SIZED_BYTES)
+fn long_protocol() -> String {
+    let mut protocol = String::from("# Agora Governance Protocol\n\n");
+    protocol.push_str("## 1. Overview\n\n### 1.1 Scope\n\n");
+    protocol.push_str("```\n## not a heading\n```\n\n");
+    protocol.push_str(&"The Council sits. ".repeat(2_000));
+    protocol.push_str("\n\n## 2. Agenda Formation\n\nThe end.");
+    protocol
+}
+
+/// The Protocol whole, and served for `lines=` as a server serves it
+/// ([`DocumentResponse::new`](crate::responses::DocumentResponse::new))
+fn mock_protocol(server: &MockServer) {
+    let protocol = long_protocol();
+    let served = |lines: Option<&str>| {
+        let doc = crate::responses::DocumentResponse::new(
+            crate::ids::PlatformDoc::GovernanceProtocol,
+            "The Agora Governance Protocol".into(),
+            "0.3.10".into(),
+            &protocol,
+            lines.map(|l| l.parse().unwrap()),
+        )
+        .unwrap();
+        serde_json::to_value(crate::responses::ContentResponse::Document(doc))
+            .unwrap()
+    };
+    for lines in ["13-15", "3-12", "99-"] {
+        let body = served((lines != "99-").then_some(lines));
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/agora/api/content/protocol")
+                .query_param("lines", lines);
+            if lines == "99-" {
+                let past = crate::responses::DocumentLines::select(
+                    "The Agora Governance Protocol",
+                    &long_protocol(),
+                    Some("99-".parse().unwrap()),
+                )
+                .unwrap_err();
+                then.status(400).json_body(
+                    serde_json::json!({ "error": past.to_string() }),
+                );
+            } else {
+                then.status(200).json_body(body);
+            }
+        });
+    }
+    let whole = served(None);
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/protocol")
+            .query_param_missing("lines");
+        then.status(200).json_body(whole);
+    });
+}
+
+/// A document's lines read alone, by the outline's numbers (Steward,
+/// 2026-10-23): a ranged read is never refused for the whole document
+/// shown, never marks it shown, is never outlined, says which lines of how
+/// many it shows, and is a pointer when read again
+#[tokio::test]
+async fn a_documents_lines_read_alone() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    mock_protocol(&server);
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    let read =
+        |input: serde_json::Value| tool_use_message("get_content", input);
+    // Some lines before any whole read: the whole is then still outlined
+    for input in [
+        serde_json::json!({"id": "protocol", "lines": "3-12"}),
+        serde_json::json!({"id": "protocol"}),
+        serde_json::json!({"id": "protocol"}),
+        // After the whole: lines are still served, not a pointer to it
+        serde_json::json!({"id": "protocol", "lines": "13\u{2013}15"}),
+        serde_json::json!({"id": "protocol", "lines": "13-15"}),
+    ] {
+        agent.handle(read(input)).await.unwrap();
+    }
+    let mut rendered = transcript(&agent);
+    // A session's rounds are few: the rest in another
+    let mut agent = self::agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://protocol?lines=3-12"}),
+        ))
+        .await
+        .unwrap();
+    for input in [
+        serde_json::json!({"id": "protocol", "lines": "3-12"}),
+        serde_json::json!({"id": "protocol", "lines": "99-"}),
+    ] {
+        agent.handle(read(input)).await.unwrap();
+    }
+    rendered.push_str(&transcript(&agent));
+    assert!(
+        rendered.contains(
+            "# The Agora Governance Protocol (v0.3.10)\n\nLines 3-12 of 15 \
+             (cite them as `agora://protocol?lines=3-12`):\n\n## 1. Overview\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "so this read shows its outline; the same read again shows it \
+             whole. To read one section, give its lines: \
+             get_content(id=\"protocol\", lines=\"3-12\") reads \
+             \"## 1. Overview\".)"
+        ),
+        "outlined after a ranged read: {rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Lines 13-15 of 15 (cite them as \
+             `agora://protocol?lines=13-15`):\n\n## 2. Agenda Formation\n\n\
+             The end.\n"
+        ),
+        "{rendered}"
+    );
+    // Whole once, the lines 13-15 once
+    assert_eq!(rendered.matches("The end.").count(), 2, "{rendered}");
+    assert!(
+        rendered.contains(
+            "(`protocol, lines 13-15` is in your context already, the same \
+             text: shown in your read of protocol, lines 13-15,"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "(`protocol, lines 3-12` is in your context already, the same \
+             text: shown in your read of agora://protocol?lines=3-12,"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Invalid arguments at `lines`: lines=\"99-\": The Agora \
+             Governance Protocol has 15 lines, so the range starts past its \
+             end."
+        ),
+        "{rendered}"
+    );
+}
+
+/// The calendar's lines are its rendering's, cut by the runner: the server
+/// serves it as data, and is never asked for lines of it (0.118.0)
+#[tokio::test]
+async fn the_calendars_lines_are_its_renderings() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let calendar = crate::responses::CalendarResponse {
+        how_to_read: crate::responses::CALENDAR_HOW_TO_READ.into(),
+        items: Vec::new(),
+        unreadable_obligations: None,
+    };
+    let whole = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/calendar")
+            .query_param_missing("lines");
+        then.status(200).json_body(
+            serde_json::to_value(crate::responses::ContentResponse::Calendar(
+                calendar,
+            ))
+            .unwrap(),
+        );
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    for link in ["agora://calendar?lines=5", "agora://calendar?lines=9-"] {
+        agent
+            .handle(tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": link }),
+            ))
+            .await
+            .unwrap();
+    }
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "# The Agora calendar\n\nLines 5-5 of 5 (cite them as \
+             `agora://calendar?lines=5-5`):\n\nNothing is on the calendar.\n"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("The Agora calendar has 5 lines, so the range"),
+        "{rendered}"
+    );
+    assert_eq!(whole.calls(), 2);
+}
+
+/// A version of the Constitution reads some lines by its link too, and
+/// its outline's note names that link (0.118.0)
+#[tokio::test]
+async fn a_constitution_versions_lines_by_link() {
+    let server = MockServer::start();
+    let text = "# Constitution\n\n## Article I\n\nOne.\n";
+    let served = crate::responses::ConstitutionResponse::new(
+        "0.3".into(),
+        text,
+        Some("3-5".parse().unwrap()),
+    )
+    .unwrap();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/constitution")
+            .query_param("version", "0.3")
+            .query_param("lines", "3-5");
+        then.status(200)
+            .json_body(serde_json::to_value(&served).unwrap());
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({
+                "link": "agora://constitution?version=0.3&lines=3-5"
+            }),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(
+        rendered.contains(
+            "# The Agora Constitution (v0.3)\n\nLines 3-5 of 5 (cite them as \
+             `agora://constitution?lines=3-5&version=0.3`):\n\n## Article I\n\n\
+             One.\n"
         ),
         "{rendered}"
     );

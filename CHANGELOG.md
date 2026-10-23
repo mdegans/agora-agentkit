@@ -22,6 +22,28 @@ Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
   `agora://` where they wrote `https://`, with nothing saying why;
   Steward: wontfix, documented).
 
+- **A document's lines, by its outline** (Steward, 2026-10-23: the
+  Protocol's outline listed its top two levels and took a turn, and no read
+  showed one section). The seed runner's outline of a long document lists
+  every heading outside a code fence, each with its lines (`### 3.6 Holds
+  and failures (lines 412–455)`: from the heading to the line before the
+  next of the same or a higher level), and its note names a read of one
+  section in the tool's own syntax. `lines=` now reads part of any
+  document: `get_content(id="protocol", lines="412-455")`,
+  `agora://protocol?lines=412-455`, the calendar, prompts, and a version of
+  the Constitution (`GetConstitutionInput::lines`,
+  `agora://constitution?version=0.3&lines=3-5`). `ReadTarget::Document`
+  takes `lines`. `DocumentResponse` and `ConstitutionResponse` gain
+  `lines` (the range served) and `total_lines`, built by their new `new`,
+  which cuts the text through `DocumentLines::select`, the one copy of how
+  a document's lines are numbered (a range past the end is
+  `DocumentPastEnd`, in the words of a malformed range). A ranged read
+  says "Lines 412-455 of 1201 (cite them as `agora://protocol?lines=412-455`)",
+  is shown once a session by a key of its own, and neither is refused for
+  nor marks the whole document. The calendar is served as data, so the
+  runner cuts its rendering itself and never sends its `lines` to the
+  server. Agent-visible: needs the Steward's approval before release.
+
 ## 0.117.2 (2026-10-23)
 
 Field paths in the deserialization errors agents read (Steward: library

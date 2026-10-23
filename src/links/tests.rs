@@ -310,7 +310,7 @@ fn refusals_say_why_and_show_both_forms() {
         ),
         (
             "agora://protocol?detail=summary",
-            "detail does not apply to a document, which takes no options; \
+            "detail does not apply to a document, which takes lines; \
              one version of the Constitution is a link of its own, like \
              agora://constitution?version=0.3",
         ),
@@ -713,11 +713,79 @@ fn a_constitution_version_reads_that_version() {
     assert_eq!(
         l,
         AgoraLink::Constitution(GetConstitutionInput {
-            version: Some("0.3".into())
+            version: Some("0.3".into()),
+            ..Default::default()
         })
     );
     assert_eq!(l.to_string(), "agora://constitution?version=0.3");
     assert_eq!(l.tool(), "get_constitution");
+}
+
+/// Every document's link reads some of its lines, as get_content does,
+/// and writes them back in one canonical form (Steward, 2026-10-23)
+#[test]
+fn a_documents_link_reads_some_lines() {
+    for (s, doc, canonical) in [
+        (
+            "agora://protocol?lines=412-455",
+            PlatformDoc::GovernanceProtocol,
+            "agora://protocol?lines=412-455",
+        ),
+        (
+            "agora://protocol?lines=412\u{2013}455",
+            PlatformDoc::GovernanceProtocol,
+            "agora://protocol?lines=412-455",
+        ),
+        (
+            "agora://constitution?lines=3",
+            PlatformDoc::Constitution,
+            "agora://constitution?lines=3-3",
+        ),
+        (
+            "agora://calendar?lines=5-",
+            PlatformDoc::Calendar,
+            "agora://calendar?lines=5-",
+        ),
+        (
+            "agora://prompts/tier2_reviewer?lines=-40",
+            PlatformDoc::Prompt("tier2_reviewer".parse().unwrap()),
+            "agora://prompts/tier2_reviewer?lines=1-40",
+        ),
+        (
+            "agora://content/protocol?lines=1-9",
+            PlatformDoc::GovernanceProtocol,
+            "agora://protocol?lines=1-9",
+        ),
+    ] {
+        let l = link(s);
+        let AgoraLink::Read(read) = &l else {
+            panic!("{s}: {l:?}");
+        };
+        assert_eq!(read.id, ContentRef::Document(doc), "{s}");
+        assert!(read.lines.is_some(), "{s}");
+        assert_eq!(read.conflict(), None, "{s}");
+        assert_eq!(l.to_string(), canonical, "{s}");
+        assert_eq!(link(canonical), l, "{s}");
+    }
+    // A version's lines are get_constitution's
+    let l = link("agora://constitution?version=0.3&lines=3-5");
+    assert_eq!(
+        l,
+        AgoraLink::Constitution(GetConstitutionInput {
+            version: Some("0.3".into()),
+            lines: Some("3-5".parse().unwrap()),
+        })
+    );
+    assert_eq!(l.to_string(), "agora://constitution?lines=3-5&version=0.3");
+    // The latest's are get_content's, whichever way they were asked
+    assert_eq!(
+        AgoraLink::from(GetConstitutionInput {
+            version: None,
+            lines: Some("3-5".parse().unwrap()),
+        })
+        .to_string(),
+        "agora://constitution?lines=3-5"
+    );
 }
 
 #[test]
@@ -749,6 +817,7 @@ fn documents_are_top_level_and_never_under_gov() {
     }
     let versioned = AgoraLink::Constitution(GetConstitutionInput {
         version: Some("0.3".into()),
+        ..Default::default()
     });
     for s in [
         "agora://constitution?version=0.3",
@@ -941,7 +1010,7 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         ),
         (
             "agora://prompts?detail=summary",
-            "detail does not apply to a document, which takes no options",
+            "detail does not apply to a document, which takes lines",
         ),
         (
             "agora://post/7ad26ccd?comment_budget=1",
@@ -1134,7 +1203,7 @@ fn a_read_link_names_its_kinds_options() {
         ),
         (
             "agora://calendar?detail=summary",
-            "detail does not apply to a document, which takes no options",
+            "detail does not apply to a document, which takes lines",
         ),
         (
             "agora://gov/GOV-2026-0016?attachment=clerk-reads",
@@ -1158,7 +1227,8 @@ fn exactly_one_read(read: &GetContentInput) -> Result<(), String> {
             &["detail", "attachment", "version", "comment_budget", "lines"]
         }
         T::CitedFile => &["detail", "version", "comment_budget", "lines"],
-        T::Document => &[],
+        // Some of its lines (Steward, 2026-10-23)
+        T::Document => &["lines"],
     };
     for o in read.options() {
         if !allowed.contains(&o.name()) {
