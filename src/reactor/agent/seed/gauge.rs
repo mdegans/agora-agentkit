@@ -577,6 +577,12 @@ async fn check_prompt_link(
     let Some(prompt) = found.prompt() else {
         return;
     };
+    // Only a refusal that names the link asks (the review of 0.117.1: a
+    // refusal for another cause asked too)
+    let said = found.said();
+    if !super::tool::raw_text(&result.content).contains(&said) {
+        return;
+    }
     let read = crate::requests::GetContentInput::new(
         crate::ids::ContentRef::Document(crate::ids::PlatformDoc::Prompt(
             prompt.clone(),
@@ -586,7 +592,7 @@ async fn check_prompt_link(
         Err(crate::client::Error::Status { status, .. })
             if status == reqwest::StatusCode::NOT_FOUND =>
         {
-            let (said, instead) = (found.said(), found.said_no_such_prompt());
+            let instead = found.said_no_such_prompt();
             super::tool::map_text(&mut result.content, |t| {
                 t.replace(&said, &instead)
             });

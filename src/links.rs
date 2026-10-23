@@ -562,6 +562,19 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
             }
         }
     };
+    // A comment's permalink on its post's page (`#comment-<id>`, the
+    // anchor the site's post page gives each comment) is the comment's
+    // link: read as the post, it lost the comment it pointed at (the review
+    // of 0.117.1)
+    let comment: Option<[&str; 1]> = page
+        .fragment()
+        .and_then(|f| f.strip_prefix("comment-"))
+        .filter(|id| id.parse::<CommentId>().is_ok())
+        .map(|id| [id]);
+    let (kind, segments, query) = match (kind, &comment) {
+        (Kind::Post, Some(id)) => (Kind::Comment, &id[..], Vec::new()),
+        _ => (kind, segments, query),
+    };
     let mut link = kind.base();
     if !segments.is_empty() {
         link.path_segments_mut()

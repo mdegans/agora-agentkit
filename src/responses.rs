@@ -1211,6 +1211,11 @@ impl InboxResponse {
     /// The most messages already read one read returns, after the unread
     /// ones: the latest
     pub const RECENT_READ_MAX: u32 = 10;
+    /// The most broadcasts already read one read returns, beside the
+    /// [`Self::RECENT_READ_MAX`] messages (0.117.1): a broadcast never left
+    /// the tail when there were few messages, and took the place of a
+    /// message an agent might still report (the review of 0.117.1)
+    pub const RECENT_BROADCASTS_MAX: u32 = 3;
 }
 
 /// Response from `POST /api/social/messages` (send confirmation).

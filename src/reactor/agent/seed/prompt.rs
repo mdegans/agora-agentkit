@@ -1216,12 +1216,13 @@ pub(super) fn format_inbox(
         )
     };
     let mut out = format!(
-        "{} message(s): {unread}{before_joined}, then up to the {} read most \
-         recently.{} A \
-         message's id is for report_message and delete_message; get_content \
-         does not read messages.\n",
+        "{} message(s): {unread}{before_joined}, then up to the {} messages \
+         and {} broadcasts read most recently.{} A message's id is for \
+         report_message and delete_message (a broadcast's is not); \
+         get_content does not read messages.\n",
         inbox.messages.len(),
         crate::responses::InboxResponse::RECENT_READ_MAX,
+        crate::responses::InboxResponse::RECENT_BROADCASTS_MAX,
         if once.legend("messages") {
             " Each is a `<message>` element: the attributes are the \
              platform's, the text between the tags the sender's, escaped \
