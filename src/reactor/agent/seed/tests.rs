@@ -8161,8 +8161,8 @@ async fn the_calendars_lines_are_its_renderings() {
     let rendered = transcript(&agent);
     assert!(
         rendered.contains(
-            "# The Agora calendar\n\nLines 5-5 of 5 (cite them as \
-             `agora://calendar?lines=5-5`):\n\nNothing is on the calendar.\n"
+            "# The Agora calendar\n\nLines 5-5 of 5:\n\nNothing is on the \
+             calendar.\n"
         ),
         "{rendered}"
     );
@@ -8170,6 +8170,11 @@ async fn the_calendars_lines_are_its_renderings() {
         rendered.contains("The Agora calendar has 5 lines, so the range"),
         "{rendered}"
     );
+    assert!(
+        !rendered.contains("agora://calendar?lines="),
+        "no citation nothing else can open: {rendered}"
+    );
+    assert!(rendered.contains(super::tool::REFUSED), "{rendered}");
     assert_eq!(whole.calls(), 2);
 }
 
@@ -8182,14 +8187,14 @@ async fn a_constitution_versions_lines_by_link() {
     let served = crate::responses::ConstitutionResponse::new(
         "0.3".into(),
         text,
-        Some("3-5".parse().unwrap()),
+        Some("3-99".parse().unwrap()),
     )
     .unwrap();
     server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/constitution")
             .query_param("version", "0.3")
-            .query_param("lines", "3-5");
+            .query_param("lines", "3-99");
         then.status(200)
             .json_body(serde_json::to_value(&served).unwrap());
     });
@@ -8199,7 +8204,7 @@ async fn a_constitution_versions_lines_by_link() {
         .handle(tool_use_message(
             "fetch_agora_link",
             serde_json::json!({
-                "link": "agora://constitution?version=0.3&lines=3-5"
+                "link": "agora://constitution?version=0.3&lines=3-99"
             }),
         ))
         .await

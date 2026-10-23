@@ -1454,6 +1454,7 @@ impl Agora {
                 // (0.118.0). Not the system prompt's note: these lines are
                 // not the text it holds
                 if let Some(range) = doc.lines {
+                    let raw = doc.text.clone();
                     let served = crate::responses::DocumentLines {
                         text,
                         lines: Some(range),
@@ -1471,8 +1472,13 @@ impl Agora {
                     };
                     let heading =
                         format!("# {} ({v}{})", doc.title, doc.version);
-                    return Ok(self
-                        .show_document_lines(&name, &heading, &served, &cite));
+                    return Ok(self.show_document_lines(
+                        &name,
+                        Some(&heading),
+                        &raw,
+                        &served,
+                        Some(&cite),
+                    ));
                 }
                 let shown = if text.trim_start().starts_with("# ") {
                     format!("{held}(Version {v}{}.)\n\n{text}", doc.version)
@@ -1494,7 +1500,7 @@ impl Agora {
                         &shown,
                         Some(asked),
                     )
-                    .map_err(|e| Content::from(e.to_string()))?;
+                    .map_err(|e| Content::from(format!("{e} {REFUSED}")))?;
                     let range = served.lines.expect("a read of some lines");
                     let cite = AgoraLink::from(GetContentInput {
                         lines: Some(range),
@@ -1506,11 +1512,14 @@ impl Agora {
                     } else {
                         format!("{}, lines {range}", input.id)
                     };
+                    // No citation: only this rendering has these lines,
+                    // and the server refuses lines of the calendar; no
+                    // heading over lines that open with it
+                    let heading =
+                        (range.start() > 1).then_some("# The Agora calendar");
+                    let raw = served.text.clone();
                     return Ok(self.show_document_lines(
-                        &name,
-                        "# The Agora calendar",
-                        &served,
-                        &cite,
+                        &name, heading, &raw, &served, None,
                     ));
                 }
                 self.show_document(&input.id, &shown.clone(), shown)
@@ -1843,18 +1852,23 @@ impl Agora {
     /// like a whole document, by a key of their own: the whole document's
     /// key neither refuses them nor is marked by them, and they are never
     /// outlined, being what an outline asks for
+    ///
+    /// `raw` is the lines as served, before any relinking, so the same
+    /// lines read by link and by id are one key. `cite` is how to cite
+    /// them, when a link outside this session reads them (not the
+    /// calendar's, which only the runner renders); `heading` is left out
+    /// where the lines open with it
     fn show_document_lines(
         &mut self,
         name: &str,
-        heading: &str,
+        heading: Option<&str>,
+        raw: &str,
         served: &crate::responses::DocumentLines,
-        cite: &str,
+        cite: Option<&str>,
     ) -> Content {
         let range = served.lines.expect("a read of some lines");
-        let key = format!(
-            "{} lines {range}",
-            super::ShownOnce::document_key(&served.text)
-        );
+        let key =
+            format!("{} lines {range}", super::ShownOnce::document_key(raw));
         if let Some(earlier) = self.shown_once.earlier_part(&key) {
             return format!(
                 "(`{name}` is in your context already, the same text: shown \
@@ -1864,8 +1878,11 @@ impl Agora {
             )
             .into();
         }
+        let heading = heading.map_or_else(String::new, |h| format!("{h}\n\n"));
+        let cite =
+            cite.map_or_else(String::new, |c| format!(" (cite them as `{c}`)"));
         let mut shown = format!(
-            "{heading}\n\nLines {range} of {} (cite them as `{cite}`):\n\n{}",
+            "{heading}Lines {range} of {}{cite}:\n\n{}",
             served.total_lines, served.text
         );
         if !shown.ends_with('\n') {
@@ -1926,13 +1943,27 @@ impl Agora {
                             c.version
                         );
                         if let Some(range) = c.lines {
+                            // Named and cited by the lines served, its end
+                            // clamped, as get_content's are
+                            let cite = AgoraLink::Constitution(
+                                crate::requests::GetConstitutionInput {
+                                    lines: Some(range),
+                                    ..args.clone()
+                                },
+                            )
+                            .to_string();
+                            let raw = c.text.clone();
                             let served = crate::responses::DocumentLines {
                                 text: c.text,
                                 lines: Some(range),
                                 total_lines: c.total_lines,
                             };
                             Ok(self.show_document_lines(
-                                &name, &heading, &served, &name,
+                                &cite,
+                                Some(&heading),
+                                &raw,
+                                &served,
+                                Some(&cite),
                             ))
                         } else {
                             let shown = format!("{heading}\n\n{}", c.text);
