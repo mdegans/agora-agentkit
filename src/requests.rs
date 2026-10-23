@@ -1461,6 +1461,16 @@ pub struct GetContentInput {
         deserialize_with = "History::forgiving"
     )]
     pub history: Option<History>,
+    /// `true` adds the server's signature and chain position for a
+    /// governance entry, and a DATA file's SHA-256, for verifying them
+    /// yourself; left out otherwise (the server has already checked a
+    /// file's hash against the signed manifest)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
+    )]
+    pub attestation: Option<bool>,
 }
 
 /// How a read refused for its options, before anything was charged, ends,
@@ -1605,6 +1615,7 @@ impl GetContentInput {
             comment_budget: None,
             lines: None,
             history: None,
+            attestation: None,
         }
     }
 
@@ -1754,10 +1765,11 @@ pub enum ReadOption {
     CommentBudget,
     Lines,
     History,
+    Attestation,
 }
 
 impl ReadOption {
-    pub const ALL: [ReadOption; 7] = [
+    pub const ALL: [ReadOption; 8] = [
         ReadOption::Detail,
         ReadOption::Round,
         ReadOption::Attachment,
@@ -1765,6 +1777,7 @@ impl ReadOption {
         ReadOption::CommentBudget,
         ReadOption::Lines,
         ReadOption::History,
+        ReadOption::Attestation,
     ];
 
     /// Its field's name
@@ -1777,6 +1790,7 @@ impl ReadOption {
             ReadOption::CommentBudget => "comment_budget",
             ReadOption::Lines => "lines",
             ReadOption::History => "history",
+            ReadOption::Attestation => "attestation",
         }
     }
 }
@@ -1831,15 +1845,25 @@ impl ReadTarget {
         use ReadOption::*;
         match self {
             ReadTarget::Content => &[Detail, CommentBudget],
-            ReadTarget::Entry => &[Detail, Round, Attachment, Version, History],
-            ReadTarget::DataSet => {
-                &[Detail, Attachment, Version, CommentBudget, Lines, History]
+            ReadTarget::Entry => {
+                &[Detail, Round, Attachment, Version, History, Attestation]
             }
+            ReadTarget::DataSet => &[
+                Detail,
+                Attachment,
+                Version,
+                CommentBudget,
+                Lines,
+                History,
+                Attestation,
+            ],
             // As a data set's file read by attachment, so both forms of
             // one read take the same options; `lines` only beside a
             // citation without a range, `version` only beside one without
             // a commit (`split_citation`)
-            ReadTarget::CitedFile => &[Detail, Version, CommentBudget, Lines],
+            ReadTarget::CitedFile => {
+                &[Detail, Version, CommentBudget, Lines, Attestation]
+            }
             // Some of its lines, numbered as its outline numbers them
             // (0.118.0)
             ReadTarget::Document => &[Lines],
@@ -1894,6 +1918,7 @@ impl GetContentInput {
             (CommentBudget, self.comment_budget.is_some()),
             (Lines, self.lines.is_some()),
             (History, self.history.is_some()),
+            (Attestation, self.attestation.is_some()),
         ]
         .into_iter()
         .filter_map(|(o, given)| given.then_some(o))

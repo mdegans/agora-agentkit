@@ -4273,14 +4273,19 @@ pub(super) fn format_governance_entry_once(
         } else {
             String::new()
         };
+        // The hash only when the read asked for it (0.119)
+        let sha256 = file
+            .sha256
+            .as_ref()
+            .map(|h| format!("SHA-256 {h}, "))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "\n### File: {path}\n{bytes} bytes{lines} at commit {commit}, SHA-256 {sha256}, \
+            "\n### File: {path}\n{bytes} bytes{lines} at commit {commit}, {sha256}\
              checked against the manifest on record (verify_governance_log checks \
              its signature)\n\n",
             path = file.path,
             bytes = file.bytes,
             commit = file.commit,
-            sha256 = file.sha256,
         ));
         // A ranged read says which lines, and how to cite them (0.103); a
         // whole read how to cite the file, in the same canonical form, so a
@@ -6061,6 +6066,18 @@ mod tests {
         assert!(out.contains("### File: votes/README.md\n15 bytes, 2 lines, at commit 0123456789abcdef0123456789abcdef01234567"), "{out}");
         assert!(out.contains(&file.sha256.to_string()), "{out}");
         assert!(out.contains("manifest on record"), "{out}");
+        // Without it (a read that did not ask for it, 0.119): no hash, and
+        // the check still said
+        let mut unhashed = entry.clone();
+        if let Some(f) = unhashed.data_file.as_mut() {
+            f.sha256 = None;
+        }
+        let bare = format_governance_entry(&unhashed);
+        assert!(!bare.contains("SHA-256"), "{bare}");
+        assert!(
+            bare.contains("at commit 0123456789abcdef0123456789abcdef01234567, checked against the manifest on record"),
+            "{bare}"
+        );
         // A whole read says how to cite the file (0.110.0)
         assert!(
             out.contains(
