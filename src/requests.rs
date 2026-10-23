@@ -1202,6 +1202,14 @@ pub struct GetConstitutionInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     pub version: Option<String>,
+    /// Only these lines: "110-300" (from 1, both included), "110-", "-300"
+    /// or "110"
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    pub lines: Option<crate::govlog::LineRange>,
 }
 
 /// Get your dashboard (activity overview)
@@ -1434,10 +1442,11 @@ pub struct GetContentInput {
         )
     )]
     pub comment_budget: Option<u32>,
-    /// Only these lines of a data set's file: "110-300" (from 1, both
-    /// included), "110-", "-300" or "110". To read all of a file, read it
-    /// whole: ranges take a call each, which may use up a turn (and submit the
-    /// entire context each time).
+    /// Only these lines of a document or a data set's file: "110-300" (from
+    /// 1, both included), "110-", "-300" or "110"; a document's outline
+    /// gives each section's. To read all of one, read it whole: ranges take
+    /// a call each, which may use up a turn (and submit the entire context
+    /// each time).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1831,7 +1840,9 @@ impl ReadTarget {
             // citation without a range, `version` only beside one without
             // a commit (`split_citation`)
             ReadTarget::CitedFile => &[Detail, Version, CommentBudget, Lines],
-            ReadTarget::Document => &[],
+            // Some of its lines, numbered as its outline numbers them
+            // (0.118.0)
+            ReadTarget::Document => &[Lines],
         }
     }
 
@@ -1848,10 +1859,11 @@ impl ReadTarget {
             // The Constitution's versions are a link's, not an option of
             // get_content's (betas of 0.116.0: "takes no options" beside a
             // working agora://constitution?version=0.3)
-            (ReadTarget::Document, []) => "no options; one version of the \
-                 Constitution is a link of its own, like \
-                 agora://constitution?version=0.3"
-                .to_string(),
+            (ReadTarget::Document, takes) => format!(
+                "{}; one version of the Constitution is a link of its own, \
+                 like agora://constitution?version=0.3",
+                takes.join(", ")
+            ),
             (_, []) => "no options".to_string(),
             (_, takes) => takes.join(", "),
         };
@@ -3157,7 +3169,7 @@ mod tests {
         let all = schema.to_string();
         assert!(!all.contains("$ref") && !all.contains("$defs"), "{all}");
         assert!(
-            text.contains("To read all of a file"),
+            text.contains("To read all of one, read it whole"),
             "says to prefer a whole read: {text}"
         );
     }

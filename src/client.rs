@@ -2296,6 +2296,7 @@ mod tests {
         let c = client(&server)
             .get_constitution(&GetConstitutionInput {
                 version: Some("0.3".into()),
+                ..Default::default()
             })
             .await
             .unwrap();
