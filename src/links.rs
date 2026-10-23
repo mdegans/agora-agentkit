@@ -42,7 +42,7 @@ use url::Url;
 use crate::govlog::{DataCitation, DataFilePath, GitCommitPrefix};
 use crate::ids::{
     CommentId, ContentId, ContentRef, GovernanceLogId, GovernanceLogPrefix,
-    PlatformDoc, PostId,
+    PlatformDoc, PostId, PromptName,
 };
 use crate::requests::{
     GetConstitutionInput, GetContentInput, GetFeedInput, GetGovernanceLogInput,
@@ -663,22 +663,76 @@ fn moved(
 /// `agora://GOV-2026-0006`): that id's link, to name in the refusal (betas
 /// of 0.116.0: `agora://prompt:<name>` was "invalid port number")
 fn id_as_kind(link: &str) -> Option<String> {
-    let rest = link.get(SCHEME.len() + 3..)?;
-    let whole = rest.split(['?', '#']).next()?.trim_end_matches('/');
-    // The whole path an id (a citation holds `/`), else its first part
-    let first = whole.split('/').next()?;
-    [(whole, "its"), (first, "that id's")].into_iter().find_map(
-        |(id, whose)| {
-            let id = percent_encoding::percent_decode_str(id)
-                .decode_utf8()
-                .ok()?;
-            let read = id.parse::<ContentRef>().ok()?;
-            Some(format!(
-                "{id} is an id, not a kind of link: {whose} link is {}",
-                AgoraLink::from(read)
-            ))
-        },
-    )
+    IdAsKind::of(link).map(|found| found.said())
+}
+
+/// A link written with an id as its kind, and the link that id has: what
+/// [`id_as_kind`] refuses it with. Public for the runner, which checks a
+/// named prompt exists before the refusal suggests it (betas of 0.117.0:
+/// `agora://prompt:council` was told to read `agora://prompts/council`,
+/// which does not exist)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdAsKind {
+    /// The id as written
+    pub id: String,
+    whose: &'static str,
+    /// The id's link
+    pub link: AgoraLink,
+}
+
+impl IdAsKind {
+    /// The id `link` names as its kind, if it names one
+    pub fn of(link: &str) -> Option<Self> {
+        let link = unwrap_pasted(link);
+        let rest = link.get(SCHEME.len() + 3..)?;
+        let whole = rest.split(['?', '#']).next()?.trim_end_matches('/');
+        // The whole path an id (a citation holds `/`), else its first part
+        let first = whole.split('/').next()?;
+        [(whole, "its"), (first, "that id's")].into_iter().find_map(
+            |(id, whose)| {
+                let id = percent_encoding::percent_decode_str(id)
+                    .decode_utf8()
+                    .ok()?;
+                let read = id.parse::<ContentRef>().ok()?;
+                Some(Self {
+                    id: id.into_owned(),
+                    whose,
+                    link: AgoraLink::from(read),
+                })
+            },
+        )
+    }
+
+    /// The prompt the id names, if it names one
+    pub fn prompt(&self) -> Option<&PromptName> {
+        match &self.link {
+            AgoraLink::Read(read) => match &read.id {
+                ContentRef::Document(doc) => doc.as_prompt(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The refusal's words, naming the id's link
+    pub fn said(&self) -> String {
+        format!(
+            "{} is an id, not a kind of link: {} link is {}",
+            self.id, self.whose, self.link
+        )
+    }
+
+    /// The refusal's words for an id naming a prompt that is not
+    /// published: no link of its own, and the index of those that are
+    pub fn said_no_such_prompt(&self) -> String {
+        format!(
+            "{} is an id, not a kind of link, and no prompt is published \
+             as {:?}: the published prompts are listed at {}",
+            self.id,
+            self.prompt().map(PromptName::as_str).unwrap_or_default(),
+            AgoraLink::from(ContentRef::Document(PlatformDoc::Prompts))
+        )
+    }
 }
 
 /// A page path naming a data set's directory, whose trailing `/` is

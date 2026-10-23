@@ -193,6 +193,9 @@ pub struct Gauged<T> {
     /// What each result showed in full, committed when it is seated and
     /// discarded when it is left out (0.108)
     shown_once: Option<super::ShownOnce>,
+    /// The client a refusal that names a prompt's link checks it with
+    /// ([`Self::with_prompt_check`])
+    prompt_check: Option<crate::client::Client>,
 }
 
 impl<T> Gauged<T> {
@@ -202,7 +205,18 @@ impl<T> Gauged<T> {
             context,
             agent_id: None,
             shown_once: None,
+            prompt_check: None,
         }
+    }
+
+    /// Before a refusal of `agora://prompt:<name>` names the prompt's
+    /// link, ask `client` whether it is published; when it is not, the
+    /// refusal says so and names the index instead (betas of 0.117.0:
+    /// `agora://prompt:council` was pointed at `agora://prompts/council`,
+    /// which does not exist)
+    pub fn with_prompt_check(mut self, client: crate::client::Client) -> Self {
+        self.prompt_check = Some(client);
+        self
     }
 
     /// Commit what each result showed in full to `shown_once` when it is
@@ -536,6 +550,51 @@ fn data_file_instead(room: u64, text: &str, requested: &Requested) -> String {
     )
 }
 
+/// A refusal of a link written with a prompt's id as its kind
+/// ([`crate::links::IdAsKind`]) names that prompt's link only when the
+/// server publishes it; when the server answers that it has no such
+/// prompt, the refusal says so and names the index. Any other answer
+/// leaves the refusal as it was
+async fn check_prompt_link(
+    client: &crate::client::Client,
+    tool: &str,
+    input: &serde_json::Value,
+    result: &mut tool::Result,
+) {
+    #[derive(serde::Deserialize)]
+    struct Sent {
+        link: String,
+    }
+    if tool != "fetch_agora_link" || !super::tool::is_refusal(result) {
+        return;
+    }
+    let Ok(sent) = serde_json::from_value::<Sent>(input.clone()) else {
+        return;
+    };
+    let Some(found) = crate::links::IdAsKind::of(&sent.link) else {
+        return;
+    };
+    let Some(prompt) = found.prompt() else {
+        return;
+    };
+    let read = crate::requests::GetContentInput::new(
+        crate::ids::ContentRef::Document(crate::ids::PlatformDoc::Prompt(
+            prompt.clone(),
+        )),
+    );
+    match client.get_content(&read).await {
+        Err(crate::client::Error::Status { status, .. })
+            if status == reqwest::StatusCode::NOT_FOUND =>
+        {
+            let (said, instead) = (found.said(), found.said_no_such_prompt());
+            super::tool::map_text(&mut result.content, |t| {
+                t.replace(&said, &instead)
+            });
+        }
+        _ => {}
+    }
+}
+
 #[async_trait::async_trait]
 impl<T: Tool> Tool for Gauged<T> {
     fn name(&self) -> &str {
@@ -561,6 +620,9 @@ impl<T: Tool> Tool for Gauged<T> {
             super::tool::map_text(&mut result.content, |t| {
                 t.replace(crate::links::FORM, crate::links::FORM_AGAIN)
             });
+        }
+        if let Some(client) = &self.prompt_check {
+            check_prompt_link(client, &name, &input, &mut result).await;
         }
         // An input that did not parse is free, and says so (betas of
         // 0.113.0: "Invalid arguments at `history`" said nothing of cost)

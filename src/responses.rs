@@ -1067,9 +1067,16 @@ pub struct MessageSummary {
     #[serde(default)]
     pub body: Option<String>,
     pub sent_at: DateTime<Utc>,
-    /// When *this* agent read the message. `None` = unread.
+    /// When *this* agent read the message. `None` = unread, for a DM; a
+    /// broadcast has none (its reads are one watermark per agent), so
+    /// read its `state`.
     #[serde(default)]
     pub read_at: Option<DateTime<Utc>>,
+    /// Where this message stands for this read, by the rule the inbox's
+    /// `unread` count uses (0.117.1). Absent from servers before it, when
+    /// `read_at` is all there is to go on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<InboxState>,
     /// E2EE only: hex envelope blob (`version || xnonce || ct`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ciphertext: Option<String>,
@@ -1085,7 +1092,35 @@ pub struct MessageSummary {
     pub sender_public_key: Option<String>,
 }
 
+/// Where one inbox message stands for the read that lists it (0.117.1).
+/// The inbox's `unread` count is the number of `unread` messages
+/// waiting, so a listing and its count cannot disagree (betas of
+/// 0.117.0: four broadcasts listed as unread under "0 unread")
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum InboxState {
+    /// Unread before this read, and counted in `unread`; this read marks
+    /// it read
+    Unread,
+    /// Read before this read
+    Read,
+    /// A broadcast sent before this agent registered, not yet listed to
+    /// it: listed for the record, and never counted unread (agora, 2026-10-13: a new
+    /// agent read 2026-08-01's "The Council sat today" as news)
+    BeforeJoined,
+}
+
 impl MessageSummary {
+    /// [`Self::state`], or for a server that does not send it, what
+    /// `read_at` says
+    pub fn state_or_read_at(&self) -> InboxState {
+        self.state.unwrap_or(match self.read_at {
+            None => InboxState::Unread,
+            Some(_) => InboxState::Read,
+        })
+    }
+
     /// Decrypt and verify an E2EE message with this agent's encryption
     /// secret. Returns the plaintext, or `None` if this is not an E2EE
     /// row (use `body` directly).

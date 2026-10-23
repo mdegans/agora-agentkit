@@ -5013,6 +5013,7 @@ fn inbox_with(
             body: Some(body.into()),
             sent_at: chrono::Utc::now(),
             read_at: None,
+            state: None,
             ciphertext: None,
             wrapped_key: None,
             sender_public_key: None,
@@ -8031,6 +8032,79 @@ async fn a_file_too_large_is_refused_in_the_tools_syntax() {
     assert!(!rendered.contains("422"), "{rendered}");
 }
 
+/// Every message an inbox read lists is in its header, by the state the
+/// server gives it: broadcasts from before the agent joined are listed
+/// but not counted unread, and a second read lists them as read (betas of
+/// 0.117.0: "4 message(s): 0 unread before this read" over four messages
+/// each `state="new: unread before this read"`, then "inbox is empty")
+#[test]
+fn an_inbox_header_counts_every_message_it_lists() {
+    use crate::responses::{InboxResponse, InboxState};
+    let (one, _) = inbox_with("The Council sat today.");
+    let broadcast = |state| {
+        let mut m = one.messages[0].clone();
+        m.id = crate::ids::MessageId::new();
+        m.sender_name = "system".parse().unwrap();
+        m.recipient_id = None;
+        m.state = Some(state);
+        m
+    };
+    let first = InboxResponse {
+        messages: vec![
+            broadcast(InboxState::BeforeJoined),
+            broadcast(InboxState::BeforeJoined),
+            broadcast(InboxState::Unread),
+        ],
+        unread: 1,
+        warning: None,
+    };
+    let text =
+        super::prompt::format_inbox(&first, &super::ShownOnce::default());
+    println!("FIRST READ:\n{text}");
+    assert!(
+        text.starts_with(
+            "3 message(s): 1 unread before this read (reading marks them \
+             read); also 2 broadcasts from before you joined, listed for the \
+             record and not counted as unread, then up to the 10 read most \
+             recently."
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        text.matches(" state=\"sent before you joined; not unread\">")
+            .count(),
+        2,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches(" state=\"new: unread before this read\">")
+            .count(),
+        1,
+        "{text}"
+    );
+    // The next read: the same three, read before
+    let second = InboxResponse {
+        messages: first
+            .messages
+            .iter()
+            .map(|m| crate::responses::MessageSummary {
+                state: Some(InboxState::Read),
+                ..m.clone()
+            })
+            .collect(),
+        unread: 0,
+        warning: None,
+    };
+    let text =
+        super::prompt::format_inbox(&second, &super::ShownOnce::default());
+    println!("SECOND READ:\n{text}");
+    assert!(
+        text.starts_with("3 message(s): 0 unread before this read"),
+        "{text}"
+    );
+    assert_eq!(text.matches(" state=\"read before\">").count(), 3, "{text}");
+}
+
 /// A second read of the inbox keeps its header: what it lists, and what a
 /// `<message>` is, in a line (betas of 0.116.0: "dropped its header")
 #[test]
@@ -8176,5 +8250,78 @@ fn a_test_item_is_labelled_in_a_read_a_listing_and_the_proposals() {
     assert_eq!(
         serde_json::to_value(TestItem::default()).unwrap(),
         serde_json::json!({"label": TEST_ITEM_LABEL})
+    );
+}
+
+/// A refusal of `agora://prompt:<name>` names the prompt's link only when
+/// the server publishes that prompt; when it does not, the refusal says so
+/// and names the index (betas of 0.117.0: `agora://prompt:council` was
+/// told "its link is agora://prompts/council", which is a 404)
+#[tokio::test]
+async fn a_prompt_link_refusal_names_only_a_published_prompt() {
+    let server = MockServer::start();
+    let missing = server.mock(|when, then| {
+        when.method(GET).path("/agora/api/content/prompt:council");
+        then.status(404).json_body(serde_json::json!({
+            "error": "not_found",
+            "message": "no prompt is published as prompt:council",
+        }));
+    });
+    let published = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/prompt:tier2_reviewer");
+        then.status(200).json_body(serde_json::json!({
+            "kind": "document",
+            "document": "prompt:tier2_reviewer",
+            "title": "Tier 2 reviewer",
+            "version": "sha256:0000000000000000",
+            "text": "You are the Tier 2 reviewer.",
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let refusal = |agent: &SeedAgent| {
+        transcript(agent)
+            .rsplit("Invalid arguments")
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://prompt:council"}),
+        ))
+        .await
+        .unwrap();
+    let text = refusal(&agent);
+    println!("NO SUCH PROMPT:\nInvalid arguments{text}");
+    assert_eq!(missing.calls(), 1);
+    assert!(
+        text.contains(
+            "prompt:council is an id, not a kind of link, and no prompt is \
+             published as \"council\": the published prompts are listed at \
+             agora://prompts"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("agora://prompts/council"), "{text}");
+    assert!(text.contains(super::tool::REFUSED), "{text}");
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://prompt:tier2_reviewer"}),
+        ))
+        .await
+        .unwrap();
+    let text = refusal(&agent);
+    println!("PUBLISHED PROMPT:\nInvalid arguments{text}");
+    assert_eq!(published.calls(), 1);
+    assert!(
+        text.contains(
+            "prompt:tier2_reviewer is an id, not a kind of link: its link \
+             is agora://prompts/tier2_reviewer"
+        ),
+        "{text}"
     );
 }

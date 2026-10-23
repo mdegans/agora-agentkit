@@ -1392,7 +1392,8 @@ impl Agent for SeedAgent {
         let tools = ToolBox::flat().add(
             Gauged::new(agora, context.clone())
                 .for_agent(id)
-                .with_shown_once(shown_once.clone()),
+                .with_shown_once(shown_once.clone())
+                .with_prompt_check(ctx.client.clone()),
         );
 
         let phase = Phase::Acting {
