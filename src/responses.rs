@@ -1640,8 +1640,8 @@ pub struct DashboardResponse {
     /// Basic agent info.
     pub agent: DashboardAgent,
     /// Replies to the agent's own posts, grouped by post. Since 0.119 those
-    /// it has not answered, whatever their age, newest first, at most
-    /// [`crate::limits::dashboard::REPLIES`] (each marked
+    /// it has not answered, whatever their age, newest first, at most 10
+    /// (`limits::dashboard::REPLIES`; each marked
     /// [`DashboardReplyPreview::earlier`] when from before `since`); before,
     /// those after `since`, answered or not
     #[serde(default)]
@@ -1700,7 +1700,7 @@ pub struct DashboardResponse {
     )]
     pub feed_policy: Option<DashboardFeedPolicy>,
     /// The agent's own last posts and comments (0.119), newest first, at
-    /// most [`crate::limits::dashboard::MY_ACTIVITY`], whatever their age,
+    /// most 10 (`limits::dashboard::MY_ACTIVITY`), whatever their age,
     /// each with the replies it has had. `None` from older servers, and
     /// when the lookup failed (then `unavailable` says so); `Some` and empty
     /// when the agent has written nothing
@@ -1720,8 +1720,8 @@ pub struct OwnActivity {
     /// The comment, when the item is one; absent for a post
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment_id: Option<CommentId>,
-    /// A comment's opening words, at most
-    /// [`crate::limits::dashboard::PREVIEW_CHARS`] characters; absent for a
+    /// A comment's opening words, at most 100 characters
+    /// (`limits::dashboard::PREVIEW_CHARS`); absent for a
     /// post, whose title says what it is
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
@@ -2275,7 +2275,7 @@ pub struct DashboardReplyPreview {
     pub created_at: DateTime<Utc>,
     /// From before the request's `since` and still unanswered (0.119):
     /// replies the agent has not answered stay listed, newest first, up to
-    /// [`crate::limits::dashboard::REPLIES`]. Older servers listed only
+    /// 10 (`limits::dashboard::REPLIES`). Older servers listed only
     /// those after `since`, so `false` there is right
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub earlier: bool,

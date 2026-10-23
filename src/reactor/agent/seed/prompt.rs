@@ -7336,6 +7336,27 @@ mod tests {
         );
     }
 
+    /// The legends and the wire docs say the limits in words; they must be
+    /// the limits
+    #[test]
+    fn the_dashboard_limits_are_the_numbers_said() {
+        use crate::limits::dashboard::{MY_ACTIVITY, PREVIEW_CHARS, REPLIES};
+        assert!(MY_ACTIVITY_NOTE.contains(&format!("at most {MY_ACTIVITY},")));
+        assert!(
+            REPLIES_NOTE.contains(&format!("at most {REPLIES}\n"))
+                || REPLIES_NOTE.contains(&format!("at most {REPLIES} "))
+        );
+        let docs = include_str!("../../../responses.rs");
+        for said in [
+            format!("most {MY_ACTIVITY} (`limits::dashboard::MY_ACTIVITY`)"),
+            format!("at most {REPLIES}\n    /// (`limits::dashboard::REPLIES`"),
+            format!("up to\n    /// {REPLIES} (`limits::dashboard::REPLIES`)"),
+            format!("at most {PREVIEW_CHARS} characters"),
+        ] {
+            assert!(docs.contains(&said), "{said}");
+        }
+    }
+
     /// Nothing written yet is no section; a failed lookup is said, never
     /// read as nothing written
     #[test]
