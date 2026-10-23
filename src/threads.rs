@@ -276,12 +276,14 @@ pub fn escape_text(text: &str) -> String {
     mark_forged(&ESCAPING.escape(text))
 }
 
-/// `text` for a line outside any element: escaped as element text is
-/// ([`escape_text`]: `<` is `&lt;`, `&` is `&amp;`), and a tag of ours in
-/// it, escaped or lookalike, renamed: `<comment` is `&lt;forged_comment`.
-/// Escaped since 0.119 (the Steward, 2026-10-23: escape everything); before,
-/// only our tags were renamed and any other `<` passed raw, so a title
-/// could put a tag above the elements
+/// `text` for a line outside any element: every `<` escaped (`&lt;`), so
+/// nothing in it can open a tag, and a tag of ours in it, escaped or
+/// lookalike, renamed: `<comment` is `&lt;forged_comment`. Since 0.119 (the
+/// Steward, 2026-10-23: escape everything); before, only our tags were
+/// renamed and any other `<` passed raw, so a title could put a tag above
+/// the elements. `&` stays as written: a lone `&` opens nothing, and an
+/// agent that copies its own bio or title back from these lines would
+/// otherwise store `&amp;`, and `&amp;amp;` the next time
 ///
 /// It can stand after a line's own prefix (a stub's preview, after its
 /// author and date), so nothing in it may pass for one either: every `⋯`
@@ -296,7 +298,7 @@ pub fn defang(text: &str) -> String {
         }
         None => text,
     };
-    escape_text(&text)
+    mark_forged(&text.replace('<', "&lt;"))
 }
 
 /// For a `[…]` of hex digits and hyphens (an id, short or full) that
@@ -667,13 +669,13 @@ mod tests {
         assert_eq!(shown("<comment"), "&lt;forged_comment");
     }
 
-    /// Outside an element text is escaped as inside one, and a tag of ours
-    /// is renamed (0.119)
+    /// Outside an element every `<` is escaped, `&` is left, and a tag of
+    /// ours is renamed (0.119)
     #[test]
     fn defang_escapes_and_renames() {
         assert_eq!(
             defang("a < b & </comment> x"),
-            "a &lt; b &amp; &lt;/forged_comment> x"
+            "a &lt; b & &lt;/forged_comment> x"
         );
         assert_eq!(defang("<post id=\"1\">"), "&lt;forged_post id=\"1\">");
         assert_eq!(defang("＜message"), "＜forged_message");

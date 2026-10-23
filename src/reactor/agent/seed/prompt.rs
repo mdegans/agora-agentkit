@@ -1283,8 +1283,8 @@ pub(super) fn format_inbox(
     out
 }
 
-/// An author's text for a quoted line outside any element (`"…"`):
-/// escaped, a tag of ours renamed ([`crate::threads::defang`]), and its
+/// An author's text for a quoted line outside any element (`"…"`): its
+/// `<` escaped, a tag of ours renamed ([`crate::threads::defang`]), and its
 /// quotes as `'`, so it cannot close the quote and go on (betas of 0.108)
 fn quoted(text: &str) -> String {
     crate::threads::defang(text).replace(['"', '“', '”'], "'")
@@ -1421,7 +1421,10 @@ pub(super) fn format_communities(
                 plural(n as u64, "member", "members")
             ));
         }
-        if let Some(d) = c.description.as_deref().map(one_line)
+        if let Some(d) = c
+            .description
+            .as_deref()
+            .map(|d| crate::threads::defang(&one_line(d)))
             && !d.is_empty()
         {
             line.push_str(&format!(": {d}"));
@@ -8409,8 +8412,8 @@ mod tests {
         assert!(pointer.trim_end().ends_with("/>"), "{pointer}");
     }
 
-    /// Outside an element an author's text is escaped as inside one, and a
-    /// tag of ours in it renamed (0.119; the betas of 0.108 had it raw, so a
+    /// Outside an element an author's `<` is escaped, and a tag of ours in
+    /// it renamed (0.119; the betas of 0.108 had it raw, so a
     /// title could put a tag above the elements): no `<` of theirs is raw
     #[test]
     fn outside_an_element_text_is_escaped_too() {
@@ -8420,13 +8423,11 @@ mod tests {
         post.post.title = "T \" <post> &".into();
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(
-            out.contains(
-                ": a &lt; b &amp;&amp; \"c\" &lt;/forged_comment> d\n"
-            ),
+            out.contains(": a &lt; b && \"c\" &lt;/forged_comment> d\n"),
             "{out}"
         );
         assert!(
-            out.contains("x &lt; y &amp; z &lt;/forged_post> &lt;b>"),
+            out.contains("x &lt; y & z &lt;/forged_post> &lt;b>"),
             "{out}"
         );
         for raw in ["<post>", "z </post>", "</comment> d", "<b>"] {
@@ -8444,7 +8445,7 @@ mod tests {
             assert!(!out.contains("<post id=\"1\""), "{out}");
             assert!(!out.contains("</comment><"), "{out}");
             assert!(!out.contains("<b>"), "{out}");
-            assert!(out.contains("&lt;b>&amp;"), "{out}");
+            assert!(out.contains("&lt;b>&"), "{out}");
         };
 
         let agent: crate::responses::AgentResponse =
@@ -8460,7 +8461,7 @@ mod tests {
             }))
             .unwrap();
         let out = format_profile(&agent, &"viewer".parse().unwrap());
-        assert_eq!(out.matches("&lt;b>&amp;").count(), 4, "{out}");
+        assert_eq!(out.matches("&lt;b>&").count(), 4, "{out}");
         raw(&out);
 
         let chain = CommentChainResponse {
@@ -8483,7 +8484,7 @@ mod tests {
         request.title = HOSTILE.into();
         request.item_title = HOSTILE.into();
         let line = format_comment_request(&request);
-        assert_eq!(line.matches("&lt;b>&amp;").count(), 2, "{line}");
+        assert_eq!(line.matches("&lt;b>&").count(), 2, "{line}");
         raw(&line);
 
         let mut post = trash_entry(ContentKind::Post, DeletedBy::Author);
@@ -8496,7 +8497,7 @@ mod tests {
             offset: 0,
             limit: 2,
         });
-        assert!(out.matches("&lt;b>&amp;").count() >= 2, "{out}");
+        assert!(out.matches("&lt;b>&").count() >= 2, "{out}");
         raw(&out);
     }
 
