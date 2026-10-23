@@ -610,10 +610,14 @@ where
     let mut object =
         serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
     let envelope = take_fields(&mut object, fields);
-    let envelope = serde_json::from_value(serde_json::Value::Object(envelope))
-        .map_err(D::Error::custom)?;
-    let payload = serde_json::from_value(serde_json::Value::Object(object))
-        .map_err(D::Error::custom)?;
+    // Each half with its field's path: read from a `Value` here, the
+    // body's own path stops at this function (0.117.2)
+    let envelope =
+        crate::field_path::from_value(serde_json::Value::Object(envelope))
+            .map_err(D::Error::custom)?;
+    let payload =
+        crate::field_path::from_value(serde_json::Value::Object(object))
+            .map_err(D::Error::custom)?;
     Ok((payload, envelope))
 }
 
@@ -3785,6 +3789,36 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("unknown field `agent_id`"), "{err}");
+    }
+
+    /// A field of either half of a signed body is named when it does not
+    /// fit (0.117.2: "invalid type: string \"soon\", expected i64" named
+    /// no field)
+    #[test]
+    fn a_signed_body_names_the_field_that_does_not_fit() {
+        let uuid = "7ad26ccd-0000-4000-8000-000000000000";
+        let err =
+            serde_json::from_value::<CastVoteRequest>(serde_json::json!({
+                "agent_id": uuid, "target": uuid, "value": 1,
+                "signature": "ab", "timestamp": "soon",
+            }))
+            .unwrap_err()
+            .to_string();
+        println!("AFTER-SIGNED: {err}");
+        assert_eq!(
+            err,
+            "at `timestamp`: invalid type: string \"soon\", expected i64"
+        );
+        let err = serde_json::from_value::<UpdateProfileRequest>(
+            serde_json::json!({"bio": 7, "signature": "ab", "timestamp": 7}),
+        )
+        .unwrap_err()
+        .to_string();
+        println!("AFTER-SIGNED: {err}");
+        assert!(
+            err.starts_with("at `bio`: invalid type: integer `7`"),
+            "{err}"
+        );
     }
 
     /// The published schema of a signed body is the payload's properties

@@ -150,16 +150,13 @@ fn strip_code_fences(s: &str) -> &str {
         .trim()
 }
 
-/// Render a [`serde_path_to_error::Error`] as a model-facing retry message
+/// Render a [`serde_path_to_error::Error`] as a model-facing retry message:
+/// the field's path and serde's message, without the line and column
+/// ([`crate::field_path`])
 fn format_for_agent(
-    e: &serde_path_to_error::Error<serde_json::Error>,
+    e: serde_path_to_error::Error<serde_json::Error>,
 ) -> String {
-    let path = e.path().to_string();
-    if path.is_empty() || path == "." {
-        format!("Invalid JSON: {}", e.inner())
-    } else {
-        format!("Invalid JSON at `{path}`: {}", e.inner())
-    }
+    crate::field_path::FieldError::new(e).after("Invalid JSON")
 }
 
 /// Parse a [`Memory`] rewrite (`{"content": "..."}`) from the reflect
@@ -168,7 +165,7 @@ pub fn parse_memory_rewrite(response: &str) -> Result<Memory, String> {
     let json = strip_code_fences(response);
     let mut de = serde_json::Deserializer::from_str(json);
     serde_path_to_error::deserialize::<_, Memory>(&mut de)
-        .map_err(|e| format_for_agent(&e))
+        .map_err(format_for_agent)
 }
 
 /// Parse a [`Soul`] mutation — the full SOUL JSON without `evolution_log`
@@ -177,7 +174,7 @@ pub fn parse_soul_mutation(response: &str) -> Result<Soul, String> {
     let json = strip_code_fences(response);
     let mut de = serde_json::Deserializer::from_str(json);
     serde_path_to_error::deserialize::<_, Soul>(&mut de)
-        .map_err(|e| format_for_agent(&e))
+        .map_err(format_for_agent)
 }
 
 /// [`parse_soul_mutation`] for a last attempt: over-length prose fields are
@@ -190,7 +187,7 @@ pub fn parse_soul_mutation_clipped(
     let mut de = serde_json::Deserializer::from_str(json);
     serde_path_to_error::deserialize::<_, SoulDraft>(&mut de)
         .map(SoulDraft::into_clipped)
-        .map_err(|e| format_for_agent(&e))
+        .map_err(format_for_agent)
 }
 
 /// [`parse_evolution`] for a last attempt: an over-length note is clipped at
@@ -207,8 +204,8 @@ pub fn parse_evolution_clipped(
         return Ok((None, false));
     }
     let mut de = serde_json::Deserializer::from_str(json);
-    let draft: Draft = serde_path_to_error::deserialize(&mut de)
-        .map_err(|e| format_for_agent(&e))?;
+    let draft: Draft =
+        serde_path_to_error::deserialize(&mut de).map_err(format_for_agent)?;
     if draft.note.trim().is_empty() {
         return Ok((None, false));
     }
@@ -225,8 +222,7 @@ pub fn parse_evolution(response: &str) -> Result<Option<String>, String> {
     }
     let mut de = serde_json::Deserializer::from_str(json);
     let req: super::EvolutionRequest =
-        serde_path_to_error::deserialize(&mut de)
-            .map_err(|e| format_for_agent(&e))?;
+        serde_path_to_error::deserialize(&mut de).map_err(format_for_agent)?;
     let note = req.note.into_inner();
     if note.trim().is_empty() {
         Ok(None)
@@ -250,8 +246,8 @@ pub fn parse_feedback_clipped(
         return Ok((None, false));
     }
     let mut de = serde_json::Deserializer::from_str(json);
-    let draft: Draft = serde_path_to_error::deserialize(&mut de)
-        .map_err(|e| format_for_agent(&e))?;
+    let draft: Draft =
+        serde_path_to_error::deserialize(&mut de).map_err(format_for_agent)?;
     let (text, cut) = super::ShortString::clipped(&draft.text);
     let feedback = Feedback {
         text,
@@ -270,7 +266,7 @@ pub fn parse_feedback(response: &str) -> Result<Option<Feedback>, String> {
     let mut de = serde_json::Deserializer::from_str(json);
     serde_path_to_error::deserialize::<_, Feedback>(&mut de)
         .map(Some)
-        .map_err(|e| format_for_agent(&e))
+        .map_err(format_for_agent)
 }
 
 #[cfg(test)]
@@ -318,7 +314,13 @@ mod tests {
     #[test]
     fn memory_rewrite_error_names_the_path() {
         let err = parse_memory_rewrite(r#"{"content": 42}"#).unwrap_err();
-        assert!(err.contains("content"), "{err}");
+        // Its path and serde's words, no line or column (0.117.2: it ended
+        // "at line 1 column 14")
+        assert_eq!(
+            err,
+            "Invalid JSON at `content`: invalid type: integer `42`, expected \
+             a string"
+        );
     }
 
     #[test]

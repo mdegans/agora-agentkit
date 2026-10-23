@@ -1433,8 +1433,16 @@ fn read_input(
 fn from_options<T: serde::de::DeserializeOwned>(
     options: Map<String, Value>,
 ) -> Result<T, String> {
-    serde_json::from_value(Value::Object(options))
-        .map_err(|e| format!("in its options, {e}"))
+    // The option it is about by name (betas of 0.117.0: "in its options,
+    // unknown variant `bogus`" named none)
+    crate::field_path::from_value(Value::Object(options)).map_err(|e| {
+        match e.path() {
+            Some(option) => {
+                format!("in its option `{option}`, {}", e.message())
+            }
+            None => format!("in its options, {}", e.message()),
+        }
+    })
 }
 
 impl Serialize for AgoraLink {

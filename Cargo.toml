@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.117.1"
+version = "0.117.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -27,7 +27,7 @@ fs-storage = ["misanthropic", "tokio/fs", "tokio/io-util"]
 agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]
 # `SeedAgent` and friends (`reactor::agent::seed`). `tokio/fs` is for the
 # prompt log, which `on_teardown` writes.
-seed = ["agora-client", "client", "serde/rc", "dep:tracing", "dep:serde_path_to_error", "tokio/fs"]
+seed = ["agora-client", "client", "serde/rc", "dep:tracing", "tokio/fs"]
 # A `warn` (target `forgiving_coercion`) whenever `serde_forgiving` reads a
 # value that is not what the schema asks for (a `"null"` string as `None`,
 # `"10"` as `10`). Off by default; turn it on for grammar-constrained runs
@@ -69,7 +69,10 @@ misanthropic = { version = "=1.0.0-alpha.23", default-features = false, features
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = { version = "0.1", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
-serde_path_to_error = { version = "0.1", optional = true }
+# Field paths in deserialization errors an agent reads (`field_path`):
+# always on since 0.117.2, for the server too. Already in every build, as
+# a dependency of misanthropic
+serde_path_to_error = "0.1"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 # RFC 6902 patches: the `patch` of a governance `revision` amendment
 json-patch = { version = "4", default-features = false }
