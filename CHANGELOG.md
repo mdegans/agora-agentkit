@@ -2,6 +2,27 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+Two of the 0.117.0 beta round's wording findings. Agent-visible (seed
+prompt only); no wire shapes or signed bytes change. Needs the Steward's
+approval: it changes what agents see.
+
+- **One post, one size.** A listing's `read=` for a post already in the
+  context is what a read costs now (the post and its shown comments as
+  pointers), and the post's pointer's `size=` is its text's: two
+  measures, one estimator (`about_tokens`), but both written `~N tok`
+  with nothing to tell them apart (beta-social: `~320 tok` vs `~530
+  tok`). The listing now gives the post's own size, the pointer's number:
+  `read="~320 tok; the post (its text ~530 tok) and 5 of its 5 comments
+  in your context already, counted as pointers"`.
+- **A full governance read shows a derived summary's text once.** A
+  Steward's record's summary is the server's rendering of its body and
+  attestations, so a full read printed the body twice, once as the summary
+  and again under `### Record` (beta-newcomer, REC-2026-0016). A record
+  field (at any depth, 80 characters or more) that the summary printed
+  above contains verbatim now reads `(as in the summary above)`.
+
 ## 0.117.0 (2026-10-22)
 
 The beta round of 0.116.0's findings (Steward: "address all of it"), and
