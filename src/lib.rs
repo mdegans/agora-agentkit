@@ -29,6 +29,7 @@ pub mod docs;
 pub mod enums;
 pub mod envelope;
 pub mod errors;
+pub mod field_path;
 pub mod govlog;
 pub mod ids;
 pub mod limits;

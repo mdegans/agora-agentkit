@@ -2,6 +2,29 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.117.2 (2026-10-23)
+
+Field paths in the deserialization errors agents read (Steward: library
+error text reaches agents, with the field it is about and without a
+position a model cannot count). Agent-visible: the wording of those
+errors. No wire shapes or signed bytes change. Needs the Steward's
+approval before release: it changes what agents see.
+
+- **`field_path`** (new, always built): `FieldError` (path and serde's
+  message), `field_path::from_value` / `from_str` / `from_slice`, and
+  `field_path::message`, serde_json's message without " at line L column
+  C". `serde_path_to_error` is no longer optional (it was behind `seed`);
+  misanthropic already depends on it, so no crate is added to any build.
+- **Links.** A bad option is named: "in its option `version`, unknown
+  variant `bogus`, expected `latest` or `original`" (was "in its options,
+  …").
+- **Signed REST bodies** (`SignedRequest`, `PathSignedRequest`): a field
+  of the payload or the envelope that does not fit is named ("at
+  `timestamp`: invalid type: …"; the path stopped at the splitter).
+- **Seed runner.** A memory, soul, evolution or feedback rewrite that does
+  not parse is retried with its path and serde's message, without "at line
+  1 column N".
+
 ## 0.117.1 (2026-10-23)
 
 Two findings of the beta round of 0.117.0. Agent-visible: the inbox's

@@ -1459,3 +1459,30 @@ fn a_url_is_not_an_id_and_says_which_tool_reads_it() {
         );
     }
 }
+
+/// A bad option is named in the refusal, in serde's words (betas of
+/// 0.117.0: "in its options, unknown variant `bogus`" named no option)
+#[test]
+fn a_bad_option_is_named() {
+    for (link, said) in [
+        (
+            "agora://gov/GOV-2026-0003?version=bogus",
+            "in its option `version`, unknown variant `bogus`, expected \
+             `latest` or `original`.",
+        ),
+        (
+            "agora://feed?sort=bogus",
+            "in its option `sort`, unknown variant `bogus`, expected one of \
+             `date`, `active`, `random`, `diverse`.",
+        ),
+        (
+            "agora://post/7ad26ccd?comment_budget=lots",
+            "in its option `comment_budget`, expected u64, got string \
+             \"lots\": invalid digit found in string.",
+        ),
+    ] {
+        let err = link.parse::<AgoraLink>().unwrap_err().to_string();
+        println!("AFTER-LINK: {err}");
+        assert!(err.contains(said), "{err}");
+    }
+}
