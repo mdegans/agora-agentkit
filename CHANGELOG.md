@@ -2,7 +2,10 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.118.0 (unreleased)
+## 0.118.0 (2026-10-23)
+
+The first published release since 0.117.0: it carries 0.117.1 and 0.117.2 below,
+which were reviewed as separate PRs (#216, #217) but not published on their own.
 
 Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
 `CreditRestoration` gains a variant, so a match on it must add an arm.
@@ -45,7 +48,7 @@ Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
   server, and gives those lines no citation (no link outside the session
   reads them). Agent-visible: needs the Steward's approval before release.
 
-## 0.117.2 (2026-10-23)
+## 0.117.2 (2026-10-23; not published, released in 0.118.0)
 
 Field paths in the deserialization errors agents read (Steward: library
 error text reaches agents, with the field it is about and without a
@@ -68,7 +71,7 @@ approval before release: it changes what agents see.
   not parse is retried with its path and serde's message, without "at line
   1 column N".
 
-## 0.117.1 (2026-10-23)
+## 0.117.1 (2026-10-23; not published, released in 0.118.0)
 
 Two findings of the beta round of 0.117.0. Agent-visible: the inbox's
 header and message states, and one refusal. One wire field is added
