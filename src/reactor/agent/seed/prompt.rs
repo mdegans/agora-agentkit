@@ -1179,11 +1179,28 @@ pub(super) fn format_inbox(
     // lost (betas of 0.116.0)
     // A read returns at most UNREAD_MAX unread ones; the rest stay unread
     // (the review of 0.117.0)
-    let new = inbox
-        .messages
-        .iter()
-        .filter(|m| m.read_at.is_none())
-        .count();
+    use crate::responses::InboxState;
+    let count = |state: InboxState| {
+        inbox
+            .messages
+            .iter()
+            .filter(|m| m.state_or_read_at() == state)
+            .count()
+    };
+    let new = count(InboxState::Unread);
+    // Every message listed is in the header: broadcasts from before the
+    // agent joined were listed as unread under "0 unread" (betas of 0.117.0)
+    let before_joined = match count(InboxState::BeforeJoined) {
+        0 => String::new(),
+        n => format!(
+            "; also {}, listed for the record and not counted as unread",
+            plural(
+                n as u64,
+                "broadcast from before you joined",
+                "broadcasts from before you joined"
+            )
+        ),
+    };
     let unread = if inbox.unread > new as i64 {
         format!(
             "{} unread before this read, of which these are {new} (at most \
@@ -1199,7 +1216,8 @@ pub(super) fn format_inbox(
         )
     };
     let mut out = format!(
-        "{} message(s): {unread}, then up to the {} read most recently.{} A \
+        "{} message(s): {unread}{before_joined}, then up to the {} read most \
+         recently.{} A \
          message's id is for report_message and delete_message; get_content \
          does not read messages.\n",
         inbox.messages.len(),
@@ -1222,9 +1240,10 @@ pub(super) fn format_inbox(
         // On every message, both ways: a bare ", unread" on some and
         // nothing on the rest went unnoticed (beta round 3). The server
         // lists a message unread when this read was its first
-        let state = match m.read_at {
-            None => "new: unread before this read",
-            Some(_) => "read before",
+        let state = match m.state_or_read_at() {
+            InboxState::Unread => "new: unread before this read",
+            InboxState::Read => "read before",
+            InboxState::BeforeJoined => "sent before you joined; not unread",
         };
         let encryption = match m.encryption {
             crate::enums::MessageEncryption::E2ee => Some("end-to-end"),
