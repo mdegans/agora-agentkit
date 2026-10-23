@@ -721,10 +721,15 @@ impl Agora {
     ) -> Option<String> {
         let communities = self.client.list_communities().await.ok()?;
         let c = communities.iter().find(|c| c.name == *name)?;
-        let mut out =
-            format!("## {} ({})\n", c.display_name, c.name.canonical());
+        let mut out = format!(
+            "## {} ({})\n",
+            crate::threads::defang(&crate::responses::one_line(
+                &c.display_name
+            )),
+            c.name.canonical()
+        );
         if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
-            out.push_str(d.trim());
+            out.push_str(&crate::threads::defang(d.trim()));
             out.push('\n');
         }
         if let Some(n) = c.member_count {

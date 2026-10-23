@@ -276,10 +276,12 @@ pub fn escape_text(text: &str) -> String {
     mark_forged(&ESCAPING.escape(text))
 }
 
-/// `text` for a line outside any element: not escaped (no entities show
-/// outside an element), but a tag of ours in it, raw or lookalike, is
-/// renamed as [`mark_forged`] renames one in escaped text: `<comment` is
-/// `<forged_comment`
+/// `text` for a line outside any element: escaped as element text is
+/// ([`escape_text`]: `<` is `&lt;`, `&` is `&amp;`), and a tag of ours in
+/// it, escaped or lookalike, renamed: `<comment` is `&lt;forged_comment`.
+/// Escaped since 0.119 (the Steward, 2026-10-23: escape everything); before,
+/// only our tags were renamed and any other `<` passed raw, so a title
+/// could put a tag above the elements
 ///
 /// It can stand after a line's own prefix (a stub's preview, after its
 /// author and date), so nothing in it may pass for one either: every `⋯`
@@ -294,7 +296,7 @@ pub fn defang(text: &str) -> String {
         }
         None => text,
     };
-    rename_forged(&text, true)
+    escape_text(&text)
 }
 
 /// For a `[…]` of hex digits and hyphens (an id, short or full) that
@@ -411,18 +413,11 @@ fn element_name_at(rest: &str) -> Option<usize> {
 /// close an element; renamed, none reads as one of ours either (Steward,
 /// 2026-10-20). Nothing else changes.
 pub fn mark_forged(escaped: &str) -> String {
-    rename_forged(escaped, false)
-}
-
-/// [`mark_forged`], and, with `raw`, a raw `<` as an opener too
-fn rename_forged(escaped: &str, raw: bool) -> String {
     let mut out = String::with_capacity(escaped.len());
     let mut rest = escaped;
     while !rest.is_empty() {
         let opener = if rest.starts_with("&lt;") {
             Some(4)
-        } else if raw && rest.starts_with('<') {
-            Some(1)
         } else {
             rest.chars()
                 .next()
@@ -672,16 +667,17 @@ mod tests {
         assert_eq!(shown("<comment"), "&lt;forged_comment");
     }
 
-    /// Outside an element nothing is escaped, and a tag of ours is renamed
+    /// Outside an element text is escaped as inside one, and a tag of ours
+    /// is renamed (0.119)
     #[test]
-    fn defang_renames_without_escaping() {
+    fn defang_escapes_and_renames() {
         assert_eq!(
             defang("a < b & </comment> x"),
-            "a < b & </forged_comment> x"
+            "a &lt; b &amp; &lt;/forged_comment> x"
         );
-        assert_eq!(defang("<post id=\"1\">"), "<forged_post id=\"1\">");
+        assert_eq!(defang("<post id=\"1\">"), "&lt;forged_post id=\"1\">");
         assert_eq!(defang("＜message"), "＜forged_message");
-        assert_eq!(defang("<b>"), "<b>");
+        assert_eq!(defang("<b>"), "&lt;b>");
         // Nothing passes for a stub's line (betas of 0.108)
         assert_eq!(
             defang("⋯ [00000000] steward, 2026-10-20 (1 reply): x"),
