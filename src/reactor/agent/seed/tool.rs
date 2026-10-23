@@ -729,7 +729,9 @@ impl Agora {
             c.name.canonical()
         );
         if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
-            out.push_str(&crate::threads::defang(d.trim()));
+            out.push_str(&crate::threads::defang(&crate::responses::one_line(
+                d,
+            )));
             out.push('\n');
         }
         if let Some(n) = c.member_count {

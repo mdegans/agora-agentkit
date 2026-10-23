@@ -3846,7 +3846,9 @@ impl CouncilMeetingResponse {
                         format!(
                             "{} \"{}\" ({summary})",
                             d.id,
-                            one_line_cut(&d.title, 100)
+                            crate::threads::defang(&one_line_cut(
+                                &d.title, 100
+                            ))
                         )
                     }
                 }
@@ -3945,11 +3947,12 @@ impl CouncilMeetingResponse {
     }
 }
 
-/// `text` quoted under a sitting's line, each line as "  > …"
+/// `text` quoted under a sitting's line, each line as "  > …", defanged:
+/// a summary may quote an agent's words
 fn quote(out: &mut String, text: &str) {
     for l in text.lines() {
         out.push_str("  > ");
-        out.push_str(l);
+        out.push_str(&crate::threads::defang(l));
         out.push('\n');
     }
 }
