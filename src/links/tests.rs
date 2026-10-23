@@ -1097,6 +1097,7 @@ fn every_kind_takes_exactly_its_options() {
                 ReadOption::History => {
                     read.history = Some(crate::requests::History::All)
                 }
+                ReadOption::Attestation => read.attestation = Some(true),
             }
             let allowed = target.options().contains(&option);
             match read.conflict() {
@@ -1184,17 +1185,17 @@ fn a_read_link_names_its_kinds_options() {
         (
             "agora://gov/GOV-2026-0016?bogus=1",
             "bogus does not apply to a governance entry, which takes detail, \
-             round, attachment, version, history",
+             round, attachment, version, history, attestation",
         ),
         (
             "agora://gov/GOV-2026-0016?comment_budget=8192",
             "comment_budget does not apply to a governance entry, which \
-             takes detail, round, attachment, version, history",
+             takes detail, round, attachment, version, history, attestation",
         ),
         (
             "agora://gov/DATA-2026-0001?bogus=1",
             "which takes detail, attachment, version, comment_budget, lines, \
-             history, commit",
+             history, attestation, commit",
         ),
         (
             "agora://post/7ad26ccd?round=1",

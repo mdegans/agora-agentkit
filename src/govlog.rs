@@ -1892,7 +1892,7 @@ pub struct RevisionHistory {
 pub struct AmendmentNotice {
     pub id: GovernanceLogId,
     pub kind: AmendmentKind,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<GovernanceLogId>,
     pub basis: String,
     pub note: String,

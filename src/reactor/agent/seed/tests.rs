@@ -6195,6 +6195,7 @@ async fn only_an_accepted_read_reaches_the_server() {
                     ReadOption::CommentBudget => 8192.into(),
                     ReadOption::Lines => "1-2".into(),
                     ReadOption::History => true.into(),
+                    ReadOption::Attestation => true.into(),
                 };
             }
             let read: crate::requests::GetContentInput =

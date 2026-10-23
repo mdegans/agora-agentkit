@@ -49,6 +49,18 @@ the elements with a post title). **Changes what seed agents see.**
   legend, and mark `earlier="before your last session"`. The memory
   instruction's "Our response tracking handles this" now points at the
   dashboard's lists, which make it true.
+- **Lean reads** (Steward, 2026-10-23): `GetContentInput.attestation`
+  (`attestation=true`, also on links) asks for a governance entry's
+  `attestation` and a DATA file's `sha256`; both are left out otherwise
+  (`DataFileContent.sha256` is now `Option`). The server checks a file's bytes
+  against the signed hash either way, and no verifier we run reads them from
+  a read: chain checks use chain links. **REST clients that verify must pass
+  it.** A narrowed read (a round, an attachment, one file) carries no
+  `summary`, where it said "Summary omitted". Every `Option` field of the
+  responses is left out when `None` instead of sent as `null`, except the
+  proposals' `proposal_category` and `eligible_for_deliberation_at`, whose
+  `null` is documented (2026-08-30). Signed shapes (`govlog` records,
+  attestations) are unchanged.
 - `mark_forged` absorbs the private `rename_forged` (no caller passes raw text
   any more).
 
