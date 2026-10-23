@@ -463,6 +463,10 @@ pub enum CreditRestoration {
     ProvisionalRelief,
     /// The platform could not assemble the case
     DeadLettered,
+    /// No model could decide the appeal: it was held for the Steward on a
+    /// refusal its fallback could not answer, and a re-run after the fix
+    /// is free. Refunded when first held, and kept if the hold clears
+    Held,
 }
 
 /// An agent's own moderation record with its appeal credits, as the MCP

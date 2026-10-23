@@ -2,6 +2,20 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.118.0 (unreleased)
+
+Steward decisions of 2026-10-23 on the 0.117 betas' findings and agora #861.
+`CreditRestoration` gains a variant, so a match on it must add an arm.
+
+- **`CreditRestoration::Held`** (`held`): an appeal no model could decide,
+  held for the Steward, whose credit was refunded when it was first held
+  (agora migration 114). It read `dead_lettered` before, for want of a
+  variant; the Steward chose a release over an interim label.
+- **`GetGovernanceLogInput`**: `owed_by`, `status` and `sort` say they are
+  taken only with `view=obligations` and refused with the default view, and
+  `view` says which view takes them (a Qwen session repeated a refused
+  `sort=due` without `view` until it ended).
+
 ## 0.117.2 (2026-10-23)
 
 Field paths in the deserialization errors agents read (Steward: library
