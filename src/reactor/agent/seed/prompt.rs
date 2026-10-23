@@ -162,9 +162,15 @@ pub(super) fn assemble(
         sessions,
         &format_dashboard(dashboard, model),
         max_rounds,
-        &match recent_posts {
-            Some(posts) => format_recent_activity(posts, recent_limit),
-            None => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
+        &match (&dashboard.my_activity, recent_posts) {
+            // The server's list (0.119), the agent's posts and comments
+            (Some(items), _) => format_my_activity(items),
+            (None, _) if has_gap(dashboard, DashboardSection::MyActivity) => {
+                format_gap(dashboard, DashboardSection::MyActivity)
+            }
+            // An older server: its posts, fetched by the runner
+            (None, Some(posts)) => format_recent_activity(posts, recent_limit),
+            (None, None) => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
         },
     );
     let mut prompt = prompt
@@ -703,6 +709,14 @@ fn format_comment_request(request: &CouncilCommentRequest) -> String {
 
 /// What the dashboard says where `section` would be, when it could not be
 /// loaded: never an absence that reads like "none"
+/// Whether `section` is among the dashboard's `unavailable`
+pub(super) fn has_gap(
+    dash: &DashboardResponse,
+    section: DashboardSection,
+) -> bool {
+    dash.unavailable.iter().any(|g| g.section == section)
+}
+
 fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
     dash.unavailable
         .iter()
@@ -773,8 +787,12 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
     // A section newer than this client: its note, here
     out.push_str(&format_gap(dash, DashboardSection::Unknown));
 
+    let mut reply_legend = false;
     if !dash.unread_post_replies.is_empty() {
-        out.push_str("### Unread Replies to Your Posts\n\n");
+        out.push_str("### Replies to Your Posts\n\n");
+        if once_reply_legend(&mut reply_legend) {
+            out.push_str(REPLIES_NOTE);
+        }
         for post_group in &dash.unread_post_replies {
             // Elements, as every listing's entry (0.108)
             out.push_str(&elements::render(
@@ -798,6 +816,7 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
                     &El {
                         id: Some(reply.comment_id.to_string()),
                         by: Some(reply.author.as_str()),
+                        earlier: reply.earlier.then_some(elements::EARLIER),
                         body: Some(&preview),
                         ..El::default()
                     },
@@ -810,6 +829,9 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
 
     if !dash.unread_comment_replies.is_empty() {
         out.push_str("### Replies to Your Comments\n\n");
+        if once_reply_legend(&mut reply_legend) {
+            out.push_str(REPLIES_NOTE);
+        }
         for reply in &dash.unread_comment_replies {
             let preview = truncate(&one_line(&reply.preview), 100);
             out.push_str(&elements::render(
@@ -822,6 +844,7 @@ fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
                         &one_line(&reply.post_title),
                         80,
                     )),
+                    earlier: reply.earlier.then_some(elements::EARLIER),
                     body: Some(&preview),
                     ..El::default()
                 },
@@ -1789,6 +1812,65 @@ pub(super) const RECENT_ACTIVITY_UNAVAILABLE: &str = "\u{26a0} Your recent activ
 /// agents believed and repeated — the "posts disappear into the
 /// `unknown` community" meme (2026-09-13..16, agora#342). Never
 /// reintroduce a placeholder word for a missing prompt value.
+/// Said once above the reply sections (0.119)
+const REPLIES_NOTE: &str = "*Replies you have not answered, newest first, at most 10 \
+    per section, however old: answer one and it leaves the list. \
+    `earlier=\"before your last session\"` marks one you saw before.*\n\n";
+
+/// True the first time, so a legend shared by two sections is said once
+fn once_reply_legend(said: &mut bool) -> bool {
+    !std::mem::replace(said, true)
+}
+
+/// Said above `## Your Recent Activity` when the server lists it (0.119)
+const MY_ACTIVITY_NOTE: &str = "*Your last posts and comments, newest first, \
+    at most 10, however old. `replies` counts other agents' comments on your \
+    post, or their direct replies to your comment; `new`, those since your \
+    last session.*\n\n";
+
+/// `## Your Recent Activity` from the dashboard's `my_activity` (0.119):
+/// one element per post or comment, its replies counted. Empty when the
+/// agent has written nothing, so the section is left out
+fn format_my_activity(items: &[crate::responses::OwnActivity]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut out = MY_ACTIVITY_NOTE.to_string();
+    for item in items {
+        let title = truncate(&one_line(&item.post_title), 60);
+        let common = El {
+            community: Some(item.community.to_string()),
+            date: Some(item.created_at.date_naive().to_string()),
+            replies: Some(item.replies.to_string()),
+            replies_new: item.replies_new.map(|n| n.to_string()),
+            ..El::default()
+        };
+        let preview = item.preview.as_deref().map(one_line);
+        out.push_str(&match item.comment_id {
+            None => elements::render(
+                "post",
+                &El {
+                    id: Some(item.post_id.to_string()),
+                    title: Some(title),
+                    ..common
+                },
+            ),
+            Some(comment) => elements::render(
+                "comment",
+                &El {
+                    id: Some(comment.to_string()),
+                    post: Some(item.post_id.to_string()),
+                    post_title: Some(title),
+                    body: Some(preview.as_deref().unwrap_or("")),
+                    ..common
+                },
+            ),
+        });
+        out.push('\n');
+    }
+    out
+}
+
 fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
@@ -7180,6 +7262,144 @@ mod tests {
         assert!(intro.contains("A feed post title"), "feed");
         assert!(intro.contains("## Your Recent Activity"), "recent");
         assert!(intro.contains("My earlier post"), "recent post title");
+    }
+
+    fn intro_for(dashboard: &DashboardResponse) -> String {
+        assemble(
+            Prompt::default(),
+            &Perception {
+                constitution: FIXTURE_CONSTITUTION,
+                communities: &["tech".to_string()],
+                max_rounds: 7,
+                soul_markdown: "## Identity\nA curious agent.",
+                memory: "Remembered things.",
+                dashboard,
+                recent_posts: None,
+                recent_limit: 5,
+                web_tools: false,
+                model: test_model(),
+                sessions: Sessions::Returning,
+            },
+        )
+        .unwrap()
+        .messages
+        .first()
+        .unwrap()
+        .to_string()
+    }
+
+    fn own(comment: bool) -> crate::responses::OwnActivity {
+        crate::responses::OwnActivity {
+            post_id: PostId::from(uuid::Uuid::from_u128(0x7ad26ccd)),
+            post_title: "On the <hash> chain".into(),
+            comment_id: comment
+                .then(|| CommentId::from(uuid::Uuid::from_u128(0x9c1e0000))),
+            preview: comment.then(|| "I said </comment><post> & more".into()),
+            community: "tech".parse().unwrap(),
+            created_at: "2026-10-21T10:00:00Z".parse().unwrap(),
+            replies: 3,
+            replies_new: Some(1),
+        }
+    }
+
+    /// The server's list of the agent's posts and comments is the section
+    /// (0.119), each with its replies counted, escaped as every element;
+    /// the runner's own fetch is not needed
+    #[test]
+    fn my_activity_lists_posts_and_comments_with_replies() {
+        let mut dashboard = dash();
+        dashboard.my_activity = Some(vec![own(true), own(false)]);
+        let intro = intro_for(&dashboard);
+        assert!(intro.contains("## Your Recent Activity"), "{intro}");
+        assert!(intro.contains(MY_ACTIVITY_NOTE.trim()), "{intro}");
+        assert!(
+            !intro.contains(RECENT_ACTIVITY_UNAVAILABLE.trim()),
+            "{intro}"
+        );
+        assert!(
+            intro.contains(
+                "<comment id=\"00000000-0000-0000-0000-00009c1e0000\" \
+                 post=\"00000000-0000-0000-0000-00007ad26ccd\" \
+                 post_title=\"On the &lt;hash> chain\" community=\"tech\" \
+                 date=\"2026-10-21\" replies=\"3\" new=\"1\">\
+                 I said &lt;/forged_comment>&lt;forged_post> &amp; more</comment>"
+            ),
+            "{intro}"
+        );
+        assert!(
+            intro.contains(
+                "<post id=\"00000000-0000-0000-0000-00007ad26ccd\" \
+                 community=\"tech\" title=\"On the &lt;hash> chain\" \
+                 date=\"2026-10-21\" replies=\"3\" new=\"1\"/>"
+            ),
+            "{intro}"
+        );
+    }
+
+    /// Nothing written yet is no section; a failed lookup is said, never
+    /// read as nothing written
+    #[test]
+    fn my_activity_empty_or_unavailable() {
+        let mut dashboard = dash();
+        dashboard.my_activity = Some(Vec::new());
+        let intro = intro_for(&dashboard);
+        assert!(!intro.contains("## Your Recent Activity"), "{intro}");
+
+        let mut dashboard = dash();
+        dashboard.unavailable = vec![crate::responses::DashboardGap::of(
+            DashboardSection::MyActivity,
+        )];
+        let intro = intro_for(&dashboard);
+        assert!(intro.contains("## Your Recent Activity"), "{intro}");
+        assert!(
+            intro.contains(DashboardSection::MyActivity.unavailable_note()),
+            "{intro}"
+        );
+    }
+
+    /// An unanswered reply from before the last session is marked, and the
+    /// legend shared by both reply sections is said once (0.119)
+    #[test]
+    fn earlier_replies_are_marked_and_the_legend_said_once() {
+        let mut dashboard = dash();
+        let at = "2026-10-20T10:00:00Z".parse().unwrap();
+        dashboard.unread_post_replies =
+            vec![crate::responses::DashboardPostReplies {
+                post_id: PostId::new(),
+                post_title: "Mine".into(),
+                replies: vec![crate::responses::DashboardReplyPreview {
+                    comment_id: CommentId::new(),
+                    author: "artist".parse().unwrap(),
+                    preview: "Old and unanswered".into(),
+                    created_at: at,
+                    earlier: true,
+                }],
+            }];
+        dashboard.unread_comment_replies =
+            vec![crate::responses::DashboardCommentReply {
+                post_id: PostId::new(),
+                post_title: "Theirs".into(),
+                comment_id: CommentId::new(),
+                author: "lawyer".parse().unwrap(),
+                preview: "New".into(),
+                created_at: at,
+                earlier: false,
+            }];
+        let intro = intro_for(&dashboard);
+        assert_eq!(intro.matches(REPLIES_NOTE.trim()).count(), 1, "{intro}");
+        assert_eq!(
+            intro
+                .matches("earlier=\"before your last session\"")
+                .count(),
+            2,
+            "the legend's example and the one reply: {intro}"
+        );
+        assert!(
+            intro.contains(
+                "by=\"artist\" earlier=\"before your last session\">Old"
+            ),
+            "{intro}"
+        );
     }
 
     /// Recent activity that could not be loaded says so, rather than

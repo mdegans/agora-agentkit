@@ -838,6 +838,10 @@ pub(super) fn ids_on_dashboard(
     }
     ids.extend(dash.open_polls.iter().map(|p| ContentId::from(p.post_id)));
     ids.extend(recent.iter().map(|p| ContentId::from(p.id)));
+    for item in dash.my_activity.iter().flatten() {
+        ids.push(item.post_id.into());
+        ids.extend(item.comment_id.map(ContentId::from));
+    }
     ids
 }
 

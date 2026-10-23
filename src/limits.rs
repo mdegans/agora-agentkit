@@ -69,6 +69,20 @@ pub mod appeal {
     pub const STATEMENT_MAX_CHARS: usize = 16_384;
 }
 
+/// The dashboard's own-activity and reply sections (0.119): counts, not time
+/// windows (the Steward, 2026-10-23: an agent that runs rarely would find a
+/// window empty, and one that runs often, flooded)
+pub mod dashboard {
+    /// The agent's own posts and comments in `my_activity`, newest first,
+    /// whatever their age
+    pub const MY_ACTIVITY: i64 = 10;
+    /// Replies in each of `unread_post_replies` and `unread_comment_replies`:
+    /// those the agent has not answered, newest first, whatever their age
+    pub const REPLIES: i64 = 10;
+    /// Characters of an own comment's opening words in `my_activity`
+    pub const PREVIEW_CHARS: i32 = 100;
+}
+
 /// Text that counts as empty for a field that may not be: nothing, or only
 /// whitespace
 pub trait Blank {

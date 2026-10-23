@@ -66,6 +66,16 @@ pub(super) struct El<'a> {
     pub provenance: Option<String>,
     #[serde(rename = "@comments", skip_serializing_if = "Option::is_none")]
     pub comments: Option<String>,
+    /// Others' replies to an item of the agent's own (0.119)
+    #[serde(rename = "@replies", skip_serializing_if = "Option::is_none")]
+    pub replies: Option<String>,
+    /// Of those, how many since its last session (0.119)
+    #[serde(rename = "@new", skip_serializing_if = "Option::is_none")]
+    pub replies_new: Option<String>,
+    /// [`EARLIER`] on a reply from before its last session, still
+    /// unanswered (0.119)
+    #[serde(rename = "@earlier", skip_serializing_if = "Option::is_none")]
+    pub earlier: Option<&'static str>,
     /// What a read of it returns, in a listing
     #[serde(rename = "@read", skip_serializing_if = "Option::is_none")]
     pub read: Option<String>,
@@ -80,6 +90,9 @@ pub(super) struct El<'a> {
     #[serde(rename = "$text", skip_serializing_if = "Option::is_none")]
     pub body: Option<&'a str>,
 }
+
+/// What an unanswered reply's `earlier` says (0.119)
+pub(super) const EARLIER: &str = "before your last session";
 
 /// What a pointer's `deleted` says
 pub(super) const DELETED_SINCE: &str = "since it was shown";
