@@ -26,11 +26,17 @@ impl FieldError {
     /// From a [`serde_path_to_error`] error over serde_json
     pub fn new(e: serde_path_to_error::Error<serde_json::Error>) -> Self {
         let path = e.path().to_string();
+        let message = message(e.inner());
         Self {
             // `?` is a segment serde_path_to_error could not name: alone,
-            // it says nothing a missing path does not
-            path: (!matches!(path.as_str(), "" | "." | "?")).then_some(path),
-            message: message(e.inner()),
+            // it says nothing a missing path does not. A message that
+            // already opens with the path (our own deserializers' "`reply_to`
+            // must be …", "entry_type \"bogus\" is not one of …") is not
+            // given it twice
+            path: (!matches!(path.as_str(), "" | "." | "?")
+                && !names_its_field(&message, &path))
+            .then_some(path),
+            message,
         }
     }
 
@@ -67,6 +73,16 @@ impl fmt::Display for FieldError {
 }
 
 impl std::error::Error for FieldError {}
+
+/// Whether `message` opens by naming `path`, bare or in backticks
+fn names_its_field(message: &str, path: &str) -> bool {
+    let rest = message
+        .strip_prefix('`')
+        .and_then(|m| m.strip_prefix(path))
+        .and_then(|m| m.strip_prefix('`'))
+        .or_else(|| message.strip_prefix(path));
+    rest.is_some_and(|rest| rest.starts_with([' ', ':']))
+}
 
 /// serde_json's message for `e` without the " at line L column C" it
 /// appends when the error came from text (`line()` is 0 for one from a
@@ -194,5 +210,40 @@ mod tests {
         );
         let err = from_str::<serde_json::Value>("{} x").unwrap_err();
         assert_eq!(err.to_string(), "trailing characters");
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Named {
+        reply_to: Checked,
+    }
+
+    #[derive(Debug)]
+    struct Checked;
+
+    impl<'de> serde::Deserialize<'de> for Checked {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            _: D,
+        ) -> Result<Self, D::Error> {
+            Err(serde::de::Error::custom(
+                "`reply_to` must be a post or comment id",
+            ))
+        }
+    }
+
+    /// A message that already opens with its field is not given the path
+    /// again ("at `reply_to`: `reply_to` must be …"); one that merely
+    /// mentions it later is
+    #[test]
+    fn a_message_naming_its_field_is_not_given_it_twice() {
+        let err = from_str::<Named>(r#"{"reply_to": "x"}"#).unwrap_err();
+        assert_eq!(err.path(), None);
+        assert_eq!(err.to_string(), "`reply_to` must be a post or comment id");
+        assert!(names_its_field(
+            "entry_type \"bogus\" is not one of: a",
+            "entry_type"
+        ));
+        assert!(!names_its_field("entry_types are listed", "entry_type"));
+        assert!(!names_its_field("expected `reply_to` here", "reply_to"));
     }
 }
