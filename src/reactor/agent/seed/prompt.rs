@@ -993,6 +993,7 @@ fn format_feed_posts(
                             &size,
                             Some(post.comment_count),
                             InContext::fresh(&post.title),
+                            false,
                         )
                     }),
                     ..El::default()
@@ -1182,7 +1183,7 @@ fn proposal_read_phrase(
         || crate::threads::shown_body(&p.body).len() as u64,
         |shown| shown.bytes,
     ));
-    let body = if context.post {
+    let body = if context.post.is_some() {
         format!("Its body ({body}) is in your context already")
     } else {
         format!("Its body is {body}")
@@ -1190,12 +1191,12 @@ fn proposal_read_phrase(
     match (p.comment_count, p.size) {
         (Some(0), Some(size)) => format!(
             "{body}, with no comments; a read is {}.",
-            read_size_phrase(&size, Some(0), context)
+            read_size_phrase(&size, Some(0), context, true)
         ),
         (Some(n), Some(size)) => format!(
             "{body}; a read adds its {}: {}.",
             plural(n as u64, "comment", "comments"),
-            read_size_phrase(&size, Some(n), context)
+            read_size_phrase(&size, Some(n), context, true)
         ),
         (Some(0), None) => format!("{body}, with no comments."),
         (Some(n), None) => format!(
@@ -1496,8 +1497,9 @@ pub(super) const POINTER_BYTES: u64 = 120;
 /// bodies, the notes still to be shown this session among it
 #[derive(Debug, Clone, Copy)]
 pub(super) struct InContext {
-    /// The post itself was shown in full
-    post: bool,
+    /// The post itself was shown in full: its text's size, as its pointer
+    /// gives it ([`super::Shown::bytes`])
+    post: Option<u64>,
     /// Its comments shown in full: how many, and their bodies' raw bytes
     comments: u64,
     comment_bytes: u64,
@@ -1517,7 +1519,7 @@ impl InContext {
     /// A post titled `title` when nothing is in the context yet
     pub(super) fn fresh(title: &str) -> Self {
         Self {
-            post: false,
+            post: None,
             comments: 0,
             comment_bytes: 0,
             chrome: POST_CHROME_BYTES
@@ -1528,7 +1530,8 @@ impl InContext {
 
     pub(super) fn of(once: &ShownOnce, post: PostId, title: &str) -> Self {
         let (comments, comment_bytes) = once.comments_of(post);
-        let in_context = once.contains(post);
+        let shown = once.earlier(post).map(|s| s.bytes);
+        let in_context = shown.is_some();
         let note = |key: &'static str, text: &str, wanted: bool| {
             if wanted && !once.legend_shown(key) {
                 text.len() as u64
@@ -1537,7 +1540,7 @@ impl InContext {
             }
         };
         Self {
-            post: in_context,
+            post: shown,
             comments,
             comment_bytes,
             chrome: POST_CHROME_BYTES
@@ -1572,7 +1575,7 @@ fn post_body_bytes(
     size: &crate::responses::ReadSize,
     context: InContext,
 ) -> u64 {
-    if context.post {
+    if context.post.is_some() {
         POINTER_BYTES
     } else {
         size.body_bytes
@@ -1587,10 +1590,14 @@ fn post_body_bytes(
 /// A default read is the body and at most `DEFAULT_COMMENT_BUDGET` of
 /// comments, as the server charges them: each line at what it renders to
 /// here ([`crate::threads`]), so this is an upper bound.
+///
+/// `size_said`: the line gives the post's own size already (a proposal's
+/// "Its body (~N tok) is in your context already"), so this does not
 fn read_size_phrase(
     size: &crate::responses::ReadSize,
     comments: Option<i64>,
     context: InContext,
+    size_said: bool,
 ) -> String {
     let whole = whole_read_bytes(size, comments, context);
     let floor = context.chrome + post_body_bytes(size, context);
@@ -1599,27 +1606,39 @@ fn read_size_phrase(
             crate::requests::GetContentInput::DEFAULT_COMMENT_BUDGET,
         ));
     // What the size counts as pointers, said (betas of 0.108: "(the post
-    // is in your context already)" did not say what was counted)
+    // is in your context already)" did not say what was counted), with the
+    // post's own size, the one its pointer gives (beta-social, 0.117: a
+    // read of `~320 tok` beside a pointer's `size="~530 tok"` read as two
+    // counts of one post)
     let lines = comments.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
     let shown = context.comments.min(lines);
-    let pointers = match (context.post, shown) {
-        (false, 0) => String::new(),
-        (true, 0) => {
-            "; the post itself is in your context already, counted as a \
-             pointer"
-                .to_string()
+    // The post's own size, unless the line gives it already
+    let its = |bytes: u64| {
+        if size_said {
+            String::new()
+        } else {
+            format!(" (its text {})", about_tokens(bytes))
         }
+    };
+    let pointers = match (context.post, shown) {
+        (None, 0) => String::new(),
+        (Some(bytes), 0) => format!(
+            "; the post itself{} is in your context already, counted as a \
+             pointer",
+            its(bytes)
+        ),
         (post, n) => format!(
             "; {}{} of its {} in your context already, counted as \
              pointers",
-            if post { "the post and " } else { "" },
+            post.map(|b| format!("the post{} and ", its(b)))
+                .unwrap_or_default(),
             n,
             plural(lines, "comment", "comments")
         ),
     };
     if default >= whole {
         format!("{}{pointers}", about_tokens(whole))
-    } else if context.post {
+    } else if context.post.is_some() {
         format!(
             "a read is {}, the whole thread {}{pointers}",
             about_tokens(default),
@@ -1662,6 +1681,7 @@ fn post_line(
             &size,
             post.comment_count,
             InContext::of(once, post.id, &post.title),
+            false,
         )
     });
     elements::render(
@@ -4348,6 +4368,20 @@ pub(super) fn format_governance_entry_once(
             );
             data["summary"]["text"] = text.into();
         }
+        // A summary the server builds from the record (a Steward's record's
+        // is its body and attestations) was printed above: its fields are
+        // not printed again (beta-newcomer, 0.117: REC-2026-0016's body
+        // came twice, once as the summary and again under `### Record`)
+        if !part
+            && let Some(summary) = entry.summary.as_deref()
+            && let Some(obj) = data.as_object_mut()
+        {
+            for (key, value) in obj.iter_mut() {
+                if key != "summary" {
+                    point_at_summary(value, summary);
+                }
+            }
+        }
         // A part's record carries the record's other fields beside it:
         // shown once by their text (a round 2 read reprinted what round 3
         // had shown)
@@ -4405,6 +4439,36 @@ pub(super) fn format_governance_entry_once(
         }
     }
     out
+}
+
+/// What a record's field reads in place of text the summary above
+/// printed verbatim
+pub(super) const IN_SUMMARY_ABOVE: &str = "(as in the summary above)";
+
+/// The shortest field [`point_at_summary`] replaces: below it a match is
+/// likely a coincidence (a kind, a name), and repeating it costs little
+const IN_SUMMARY_MIN_CHARS: usize = 80;
+
+/// Replaces each string in `value`, at any depth, that `summary` contains
+/// verbatim with [`IN_SUMMARY_ABOVE`]
+fn point_at_summary(value: &mut serde_json::Value, summary: &str) {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => {
+            let t = s.trim();
+            if t.chars().count() >= IN_SUMMARY_MIN_CHARS && summary.contains(t)
+            {
+                *s = IN_SUMMARY_ABOVE.to_string();
+            }
+        }
+        Value::Array(items) => {
+            items.iter_mut().for_each(|v| point_at_summary(v, summary))
+        }
+        Value::Object(obj) => {
+            obj.values_mut().for_each(|v| point_at_summary(v, summary))
+        }
+        _ => {}
+    }
 }
 
 /// A string shown on one line: short and without a newline
@@ -5291,6 +5355,83 @@ mod tests {
         );
         // Before the summary, where a reader looks first.
         assert!(out.find("Cited by").unwrap() < out.find("Approved").unwrap());
+    }
+
+    /// A Steward's record's summary is the server's rendering of its body
+    /// and attestations: a full read prints them once, in the summary, and
+    /// the record points there (beta-newcomer, 0.117: REC-2026-0016's body
+    /// came twice)
+    #[test]
+    fn a_stewards_record_body_is_shown_once() {
+        let body = "On 2026-10-17 the Steward stopped the Council's sitting \
+                    during round 1 of its only item.\n\n**Why.** The seats \
+                    made the recusal determination without the drafts.";
+        let attests = "That he stopped the sitting, for the reason given, \
+                       and that this record describes what happened.";
+        // As agora-server's `summary_for` builds it
+        let summary = format!(
+            "Steward's record (council_operations) — it says what was done \
+             and decides nothing. Concerns GOV-2026-0010.\n\n{body}\n\n\
+             **Mike de Gans** (Steward) attests: {attests}"
+        );
+        let data = serde_json::json!({
+            "kind": "council_operations",
+            "title": "The 2026-10-17 sitting stopped",
+            "body": format!("{body}\n"),
+            "participants": [
+                {"name": "Mike de Gans", "role": "Steward", "attests": attests}
+            ],
+            "concerns": ["GOV-2026-0010"],
+        });
+        let entry = GovernanceEntryResponse {
+            id: "REC-2026-0016".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::StewardRecord,
+            title: "The 2026-10-17 sitting stopped".into(),
+            created_at: chrono::Utc::now(),
+            tags: None,
+            summary: Some(summary),
+            summary_authorship: None,
+            total_rounds: None,
+            round_bytes: Vec::new(),
+            data: Some(data),
+            round: None,
+            attachments: Vec::new(),
+            attachment: None,
+            version: None,
+            revisions: Vec::new(),
+            attestation: None,
+            standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
+            amendments: Vec::new(),
+            cited_by: Vec::new(),
+            texts: None,
+            obligation: None,
+            obligations: Vec::new(),
+            data_file: None,
+            data_set: None,
+            history: None,
+        };
+        let out = format_governance_entry(&entry);
+        assert_eq!(
+            out.matches("stopped the Council's sitting").count(),
+            1,
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("made the recusal determination").count(),
+            1,
+            "{out}"
+        );
+        assert_eq!(out.matches(attests).count(), 1, "{out}");
+        assert!(
+            out.contains(&format!("**Body:** {IN_SUMMARY_ABOVE}")),
+            "{out}"
+        );
+        // The record's short fields stay
+        assert!(out.contains("**Kind:** council_operations"), "{out}");
+        assert!(out.contains("**Name:** Mike de Gans"), "{out}");
     }
 
     /// A signed summary says whose it is, and the record does not repeat it
@@ -9316,11 +9457,45 @@ mod tests {
         let after = post_line(&p, &viewer, &once, None);
         assert!(
             after.contains(
-                " read=\"~890 tok; the post and 1 of its 2 comments in your \
-                 context already, counted as pointers\" shown=\"your read of \
-                 11111111\"/>"
+                " read=\"~890 tok; the post (its text ~10k tok) and 1 of its 2 \
+                 comments in your context already, counted as pointers\" \
+                 shown=\"your read of 11111111\"/>"
             ),
             "{after}"
+        );
+    }
+
+    /// A listing of a post in the context gives the post's own size as its
+    /// pointer does, beside what a read of it costs now (beta-social, 0.117:
+    /// the feed's `~320 tok` and the pointer's `~530 tok` read as two counts
+    /// of one post)
+    #[test]
+    fn a_listing_gives_a_posts_size_as_its_pointer_does() {
+        let viewer: crate::names::AgentName = "viewer".parse().unwrap();
+        let once = ShownOnce::default();
+        let mut read = mixed_read(1_500, 0);
+        read.post.size = Some(crate::responses::ReadSize {
+            body_bytes: 1_500,
+            comment_bytes: 400,
+        });
+        once.begin("your read of 11111111");
+        let _ = format_post_with_index(&read, &viewer, None, &once);
+        once.commit();
+        once.begin("your read of 22222222");
+        let pointers = format_post_with_index(&read, &viewer, None, &once);
+        let listing = post_line(&read.post, &viewer, &once, None);
+        let pointer = pointers
+            .lines()
+            .find(|l| l.starts_with("<post ") && l.contains(" shown=\""))
+            .expect("the post's pointer");
+        let size = pointer
+            .split(" size=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("the pointer's size");
+        assert!(
+            listing.contains(&format!("(its text {size})")),
+            "{size}: {listing}"
         );
     }
 
