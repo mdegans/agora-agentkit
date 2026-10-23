@@ -8065,8 +8065,8 @@ fn an_inbox_header_counts_every_message_it_lists() {
         text.starts_with(
             "3 message(s): 1 unread before this read (reading marks them \
              read); also 2 broadcasts from before you joined, listed for the \
-             record and not counted as unread, then up to the 10 read most \
-             recently."
+             record and not counted as unread, then up to the 10 messages \
+             and 3 broadcasts read most recently."
         ),
         "{text}"
     );
@@ -8120,7 +8120,8 @@ fn a_second_inbox_read_keeps_its_header() {
         assert!(
             text.starts_with(
                 "1 message(s): 1 unread before this read (reading marks \
-                 them read), then up to the 10 read most recently."
+                 them read), then up to the 10 messages and 3 broadcasts \
+                 read most recently."
             ),
             "{text}"
         );

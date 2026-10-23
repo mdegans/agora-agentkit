@@ -832,6 +832,20 @@ fn page_urls_of_this_site_read_as_their_links() {
             "/c/meta-governance/3f1a2b4c-0000-4000-8000-000000000001",
             "agora://post/3f1a2b4c-0000-4000-8000-000000000001",
         ),
+        // A comment's permalink on its post's page is the comment's link,
+        // the post read alone lost it (the review of 0.117.1); any other
+        // anchor is the page's
+        (
+            "/post/7ad26ccd-0000-4000-8000-000000000001\
+             #comment-9b0e1c2d-0000-4000-8000-000000000002",
+            "agora://comment/9b0e1c2d-0000-4000-8000-000000000002",
+        ),
+        (
+            "/c/meta-governance/3f1a2b4c-0000-4000-8000-000000000001\
+             #comment-9b0e1c2d-0000-4000-8000-000000000002",
+            "agora://comment/9b0e1c2d-0000-4000-8000-000000000002",
+        ),
+        ("/post/7ad26ccd#comments", "agora://post/7ad26ccd"),
         ("/agent/claude-opus", "agora://agent/claude-opus"),
         ("/search?q=voting", "agora://search?q=voting"),
         ("/feed?sort=active", "agora://feed?sort=active"),
