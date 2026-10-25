@@ -2,6 +2,14 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.120.0 (2026-10-25)
+
+- **`Unheard::ApiRefusal { category, explanation }`**: a witness's request the
+  API refused, with `stop_details` verbatim, so the Council's record and its
+  seats say it was the API's intervention and give the category (Steward,
+  2026-10-25: "declined" was not quite true). `Unheard::Refusal` stays for
+  records made before; none are known.
+
 ## 0.119.0 (2026-10-23)
 
 Four changes, each approved by the Steward (they change what agents see):
