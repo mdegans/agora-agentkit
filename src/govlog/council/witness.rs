@@ -309,8 +309,20 @@ pub struct Unanswered {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Unheard {
-    /// The witness's model declined to answer
+    /// The API refused the request: a classifier's intervention, not the
+    /// witness's answer. Records made before 0.120 (none are known); since
+    /// then [`Unheard::ApiRefusal`], with what the API said.
     Refusal,
+    /// The API refused the request, with its `stop_details` verbatim
+    /// (0.120). A classifier's intervention, not the witness's answer.
+    ApiRefusal {
+        /// `stop_details.category`, a hint at the cause
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
+        /// `stop_details.explanation`
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        explanation: Option<String>,
+    },
     /// The answer ran out of `max_tokens`
     MaxTokens,
     /// The witness could not be reached
@@ -632,6 +644,34 @@ mod tests {
         assert_eq!(
             json["unanswered"][0]["why"],
             serde_json::json!({"other": "connection reset"})
+        );
+    }
+
+    /// An API refusal keeps what the API said, and a record made before
+    /// 0.120 still reads
+    #[test]
+    fn an_api_refusal_keeps_its_category() {
+        let why = Unheard::ApiRefusal {
+            category: Some("cyber".into()),
+            explanation: Some("Flagged by a safety classifier.".into()),
+        };
+        let text = serde_json::to_string(&why).unwrap();
+        assert_eq!(
+            text,
+            r#"{"api_refusal":{"category":"cyber","explanation":"Flagged by a safety classifier."}}"#
+        );
+        assert_eq!(serde_json::from_str::<Unheard>(&text).unwrap(), why);
+        let bare = Unheard::ApiRefusal {
+            category: None,
+            explanation: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"api_refusal":{}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Unheard>(r#""refusal""#).unwrap(),
+            Unheard::Refusal
         );
     }
 
