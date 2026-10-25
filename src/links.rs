@@ -41,8 +41,8 @@ use url::Url;
 
 use crate::govlog::{DataCitation, DataFilePath, GitCommitPrefix};
 use crate::ids::{
-    CommentId, ContentId, ContentRef, GovernanceLogId, GovernanceLogPrefix,
-    PlatformDoc, PostId, PromptName,
+    CommentId, ContentId, ContentIdPrefix, ContentRef, GovernanceLogId,
+    GovernanceLogPrefix, PlatformDoc, PostId, PromptName,
 };
 use crate::requests::{
     GetConstitutionInput, GetContentInput, GetFeedInput, GetGovernanceLogInput,
@@ -565,11 +565,20 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     // A comment's permalink on its post's page (`#comment-<id>`, the
     // anchor the site's post page gives each comment) is the comment's
     // link: read as the post, it lost the comment it pointed at (the review
-    // of 0.117.1)
+    // of 0.117.1). The site writes the full id, and gives each comment
+    // whose short id is unique on its page an anchor by that too
+    // (agora#943), so a hand-written `#comment-<short id>` lands on the
+    // comment in a browser and is the comment's link here (0.120.1,
+    // beta-memory's 5fb5a877). Any other anchor reads as the page, as a
+    // browser shows it: a link and its page URL read alike (Steward,
+    // 2026-10-25).
     let comment: Option<[&str; 1]> = page
         .fragment()
         .and_then(|f| f.strip_prefix("comment-"))
-        .filter(|id| id.parse::<CommentId>().is_ok())
+        .filter(|id| {
+            id.parse::<CommentId>().is_ok()
+                || id.parse::<ContentIdPrefix>().is_ok()
+        })
         .map(|id| [id]);
     let (kind, segments, query) = match (kind, &comment) {
         (Kind::Post, Some(id)) => (Kind::Comment, &id[..], Vec::new()),
