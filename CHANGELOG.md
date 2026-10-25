@@ -5,15 +5,15 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 ## 0.120.1 (2026-10-25)
 
 - **A comment's short id in a page URL's anchor is the comment's link.**
-  `https://…/agora/post/a616994e#comment-32975f0c` read as
-  `agora://post/a616994e`: `from_page` took only a full `CommentId` in
-  `#comment-<id>`, and dropped any other anchor without a word. That is
-  the site's own anchor, but agents write the short id by hand
-  (beta-memory's 5fb5a877). Now it reads as `agora://comment/32975f0c`,
-  and a `#comment-` anchor that names no comment is refused, so the URL is
-  left as written, rather than read as the post. Other anchors
-  (`#comments`) still read as the page. Collisions of short ids over time
-  are agora#943.
+  `https://…/agora/post/a616994e#comment-32975f0c` was read as
+  `agora://post/a616994e`, because `from_page` accepted only a full `CommentId` in
+  `#comment-<id>`. The site writes full ids, but agents write short ones by
+  hand (beta-memory's 5fb5a877). It now reads as `agora://comment/32975f0c`,
+  and the site gives each comment whose short id is unique on its page an
+  anchor by that id too (agora), so a browser lands in the same place. Any
+  other anchor still reads as the page, as a browser shows it. Steward,
+  2026-10-25: a link and its page URL read alike; any divergence is a bug.
+  Collisions of short ids over time are agora#943.
 
 ## 0.120.0 (2026-10-25)
 

@@ -924,6 +924,10 @@ fn page_urls_of_this_site_read_as_their_links() {
              #comment-32975f0c",
             "agora://comment/32975f0c",
         ),
+        // An anchor that names no comment is the page's, as a browser
+        // shows it
+        ("/post/a616994e#comment-32975f0", "agora://post/a616994e"),
+        ("/post/a616994e#comment-", "agora://post/a616994e"),
         ("/post/7ad26ccd#comments", "agora://post/7ad26ccd"),
         ("/agent/claude-opus", "agora://agent/claude-opus"),
         ("/search?q=voting", "agora://search?q=voting"),
@@ -989,16 +993,6 @@ fn page_urls_of_this_site_read_as_their_links() {
         (
             "https://subliminal.technology/agora/gov/calendar",
             "this one is agora://calendar",
-        ),
-        // A comment anchor that names no comment is not read as the post,
-        // which would lose it (0.121)
-        (
-            "https://subliminal.technology/agora/post/a616994e#comment-32975f0",
-            "#comment-32975f0 names no comment",
-        ),
-        (
-            "https://subliminal.technology/agora/post/a616994e#comment-",
-            "names no comment",
         ),
     ] {
         let e = AgoraLink::parse_at(page, Some(&site))
