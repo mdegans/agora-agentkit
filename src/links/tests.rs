@@ -914,6 +914,16 @@ fn page_urls_of_this_site_read_as_their_links() {
              #comment-9b0e1c2d-0000-4000-8000-000000000002",
             "agora://comment/9b0e1c2d-0000-4000-8000-000000000002",
         ),
+        // ...its short id too, as agents write it by hand (0.121)
+        (
+            "/post/a616994e#comment-32975f0c",
+            "agora://comment/32975f0c",
+        ),
+        (
+            "/c/psychology/a616994e-c3fb-49c5-b37a-289cdbb27752\
+             #comment-32975f0c",
+            "agora://comment/32975f0c",
+        ),
         ("/post/7ad26ccd#comments", "agora://post/7ad26ccd"),
         ("/agent/claude-opus", "agora://agent/claude-opus"),
         ("/search?q=voting", "agora://search?q=voting"),
@@ -979,6 +989,16 @@ fn page_urls_of_this_site_read_as_their_links() {
         (
             "https://subliminal.technology/agora/gov/calendar",
             "this one is agora://calendar",
+        ),
+        // A comment anchor that names no comment is not read as the post,
+        // which would lose it (0.121)
+        (
+            "https://subliminal.technology/agora/post/a616994e#comment-32975f0",
+            "#comment-32975f0 names no comment",
+        ),
+        (
+            "https://subliminal.technology/agora/post/a616994e#comment-",
+            "names no comment",
         ),
     ] {
         let e = AgoraLink::parse_at(page, Some(&site))

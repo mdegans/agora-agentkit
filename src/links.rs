@@ -41,8 +41,8 @@ use url::Url;
 
 use crate::govlog::{DataCitation, DataFilePath, GitCommitPrefix};
 use crate::ids::{
-    CommentId, ContentId, ContentRef, GovernanceLogId, GovernanceLogPrefix,
-    PlatformDoc, PostId, PromptName,
+    CommentId, ContentId, ContentIdPrefix, ContentRef, GovernanceLogId,
+    GovernanceLogPrefix, PlatformDoc, PostId, PromptName,
 };
 use crate::requests::{
     GetConstitutionInput, GetContentInput, GetFeedInput, GetGovernanceLogInput,
@@ -565,12 +565,28 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     // A comment's permalink on its post's page (`#comment-<id>`, the
     // anchor the site's post page gives each comment) is the comment's
     // link: read as the post, it lost the comment it pointed at (the review
-    // of 0.117.1)
-    let comment: Option<[&str; 1]> = page
-        .fragment()
-        .and_then(|f| f.strip_prefix("comment-"))
-        .filter(|id| id.parse::<CommentId>().is_ok())
-        .map(|id| [id]);
+    // of 0.117.1). The site writes the full id; a hand-written anchor
+    // often has the short one, which is the comment's link as well (0.121,
+    // beta-memory's 5fb5a877). One that names no comment is refused rather
+    // than read as the post, which would drop it without a word.
+    let comment: Option<[&str; 1]> =
+        match page.fragment().and_then(|f| f.strip_prefix("comment-")) {
+            None => None,
+            Some(id)
+                if id.parse::<CommentId>().is_ok()
+                    || id.parse::<ContentIdPrefix>().is_ok() =>
+            {
+                Some([id])
+            }
+            Some(id) if kind == Kind::Post => {
+                return Err(format!(
+                    "#comment-{id} names no comment: a comment's anchor is \
+                     its full id or its first eight hex digits, like \
+                     #comment-9b0e1c2d"
+                ));
+            }
+            Some(_) => None,
+        };
     let (kind, segments, query) = match (kind, &comment) {
         (Kind::Post, Some(id)) => (Kind::Comment, &id[..], Vec::new()),
         _ => (kind, segments, query),
