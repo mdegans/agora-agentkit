@@ -1010,9 +1010,18 @@ impl Agora {
                 }
                 other => other.map_err(err)?,
             },
-            // A repository's read: rendered below as it comes
+            // A repository's read: rendered below as it comes, a refusal
+            // in the server's own words (the range to read instead)
             ContentRef::GitRepos | ContentRef::GitCitation(_) => {
-                self.client.get_content(&input).await.map_err(err)?
+                match self.client.get_content(&input).await {
+                    Ok(content) => content,
+                    Err(e) => {
+                        return Err(e.api_body().map_or_else(
+                            || err(&e),
+                            |body| Content::from(body.message().to_string()),
+                        ));
+                    }
+                }
             }
             ContentRef::Governance(_)
             | ContentRef::DataCitation(_)
@@ -1182,6 +1191,24 @@ impl Agora {
             };
         Ok(match content {
             crate::responses::ContentResponse::Git(git) => {
+                // A file read at its commit is one part, as a data set's
+                // file is: shown again, it is pointed at, not read again
+                if let (Some(file), Some(cited)) = (&git.file, &git.citation) {
+                    let key =
+                        AgoraLink::from(ContentRef::GitCitation(cited.clone()))
+                            .to_string();
+                    if let Some(shown) = self.shown_once.earlier_part(&key) {
+                        return Ok(format!(
+                            "(`{key}` is in your context already: shown in \
+                             {}, {}. Nothing was read again.)",
+                            shown.read,
+                            crate::threads::about_tokens(shown.bytes)
+                        )
+                        .into());
+                    }
+                    self.shown_once.begin(key.clone());
+                    self.shown_once.mark_part(key, file.text.len());
+                }
                 Content::from(prompt::format_git(&git, self.by_link))
             }
             crate::responses::ContentResponse::Post(post) => {

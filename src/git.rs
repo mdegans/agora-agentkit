@@ -171,6 +171,18 @@ pub enum GitRev {
     Ref(GitRefName),
 }
 
+impl GitRev {
+    /// `s` as a citation names what it reads at: `main`, the default, is
+    /// written as no rev at all, so `main` has one form (the review of
+    /// 0.121.0)
+    pub fn named(s: &str) -> Result<Option<Self>, GitCitationError> {
+        match s.parse()? {
+            Self::Ref(r) if r == GitRefName::main() => Ok(None),
+            rev => Ok(Some(rev)),
+        }
+    }
+}
+
 impl std::str::FromStr for GitRev {
     type Err = GitCitationError;
 
@@ -349,36 +361,18 @@ impl std::str::FromStr for GitCitation {
         let (rev, rest) = match rest.strip_prefix('/') {
             Some(path) => (None, format!("/{path}")),
             None => match rest.split_once(':') {
-                Some((rev, rest)) => {
-                    (Some(rev.parse::<GitRev>()?), rest.to_string())
-                }
+                Some((rev, rest)) => (GitRev::named(rev)?, rest.to_string()),
                 None => {
                     // A rev and no path is the rev's top directory
                     return Ok(Self {
-                        rev: Some(rest.parse()?),
+                        rev: GitRev::named(rest)?,
                         ..Self::root(repo)
                     });
                 }
             },
         };
-        // The range is strictly `<from>-<to>` or `<from>-` after the last
-        // `:`, as `Display` writes it, so a path may hold a `:`
-        let canonical = |r: &str| {
-            r.split_once('-').is_some_and(|(a, b)| {
-                !a.is_empty()
-                    && a.bytes().all(|c| c.is_ascii_digit())
-                    && b.bytes().all(|c| c.is_ascii_digit())
-            })
-        };
-        let (path, lines) = match rest.rsplit_once(':') {
-            Some((path, range)) if !path.is_empty() && canonical(range) => {
-                match range.parse::<LineRange>() {
-                    Ok(lines) => (path.to_string(), Some(lines)),
-                    Err(_) => (rest.clone(), None),
-                }
-            }
-            _ => (rest.clone(), None),
-        };
+        // The range after the last `:`, as a data set's citation reads it
+        let (path, lines) = LineRange::split_cited(&rest);
         let path = path.trim();
         let path =
             GitPath::parse_written(path.strip_prefix("./").unwrap_or(path))?;
@@ -503,8 +497,14 @@ mod tests {
                 "git:agora-agentkit:v0.120.1:Cargo.toml",
                 "git:agora-agentkit:v0.120.1:Cargo.toml",
             ),
-            ("git:agora-agentkit:main", "git:agora-agentkit:main:"),
-            ("git:agora-agentkit:main:", "git:agora-agentkit:main:"),
+            // main is the default: one form, with no rev
+            ("git:agora-agentkit:main", "git:agora-agentkit"),
+            ("git:agora-agentkit:main:", "git:agora-agentkit"),
+            ("git:agora-agentkit:main:src/", "git:agora-agentkit:/src/"),
+            (
+                "git:agora-agentkit:v0.120.1:",
+                "git:agora-agentkit:v0.120.1:",
+            ),
             (
                 "git:drama_llama:/README.md:1-",
                 "git:drama_llama:/README.md:1-",
@@ -526,7 +526,8 @@ mod tests {
         assert!(matches!(c.rev, Some(GitRev::Commit(_))));
         assert!(matches!(c.path, GitPath::File(_)));
         assert_eq!(c.lines.map(|l| l.to_string()).as_deref(), Some("40-60"));
-        assert!(matches!(cite("git:x:main:").rev, Some(GitRev::Ref(_))));
+        assert!(matches!(cite("git:x:v1:").rev, Some(GitRev::Ref(_))));
+        assert_eq!(cite("git:x:main:a.rs").rev, None);
     }
 
     #[test]

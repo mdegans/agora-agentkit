@@ -1599,7 +1599,7 @@ const EVERY_KIND: &[&str] = &[
     "agora://git/agora-agentkit/src/links.rs",
     "agora://git/agora-agentkit/src/links.rs?lines=40-60&commit=47c2cf5",
     "agora://git/agora-agentkit/Cargo.toml?commit=v0.120.1",
-    "agora://git/drama_llama?commit=main",
+    "agora://git/drama_llama/src/?commit=v0.5.0",
 ];
 
 #[test]
@@ -1633,6 +1633,42 @@ fn every_link_reads_back_from_its_page_and_its_site_path() {
         "https://subliminal.technology/agora/gov/GOV-2026-0006"
     );
     assert_eq!(link("agora://git").site_path(), "/agora/git");
+    // main is the default: one form
+    assert_eq!(
+        link("agora://git/drama_llama/a.rs?commit=main"),
+        link("agora://git/drama_llama/a.rs")
+    );
+    // The main site's path of a link is its page too, a directory's
+    // trailing `/` kept (the review of 0.121.0)
+    for s in EVERY_KIND {
+        let l = link(s);
+        let on_site = format!("https://subliminal.technology{}", l.site_path());
+        assert_eq!(
+            AgoraLink::parse_at(&on_site, Some(&site))
+                .unwrap_or_else(|e| panic!("{on_site}: {e}")),
+            l,
+            "{on_site}"
+        );
+    }
+    // A site at an address has no repositories' host: no panic, and the
+    // page is on the site itself (the review of 0.121.0)
+    for at in ["http://127.0.0.1:8080", "http://[::1]:3000"] {
+        let site = Url::parse(at).unwrap();
+        for s in EVERY_KIND {
+            let l = link(s);
+            let page = l.page_url(&site);
+            assert_eq!(
+                AgoraLink::parse_at(page.as_str(), Some(&site))
+                    .unwrap_or_else(|e| panic!("{page}: {e}")),
+                l,
+                "{page}"
+            );
+        }
+        assert!(
+            AgoraLink::parse_at("https://example.com/agora/feed", Some(&site))
+                .is_err()
+        );
+    }
     assert_eq!(AgoraLink::from_site_path("/about").map(|r| r.is_ok()), None);
 }
 

@@ -549,15 +549,12 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     let Some(site) = site else {
         return Err("this client knows no website to read page URLs of".into());
     };
-    // The repositories' pages are on their own host (0.121.0)
-    if let Some(host) = site.host_str() {
-        let mut git_site = site.clone();
-        git_site
-            .set_host(Some(&format!("git.{host}")))
-            .expect("a site's host with git. is one");
-        if same_site(page, &git_site) {
-            return from_git_page(page);
-        }
+    // The repositories' pages are on their own host (0.121.0), when the
+    // site has a domain name to put `git.` before
+    if let Some(git_site) = git_site(site)
+        && same_site(page, &git_site)
+    {
+        return from_git_page(page);
     }
     if !same_site(page, site) {
         return Err(format!(
@@ -664,16 +661,17 @@ impl AgoraLink {
 
     /// The link's page on `site` (an origin, like `https://subliminal.technology`):
     /// `<site>/agora/<kind><path>?<query>`, but a repository's at
-    /// `git.<site host>/<repository>/<path>?<query>`, beside its clone URL.
+    /// `git.<site host>/<repository>/<path>?<query>`, beside its clone URL
+    /// (on a site with no domain name, an address, under `/agora/git/`).
     /// A page URL reads back as this link ([`parse_at`](Self::parse_at)).
     pub fn page_url(&self, site: &Url) -> Url {
         let url = self.to_url();
         let mut page = site.clone();
         page.set_fragment(None);
-        if url.host_str() == Some(Kind::Git.host()) {
-            let host = format!("git.{}", site.host_str().unwrap_or_default());
-            page.set_host(Some(&host))
-                .expect("a site's host with git. is one");
+        if url.host_str() == Some(Kind::Git.host())
+            && let Some(git_site) = git_site(site)
+        {
+            page = git_site;
             page.set_path(url.path());
         } else {
             page.set_path(&format!(
@@ -698,6 +696,19 @@ impl AgoraLink {
         let given = format!("{SCHEME}://{rest}");
         Some(parse_link(&given).map_err(|why| AgoraLinkError { given, why }))
     }
+}
+
+/// The repositories' host beside `site`, `git.<its domain>`: none for a
+/// site at an address (a test's `127.0.0.1`), whose repository pages stay
+/// under `/agora/git/`
+fn git_site(site: &Url) -> Option<Url> {
+    let domain = site.domain()?;
+    let mut git = site.clone();
+    git.set_host(Some(&format!("git.{domain}"))).ok()?;
+    git.set_path("/");
+    git.set_query(None);
+    git.set_fragment(None);
+    Some(git)
 }
 
 /// A page on the repositories' host, `git.<site host>`: its link, or why it
@@ -888,12 +899,14 @@ impl IdAsKind {
     }
 }
 
-/// A page path naming a data set's directory, whose trailing `/` is
-/// meaningful: `gov/<DATA id>/<dir>/`
+/// A page path naming a directory, whose trailing `/` is meaningful: a
+/// data set's, `gov/<DATA id>/<dir>/`, or a repository's,
+/// `git/<repository>/<dir>/` (0.121.0)
 fn is_data_directory(parts: &[&str]) -> bool {
     matches!(parts, ["gov", id, _, .., ""]
         if id.parse::<GovernanceLogId>()
             .is_ok_and(|id| id.prefix() == GovernanceLogPrefix::Data))
+        || matches!(parts, ["git", _, _, .., ""])
 }
 
 /// A read's options as query parameters: every field but the two the path
@@ -1476,16 +1489,15 @@ fn parse_git(
     directory: bool,
     mut options: Map<String, Value>,
 ) -> Result<AgoraLink, String> {
+    let commit_given = options.contains_key("commit");
     let rev = match options.remove("commit") {
-        Some(rev) => Some(
-            value_str(&rev)
-                .parse::<GitRev>()
-                .map_err(|e| e.to_string())?,
-        ),
+        Some(rev) => {
+            GitRev::named(&value_str(&rev)).map_err(|e| e.to_string())?
+        }
         None => None,
     };
     let Some((repo, rest)) = segments.split_first() else {
-        if rev.is_some() {
+        if commit_given {
             return Err("commit= is for a repository: \
                  agora://git/<repository>/<path>?commit=<rev>"
                 .into());
