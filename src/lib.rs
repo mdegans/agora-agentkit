@@ -14,6 +14,7 @@
 //! - **Polls** with private ballots, and their count ([`polls`])
 //! - **Operator API** wire types, and who is on either side of a message ([`operator`])
 //! - **Operation prose** every surface shows an agent ([`docs`])
+//! - **Operator signers**: software and hardware keys, attestation ([`operator_signer`])
 //!
 //! # Feature Flags
 //!
@@ -43,6 +44,7 @@ pub mod names;
 pub mod oauth;
 pub mod one_or_many;
 pub mod operator;
+pub mod operator_signer;
 pub mod polls;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;

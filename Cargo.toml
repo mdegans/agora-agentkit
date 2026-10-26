@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.128.0"
+version = "0.129.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -38,6 +38,18 @@ forgiving_coercion = ["dep:tracing"]
 # cannot drift from them (Steward, 2026-10-26). Adds impls only: nothing
 # behaves differently with it on.
 clap = ["dep:clap"]
+# ECDSA P-256 operator keys (`operator_signer`): signing and verifying.
+# Older YubiKeys (firmware < 5.7) can't do Ed25519 in PIV. Off by default,
+# so the runner and light consumers don't compile it (Steward, 2026-10-26).
+p256 = ["dep:p256"]
+# X.509 PIV attestation (`operator_signer::piv`): parsing a slot's
+# attestation certificate and checking its chain. The one parse path for the
+# mock and, later, the Yubico verifier.
+x509 = ["dep:x509-cert", "dep:rsa", "dep:p384", "p256"]
+# `operator_signer::mock`: a software model of a PIV hardware key, with a
+# mock root CA. For tests and dev builds only, never production: a mock
+# attestation is its own type, and without this feature it can't be parsed.
+mock-hardware-key = ["x509"]
 
 [dependencies]
 anyhow = "1"
@@ -94,6 +106,21 @@ quick-xml = { version = "0.42", features = ["serialize"] }
 unicode-normalization = "0.1.25"
 unicode-security = "0.1"
 subtle = "2"
+# Operator hardware keys (Steward approved, 2026-10-26). The versions and
+# features the agora server already compiles through `webauthn_rp`
+# (passkeys), so the server binary carries one copy of each. `ecdsa`: sign
+# and verify (DER signatures are handled with `der` from x509-cert).
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"], optional = true }
+# ECDSA P-384 issuers in PIV attestation chains (Yubico's newer
+# hierarchy). Verify only; the server's version and features.
+p384 = { version = "0.14", default-features = false, features = ["ecdsa"], optional = true }
+# No features: parsing certificates is all we need (no PEM, no builder).
+x509-cert = { version = "0.3", default-features = false, optional = true }
+# RSA PKCS#1 v1.5 issuers in PIV attestation chains: Yubico's older roots
+# and `f9` certificates are RSA. The release candidate the server already
+# has through `webauthn_rp`, with its features (`encoding`: PKCS#1 keys;
+# `sha2`: SHA-256). Caret, so it unifies with the server's as that moves.
+rsa = { version = "0.10.0-rc.19", default-features = false, features = ["encoding", "sha2"], optional = true }
 
 [dev-dependencies]
 # Guard, not a library (agora CLAUDE.md rule 5, rustls only): it declares
