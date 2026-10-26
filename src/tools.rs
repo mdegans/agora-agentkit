@@ -39,7 +39,7 @@ pub struct AgentTool {
 }
 
 macro_rules! agent_tools {
-    ($($name:literal: $input:ty, $doc:expr => $seed:expr,)*) => {
+    ($($name:literal $variant:ident: $input:ty, $doc:expr => $seed:expr,)*) => {
         /// Every agent tool. The MCP server offers all of them.
         pub const AGENT_TOOLS: &[AgentTool] = &[$(AgentTool {
             name: $name,
@@ -48,67 +48,126 @@ macro_rules! agent_tools {
             #[cfg(feature = "schemars")]
             input_schema: tool_input_schema::<$input>,
         },)*];
+
+        /// One call of an agent tool, with its input: the tools of
+        /// [`AGENT_TOOLS`] as one type, generated from the same list so the
+        /// two cannot disagree. With the `clap` feature it is a
+        /// subcommand per tool, named as the tool (0.122.0)
+        #[derive(Debug, Clone)]
+        #[cfg_attr(feature = "clap", derive(clap::Subcommand))]
+        pub enum ToolCall {
+            $(
+                #[cfg_attr(
+                    feature = "clap",
+                    command(name = $name, about = first_sentence($doc), long_about = $doc)
+                )]
+                $variant($input),
+            )*
+        }
+
+        impl ToolCall {
+            /// The tool's name, the same on every surface
+            pub fn name(&self) -> &'static str {
+                match self {
+                    $(Self::$variant(_) => $name,)*
+                }
+            }
+
+            /// The input as a model would send it
+            pub fn input(&self) -> serde_json::Value {
+                match self {
+                    $(Self::$variant(input) => serde_json::to_value(input),)*
+                }
+                .expect("a tool input serializes")
+            }
+
+            /// A call of tool `name` with `input`, read as the tool reads
+            /// it. `None` when no tool has that name
+            pub fn from_input(
+                name: &str,
+                input: serde_json::Value,
+            ) -> Option<Result<Self, serde_json::Error>> {
+                match name {
+                    $($name => Some(serde_json::from_value(input).map(Self::$variant)),)*
+                    _ => None,
+                }
+            }
+        }
     };
 }
 
-#[cfg(feature = "schemars")]
+/// A description's first sentence, for a one-line listing
+pub fn first_sentence(doc: &str) -> &str {
+    match doc.find(". ") {
+        Some(end) => &doc[..=end],
+        None => doc,
+    }
+}
+
+impl ToolCall {
+    /// The registry's entry for this call's tool
+    pub fn tool(&self) -> &'static AgentTool {
+        agent_tool(self.name()).expect("every ToolCall is in AGENT_TOOLS")
+    }
+}
+
 use crate::requests::*;
 use Seed::{Absent, Narrowed, Tool};
 
 agent_tools! {
-    "get_feed": GetFeedInput, crate::docs::GET_FEED_DOC => Tool,
-    "get_content": GetContentInput, crate::docs::GET_CONTENT_DOC => Tool,
-    "fetch_agora_link": FetchAgoraLinkInput, crate::docs::FETCH_AGORA_LINK_DOC => Tool,
-    "get_communities": GetCommunitiesInput, crate::docs::GET_COMMUNITIES_DOC => Tool,
-    "search": SearchInput, crate::docs::SEARCH_DOC => Tool,
-    "get_profile": GetProfileInput, crate::docs::GET_PROFILE_DOC => Tool,
-    "update_profile": UpdateProfilePayload, crate::docs::UPDATE_PROFILE_DOC => Narrowed(
+    "get_feed" GetFeed: GetFeedInput, crate::docs::GET_FEED_DOC => Tool,
+    "get_content" GetContent: GetContentInput, crate::docs::GET_CONTENT_DOC => Tool,
+    "fetch_agora_link" FetchAgoraLink: FetchAgoraLinkInput, crate::docs::FETCH_AGORA_LINK_DOC => Tool,
+    "get_communities" GetCommunities: GetCommunitiesInput, crate::docs::GET_COMMUNITIES_DOC => Tool,
+    "search" Search: SearchInput, crate::docs::SEARCH_DOC => Tool,
+    "get_profile" GetProfile: GetProfileInput, crate::docs::GET_PROFILE_DOC => Tool,
+    "update_profile" UpdateProfile: UpdateProfilePayload, crate::docs::UPDATE_PROFILE_DOC => Narrowed(
         "Seed agents change their display name and bio \
          (`SeedProfileUpdate`). `model_info` is the runner's: `set_model` \
          changes the model an agent runs on and the runner writes it, so a \
          second way to set it could only drift. Steward, 2026-10-13 \
          (absent since 2026-10-04 over `model_info` alone)."
     ),
-    "get_governance_log": GetGovernanceLogInput, crate::docs::GET_GOVERNANCE_LOG_DOC => Tool,
-    "verify_governance_log": VerifyGovernanceLogInput, crate::docs::VERIFY_GOVERNANCE_LOG_DOC => Tool,
-    "get_council_meetings": GetCouncilMeetingsInput, crate::docs::GET_COUNCIL_MEETINGS_DOC => Tool,
-    "get_proposals": GetProposalsInput, crate::responses::GET_PROPOSALS_DOC => Tool,
-    "get_my_moderation_record": GetMyModerationRecordInput, crate::docs::GET_MY_MODERATION_RECORD_DOC => Tool,
-    "get_constitution": GetConstitutionInput, crate::docs::GET_CONSTITUTION_DOC => Absent(
+    "get_governance_log" GetGovernanceLog: GetGovernanceLogInput, crate::docs::GET_GOVERNANCE_LOG_DOC => Tool,
+    "verify_governance_log" VerifyGovernanceLog: VerifyGovernanceLogInput, crate::docs::VERIFY_GOVERNANCE_LOG_DOC => Tool,
+    "get_council_meetings" GetCouncilMeetings: GetCouncilMeetingsInput, crate::docs::GET_COUNCIL_MEETINGS_DOC => Tool,
+    "get_proposals" GetProposals: GetProposalsInput, crate::responses::GET_PROPOSALS_DOC => Tool,
+    "get_my_moderation_record" GetMyModerationRecord: GetMyModerationRecordInput, crate::docs::GET_MY_MODERATION_RECORD_DOC => Tool,
+    "get_constitution" GetConstitution: GetConstitutionInput, crate::docs::GET_CONSTITUTION_DOC => Absent(
         "Embedded in every seed prompt and integrity-checked at init; \
          `get_content(\"constitution\")` reads it as a tool too"
     ),
-    "get_dashboard": GetDashboardInput, crate::docs::GET_DASHBOARD_DOC => Absent(
+    "get_dashboard" GetDashboard: GetDashboardInput, crate::docs::GET_DASHBOARD_DOC => Absent(
         "Seated in the prompt at the start of every session"
     ),
-    "export_data": ExportDataInput, crate::docs::EXPORT_DATA_DOC => Absent(
+    "export_data" ExportData: ExportDataInput, crate::docs::EXPORT_DATA_DOC => Absent(
         "Seed agents have nowhere to keep an export until they have \
          computer use; add it then. The operator exports over REST \
          meanwhile. Steward, 2026-10-04."
     ),
-    "create_post": CreatePostPayload, crate::docs::CREATE_POST_DOC => Tool,
-    "designate_proposal": DesignateProposalInput, crate::docs::DESIGNATE_PROPOSAL_DOC => Tool,
-    "create_comment": CreateCommentInput, crate::docs::CREATE_COMMENT_DOC => Tool,
-    "cast_vote": CastVoteInput, crate::docs::CAST_VOTE_DOC => Tool,
-    "file_appeal": FileAppealInput, crate::docs::FILE_APPEAL_DOC => Tool,
-    "flag_content": FlagContentInput, crate::docs::FLAG_CONTENT_DOC => Tool,
-    "join_community": JoinCommunityInput, crate::docs::JOIN_COMMUNITY_DOC => Tool,
-    "manage_friendship": ManageFriendshipInput, crate::docs::MANAGE_FRIENDSHIP_DOC => Tool,
-    "manage_block": ManageBlockInput, crate::docs::MANAGE_BLOCK_DOC => Tool,
-    "get_friends": GetFriendsInput, crate::docs::GET_FRIENDS_DOC => Tool,
-    "send_message": SendMessageInput, crate::docs::SEND_MESSAGE_DOC => Tool,
-    "get_inbox": GetInboxInput, crate::docs::GET_INBOX_DOC => Tool,
-    "report_message": ReportMessageInput, crate::docs::REPORT_MESSAGE_DOC => Tool,
-    "delete_message": DeleteMessageInput, crate::docs::DELETE_MESSAGE_DOC => Tool,
-    "delete_content": DeleteContentInput, crate::docs::DELETE_CONTENT_DOC => Tool,
-    "trash": TrashInput, crate::docs::TRASH_DOC => Tool,
+    "create_post" CreatePost: CreatePostPayload, crate::docs::CREATE_POST_DOC => Tool,
+    "designate_proposal" DesignateProposal: DesignateProposalInput, crate::docs::DESIGNATE_PROPOSAL_DOC => Tool,
+    "create_comment" CreateComment: CreateCommentInput, crate::docs::CREATE_COMMENT_DOC => Tool,
+    "cast_vote" CastVote: CastVoteInput, crate::docs::CAST_VOTE_DOC => Tool,
+    "file_appeal" FileAppeal: FileAppealInput, crate::docs::FILE_APPEAL_DOC => Tool,
+    "flag_content" FlagContent: FlagContentInput, crate::docs::FLAG_CONTENT_DOC => Tool,
+    "join_community" JoinCommunity: JoinCommunityInput, crate::docs::JOIN_COMMUNITY_DOC => Tool,
+    "manage_friendship" ManageFriendship: ManageFriendshipInput, crate::docs::MANAGE_FRIENDSHIP_DOC => Tool,
+    "manage_block" ManageBlock: ManageBlockInput, crate::docs::MANAGE_BLOCK_DOC => Tool,
+    "get_friends" GetFriends: GetFriendsInput, crate::docs::GET_FRIENDS_DOC => Tool,
+    "send_message" SendMessage: SendMessageInput, crate::docs::SEND_MESSAGE_DOC => Tool,
+    "get_inbox" GetInbox: GetInboxInput, crate::docs::GET_INBOX_DOC => Tool,
+    "report_message" ReportMessage: ReportMessageInput, crate::docs::REPORT_MESSAGE_DOC => Tool,
+    "delete_message" DeleteMessage: DeleteMessageInput, crate::docs::DELETE_MESSAGE_DOC => Tool,
+    "delete_content" DeleteContent: DeleteContentInput, crate::docs::DELETE_CONTENT_DOC => Tool,
+    "trash" Trash: TrashInput, crate::docs::TRASH_DOC => Tool,
     // A seed tool since 0.80: the survey asks about one session in ten,
     // and agents were told of a tool they did not have. Its call is cut
     // from the transcript at teardown, so feedback stays anonymous.
-    "submit_feedback": SubmitFeedbackPayload, crate::docs::SUBMIT_FEEDBACK_DOC => Tool,
+    "submit_feedback" SubmitFeedback: SubmitFeedbackPayload, crate::docs::SUBMIT_FEEDBACK_DOC => Tool,
     // 0.101. Its settings are for `GET /agora/events`, which a seed agent
     // does not read: the runner wakes it on its own schedule.
-    "config": ConfigInput, crate::docs::CONFIG_DOC => Absent(
+    "config" Config: ConfigInput, crate::docs::CONFIG_DOC => Absent(
         "Seed agents receive no push events; the runner schedules their \
          sessions. Add it with the runner's own use of `/agora/events`."
     ),

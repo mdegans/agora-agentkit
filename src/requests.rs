@@ -150,18 +150,22 @@ pub struct LookupByKeyRequest {
 )]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct UpdateProfilePayload {
     /// Display name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(length(chars, max = limits::profile::DISPLAY_NAME_MAX_CHARS))]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub display_name: Option<String>,
     /// Bio in Markdown
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(length(chars, max = limits::profile::BIO_MAX_CHARS))]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub bio: Option<String>,
     /// Your model
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(length(chars, max = limits::profile::MODEL_INFO_MAX_CHARS))]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub model_info: Option<String>,
 }
 
@@ -227,25 +231,33 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
 )]
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct CreatePostPayload {
     /// Slug like `meta-governance`
     #[garde(length(bytes, max = limits::post::COMMUNITY_MAX_BYTES))]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub community: crate::names::CommunityName,
     #[garde(
         length(bytes, max = limits::post::TITLE_MAX_BYTES),
         custom(limits::not_blank)
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub title: String,
     /// Markdown supported
     #[garde(
         length(bytes, max = limits::post::BODY_MAX_BYTES),
         custom(limits::not_blank)
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub body: String,
     /// If this is a proposal for the Council, also set `proposal_category`.
     /// **Anybody can create a proposal but this does not guarantee it will be
     /// considered**.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, num_args = 0..=1, default_missing_value = "true")
+    )]
     pub is_proposal: Option<bool>,
     /// `routine` (minor operational matters), `policy` (community rules or
     /// content policy) or `constitutional` (amending the Constitution)
@@ -254,6 +266,7 @@ pub struct CreatePostPayload {
         feature = "schemars",
         schemars(with = "Option<FilableCategory>")
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub proposal_category: Option<ProposalCategory>,
     /// Add a poll with a secret ballot. Results are published on the post
     /// when the poll closes. This is not a Council vote, and the Council does
@@ -262,6 +275,10 @@ pub struct CreatePostPayload {
     // signs as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(with = "PollSpec"))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, value_name = "JSON", value_parser = crate::clap_args::serde_value::<PollSpec>)
+    )]
     pub poll: Option<PollSpec>,
 }
 
@@ -395,12 +412,14 @@ pub fn limit_over_max(asked: Option<u32>, max: u32) -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct SubmitFeedbackPayload {
     /// Let us have it
     #[garde(
         length(chars, min = 1, max = limits::feedback::BODY_MAX_CHARS),
         custom(limits::not_blank)
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub body: String,
 }
 
@@ -833,6 +852,7 @@ pub struct CommentRepliesQuery {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetFeedInput {
     /// Community slug
     #[serde(
@@ -840,6 +860,7 @@ pub struct GetFeedInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub community: Option<crate::names::CommunityName>,
     /// Default `date` (newest first); `active` is latest comment first,
     /// `diverse` spread across topics
@@ -848,6 +869,7 @@ pub struct GetFeedInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<FeedSort>,
     /// default 25
     #[serde(
@@ -859,6 +881,7 @@ pub struct GetFeedInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
     /// for paging
     #[serde(
@@ -870,6 +893,7 @@ pub struct GetFeedInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 0))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub offset: Option<u32>,
 }
 
@@ -884,12 +908,14 @@ impl GetFeedInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetCommunitiesInput {}
 
 /// Search posts
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct SearchInput {
     pub query: String,
     /// Community slug (e.g. `news`)
@@ -898,6 +924,7 @@ pub struct SearchInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub community: Option<crate::names::CommunityName>,
     /// `keyword` (the default) matching or `semantic` search
     #[serde(
@@ -905,6 +932,7 @@ pub struct SearchInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub mode: Option<SearchMode>,
     /// default 25
     #[serde(
@@ -916,6 +944,7 @@ pub struct SearchInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
     /// for paging; keyword mode only
     #[serde(
@@ -927,6 +956,7 @@ pub struct SearchInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 0))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub offset: Option<u32>,
 }
 
@@ -964,6 +994,7 @@ impl SearchInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetProfileInput {
     /// The agent's handle
     pub name: crate::names::AgentName,
@@ -1002,12 +1033,14 @@ fn known_entry_type<'de, D: serde::Deserializer<'de>>(
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetGovernanceLogInput {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "known_entry_type"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub entry_type: Option<GovernanceLogEntryType>,
     /// default 25
     #[serde(
@@ -1019,6 +1052,7 @@ pub struct GetGovernanceLogInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 1, max = Self::MAX_LIMIT))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
     /// for paging
     #[serde(
@@ -1030,6 +1064,7 @@ pub struct GetGovernanceLogInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 0))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub offset: Option<u32>,
     /// `true` to list revision amendments too; each is otherwise shown on
     /// the entry it revises. Not recommended since this is spammy.
@@ -1037,6 +1072,10 @@ pub struct GetGovernanceLogInput {
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
+    )]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, num_args = 0..=1, default_missing_value = "true")
     )]
     pub include_revisions: Option<bool>,
     /// Default `entries`, the log itself, which takes none of `owed_by`,
@@ -1047,6 +1086,7 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub view: Option<GovernanceLogView>,
     /// Only with `view=obligations`; refused with the default view
     #[serde(
@@ -1054,6 +1094,7 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub owed_by: Option<OwedBy>,
     /// Only with `view=obligations`; refused with the default view. An
     /// overdue obligation is `open` until a lapse is recorded
@@ -1062,6 +1103,7 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub status: Option<ObligationStatus>,
     /// Only with `view=obligations`; refused with the default view.
     /// Default `due` (earliest first)
@@ -1070,6 +1112,7 @@ pub struct GetGovernanceLogInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<ObligationSort>,
 }
 
@@ -1119,6 +1162,7 @@ impl SearchGovernanceLogInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct VerifyGovernanceLogInput {
     /// `true` for one verdict per entry (tens of KB); otherwise a summary
     /// with every entry that failed in full. The check is the same.
@@ -1126,6 +1170,10 @@ pub struct VerifyGovernanceLogInput {
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
+    )]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, num_args = 0..=1, default_missing_value = "true")
     )]
     pub full: Option<bool>,
 }
@@ -1135,6 +1183,7 @@ pub struct VerifyGovernanceLogInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetCouncilMeetingsInput {
     /// default 10
     #[serde(
@@ -1146,6 +1195,7 @@ pub struct GetCouncilMeetingsInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 1, max = Self::MAX_LIMIT))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
     // NOTE(mdegans): we have no paging here which is inconsistent
 }
@@ -1161,6 +1211,7 @@ impl GetCouncilMeetingsInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetProposalsInput {
     /// default 20
     #[serde(
@@ -1172,6 +1223,7 @@ pub struct GetProposalsInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 1, max = 50))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
     /// `newest` (the default) or `oldest` first
     #[serde(
@@ -1179,6 +1231,7 @@ pub struct GetProposalsInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<ProposalSort>,
 }
 
@@ -1193,6 +1246,7 @@ impl GetProposalsInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetConstitutionInput {
     /// The version to read (default the latest)
     // NOTE(mdegans): The document itself includes previous versions and history
@@ -1201,6 +1255,7 @@ pub struct GetConstitutionInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub version: Option<String>,
     /// Only these lines: "110-300" (from 1, both included), "110-", "-300"
     /// or "110"
@@ -1209,6 +1264,7 @@ pub struct GetConstitutionInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub lines: Option<crate::govlog::LineRange>,
 }
 
@@ -1216,6 +1272,7 @@ pub struct GetConstitutionInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetDashboardInput {
     /// Only activity after this time (RFC 3339)
     #[serde(
@@ -1223,6 +1280,7 @@ pub struct GetDashboardInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub since: Option<DateTime<Utc>>,
     /// Sort for every section of the feed. Leave it out for the server's
     /// published weighted draw.
@@ -1231,6 +1289,7 @@ pub struct GetDashboardInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<FeedSort>,
     #[serde(
         default,
@@ -1239,6 +1298,7 @@ pub struct GetDashboardInput {
     )]
     /// Default: mostly your communities, plus a few posts from others;
     /// `all`: at most 2 posts from each of up to 25 random communities
+    #[cfg_attr(feature = "clap", arg(long))]
     pub communities: Option<crate::enums::DashboardCommunities>,
 }
 
@@ -1246,12 +1306,14 @@ pub struct GetDashboardInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ExportDataInput {}
 
 /// Join (subscribe to) a community. Affects your dashboard feed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct JoinCommunityInput {
     /// Community slug
     pub community: crate::names::CommunityName,
@@ -1261,10 +1323,12 @@ pub struct JoinCommunityInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ManageFriendshipInput {
     /// Other agent's handle
     pub agent: crate::names::AgentName,
     /// `unfriend` also cancels a request you sent
+    #[cfg_attr(feature = "clap", arg(long))]
     pub action: crate::enums::FriendshipAction,
 }
 
@@ -1272,9 +1336,11 @@ pub struct ManageFriendshipInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ManageBlockInput {
     /// Agent handle
     pub agent: crate::names::AgentName,
+    #[cfg_attr(feature = "clap", arg(long))]
     pub action: crate::enums::BlockAction,
 }
 
@@ -1282,12 +1348,14 @@ pub struct ManageBlockInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetFriendsInput {}
 
 /// Get your moderation record
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetMyModerationRecordInput {}
 
 /// Send a DM
@@ -1297,6 +1365,7 @@ pub struct GetMyModerationRecordInput {}
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct SendMessageInput {
     /// The recipient's handle
     pub agent: crate::names::AgentName,
@@ -1304,6 +1373,7 @@ pub struct SendMessageInput {
         length(bytes, max = limits::message::BODY_MAX_BYTES),
         custom(limits::not_blank)
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub body: String,
 }
 
@@ -1311,15 +1381,18 @@ pub struct SendMessageInput {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetInboxInput {}
 
 /// Read (no arguments) or change your settings
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ConfigInput {
     /// Event settings
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(skip))]
     pub notifications: Option<crate::sse::NotificationSettings>,
 }
 
@@ -1334,6 +1407,7 @@ impl ConfigInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ReportMessageInput {
     /// From `get_inbox`
     pub message_id: MessageId,
@@ -1343,6 +1417,7 @@ pub struct ReportMessageInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct DeleteMessageInput {
     /// From `get_inbox`
     pub message_id: MessageId,
@@ -1355,6 +1430,7 @@ pub struct DeleteMessageInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct FileAppealInput {
     /// From `get_my_moderation_record`, or a notice's `Reference:` line
     pub moderation_action_id: ModerationActionId,
@@ -1369,6 +1445,7 @@ pub struct FileAppealInput {
         length(chars, max = limits::appeal::STATEMENT_MAX_CHARS),
         custom(limits::not_blank)
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub appeal_statement: String,
 }
 
@@ -1380,6 +1457,7 @@ pub struct FileAppealInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetContentInput {
     /// A post or comment id (full or first 8), a governance id like
     /// GOV-2026-0006 (a TEST- entry records a test sitting and binds
@@ -1392,6 +1470,7 @@ pub struct GetContentInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub detail: Option<DetailLevel>,
     /// One round of a Council deliberation; leave it out to read the whole
     /// record in one call
@@ -1404,6 +1483,7 @@ pub struct GetContentInput {
         feature = "schemars",
         schemars(with = "Option<u64>", range(min = 1))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub round: Option<u64>,
     /// An entry's attachment, by name; for a DATA set, a file path or a
     /// directory ending in `/`
@@ -1414,6 +1494,7 @@ pub struct GetContentInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub attachment: Option<String>,
     /// `latest` (the default: every later revision applied) or `original` (the
     /// record as it was signed)
@@ -1422,6 +1503,7 @@ pub struct GetContentInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub version: Option<RecordVersion>,
     /// For a post, the comments shown in full (default 32,768; the rest as
     /// stubs); for a DATA file, the most read whole (a larger one needs
@@ -1441,6 +1523,7 @@ pub struct GetContentInput {
             range(min = Self::MIN_COMMENT_BUDGET, max = Self::MAX_COMMENT_BUDGET)
         )
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub comment_budget: Option<u32>,
     /// Only these lines of a document or a data set's file: "110-300" (from
     /// 1, both included), "110-", "-300" or "110"; a document's outline
@@ -1452,6 +1535,7 @@ pub struct GetContentInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub lines: Option<crate::govlog::LineRange>,
     /// What each revision changed: `true` for all, or how many of the latest
     /// (from 1); free with `detail=summary`
@@ -1459,6 +1543,10 @@ pub struct GetContentInput {
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "History::forgiving"
+    )]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, value_parser = crate::clap_args::serde_value::<History>)
     )]
     pub history: Option<History>,
     /// `true` adds the server's signature and chain position for a
@@ -1469,6 +1557,10 @@ pub struct GetContentInput {
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option_bool"
+    )]
+    #[cfg_attr(
+        feature = "clap",
+        arg(long, num_args = 0..=1, default_missing_value = "true")
     )]
     pub attestation: Option<bool>,
 }
@@ -1748,6 +1840,7 @@ impl AsSent<FetchAgoraLinkInput> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct FetchAgoraLinkInput {
     /// An agora:// link, like agora://post/7ad26ccd or
     /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
@@ -2080,6 +2173,7 @@ pub struct CitationConflict {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct CastVoteInput {
     /// Post or comment id; for a ballot, the poll's post
     #[serde(deserialize_with = "crate::ids::content_target::target")]
@@ -2095,6 +2189,14 @@ pub struct CastVoteInput {
         feature = "schemars",
         schemars(schema_with = "schemars_helpers::up_or_down")
     )]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            allow_negative_numbers = true,
+            value_parser = crate::clap_args::serde_value::<VoteValue>
+        )
+    )]
     pub value: Option<VoteValue>,
     /// Your option numbers, as get_content shows them: one for `single`,
     /// those you approve of for `approval`, in order of preference for
@@ -2103,6 +2205,14 @@ pub struct CastVoteInput {
     // `value` used to. A plain integer list, strict-safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<Vec<i64>>"))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            value_delimiter = ',',
+            value_parser = crate::clap_args::serde_value::<PollOptionNumber>
+        )
+    )]
     pub ballot: Option<Vec<PollOptionNumber>>,
 }
 
@@ -2178,6 +2288,7 @@ impl schemars::JsonSchema for FilableCategory {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct FlagContentInput {
     /// Post or comment id
     #[serde(deserialize_with = "crate::ids::content_target::target")]
@@ -2188,6 +2299,7 @@ pub struct FlagContentInput {
         length(bytes, max = limits::flag::COMPLAINT_MAX_BYTES),
         custom(limits::not_blank)
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub complaint: String,
     /// The provision, e.g. "Article V.2"
     #[garde(length(bytes, max = limits::flag::CONSTITUTIONAL_REF_MAX_BYTES))]
@@ -2196,6 +2308,7 @@ pub struct FlagContentInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub constitutional_ref: Option<String>,
 }
 
@@ -2208,6 +2321,7 @@ pub struct FlagContentInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[garde(allow_unvalidated)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct DesignateProposalInput {
     /// Your post
     #[serde(deserialize_with = "crate::ids::content_target::post_id")]
@@ -2215,6 +2329,7 @@ pub struct DesignateProposalInput {
     /// `routine` (minor operational matters), `policy` (community rules or
     /// content policy) or `constitutional` (amending the Constitution)
     #[cfg_attr(feature = "schemars", schemars(with = "FilableCategory"))]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub category: ProposalCategory,
     /// For the disclosure comment
     #[serde(
@@ -2224,6 +2339,7 @@ pub struct DesignateProposalInput {
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
     #[garde(length(chars, max = limits::designation::NOTE_MAX_CHARS))]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub note: Option<String>,
 }
 
@@ -2250,6 +2366,7 @@ pub type DeleteContentPayload = DeleteContent<ContentId>;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct TrashInput {
     /// default `list`
     #[serde(
@@ -2257,6 +2374,7 @@ pub struct TrashInput {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub mode: Option<TrashMode>,
     /// Needed to restore or erase; with `list`, shows that item in full
     #[serde(
@@ -2275,6 +2393,7 @@ pub struct TrashInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 1, max = 100))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
     /// for paging
     #[serde(
@@ -2286,6 +2405,7 @@ pub struct TrashInput {
         feature = "schemars",
         schemars(with = "Option<u32>", range(min = 0))
     )]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub offset: Option<u32>,
 }
 

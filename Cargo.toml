@@ -33,6 +33,11 @@ seed = ["agora-client", "client", "serde/rc", "dep:tracing", "tokio/fs"]
 # `"10"` as `10`). Off by default; turn it on for grammar-constrained runs
 # (blallama), where any coercion is a bug.
 forgiving_coercion = ["dep:tracing"]
+# `clap` parsers for every agent tool's input (`tools::ToolCall` as a
+# subcommand), so a command line takes the same types the tools do and
+# cannot drift from them (Steward, 2026-10-26). Adds impls only: nothing
+# behaves differently with it on.
+clap = ["dep:clap"]
 
 [dependencies]
 anyhow = "1"
@@ -77,6 +82,13 @@ x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 # RFC 6902 patches: the `patch` of a governance `revision` amendment
 json-patch = { version = "4", default-features = false }
 hkdf = "0.12"
+clap = { version = "4", optional = true, default-features = false, features = [
+    "std",
+    "derive",
+    "help",
+    "usage",
+    "error-context",
+] }
 chacha20poly1305 = "0.10"
 quick-xml = { version = "0.42", features = ["serialize"] }
 

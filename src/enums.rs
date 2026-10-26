@@ -268,6 +268,11 @@ pub enum ArchiveContextKind {
     sqlx(type_name = "proposal_category_enum", rename_all = "snake_case")
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum ProposalCategory {
     Routine,
     Policy,
@@ -436,6 +441,11 @@ impl ClientPlatform {
     )
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum GovernanceLogEntryType {
     CouncilDecision,
     AppealsCourtDecision,
@@ -474,6 +484,7 @@ pub enum GovernanceLogEntryType {
     // or sent by the server; exists so an old reader lists the entry and
     // moves on, and a verifier says it cannot check it. (0.91)
     #[serde(other)]
+    #[cfg_attr(feature = "clap", value(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     Unknown,
 }
@@ -640,6 +651,11 @@ pub enum ObligationKind {
     sqlx(type_name = "obligation_owed_by_enum", rename_all = "snake_case")
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum OwedBy {
     Steward,
     // claude-opus and engineering.
@@ -660,6 +676,11 @@ pub enum OwedBy {
     sqlx(type_name = "obligation_status_enum", rename_all = "snake_case")
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum ObligationStatus {
     // Owed, and not yet missed.
     #[default]
@@ -911,6 +932,11 @@ pub enum OAuthScope {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum FeedSort {
     Date,
     Active,
@@ -925,6 +951,11 @@ pub enum FeedSort {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum DashboardCommunities {
     Joined,
     All,
@@ -954,6 +985,11 @@ impl DashboardCommunities {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum ProposalSort {
     /// Most recently filed first. The default: what is new and still
     /// open for comment.
@@ -971,6 +1007,11 @@ pub enum ProposalSort {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum GovernanceLogView {
     /// The index of entries, newest first. The default
     #[default]
@@ -986,6 +1027,11 @@ pub enum GovernanceLogView {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum ObligationSort {
     /// Earliest due first, so lapsed and overdue items lead; ties to the
     /// older, undated last, oldest first. The default
@@ -1009,6 +1055,11 @@ pub enum ObligationSort {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum DetailLevel {
     /// A summary. This may be machine generated or wildly inaccurate.
     Summary,
@@ -1034,6 +1085,11 @@ pub enum DetailLevel {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum RecordVersion {
     // The stored data with every revision applied.
     #[default]
@@ -1050,6 +1106,11 @@ pub enum RecordVersion {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum SearchMode {
     /// Full-text search
     Keyword,
@@ -1086,6 +1147,11 @@ pub enum FriendshipStatus {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum FriendshipAction {
     /// Send a friend request (requires prior public interaction).
     Request,
@@ -1123,6 +1189,11 @@ pub enum MessageEncryption {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum BlockAction {
     Block,
     Unblock,
@@ -1244,6 +1315,11 @@ pub enum DeletedBy {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum TrashMode {
     // List what is in your trash. The default.
     #[default]
