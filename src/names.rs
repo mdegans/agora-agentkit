@@ -475,17 +475,14 @@ impl PartialEq<AgentName> for String {
 /// `docs/design-operator-api.md`, decision 14)
 pub const RESERVED_NAME_WORDS: [&str; 3] = ["operator", "system", "council"];
 
-/// Whether `name` contains a [`RESERVED_NAME_WORDS`] word once folded:
-/// case, separators (`o-p_e.r a`), and the ASCII look-alikes `0`→`o`,
-/// `1`/`i`→`l`, `rn`→`m`. A plain substring test, so `ecosystem` is reserved
-/// too, a false positive accepted for new names.
+/// Whether `name` contains a [`RESERVED_NAME_WORDS`] word once folded: NFKC
+/// (`ｏｐｅｒａｔｏｒ`), case, the Unicode confusable skeleton (UTS 39: a
+/// Cyrillic `о`, `I`→`l`), separators (`o-p_e.r a`), and the ASCII look-alikes
+/// `0`→`o`, `1`/`i`→`l`, `rn`→`m`. A plain substring test, so `ecosystem` is
+/// reserved too, a false positive accepted for new names.
 ///
 /// For **new** names only: existing ones (the platform's `council` and
 /// `system`) are grandfathered by the caller, never refused on parse.
-// TODO(unicode-normalization): fold with NFKC first, so `ｓｙｓｔｅｍ` and
-// the like are caught in operator display names (agent names are ASCII,
-// where it changes nothing); and refuse mixed-script display names
-// (`unicode-security`'s mixed-script check). Both need a new dependency.
 pub fn is_reserved(name: &str) -> bool {
     let folded = fold(name);
     RESERVED_NAME_WORDS
@@ -493,8 +490,48 @@ pub fn is_reserved(name: &str) -> bool {
         .any(|word| folded.contains(&fold(word)))
 }
 
+/// Whether `name` mixes scripts (UTS 39 mixed-script detection): `pаypal`
+/// with a Cyrillic `а`. Digits and punctuation belong to every script
+pub fn is_mixed_script(name: &str) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+    use unicode_security::MixedScript;
+    !name.nfkc().collect::<String>().as_str().is_single_script()
+}
+
+/// Why a new agent name or operator display name is refused, beyond its own
+/// syntax (0.128)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NewNameRefusal {
+    #[error(
+        "names containing `operator`, `system` or `council`, or anything that \
+         looks like them, are reserved"
+    )]
+    Reserved,
+    #[error("a name may not mix scripts, like Latin and Cyrillic letters")]
+    MixedScript,
+}
+
+/// The check a name passes to be given to a new agent or a new operator:
+/// not [`is_reserved`], not [`is_mixed_script`]
+pub fn check_new_name(name: &str) -> Result<(), NewNameRefusal> {
+    if is_mixed_script(name) {
+        Err(NewNameRefusal::MixedScript)
+    } else if is_reserved(name) {
+        Err(NewNameRefusal::Reserved)
+    } else {
+        Ok(())
+    }
+}
+
 fn fold(name: &str) -> String {
-    name.chars()
+    use unicode_normalization::UnicodeNormalization;
+    // Skeleton, lowercase, skeleton: a capital's look-alike (Greek `Ε`) is
+    // found before lowercasing, a small one's (Cyrillic `о`) after
+    let nfkc: String = name.nfkc().collect();
+    let lowered: String = unicode_security::skeleton(&nfkc)
+        .flat_map(char::to_lowercase)
+        .collect();
+    unicode_security::skeleton(&lowered)
         .flat_map(char::to_lowercase)
         .filter(|c| c.is_alphanumeric())
         .map(|c| match c {
@@ -596,6 +633,36 @@ mod tests {
         }
         for name in ["claude-opus", "steward", "coil", "oper", "cosmic"] {
             assert!(!super::is_reserved(name), "{name}");
+        }
+        // Unicode, for operator display names
+        for name in [
+            "\u{43e}perator",
+            "\u{ff2f}perator",
+            "SYST\u{0395}M",
+            "c\u{43e}uncil",
+        ] {
+            assert!(super::is_reserved(name), "{name}");
+            assert!(super::check_new_name(name).is_err(), "{name}");
+        }
+        assert_eq!(
+            super::check_new_name("\u{43e}perator"),
+            Err(super::NewNameRefusal::MixedScript)
+        );
+        assert_eq!(
+            super::check_new_name("\u{ff2f}perator"),
+            Err(super::NewNameRefusal::Reserved)
+        );
+        assert_eq!(
+            super::check_new_name("Operator"),
+            Err(super::NewNameRefusal::Reserved)
+        );
+        for name in [
+            "claude-opus",
+            "steward",
+            "Mike de Gans",
+            "\u{41c}\u{438}\u{445}\u{430}\u{438}\u{43b}",
+        ] {
+            assert_eq!(super::check_new_name(name), Ok(()), "{name}");
         }
         let council: super::AgentName = "council".parse().unwrap();
         assert!(council.is_reserved(), "parses, and says it is reserved");

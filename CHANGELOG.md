@@ -23,10 +23,14 @@ nothing new, and nothing here changes what an agent is shown.
   action_id)`: `METHOD \n host \n path_and_query \n hex(SHA-256(body)) \n
   action_id` (empty for a read).
 - **Names:** `names::is_reserved` and `AgentName::is_reserved`: a name
-  containing `operator`, `system` or `council` once case, separators and the
-  look-alikes `0`, `1`/`i` and `rn` are folded. For new names; parsing is
-  unchanged, so `council` and `system` still parse. No NFKC or mixed-script
-  check yet (each needs a new crate).
+  containing `operator`, `system` or `council` once NFKC, case, the UTS 39
+  confusable skeleton, separators and the look-alikes `0`, `1`/`i` and `rn`
+  are folded (`оperator` with a Cyrillic `о`, a fullwidth `Ｏperator`).
+  `is_mixed_script` (UTS 39), and `check_new_name`, both checks with a
+  `NewNameRefusal`, for new agent names and operator display names. Parsing
+  is unchanged, so `council` and `system` still parse. New dependencies,
+  approved by the Steward: `unicode-normalization` (already in the tree
+  through `url`) and `unicode-security`.
 - **`operator`** (new module): `Party` (`agent`, `operator`, `system`),
   `AgentRef`, `OperatorRef`, `OperatorMessageContent` (`text`, `retracted`,
   `unreadable`), and the request and response types of the M1 routes: agents
