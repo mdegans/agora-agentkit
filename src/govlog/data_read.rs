@@ -55,6 +55,30 @@ pub struct PastEnd {
 }
 
 impl LineRange {
+    /// A cited path and the range after its last `:`, if one is there. The
+    /// range in a citation is strictly `<from>-<to>` or `<from>-`, as
+    /// `Display` writes it, so a path ending in `:12` is never read as a
+    /// range of another file (the review of 0.103). One copy, for a data
+    /// set's citation and a repository's (0.121.0)
+    pub fn split_cited(cited: &str) -> (&str, Option<Self>) {
+        let canonical = |r: &str| {
+            r.split_once('-').is_some_and(|(a, b)| {
+                !a.is_empty()
+                    && a.bytes().all(|c| c.is_ascii_digit())
+                    && b.bytes().all(|c| c.is_ascii_digit())
+            })
+        };
+        match cited.rsplit_once(':') {
+            Some((path, range)) if !path.is_empty() && canonical(range) => {
+                match range.parse::<Self>() {
+                    Ok(lines) => (path, Some(lines)),
+                    Err(_) => (cited, None),
+                }
+            }
+            _ => (cited, None),
+        }
+    }
+
     /// How a range is written, for error messages
     pub const FORM: &'static str = "Write a range of lines as \"<from>-<to>\" \
          (1-based, both included, e.g. \"110-300\"), or \"<from>-\" to read to \
@@ -410,25 +434,7 @@ impl std::str::FromStr for DataCitation {
                 }
             },
         };
-        // The range in a citation is strictly `<from>-<to>` or `<from>-`,
-        // as `Display` writes it, so a path ending in `:12` is never read
-        // as a range of another file (the review of 0.103)
-        let canonical = |r: &str| {
-            r.split_once('-').is_some_and(|(a, b)| {
-                !a.is_empty()
-                    && a.bytes().all(|c| c.is_ascii_digit())
-                    && b.bytes().all(|c| c.is_ascii_digit())
-            })
-        };
-        let (path, lines) = match rest.rsplit_once(':') {
-            Some((path, range)) if !path.is_empty() && canonical(range) => {
-                match range.parse::<LineRange>() {
-                    Ok(lines) => (path, Some(lines)),
-                    Err(_) => (rest, None),
-                }
-            }
-            _ => (rest, None),
-        };
+        let (path, lines) = LineRange::split_cited(rest);
         // After a commit, a path is read leniently (`./x`, `/x`); after the
         // `/` of the commit-less form it is taken as written, so `//x` is
         // an empty segment and refused

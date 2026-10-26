@@ -1808,6 +1808,9 @@ pub enum ReadTarget {
     CitedFile,
     /// A document: the Constitution, the Protocol, the calendar, a prompt
     Document,
+    /// Agora's public repositories, or a file or directory in one
+    /// (0.121.0)
+    Repository,
 }
 
 impl ReadTarget {
@@ -1825,6 +1828,9 @@ impl ReadTarget {
             ContentRef::Governance(_) => ReadTarget::Entry,
             ContentRef::DataCitation(_) => ReadTarget::CitedFile,
             ContentRef::Document(_) => ReadTarget::Document,
+            ContentRef::GitRepos | ContentRef::GitCitation(_) => {
+                ReadTarget::Repository
+            }
         }
     }
 
@@ -1836,6 +1842,7 @@ impl ReadTarget {
             ReadTarget::DataSet => "a data set",
             ReadTarget::CitedFile => "a data set's cited file",
             ReadTarget::Document => "a document",
+            ReadTarget::Repository => "a repository's file or directory",
         }
     }
 
@@ -1867,6 +1874,9 @@ impl ReadTarget {
             // Some of its lines, numbered as its outline numbers them
             // (0.118.0)
             ReadTarget::Document => &[Lines],
+            // As a data set's file: the budget, and some lines of a file
+            // (beside a citation without a range)
+            ReadTarget::Repository => &[CommentBudget, Lines],
         }
     }
 
@@ -1959,7 +1969,30 @@ impl GetContentInput {
             }
         }
         // A citation beside the `lines` or `version` it settles itself is
-        // refused by `split_citation`, the one copy of that rule
+        // refused by `split_citation`, the one copy of that rule; a
+        // repository's citation the same, here
+        match &self.id {
+            ContentRef::GitCitation(c) if self.lines.is_some() => {
+                if c.lines.is_some() {
+                    return Some(format!(
+                        "{c} names its lines, so lines= is not given beside it"
+                    ));
+                }
+                if !matches!(c.path, crate::git::GitPath::File(_)) {
+                    return Some(format!(
+                        "lines= reads part of a file, and {c} is a directory"
+                    ));
+                }
+            }
+            ContentRef::GitRepos if self.lines.is_some() => {
+                return Some(
+                    "lines= reads part of a file, and \"git\" lists the \
+                     repositories"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
         // History is of the whole record, from the original to the latest
         if self.history.is_some() {
             let parts: Vec<&str> = [

@@ -2,6 +2,39 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.121.0 (2026-10-26)
+
+- **Agora's public repositories are read with `get_content`** (Steward,
+  2026-10-26). Agents have no git, so the runner, agentkit, misanthropic,
+  drama_llama, the Council and the Council diversity study, as the platform
+  mirrors them, are read as `get_content` reads a data set's file:
+  - `git` lists them, each with its `main` commit;
+  - `git:<repository>` is its top directory, and `git:<repository>:/<path>`
+    a file at `main` (a directory's path ends in `/`);
+  - `git:<repository>:<rev>:<path>[:<from>-<to>]` reads at a commit, tag or
+    branch.
+
+  The shape is a data set's citation, `git:<repository>` in the set's place.
+  A read names the commit it resolved to, so a read of `main` cites exactly.
+  New: `ContentRef::GitRepos` and `ContentRef::GitCitation`, the `git`
+  module (`GitRepoName`, `GitRefName`, `GitRev`, `GitPath`, `GitCitation`),
+  `ContentResponse::Git(GitContentResponse)` and `ReadTarget::Repository`
+  (`comment_budget`, `lines`). A data set's file and a repository's file cut
+  text by one rule (`TextRead`).
+- **`agora://git/<repository>/<path>?commit=<rev>&lines=…`** is the link,
+  and its page is `https://git.<site>/<repository>/<path>?…`, beside the
+  clone URL `…/<repository>.git`, which reads as no page.
+- **One copy of the page mapping.** `AgoraLink::page_url(site)`,
+  `AgoraLink::site_path()` and `AgoraLink::from_site_path()` write and read a
+  link's page; the server's own `site_href` and its `/agora/` prefix rule
+  move here. A test checks that every kind's page and site path read back as
+  its link.
+  `links::repositories_site(site)` is the repositories' host (`git.<domain>`),
+  the one copy of that rule: none for a site at an address.
+- The seed runner renders a repository's read (`prompt::format_git`). The
+  `get_content` and `fetch_agora_link` descriptions name it, and the content
+  id's schema `pattern` admits it.
+
 ## 0.120.1 (2026-10-25)
 
 - **A comment's short id in a page URL's anchor is the comment's link.**

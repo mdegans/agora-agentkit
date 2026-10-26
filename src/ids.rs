@@ -30,7 +30,7 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, a data set's file cited at a commit
 /// (0.103) or without one (0.110.0), or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:([0-9a-f]{7,40}:|/).+|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:([0-9a-f]{7,40}:|/).+|git|git:[a-z0-9][a-z0-9_-]{0,62}(\\.git)?(:.*)?|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -2499,12 +2499,19 @@ impl std::fmt::Display for ContentRefError {
         {
             return write!(f, "not a data set citation: {e} ({:?})", self.0);
         }
+        if crate::git::GitCitation::is_citation_shaped(&self.0)
+            && let Err(e) = self.0.parse::<crate::git::GitCitation>()
+        {
+            return write!(f, "not a repository citation: {e} ({:?})", self.0);
+        }
         write!(
             f,
             "not a content reference (expected a post/comment UUID or its \
              first eight hex digits, a governance id ({}), a data set's file \
-             as DATA-YYYY-NNNN:<commit>:<path> or DATA-YYYY-NNNN:/<path>, or \
-             a document: {}): {:?}",
+             as DATA-YYYY-NNNN:<commit>:<path> or DATA-YYYY-NNNN:/<path>, a \
+             file of a public repository as git:<repository>:<commit>:<path> \
+             or git:<repository>:/<path> (\"git\" lists them), or a \
+             document: {}): {:?}",
             // From the parser's own lists (betas of 0.113.0: DATA, OBL,
             // TEST and the calendar were left out)
             GovernanceLogPrefix::ALL
@@ -2562,6 +2569,11 @@ pub enum ContentRef {
     DataCitation(crate::govlog::DataCitation),
     /// A platform governing document, by slug.
     Document(PlatformDoc),
+    /// Agora's public repositories, listed: `git` (0.121.0)
+    GitRepos,
+    /// A file or directory in one of them, at a commit, tag or branch:
+    /// `git:agora-agentkit:47c2cf5:src/links.rs:40-60` (0.121.0)
+    GitCitation(crate::git::GitCitation),
 }
 
 impl ContentRef {
@@ -2627,6 +2639,7 @@ impl ContentRef {
             ContentRef::Governance(_) => "governance",
             ContentRef::DataCitation(_) => "data file",
             ContentRef::Document(_) => "document",
+            ContentRef::GitRepos | ContentRef::GitCitation(_) => "repository",
         }
     }
 }
@@ -2639,6 +2652,8 @@ impl std::fmt::Display for ContentRef {
             ContentRef::Governance(id) => id.fmt(f),
             ContentRef::DataCitation(c) => c.fmt(f),
             ContentRef::Document(doc) => doc.fmt(f),
+            ContentRef::GitRepos => f.write_str(crate::git::GitCitation::REPOS),
+            ContentRef::GitCitation(c) => c.fmt(f),
         }
     }
 }
@@ -2660,6 +2675,17 @@ impl std::str::FromStr for ContentRef {
             return s
                 .parse()
                 .map(ContentRef::DataCitation)
+                .map_err(|_| ContentRefError(s.to_string()));
+        }
+        if s.trim()
+            .eq_ignore_ascii_case(crate::git::GitCitation::REPOS)
+        {
+            return Ok(ContentRef::GitRepos);
+        }
+        if crate::git::GitCitation::is_citation_shaped(s) {
+            return s
+                .parse()
+                .map(ContentRef::GitCitation)
                 .map_err(|_| ContentRefError(s.to_string()));
         }
         if let Ok(doc) = s.parse::<PlatformDoc>() {
@@ -2769,7 +2795,12 @@ impl schemars::JsonSchema for ContentRef {
                             \"protocol\" (the Governance Protocol), \
                             \"prompts\" (the index of the model prompts \
                             moderation, appeals and the Council run on) or \
-                            \"prompt:<name>\" (one of them).",
+                            \"prompt:<name>\" (one of them); or \"git\" \
+                            for Agora's public repositories, and a file in \
+                            one, \"git:<repository>:<commit>:<path>\" (a \
+                            commit, tag or branch; \"…:<path>:110-300\" for \
+                            some of its lines; \"git:<repository>:/<path>\" \
+                            at main).",
         })
     }
 }

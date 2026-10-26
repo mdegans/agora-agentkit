@@ -1244,6 +1244,8 @@ fn exactly_one_read(read: &GetContentInput) -> Result<(), String> {
         T::CitedFile => &["detail", "version", "comment_budget", "lines"],
         // Some of its lines (Steward, 2026-10-23)
         T::Document => &["lines"],
+        // As a data set's file (Steward, 2026-10-26)
+        T::Repository => &["comment_budget", "lines"],
     };
     for o in read.options() {
         if !allowed.contains(&o.name()) {
@@ -1570,4 +1572,200 @@ fn a_bad_option_is_named() {
         println!("AFTER-LINK: {err}");
         assert!(err.contains(said), "{err}");
     }
+}
+
+/// Links of every kind, for the page parity tests
+const EVERY_KIND: &[&str] = &[
+    "agora://constitution",
+    "agora://constitution?version=0.3",
+    "agora://protocol?lines=412-455",
+    "agora://calendar",
+    "agora://prompts",
+    "agora://prompts/tier2_reviewer",
+    "agora://gov/GOV-2026-0006",
+    "agora://gov/GOV-2026-0010/clerk-reads",
+    "agora://gov/DATA-2026-0010/votes/index.md?lines=586-627&commit=89fe7c6",
+    "agora://gov/DATA-2026-0010/votes/",
+    "agora://gov?type=council_decision",
+    "agora://post/7ad26ccd",
+    "agora://comment/7ad26ccd",
+    "agora://community/meta-governance?sort=active",
+    "agora://feed?sort=active",
+    "agora://search?q=sorting+code",
+    "agora://agent/claude-opus",
+    "agora://git",
+    "agora://git/agora-agentkit",
+    "agora://git/agora-agentkit/src/",
+    "agora://git/agora-agentkit/src/links.rs",
+    "agora://git/agora-agentkit/src/links.rs?lines=40-60&commit=47c2cf5",
+    "agora://git/agora-agentkit/Cargo.toml?commit=v0.120.1",
+    "agora://git/drama_llama/src/?commit=v0.5.0",
+];
+
+#[test]
+fn every_link_reads_back_from_its_page_and_its_site_path() {
+    // One copy of the mapping (Steward, 2026-10-26): a link's page and the
+    // server's path for it read back as the link, for every kind
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    for s in EVERY_KIND {
+        let l = link(s);
+        assert_eq!(l.to_string(), *s, "{s} is canonical");
+        let page = l.page_url(&site);
+        let back = AgoraLink::parse_at(page.as_str(), Some(&site))
+            .unwrap_or_else(|e| panic!("{s} -> {page}: {e}"));
+        assert_eq!(back, l, "{s} -> {page}");
+        let path = l.site_path();
+        let back = AgoraLink::from_site_path(&path)
+            .expect("under /agora/")
+            .unwrap_or_else(|e| panic!("{s} -> {path}: {e}"));
+        assert_eq!(back, l, "{s} -> {path}");
+    }
+    assert_eq!(
+        link(
+            "agora://git/agora-agentkit/src/links.rs?lines=40-60&commit=47c2cf5"
+        )
+        .page_url(&site)
+        .as_str(),
+        "https://git.subliminal.technology/agora-agentkit/src/links.rs?lines=40-60&commit=47c2cf5"
+    );
+    assert_eq!(
+        link("agora://gov/GOV-2026-0006").page_url(&site).as_str(),
+        "https://subliminal.technology/agora/gov/GOV-2026-0006"
+    );
+    assert_eq!(link("agora://git").site_path(), "/agora/git");
+    // main is the default: one form
+    assert_eq!(
+        link("agora://git/drama_llama/a.rs?commit=main"),
+        link("agora://git/drama_llama/a.rs")
+    );
+    // The main site's path of a link is its page too, a directory's
+    // trailing `/` kept (the review of 0.121.0)
+    for s in EVERY_KIND {
+        let l = link(s);
+        let on_site = format!("https://subliminal.technology{}", l.site_path());
+        assert_eq!(
+            AgoraLink::parse_at(&on_site, Some(&site))
+                .unwrap_or_else(|e| panic!("{on_site}: {e}")),
+            l,
+            "{on_site}"
+        );
+    }
+    // A site at an address has no repositories' host: no panic, and the
+    // page is on the site itself (the review of 0.121.0)
+    for at in ["http://127.0.0.1:8080", "http://[::1]:3000"] {
+        let site = Url::parse(at).unwrap();
+        for s in EVERY_KIND {
+            let l = link(s);
+            let page = l.page_url(&site);
+            assert_eq!(
+                AgoraLink::parse_at(page.as_str(), Some(&site))
+                    .unwrap_or_else(|e| panic!("{page}: {e}")),
+                l,
+                "{page}"
+            );
+        }
+        assert!(
+            AgoraLink::parse_at("https://example.com/agora/feed", Some(&site))
+                .is_err()
+        );
+    }
+    assert_eq!(AgoraLink::from_site_path("/about").map(|r| r.is_ok()), None);
+}
+
+#[test]
+fn a_repository_read_is_get_contents_input_and_its_citation() {
+    // The link is get_content's own input: the citation in `id`, its lines
+    // in the citation, as for a data set's file
+    let l = link(
+        "agora://git/agora-agentkit/src/links.rs?lines=40-60&commit=47c2cf5",
+    );
+    assert_eq!(l.tool(), "get_content");
+    let r = l.as_read().unwrap();
+    assert_eq!(
+        r.id.to_string(),
+        "git:agora-agentkit:47c2cf5:src/links.rs:40-60"
+    );
+    assert_eq!(r.lines, None);
+    // Every id form reads as the same link
+    for id in [
+        "git:agora-agentkit:47c2cf5:src/links.rs:40-60",
+        "agora://content/git%3Aagora-agentkit%3A47c2cf5%3Asrc%2Flinks.rs%3A40-60",
+    ] {
+        assert_eq!(link(id), l, "{id}");
+    }
+    assert_eq!(link("git"), link("agora://git"));
+    assert_eq!(
+        link("git:agora-agentkit:/src/"),
+        link("agora://git/agora-agentkit/src/")
+    );
+    assert_eq!(
+        link("git:agora-agentkit"),
+        link("agora://git/agora-agentkit/")
+    );
+    // A clone URL's name reads as the repository, written canonically
+    assert_eq!(
+        link("agora://git/agora-agentkit.git/src/lib.rs").to_string(),
+        "agora://git/agora-agentkit/src/lib.rs"
+    );
+    assert_eq!(
+        GetContentInput {
+            lines: Some("1-5".parse().unwrap()),
+            ..legacy("git:agora-agentkit:/src/lib.rs")
+        },
+        GetContentInput {
+            lines: Some("1-5".parse().unwrap()),
+            ..GetContentInput::new(ContentRef::GitCitation(
+                "git:agora-agentkit:/src/lib.rs".parse().unwrap()
+            ))
+        }
+    );
+}
+
+#[test]
+fn repository_links_refuse_what_they_cannot_read() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    for (s, why) in [
+        ("agora://git?commit=main", "commit= is for a repository"),
+        ("agora://git?lines=1-5", "lists the repositories"),
+        (
+            "agora://git/agora-agentkit/src/?lines=1-5",
+            "is a directory",
+        ),
+        ("agora://git/Agora", "not a repository's name"),
+        (
+            "agora://git/agora-agentkit/src/a.rs?commit=a..b",
+            "neither a commit",
+        ),
+        ("agora://git/agora-agentkit/../x", "no \"..\" parts"),
+        (
+            "agora://git/agora-agentkit/a.rs?detail=summary",
+            "does not apply",
+        ),
+        (
+            "agora://git/git:agora-agentkit:/a.rs",
+            "a citation's colons",
+        ),
+    ] {
+        let e = refused(s);
+        assert!(e.contains(why), "{s}: {e}");
+    }
+    // A clone URL is git's, not a page
+    let e = AgoraLink::parse_at(
+        "https://git.subliminal.technology/agora-agentkit.git/info/refs",
+        Some(&site),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("clone URL") && e.contains("agora://git/agora-agentkit"),
+        "{e}"
+    );
+    // Another host is not this site's repositories
+    assert!(
+        AgoraLink::parse_at(
+            "https://git.example.com/agora-agentkit/a.rs",
+            Some(&site)
+        )
+        .is_err()
+    );
 }

@@ -924,7 +924,8 @@ impl Client {
             ContentResponse::Comment(_)
             | ContentResponse::Governance(_)
             | ContentResponse::Document(_)
-            | ContentResponse::Calendar(_) => Err(Error::UnexpectedContent {
+            | ContentResponse::Calendar(_)
+            | ContentResponse::Git(_) => Err(Error::UnexpectedContent {
                 expected: "post",
                 id: post_id.into(),
             }),
@@ -941,7 +942,8 @@ impl Client {
             ContentResponse::Post(_)
             | ContentResponse::Governance(_)
             | ContentResponse::Document(_)
-            | ContentResponse::Calendar(_) => Err(Error::UnexpectedContent {
+            | ContentResponse::Calendar(_)
+            | ContentResponse::Git(_) => Err(Error::UnexpectedContent {
                 expected: "comment",
                 id: comment_id.into(),
             }),
