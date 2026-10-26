@@ -10,7 +10,7 @@ install-hooks:
 # The same gate the pre-commit hook runs: formatting, lints, the feature
 # matrix, tests — both implementations' tests, since the Python verifier is
 # only worth having if it is held to the same vectors.
-check: fmt-check lint features test test-python
+check: fmt-check no-openssl lint features test test-python
 
 # Compile every feature in isolation, plus no-default.
 #
@@ -52,6 +52,28 @@ check-published-keys:
     cargo test --features agora-client --lib \
         govlog::tests::the_published_key_is_the_one_the_platform_serves \
         -- --ignored --exact --nocapture
+
+# Refuse to release half-built code: the same deny as agora's `todo-gate`,
+# plus `--all-features` so feature-gated code is linted too. Not part of
+# `check`: `todo!()` is fine on branches and in PRs. Clippy never lints
+# dependencies, so agora's own gate cannot see a `todo!()` in this crate;
+# the release workflow runs this before `cargo publish`.
+todo-gate:
+    cargo clippy --all-features --all-targets -- -D clippy::todo -D clippy::unimplemented
+
+# No openssl-sys under any feature or target (agora CLAUDE.md rule 5). The
+# `no-openssl` dev-dependency (`links = "openssl"`) already fails resolution;
+# this also catches openssl-sys 0.9.28-0.9.30, whose index entries lack `links`.
+no-openssl:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tree=$(cargo tree --all-features --target all -e normal,build,dev --prefix none)
+    if grep -q '^openssl-sys ' <<<"$tree"; then
+        echo "ERROR: openssl-sys found in dependency tree!"
+        cargo tree --all-features --target all -i openssl-sys
+        exit 1
+    fi
+    echo "No openssl-sys dependency found."
 
 # Verify formatting without modifying files.
 fmt-check:

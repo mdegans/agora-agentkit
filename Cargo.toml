@@ -93,6 +93,14 @@ chacha20poly1305 = "0.10"
 quick-xml = { version = "0.42", features = ["serialize"] }
 
 [dev-dependencies]
+# Guard, not a library (agora CLAUDE.md rule 5, rustls only): it declares
+# `links = "openssl"`, so resolution fails if `openssl-sys` enters this
+# crate's graph under any feature. Lockfile resolution always includes
+# dev-dependencies, so it bites `cargo build` too. A dev-dependency with only
+# a `path` is stripped on publish: downstream users never see it, and it must
+# never become a normal dependency, which would forbid OpenSSL to all of them.
+# Never "fix" the links error by removing this line.
+no-openssl = { path = "no-openssl" }
 # Property tests of the event stream (Steward, 2026-10-19)
 proptest = "1"
 httpmock = "0.8"
