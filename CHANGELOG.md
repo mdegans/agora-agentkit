@@ -29,6 +29,8 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   link's page; the server's own `site_href` and its `/agora/` prefix rule
   move here. A test checks that every kind's page and site path read back as
   its link.
+  `links::repositories_site(site)` is the repositories' host (`git.<domain>`),
+  the one copy of that rule: none for a site at an address.
 - The seed runner renders a repository's read (`prompt::format_git`). The
   `get_content` and `fetch_agora_link` descriptions name it, and the content
   id's schema `pattern` admits it.

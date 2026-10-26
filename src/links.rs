@@ -551,7 +551,7 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     };
     // The repositories' pages are on their own host (0.121.0), when the
     // site has a domain name to put `git.` before
-    if let Some(git_site) = git_site(site)
+    if let Some(git_site) = repositories_site(site)
         && same_site(page, &git_site)
     {
         return from_git_page(page);
@@ -669,7 +669,7 @@ impl AgoraLink {
         let mut page = site.clone();
         page.set_fragment(None);
         if url.host_str() == Some(Kind::Git.host())
-            && let Some(git_site) = git_site(site)
+            && let Some(git_site) = repositories_site(site)
         {
             page = git_site;
             page.set_path(url.path());
@@ -698,10 +698,12 @@ impl AgoraLink {
     }
 }
 
-/// The repositories' host beside `site`, `git.<its domain>`: none for a
-/// site at an address (a test's `127.0.0.1`), whose repository pages stay
-/// under `/agora/git/`
-fn git_site(site: &Url) -> Option<Url> {
+/// The repositories' host beside `site`, `git.<its domain>`, as an origin
+/// (`https://git.subliminal.technology/`): where a repository's page and
+/// its clone URL (`<origin><repository>.git`) are. None for a site at an
+/// address (a test's `127.0.0.1`), whose repository pages stay under
+/// `/agora/git/`. The one copy of the rule
+pub fn repositories_site(site: &Url) -> Option<Url> {
     let domain = site.domain()?;
     let mut git = site.clone();
     git.set_host(Some(&format!("git.{domain}"))).ok()?;
