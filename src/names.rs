@@ -481,11 +481,22 @@ pub const RESERVED_NAME_WORDS: [&str; 3] = ["operator", "system", "council"];
 /// `0per4tor` are reserved; `cooperator`, `councillor`, `subsystem` and
 /// `ecosystem-watcher` are not.
 ///
-/// Before comparing, the name is NFKC-normalized (`ｏｐｅｒａｔｏｒ`),
-/// lowercased, and its look-alike digits and symbols folded (`0`→`o`,
-/// `3`→`e`, `4`→`a`, `5`/`$`→`s`, `7`→`t`, `1`/`!`/`i`→`l`, `rn`→`m`). Words
-/// are split at separators, at a lowercase letter followed by a capital, and
-/// at the digits left after folding.
+/// Before comparing, the name is NFKD-normalized with its combining marks
+/// dropped (`ｏｐｅｒａｔｏｒ`, `Öperator`, `ope\u{301}rator`), lowercased,
+/// and its look-alike digits and symbols folded (`0`→`o`, `3`→`e`, `4`→`a`,
+/// `5`/`$`→`s`, `7`→`t`, `1`/`!`/`i`→`l`, `rn`→`m`). Words are split at
+/// separators, at a lowercase letter followed by a capital, and at the
+/// digits left after folding. The name is also read once more with nothing
+/// folded and its digits and symbols as boundaries, so a digit at a word's
+/// edge (`operator1`, `1operator`) does not hide the word.
+///
+/// A courtesy, not the defence: the defence against impersonation is
+/// structural (only the inbox's server-written operator section is the
+/// operator). So some trade-offs are accepted:
+/// - joined words pass (`myoperator`, `operatorbot`);
+/// - a reserved plural refuses an honest name (`systems-thinker`,
+///   `solar-system`);
+/// - look-alikes outside the list pass (`c0vnc1l`, with `v` for `u`).
 ///
 /// No confusable skeleton (Steward, 2026-10-22): a name written wholly in
 /// Cyrillic look-alikes (`орегатог`) is allowed, since agents see tokens,
@@ -503,14 +514,24 @@ pub fn is_reserved(name: &str) -> bool {
             folded == w || folded.strip_suffix('s') == Some(w.as_str())
         })
     };
-    let normal: String = name.nfkc().collect();
-    let whole: String = normal
+    let normal: String = name
+        .nfkd()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect();
+    // The whole name, separators out: look-alikes folded, then digits out
+    let folded: String = normal
         .chars()
         .map(lookalike)
         .filter(|c| c.is_alphanumeric())
         .collect();
-    is_word(&fold(&whole))
-        || words_of(&normal).iter().any(|t| is_word(&fold(t)))
+    let letters: String =
+        normal.chars().filter(|c| c.is_alphabetic()).collect();
+    is_word(&fold(&folded))
+        || is_word(&fold(&letters))
+        || words_of(&normal, true)
+            .iter()
+            .chain(&words_of(&normal, false))
+            .any(|t| is_word(&fold(t)))
 }
 
 /// The look-alike a character is folded to before comparing
@@ -536,12 +557,16 @@ fn fold(word: &str) -> String {
         .replace("rn", "m")
 }
 
-/// `name`'s words, look-alikes already folded so `0per4tor` stays whole
-fn words_of(name: &str) -> Vec<String> {
+/// `name`'s words: with `lookalikes`, folded first so `0per4tor` stays
+/// whole; without, every digit and symbol a boundary
+fn words_of(name: &str, lookalikes: bool) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut prev: Option<char> = None;
-    for c in name.chars().map(lookalike) {
+    for c in name
+        .chars()
+        .map(|c| if lookalikes { lookalike(c) } else { c })
+    {
         let boundary = match prev {
             _ if !c.is_alphanumeric() => {
                 prev = None;
@@ -705,6 +730,18 @@ mod tests {
             "$y$7em",
             "s-y-$-t-e-m",
             "\u{ff2f}perator",
+            // A folded digit at a word's edge (review of 0.128)
+            "operator1",
+            "operator0",
+            "1operator",
+            "system1",
+            "council0",
+            "operat0r_",
+            // Diacritics
+            "\u{d6}perator",
+            "operat\u{f6}r",
+            "ope\u{301}rator",
+            "s\u{1ef3}stem",
         ] {
             assert!(super::is_reserved(name), "{name}");
         }
@@ -729,6 +766,15 @@ mod tests {
             "\u{43e}\u{440}\u{435}\u{433}\u{430}\u{442}\u{43e}\u{433}",
         ] {
             assert!(!super::is_reserved(name), "{name}");
+        }
+        // Accepted trade-offs, pinned so a change to them is deliberate:
+        // joined words and look-alikes outside the list pass...
+        for name in ["myoperator", "operatorbot", "councilbot", "c0vnc1l"] {
+            assert!(!super::is_reserved(name), "{name}");
+        }
+        // ...and a reserved plural refuses an honest name
+        for name in ["systems-thinker", "solar-system", "complex-systems"] {
+            assert!(super::is_reserved(name), "{name}");
         }
     }
 
