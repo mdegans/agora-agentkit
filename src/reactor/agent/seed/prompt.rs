@@ -786,8 +786,8 @@ pub fn format_dashboard(
     }
     if !accepted.is_empty() {
         out.push_str(&format!(
-            "Accepted your friend request since your last session: {}. You \
-             can send them private messages now.\n\n",
+            "Accepted your friend request: {}. You can send them private \
+             messages now.\n\n",
             accepted
                 .iter()
                 .map(|n| n.to_string())
@@ -803,7 +803,8 @@ pub fn format_dashboard(
             })
             .unwrap_or_default();
         out.push_str(&format!(
-            "{} of yours not answered yet{oldest}.\n\n",
+            "{} of yours not answered yet{oldest} (unfriend withdraws \
+             one).\n\n",
             plural(pending as u64, "friend request", "friend requests"),
         ));
     }
@@ -1342,10 +1343,18 @@ pub(super) fn format_inbox(
     let recent = if read_dms + read_broadcasts == 0 {
         String::new()
     } else {
+        // A zero is left out ("1 message and 0 broadcasts")
+        let parts: Vec<String> = [
+            (read_dms, "message", "messages"),
+            (read_broadcasts, "broadcast", "broadcasts"),
+        ]
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .map(|(n, one, many)| plural(n, one, many))
+        .collect();
         format!(
-            ", then {} and {} read before{}",
-            plural(read_dms, "message", "messages"),
-            plural(read_broadcasts, "broadcast", "broadcasts"),
+            ", then {} read before{}",
+            parts.join(" and "),
             match limit {
                 Some(n) => format!(", within your limit of {n}"),
                 None => format!(
@@ -7565,13 +7574,16 @@ mod tests {
         assert_eq!(out.matches("### Messages").count(), 1, "{out}");
         assert!(
             out.contains(
-                "Accepted your friend request since your last session: \
-                 beta-social. You can send them private messages now."
+                "Accepted your friend request: beta-social. You can send them \
+                 private messages now."
             ),
             "{out}"
         );
         assert!(
-            out.contains("2 friend requests of yours not answered yet, the oldest sent 3 days ago."),
+            out.contains(
+                "2 friend requests of yours not answered yet, the oldest sent 3 \
+                 days ago (unfriend withdraws one)."
+            ),
             "{out}"
         );
         // Nothing to say, nothing said
@@ -8968,6 +8980,18 @@ mod tests {
             "No friends yet.\nNo friend requests to you.\nNo requests of \
              yours pending.\n"
         );
+    }
+
+    #[test]
+    fn days_ago_reads_utc_calendar_days() {
+        let now: chrono::DateTime<chrono::Utc> =
+            "2026-10-26T00:01:00Z".parse().unwrap();
+        let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        assert_eq!(days_ago(at("2026-10-25T23:59:00Z"), now), "yesterday");
+        assert_eq!(days_ago(at("2026-10-26T00:00:30Z"), now), "today");
+        // A clock ahead of ours is no time from now
+        assert_eq!(days_ago(at("2026-10-27T12:00:00Z"), now), "today");
+        assert_eq!(days_ago(at("2026-10-16T12:00:00Z"), now), "10 days ago");
     }
 
     /// A request the agent declined is listed, so it can change its mind

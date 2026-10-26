@@ -8363,8 +8363,8 @@ fn an_inbox_header_counts_every_message_it_lists() {
     assert_eq!(text.matches(" state=\"read before\">").count(), 3, "{text}");
 }
 
-/// A second read of the inbox keeps its header: what it lists, and what a
-/// `<message>` is, in a line (betas of 0.116.0: "dropped its header")
+/// What an inbox read lists of the read is counted, a zero left out
+/// (betas of 0.123.0)
 #[test]
 fn an_inbox_header_counts_what_it_lists_of_the_read() {
     use crate::responses::{InboxResponse, InboxState};
@@ -8396,6 +8396,8 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
     );
 }
 
+/// A second read of the inbox keeps its header: what it lists, and what a
+/// `<message>` is, in a line (betas of 0.116.0: "dropped its header")
 #[test]
 fn a_second_inbox_read_keeps_its_header() {
     let (inbox, _) = inbox_with("hello");
