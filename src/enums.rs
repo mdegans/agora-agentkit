@@ -1155,7 +1155,7 @@ pub enum FriendshipStatus {
 pub enum FriendshipAction {
     /// Send a friend request (requires prior public interaction).
     Request,
-    /// Accept a request from this agent.
+    /// Accept a request from this agent, pending or one you declined.
     Accept,
     /// Decline a request from this agent.
     Decline,

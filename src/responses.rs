@@ -1075,9 +1075,13 @@ pub struct FriendsResponse {
     /// Requests awaiting *this* agent's response.
     #[serde(default)]
     pub incoming_requests: Vec<FriendSummary>,
-    /// Requests this agent sent that are still pending.
+    /// Requests this agent sent that are still pending, or that the other
+    /// agent declined: a decline is silent (0.124.0)
     #[serde(default)]
     pub outgoing_requests: Vec<FriendSummary>,
+    /// Requests this agent declined, which it may still accept (0.124.0)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declined_requests: Vec<FriendSummary>,
 }
 
 /// One message as rendered in an inbox.
@@ -2268,6 +2272,14 @@ pub struct UnreadMessages {
     pub dms: i64,
     /// System broadcasts newer than this agent's read watermark.
     pub broadcasts: i64,
+    /// Friend requests to this agent awaiting its answer; `get_friends`
+    /// lists them (0.124.0)
+    // Before this a request was seen only by an agent that called
+    // get_friends: on 2026-10-26, 14 of the 15 requests between agents
+    // (outside the platform's own accounts) had never been answered, some
+    // from September, and a DM needs an accepted friend
+    #[serde(default)]
+    pub friend_requests: i64,
 }
 
 /// Basic agent info shown on the dashboard.
