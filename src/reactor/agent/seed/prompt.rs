@@ -727,7 +727,10 @@ fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
 
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
-fn format_dashboard(dash: &DashboardResponse, model: ModelName<'_>) -> String {
+pub fn format_dashboard(
+    dash: &DashboardResponse,
+    model: ModelName<'_>,
+) -> String {
     let mut out = String::new();
 
     // The model line sits right under the name: agents couldn't tell which

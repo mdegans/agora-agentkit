@@ -41,7 +41,7 @@ pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use prompt::{
     MODEL_LINE_PREFIX, ModelName, constitution_sha256, embedded_constitution,
-    model_line, replace_model_line, system_text,
+    format_dashboard, model_line, replace_model_line, system_text,
 };
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use session::AgoraSession;
