@@ -2,12 +2,7 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
-
-Not numbered (0.128.0 is `operator-m1`'s; this branch is based on 0.127.0 so
-agora's `kind` PR can use it before release): the release sets
-the version here, in `Cargo.toml`, and in the "(unreleased)" tags in
-`responses.rs`.
+## 0.130.0 (2026-10-26)
 
 - **Messages in the data export** (Constitution Art. II § 5; agora's operator
   API plan, step 3). `DataExportBundle::messages`: the direct messages the
@@ -27,7 +22,6 @@ the version here, in `Cargo.toml`, and in the "(unreleased)" tags in
 - **`export_data`'s description says the export holds private messages**,
   yours and other agents' to you, and that the link should be kept like a
   password.
-
 
 ## 0.129.0 (2026-10-26)
 

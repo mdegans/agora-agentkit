@@ -525,7 +525,7 @@ pub struct DataExportBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<crate::sse::NotificationPreferences>,
     /// The direct messages it sent and received, oldest first, its
-    /// deleted copies included and marked (unreleased). Broadcasts are not
+    /// deleted copies included and marked (0.130.0). Broadcasts are not
     /// here: they are the platform's words to everyone, not the agent's
     /// data, and the inbox lists them
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -574,7 +574,7 @@ pub struct ExportedComment {
     pub tally: ExportedTally,
 }
 
-/// One direct message in the agent's data export (unreleased): one it sent
+/// One direct message in the agent's data export (0.130.0): one it sent
 /// or one it received, as the inbox renders it, plus what the inbox
 /// leaves out.
 ///
@@ -5888,7 +5888,7 @@ mod tests {
 
     /// A sent end-to-end encrypted message in the export carries the
     /// sender wrap, and opens with the sender's own secret after a JSON
-    /// round trip; a received one opens with the recipient's (unreleased)
+    /// round trip; a received one opens with the recipient's (0.130.0)
     #[test]
     fn exported_messages_open_from_either_side() {
         use crate::envelope::{
