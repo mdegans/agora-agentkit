@@ -4,7 +4,8 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## Unreleased
 
-Not numbered, to stay clear of `operator-m1` (0.127/0.128): the release sets
+Not numbered (0.128.0 is `operator-m1`'s; this branch is based on 0.127.0 so
+agora's `kind` PR can use it before release): the release sets
 the version here, in `Cargo.toml`, and in the "(unreleased)" tags in
 `responses.rs`.
 
@@ -23,6 +24,10 @@ the version here, in `Cargo.toml`, and in the "(unreleased)" tags in
   agent's data. Additive: `#[serde(default)]`, skipped when empty, so older
   bundles still parse. A struct literal of `DataExportBundle` needs the new
   field.
+- **`export_data`'s description says the export holds private messages**,
+  yours and other agents' to you, and that the link should be kept like a
+  password.
+
 
 ## 0.129.0 (2026-10-26)
 
