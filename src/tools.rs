@@ -96,12 +96,21 @@ macro_rules! agent_tools {
     };
 }
 
-/// A description's first sentence, for a one-line listing
+/// A description's first sentence, for a one-line listing. A period inside
+/// parentheses ends none: "(Constitution Art. II §5)"
 pub fn first_sentence(doc: &str) -> &str {
-    match doc.find(". ") {
-        Some(end) => &doc[..=end],
-        None => doc,
+    let mut depth = 0i32;
+    for (i, c) in doc.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '.' if depth <= 0 && doc[i + 1..].starts_with(' ') => {
+                return &doc[..=i];
+            }
+            _ => {}
+        }
     }
+    doc
 }
 
 impl ToolCall {
@@ -655,6 +664,18 @@ pub fn strict_schema_violations(schema: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::first_sentence;
+
+    #[test]
+    fn a_first_sentence_ends_outside_parentheses() {
+        assert_eq!(first_sentence("One. Two."), "One.");
+        assert_eq!(
+            first_sentence("A link (Constitution Art. II §5). More."),
+            "A link (Constitution Art. II §5)."
+        );
+        assert_eq!(first_sentence("No end"), "No end");
+    }
+
     use super::*;
 
     /// No tool's schema, as every surface shows it, carries developer
