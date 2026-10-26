@@ -8728,3 +8728,91 @@ fn seed_limits_are_the_runners_constants() {
     assert_eq!(seed.listing, Some(MAX_LISTING));
     assert_eq!(Limits::default(), seed);
 }
+
+/// `manage_friendship` with one name takes the per-name route, as before;
+/// with several, one signed batch over the batch's bytes, and a line per
+/// agent
+#[tokio::test]
+async fn manage_friendship_sends_several_names_as_one_signed_batch() {
+    use crate::requests::{ManageFriendshipInput, SignedRequest};
+    use crate::signing::SignedAction;
+
+    let server = MockServer::start();
+    let (key, verifying) = generate_keypair();
+    let single = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/friends/ada/accept");
+        then.status(200)
+            .json_body(serde_json::json!({"status": "accepted"}));
+    });
+    let batch = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/friends/batch")
+            .is_true(move |req| {
+                let body: SignedRequest<ManageFriendshipInput> =
+                    serde_json::from_slice(req.body().as_ref()).unwrap();
+                let agents = body.payload.distinct_agents();
+                let bytes =
+                    SignedAction::friendship(body.payload.action, &agents)
+                        .canonical_bytes();
+                let sig: [u8; 64] = hex::decode(&body.signature)
+                    .unwrap()
+                    .try_into()
+                    .unwrap();
+                agents.len() == 2
+                    && crate::crypto::verify(
+                        &verifying,
+                        &bytes,
+                        body.timestamp,
+                        &crate::crypto::Signature::from_bytes(&sig),
+                    )
+            });
+        then.status(200).json_body(serde_json::json!({"results": [
+            {"agent": "ada", "status": "accepted"},
+            {"agent": "bob", "error": "no pending friend request from that agent"},
+        ]}));
+    });
+    let agora = Agora::new(
+        Client::new(Url::parse(&server.base_url()).unwrap()).unwrap(),
+        AgentId::new(),
+        "tester".parse().unwrap(),
+        key,
+        None,
+        SharedLedger::default(),
+    );
+    let mut session =
+        AgoraSession::new(agora, ContextGauge::new(u64::MAX / 4, 0));
+    let call = |body: serde_json::Value| {
+        crate::tools::ToolCall::from_input("manage_friendship", body)
+            .unwrap()
+            .unwrap()
+    };
+
+    for body in [
+        serde_json::json!({"agent": "ada", "action": "accept"}),
+        serde_json::json!({"agents": ["ada", "ada"], "action": "accept"}),
+    ] {
+        let one = session.call(&call(body)).await;
+        assert!(!one.is_error, "{}", one.content);
+        assert_eq!(
+            one.content.to_string(),
+            "Friendship action result: accepted"
+        );
+    }
+    assert_eq!(single.calls(), 2);
+
+    let several = session
+        .call(&call(serde_json::json!({
+            "agents": ["ada", "bob", "ada"],
+            "action": "accept"
+        })))
+        .await;
+    assert!(!several.is_error, "{}", several.content);
+    assert_eq!(
+        several.content.to_string(),
+        "Friendship action results (accept on 2 agents): 1 done, 1 refused\n\
+         ada: accepted\n\
+         bob: no pending friend request from that agent"
+    );
+    batch.assert();
+}

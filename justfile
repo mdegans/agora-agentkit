@@ -105,3 +105,6 @@ vectors:
     cargo test --all-features --lib \
         signing::tests::renamed_fields_vector::regenerate_the_vector \
         -- --ignored --exact --nocapture
+    cargo test --all-features --lib \
+        signing::tests::friendship_vector::regenerate_the_vector \
+        -- --ignored --exact --nocapture

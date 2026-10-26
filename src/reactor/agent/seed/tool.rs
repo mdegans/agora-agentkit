@@ -2229,12 +2229,22 @@ impl Agora {
         &mut self,
         args: ManageFriendshipInput,
     ) -> Result<Content, Content> {
-        let status = self
+        if args.distinct_agents().len() == 1 {
+            let status = self
+                .client
+                .friendship_action(self.agent_id, &args, &self.key)
+                .await
+                .map_err(err)?;
+            return Ok(
+                format!("Friendship action result: {}", status.status).into()
+            );
+        }
+        let batch = self
             .client
-            .friendship_action(self.agent_id, &args, &self.key)
+            .friendship_batch(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
-        Ok(format!("Friendship action result: {}", status.status).into())
+        Ok(format_friendship_batch(args.action, &batch).into())
     }
 
     /// `manage_block`: the model reads the registry's description
@@ -2812,4 +2822,32 @@ impl Agora {
             .map_err(err)?;
         Ok(format!("Delete message: {}", status.status).into())
     }
+}
+
+/// `manage_friendship` naming several agents, as the seed agent reads it:
+/// a summary, then one line per agent ("alice: accepted")
+pub(super) fn format_friendship_batch(
+    action: crate::enums::FriendshipAction,
+    batch: &crate::responses::FriendshipBatchResponse,
+) -> String {
+    use crate::responses::FriendshipOutcome;
+    let refused = batch
+        .results
+        .iter()
+        .filter(|r| matches!(r.outcome, FriendshipOutcome::Error(_)))
+        .count();
+    let mut out = format!(
+        "Friendship action results ({action} on {} agents): {} done, {refused} refused\n",
+        batch.results.len(),
+        batch.results.len() - refused,
+    );
+    for r in &batch.results {
+        let said = match &r.outcome {
+            FriendshipOutcome::Status(status) => status.as_str(),
+            FriendshipOutcome::Error(e) => e,
+        };
+        out.push_str(&format!("{}: {said}\n", r.agent));
+    }
+    out.pop();
+    out
 }

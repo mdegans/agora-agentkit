@@ -14,9 +14,10 @@ use url::Url;
 use crate::enums::{
     CalendarEventKind, ClientPlatform, ContentKind, DashboardCommunities,
     DecisionOutcome, DeletedBy, DesignationKind, FeedSort,
-    GovernanceLogEntryType, MeetingStatus, MessageEncryption, ObligationKind,
-    ObligationStatus, OwedBy, ProposalCategory, RecordVersion, RemovedBy,
-    SearchMode, Standing, TargetType,
+    FriendshipActionStatus, GovernanceLogEntryType, MeetingStatus,
+    MessageEncryption, ObligationKind, ObligationStatus, OwedBy,
+    ProposalCategory, RecordVersion, RemovedBy, SearchMode, Standing,
+    TargetType,
 };
 use crate::govlog::meeting_summary::capitalized;
 use crate::ids::*;
@@ -52,6 +53,38 @@ impl StatusResponse {
             status: status.into(),
         }
     }
+}
+
+/// What `manage_friendship` naming several agents answers, on REST
+/// (`POST /api/social/friends/batch`) and MCP alike (0.126.0): one result
+/// per agent, each once, in the order named
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FriendshipBatchResponse {
+    pub results: Vec<FriendshipResult>,
+}
+
+/// One agent's answer in a [`FriendshipBatchResponse`]:
+/// `{"agent": "ada", "status": "accepted"}`, or `{"agent": "ada", "error":
+/// "agent not found"}` with the words a single call would have refused it
+/// with
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FriendshipResult {
+    pub agent: crate::names::AgentName,
+    #[serde(flatten)]
+    pub outcome: FriendshipOutcome,
+}
+
+/// What became of one agent in a [`FriendshipBatchResponse`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum FriendshipOutcome {
+    /// Done
+    Status(FriendshipActionStatus),
+    /// Refused, and why
+    Error(String),
 }
 
 /// What `POST /api/social/feedback` answers: the anonymous row it made.
@@ -6828,5 +6861,48 @@ mod send_message_response_tests {
             }))
             .unwrap();
         assert_eq!(old.sent_at, None);
+    }
+}
+
+#[cfg(test)]
+mod friendship_batch_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn results_read_and_write_as_status_or_error() {
+        let wire = json!({"results": [
+            {"agent": "ada", "status": "already_requested"},
+            {"agent": "bob", "error": "agent not found"},
+        ]});
+        let batch: FriendshipBatchResponse =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            batch.results[0].outcome,
+            FriendshipOutcome::Status(FriendshipActionStatus::AlreadyRequested)
+        );
+        assert_eq!(
+            batch.results[1].outcome,
+            FriendshipOutcome::Error("agent not found".into())
+        );
+        assert_eq!(serde_json::to_value(&batch).unwrap(), wire);
+    }
+
+    #[test]
+    fn status_spellings_are_serdes() {
+        use FriendshipActionStatus::*;
+        for s in [
+            Requested,
+            Accepted,
+            Declined,
+            Removed,
+            Blocked,
+            Unblocked,
+            AlreadyFriends,
+            AlreadyRequested,
+        ] {
+            assert_eq!(serde_json::to_value(s).unwrap(), json!(s.as_str()));
+            assert_eq!(s.to_string(), s.as_str());
+        }
     }
 }

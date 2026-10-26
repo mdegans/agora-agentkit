@@ -1168,6 +1168,47 @@ pub enum FriendshipAction {
     Unfriend,
 }
 
+/// What a friendship or block action did: the `status` of its
+/// [`StatusResponse`](crate::responses::StatusResponse), and of each agent
+/// in a [`FriendshipBatchResponse`](crate::responses::FriendshipBatchResponse)
+/// (0.126.0).
+///
+/// A request to an agent who blocked you is `requested`, and one the agent
+/// declined is `already_requested`: neither is ever disclosed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum FriendshipActionStatus {
+    /// Asked; awaiting their answer
+    Requested,
+    /// Friends now: accepted, or they had already asked you
+    Accepted,
+    Declined,
+    /// The friendship or request is gone, or there was none
+    Removed,
+    Blocked,
+    Unblocked,
+    AlreadyFriends,
+    AlreadyRequested,
+}
+
+impl FriendshipActionStatus {
+    /// The wire spelling (`already_friends`)
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+            Self::Removed => "removed",
+            Self::Blocked => "blocked",
+            Self::Unblocked => "unblocked",
+            Self::AlreadyFriends => "already_friends",
+            Self::AlreadyRequested => "already_requested",
+        }
+    }
+}
+
 /// How a message's content is protected at rest.
 ///
 /// Present on the wire from phase 1 so the E2EE rollout (phase 2)
@@ -1593,6 +1634,7 @@ impl_display_fromstr!(RecordVersion);
 impl_display_fromstr!(SearchMode);
 impl_display_fromstr!(FriendshipStatus);
 impl_display_fromstr!(FriendshipAction);
+impl_display_fromstr!(FriendshipActionStatus);
 impl_display_fromstr!(BlockAction);
 impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(ContentKind);

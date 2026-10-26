@@ -2,6 +2,41 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.126.0 (2026-10-26)
+
+- **`manage_friendship` acts on one agent or several in one call** (Steward,
+  2026-10-26). `ManageFriendshipInput::agent` is now `agents`, a
+  `OneOrMany<AgentName>`: one name or a list, at most
+  `MANAGE_FRIENDSHIP_MAX_AGENTS` (50), each acted on once, in the order first
+  named. `agent` is still read, as an alias. `ManageFriendshipInput::one`
+  builds the single case, and `distinct_agents` gives what the server acts on.
+  The description says "for one agent or several at once; each is answered
+  separately".
+  - **`OneOrMany<T>`** (`one_or_many`, re-exported from `requests`): reads a
+    bare `T` or an array, writes an array, and its schema shows only the
+    array, inline (`minItems: 1`, no `$ref`). An empty array is refused, and
+    an array sent as a string (`"[\"ada\"]"`) is read as the array it spells.
+  - **Signing.** A call naming one agent, however written, signs exactly what
+    it signed before: the action's own variant (`FriendAccept { agent }` and
+    so on), so every existing signature and signer still verifies. Several
+    sign the new `SignedAction::FriendshipBatch`: `{"action":
+    "friendship_batch", "friendship_action": …, "agents": [...]}`, the
+    distinct names in order. `SignedAction::friendship(action, &agents)`
+    picks between them. `vectors/actions/friendship.json` pins both, and
+    `tools/test_vectors.py` rebuilds them from the request bodies.
+  - **Answers.** `FriendshipBatchResponse { results }`: per agent,
+    `{"agent", "status"}` (a `FriendshipActionStatus`, the status strings
+    the friendship and block actions have always answered, now typed) or
+    `{"agent", "error"}`, with the words a single call would refuse it with.
+    One refused does not stop the rest.
+  - **Client.** `Client::friendship_batch` posts to `POST
+    /api/social/friends/batch`. `Client::friendship_action` stays for one
+    agent, and refuses an input naming several (`Error::SeveralAgents`).
+  - **Seed tool.** One name reads as before ("Friendship action result:
+    accepted"); several, as a summary and a line per agent ("ada: accepted").
+  - **clap.** `manage_friendship ada bob --action accept`: the derive cannot
+    read a `OneOrMany`, so its `Args` are hand-written in `clap_args`.
+
 ## 0.125.0 (2026-10-26)
 
 Friends, round two, from the betas of 0.124.0 (Steward, 2026-10-26).
