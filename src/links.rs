@@ -9,10 +9,19 @@
 //! agora://gov?type=council_decision        agora://gov?view=obligations&status=open
 //! agora://post/<id>    agora://comment/<id>    agora://community/<name>?sort=active
 //! agora://agent/<name> agora://feed?sort=active agora://search?q=<words>
+//! agora://git          agora://git/<repository>/<path>?commit=<rev>&lines=40-60
 //! ```
 //!
 //! `gov` is the governance log and its entries; a document is its own
-//! kind.
+//! kind. `git` is Agora's public repositories ([`crate::git`]).
+//!
+//! A link's page is on the site: `https://<site>/agora/<kind>/<path>?…`,
+//! but for `git`, whose page is on the repositories' own host beside their
+//! clone URLs: `https://git.<site>/<repository>/<path>?…`. This module is
+//! the one copy of that mapping, both ways: [`AgoraLink::page_url`] and
+//! [`AgoraLink::site_path`] write a link's page, and page URLs
+//! ([`AgoraLink::parse_at`]) and site paths ([`AgoraLink::from_site_path`])
+//! read back as the link.
 //!
 //! The host is a kind word, always lowercase; ids live in the path and keep
 //! their case. A post's or comment's id is its UUID or its first eight hex
@@ -39,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
+use crate::git::{GitCitation, GitPath, GitRepoName, GitRev};
 use crate::govlog::{DataCitation, DataFilePath, GitCommitPrefix};
 use crate::ids::{
     CommentId, ContentId, ContentIdPrefix, ContentRef, GovernanceLogId,
@@ -57,16 +67,17 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
      agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds are \
      gov, constitution, protocol, calendar, prompts, post, comment, content, \
-     community, agent, feed and search. A page URL of \
-     this site reads as the link it shows. An id as \
+     community, agent, feed, search and git. A repository's file is \
+     agora://git/<repository>/<path>. A page URL of this site reads as the link it shows. An id as \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
-     DATA-2026-0001:<commit>:<path>, constitution) reads too.";
+     DATA-2026-0001:<commit>:<path>, git:<repository>:/<path>, \
+     constitution) reads too.";
 
 /// [`FORM`] once it has been shown: what the seed runner says in its place
 /// after a session's first refusal
 pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
      the kinds are gov, constitution, protocol, calendar, prompts, post, \
-     comment, content, community, agent, feed and search.";
+     comment, content, community, agent, feed, search and git.";
 
 /// Every kind word, a link's host: the site routes `/agora/<kind>/…` on
 /// them
@@ -143,10 +154,11 @@ enum Kind {
     Agent,
     Feed,
     Search,
+    Git,
 }
 
 impl Kind {
-    const ALL: [Kind; 12] = [
+    const ALL: [Kind; 13] = [
         Kind::Gov,
         Kind::Constitution,
         Kind::Protocol,
@@ -159,6 +171,7 @@ impl Kind {
         Kind::Agent,
         Kind::Feed,
         Kind::Search,
+        Kind::Git,
     ];
 
     const fn host(self) -> &'static str {
@@ -175,6 +188,7 @@ impl Kind {
             Kind::Agent => "agent",
             Kind::Feed => "feed",
             Kind::Search => "search",
+            Kind::Git => "git",
         }
     }
 
@@ -323,6 +337,26 @@ impl AgoraLink {
                         std::iter::once(c.set.to_string())
                             .chain(c.path.as_str().split('/').map(String::from))
                             .collect()
+                    }
+                    ContentRef::GitRepos => {
+                        return url_of(Kind::Git, &[], options, None);
+                    }
+                    ContentRef::GitCitation(c) => {
+                        if let Some(lines) = c.lines.or(read.lines) {
+                            options.insert(
+                                "lines".into(),
+                                lines.to_string().into(),
+                            );
+                        }
+                        last =
+                            c.rev.as_ref().map(|r| ("commit", r.to_string()));
+                        let mut segments = vec![c.repo.to_string()];
+                        if c.path != GitPath::Root {
+                            segments.extend(
+                                c.path.written().split('/').map(String::from),
+                            );
+                        }
+                        return url_of(Kind::Git, &segments, options, last);
                     }
                     ContentRef::Document(doc) => {
                         if let Some(a) = &read.attachment {
@@ -515,6 +549,16 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     let Some(site) = site else {
         return Err("this client knows no website to read page URLs of".into());
     };
+    // The repositories' pages are on their own host (0.121.0)
+    if let Some(host) = site.host_str() {
+        let mut git_site = site.clone();
+        git_site
+            .set_host(Some(&format!("git.{host}")))
+            .expect("a site's host with git. is one");
+        if same_site(page, &git_site) {
+            return from_git_page(page);
+        }
+    }
     if !same_site(page, site) {
         return Err(format!(
             "{} is not this site; Agora's pages are on {}",
@@ -593,6 +637,93 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
     if !query.is_empty() {
         link.query_pairs_mut().extend_pairs(query);
     }
+    Ok(link)
+}
+
+/// The path under which the site serves every link's page: `/agora/`
+pub const SITE_PREFIX: &str = "/agora/";
+
+impl AgoraLink {
+    /// The link's page as the server routes it: `/agora/<kind><path>?<query>`,
+    /// the link's canonical form with `/agora/` for `agora://`, for every
+    /// kind, `git` included (whose public page is on another host:
+    /// [`page_url`](Self::page_url)). [`from_site_path`](Self::from_site_path)
+    /// reads it back.
+    pub fn site_path(&self) -> String {
+        let url = self.to_url();
+        let mut path = String::from(SITE_PREFIX);
+        path.push_str(url.host_str().unwrap_or_default());
+        // Already percent-encoded by the link's own `Url`
+        path.push_str(url.path());
+        if let Some(query) = url.query() {
+            path.push('?');
+            path.push_str(query);
+        }
+        path
+    }
+
+    /// The link's page on `site` (an origin, like `https://subliminal.technology`):
+    /// `<site>/agora/<kind><path>?<query>`, but a repository's at
+    /// `git.<site host>/<repository>/<path>?<query>`, beside its clone URL.
+    /// A page URL reads back as this link ([`parse_at`](Self::parse_at)).
+    pub fn page_url(&self, site: &Url) -> Url {
+        let url = self.to_url();
+        let mut page = site.clone();
+        page.set_fragment(None);
+        if url.host_str() == Some(Kind::Git.host()) {
+            let host = format!("git.{}", site.host_str().unwrap_or_default());
+            page.set_host(Some(&host))
+                .expect("a site's host with git. is one");
+            page.set_path(url.path());
+        } else {
+            page.set_path(&format!(
+                "{SITE_PREFIX}{}{}",
+                url.host_str().unwrap_or_default(),
+                url.path()
+            ));
+        }
+        page.set_query(url.query());
+        page
+    }
+
+    /// The link a server path is: `/agora/<kind>[/<rest>][?<query>]` read
+    /// as `agora://<kind>[/<rest>][?<query>]`, byte for byte, so the parser
+    /// sees (and refuses) a `.` or `..` that [`Url`] would resolve away.
+    /// The inverse of [`site_path`](Self::site_path). `None` for a path
+    /// not under `/agora/`.
+    pub fn from_site_path(
+        path_and_query: &str,
+    ) -> Option<Result<Self, AgoraLinkError>> {
+        let rest = path_and_query.strip_prefix(SITE_PREFIX)?;
+        let given = format!("{SCHEME}://{rest}");
+        Some(parse_link(&given).map_err(|why| AgoraLinkError { given, why }))
+    }
+}
+
+/// A page on the repositories' host, `git.<site host>`: its link, or why it
+/// has none (a clone URL is git's, not a page)
+fn from_git_page(page: &Url) -> Result<Url, String> {
+    let path = page.path();
+    let first = path
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    if let Some(name) = first.strip_suffix(".git") {
+        return Err(format!(
+            "{} is a repository's clone URL, for git; its link is \
+             agora://git/{name}",
+            page.as_str()
+        ));
+    }
+    if page.query_pairs().any(|(name, _)| name == "page") {
+        return Err("a page number has no link: give offset= instead".into());
+    }
+    let mut link = Kind::Git.base();
+    // The path as the page has it, still percent-encoded: the parser reads
+    // it as a link's path, its trailing `/` (a directory) kept
+    link.set_path(path);
+    link.set_query(page.query());
     Ok(link)
 }
 
@@ -861,6 +992,11 @@ fn canonical_read(mut read: GetContentInput) -> GetContentInput {
             }
         }
         ContentRef::DataCitation(c) if c.lines.is_none() => {
+            c.lines = read.lines.take();
+        }
+        ContentRef::GitCitation(c)
+            if c.lines.is_none() && matches!(c.path, GitPath::File(_)) =>
+        {
             c.lines = read.lines.take();
         }
         _ => {}
@@ -1154,6 +1290,7 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
 
     match kind {
         Kind::Gov => parse_gov(segments, directory, options),
+        Kind::Git => parse_git(segments, directory, options),
         Kind::Constitution
         | Kind::Protocol
         | Kind::Calendar
@@ -1332,6 +1469,64 @@ fn parse_gov(
     ))
 }
 
+/// `agora://git[/<repository>[/<path>]]?commit=<rev>&lines=…`: the
+/// repositories, or a file or directory in one ([`crate::git`])
+fn parse_git(
+    segments: Vec<String>,
+    directory: bool,
+    mut options: Map<String, Value>,
+) -> Result<AgoraLink, String> {
+    let rev = match options.remove("commit") {
+        Some(rev) => Some(
+            value_str(&rev)
+                .parse::<GitRev>()
+                .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+    let Some((repo, rest)) = segments.split_first() else {
+        if rev.is_some() {
+            return Err("commit= is for a repository: \
+                 agora://git/<repository>/<path>?commit=<rev>"
+                .into());
+        }
+        let read = read_input(options, ContentRef::GitRepos, None)?;
+        if let Some(conflict) = read.conflict() {
+            return Err(conflict);
+        }
+        return Ok(AgoraLink::Read(read));
+    };
+    if let Some((head, _)) = repo.split_once(':') {
+        return Err(format!(
+            "a citation's colons are not a link's path: write \
+             agora://git/{head}/<path>?commit=<rev>&lines=<from>-<to>"
+        ));
+    }
+    let repo: GitRepoName = repo
+        .parse()
+        .map_err(|e: crate::git::GitRepoNameError| e.to_string())?;
+    let path = if rest.is_empty() {
+        GitPath::Root
+    } else {
+        let mut written = rest.join("/");
+        if directory {
+            written.push('/');
+        }
+        GitPath::parse_written(&written).map_err(|e| e.to_string())?
+    };
+    let citation = GitCitation {
+        repo,
+        rev,
+        path,
+        lines: None,
+    };
+    let read = read_input(options, ContentRef::GitCitation(citation), None)?;
+    if let Some(conflict) = read.conflict() {
+        return Err(conflict);
+    }
+    Ok(AgoraLink::Read(canonical_read(read)))
+}
+
 /// A document's link: `segments` start with its kind
 fn parse_doc(
     segments: &[String],
@@ -1408,7 +1603,9 @@ fn option_values(name: &str) -> String {
             format!("a number of bytes, {} to {}", bounds.start(), bounds.end())
         }
         "lines" => "a range of lines like 110-300, 110- or 110".into(),
-        "commit" => "7 to 40 hex digits of the data set's commit".into(),
+        "commit" => "7 to 40 hex digits of the data set's commit (for a \
+                     repository, a commit, tag or branch)"
+            .into(),
         "q" | "query" => "the words to look for".into(),
         "limit" | "offset" => "a number".into(),
         _ => "a value".into(),
@@ -1431,7 +1628,8 @@ fn read_input(
         .find(|k| !allowed.iter().any(|o| o.name() == k.as_str()))
     {
         let more: &[&str] = match target {
-            crate::requests::ReadTarget::DataSet => &["commit"],
+            crate::requests::ReadTarget::DataSet
+            | crate::requests::ReadTarget::Repository => &["commit"],
             _ => &[],
         };
         return Err(target.refusal(name, more));

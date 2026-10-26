@@ -4630,6 +4630,103 @@ fn format_change_whole(c: &crate::govlog::Change) -> String {
     }
 }
 
+/// A read of Agora's public repositories (0.121.0): the list of them, a
+/// directory, or a file's text, with how to cite what was read. `by_link`
+/// cites by `agora://git/…` link, else by the `git:` id get_content takes
+pub fn format_git(
+    git: &crate::responses::GitContentResponse,
+    by_link: bool,
+) -> String {
+    use crate::responses::GitEntryKind;
+    let cite = |c: &crate::git::GitCitation| {
+        if by_link {
+            crate::links::AgoraLink::from(crate::ids::ContentRef::GitCitation(
+                c.clone(),
+            ))
+            .to_string()
+        } else {
+            c.to_string()
+        }
+    };
+    let mut out = String::new();
+    if !git.repos.is_empty() {
+        out.push_str("# Agora's public repositories\n\n");
+        for r in &git.repos {
+            let short = &r.commit.to_hex()[..7];
+            let open = cite(&crate::git::GitCitation::root(r.repo.clone()));
+            out.push_str(&format!("- {} (main at {short}), `{open}`", r.repo));
+            if let Some(d) = &r.description {
+                out.push_str(&format!(": {d}"));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    let at = match (&git.commit, &git.rev) {
+        (Some(c), Some(rev)) => {
+            format!(" at commit {} ({rev})", &c.to_hex()[..7])
+        }
+        (Some(c), None) => format!(" at commit {}", &c.to_hex()[..7]),
+        _ => String::new(),
+    };
+    let repo = git
+        .repo
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if let Some(dir) = &git.directory {
+        out.push_str(&format!("# {repo}/{}{at}\n\n", dir.path));
+        if let Some(c) = &git.citation {
+            out.push_str(&format!("Cite it as `{}`.\n\n", cite(c)));
+        }
+        for e in &dir.entries {
+            let what = match (e.kind, e.bytes) {
+                (GitEntryKind::File, Some(b)) => format!(" ({b} bytes)"),
+                (GitEntryKind::Symlink, _) => " (a symbolic link)".into(),
+                (GitEntryKind::Submodule, _) => {
+                    " (another repository, not readable here)".into()
+                }
+                _ => String::new(),
+            };
+            out.push_str(&format!("- {}{what}\n", e.name));
+        }
+        out.push('\n');
+    }
+    if let Some(file) = &git.file {
+        out.push_str(&format!(
+            "### File: {repo}/{path}\n{bytes} bytes, {lines} lines{at}\n\n",
+            path = file.path,
+            bytes = file.bytes,
+            lines = file.total_lines,
+        ));
+        match (file.lines, file.partial_line, &git.citation) {
+            (Some(range), _, Some(c)) => out.push_str(&format!(
+                "Lines {range} of {total} (cite them as `{cite}`):\n\n",
+                total = file.total_lines,
+                cite = cite(c),
+            )),
+            (None, None, Some(c)) => {
+                out.push_str(&format!("Cite the file as `{}`.\n\n", cite(c)))
+            }
+            (_, Some(line), _) => out.push_str(&format!(
+                "Only the start of line {line} of {total}, cut inside the line \
+                 (no range cites part of a line):\n\n",
+                total = file.total_lines,
+            )),
+            _ => {}
+        }
+        out.push_str(&file.text);
+        if let Some(cut) = &file.cut {
+            out.push_str(&format!("\n\n({cut})"));
+        }
+        out.push('\n');
+    }
+    if !git.how_to_read.is_empty() {
+        out.push_str(&format!("\n{}\n", git.how_to_read));
+    }
+    out
+}
+
 /// The shown-once key of a part's text (a round, an attachment, a data
 /// set's file), whatever version or spelling read it: the same text is one
 /// part (betas of 0.113.0, B1: a round its revision did not touch, read

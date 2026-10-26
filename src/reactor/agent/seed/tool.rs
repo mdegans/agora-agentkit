@@ -514,7 +514,8 @@ impl Agora {
             }
             crate::responses::ContentResponse::Governance(_)
             | crate::responses::ContentResponse::Document(_)
-            | crate::responses::ContentResponse::Calendar(_) => {
+            | crate::responses::ContentResponse::Calendar(_)
+            | crate::responses::ContentResponse::Git(_) => {
                 return Err(err(format!(
                     "{prefix} is not a post or comment id"
                 )));
@@ -1009,6 +1010,10 @@ impl Agora {
                 }
                 other => other.map_err(err)?,
             },
+            // A repository's read: rendered below as it comes
+            ContentRef::GitRepos | ContentRef::GitCitation(_) => {
+                self.client.get_content(&input).await.map_err(err)?
+            }
             ContentRef::Governance(_)
             | ContentRef::DataCitation(_)
             | ContentRef::Document(_) => {
@@ -1176,6 +1181,9 @@ impl Agora {
                 None => rendered,
             };
         Ok(match content {
+            crate::responses::ContentResponse::Git(git) => {
+                Content::from(prompt::format_git(&git, self.by_link))
+            }
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
                 self.ledger

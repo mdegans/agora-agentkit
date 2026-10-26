@@ -1455,6 +1455,9 @@ pub enum ContentResponse {
     /// The platform calendar, `get_content("calendar")`: what is coming
     /// up (0.72)
     Calendar(CalendarResponse),
+    /// Agora's public repositories, or a file or directory in one
+    /// (0.121.0)
+    Git(GitContentResponse),
 }
 
 /// A platform document, as served by `get_content("constitution")`,
@@ -3544,10 +3547,21 @@ impl DataFileContent {
             sha256: file.sha256,
         })?;
         let total_lines = crate::govlog::count_lines(text);
-        let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
-        let total = text.len();
-        let content = |text: String, lines, omitted: u64, cut| Self {
-            partial_line: None,
+        if lines.is_none()
+            && let Some(refused) = Self::refuse_whole(set, commit, file, None)
+        {
+            return Err(refused);
+        }
+        let read = TextRead::of(text, budget, lines).map_err(|asked| {
+            DataFileReadError::PastEnd {
+                path: file.path.clone(),
+                asked,
+                total_lines,
+                bytes: file.bytes,
+            }
+        })?;
+        Ok(Self {
+            partial_line: read.partial_line,
             path: file.path.clone(),
             commit,
             bytes: file.bytes,
@@ -3555,16 +3569,254 @@ impl DataFileContent {
             // The server leaves it out unless the read asked for it
             sha256: Some(file.sha256),
             note: file.note.clone(),
+            lines: read.lines,
+            text: read.text,
+            omitted_bytes: read.omitted_bytes,
+            cut: read.cut,
+            asked: None,
+        })
+    }
+}
+
+/// A read of Agora's public repositories (0.121.0): `get_content("git")`
+/// lists them; `git:<repository>…` reads a file or directory in one, at
+/// the commit named or the one a branch or tag resolved to
+/// ([`crate::git`])
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GitContentResponse {
+    /// For `git`: every repository, with the commit its `main` is at
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<GitRepoListing>,
+    /// The repository read
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<crate::git::GitRepoName>,
+    /// The commit read at, whole
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<crate::govlog::GitCommitId>,
+    /// The branch or tag the read named, resolved to `commit`: `main` when
+    /// it named none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<crate::git::GitRefName>,
+    /// What was read, cited at its commit (with the lines served): the
+    /// canonical form to quote
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub citation: Option<crate::git::GitCitation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<GitFileContent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<GitDirectory>,
+    pub how_to_read: String,
+}
+
+/// One of Agora's public repositories, as `get_content("git")` lists it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GitRepoListing {
+    pub repo: crate::git::GitRepoName,
+    /// The commit its `main` is at
+    pub commit: crate::govlog::GitCommitId,
+    /// What it is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A file of a repository, as `get_content` serves it: the whole file, or
+/// with `lines` those lines, cut to the read's budget (0.121.0)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GitFileContent {
+    pub path: crate::govlog::DataFilePath,
+    /// The whole file's size in bytes
+    pub bytes: u64,
+    /// The whole file's lines
+    pub total_lines: u64,
+    /// The lines `text` holds, for a read of some lines, as for a data
+    /// set's file ([`DataFileContent::lines`])
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<crate::govlog::LineRange>,
+    /// For a read of some lines whose first line alone is over the budget:
+    /// that line's number
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_line: Option<u64>,
+    /// The file's text, or as much of it as the budget holds
+    pub text: String,
+    /// Bytes of the file not in `text`: 0 when it is whole
+    pub omitted_bytes: u64,
+    /// When `text` is cut: where, and how much more there is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<String>,
+}
+
+/// A repository's directory, one level of it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GitDirectory {
+    /// The directory, ending in `/`; empty for the top directory
+    pub path: String,
+    /// Its directories first, then its files, each by name
+    pub entries: Vec<GitTreeEntry>,
+}
+
+/// One entry of a [`GitDirectory`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct GitTreeEntry {
+    /// Its name; a directory's ends in `/`
+    pub name: String,
+    pub kind: GitEntryKind,
+    /// A file's size in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+/// What a [`GitTreeEntry`] is
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum GitEntryKind {
+    File,
+    Directory,
+    /// A symbolic link: its target is its text
+    Symlink,
+    /// Another repository, pinned: not readable here
+    Submodule,
+}
+
+/// Why [`GitFileContent::new`] serves nothing: each says what to ask for
+/// instead (0.121.0)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GitFileReadError {
+    #[error(
+        "{path} is not text ({bytes} bytes), so get_content cannot show it"
+    )]
+    NotText {
+        path: crate::govlog::DataFilePath,
+        bytes: u64,
+    },
+    #[error(
+        "{citation} is {bytes} bytes, more than one read shows whole ({max} \
+         bytes), so it is read in parts: lines=\"<from>-<to>\" (1-based, both \
+         included) with comment_budget={max} shows up to {max} bytes of its \
+         lines in one read, and says how many lines the file has. Read the \
+         part you need. Cite a part as {citation}:<from>-<to>. {refused}",
+        refused = crate::requests::REFUSED
+    )]
+    TooLargeWhole {
+        citation: Box<crate::git::GitCitation>,
+        bytes: u64,
+        max: u64,
+    },
+    #[error(
+        "{invalid}lines=\"{asked}\": {path} has {total_lines} lines ({bytes} \
+         bytes), so the range starts past its end. {form}",
+        invalid = crate::govlog::LineRange::INVALID,
+        form = crate::govlog::LineRange::FORM
+    )]
+    PastEnd {
+        path: crate::govlog::DataFilePath,
+        asked: crate::govlog::LineRange,
+        total_lines: u64,
+        bytes: u64,
+    },
+}
+
+impl GitFileContent {
+    /// The file `citation` names, from its `bytes`, as text of at most
+    /// `budget` bytes: the whole file, or with `lines` those lines, cut as a
+    /// data set's file is. A whole read of a file over
+    /// [`MAX_WHOLE_READ_BYTES`](crate::govlog::MAX_WHOLE_READ_BYTES) is
+    /// refused, saying how to read it in parts; `citation` is cited at the
+    /// commit read, for that refusal.
+    pub fn new(
+        citation: &crate::git::GitCitation,
+        path: &crate::govlog::DataFilePath,
+        bytes: &[u8],
+        budget: usize,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Result<Self, GitFileReadError> {
+        let size = bytes.len() as u64;
+        let max = crate::govlog::MAX_WHOLE_READ_BYTES;
+        if lines.is_none() && size > max {
+            return Err(GitFileReadError::TooLargeWhole {
+                citation: Box::new(crate::git::GitCitation {
+                    lines: None,
+                    ..citation.clone()
+                }),
+                bytes: size,
+                max,
+            });
+        }
+        let text = std::str::from_utf8(bytes).map_err(|_| {
+            GitFileReadError::NotText {
+                path: path.clone(),
+                bytes: size,
+            }
+        })?;
+        let total_lines = crate::govlog::count_lines(text);
+        let read = TextRead::of(text, budget, lines).map_err(|asked| {
+            GitFileReadError::PastEnd {
+                path: path.clone(),
+                asked,
+                total_lines,
+                bytes: size,
+            }
+        })?;
+        Ok(Self {
+            path: path.clone(),
+            bytes: size,
+            total_lines,
+            lines: read.lines,
+            partial_line: read.partial_line,
+            text: read.text,
+            omitted_bytes: read.omitted_bytes,
+            cut: read.cut,
+        })
+    }
+}
+
+/// A text file's read, as much as a budget holds: what a data set's file
+/// and a repository's file share (0.121.0, one copy of the rule)
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextRead {
+    text: String,
+    lines: Option<crate::govlog::LineRange>,
+    partial_line: Option<u64>,
+    omitted_bytes: u64,
+    cut: Option<String>,
+}
+
+impl TextRead {
+    /// `text` cut to `budget` bytes: the whole of it, or with `lines` those
+    /// lines. A whole read cut by the budget falls at the end of a line
+    /// when one ends in the budget's second half, else at a character
+    /// boundary; a range is cut back to its last whole line that fits (or,
+    /// when its first line alone does not, at a character boundary). `Err`
+    /// is a range that starts past the last line. A whole read too large
+    /// to show is refused by the caller first, in its own citation form.
+    fn of(
+        text: &str,
+        budget: usize,
+        lines: Option<crate::govlog::LineRange>,
+    ) -> Result<Self, crate::govlog::LineRange> {
+        let total_lines = crate::govlog::count_lines(text);
+        let max = crate::requests::GetContentInput::MAX_COMMENT_BUDGET;
+        let total = text.len();
+        let content = |text: String, lines, omitted: u64, cut| Self {
+            partial_line: None,
             lines,
             text,
             omitted_bytes: omitted,
             cut,
-            asked: None,
         };
         let Some(asked) = lines else {
-            if let Some(refused) = Self::refuse_whole(set, commit, file, None) {
-                return Err(refused);
-            }
             let mut end = total.min(budget);
             while !text.is_char_boundary(end) {
                 end -= 1;
@@ -3601,13 +3853,7 @@ impl DataFileContent {
             });
             return Ok(content(text[..end].to_string(), None, omitted, cut));
         };
-        let span =
-            asked.span(text).map_err(|_| DataFileReadError::PastEnd {
-                path: file.path.clone(),
-                asked,
-                total_lines,
-                bytes: file.bytes,
-            })?;
+        let span = asked.span(text).map_err(|_| asked)?;
         let wanted = &text[span.start_byte..span.end_byte];
         let first = span.served.start();
         if wanted.len() <= budget {
