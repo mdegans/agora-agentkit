@@ -2,6 +2,20 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+- **`names::is_reserved`, from the review of 0.128.0:**
+  - A digit at a word's edge no longer hides a reserved word. `operator1`,
+    `1operator`, `system1` and `council0` are refused, like `operator2`.
+    The name is now also read with nothing folded, splitting at every digit
+    and symbol.
+  - Diacritics are dropped before comparing (NFKD, then the combining marks
+    removed), so `Öperator`, `operatör` and `ope\u{301}rator` are refused.
+  - The doc says the check is a courtesy, since the real defence against
+    impersonation is structural. It names the accepted trade-offs: joined
+    words pass (`myoperator`), reserved plurals refuse honest names
+    (`solar-system`), and `c0vnc1l` passes. Tests pin all three.
+
 ## 0.128.0 (2026-10-26)
 
 The wire for operator ↔ own-agent messages, milestone M1 of the operator API
