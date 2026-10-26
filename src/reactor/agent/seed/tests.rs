@@ -8577,3 +8577,105 @@ async fn a_prompt_link_refusal_names_only_a_published_prompt() {
         "{text}"
     );
 }
+
+/// A session at `server` as the CLI runs one: the runner's wiring, `limits`,
+/// and a window nothing fills
+fn session(server: &MockServer, limits: Limits) -> AgoraSession {
+    let (key, _) = generate_keypair();
+    let agora = Agora::new(
+        Client::new(Url::parse(&server.base_url()).unwrap()).unwrap(),
+        AgentId::new(),
+        "tester".parse().unwrap(),
+        key,
+        None,
+        SharedLedger::default(),
+    )
+    .with_limits(limits);
+    AgoraSession::new(agora, ContextGauge::new(u64::MAX / 4, 0))
+}
+
+fn read_gov_0006() -> crate::tools::ToolCall {
+    crate::tools::ToolCall::GetContent(crate::requests::GetContentInput::new(
+        "GOV-2026-0006".parse::<crate::ids::ContentRef>().unwrap(),
+    ))
+}
+
+/// A session spends full reads as an agent's does: the third read is the
+/// summary, said plainly
+#[tokio::test]
+async fn a_session_spends_full_reads_as_the_runner_does() {
+    let server = MockServer::start();
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| !has_param(req, "detail"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+    let summary = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .query_param("detail", "summary");
+        then.status(200)
+            .json_body(governance_content("GOV-2026-0006", None));
+    });
+
+    let mut session = session(&server, Limits::seed());
+    let first = session.call(&read_gov_0006()).await;
+    assert!(!first.is_error);
+    assert!(
+        first.content.to_string().contains("1 of 2 left"),
+        "{}",
+        first.content
+    );
+    session.call(&read_gov_0006()).await;
+    let third = session.call(&read_gov_0006()).await;
+    assert_eq!(record.calls(), 2);
+    summary.assert();
+    assert!(
+        third
+            .content
+            .to_string()
+            .contains("You have used your 2 full governance reads"),
+        "{}",
+        third.content
+    );
+}
+
+/// `Limits::operator` reads every record in full and counts nothing, so no
+/// result names a budget
+#[tokio::test]
+async fn operator_limits_read_every_record_and_count_nothing() {
+    let server = MockServer::start();
+    let record = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/content/GOV-2026-0006")
+            .is_true(|req| !has_param(req, "detail"));
+        then.status(200).json_body(governance_content(
+            "GOV-2026-0006",
+            Some(two_round_record()),
+        ));
+    });
+
+    let mut session = session(&server, Limits::operator());
+    for _ in 0..3 {
+        let result = session.call(&read_gov_0006()).await;
+        let text = result.content.to_string();
+        assert!(!result.is_error, "{text}");
+        assert!(text.contains("### Record"), "{text}");
+        assert!(!text.contains("full read"), "{text}");
+        assert!(!text.contains("governance reads"), "{text}");
+    }
+    assert_eq!(record.calls(), 3);
+}
+
+#[test]
+fn seed_limits_are_the_runners_constants() {
+    let seed = Limits::seed();
+    assert_eq!(seed.governance_reads, Some(MAX_GOVERNANCE_READS));
+    assert_eq!(seed.trash_writes, Some(tool::MAX_TRASH_WRITES));
+    assert_eq!(seed.listing, Some(MAX_LISTING));
+    assert_eq!(Limits::default(), seed);
+}
