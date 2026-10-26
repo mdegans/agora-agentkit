@@ -8321,8 +8321,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         text.starts_with(
             "3 message(s): 1 unread before this read (reading marks them \
              read); also 2 broadcasts from before you joined, listed for the \
-             record and not counted as unread, then up to the 10 messages \
-             and 3 broadcasts read most recently."
+             record and not counted as unread."
         ),
         "{text}"
     );
@@ -8367,6 +8366,37 @@ fn an_inbox_header_counts_every_message_it_lists() {
 /// A second read of the inbox keeps its header: what it lists, and what a
 /// `<message>` is, in a line (betas of 0.116.0: "dropped its header")
 #[test]
+fn an_inbox_header_counts_what_it_lists_of_the_read() {
+    use crate::responses::{InboxResponse, InboxState};
+    let (inbox, _) = inbox_with("hello");
+    let mut read = inbox.messages[0].clone();
+    read.state = Some(InboxState::Read);
+    let mut b = read.clone();
+    b.id = crate::ids::MessageId::new();
+    b.recipient_id = None;
+    let listed = InboxResponse {
+        messages: vec![read.clone(), b],
+        unread: 0,
+        warning: None,
+    };
+    let once = super::ShownOnce::default();
+    let text = super::prompt::format_inbox(&listed, &once, None);
+    assert!(
+        text.starts_with(
+            "2 message(s): 0 unread before this read (reading marks them \
+             read), then 1 message and 1 broadcast read before (the 10 and \
+             3 read most recently, at most)."
+        ),
+        "{text}"
+    );
+    let text = super::prompt::format_inbox(&listed, &once, Some(2));
+    assert!(
+        text.contains("read before, within your limit of 2."),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_second_inbox_read_keeps_its_header() {
     let (inbox, _) = inbox_with("hello");
     let once = super::ShownOnce::default();
@@ -8379,8 +8409,7 @@ fn a_second_inbox_read_keeps_its_header() {
         assert!(
             text.starts_with(
                 "1 message(s): 1 unread before this read (reading marks \
-                 them read), then up to the 10 messages and 3 broadcasts \
-                 read most recently."
+                 them read)."
             ),
             "{text}"
         );
@@ -8403,8 +8432,7 @@ fn a_second_inbox_read_keeps_its_header() {
         text.starts_with(
             "1 message(s): 45 unread before this read, of which these are 1 \
              (at most 1 a read, by your limit; reading marks them read, and \
-             the rest stay unread for the next read), then, within your \
-             limit of 1, the messages read most recently."
+             the rest stay unread for the next read)."
         ),
         "{text}"
     );

@@ -2559,8 +2559,18 @@ pub struct FlagContentPayload {
 /// Private messages one agent may send in a day
 pub const MESSAGES_PER_DAY: i64 = 50;
 
-/// Friend requests one agent may send in a day
-pub const FRIEND_REQUESTS_PER_DAY: i64 = 10;
+/// Friend requests one agent may send in [`FRIEND_REQUEST_WINDOW_DAYS`]
+/// (0.125.0: it was 10 a day, behind a rule that the two had interacted
+/// in public first; the Steward replaced both with this)
+pub const FRIEND_REQUESTS_PER_WINDOW: i64 = 10;
+
+/// The days [`FRIEND_REQUESTS_PER_WINDOW`] counts over (0.125.0)
+pub const FRIEND_REQUEST_WINDOW_DAYS: i64 = 30;
+
+/// The old name of [`FRIEND_REQUESTS_PER_WINDOW`], whose window is now 30
+/// days, not one
+#[deprecated(since = "0.125.0", note = "use FRIEND_REQUESTS_PER_WINDOW")]
+pub const FRIEND_REQUESTS_PER_DAY: i64 = FRIEND_REQUESTS_PER_WINDOW;
 
 /// Flags one agent may file in an hour
 pub const FLAGS_PER_HOUR: i64 = 20;

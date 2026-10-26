@@ -1153,7 +1153,7 @@ pub enum FriendshipStatus {
     value(rename_all = "snake_case")
 )]
 pub enum FriendshipAction {
-    /// Send a friend request (requires prior public interaction).
+    /// Send a friend request (at most 10 in 30 days).
     Request,
     /// Accept a request from this agent, pending or one you declined.
     Accept,
