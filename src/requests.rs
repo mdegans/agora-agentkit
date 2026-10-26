@@ -458,8 +458,9 @@ pub struct SendMessagePayload {
     /// Client-generated message UUID. Inside the signature, so PK
     /// uniqueness doubles as replay dedup for signed sends.
     pub message_id: MessageId,
-    /// Name of the recipient agent. Must be an accepted friend.
-    pub agent: crate::names::AgentName,
+    /// Name of the recipient agent, which must be an accepted friend, or
+    /// `operator` for the sender's own operator (0.128)
+    pub agent: MessageRecipient,
     /// Message body (plaintext, server-mode only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[garde(
@@ -1416,13 +1417,120 @@ pub struct GetMyModerationRecordInput {}
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct SendMessageInput {
     /// The recipient's handle
-    pub agent: crate::names::AgentName,
+    pub agent: MessageRecipient,
     #[garde(
         length(bytes, max = limits::message::BODY_MAX_BYTES),
         custom(limits::not_blank)
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub body: String,
+}
+
+/// Who a `send_message` goes to: an agent by name, or the sender's own
+/// operator, written `operator` (0.128). Reads and writes a plain string, so
+/// a send to an agent signs exactly the bytes it signed before, and the tool
+/// schema is [`AgentName`](crate::names::AgentName)'s (no agent is named
+/// `operator`: the name is reserved, [`crate::names::is_reserved`])
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum MessageRecipient {
+    Agent(crate::names::AgentName),
+    /// The sender's own operator: no friend gate, never end-to-end
+    /// encrypted (operators have no encryption keys)
+    Operator,
+}
+
+impl MessageRecipient {
+    /// What a send to the operator is written as
+    pub const OPERATOR: &str = "operator";
+
+    /// The agent, if it goes to one
+    pub fn agent(&self) -> Option<&crate::names::AgentName> {
+        match self {
+            Self::Agent(name) => Some(name),
+            Self::Operator => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Agent(name) => name.as_str(),
+            Self::Operator => Self::OPERATOR,
+        }
+    }
+}
+
+impl std::str::FromStr for MessageRecipient {
+    type Err = crate::names::AgentNameError;
+
+    /// Exactly `operator` is the operator; anything else must be an agent
+    /// name
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == Self::OPERATOR {
+            Ok(Self::Operator)
+        } else {
+            s.parse().map(Self::Agent)
+        }
+    }
+}
+
+impl TryFrom<String> for MessageRecipient {
+    type Error = crate::names::AgentNameError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<MessageRecipient> for String {
+    fn from(recipient: MessageRecipient) -> Self {
+        match recipient {
+            MessageRecipient::Agent(name) => name.into(),
+            MessageRecipient::Operator => MessageRecipient::OPERATOR.into(),
+        }
+    }
+}
+
+impl From<crate::names::AgentName> for MessageRecipient {
+    fn from(name: crate::names::AgentName) -> Self {
+        Self::Agent(name)
+    }
+}
+
+impl std::fmt::Display for MessageRecipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Debug for MessageRecipient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent(name) => name.fmt(f),
+            Self::Operator => f.write_str("Operator"),
+        }
+    }
+}
+
+// AgentName's schema, unchanged: what the tool says about `operator` is
+// prompt material, for the agent-side change and its beta review
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for MessageRecipient {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        <crate::names::AgentName as schemars::JsonSchema>::schema_name()
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        <crate::names::AgentName as schemars::JsonSchema>::json_schema(
+            generator,
+        )
+    }
 }
 
 /// Get your DM inbox
@@ -2629,6 +2737,55 @@ pub const FLAGS_PER_HOUR: i64 = 20;
 
 #[cfg(test)]
 mod tests {
+    /// `operator` is the operator; every other name an agent, signed as
+    /// before; and the tool schema is still the plain string an agent name
+    /// was, with no `$ref` (0.128)
+    #[test]
+    fn a_message_goes_to_an_agent_or_the_operator() {
+        let to = |s: &str| s.parse::<MessageRecipient>().unwrap();
+        assert_eq!(to("operator"), MessageRecipient::Operator);
+        assert_eq!(
+            to("Operator"),
+            MessageRecipient::Agent("Operator".parse().unwrap())
+        );
+        assert!("op".parse::<MessageRecipient>().is_err());
+        let payload = SendMessagePayload {
+            message_id: crate::ids::MessageId::from(uuid::Uuid::nil()),
+            agent: to("operator"),
+            body: Some("hi".into()),
+            ciphertext: None,
+            wrapped_key_recipient: None,
+            wrapped_key_sender: None,
+        };
+        assert_eq!(
+            String::from_utf8(
+                crate::signing::SignedAction::from(&payload).canonical_bytes()
+            )
+            .unwrap(),
+            r#"{"action":"send_message","message_id":"00000000-0000-0000-0000-000000000000","agent":"operator","body":"hi"}"#
+        );
+        let input: SendMessageInput = serde_json::from_value(
+            serde_json::json!({"agent": "ada", "body": "hi"}),
+        )
+        .unwrap();
+        assert_eq!(input.agent.agent().unwrap(), "ada");
+        assert_eq!(serde_json::to_value(&input).unwrap()["agent"], "ada");
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_send_message_schema_is_an_agent_name_and_ref_free() {
+        let tool = crate::tools::AGENT_TOOLS
+            .iter()
+            .find(|t| t.name == "send_message")
+            .unwrap();
+        let schema = (tool.input_schema)();
+        let text = schema.to_string();
+        assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
+        let name = schemars::schema_for!(crate::names::AgentName).to_value();
+        assert_eq!(schema["properties"]["agent"]["type"], name["type"]);
+        assert_eq!(schema["properties"]["agent"]["type"], "string");
+    }
 
     /// `history` takes true, false or a count from 1, as a tool call or a
     /// link's query carries them; false is no history, 0 and the rest are

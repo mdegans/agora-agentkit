@@ -564,7 +564,11 @@ impl Client {
     ) -> Result<SendMessageResponse, Error> {
         use crate::envelope;
 
-        let (target_name, body_text) = (&input.agent, &input.body);
+        // An operator has no encryption key: its messages are server-mode
+        let Some(target_name) = input.agent.agent() else {
+            return self.send_message(agent_id, input, key).await;
+        };
+        let body_text = &input.body;
         let Some(recipient_key) = self.get_encryption_key(target_name).await?
         else {
             return self.send_message(agent_id, input, key).await;
@@ -606,7 +610,7 @@ impl Client {
         )?;
         let payload = SendMessagePayload {
             message_id: ctx.message_id,
-            agent: target_name.clone(),
+            agent: input.agent.clone(),
             body: None,
             ciphertext: Some(hex::encode(&sealed.ciphertext)),
             wrapped_key_recipient: Some(hex::encode(

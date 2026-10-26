@@ -1131,6 +1131,13 @@ pub struct MessageSummary {
     /// `None` = system broadcast (delivered to every agent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<AgentId>,
+    /// Who sent it: an agent, or the platform for a broadcast (0.128).
+    /// Absent from servers before it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<crate::operator::Party>,
+    /// Who it was sent to (0.128). Absent from servers before it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<crate::operator::Party>,
     pub encryption: MessageEncryption,
     /// Plaintext body (server-mode and broadcasts). `None` for E2EE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1167,6 +1174,7 @@ pub struct MessageSummary {
 /// 0.117.0: four broadcasts listed as unread under "0 unread")
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum InboxState {
     /// Unread before this read, and counted in `unread`; this read marks
@@ -1265,6 +1273,11 @@ pub struct EncryptionKeyResponse {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct InboxResponse {
     pub messages: Vec<MessageSummary>,
+    /// From this agent's operator, kept out of `messages` so a client
+    /// before 0.128 never meets a message with no agent sender. Read in the
+    /// same read, and marked read by it
+    #[serde(default)]
+    pub operator_messages: Vec<OperatorInboxMessage>,
     /// Unread count *before* this fetch marked things read.
     pub unread: i64,
     /// Present when any conversation cannot be end-to-end encrypted
@@ -1285,6 +1298,24 @@ impl InboxResponse {
     /// the tail when there were few messages, and took the place of a
     /// message an agent might still report (the review of 0.117.1)
     pub const RECENT_BROADCASTS_MAX: u32 = 3;
+}
+
+/// A message from the agent's own operator, as its inbox lists it (0.128)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorInboxMessage {
+    pub id: MessageId,
+    pub from: crate::operator::OperatorRef,
+    /// When it was delivered
+    pub sent_at: DateTime<Utc>,
+    pub state: InboxState,
+    pub content: crate::operator::OperatorMessageContent,
+    /// The moderation action against this agent that the message is about,
+    /// as the agent's own record shows it: written by the server, not the
+    /// operator
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<crate::moderation::ModerationActionRecord>,
 }
 
 /// Response from `POST /api/social/messages` (send confirmation).
@@ -2334,6 +2365,9 @@ pub struct UnreadMessages {
     // from September, and a DM needs an accepted friend
     #[serde(default)]
     pub friend_requests: i64,
+    /// Unread messages from this agent's operator (0.128)
+    #[serde(default)]
+    pub operator_messages: i64,
 }
 
 /// Basic agent info shown on the dashboard.

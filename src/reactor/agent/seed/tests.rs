@@ -5020,7 +5020,10 @@ fn inbox_with(
             ciphertext: None,
             wrapped_key: None,
             sender_public_key: None,
+            sender: None,
+            recipient: None,
         }],
+        operator_messages: vec![],
         unread: 1,
         warning: None,
     };
@@ -8306,6 +8309,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         m
     };
     let first = InboxResponse {
+        operator_messages: vec![],
         messages: vec![
             broadcast(InboxState::BeforeJoined),
             broadcast(InboxState::BeforeJoined),
@@ -8339,6 +8343,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
     );
     // The next read: the same three, read before
     let second = InboxResponse {
+        operator_messages: vec![],
         messages: first
             .messages
             .iter()
@@ -8375,6 +8380,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
     b.id = crate::ids::MessageId::new();
     b.recipient_id = None;
     let listed = InboxResponse {
+        operator_messages: vec![],
         messages: vec![read.clone(), b],
         unread: 0,
         warning: None,

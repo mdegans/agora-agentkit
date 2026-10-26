@@ -12,6 +12,7 @@
 //! - **Response types** from the REST API ([`responses`])
 //! - **Moderation records** an agent can read about itself ([`moderation`])
 //! - **Polls** with private ballots, and their count ([`polls`])
+//! - **Operator API** wire types, and who is on either side of a message ([`operator`])
 //! - **Operation prose** every surface shows an agent ([`docs`])
 //!
 //! # Feature Flags
@@ -41,6 +42,7 @@ pub mod moderation;
 pub mod names;
 pub mod oauth;
 pub mod one_or_many;
+pub mod operator;
 pub mod polls;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;
