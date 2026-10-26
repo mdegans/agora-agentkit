@@ -249,6 +249,217 @@ pub enum SignedAction<'a> {
     },
 }
 
+/// `context || part₁ \n part₂ \n … \n partₙ`: the bytes a signed HTTP
+/// request's signature covers, before the timestamp [`crate::crypto::sign`]
+/// adds (0.128). One function for [`signed_get`] and [`operator_request`],
+/// told apart by `context`.
+///
+/// A part holding a newline is refused, since it could pass for two parts.
+/// HTTP forbids one in a method, a header value and a request target, and
+/// a body enters as a fixed-length digest, so a real request never has one.
+pub fn signed_request_bytes(
+    context: &[u8],
+    parts: &[&str],
+) -> Result<Vec<u8>, NewlineInPart> {
+    if let Some(part) = parts.iter().find(|p| p.contains('\n')) {
+        return Err(NewlineInPart((*part).to_owned()));
+    }
+    let len = parts.iter().map(|p| p.len() + 1).sum::<usize>();
+    let mut bytes = Vec::with_capacity(context.len() + len);
+    bytes.extend_from_slice(context);
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    Ok(bytes)
+}
+
+/// A part of a signed request with a newline in it (0.128)
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("a signed request part may not contain a newline: {0:?}")]
+pub struct NewlineInPart(pub String);
+
+/// Signed operator API requests (0.128): every request under
+/// `/api/operator/` is signed by one of the operator's registered
+/// credentials, with no bearer token.
+///
+/// The request carries [`CREDENTIAL_ID_HEADER`], [`TIMESTAMP_HEADER`] (Unix
+/// seconds) and [`SIGNATURE_HEADER`] (hex, through [`crate::crypto::sign`]
+/// with that timestamp) over [`operator_request_bytes`]. A write's body
+/// carries its client-generated [`OperatorActionId`], which is signed too:
+/// the log's primary key rejects a replay and makes a retry idempotent.
+/// Its [`CONTEXT`] differs from every other signed domain's, so a key
+/// registered both as an agent's and as an operator credential cannot have
+/// one signature stand for the other.
+pub mod operator_request {
+    use sha2::{Digest, Sha256};
+
+    use super::NewlineInPart;
+    use crate::ids::{OperatorActionId, OperatorCredentialId};
+
+    /// What every signed operator request's bytes begin with
+    pub const CONTEXT: &[u8] = b"agora/operator/v1\n";
+    /// The signing credential's id
+    pub const CREDENTIAL_ID_HEADER: &str = "x-agora-operator-credential";
+    /// Unix seconds, part of the signed digest
+    pub const TIMESTAMP_HEADER: &str = "x-agora-timestamp";
+    /// Hex signature
+    pub const SIGNATURE_HEADER: &str = "x-agora-signature";
+
+    /// Whether a request reads or writes, and a write's log entry
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RequestKind {
+        Read,
+        /// The write's client-generated id, also in its body
+        Write(OperatorActionId),
+    }
+
+    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n CREDENTIAL_ID \n
+    /// hex(SHA-256(body)) \n ACTION_ID`.
+    ///
+    /// `host` as for [`signed_get_bytes`](super::signed_get::signed_get_bytes)
+    /// ([`host_of`](super::signed_get::host_of)); `credential` is the
+    /// [`CREDENTIAL_ID_HEADER`]'s; `body` is the request body exactly as sent,
+    /// empty for a GET; `ACTION_ID` is a write's [`OperatorActionId`]
+    /// (lowercase hyphenated), empty for a read.
+    pub fn operator_request_bytes(
+        method: &str,
+        host: &str,
+        path_and_query: &str,
+        credential: OperatorCredentialId,
+        body: &[u8],
+        kind: RequestKind,
+    ) -> Result<Vec<u8>, NewlineInPart> {
+        let action = match kind {
+            RequestKind::Read => String::new(),
+            RequestKind::Write(id) => id.to_string(),
+        };
+        super::signed_request_bytes(
+            CONTEXT,
+            &[
+                &method.to_ascii_uppercase(),
+                &host.to_ascii_lowercase(),
+                path_and_query,
+                &credential.to_string(),
+                &hex::encode(Sha256::digest(body)),
+                &action,
+            ],
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_bytes_bind_method_host_url_credential_body_and_action() {
+            let id: OperatorActionId =
+                "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f".parse().unwrap();
+            let cred: OperatorCredentialId =
+                "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap();
+            let bytes = |m, h, p, c, b: &[u8], k| {
+                operator_request_bytes(m, h, p, c, b, k).unwrap()
+            };
+            assert_eq!(
+                bytes(
+                    "post",
+                    "Example.org",
+                    "/api/operator/messages",
+                    cred,
+                    b"{}",
+                    RequestKind::Write(id),
+                ),
+                b"agora/operator/v1\nPOST\nexample.org\n/api/operator/messages\n\
+                  0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10\n\
+                  44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\n\
+                  6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f"
+                    .to_vec()
+            );
+            // A read: the empty body's digest, no action
+            assert_eq!(
+                bytes("GET", "a.org", "/api/operator/log", cred, b"", RequestKind::Read),
+                b"agora/operator/v1\nGET\na.org\n/api/operator/log\n\
+                  0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10\n\
+                  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n"
+                    .to_vec()
+            );
+            let w = RequestKind::Write(id);
+            let base = bytes("POST", "a.org", "/p", cred, b"x", w);
+            for other in [
+                bytes("PUT", "a.org", "/p", cred, b"x", w),
+                bytes("POST", "b.org", "/p", cred, b"x", w),
+                bytes("POST", "a.org", "/p?q", cred, b"x", w),
+                bytes(
+                    "POST",
+                    "a.org",
+                    "/p",
+                    OperatorCredentialId::new(),
+                    b"x",
+                    w,
+                ),
+                bytes("POST", "a.org", "/p", cred, b"y", w),
+                bytes("POST", "a.org", "/p", cred, b"x", RequestKind::Read),
+            ] {
+                assert_ne!(base, other);
+            }
+        }
+
+        /// A newline could move text from one part to the next: refused
+        /// (review of 0.128)
+        #[test]
+        fn a_part_with_a_newline_is_refused() {
+            let cred = OperatorCredentialId::new();
+            for (host, path) in [("a.org\n/x", "/y"), ("a.org", "/x\n/y")] {
+                assert_eq!(
+                    operator_request_bytes(
+                        "POST",
+                        host,
+                        path,
+                        cred,
+                        b"",
+                        RequestKind::Read
+                    ),
+                    Err(NewlineInPart(
+                        if host.contains('\n') { host } else { path }
+                            .to_owned()
+                    ))
+                );
+            }
+            assert!(
+                super::super::signed_get::signed_get_bytes(
+                    "GET",
+                    "h",
+                    "/p",
+                    Some("a\nb")
+                )
+                .is_err()
+            );
+        }
+
+        /// No other signed domain's bytes can begin like an operator
+        /// request's, nor an operator request's like theirs
+        #[test]
+        fn the_context_is_its_own() {
+            for other in [
+                crate::signing::signed_get::CONTEXT,
+                crate::sse::EVENT_CONTEXT,
+                crate::govlog::ROOT_DOMAIN,
+                b"agora/msg/v1",
+                b"agora/enc-key/v1",
+                b"agora/wrap/v1",
+            ] {
+                assert!(
+                    !CONTEXT.starts_with(other) && !other.starts_with(CONTEXT)
+                );
+            }
+            // Signed actions are JSON objects
+            assert_ne!(CONTEXT[0], b'{');
+        }
+    }
+}
+
 /// Signed GETs (0.101): how an agent that holds a key, and no bearer
 /// token, proves who it is on a request with no body.
 ///
@@ -269,7 +480,8 @@ pub mod signed_get {
     /// Hex Ed25519 signature
     pub const SIGNATURE_HEADER: &str = "x-agora-signature";
 
-    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n LAST_EVENT_ID`.
+    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n LAST_EVENT_ID`,
+    /// through [`signed_request_bytes`](super::signed_request_bytes).
     ///
     /// `host` is the request's `Host` header: the URL's host, with its port
     /// when it is not the scheme's default. `last_event_id` is the header's
@@ -280,23 +492,16 @@ pub mod signed_get {
         host: &str,
         path_and_query: &str,
         last_event_id: Option<&str>,
-    ) -> Vec<u8> {
-        let mut bytes = CONTEXT.to_vec();
-        for (i, part) in [
-            method.to_ascii_uppercase().as_str(),
-            &host.to_ascii_lowercase(),
-            path_and_query,
-            last_event_id.unwrap_or(""),
-        ]
-        .iter()
-        .enumerate()
-        {
-            if i > 0 {
-                bytes.push(b'\n');
-            }
-            bytes.extend_from_slice(part.as_bytes());
-        }
-        bytes
+    ) -> Result<Vec<u8>, super::NewlineInPart> {
+        super::signed_request_bytes(
+            CONTEXT,
+            &[
+                &method.to_ascii_uppercase(),
+                &host.to_ascii_lowercase(),
+                path_and_query,
+                last_event_id.unwrap_or(""),
+            ],
+        )
     }
 
     /// The `Host` header a client sends for `url`
@@ -311,6 +516,16 @@ pub mod signed_get {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The bytes of a request with no newline in it
+        fn signed_get_bytes(
+            m: &str,
+            h: &str,
+            p: &str,
+            l: Option<&str>,
+        ) -> Vec<u8> {
+            super::signed_get_bytes(m, h, p, l).unwrap()
+        }
 
         #[test]
         fn the_bytes_bind_method_host_url_and_cursor() {
@@ -342,6 +557,42 @@ pub mod signed_get {
                 "localhost:8080"
             );
             assert_eq!(host_of(&"https://a.org/x".parse().unwrap()), "a.org");
+        }
+
+        /// The bytes before 0.128 generalised them: the same for every
+        /// input, so every signed GET's signature still verifies
+        #[test]
+        fn the_generalised_bytes_are_the_old_bytes() {
+            fn before(m: &str, h: &str, p: &str, l: Option<&str>) -> Vec<u8> {
+                let mut bytes = CONTEXT.to_vec();
+                for (i, part) in [
+                    m.to_ascii_uppercase().as_str(),
+                    &h.to_ascii_lowercase(),
+                    p,
+                    l.unwrap_or(""),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    if i > 0 {
+                        bytes.push(b'\n');
+                    }
+                    bytes.extend_from_slice(part.as_bytes());
+                }
+                bytes
+            }
+            for (m, h, p, l) in [
+                ("GET", "a.org", "/agora/events", None),
+                (
+                    "get",
+                    "Localhost:8080",
+                    "/agora/events?x=1&y=%20",
+                    Some("c1"),
+                ),
+                ("GET", "", "", Some("")),
+            ] {
+                assert_eq!(signed_get_bytes(m, h, p, l), before(m, h, p, l));
+            }
         }
     }
 }

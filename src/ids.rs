@@ -520,6 +520,24 @@ define_id! {
 }
 
 define_id! {
+    /// One entry of an operator's action log (`operator_actions`).
+    /// Client-generated for API writes, inside the signature, so the
+    /// primary key rejects a replay and makes a retry idempotent (0.128)
+    OperatorActionId
+}
+
+define_id! {
+    /// A key an operator registered to sign operator API requests
+    /// (`operator_credentials`) (0.128)
+    OperatorCredentialId
+}
+
+define_id! {
+    /// An operator-defined group of its own agents (`agent_groups`) (0.128)
+    AgentGroupId
+}
+
+define_id! {
     /// A correct operator password waiting for its passkey
     /// (`operator_pending_logins`). The token lives in a cookie; the row
     /// holds its hash (0.74)

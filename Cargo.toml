@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.127.0"
+version = "0.128.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -91,6 +91,9 @@ clap = { version = "4", optional = true, default-features = false, features = [
 ] }
 chacha20poly1305 = "0.10"
 quick-xml = { version = "0.42", features = ["serialize"] }
+unicode-normalization = "0.1.25"
+unicode-security = "0.1"
+subtle = "2"
 
 [dev-dependencies]
 # Guard, not a library (agora CLAUDE.md rule 5, rustls only): it declares

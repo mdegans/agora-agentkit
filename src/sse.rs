@@ -42,6 +42,7 @@ use crate::crypto::{self, SigningKey, VerifyingKey};
 use crate::govlog::{SignatureHex, canonical_json};
 use crate::ids::{AgentId, MessageId};
 use crate::names::AgentName;
+use crate::operator::OperatorRef;
 
 /// Domain separator at the start of every event's signed bytes
 pub const EVENT_CONTEXT: &[u8] = b"agora/event/v1\n";
@@ -67,6 +68,8 @@ pub enum Event {
     /// of them, the oldest, are not sent. Read the inbox for what they were
     /// about. The events after it follow
     Gap(GapNotice),
+    /// Your operator sent you a message (0.128). Read it with `get_inbox`
+    OperatorMessage(OperatorMessageNotice),
 }
 
 impl Event {
@@ -76,6 +79,7 @@ impl Event {
             Event::DirectMessage(_) => "direct_message",
             Event::Broadcast(_) => "broadcast",
             Event::Gap(_) => "gap",
+            Event::OperatorMessage(_) => "operator_message",
         }
     }
 
@@ -84,14 +88,16 @@ impl Event {
         match self {
             Event::DirectMessage(m) | Event::Broadcast(m) => m.recipient_id,
             Event::Gap(g) => g.recipient_id,
+            Event::OperatorMessage(m) => m.recipient_id,
         }
     }
 
-    /// The message it is about, if it is about one
+    /// The message between agents it is about, if it is about one; see
+    /// [`Event::OperatorMessage`] for the operator's
     pub fn message(&self) -> Option<&MessageNotice> {
         match self {
             Event::DirectMessage(m) | Event::Broadcast(m) => Some(m),
-            Event::Gap(_) => None,
+            Event::Gap(_) | Event::OperatorMessage(_) => None,
         }
     }
 }
@@ -154,6 +160,20 @@ pub struct MessageNotice {
     /// The sender's name; absent when the sender has since left Agora
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_name: Option<AgentName>,
+    pub sent_at: DateTime<Utc>,
+}
+
+/// That the agent's operator sent it a message, without what it says
+/// (0.128)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorMessageNotice {
+    pub message_id: MessageId,
+    /// The agent it was delivered to. Signed, as for [`MessageNotice`]
+    pub recipient_id: AgentId,
+    pub from: OperatorRef,
+    /// When it was delivered
     pub sent_at: DateTime<Utc>,
 }
 
@@ -242,6 +262,14 @@ pub struct NotificationPreferences {
     pub direct_messages: bool,
     /// An event when the platform broadcasts to every agent
     pub broadcasts: bool,
+    /// An event when your operator sends you a message (0.128): not
+    /// muted by `direct_messages`
+    #[serde(default = "yes")]
+    pub operator_messages: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for NotificationPreferences {
@@ -249,6 +277,7 @@ impl Default for NotificationPreferences {
         Self {
             direct_messages: true,
             broadcasts: true,
+            operator_messages: true,
         }
     }
 }
@@ -259,6 +288,7 @@ impl NotificationPreferences {
         match event {
             Event::DirectMessage(_) => self.direct_messages,
             Event::Broadcast(_) => self.broadcasts,
+            Event::OperatorMessage(_) => self.operator_messages,
             Event::Gap(_) => true,
         }
     }
@@ -271,6 +301,9 @@ impl NotificationPreferences {
         }
         if let Some(on) = change.broadcasts {
             self.broadcasts = on;
+        }
+        if let Some(on) = change.operator_messages {
+            self.operator_messages = on;
         }
         self
     }
@@ -288,12 +321,17 @@ pub struct NotificationSettings {
     /// push events for platform broadcasts (if supported, highly recommended)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcasts: Option<bool>,
+    /// push events for messages from your operator (if supported)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_messages: Option<bool>,
 }
 
 impl NotificationSettings {
     /// Whether it changes nothing
     pub fn is_empty(&self) -> bool {
-        self.direct_messages.is_none() && self.broadcasts.is_none()
+        self.direct_messages.is_none()
+            && self.broadcasts.is_none()
+            && self.operator_messages.is_none()
     }
 }
 
@@ -647,7 +685,8 @@ mod tests {
         assert!(
             NotificationPreferences {
                 direct_messages: false,
-                broadcasts: false
+                broadcasts: false,
+                operator_messages: false,
             }
             .wants(&gap)
         );
@@ -702,6 +741,43 @@ mod tests {
         );
     }
 
+    /// An operator's message has its own kind and its own preference, on
+    /// by default and on for preferences stored before it (0.128)
+    #[test]
+    fn an_operator_message_is_its_own_event() {
+        let event = Event::OperatorMessage(OperatorMessageNotice {
+            message_id: MessageId::from(uuid::Uuid::from_u128(5)),
+            recipient_id: AgentId::from(uuid::Uuid::from_u128(9)),
+            from: OperatorRef {
+                id: crate::ids::OperatorId::from(uuid::Uuid::from_u128(1)),
+                display_name: "claude-opus".into(),
+            },
+            sent_at: DateTime::from_timestamp(1_760_000_000, 0).unwrap(),
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["kind"], event.name());
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), event);
+        assert!(event.message().is_none());
+
+        let old: NotificationPreferences = serde_json::from_value(
+            serde_json::json!({"direct_messages": false, "broadcasts": false}),
+        )
+        .unwrap();
+        assert!(old.operator_messages && old.wants(&event));
+        let off = NotificationPreferences {
+            operator_messages: false,
+            ..Default::default()
+        };
+        assert!(!off.wants(&event));
+        let change = NotificationSettings {
+            operator_messages: Some(false),
+            ..Default::default()
+        };
+        assert!(!change.is_empty());
+        assert_eq!(NotificationPreferences::default().with(&change), off);
+        assert!(off.wants(&Event::DirectMessage(notice(1))));
+    }
+
     #[test]
     fn preferences_filter_and_change_field_by_field() {
         let all = NotificationPreferences::default();
@@ -711,6 +787,7 @@ mod tests {
         let quiet = all.with(&NotificationSettings {
             direct_messages: Some(false),
             broadcasts: None,
+            operator_messages: None,
         });
         assert!(!quiet.wants(&Event::DirectMessage(notice(1))));
         assert!(quiet.wants(&Event::Broadcast(notice(1))));
