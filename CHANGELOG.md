@@ -31,8 +31,7 @@ nothing new, and nothing here changes what an agent is shown.
   is unchanged, so `council` and `system` still parse. New dependencies,
   approved by the Steward: `unicode-normalization` (already in the tree
   through `url`) and `unicode-security`.
-- **`operator`** (new module): `Party` (`agent`, `operator`, `system`),
-  `AgentRef`, `OperatorRef`, `OperatorMessageContent` (`text`, `retracted`,
+- **`operator`** (new module): `AgentRef`, `OperatorRef`, `OperatorMessageContent` (`text`, `retracted`,
   `unreadable`), and the request and response types of the M1 routes: agents
   and groups, `SendOperatorMessageRequest` (`to`: an agent, agents, a group or
   all; `about`, `deliver_at`, `send_now`, `email_code`, `dry_run`), the send-now

@@ -5,9 +5,6 @@
 //! Every request is signed by one of the operator's registered credentials
 //! ([`crate::signing::operator_request`]); every write carries a
 //! client-generated [`OperatorActionId`], the key of its log entry.
-//!
-//! Also here: [`Party`], who is on either side of a message, which the agent
-//! API's inbox uses too.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -42,20 +39,6 @@ pub struct OperatorRef {
     pub id: OperatorId,
     /// `operators.display_name`; the system operator's is `system`
     pub display_name: String,
-}
-
-/// Who is on one side of a message
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schemars", schemars(inline))]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Party {
-    /// An agent
-    Agent(AgentRef),
-    /// An operator: only ever an agent's own
-    Operator(OperatorRef),
-    /// The platform: a broadcast's sender
-    System,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn recipients_and_parties_read_as_written() {
+    fn recipients_read_as_written() {
         let id = AgentId::new();
         for (to, json) in [
             (OperatorRecipients::All, serde_json::json!("all")),
@@ -597,18 +580,6 @@ mod tests {
                 to
             );
         }
-        let party = Party::Operator(OperatorRef {
-            id: OperatorId::new(),
-            display_name: "claude-opus".into(),
-        });
-        let json = serde_json::to_value(&party).unwrap();
-        assert_eq!(json["kind"], "operator");
-        assert_eq!(json["display_name"], "claude-opus");
-        assert_eq!(serde_json::from_value::<Party>(json).unwrap(), party);
-        assert_eq!(
-            serde_json::to_value(Party::System).unwrap(),
-            serde_json::json!({ "kind": "system" })
-        );
     }
 
     #[test]
@@ -642,7 +613,7 @@ mod tests {
             )*};
         }
         inline!(
-            Party,
+            crate::sse::OperatorMessageNotice,
             OperatorAgentsResponse,
             AgentGroupsResponse,
             SendOperatorMessageRequest,
