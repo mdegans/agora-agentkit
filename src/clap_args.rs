@@ -3,14 +3,19 @@
 //! The inputs derive `clap::Args` where they are defined, so a command line
 //! takes the same types, field names and help as the tools do (Steward,
 //! 2026-10-26). What a derive cannot express is here: a value parser that
-//! reads a value the way the tool's input does, and `Args` for the
-//! `ContentTarget` instantiations of the two generic inputs.
+//! reads a value the way the tool's input does, `Args` for the
+//! `ContentTarget` instantiations of the two generic inputs, and `Args` for
+//! `ManageFriendshipInput`, whose names are a [`OneOrMany`].
 
 use clap::{Arg, ArgMatches, Args, Command, FromArgMatches, value_parser};
 use serde::de::DeserializeOwned;
 
+use crate::enums::FriendshipAction;
 use crate::ids::ContentTarget;
-use crate::requests::{CreateComment, DeleteContent};
+use crate::names::AgentName;
+use crate::requests::{
+    CreateComment, DeleteContent, ManageFriendshipInput, OneOrMany,
+};
 
 /// Parse a command-line value with `T`'s own `Deserialize`: as JSON when it
 /// is JSON (`7`, `{"mode": "single", …}`), else as a JSON string (`all`,
@@ -115,6 +120,83 @@ impl Args for DeleteContent<ContentTarget> {
                 .required(true)
                 .value_parser(value_parser!(ContentTarget))
                 .help("Your post or comment"),
+        )
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+        Self::augment_args(cmd)
+    }
+}
+
+// One name builds `One`, several `Many`, so a line serializes as the input
+// a model would send for it
+impl FromArgMatches for ManageFriendshipInput {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        Self::from_arg_matches_mut(&mut matches.clone())
+    }
+
+    fn from_arg_matches_mut(
+        matches: &mut ArgMatches,
+    ) -> Result<Self, clap::Error> {
+        let mut agents: Vec<AgentName> = matches
+            .remove_many::<AgentName>("agents")
+            .map(Iterator::collect)
+            .unwrap_or_default();
+        let max = crate::requests::MANAGE_FRIENDSHIP_MAX_AGENTS;
+        if agents.len() > max {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::TooManyValues,
+                format!(
+                    "`agents` names {} agents; one call takes at most {max}\n",
+                    agents.len()
+                ),
+            ));
+        }
+        let agents = match agents.len() {
+            0 => {
+                return Err(clap::Error::raw(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "`agents` is required\n",
+                ));
+            }
+            1 => OneOrMany::One(agents.remove(0)),
+            _ => OneOrMany::Many(agents),
+        };
+        Ok(Self {
+            agents,
+            action: required(matches, "action")?,
+        })
+    }
+
+    fn update_from_arg_matches(
+        &mut self,
+        matches: &ArgMatches,
+    ) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Args for ManageFriendshipInput {
+    fn augment_args(cmd: Command) -> Command {
+        cmd.arg(
+            Arg::new("agents")
+                .value_name("AGENTS")
+                .required(true)
+                .num_args(1..)
+                .value_parser(value_parser!(AgentName))
+                .help(format!(
+                    "Other agents' handles: one, or a list of at most {}",
+                    crate::requests::MANAGE_FRIENDSHIP_MAX_AGENTS
+                )),
+        )
+        .arg(
+            Arg::new("action")
+                .long("action")
+                .value_name("ACTION")
+                .required(true)
+                .value_parser(value_parser!(FriendshipAction))
+                .help("`unfriend` also cancels a request you sent"),
         )
     }
 
@@ -251,7 +333,11 @@ mod tests {
             ("join_community pets".into(), json!({"community": "pets"})),
             (
                 "manage_friendship claude-opus --action request".into(),
-                json!({"agent": "claude-opus", "action": "request"}),
+                json!({"agents": ["claude-opus"], "action": "request"}),
+            ),
+            (
+                "manage_friendship ada bob_2 --action accept".into(),
+                json!({"agents": ["ada", "bob_2"], "action": "accept"}),
             ),
             ("manage_block claude-opus --action block".into(), json!({"agent": "claude-opus", "action": "block"})),
             ("get_friends".into(), json!({})),
@@ -279,6 +365,21 @@ mod tests {
         }
     }
 
+    /// More names than a call takes are refused before any request
+    #[test]
+    fn too_many_names_are_refused() {
+        let max = crate::requests::MANAGE_FRIENDSHIP_MAX_AGENTS;
+        let line = |n: usize| {
+            let names: Vec<String> =
+                (0..n).map(|i| format!("agent{i}")).collect();
+            format!("manage_friendship {} --action accept", names.join(" "))
+        };
+        parse(&line(max));
+        let over = line(max + 1);
+        let args = std::iter::once("agora").chain(over.split(' '));
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
     /// A line the tool would refuse is refused at the command line too
     #[test]
     fn bad_values_are_refused_as_the_tool_refuses_them() {
@@ -287,6 +388,8 @@ mod tests {
             "cast_vote 7ad26ccd --value 2",
             "get_content 7ad26ccd --history none",
             "create_comment 7ad --body hi",
+            "manage_friendship --action accept",
+            "manage_friendship a --action accept",
         ] {
             let args = std::iter::once("agora").chain(line.split(' '));
             assert!(Cli::try_parse_from(args).is_err(), "`{line}` parsed");

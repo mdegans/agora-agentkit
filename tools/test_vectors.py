@@ -231,6 +231,46 @@ class RenamedFields(unittest.TestCase):
         self.assertEqual(cases, 6)
 
 
+class Friendship(unittest.TestCase):
+    """`vectors/actions/friendship.json`: `manage_friendship` with one
+    agent signs that action's own bytes, as before lists (agentkit
+    0.126.0); with several, the batch's. A signer builds them as below"""
+
+    PATH = os.path.join(os.path.dirname(VECTORS), "actions", "friendship.json")
+
+    def test_each_body_signs_its_canonical_bytes(self):
+        with open(self.PATH) as f:
+            vector = json.load(f)
+        key = bytes.fromhex(vector["public_key"])
+        for case in vector["cases"]:
+            body = case["body"]
+            named = body["agents"] if "agents" in body else body["agent"]
+            if isinstance(named, str):
+                named = [named]
+            agents = []
+            for name in named:
+                if name not in agents:
+                    agents.append(name)
+            if len(agents) == 1:
+                canonical = {
+                    "action": vector["single"][body["action"]],
+                    "agent": agents[0],
+                }
+            else:
+                canonical = {
+                    "action": "friendship_batch",
+                    "friendship_action": body["action"],
+                    "agents": agents,
+                }
+            text = json.dumps(canonical, separators=(",", ":"), ensure_ascii=False)
+            self.assertEqual(text, case["canonical"])
+            message = govlog.signed_message(text.encode(), vector["timestamp"])
+            self.assertTrue(
+                govlog.ed25519_verify(key, message, bytes.fromhex(case["signature"]))
+            )
+        self.assertEqual(len(vector["cases"]), 8)
+
+
 class Ed25519(unittest.TestCase):
     """RFC 8032 §7.1 vector 2, and what strict verification refuses"""
 

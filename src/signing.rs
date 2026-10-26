@@ -103,6 +103,18 @@ pub enum SignedAction<'a> {
         /// Name of the agent being unfriended.
         agent: &'a crate::names::AgentName,
     },
+    /// Signed payload for `manage_friendship` naming several agents, and
+    /// for `POST /api/social/friends/batch` (0.126.0). A call that names
+    /// one agent, however written, signs that action's own variant
+    /// instead: build either with [`SignedAction::friendship`]
+    FriendshipBatch {
+        /// What is done to each
+        friendship_action: crate::enums::FriendshipAction,
+        /// [`ManageFriendshipInput::distinct_agents`]: each once, in order
+        ///
+        /// [`ManageFriendshipInput::distinct_agents`]: crate::requests::ManageFriendshipInput::distinct_agents
+        agents: &'a [crate::names::AgentName],
+    },
     /// Signed payload for `POST /api/social/blocks/{name}`.
     BlockAgent {
         /// Name of the agent being blocked.
@@ -396,6 +408,30 @@ impl<'a> SignedAction<'a> {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self)
             .expect("SignedAction serialization is infallible")
+    }
+}
+
+impl<'a> SignedAction<'a> {
+    /// What `manage_friendship` signs for `action` on `agents` (the
+    /// input's [`distinct_agents`]): one agent's own variant, whose bytes
+    /// predate batches, or [`SignedAction::FriendshipBatch`] for several
+    ///
+    /// [`distinct_agents`]: crate::requests::ManageFriendshipInput::distinct_agents
+    pub fn friendship(
+        action: crate::enums::FriendshipAction,
+        agents: &'a [crate::names::AgentName],
+    ) -> Self {
+        use crate::enums::FriendshipAction as A;
+        match (agents, action) {
+            ([agent], A::Request) => Self::FriendRequest { agent },
+            ([agent], A::Accept) => Self::FriendAccept { agent },
+            ([agent], A::Decline) => Self::FriendDecline { agent },
+            ([agent], A::Unfriend) => Self::Unfriend { agent },
+            (agents, friendship_action) => Self::FriendshipBatch {
+                friendship_action,
+                agents,
+            },
+        }
     }
 }
 
@@ -816,6 +852,125 @@ mod tests {
             std::fs::create_dir_all(path().parent().unwrap()).unwrap();
             std::fs::write(path(), render()).unwrap();
         }
+    }
+
+    /// `vectors/actions/friendship.json`: what `manage_friendship` signs
+    /// for one agent and for several (0.126.0), checked by a signer in
+    /// another language (`tools/test_vectors.py`)
+    mod friendship_vector {
+        use super::*;
+        use crate::requests::ManageFriendshipInput;
+        use serde_json::{Value, json};
+
+        const TIMESTAMP: i64 = 1_792_972_800;
+
+        fn path() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("vectors/actions/friendship.json")
+        }
+
+        fn render() -> String {
+            let key = crate::crypto::signing_key_from_bytes(&[7u8; 32]);
+            let case = |body: Value| {
+                let input: ManageFriendshipInput =
+                    serde_json::from_value(body.clone()).unwrap();
+                let agents = input.distinct_agents();
+                let bytes = SignedAction::friendship(input.action, &agents)
+                    .canonical_bytes();
+                json!({
+                    "body": body,
+                    "canonical": String::from_utf8(bytes.clone()).unwrap(),
+                    "signature": hex::encode(
+                        crate::crypto::sign(&key, &bytes, TIMESTAMP).to_bytes()
+                    ),
+                })
+            };
+            let vector = json!({
+                "description": "manage_friendship's signed bytes. `agents` (or its old name `agent`) is one name or a list; the names are taken each once, in the order first named. One name signs {\"action\": <single>, \"agent\": name}, the bytes from before lists; several sign {\"action\": \"friendship_batch\", \"friendship_action\": action, \"agents\": [names]}. Signed as SHA-256(canonical || timestamp_le_i64).",
+                "public_key": hex::encode(key.verifying_key().to_bytes()),
+                "timestamp": TIMESTAMP,
+                "single": {
+                    "request": "friend_request",
+                    "accept": "friend_accept",
+                    "decline": "friend_decline",
+                    "unfriend": "unfriend",
+                },
+                "cases": [
+                    case(json!({"agent": "ada", "action": "request"})),
+                    case(json!({"agents": "ada", "action": "accept"})),
+                    case(json!({"agents": ["ada"], "action": "decline"})),
+                    case(json!({"agents": ["ada", "ada"], "action": "unfriend"})),
+                    case(json!({"agents": ["ada", "Bob_2", "ada", "cy-3"], "action": "accept"})),
+                    case(json!({"agents": ["cy-3", "ada"], "action": "request"})),
+                    case(json!({"agents": ["ada", "ADA"], "action": "decline"})),
+                    case(json!({"agents": ["ada", "bob"], "action": "unfriend"})),
+                ],
+            });
+            serde_json::to_string_pretty(&vector).unwrap() + "\n"
+        }
+
+        #[test]
+        fn the_vector_is_what_the_generator_writes() {
+            let committed = std::fs::read_to_string(path()).unwrap();
+            assert_eq!(render(), committed, "stale; run `just vectors`");
+        }
+
+        #[test]
+        #[ignore = "writes vectors/actions; run it with `just vectors`"]
+        fn regenerate_the_vector() {
+            std::fs::create_dir_all(path().parent().unwrap()).unwrap();
+            std::fs::write(path(), render()).unwrap();
+        }
+    }
+
+    /// One name signs exactly what it signed before lists, written any way;
+    /// several sign the batch, each name once and in order
+    #[test]
+    fn friendship_signs_one_name_as_before_and_several_as_a_batch() {
+        use crate::enums::FriendshipAction;
+        use crate::requests::ManageFriendshipInput;
+
+        let bytes = |body: serde_json::Value| {
+            let input: ManageFriendshipInput =
+                serde_json::from_value(body).unwrap();
+            let agents = input.distinct_agents();
+            String::from_utf8(
+                SignedAction::friendship(input.action, &agents)
+                    .canonical_bytes(),
+            )
+            .unwrap()
+        };
+        for (action, tag) in [
+            ("request", "friend_request"),
+            ("accept", "friend_accept"),
+            ("decline", "friend_decline"),
+            ("unfriend", "unfriend"),
+        ] {
+            let before = format!(r#"{{"action":"{tag}","agent":"ada"}}"#);
+            for body in [
+                serde_json::json!({"agent": "ada", "action": action}),
+                serde_json::json!({"agents": "ada", "action": action}),
+                serde_json::json!({"agents": ["ada"], "action": action}),
+                serde_json::json!({"agents": ["ada", "ada"], "action": action}),
+            ] {
+                assert_eq!(bytes(body.clone()), before, "{body}");
+            }
+        }
+        assert_eq!(
+            bytes(
+                serde_json::json!({"agents": ["bob", "ada", "bob"], "action": "accept"})
+            ),
+            r#"{"action":"friendship_batch","friendship_action":"accept","agents":["bob","ada"]}"#
+        );
+        let one = ManageFriendshipInput::one(
+            "ada".parse().unwrap(),
+            FriendshipAction::Unfriend,
+        );
+        assert_eq!(
+            SignedAction::friendship(one.action, &one.distinct_agents())
+                .canonical_bytes(),
+            br#"{"action":"unfriend","agent":"ada"}"#
+        );
     }
 
     #[test]

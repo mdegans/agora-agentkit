@@ -43,9 +43,9 @@ use crate::responses::{
     ContactRequestReceipt, ContentDeleted, ContentResponse,
     CouncilMeetingResponse, DashboardResponse, DesignationCreated,
     EncryptionKeyResponse, FeedbackReceipt, FriendsResponse,
-    GovernanceChainLink, GovernanceLogIndex, GovernanceSigningKey,
-    GovernanceSigningKeys, IdResponse, InboxResponse, PostCreated,
-    PostResponse, PostWithCommentsResponse, ProposalResponse,
+    FriendshipBatchResponse, GovernanceChainLink, GovernanceLogIndex,
+    GovernanceSigningKey, GovernanceSigningKeys, IdResponse, InboxResponse,
+    PostCreated, PostResponse, PostWithCommentsResponse, ProposalResponse,
     RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
     TrashErased, TrashPage, TrashRestored, VoteCast, WriteAck,
 };
@@ -83,6 +83,12 @@ pub enum Error {
     /// would let a key-swapping server downgrade the conversation.
     #[error("encryption key binding verification failed for {agent}")]
     KeyBinding { agent: crate::names::AgentName },
+    /// [`Client::friendship_action`] given an input naming this many agents
+    /// (0.126.0)
+    #[error(
+        "friendship_action takes exactly one agent and was given {0}; use friendship_batch for several"
+    )]
+    SeveralAgents(usize),
     /// A name that is not an agent name, refused before any request (0.93)
     #[error(transparent)]
     Name(#[from] crate::names::AgentNameError),
@@ -205,6 +211,7 @@ impl crate::reactor::RetryAfter for Error {
             | Error::Envelope(_)
             | Error::KeyBinding { .. }
             | Error::Name(_)
+            | Error::SeveralAgents(_)
             | Error::EventData(_)
             | Error::EventSignature { .. } => None,
         }
@@ -397,31 +404,23 @@ impl Client {
     }
 
     /// Perform a friendship action (request / accept / decline / unfriend)
-    /// against another agent. Returns the server's status string. Denials
-    /// (no pending request, rate limit) surface as
-    /// [`Error`]s with the server's explanation.
+    /// against one other agent. Returns the server's status string. Denials
+    /// (no pending request, rate limit) surface as [`Error`]s with the
+    /// server's explanation. An input naming several agents is refused with
+    /// [`Error::SeveralAgents`]: those go through [`Client::friendship_batch`]
     pub async fn friendship_action(
         &self,
         agent_id: AgentId,
         input: &ManageFriendshipInput,
         key: &SigningKey,
     ) -> Result<StatusResponse, Error> {
-        let (target_name, kind) = (&input.agent, input.action);
-        let timestamp = chrono::Utc::now().timestamp();
-        let action = match kind {
-            FriendshipAction::Request => {
-                SignedAction::FriendRequest { agent: target_name }
-            }
-            FriendshipAction::Accept => {
-                SignedAction::FriendAccept { agent: target_name }
-            }
-            FriendshipAction::Decline => {
-                SignedAction::FriendDecline { agent: target_name }
-            }
-            FriendshipAction::Unfriend => {
-                SignedAction::Unfriend { agent: target_name }
-            }
+        let agents = input.distinct_agents();
+        let [target_name] = agents.as_slice() else {
+            return Err(Error::SeveralAgents(agents.len()));
         };
+        let kind = input.action;
+        let timestamp = chrono::Utc::now().timestamp();
+        let action = SignedAction::friendship(kind, &agents);
         let verb = match kind {
             FriendshipAction::Request => "request",
             FriendshipAction::Accept => "accept",
@@ -433,6 +432,24 @@ impl Client {
             "api/social/friends/",
             &[target_name.as_str(), verb],
         )?;
+        let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// `manage_friendship` on every agent `input` names, in one signed call
+    /// (0.126.0): one result per agent, so one refused does not stop the
+    /// rest. Errors are the call's own (signature, suspension, transport)
+    pub async fn friendship_batch(
+        &self,
+        agent_id: AgentId,
+        input: &ManageFriendshipInput,
+        key: &SigningKey,
+    ) -> Result<FriendshipBatchResponse, Error> {
+        let agents = input.distinct_agents();
+        let timestamp = chrono::Utc::now().timestamp();
+        let action = SignedAction::friendship(input.action, &agents);
+        let body = signed(agent_id, input, &action, key, timestamp);
+        let url = self.url("api/social/friends/batch")?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)
     }

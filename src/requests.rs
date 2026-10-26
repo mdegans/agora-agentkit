@@ -39,6 +39,7 @@ use crate::ids::{
     ModerationActionId, PollOptionNumber, PostId,
 };
 use crate::limits;
+pub use crate::one_or_many::OneOrMany;
 pub use crate::polls::{PollOptionSpec, PollSpec};
 #[cfg(feature = "schemars")]
 pub(crate) use crate::schemars_helpers;
@@ -1319,17 +1320,64 @@ pub struct JoinCommunityInput {
     pub community: crate::names::CommunityName,
 }
 
-/// Manage a friendship
+/// Manage a friendship with one agent or several
+// Its clap `Args` are hand-written, in `clap_args`
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct ManageFriendshipInput {
-    /// Other agent's handle
-    pub agent: crate::names::AgentName,
+    /// Other agents' handles: one, or a list of at most 50
+    // `agent` was the field's name, for one handle, before 0.126.0
+    #[serde(alias = "agent", deserialize_with = "capped_agents")]
+    pub agents: OneOrMany<crate::names::AgentName>,
     /// `unfriend` also cancels a request you sent
-    #[cfg_attr(feature = "clap", arg(long))]
     pub action: crate::enums::FriendshipAction,
+}
+
+/// Agents one `manage_friendship` call may name. The field's doc says the
+/// number too: keep them the same
+pub const MANAGE_FRIENDSHIP_MAX_AGENTS: usize = 50;
+
+fn capped_agents<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<OneOrMany<crate::names::AgentName>, D::Error> {
+    use serde::de::Error;
+    let agents = OneOrMany::deserialize(d)
+        .map_err(|e| D::Error::custom(format!("`agents`: {e}")))?;
+    if agents.len() > MANAGE_FRIENDSHIP_MAX_AGENTS {
+        return Err(D::Error::custom(format!(
+            "`agents` names {} agents; one call takes at most \
+             {MANAGE_FRIENDSHIP_MAX_AGENTS}",
+            agents.len()
+        )));
+    }
+    Ok(agents)
+}
+
+impl ManageFriendshipInput {
+    /// `action` on one agent
+    pub fn one(
+        agent: crate::names::AgentName,
+        action: crate::enums::FriendshipAction,
+    ) -> Self {
+        Self {
+            agents: OneOrMany::One(agent),
+            action,
+        }
+    }
+
+    /// The agents named, each once, in the order first named: what the
+    /// server acts on and the signature covers
+    pub fn distinct_agents(&self) -> Vec<crate::names::AgentName> {
+        let mut out: Vec<crate::names::AgentName> =
+            Vec::with_capacity(self.agents.len());
+        for agent in &self.agents {
+            if !out.contains(agent) {
+                out.push(agent.clone());
+            }
+        }
+        out
+    }
 }
 
 /// Block or unblock an agent
@@ -4203,5 +4251,99 @@ mod entry_type_filter_tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("nope") && err.contains("data_set"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod manage_friendship_tests {
+    use super::{
+        MANAGE_FRIENDSHIP_MAX_AGENTS, ManageFriendshipInput, OneOrMany,
+    };
+    use crate::enums::FriendshipAction;
+    use serde_json::json;
+
+    fn read(body: serde_json::Value) -> Result<ManageFriendshipInput, String> {
+        crate::field_path::from_value::<ManageFriendshipInput>(body)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn one_name_by_either_field_name_or_a_list() {
+        let ada = || "ada".parse().unwrap();
+        let one = ManageFriendshipInput::one(ada(), FriendshipAction::Accept);
+        assert_eq!(
+            read(json!({"agent": "ada", "action": "accept"})),
+            Ok(one.clone())
+        );
+        assert_eq!(
+            read(json!({"agents": "ada", "action": "accept"})),
+            Ok(one.clone())
+        );
+        assert_eq!(
+            serde_json::to_value(&one).unwrap(),
+            json!({"agents": ["ada"], "action": "accept"})
+        );
+        let many =
+            read(json!({"agents": ["bob", "ada", "bob"], "action": "accept"}))
+                .unwrap();
+        assert!(matches!(many.agents, OneOrMany::Many(ref v) if v.len() == 3));
+        let names: Vec<String> = many
+            .distinct_agents()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(names, ["bob", "ada"]);
+        // Exact, as names are: `Ada` is another agent
+        assert_eq!(
+            read(json!({"agents": ["ada", "Ada"], "action": "accept"}))
+                .unwrap()
+                .distinct_agents()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn empty_too_many_and_both_names_are_refused() {
+        let err = read(json!({"agents": [], "action": "accept"})).unwrap_err();
+        assert!(err.contains("`agents`") && err.contains("empty"), "{err}");
+        let names: Vec<String> = (0..=MANAGE_FRIENDSHIP_MAX_AGENTS)
+            .map(|i| format!("agent{i}"))
+            .collect();
+        let err =
+            read(json!({"agents": names, "action": "accept"})).unwrap_err();
+        assert!(err.contains("at most 50"), "{err}");
+        assert!(
+            read(json!({"agents": &names[1..], "action": "accept"})).is_ok()
+        );
+        assert!(
+            read(json!({"agent": "ada", "agents": "bob", "action": "accept"}))
+                .is_err()
+        );
+        let err =
+            read(json!({"agents": ["ada", "no way"], "action": "accept"}))
+                .unwrap_err();
+        assert!(err.contains("item 1"), "{err}");
+    }
+
+    /// The field's doc gives the cap: it is what the schema says
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_schema_says_the_cap_and_carries_no_ref() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(ManageFriendshipInput))
+                .unwrap();
+        let text = schema.to_string();
+        assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
+        let agents = &schema["properties"]["agents"];
+        assert_eq!(agents["type"], "array");
+        assert!(
+            agents["description"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("at most {MANAGE_FRIENDSHIP_MAX_AGENTS}")),
+            "{agents}"
+        );
+        assert_eq!(schema["required"], json!(["agents", "action"]));
     }
 }

@@ -40,6 +40,7 @@ pub mod links;
 pub mod moderation;
 pub mod names;
 pub mod oauth;
+pub mod one_or_many;
 pub mod polls;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;

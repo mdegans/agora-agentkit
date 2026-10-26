@@ -1,0 +1,96 @@
+{
+  "cases": [
+    {
+      "body": {
+        "action": "request",
+        "agent": "ada"
+      },
+      "canonical": "{\"action\":\"friend_request\",\"agent\":\"ada\"}",
+      "signature": "16a0e68820cefc0688724bfe4635ae9a5c69034b936ab000cf92914758c284af081ebd723050e66723fe2760d37e87e409d0cdd1a80dbdb04ddeeb2250e3a300"
+    },
+    {
+      "body": {
+        "action": "accept",
+        "agents": "ada"
+      },
+      "canonical": "{\"action\":\"friend_accept\",\"agent\":\"ada\"}",
+      "signature": "f97963531979911aac9d641127f9fd61f60247f057dd20e94d348bce4e9f991ca1f7e7d9857642e0ae8f4675cc24241f35e748685c1cc62217dda6752f5cda08"
+    },
+    {
+      "body": {
+        "action": "decline",
+        "agents": [
+          "ada"
+        ]
+      },
+      "canonical": "{\"action\":\"friend_decline\",\"agent\":\"ada\"}",
+      "signature": "dcccdcd9e0cfdb04a32c45abcb8360b3268686dee5598c1c7fcdf7680fcb9523a5c13ee932ebc5b8dad0ffbd7512696a15ddd5714bad46949871fc80281a4e0c"
+    },
+    {
+      "body": {
+        "action": "unfriend",
+        "agents": [
+          "ada",
+          "ada"
+        ]
+      },
+      "canonical": "{\"action\":\"unfriend\",\"agent\":\"ada\"}",
+      "signature": "f003fdf2454f068bc392b9f071308bf94018318f37df607731390abe2c8a423a374f3efe147e98bcb3c57da21f4bce789c4f441856d4afc40778b939fac0b404"
+    },
+    {
+      "body": {
+        "action": "accept",
+        "agents": [
+          "ada",
+          "Bob_2",
+          "ada",
+          "cy-3"
+        ]
+      },
+      "canonical": "{\"action\":\"friendship_batch\",\"friendship_action\":\"accept\",\"agents\":[\"ada\",\"Bob_2\",\"cy-3\"]}",
+      "signature": "d640d981058fa0f2fe20f82a64f70f7473ba43ee9988e148245d40a658f6e15c20b575891bf1e9f9a854ccf5c65c2bbed3fa2fe8646a9258c09145e0a1dae302"
+    },
+    {
+      "body": {
+        "action": "request",
+        "agents": [
+          "cy-3",
+          "ada"
+        ]
+      },
+      "canonical": "{\"action\":\"friendship_batch\",\"friendship_action\":\"request\",\"agents\":[\"cy-3\",\"ada\"]}",
+      "signature": "2de53be88e414082263b9d93a43fee7d13dc8157dd7f6abffdf2139b48b910d6c80823ad3593a08334b73a7ca72a76cc3b5f85648b453073a7c584cdd6c4650a"
+    },
+    {
+      "body": {
+        "action": "decline",
+        "agents": [
+          "ada",
+          "ADA"
+        ]
+      },
+      "canonical": "{\"action\":\"friendship_batch\",\"friendship_action\":\"decline\",\"agents\":[\"ada\",\"ADA\"]}",
+      "signature": "807930c38690bd2e3b90a39d231778d8e5a729dc11bf04770c95a59a41e48ced0469a9d46f885c35fe5f9d6fdb50ddb236e33d6896073a0633d976713c309701"
+    },
+    {
+      "body": {
+        "action": "unfriend",
+        "agents": [
+          "ada",
+          "bob"
+        ]
+      },
+      "canonical": "{\"action\":\"friendship_batch\",\"friendship_action\":\"unfriend\",\"agents\":[\"ada\",\"bob\"]}",
+      "signature": "086a84db8f62d0688efa3dcdb9f6d76f81438fbf19d1db0c0b4120054e08022fda3bdaedc40a01b1e1942e0c00240e7042813226bcc26ef8e4c1969cce34d004"
+    }
+  ],
+  "description": "manage_friendship's signed bytes. `agents` (or its old name `agent`) is one name or a list; the names are taken each once, in the order first named. One name signs {\"action\": <single>, \"agent\": name}, the bytes from before lists; several sign {\"action\": \"friendship_batch\", \"friendship_action\": action, \"agents\": [names]}. Signed as SHA-256(canonical || timestamp_le_i64).",
+  "public_key": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "single": {
+    "accept": "friend_accept",
+    "decline": "friend_decline",
+    "request": "friend_request",
+    "unfriend": "unfriend"
+  },
+  "timestamp": 1792972800
+}
