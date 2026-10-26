@@ -2,8 +2,64 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.129.0 (2026-10-26)
 
+- **Operator signers** (`operator_signer`, Steward, 2026-10-26): what signs an
+  operator API request, ahead of M2, so the hardware tiers can be exercised
+  without a YubiKey.
+  - `OperatorSigner` (async, `dyn`-safe): `sign(bytes)`, `public_key()`,
+    `algorithm()`, `kind()` (`SignerKind::Software` or
+    `SignerKind::Hardware(&dyn HardwareKey)`), and `credential_kind()`,
+    the `enums::OperatorCredentialKind` it registers as. `sign_request` /
+    `verify_request` sign `crypto::signing_digest(payload, timestamp)`, so an
+    Ed25519 operator signature also verifies with `crypto::verify`.
+  - `HardwareKey`: `policy()` (`KeyPolicy { pin: PinPolicy, touch:
+    TouchPolicy }`), `serial()` (`DeviceSerial { Yubico, Mock }` over a
+    `PivSerial`, with the server's HMAC input), `firmware()`,
+    `verify_pin(&Pin)` (`Pin` wraps `Secret`), `attestation()`.
+  - `SignatureAlgorithm { Ed25519, EcdsaP256 }`, `OperatorPublicKey`,
+    `OperatorSignature` (P-256 as fixed `r ‖ s`; a high or zero `s` is
+    refused on construction and on verify), `PivSlot`,
+    `YUBIKEY_ED25519_MIN_FIRMWARE` (5.7.0).
+  - `SoftwareKeySigner`: the `software_key` credential, a hex Ed25519 key
+    loaded with `Secret::from_file` and `crypto::signing_key_from_hex`. A
+    malformed file's error says nothing of its contents.
+  - `AttestationBundle { YubicoPiv, MockPiv }`, tagged `format`
+    (`yubico_piv`, `mock_piv`), the same in every build.
+    `AttestationVerifier` takes one evidence type per verifier, and
+    `verify_bundle` refuses every other format (`WrongFormat`).
+    `AttestedKey` has private fields: only this crate's verifiers make one.
+  - `MOCK_HARDWARE_KEY`: whether the mock is compiled in. A release server
+    must assert it is `false` (feature unification can compile it in).
+  - Feature `x509`: `operator_signer::piv`, the one X.509 parse path for PIV
+    attestation, and `YubicoAttestationVerifier`. Its anchors are the four
+    Yubico PIV attestation CAs, pinned and shipped with the crate (`PIV Root
+    CA Serial 263751`, `PIV Attestation A 1`, `B 1`, `B2 1`, each with its
+    developers.yubico.com source and SHA-256); `from_anchors` takes a subset
+    and refuses any other key, whatever its name. Never Root 1, its
+    intermediates, or the FIDO, OpenPGP, SD, HSM or U2F CAs. PIV is a
+    positive requirement: the device chain is `[f9]` (or `[f9, anchor]`
+    with the anchor an exact copy); `f9` has exactly the subject `CN=Yubico
+    PIV Attestation`, is a CA, carries no policy and is issued by an anchor
+    whose `pathLenConstraint` allows it; the slot certificate is not a CA.
+    Unknown critical and duplicate extensions are refused, inner and outer
+    algorithms must agree with the right parameters, links are checked
+    top-down, and RSA keys are capped at 4096 bits. Issuers: ECDSA P-256 /
+    SHA-256, ECDSA P-384 / SHA-384 and RSA PKCS#1 v1.5 / SHA-256. A real
+    YubiKey 5.7.4 attestation verifies (tests).
+  - Feature `mock-hardware-key`: `operator_signer::mock`. `MockRootCa`
+    (P-256, or RSA from a PKCS#1 key; `intermediate_p384` for the newer
+    hierarchy), `MockPivDevice` (slots, touch via
+    `press`, PIN once/always with three tries and a constant-time compare,
+    `remove`/`insert`, firmware-gated Ed25519, `KeyChanged` after a slot is
+    regenerated, `overwrite_attestation_key`), `MockHardwareKey` and
+    `MockAttestationVerifier`. Off by default.
+  - New optional dependencies (Steward approved, 2026-10-26), at the
+    versions and features the agora server already compiles through
+    `webauthn_rp`: `p256` 0.14 (`ecdsa`), `x509-cert` 0.3 (none), `p384`
+    0.14 (`ecdsa`), `rsa` 0.10.0-rc.19 (`encoding`, `sha2`). None is in a default or `seed` build.
+- `crypto::signing_digest` is public (the 32 bytes `crypto::sign` signs).
+  `crypto::signing_key_from_hex` zeroizes its decoded bytes.
 - **`names::is_reserved`, from the review of 0.128.0:**
   - A digit at a word's edge no longer hides a reserved word. `operator1`,
     `1operator`, `system1` and `council0` are refused, like `operator2`.

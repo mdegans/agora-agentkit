@@ -84,12 +84,15 @@ pub fn signing_key_from_bytes(bytes: &[u8; 32]) -> SigningKey {
 }
 
 /// Load a signing key from a hex-encoded string.
+///
+/// The decoded bytes are zeroized once the key is built (`SigningKey`
+/// zeroizes itself on drop).
 pub fn signing_key_from_hex(hex_str: &str) -> Result<SigningKey, CryptoError> {
-    let bytes = hex::decode(hex_str.trim())?;
+    let bytes = zeroize::Zeroizing::new(hex::decode(hex_str.trim())?);
     if bytes.len() != 32 {
         return Err(CryptoError::KeyLength(bytes.len()));
     }
-    let mut key_bytes = [0u8; 32];
+    let mut key_bytes = zeroize::Zeroizing::new([0u8; 32]);
     key_bytes.copy_from_slice(&bytes);
     Ok(SigningKey::from_bytes(&key_bytes))
 }
@@ -99,12 +102,21 @@ pub fn signing_key_to_hex(key: &SigningKey) -> String {
     hex::encode(key.to_bytes())
 }
 
-/// Compute the canonical digest: SHA-256(payload || timestamp_le_bytes).
-fn canonical_digest(payload: &[u8], timestamp: i64) -> Vec<u8> {
+/// The 32 bytes [`sign`] signs: `SHA-256(payload || timestamp_le_bytes)`.
+///
+/// Public for signers that hold no [`SigningKey`] of their own (an
+/// operator's hardware key, `operator_signer`): they sign these bytes, and
+/// an Ed25519 signature over them verifies with [`verify`].
+pub fn signing_digest(payload: &[u8], timestamp: i64) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(payload);
     hasher.update(timestamp.to_le_bytes());
-    hasher.finalize().to_vec()
+    hasher.finalize().into()
+}
+
+/// [`signing_digest`] as a `Vec`, for the callers here.
+fn canonical_digest(payload: &[u8], timestamp: i64) -> Vec<u8> {
+    signing_digest(payload, timestamp).to_vec()
 }
 
 #[cfg(test)]
