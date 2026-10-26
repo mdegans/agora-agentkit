@@ -32,13 +32,21 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   - `MOCK_HARDWARE_KEY`: whether the mock is compiled in. A release server
     must assert it is `false` (feature unification can compile it in).
   - Feature `x509`: `operator_signer::piv`, the one X.509 parse path for PIV
-    attestation, and `YubicoAttestationVerifier` (roots supplied by the
-    caller; the mock root refused). Chain shape enforced: a device chain of
-    1 or 2, only `f9` may issue without being a CA, no policy above the
-    slot certificate, no unknown critical or duplicate extensions, inner and
-    outer algorithms equal with the right parameters, every root of the
-    issuer's name tried. Issuers: ECDSA P-256 / SHA-256, ECDSA P-384 /
-    SHA-384 and RSA PKCS#1 v1.5 / SHA-256.
+    attestation, and `YubicoAttestationVerifier`. Its anchors are the four
+    Yubico PIV attestation CAs, pinned and shipped with the crate (`PIV Root
+    CA Serial 263751`, `PIV Attestation A 1`, `B 1`, `B2 1`, each with its
+    developers.yubico.com source and SHA-256); `from_anchors` takes a subset
+    and refuses any other key, whatever its name. Never Root 1, its
+    intermediates, or the FIDO, OpenPGP, SD, HSM or U2F CAs. PIV is a
+    positive requirement: the device chain is `[f9]` (or `[f9, anchor]`
+    with the anchor an exact copy); `f9` has exactly the subject `CN=Yubico
+    PIV Attestation`, is a CA, carries no policy and is issued by an anchor
+    whose `pathLenConstraint` allows it; the slot certificate is not a CA.
+    Unknown critical and duplicate extensions are refused, inner and outer
+    algorithms must agree with the right parameters, links are checked
+    top-down, and RSA keys are capped at 4096 bits. Issuers: ECDSA P-256 /
+    SHA-256, ECDSA P-384 / SHA-384 and RSA PKCS#1 v1.5 / SHA-256. A real
+    YubiKey 5.7.4 attestation verifies (tests).
   - Feature `mock-hardware-key`: `operator_signer::mock`. `MockRootCa`
     (P-256, or RSA from a PKCS#1 key; `intermediate_p384` for the newer
     hierarchy), `MockPivDevice` (slots, touch via

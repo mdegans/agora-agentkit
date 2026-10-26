@@ -16,7 +16,8 @@
 //!   power-cycling a real key does;
 //! - **firmware**: Ed25519 only from [`YUBIKEY_ED25519_MIN_FIRMWARE`];
 //! - **attestation**: real X.509, Yubico-shaped (an `f9`-style device
-//!   certificate issued by a [`MockRootCa`], and a slot certificate with
+//!   certificate, a CA with `pathlen:0`, issued by a [`MockRootCa`], and a
+//!   slot certificate with
 //!   Yubico's serial, firmware and policy extensions), read by the same
 //!   [`piv`] path as a real one. Every name in it says MOCK, it
 //!   travels as its own type ([`MockPivAttestation`]), and only
@@ -63,11 +64,12 @@ pub const PIN_TRIES: u8 = 3;
 // Root CA
 // ---------------------------------------------------------------------------
 
-/// A mock vendor CA, standing in for Yubico's: a root (P-256, or RSA as
-/// Yubico's older root is), or an intermediate under one
-/// ([`intermediate_p384`](Self::intermediate_p384)). A device made under an
-/// intermediate carries the intermediate's certificate in its chain, as
-/// newer YubiKeys do.
+/// A mock PIV attestation CA, standing in for Yubico's: a root (P-256, or
+/// RSA as Yubico's legacy PIV root is), or a CA under one
+/// ([`intermediate_p384`](Self::intermediate_p384)), as Yubico's newer PIV
+/// attestation CAs sit under Root 1. Whichever issues a device's `f9` is
+/// the anchor a verifier trusts; a device made under an intermediate also
+/// hands over a copy of it, which the verifier ignores.
 pub struct MockRootCa {
     key: IssuerKey,
     name: Name,
@@ -267,6 +269,24 @@ fn ca_extensions() -> Vec<Extension> {
     ]
 }
 
+/// A device certificate's: a CA that issues only end certificates, as a
+/// YubiKey's `f9` is (`CA:TRUE, pathlen:0`).
+fn f9_extensions() -> Vec<Extension> {
+    vec![
+        critical_extension(
+            &BasicConstraints {
+                ca: true,
+                path_len_constraint: Some(0),
+            },
+            OID_BASIC_CONSTRAINTS,
+        ),
+        critical_extension(
+            &KeyUsage(KeyUsages::KeyCertSign.into()),
+            OID_KEY_USAGE,
+        ),
+    ]
+}
+
 impl fmt::Debug for MockRootCa {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("MockRootCa([REDACTED])")
@@ -348,7 +368,7 @@ impl MockPivDevice {
             &root.name,
             &device_name(),
             attestation_key.spki(),
-            Vec::new(),
+            f9_extensions(),
             &root.key,
         );
         Self {
@@ -470,7 +490,7 @@ impl MockPivDevice {
             &device_name(),
             &device_name(),
             key.spki(),
-            Vec::new(),
+            f9_extensions(),
             &key,
         );
         state.attestation_key = key;
@@ -679,8 +699,9 @@ impl HardwareKey for MockHardwareKey {
 // Verifier
 // ---------------------------------------------------------------------------
 
-/// Checks [`MockPivAttestation`]s against mock root CAs, through the same
-/// [`piv::verify_attestation`] a real verifier uses.
+/// Checks [`MockPivAttestation`]s against mock CAs, through the same chain
+/// checks [`piv::YubicoAttestationVerifier`] uses, with the mock device
+/// subject in place of Yubico's.
 #[derive(Debug, Clone)]
 pub struct MockAttestationVerifier {
     roots: TrustedRoots,
@@ -698,7 +719,7 @@ impl MockAttestationVerifier {
         roots: &[DerCertificate],
     ) -> Result<Self, AttestationError> {
         Ok(Self {
-            roots: TrustedRoots::from_der(roots)?,
+            roots: TrustedRoots::new(roots, MOCK_DEVICE_SUBJECT)?,
         })
     }
 }
@@ -880,6 +901,10 @@ fn tlv(tag: u8, value: &[u8]) -> Vec<u8> {
     out.extend(value);
     out
 }
+
+#[cfg(test)]
+#[path = "mock_attacks.rs"]
+mod attacks;
 
 #[cfg(test)]
 mod tests {
@@ -1519,10 +1544,7 @@ mod tests {
         // Each rule refuses it on its own.
         let evidence = |slot_certificate| MockPivAttestation {
             slot_certificate,
-            device_chain: vec![
-                real.slot_certificate.clone(),
-                real.device_chain[0].clone(),
-            ],
+            device_chain: vec![real.slot_certificate.clone()],
         };
         assert!(matches!(
             verifier.verify(
@@ -1541,9 +1563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_issuer_above_f9_must_be_a_ca() {
-        // The real slot certificate presented as if `f9` issued an
-        // intermediate: the (non-CA) `f9` certificate at index 2.
+    async fn the_device_chain_is_f9_and_at_most_a_copy_of_its_anchor() {
         let (root, device) = device(MockPivDevice::FIRMWARE_ED25519);
         let key = device
             .generate_key(
@@ -1554,25 +1574,112 @@ mod tests {
             .unwrap();
         let real = mock_attestation(key.attestation().await.unwrap());
         let f9 = real.device_chain[0].clone();
-        let evidence = MockPivAttestation {
+        let verifier = MockAttestationVerifier::new(&root);
+        let with = |device_chain| MockPivAttestation {
             slot_certificate: real.slot_certificate.clone(),
-            device_chain: vec![f9.clone(), f9.clone()],
+            device_chain,
         };
+        verifier
+            .verify(
+                &with(vec![f9.clone(), root.certificate().clone()]),
+                &key.public_key(),
+            )
+            .unwrap();
         assert!(matches!(
-            MockAttestationVerifier::new(&root)
-                .verify(&evidence, &key.public_key()),
-            Err(AttestationError::NotACa { index: 2 })
+            verifier
+                .verify(&with(vec![f9.clone(), f9.clone()]), &key.public_key()),
+            Err(AttestationError::ChainLength { len: 2 })
         ));
-
-        let too_long = MockPivAttestation {
-            slot_certificate: real.slot_certificate.clone(),
-            device_chain: vec![f9.clone(), f9.clone(), f9],
-        };
         assert!(matches!(
-            MockAttestationVerifier::new(&root)
-                .verify(&too_long, &key.public_key()),
+            verifier.verify(
+                &with(vec![f9.clone(), f9.clone(), f9]),
+                &key.public_key()
+            ),
             Err(AttestationError::ChainLength { len: 3 })
         ));
+        assert!(matches!(
+            verifier.verify(&with(vec![]), &key.public_key()),
+            Err(AttestationError::ChainLength { len: 0 })
+        ));
+    }
+
+    /// `f9` reissued by the root with `extensions`, for the real slot key.
+    async fn with_f9_extensions(
+        extensions: Vec<Extension>,
+    ) -> Result<AttestedKey, AttestationError> {
+        let (root, device) = device(MockPivDevice::FIRMWARE_ED25519);
+        let key = device
+            .generate_key(
+                PivSlot::Authentication,
+                SignatureAlgorithm::Ed25519,
+                KeyPolicy::UNATTENDED,
+            )
+            .unwrap();
+        let real = mock_attestation(key.attestation().await.unwrap());
+        let f9 = {
+            let state = device.lock();
+            issue(
+                u64::from(SERIAL.get()),
+                &root.name,
+                &device_name(),
+                state.attestation_key.spki(),
+                extensions,
+                &root.key,
+            )
+        };
+        MockAttestationVerifier::new(&root).verify(
+            &MockPivAttestation {
+                slot_certificate: real.slot_certificate,
+                device_chain: vec![f9],
+            },
+            &key.public_key(),
+        )
+    }
+
+    #[tokio::test]
+    async fn f9_must_be_a_ca() {
+        let bc = |ca: bool, path_len_constraint: Option<u8>| {
+            critical_extension(
+                &BasicConstraints {
+                    ca,
+                    path_len_constraint,
+                },
+                OID_BASIC_CONSTRAINTS,
+            )
+        };
+        let ku = |usage: KeyUsages| {
+            critical_extension(&KeyUsage(usage.into()), OID_KEY_USAGE)
+        };
+        let cases: Vec<(&str, Vec<Extension>, bool)> = vec![
+            ("no extensions", vec![], false),
+            ("cA=FALSE", vec![bc(false, None)], false),
+            (
+                "cA=TRUE, keyUsage digitalSignature only",
+                vec![bc(true, None), ku(KeyUsages::DigitalSignature)],
+                false,
+            ),
+            (
+                "keyUsage keyCertSign, no basicConstraints",
+                vec![ku(KeyUsages::KeyCertSign)],
+                false,
+            ),
+            ("cA=TRUE, no keyUsage", vec![bc(true, None)], true),
+            ("cA=TRUE, pathlen:0", vec![bc(true, Some(0))], true),
+        ];
+        for (name, extensions, accepted) in cases {
+            let result = with_f9_extensions(extensions).await;
+            if accepted {
+                assert!(result.is_ok(), "{name}: {result:?}");
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(AttestationError::NotACa { index: 1 })
+                    ),
+                    "{name}: {result:?}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1654,7 +1761,7 @@ mod tests {
         let mock = MockAttestationVerifier::new(&root);
         // The mock root is refused as a Yubico root.
         assert!(matches!(
-            piv::YubicoAttestationVerifier::from_roots(std::slice::from_ref(
+            piv::YubicoAttestationVerifier::from_anchors(std::slice::from_ref(
                 root.certificate()
             )),
             Err(AttestationError::RootRefused { .. })
@@ -1736,15 +1843,23 @@ mod tests {
                 .unwrap();
             let mut attestation =
                 mock_attestation(key.attestation().await.unwrap());
+            // `[f9, intermediate]`: the intermediate is the anchor, as
+            // Yubico's PIV Attestation B 1 is.
             assert_eq!(attestation.device_chain.len(), 2);
-            let verifier = MockAttestationVerifier::new(&root);
+            let verifier = MockAttestationVerifier::new(&intermediate);
             let attested =
                 verifier.verify(&attestation, &key.public_key()).unwrap();
             assert_eq!(attested.serial(), DeviceSerial::Mock(SERIAL));
 
-            // The intermediate isn't a root.
+            // The root above it isn't an anchor for `f9`.
             assert!(matches!(
-                MockAttestationVerifier::new(&intermediate)
+                MockAttestationVerifier::new(&root)
+                    .verify(&attestation, &key.public_key()),
+                Err(AttestationError::ChainLength { len: 2 })
+            ));
+            attestation.device_chain.truncate(1);
+            assert!(matches!(
+                MockAttestationVerifier::new(&root)
                     .verify(&attestation, &key.public_key()),
                 Err(AttestationError::UntrustedRoot)
             ));
@@ -1756,7 +1871,7 @@ mod tests {
             attestation.device_chain[0] = DerCertificate::from_der(der);
             assert!(matches!(
                 verifier.verify(&attestation, &key.public_key()),
-                Err(AttestationError::BadSignature { index: 1 })
+                Err(AttestationError::UntrustedRoot)
             ));
         }
     }

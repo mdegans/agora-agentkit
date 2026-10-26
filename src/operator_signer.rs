@@ -668,8 +668,8 @@ impl AttestationBundle {
 /// Each verifier takes its own evidence type, and
 /// [`verify_bundle`](Self::verify_bundle) refuses every other format, so a
 /// mock attestation can't reach a real verifier. `piv::
-/// YubicoAttestationVerifier` takes [`PivAttestation`] and Yubico's
-/// published roots; `mock::MockAttestationVerifier` takes
+/// YubicoAttestationVerifier` takes [`PivAttestation`] and the Yubico PIV
+/// attestation CAs it pins; `mock::MockAttestationVerifier` takes
 /// [`MockPivAttestation`] and a mock root CA. Only this crate can make an
 /// [`AttestedKey`], so only this crate's verifiers can say anything.
 pub trait AttestationVerifier {
@@ -766,19 +766,48 @@ pub enum AttestationError {
         /// The bundle's format.
         format: &'static str,
     },
-    /// The chain is not the length of a known hierarchy (slot and `f9`,
-    /// or slot, `f9` and one intermediate).
-    #[error("the device chain has {len} certificates; 1 or 2 are expected")]
+    /// The device chain isn't `[f9]`, or `[f9, anchor]` with the anchor a
+    /// byte-for-byte copy of a trusted one.
+    #[error(
+        "the device chain has {len} certificates; expected the device \
+         certificate, optionally followed by its trusted issuer"
+    )]
     ChainLength {
         /// The device chain's length.
         len: usize,
     },
-    /// A certificate that issues others above `f9` (an intermediate, or a
-    /// root) is not a CA: no `basicConstraints cA=TRUE`, or a `keyUsage`
-    /// without `keyCertSign`. Index `len` is the root.
+    /// The device certificate (index 1) isn't the vendor's PIV attestation
+    /// certificate: its subject is not the expected one (on a YubiKey,
+    /// exactly `CN=Yubico PIV Attestation`).
+    #[error("certificate {index} is not a PIV device attestation certificate")]
+    NotADeviceCertificate {
+        /// Position of the certificate.
+        index: usize,
+    },
+    /// A certificate that issues others is not a CA: no `basicConstraints
+    /// cA=TRUE`, or a `keyUsage` without `keyCertSign`.
     #[error("certificate {index} issues certificates but is not a CA")]
     NotACa {
         /// Position of the certificate.
+        index: usize,
+    },
+    /// The slot certificate claims to be a CA.
+    #[error("certificate {index} is a slot certificate but claims to be a CA")]
+    UnexpectedCa {
+        /// Position of the certificate.
+        index: usize,
+    },
+    /// A CA's `pathLenConstraint` forbids the CA certificates below it.
+    /// Index 2 is the trust anchor.
+    #[error("certificate {index}'s path length constraint is exceeded")]
+    PathLength {
+        /// Position of the certificate.
+        index: usize,
+    },
+    /// An issuer's RSA key is over 4096 bits.
+    #[error("certificate {index}'s issuer key is too large")]
+    KeyTooLarge {
+        /// Position of the certificate whose issuer's key it is.
         index: usize,
     },
     /// A certificate above the slot certificate carries a slot policy.
@@ -810,7 +839,8 @@ pub enum AttestationError {
         /// Position of the certificate.
         index: usize,
     },
-    /// A trusted root was refused (a mock root given to a real verifier).
+    /// A trust anchor was refused: not a CA, or (for the Yubico verifier)
+    /// not one of the pinned Yubico PIV CAs.
     #[error("refused root: {reason}")]
     RootRefused {
         /// Why.

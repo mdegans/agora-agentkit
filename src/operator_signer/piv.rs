@@ -1,46 +1,56 @@
 //! PIV attestation as X.509: reading a slot's attestation certificate and
-//! checking its chain to a trusted root.
+//! checking it back to a pinned PIV attestation CA.
 //!
 //! The one parse path for every PIV attestation:
-//! [`YubicoAttestationVerifier`] calls it with Yubico's published roots,
-//! and the mock verifier (feature `mock-hardware-key`) with a mock root CA.
-//! The slot certificate's facts are read from Yubico's extensions
+//! [`YubicoAttestationVerifier`] calls it with Yubico's PIV CAs, and the
+//! mock verifier (feature `mock-hardware-key`) with a mock CA. The slot
+//! certificate's facts are read from Yubico's extensions
 //! (`1.3.6.1.4.1.41482.3.*`), which the mock writes too.
 //!
-//! **Chain shape.** Yubico's hierarchies are root → `f9` → slot (older
-//! devices) and root → intermediate → `f9` → slot (newer ones), with the
-//! root supplied by the verifier and the rest by the device. So:
-//! - the device chain holds 1 or 2 certificates;
-//! - `f9` (index 1) is the only issuer allowed not to be a CA: Yubico's
-//!   `f9` certificates aren't marked as one. Every certificate above it,
-//!   and every root, must have `basicConstraints cA=TRUE`, and
-//!   `keyCertSign` if it has a `keyUsage`;
-//! - only the slot certificate may carry a policy;
-//! - unknown critical extensions, and any extension twice, are refused;
-//! - each certificate's inner and outer signature algorithms must agree,
-//!   with the parameters the algorithm prescribes.
+//! **The real hierarchy.** A YubiKey's slot certificate is issued by the
+//! device's own attestation certificate (`f9`, subject
+//! `CN=Yubico PIV Attestation`, `CA:TRUE, pathlen:0`), which is issued by a
+//! PIV attestation CA:
+//! - before firmware 5.7.4, `Yubico PIV Root CA Serial 263751`;
+//! - from 5.7.4, `Yubico PIV Attestation A 1`, `B 1` or `B2 1`, which sit
+//!   under `Yubico Attestation Intermediate A 1` / `B 1` and `Yubico
+//!   Attestation Root 1`.
 //!
-//! Without the shape rules, any attested slot key could sign a "slot
-//! certificate" naming itself as issuer, for any key with any serial and
-//! policy, and every link would verify.
+//! Root 1 and its two intermediates also issue the FIDO, OpenPGP, SD and
+//! HSM attestation CAs, whose certificates know nothing of PIV. So the
+//! anchors are the PIV CAs themselves, pinned, and never Root 1, the
+//! intermediates or the rest of Yubico's bundle (the U2F root signs FIDO
+//! batch keys directly; YubiKey 4 isn't supported).
+//!
+//! **What is checked.** PIV is a positive requirement:
+//! - the device chain is `[f9]`, or `[f9, anchor]` with the anchor a
+//!   byte-for-byte copy of a trusted one;
+//! - `f9` has exactly the device subject, is a CA (`cA=TRUE`, and
+//!   `keyCertSign` if it has a `keyUsage`), carries no policy, and is
+//!   issued by a trust anchor whose `pathLenConstraint` allows it;
+//! - the slot certificate is not a CA and is issued by `f9`;
+//! - unknown critical extensions, and any extension twice, are refused;
+//! - each certificate's inner and outer signature algorithms agree, with
+//!   the parameters the algorithm prescribes, and the hash matches the
+//!   curve.
+//!
+//! Links are checked top-down: `f9` under the anchor first, then the slot
+//! certificate under `f9`, so no signature is checked under a key not yet
+//! authenticated. RSA keys are capped at 4096 bits.
 //!
 //! **Not checked:** validity dates (Yubico's slot certificates run to the
 //! year 9999), revocation.
 //!
 //! **Algorithms:** issuers may sign with ECDSA P-256 / SHA-256, ECDSA
-//! P-384 / SHA-384 (for Yubico's newer hierarchy) or RSA PKCS#1 v1.5 /
-//! SHA-256 (Yubico's older roots and `f9` certificates are RSA). The hash
-//! must match the curve. Any other algorithm is refused as
+//! P-384 / SHA-384 or RSA PKCS#1 v1.5 / SHA-256 (every Yubico PIV CA and
+//! `f9` is RSA). Anything else is
 //! [`AttestationError::UnsupportedAlgorithm`]. Slot keys may be Ed25519 or
 //! P-256.
-
-use std::str::FromStr;
 
 use x509_cert::Certificate;
 use x509_cert::der::asn1::{Null, ObjectIdentifier};
 use x509_cert::der::{Any, Decode, Encode};
 use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
-use x509_cert::name::Name;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
 
 use super::{
@@ -90,15 +100,62 @@ pub(crate) const OID_RSA_SHA256: ObjectIdentifier =
 pub(crate) const OID_ED25519: ObjectIdentifier =
     ObjectIdentifier::new_unwrap("1.3.101.112");
 
-/// The mock root CA's subject. A real verifier refuses a root with it.
+/// The mock root CA's subject.
 pub const MOCK_ROOT_SUBJECT: &str =
     "CN=Agora MOCK PIV Root CA - NOT A REAL DEVICE";
 /// A mock device's `f9`-style attestation certificate subject.
 pub const MOCK_DEVICE_SUBJECT: &str =
     "CN=Agora MOCK PIV Attestation - NOT A REAL DEVICE";
+/// A YubiKey's `f9` attestation certificate subject, exactly.
+pub const YUBICO_DEVICE_SUBJECT: &str = "CN=Yubico PIV Attestation";
 
-/// The most certificates a device chain holds: `f9` and one intermediate.
+/// The most certificates a device chain holds: `f9`, and optionally a copy
+/// of the trust anchor that issued it.
 const MAX_DEVICE_CHAIN: usize = 2;
+
+/// The largest RSA issuer key, in bits.
+const MAX_RSA_BITS: usize = 4096;
+
+/// A Yubico PIV attestation CA, pinned. Each was fetched from Yubico's own
+/// site on 2026-10-26 and checked against an independently fetched copy.
+struct PinnedAnchor {
+    /// Where Yubico publishes it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    source: &'static str,
+    /// SHA-256 of the DER certificate.
+    #[cfg_attr(not(test), allow(dead_code))]
+    sha256: &'static str,
+    der: &'static [u8],
+}
+
+/// The CAs that may issue a YubiKey's `f9` certificate.
+const YUBICO_PIV_ANCHORS: [PinnedAnchor; 4] = [
+    // CN=Yubico PIV Root CA Serial 263751 (firmware before 5.7.4). The
+    // reissue with pathlen:1; an older copy with pathlen:0 can't issue f9.
+    PinnedAnchor {
+        source: "https://developers.yubico.com/PKI/yubico-piv-ca-1.pem",
+        sha256: "63ece914e54dd87915f34033c85af4c0696ba1512f8add66ced738331207b546",
+        der: include_bytes!("yubico/piv-root-ca-serial-263751.der"),
+    },
+    // CN=Yubico PIV Attestation A 1 (5.7.4+, under Intermediate A 1).
+    PinnedAnchor {
+        source: "https://developers.yubico.com/PKI/yubico-intermediate.pem",
+        sha256: "6de693f05376f5d8ca29069261e1c8626c75d503bd2edbfd75354cad1f722870",
+        der: include_bytes!("yubico/piv-attestation-a-1.der"),
+    },
+    // CN=Yubico PIV Attestation B 1 (5.7.4+, under Intermediate B 1).
+    PinnedAnchor {
+        source: "https://developers.yubico.com/PKI/yubico-intermediate.pem",
+        sha256: "2d55b7998f4e42569d6d8fa382b6dc77d1dacf07358b19701163892922b17052",
+        der: include_bytes!("yubico/piv-attestation-b-1.der"),
+    },
+    // CN=Yubico PIV Attestation B2 1 (5.7.4+, under Intermediate B 1).
+    PinnedAnchor {
+        source: "https://developers.yubico.com/PKI/yubico-intermediate.pem",
+        sha256: "0c90b7d184a36edf50a35f9be935f0c5689bfdcfe5bdd073366cafb49061a440",
+        der: include_bytes!("yubico/piv-attestation-b2-1.der"),
+    },
+];
 
 /// What a slot's attestation certificate says, once its chain checks out.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,38 +170,37 @@ pub struct SlotFacts {
     pub policy: KeyPolicy,
 }
 
-/// Root certificates a verifier trusts, parsed once. Every one must be a
-/// CA.
+/// The CAs a verifier trusts to issue `f9`, parsed once, and the subject
+/// its device certificates carry. Every anchor must be a CA.
 #[derive(Clone)]
-pub struct TrustedRoots(Vec<Certificate>);
+pub(crate) struct TrustedRoots {
+    anchors: Vec<Certificate>,
+    device_subject: &'static str,
+}
 
 impl TrustedRoots {
-    /// Parse roots from DER.
-    pub fn from_der(
-        roots: &[DerCertificate],
+    /// Parse anchors from DER.
+    pub(crate) fn new(
+        anchors: &[DerCertificate],
+        device_subject: &'static str,
     ) -> Result<Self, AttestationError> {
-        let roots = roots
+        let anchors = anchors
             .iter()
             .enumerate()
             .map(|(index, der)| parse(index, der))
             .collect::<Result<Vec<_>, _>>()?;
-        for (index, root) in roots.iter().enumerate() {
-            check_extensions(index, root)?;
-            if !is_ca(index, root)? {
+        for (index, anchor) in anchors.iter().enumerate() {
+            check_extensions(index, anchor)?;
+            if ca_path_length(index, anchor)?.is_none() {
                 return Err(AttestationError::RootRefused {
-                    reason: "a root is not a CA",
+                    reason: "a trust anchor is not a CA",
                 });
             }
         }
-        Ok(Self(roots))
-    }
-
-    /// Whether any root has the mock root's subject.
-    fn has_mock_root(&self) -> bool {
-        let mock = Name::from_str(MOCK_ROOT_SUBJECT).expect("a valid name");
-        self.0
-            .iter()
-            .any(|root| *root.tbs_certificate().subject() == mock)
+        Ok(Self {
+            anchors,
+            device_subject,
+        })
     }
 }
 
@@ -152,7 +208,7 @@ impl std::fmt::Debug for TrustedRoots {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list()
             .entries(
-                self.0
+                self.anchors
                     .iter()
                     .map(|c| c.tbs_certificate().subject().to_string()),
             )
@@ -160,28 +216,65 @@ impl std::fmt::Debug for TrustedRoots {
     }
 }
 
-/// Checks Yubico PIV attestations against Yubico's roots.
-///
-/// The caller supplies the roots: Yubico publishes them at
-/// <https://developers.yubico.com/PKI/>, and which to trust is the
-/// server's configuration, not this crate's. A mock root is refused.
+/// SHA-256 of a certificate's subject public key info.
+fn key_fingerprint(cert: &Certificate) -> Result<[u8; 32], AttestationError> {
+    use sha2::{Digest, Sha256};
+    let spki = cert
+        .tbs_certificate()
+        .subject_public_key_info()
+        .to_der()
+        .map_err(|e| malformed(0, e))?;
+    Ok(Sha256::digest(spki).into())
+}
+
+/// Checks Yubico PIV attestations against Yubico's PIV attestation CAs,
+/// which this crate pins (see the module docs).
 #[derive(Debug, Clone)]
 pub struct YubicoAttestationVerifier {
     roots: TrustedRoots,
 }
 
 impl YubicoAttestationVerifier {
-    /// Trust these Yubico root certificates.
-    pub fn from_roots(
-        roots: &[DerCertificate],
+    /// Trust every pinned Yubico PIV attestation CA.
+    pub fn new() -> Self {
+        let pinned: Vec<DerCertificate> = YUBICO_PIV_ANCHORS
+            .iter()
+            .map(|anchor| DerCertificate::from_der(anchor.der.to_vec()))
+            .collect();
+        Self {
+            roots: TrustedRoots::new(&pinned, YUBICO_DEVICE_SUBJECT)
+                .expect("the pinned anchors are CAs"),
+        }
+    }
+
+    /// Trust only these of the pinned CAs. Any certificate whose key isn't
+    /// a pinned CA's (a mock root, Root 1, a FIDO CA) is refused, whatever
+    /// its name.
+    pub fn from_anchors(
+        anchors: &[DerCertificate],
     ) -> Result<Self, AttestationError> {
-        let roots = TrustedRoots::from_der(roots)?;
-        if roots.has_mock_root() {
-            return Err(AttestationError::RootRefused {
-                reason: "the mock root CA is not a Yubico root",
-            });
+        let pinned = Self::new();
+        let pinned_keys = pinned
+            .roots
+            .anchors
+            .iter()
+            .map(key_fingerprint)
+            .collect::<Result<Vec<_>, _>>()?;
+        let roots = TrustedRoots::new(anchors, YUBICO_DEVICE_SUBJECT)?;
+        for anchor in &roots.anchors {
+            if !pinned_keys.contains(&key_fingerprint(anchor)?) {
+                return Err(AttestationError::RootRefused {
+                    reason: "not a pinned Yubico PIV attestation CA",
+                });
+            }
         }
         Ok(Self { roots })
+    }
+}
+
+impl Default for YubicoAttestationVerifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -232,71 +325,89 @@ pub(crate) fn attested(
     ))
 }
 
-/// Check `slot_certificate`'s chain through `device_chain` (nearest first)
-/// to one of `roots`, then read its facts. See the module docs for what is
-/// checked.
-pub fn verify_attestation(
+/// Check `slot_certificate` through `device_chain` (`[f9]` or
+/// `[f9, anchor]`) to one of `roots`, then read its facts. See the module
+/// docs for what is checked.
+pub(crate) fn verify_attestation(
     slot_certificate: &DerCertificate,
     device_chain: &[DerCertificate],
     roots: &TrustedRoots,
 ) -> Result<SlotFacts, AttestationError> {
-    if device_chain.is_empty() || device_chain.len() > MAX_DEVICE_CHAIN {
-        return Err(AttestationError::ChainLength {
-            len: device_chain.len(),
-        });
+    let len = device_chain.len();
+    if len == 0 || len > MAX_DEVICE_CHAIN {
+        return Err(AttestationError::ChainLength { len });
     }
-    let chain = std::iter::once(slot_certificate)
-        .chain(device_chain)
-        .enumerate()
-        .map(|(index, der)| parse(index, der))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    for (index, cert) in chain.iter().enumerate() {
-        check_extensions(index, cert)?;
-        if index >= 1 && has_extension(cert, OID_YUBICO_POLICY) {
-            return Err(AttestationError::PolicyAboveLeaf { index });
-        }
-        // `f9` (index 1) is the one issuer allowed not to be a CA.
-        if index >= 2 && !is_ca(index, cert)? {
-            return Err(AttestationError::NotACa { index });
+    let slot = parse(0, slot_certificate)?;
+    let f9 = parse(1, &device_chain[0])?;
+    // A device may hand over its issuing CA too: only an exact copy of a
+    // trust anchor is accepted, and then ignored.
+    if let Some(extra) = device_chain.get(1) {
+        let extra = parse(2, extra)?;
+        if !roots.anchors.contains(&extra) {
+            return Err(AttestationError::ChainLength { len });
         }
     }
 
-    for (index, pair) in chain.windows(2).enumerate() {
-        let (cert, issuer) = (&pair[0], &pair[1]);
-        if cert.tbs_certificate().issuer() != issuer.tbs_certificate().subject()
-        {
-            return Err(AttestationError::IssuerMismatch { index });
-        }
-        check_signature(
-            index,
-            cert,
-            issuer.tbs_certificate().subject_public_key_info(),
-        )?;
+    check_extensions(0, &slot)?;
+    check_extensions(1, &f9)?;
+    if slot
+        .tbs_certificate()
+        .get_extension::<BasicConstraints>()
+        .map_err(|e| malformed(0, e))?
+        .is_some_and(|(_, constraints)| constraints.ca)
+    {
+        return Err(AttestationError::UnexpectedCa { index: 0 });
     }
+    if has_extension(&f9, OID_YUBICO_POLICY) {
+        return Err(AttestationError::PolicyAboveLeaf { index: 1 });
+    }
+    let f9_subject = f9.tbs_certificate().subject();
+    if f9_subject.len() != 1 || f9_subject.to_string() != roots.device_subject {
+        return Err(AttestationError::NotADeviceCertificate { index: 1 });
+    }
+    if ca_path_length(1, &f9)?.is_none() {
+        return Err(AttestationError::NotACa { index: 1 });
+    }
+    // `f9` issues only the slot certificate, which is not a CA, so its own
+    // pathLenConstraint (0 on a YubiKey) always holds.
 
-    // Any root of the right name whose key verifies the top certificate.
-    let top_index = chain.len() - 1;
-    let top = &chain[top_index];
-    let issued_by_a_root = roots
-        .0
+    // Top-down: `f9` under an anchor, then the slot under `f9`. Every anchor
+    // of the right name is tried; one whose pathLenConstraint is 0 can't
+    // issue `f9`, which is a CA.
+    let mut path_length_exceeded = false;
+    let issued_by_an_anchor = roots
+        .anchors
         .iter()
-        .filter(|root| {
-            root.tbs_certificate().subject() == top.tbs_certificate().issuer()
+        .filter(|anchor| {
+            anchor.tbs_certificate().subject() == f9.tbs_certificate().issuer()
         })
-        .any(|root| {
-            check_signature(
-                top_index,
-                top,
-                root.tbs_certificate().subject_public_key_info(),
+        .any(|anchor| {
+            let verified = check_signature(
+                1,
+                &f9,
+                anchor.tbs_certificate().subject_public_key_info(),
             )
-            .is_ok()
+            .is_ok();
+            // Checked at construction: every anchor is a CA.
+            let allows_f9 =
+                !matches!(ca_path_length(2, anchor), Ok(Some(Some(0))));
+            path_length_exceeded |= verified && !allows_f9;
+            verified && allows_f9
         });
-    if !issued_by_a_root {
-        return Err(AttestationError::UntrustedRoot);
+    if !issued_by_an_anchor {
+        return Err(if path_length_exceeded {
+            AttestationError::PathLength { index: 2 }
+        } else {
+            AttestationError::UntrustedRoot
+        });
     }
 
-    read_slot_facts(&chain[0])
+    if slot.tbs_certificate().issuer() != f9.tbs_certificate().subject() {
+        return Err(AttestationError::IssuerMismatch { index: 0 });
+    }
+    check_signature(0, &slot, f9.tbs_certificate().subject_public_key_info())?;
+
+    read_slot_facts(&slot)
 }
 
 fn parse(
@@ -354,18 +465,25 @@ fn has_extension(cert: &Certificate, oid: ObjectIdentifier) -> bool {
         .any(|e| e.extn_id == oid)
 }
 
-/// `basicConstraints cA=TRUE`, and `keyCertSign` if there is a `keyUsage`.
-fn is_ca(index: usize, cert: &Certificate) -> Result<bool, AttestationError> {
+/// For a CA (`basicConstraints cA=TRUE`, and `keyCertSign` if there is a
+/// `keyUsage`), `Some` of its `pathLenConstraint`; `None` if it is not one.
+fn ca_path_length(
+    index: usize,
+    cert: &Certificate,
+) -> Result<Option<Option<u8>>, AttestationError> {
     let tbs = cert.tbs_certificate();
-    let ca = tbs
+    let constraints = tbs
         .get_extension::<BasicConstraints>()
         .map_err(|e| malformed(index, e))?
-        .is_some_and(|(_, constraints)| constraints.ca);
+        .map(|(_, constraints)| constraints)
+        .filter(|constraints| constraints.ca);
     let may_sign_certificates = tbs
         .get_extension::<KeyUsage>()
         .map_err(|e| malformed(index, e))?
         .is_none_or(|(_, usage)| usage.key_cert_sign());
-    Ok(ca && may_sign_certificates)
+    Ok(constraints
+        .filter(|_| may_sign_certificates)
+        .map(|constraints| constraints.path_len_constraint))
 }
 
 /// Absent, or an explicit NULL.
@@ -374,7 +492,7 @@ fn absent_or_null(parameters: Option<&Any>) -> bool {
 }
 
 /// Check `cert`'s signature under `issuer_key`.
-fn check_signature(
+pub(crate) fn check_signature(
     index: usize,
     cert: &Certificate,
     issuer_key: &SubjectPublicKeyInfoOwned,
@@ -437,11 +555,15 @@ fn check_signature(
         {
             return Err(unsupported(index, issuer_key.algorithm.oid));
         }
+        use rsa::traits::PublicKeyParts;
         let key = issuer_key
             .subject_public_key
             .as_bytes()
             .and_then(|der| rsa::RsaPublicKey::from_pkcs1_der(der).ok())
             .ok_or_else(|| unsupported(index, issuer_key.algorithm.oid))?;
+        if key.size() * 8 > MAX_RSA_BITS {
+            return Err(AttestationError::KeyTooLarge { index });
+        }
         let signature = rsa::pkcs1v15::Signature::try_from(signature)
             .map_err(|_| AttestationError::BadSignature { index })?;
         return rsa::pkcs1v15::VerifyingKey::<rsa::sha2::Sha256>::new(key)
@@ -651,7 +773,127 @@ pub(crate) fn spki(key: &OperatorPublicKey) -> SubjectPublicKeyInfoOwned {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operator_signer::MockPivAttestation;
+    use crate::operator_signer::{MockPivAttestation, PinPolicy, TouchPolicy};
+
+    const REAL_SLOT: &[u8] = include_bytes!(
+        "../../tests/fixtures/operator_signer/yubikey-5.7.4-slot-9c.der"
+    );
+    const REAL_F9: &[u8] = include_bytes!(
+        "../../tests/fixtures/operator_signer/yubikey-5.7.4-f9.der"
+    );
+    const OTHER_SLOT: &[u8] = include_bytes!(
+        "../../tests/fixtures/operator_signer/other-yubikey-slot-9c.der"
+    );
+    const ROOT_1: &[u8] = include_bytes!(
+        "../../tests/fixtures/operator_signer/yubico-attestation-root-1.der"
+    );
+    const INTERMEDIATE_B_1: &[u8] = include_bytes!(
+        "../../tests/fixtures/operator_signer/yubico-attestation-intermediate-b-1.der"
+    );
+    const FIDO_B_1: &[u8] = include_bytes!(
+        "../../tests/fixtures/operator_signer/yubico-fido-attestation-b-1.der"
+    );
+
+    fn der(bytes: &[u8]) -> DerCertificate {
+        DerCertificate::from_der(bytes.to_vec())
+    }
+
+    fn slot_key(bytes: &[u8]) -> OperatorPublicKey {
+        let cert = Certificate::from_der(bytes).unwrap();
+        public_key(0, cert.tbs_certificate().subject_public_key_info()).unwrap()
+    }
+
+    #[test]
+    fn pinned_anchors_are_the_published_certificates() {
+        use sha2::{Digest, Sha256};
+        for anchor in &YUBICO_PIV_ANCHORS {
+            assert!(
+                anchor.source.starts_with("https://developers.yubico.com/")
+            );
+            assert_eq!(hex::encode(Sha256::digest(anchor.der)), anchor.sha256);
+        }
+        YubicoAttestationVerifier::new();
+    }
+
+    #[test]
+    fn a_real_yubikey_5_7_4_attestation_verifies() {
+        let key = slot_key(REAL_SLOT);
+        let evidence = PivAttestation {
+            slot_certificate: der(REAL_SLOT),
+            device_chain: vec![der(REAL_F9)],
+        };
+        let verifier = YubicoAttestationVerifier::new();
+        let attested = verifier.verify(&evidence, &key).unwrap();
+        assert_eq!(
+            attested.serial(),
+            DeviceSerial::Yubico(PivSerial::new(38_906_121))
+        );
+        assert_eq!(attested.firmware(), FirmwareVersion::new(5, 7, 4));
+        assert_eq!(
+            attested.policy(),
+            KeyPolicy {
+                pin: PinPolicy::Always,
+                touch: TouchPolicy::Always,
+            }
+        );
+
+        // With the issuing CA appended, as a device may send it.
+        let b_1 = der(include_bytes!("yubico/piv-attestation-b-1.der"));
+        let with_anchor = PivAttestation {
+            device_chain: vec![der(REAL_F9), b_1.clone()],
+            ..evidence.clone()
+        };
+        verifier.verify(&with_anchor, &key).unwrap();
+        // Anchored at B 1 alone, too.
+        YubicoAttestationVerifier::from_anchors(&[b_1])
+            .unwrap()
+            .verify(&evidence, &key)
+            .unwrap();
+
+        // Another YubiKey's slot certificate, issued by the same `f9`
+        // certificate and key: on 5.7.4 the device attestation key is shared
+        // across devices, so the serial comes from the slot certificate.
+        let other = PivAttestation {
+            slot_certificate: der(OTHER_SLOT),
+            device_chain: vec![der(REAL_F9)],
+        };
+        let attested = verifier.verify(&other, &slot_key(OTHER_SLOT)).unwrap();
+        assert_eq!(
+            attested.serial(),
+            DeviceSerial::Yubico(PivSerial::new(38_906_327))
+        );
+        assert!(matches!(
+            verifier.verify(&other, &key),
+            Err(AttestationError::KeyMismatch)
+        ));
+
+        // Root 1 and Intermediate B 1 in the chain are not anchors.
+        let long = PivAttestation {
+            device_chain: vec![der(REAL_F9), der(INTERMEDIATE_B_1)],
+            ..evidence
+        };
+        assert!(matches!(
+            verifier.verify(&long, &key),
+            Err(AttestationError::ChainLength { len: 2 })
+        ));
+    }
+
+    #[test]
+    fn only_the_pinned_piv_cas_can_be_anchors() {
+        for (name, bytes) in [
+            ("Root 1", ROOT_1),
+            ("Intermediate B 1", INTERMEDIATE_B_1),
+            ("FIDO Attestation B 1", FIDO_B_1),
+        ] {
+            assert!(
+                matches!(
+                    YubicoAttestationVerifier::from_anchors(&[der(bytes)]),
+                    Err(AttestationError::RootRefused { .. })
+                ),
+                "{name} accepted as an anchor"
+            );
+        }
+    }
 
     #[test]
     fn the_yubico_verifier_refuses_mock_bundles() {
