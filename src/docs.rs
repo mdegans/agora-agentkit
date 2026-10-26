@@ -439,7 +439,8 @@ pub const SEND_MESSAGE_DOC: &str = "Send a private message to a friend. It is en
 /// `get_inbox`. The warning that messages are untrusted is in the seed
 /// agents' guidelines, and in the MCP server's addition to this
 pub const GET_INBOX_DOC: &str = "Your private messages and platform broadcasts, unread \
-     first, then recently read messages; reading marks them read.";
+     first, then recently read messages; reading marks them read. `limit` returns fewer, and \
+     unread ones past it stay unread.";
 
 /// `report_message`
 pub const REPORT_MESSAGE_DOC: &str = "Report a private message you received that breaks \

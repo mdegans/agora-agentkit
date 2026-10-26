@@ -686,15 +686,11 @@ impl Client {
         &self,
         agent_id: AgentId,
         key: &SigningKey,
+        input: GetInboxInput,
     ) -> Result<InboxResponse, Error> {
         let timestamp = chrono::Utc::now().timestamp();
-        let body = signed(
-            agent_id,
-            GetInboxInput {},
-            &SignedAction::GetInbox {},
-            key,
-            timestamp,
-        );
+        let body =
+            signed(agent_id, input, &SignedAction::GetInbox {}, key, timestamp);
         let url = self.url("api/social/messages/inbox")?;
         let resp = self.send_json(reqwest::Method::POST, url, &body).await?;
         Ok(check(resp).await?.json().await?)

@@ -495,6 +495,11 @@ pub struct Agora {
     /// this session, by [`ShownOnce::document_key`](super::ShownOnce::document_key):
     /// the next read of one shows it whole
     sized_documents: HashSet<String>,
+    /// The messages `get_inbox` listed this session, by id, with the
+    /// wrapped key of each end-to-end encrypted one: `report_message`
+    /// finds its message here, so it need not read the inbox, which marks
+    /// read what a `limit` left unread (the review of 0.123.0)
+    inbox_keys: HashMap<crate::ids::MessageId, Option<String>>,
 }
 
 impl Agora {
@@ -524,6 +529,7 @@ impl Agora {
             by_link: false,
             history_cache: HashMap::new(),
             sized_documents: HashSet::new(),
+            inbox_keys: HashMap::new(),
         }
     }
 
@@ -2308,13 +2314,20 @@ impl Agora {
     #[method]
     async fn get_inbox(
         &mut self,
-        _args: GetInboxInput,
+        args: GetInboxInput,
     ) -> Result<Content, Content> {
+        // As the server reads it: a limit of 0 is 1
+        let limit = args
+            .limit
+            .map(|n| n.clamp(1, crate::responses::InboxResponse::UNREAD_MAX));
         let mut inbox = self
             .client
-            .get_inbox(self.agent_id, &self.key)
+            .get_inbox(self.agent_id, &self.key, args)
             .await
             .map_err(err)?;
+        for msg in &inbox.messages {
+            self.inbox_keys.insert(msg.id, msg.wrapped_key.clone());
+        }
         // Decrypt E2EE rows in place and drop the crypto fields — the
         // model sees plaintext (or a failure note), never blobs.
         for msg in &mut inbox.messages {
@@ -2351,7 +2364,7 @@ impl Agora {
         // passed it to get_content (54 failed calls in 40 Mistral sessions
         // in four weeks).
         self.shown_once.begin("your inbox");
-        Ok(prompt::format_inbox(&inbox, &self.shown_once).into())
+        Ok(prompt::format_inbox(&inbox, &self.shown_once, limit).into())
     }
 
     /// `report_message`: the model reads the registry's description
@@ -2364,38 +2377,50 @@ impl Agora {
     ) -> Result<Content, Content> {
         // E2EE rows need reveal-by-key: find our copy in the inbox,
         // unwrap the message key, and attach it so moderation can
-        // decrypt exactly what was delivered.
-        let inbox = self
-            .client
-            .get_inbox(self.agent_id, &self.key)
-            .await
-            .map_err(err)?;
-        let message_key =
-            match inbox.messages.iter().find(|m| m.id == args.message_id) {
-                Some(msg) if msg.wrapped_key.is_some() => {
-                    let enc = self.enc_key.as_ref().ok_or_else(|| {
-                        err("cannot report this E2EE message: no encryption \
-                         key available to unwrap it")
-                    })?;
-                    let wrapped = hex::decode(
-                        msg.wrapped_key.as_deref().expect("checked is_some"),
+        // decrypt exactly what was delivered. A message this session's
+        // reads listed is found without reading again; only one read in
+        // an earlier session needs the inbox, which marks the unread read
+        let wrapped_key = match self.inbox_keys.get(&args.message_id) {
+            Some(key) => Some(key.clone()),
+            None => {
+                let inbox = self
+                    .client
+                    .get_inbox(
+                        self.agent_id,
+                        &self.key,
+                        GetInboxInput::default(),
                     )
+                    .await
                     .map_err(err)?;
-                    Some(
-                        crate::envelope::unwrap_key(&wrapped, enc)
-                            .map_err(err)?
-                            .to_hex(),
-                    )
-                }
-                // Server-mode rows (and broadcasts) need no reveal.
-                Some(_) => None,
-                None => {
-                    return Err(err(
-                        "message not found in your recent inbox — only \
+                inbox
+                    .messages
+                    .into_iter()
+                    .find(|m| m.id == args.message_id)
+                    .map(|m| m.wrapped_key)
+            }
+        };
+        let message_key = match wrapped_key {
+            Some(Some(wrapped)) => {
+                let enc = self.enc_key.as_ref().ok_or_else(|| {
+                    err("cannot report this E2EE message: no encryption \
+                         key available to unwrap it")
+                })?;
+                let wrapped = hex::decode(&wrapped).map_err(err)?;
+                Some(
+                    crate::envelope::unwrap_key(&wrapped, enc)
+                        .map_err(err)?
+                        .to_hex(),
+                )
+            }
+            // Server-mode rows (and broadcasts) need no reveal.
+            Some(None) => None,
+            None => {
+                return Err(err(
+                    "message not found in your recent inbox — only \
                      messages still listed there can be reported",
-                    ));
-                }
-            };
+                ));
+            }
+        };
         let status = self
             .client
             .report_message(
