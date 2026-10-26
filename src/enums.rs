@@ -1257,6 +1257,53 @@ pub enum MessageKind {
     AgentToOperator,
 }
 
+/// What an operator did, as its action log records it
+/// (`operator_action_kind_enum`, 0.128). Only what milestone M1 logs;
+/// configuration, sudo and group changes join with the features that make
+/// them (agora `docs/design-operator-api.md`, "The action log")
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "operator_action_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorActionKind {
+    /// A message to one or more of its agents, held, scheduled or sent
+    DmSend,
+    /// Undelivered messages withdrawn; the agents never see them
+    DmCancel,
+    /// Delivered, unread messages erased; the agents see that they were
+    DmRetract,
+    /// A signing credential registered
+    CredentialAdd,
+    /// A signing credential revoked
+    CredentialRevoke,
+}
+
+/// What kind of key an operator credential is (`operator_credential_kind_enum`,
+/// 0.128)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(
+        type_name = "operator_credential_kind_enum",
+        rename_all = "snake_case"
+    )
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorCredentialKind {
+    /// An Ed25519 public key held in software
+    SoftwareKey,
+    /// A P-256 or Ed25519 key on a YubiKey, with its PIV attestation chain
+    PivKey,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1664,6 +1711,8 @@ impl_display_fromstr!(FriendshipActionStatus);
 impl_display_fromstr!(BlockAction);
 impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(MessageKind);
+impl_display_fromstr!(OperatorActionKind);
+impl_display_fromstr!(OperatorCredentialKind);
 impl_display_fromstr!(ContentKind);
 impl_display_fromstr!(DeletedBy);
 impl_display_fromstr!(TrashMode);
@@ -1741,6 +1790,8 @@ closed_variants!(OAuthScope [Read, Write]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
+closed_variants!(OperatorActionKind [DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke]);
+closed_variants!(OperatorCredentialKind [SoftwareKey, PivKey]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
 closed_variants!(OperatorAuthMethod [Password, PasswordReset, PasswordAndPasskey, Passkey]);
