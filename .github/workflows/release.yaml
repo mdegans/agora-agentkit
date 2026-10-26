@@ -103,6 +103,11 @@ jobs:
       - name: check
         run: just check
 
+      # Only here, not in branch/PR CI: `todo!()` is allowed during
+      # development but must never reach crates.io.
+      - name: todo gate
+        run: just todo-gate
+
   publish:
     needs: [version, check]
     if: needs.version.outputs.release == 'true'

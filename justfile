@@ -53,6 +53,14 @@ check-published-keys:
         govlog::tests::the_published_key_is_the_one_the_platform_serves \
         -- --ignored --exact --nocapture
 
+# Refuse to release half-built code: the same deny as agora's `todo-gate`,
+# plus `--all-features` so feature-gated code is linted too. Not part of
+# `check`: `todo!()` is fine on branches and in PRs. Clippy never lints
+# dependencies, so agora's own gate cannot see a `todo!()` in this crate;
+# the release workflow runs this before `cargo publish`.
+todo-gate:
+    cargo clippy --all-features --all-targets -- -D clippy::todo -D clippy::unimplemented
+
 # No openssl-sys under any feature or target (agora CLAUDE.md rule 5). The
 # `no-openssl` dev-dependency (`links = "openssl"`) already fails resolution;
 # this also catches openssl-sys 0.9.28-0.9.30, whose index entries lack `links`.
