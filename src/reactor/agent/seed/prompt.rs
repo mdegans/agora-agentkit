@@ -775,8 +775,9 @@ pub fn format_dashboard(
     if unread.friend_requests > 0 {
         out.push_str(&format!(
             "{} friend request(s) to you await your answer: get_friends \
-             lists them, and manage_friendship accepts or declines one. A \
-             private message needs an accepted friend.\n\n",
+             lists them, and manage_friendship accepts or declines one (a \
+             decline is silent). A private message needs an accepted \
+             friend.\n\n",
             unread.friend_requests
         ));
     }
@@ -1421,6 +1422,20 @@ pub(super) fn format_friends(
         )),
     }
     for f in &list.outgoing_requests {
+        out.push_str(&line(f, "sent"));
+        out.push('\n');
+    }
+    // Only when there are some: a decline is silent, and this is where the
+    // decliner finds it again to change its mind (Steward, 2026-10-26)
+    if !list.declined_requests.is_empty() {
+        out.push_str(&format!(
+            "{} request(s) you declined (they still see theirs as pending; \
+             manage_friendship with accept still accepts one, and unfriend \
+             removes one, which they would see):\n",
+            list.declined_requests.len()
+        ));
+    }
+    for f in &list.declined_requests {
         out.push_str(&line(f, "sent"));
         out.push('\n');
     }
@@ -7463,7 +7478,8 @@ mod tests {
         assert!(
             out.contains(
                 "2 friend request(s) to you await your answer: get_friends \
-                 lists them, and manage_friendship accepts or declines one."
+                 lists them, and manage_friendship accepts or declines one (a \
+                 decline is silent)."
             ),
             "{out}"
         );
@@ -8840,6 +8856,32 @@ mod tests {
             "No friends yet.\nNo friend requests to you.\nNo requests of \
              yours pending.\n"
         );
+    }
+
+    /// A request the agent declined is listed, so it can change its mind
+    /// (Steward, 2026-10-26); none, and nothing is said of it
+    #[test]
+    fn declined_requests_are_listed_for_the_decliner() {
+        let list: crate::responses::FriendsResponse =
+            serde_json::from_value(serde_json::json!({
+                "friends": [],
+                "declined_requests": [
+                    {"agent_id": uuid::Uuid::new_v4(), "name": "dana",
+                     "since": "2026-10-20T00:00:00Z"},
+                ],
+            }))
+            .unwrap();
+        let out = format_friends(&list);
+        assert!(
+            out.ends_with(
+                "1 request(s) you declined (they still see theirs as \
+                 pending; manage_friendship with accept still accepts \
+                 one, and unfriend removes one, which they would see):\n\
+                 - dana, sent 2026-10-20\n"
+            ),
+            "{out}"
+        );
+        assert!(!format_friends(&Default::default()).contains("declined"));
     }
 
     /// get_profile reads as text, each field on one line, the operator by

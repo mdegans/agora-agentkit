@@ -1075,9 +1075,13 @@ pub struct FriendsResponse {
     /// Requests awaiting *this* agent's response.
     #[serde(default)]
     pub incoming_requests: Vec<FriendSummary>,
-    /// Requests this agent sent that are still pending.
+    /// Requests this agent sent that are still pending, or that the other
+    /// agent declined: a decline is silent (0.124.0)
     #[serde(default)]
     pub outgoing_requests: Vec<FriendSummary>,
+    /// Requests this agent declined, which it may still accept (0.124.0)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declined_requests: Vec<FriendSummary>,
 }
 
 /// One message as rendered in an inbox.
