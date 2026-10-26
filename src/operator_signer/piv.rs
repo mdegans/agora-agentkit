@@ -878,6 +878,91 @@ mod tests {
         ));
     }
 
+    /// A real legacy-hierarchy `f9` (YubiKey 5Ci, firmware 5.2.7) chains to
+    /// the pinned `PIV Root CA Serial 263751`, and is a CA with pathlen 0.
+    /// The certificate identifies the Steward's own key, so it isn't in the
+    /// repository: the test reads it from `AGORA_TEST_LEGACY_F9_PEM` (or the
+    /// default path) and skips, saying so, when it is absent. The committed
+    /// legacy-shape coverage is the mock's RSA-root chain.
+    #[test]
+    fn a_real_legacy_f9_chains_to_the_pinned_piv_root() {
+        let path =
+            std::env::var("AGORA_TEST_LEGACY_F9_PEM").unwrap_or_else(|_| {
+                "/tmp/claude-1001/-home-claude-agora-Projects-agora/\
+             e5d7c613-732e-4706-b44b-f6af45f92470/scratchpad/real-legacy/\
+             f9-yubikey-5.2.7.pem"
+                    .to_owned()
+            });
+        let Ok(pem) = std::fs::read_to_string(&path) else {
+            eprintln!(
+                "SKIPPED a_real_legacy_f9_chains_to_the_pinned_piv_root: \
+                 no legacy f9 at {path} (set AGORA_TEST_LEGACY_F9_PEM)"
+            );
+            return;
+        };
+        let f9 = Certificate::from_der(&pem_body(&pem)).unwrap();
+        assert_eq!(
+            f9.tbs_certificate().subject().to_string(),
+            YUBICO_DEVICE_SUBJECT
+        );
+        assert_eq!(ca_path_length(1, &f9).unwrap(), Some(Some(0)));
+        check_extensions(1, &f9).unwrap();
+        assert!(!has_extension(&f9, OID_YUBICO_POLICY));
+
+        let legacy = Certificate::from_der(YUBICO_PIV_ANCHORS[0].der).unwrap();
+        assert_eq!(
+            f9.tbs_certificate().issuer(),
+            legacy.tbs_certificate().subject()
+        );
+        assert_eq!(ca_path_length(2, &legacy).unwrap(), Some(Some(1)));
+        check_signature(
+            1,
+            &f9,
+            legacy.tbs_certificate().subject_public_key_info(),
+        )
+        .unwrap();
+        // And under no other pinned CA.
+        for anchor in &YUBICO_PIV_ANCHORS[1..] {
+            let anchor = Certificate::from_der(anchor.der).unwrap();
+            assert!(
+                check_signature(
+                    1,
+                    &f9,
+                    anchor.tbs_certificate().subject_public_key_info()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// The DER inside a single-certificate PEM.
+    fn pem_body(pem: &str) -> Vec<u8> {
+        const ALPHABET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let text: Vec<u8> = pem
+            .lines()
+            .skip_while(|line| !line.starts_with("-----BEGIN CERTIFICATE"))
+            .skip(1)
+            .take_while(|line| !line.starts_with("-----END"))
+            .flat_map(|line| line.trim().bytes())
+            .filter(|b| *b != b'=')
+            .collect();
+        let mut out = Vec::new();
+        let (mut buffer, mut bits) = (0u32, 0);
+        for byte in text {
+            let value =
+                ALPHABET.iter().position(|a| *a == byte).unwrap() as u32;
+            buffer = (buffer << 6) | value;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((buffer >> bits) as u8);
+                buffer &= (1 << bits) - 1;
+            }
+        }
+        out
+    }
+
     #[test]
     fn only_the_pinned_piv_cas_can_be_anchors() {
         for (name, bytes) in [

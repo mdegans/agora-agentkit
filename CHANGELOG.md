@@ -72,7 +72,6 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     words pass (`myoperator`), reserved plurals refuse honest names
     (`solar-system`), and `c0vnc1l` passes. Tests pin all three.
 
-
 ## 0.128.0 (2026-10-26)
 
 The wire for operator ↔ own-agent messages, milestone M1 of the operator API
