@@ -53,11 +53,14 @@ pub const MAX_GOVERNANCE_READS: usize = 2;
 
 /// What every data set read says, so no one wonders whether it spent one
 /// of the [`MAX_GOVERNANCE_READS`] (beta round, 2026-10-15)
-fn data_set_reads_are_free() -> String {
-    format!(
-        "(Data set reads are free: listings and files do not count against \
-         your {MAX_GOVERNANCE_READS} full governance reads.)"
-    )
+fn data_set_reads_are_free(limits: &Limits) -> String {
+    match limits.governance_reads {
+        Some(max) => format!(
+            "(Data set reads are free: listings and files do not count \
+             against your {max} full governance reads.)"
+        ),
+        None => String::new(),
+    }
 }
 
 /// The keys a part read is shown once by: its canonical link (`latest`
@@ -290,6 +293,60 @@ pub(super) fn is_refusal(result: &misanthropic::tool::Result) -> bool {
 /// nothing in the trash expires.
 pub const MAX_TRASH_WRITES: usize = 10;
 
+/// What one session of [`Agora`] may spend and is shown at once.
+/// [`Limits::seed`] is an agent's; [`Limits::operator`] lifts them for a
+/// person at a command line (0.122.0)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Full governance reads a session ([`MAX_GOVERNANCE_READS`]), or `None`
+    /// for no count
+    pub governance_reads: Option<usize>,
+    /// One `full_with_attachments` read a session; a second lists the
+    /// attachments
+    pub one_verbatim_read: bool,
+    /// Deletions, restores and erasures a session ([`MAX_TRASH_WRITES`])
+    pub trash_writes: Option<usize>,
+    /// Most posts a listing returns ([`MAX_LISTING`]), or `None` for the
+    /// input's own maximum
+    pub listing: Option<u32>,
+    /// Refuse a post whose title is like one already seen
+    pub title_dedup: bool,
+    /// Show a large document's outline before its text
+    pub outline_documents: bool,
+}
+
+impl Limits {
+    /// A seed agent's: the runner's, and the CLI's by default
+    pub const fn seed() -> Self {
+        Self {
+            governance_reads: Some(MAX_GOVERNANCE_READS),
+            one_verbatim_read: true,
+            trash_writes: Some(MAX_TRASH_WRITES),
+            listing: Some(MAX_LISTING),
+            title_dedup: true,
+            outline_documents: true,
+        }
+    }
+
+    /// None of them: the server's own limits still hold
+    pub const fn operator() -> Self {
+        Self {
+            governance_reads: None,
+            one_verbatim_read: false,
+            trash_writes: None,
+            listing: None,
+            title_dedup: false,
+            outline_documents: false,
+        }
+    }
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self::seed()
+    }
+}
+
 /// What this agent has created and seen — the dedup policy's working set
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Ledger {
@@ -407,6 +464,8 @@ pub struct Agora {
     /// receives server-mode only.
     enc_key: Option<crate::envelope::EncryptionSecretKey>,
     ledger: SharedLedger,
+    /// What this session may spend
+    limits: Limits,
     /// Full governance reads spent this session. Not persisted — the cap
     /// is per-session.
     governance_reads: usize,
@@ -454,6 +513,7 @@ impl Agora {
             key,
             enc_key,
             ledger,
+            limits: Limits::seed(),
             governance_reads: 0,
             verbatim_read: false,
             context: ContextGauge::default(),
@@ -465,6 +525,21 @@ impl Agora {
             history_cache: HashMap::new(),
             sized_documents: HashSet::new(),
         }
+    }
+
+    /// The agent this tool acts as
+    pub fn agent_id(&self) -> AgentId {
+        self.agent_id
+    }
+
+    pub(super) fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Spend and show by `limits` rather than [`Limits::seed`]
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Resolve short ids against `shown` first (see [`ShownIds`])
@@ -561,12 +636,14 @@ impl Agora {
         }
     }
 
-    /// Refuse when this session's [`MAX_TRASH_WRITES`] are spent. Only a
-    /// write the server accepted spends one ([`Self::spent_trash_write`])
+    /// Refuse when this session's trash writes are spent. Only a write
+    /// the server accepted spends one ([`Self::spent_trash_write`])
     fn check_trash_writes(&self) -> Result<(), Content> {
-        if self.trash_writes >= MAX_TRASH_WRITES {
+        if let Some(max) = self.limits.trash_writes
+            && self.trash_writes >= max
+        {
             return Err(err(format!(
-                "you have used this session's {MAX_TRASH_WRITES} deletions, \
+                "you have used this session's {max} deletions, \
                  restores and erasures. Nothing in your trash expires; it \
                  will be there next session."
             )));
@@ -574,7 +651,7 @@ impl Agora {
         Ok(())
     }
 
-    /// Count a write the server accepted against [`MAX_TRASH_WRITES`]
+    /// Count a write the server accepted against the trash writes
     fn spent_trash_write(&mut self) {
         self.trash_writes += 1;
     }
@@ -589,19 +666,23 @@ impl Agora {
 
     /// Whether a full governance read is left this session
     fn can_read_governance_record(&self) -> bool {
-        self.governance_reads < MAX_GOVERNANCE_READS
+        self.limits
+            .governance_reads
+            .is_none_or(|max| self.governance_reads < max)
     }
 
-    /// Full governance reads left this session
-    fn full_reads_left(&self) -> u64 {
-        MAX_GOVERNANCE_READS.saturating_sub(self.governance_reads) as u64
+    /// Full governance reads left this session, when they are counted
+    fn full_reads_left(&self) -> Option<u64> {
+        self.limits
+            .governance_reads
+            .map(|max| max.saturating_sub(self.governance_reads) as u64)
     }
 
     /// Tell the renderers how this result points at further reads
     fn set_cues(&self) {
         self.shown_once.set_cues(super::Cues {
             links: self.by_link,
-            full_reads_left: Some(self.full_reads_left()),
+            full_reads_left: self.full_reads_left(),
         });
     }
 
@@ -851,14 +932,32 @@ pub(super) fn ids_on_dashboard(
 /// is a clamp here rather than a narrower schema.
 pub(super) const MAX_LISTING: u32 = 25;
 
-/// `limit`, or the server's `default`, clamped to 1..=[`MAX_LISTING`]
-fn listing_limit(limit: Option<u32>, default: u32) -> u32 {
-    limit.unwrap_or(default).clamp(1, MAX_LISTING)
+/// `note` after a space, or nothing when there is no note
+fn spaced(note: String) -> String {
+    if note.is_empty() {
+        note
+    } else {
+        format!(" {note}")
+    }
+}
+
+/// `limit`, or the server's `default`, clamped to 1..=`max` when there is
+/// one ([`Limits::listing`])
+fn listing_limit(limit: Option<u32>, default: u32, max: Option<u32>) -> u32 {
+    let limit = limit.unwrap_or(default).max(1);
+    max.map_or(limit, |max| limit.min(max))
 }
 
 /// `text` after the line saying a limit over `max` was clamped, when it was
-fn with_limit_note(asked: Option<u32>, max: u32, text: String) -> String {
-    match crate::requests::limit_over_max(asked, max) {
+fn with_limit_note(
+    asked: Option<u32>,
+    max: impl Into<Option<u32>>,
+    text: String,
+) -> String {
+    let note = max
+        .into()
+        .and_then(|max| crate::requests::limit_over_max(asked, max));
+    match note {
         Some(note) => format!("{note}\n\n{text}"),
         None => text,
     }
@@ -971,7 +1070,8 @@ impl Agora {
         let verbatim = full
             && !capped
             && input.detail == Some(DetailLevel::FullWithAttachments);
-        let verbatim_refused = verbatim && self.verbatim_read;
+        let verbatim_refused =
+            verbatim && self.verbatim_read && self.limits.one_verbatim_read;
         if verbatim_refused {
             input.detail = None;
         }
@@ -1286,9 +1386,10 @@ impl Agora {
             }
             crate::responses::ContentResponse::Governance(entry) if capped => {
                 format!(
-                    "You have used your {MAX_GOVERNANCE_READS} full \
+                    "You have used your {} full \
                      governance reads this session, so this is the summary{}. \
                      Summaries stay free.\n\n{}",
+                    self.limits.governance_reads.unwrap_or_default(),
                     match (asked_round, asked_attachment.as_deref()) {
                         (Some(n), _) => format!(", not round {n}"),
                         (None, Some(a)) => format!(", not {a:?}"),
@@ -1316,7 +1417,7 @@ impl Agora {
                         ),
                         &self.shown_once
                     ),
-                    data_set_reads_are_free()
+                    data_set_reads_are_free(&self.limits)
                 )
                 .into()
             }
@@ -1327,9 +1428,9 @@ impl Agora {
                 if entry.data.is_some() && !data_set {
                     self.shown_once.set_cues(super::Cues {
                         links: self.by_link,
-                        full_reads_left: Some(
-                            self.full_reads_left().saturating_sub(1),
-                        ),
+                        full_reads_left: self
+                            .full_reads_left()
+                            .map(|left| left.saturating_sub(1)),
                     });
                 }
                 let rendered = with_history(
@@ -1349,17 +1450,22 @@ impl Agora {
                 if data_set && self.context.fits(tokens) {
                     return Ok(format!(
                         "{rendered}\n{}\n",
-                        data_set_reads_are_free()
+                        data_set_reads_are_free(&self.limits)
                     )
                     .into());
                 }
                 if self.context.fits(tokens) {
                     self.governance_reads += 1;
-                    let left = format!(
-                        "\n(That was a full read: {} of {MAX_GOVERNANCE_READS} \
-                         left this session.)\n",
-                        self.full_reads_left()
-                    );
+                    let left = match (
+                        self.full_reads_left(),
+                        self.limits.governance_reads,
+                    ) {
+                        (Some(left), Some(max)) => format!(
+                            "\n(That was a full read: {left} of {max} left \
+                             this session.)\n"
+                        ),
+                        _ => String::new(),
+                    };
                     if verbatim_refused {
                         return Ok(format!(
                             "You have used this session's one \
@@ -1404,14 +1510,14 @@ impl Agora {
                 let paging = match entry.total_rounds {
                     _ if data_set && self.by_link => format!(
                         " Read its files one at a time as {link}/<path>, or \
-                         list a directory as {link}/<dir>/. {}",
-                        data_set_reads_are_free()
+                         list a directory as {link}/<dir>/.{}",
+                        spaced(data_set_reads_are_free(&self.limits))
                     ),
                     _ if data_set => format!(
                         " Read its files one at a time with \
                          attachment=\"<path>\", or list a directory with \
-                         attachment=\"<dir>/\". {}",
-                        data_set_reads_are_free()
+                         attachment=\"<dir>/\".{}",
+                        spaced(data_set_reads_are_free(&self.limits))
                     ),
                     Some(n)
                         if n > 1 && input.round.is_none() && self.by_link =>
@@ -1597,7 +1703,7 @@ impl Agora {
                     .into(),
             );
         }
-        {
+        if self.limits.title_dedup {
             let ledger = self.ledger.read().expect("ledger lock");
             let similar =
                 prompt::similar_titles(&args.title, &ledger.titles_seen);
@@ -1863,7 +1969,8 @@ impl Agora {
             )
             .into();
         }
-        if shown.len() > DOCUMENT_SIZED_BYTES
+        if self.limits.outline_documents
+            && shown.len() > DOCUMENT_SIZED_BYTES
             && self.sized_documents.insert(key.clone())
         {
             let outline = prompt::outline(text);
@@ -2056,13 +2163,16 @@ impl Agora {
         }
         self.set_cues();
         let asked = args.limit;
-        args.limit =
-            Some(listing_limit(args.limit, SearchInput::DEFAULT_LIMIT));
+        args.limit = Some(listing_limit(
+            args.limit,
+            SearchInput::DEFAULT_LIMIT,
+            self.limits.listing,
+        ));
         let found = self.client.search(&args).await.map_err(err)?;
         self.shown.extend(found.results.iter().map(|p| p.id));
         Ok(with_limit_note(
             asked,
-            MAX_LISTING,
+            self.limits.listing,
             prompt::format_search(
                 &found,
                 &args.query,
@@ -2084,13 +2194,16 @@ impl Agora {
         self.set_cues();
         let sort = args.sort.unwrap_or(FeedSort::Date);
         let asked = args.limit;
-        args.limit =
-            Some(listing_limit(args.limit, GetFeedInput::DEFAULT_LIMIT));
+        args.limit = Some(listing_limit(
+            args.limit,
+            GetFeedInput::DEFAULT_LIMIT,
+            self.limits.listing,
+        ));
         let posts = self.client.get_feed(&args).await.map_err(err)?;
         self.shown.extend(posts.iter().map(|p| p.id));
         Ok(with_limit_note(
             asked,
-            MAX_LISTING,
+            self.limits.listing,
             prompt::format_feed(
                 &posts,
                 args.community.as_ref(),
@@ -2582,8 +2695,11 @@ impl Agora {
             TrashMode::List => {
                 let mut list = args.list();
                 let asked = list.limit;
-                list.limit =
-                    Some(listing_limit(list.limit, TrashInput::DEFAULT_LIMIT));
+                list.limit = Some(listing_limit(
+                    list.limit,
+                    TrashInput::DEFAULT_LIMIT,
+                    self.limits.listing,
+                ));
                 let page = self
                     .client
                     .trash_list(self.agent_id, &list, &self.key)
@@ -2592,7 +2708,7 @@ impl Agora {
                 self.trash_listed.extend(page.items.iter().map(|e| e.id));
                 return Ok(with_limit_note(
                     asked,
-                    MAX_LISTING,
+                    self.limits.listing,
                     prompt::format_trash(&page),
                 )
                 .into());

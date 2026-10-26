@@ -25,6 +25,7 @@ mod memory;
 mod output;
 mod prompt;
 mod prompt_log;
+mod session;
 mod shortstring;
 mod shown_once;
 mod soul;
@@ -40,9 +41,10 @@ pub use keyring::{FsKeyring, Keyring};
 pub use memory::{Memory, MemoryError, TARGET_WORDS};
 pub use prompt::{
     MODEL_LINE_PREFIX, ModelName, constitution_sha256, embedded_constitution,
-    model_line, replace_model_line, system_text,
+    format_dashboard, model_line, replace_model_line, system_text,
 };
 pub use prompt_log::{PromptLogError, prompt_sha256};
+pub use session::AgoraSession;
 pub use shortstring::{ShortString, ShortStringError};
 pub use shown_once::{Cues, Shown, ShownOnce};
 pub use soul::{
@@ -50,7 +52,9 @@ pub use soul::{
     Interests, InterestsDraft, LEGACY_REQUIRED_SECTIONS, PROSE_MAX, Soul,
     SoulDraft, SoulWarning, WarnLevel, aim_under,
 };
-pub use tool::{Agora, Ledger, MAX_GOVERNANCE_READS, SharedLedger, ShownIds};
+pub use tool::{
+    Agora, Ledger, Limits, MAX_GOVERNANCE_READS, SharedLedger, ShownIds,
+};
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -1371,9 +1375,6 @@ impl Agent for SeedAgent {
                 ctx.config.phase_max_tokens,
             ),
         );
-        let shown = ShownIds::default();
-        // Per session, in memory: never persisted (0.108)
-        let shown_once = ShownOnce::default();
         let name = state
             .soul
             .agent_name()
@@ -1385,16 +1386,13 @@ impl Agent for SeedAgent {
             key.clone(),
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
-        )
-        .with_context_guard(context.clone())
-        .with_shown_ids(shown.clone())
-        .with_shown_once(shown_once.clone());
-        let tools = ToolBox::flat().add(
-            Gauged::new(agora, context.clone())
-                .for_agent(id)
-                .with_shown_once(shown_once.clone())
-                .with_prompt_check(ctx.client.clone()),
         );
+        let AgoraSession {
+            tools,
+            context,
+            shown,
+            shown_once,
+        } = AgoraSession::new(agora, context);
 
         let phase = Phase::Acting {
             rounds_left: ctx.config.max_rounds,

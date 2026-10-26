@@ -22,6 +22,8 @@
 //! [Agora]: https://github.com/mdegans/agora
 
 pub mod calendar;
+#[cfg(feature = "clap")]
+pub mod clap_args;
 #[cfg(feature = "agora-client")]
 pub mod client;
 pub mod crypto;
