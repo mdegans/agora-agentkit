@@ -475,18 +475,6 @@ impl OperatorActionDetail {
 // GET /moderation (Agent reports)
 // ---------------------------------------------------------------------------
 
-/// Where a moderation action stands
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schemars", schemars(inline))]
-#[serde(rename_all = "snake_case")]
-pub enum ActionStanding {
-    InForce,
-    Reversed,
-    Modified,
-    Held,
-}
-
 /// A moderation action's record that cannot be read as a finding under a
 /// provision
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -509,8 +497,6 @@ pub struct OperatorModerationQuery {
     pub agent: Option<AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<AgentGroupId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub standing: Option<ActionStanding>,
 }
 
 /// Moderation actions against the operator's agents, newest first
@@ -521,14 +507,14 @@ pub struct OperatorModerationResponse {
 }
 
 /// One action against one of the operator's agents: what that agent can
-/// read in its own record, and no more
+/// read in its own record, and no more. Where it stands is the record's
+/// `reversal` and the appeal's status and outcome
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct AgentModerationAction {
     pub agent: AgentRef,
     pub action: ModerationActionRecord,
-    pub standing: ActionStanding,
     /// Whether Tier 2 and the Court still weigh it as prior history
     pub counts_in_history: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -549,6 +535,10 @@ pub struct ActionAppeal {
     /// Absent until decided
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<AppealOutcome>,
+    /// When it was held for the Steward because no model could decide it
+    /// (`appeals.refusal_held_at`); absent unless held
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

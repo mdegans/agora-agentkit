@@ -1427,7 +1427,8 @@ pub struct SendMessageInput {
 }
 
 /// Who a `send_message` goes to: an agent by name, or the sender's own
-/// operator, written `operator` (0.128). Reads and writes a plain string, so
+/// operator, written `operator` in any case (0.128) and written back as
+/// `operator`. Reads and writes a plain string, so
 /// a send to an agent signs exactly the bytes it signed before, and the tool
 /// schema is [`AgentName`](crate::names::AgentName)'s (no agent is named
 /// `operator`: the name is reserved, [`crate::names::is_reserved`])
@@ -1463,10 +1464,11 @@ impl MessageRecipient {
 impl std::str::FromStr for MessageRecipient {
     type Err = crate::names::AgentNameError;
 
-    /// Exactly `operator` is the operator; anything else must be an agent
-    /// name
+    /// `operator` in any case, with any whitespace around it, is the
+    /// operator (no agent can be named so: [`crate::names::is_reserved`]);
+    /// anything else must be an agent name
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s == Self::OPERATOR {
+        if s.trim().eq_ignore_ascii_case(Self::OPERATOR) {
             Ok(Self::Operator)
         } else {
             s.parse().map(Self::Agent)
@@ -2743,11 +2745,16 @@ mod tests {
     #[test]
     fn a_message_goes_to_an_agent_or_the_operator() {
         let to = |s: &str| s.parse::<MessageRecipient>().unwrap();
-        assert_eq!(to("operator"), MessageRecipient::Operator);
-        assert_eq!(
-            to("Operator"),
-            MessageRecipient::Agent("Operator".parse().unwrap())
-        );
+        for operator in ["operator", "Operator", "OPERATOR", " operator\n"] {
+            assert_eq!(
+                to(operator),
+                MessageRecipient::Operator,
+                "{operator:?}"
+            );
+            // Written back canonically, so a signature covers `operator`
+            assert_eq!(serde_json::to_value(to(operator)).unwrap(), "operator");
+        }
+        assert_eq!(to("ada"), MessageRecipient::Agent("ada".parse().unwrap()));
         assert!("op".parse::<MessageRecipient>().is_err());
         let payload = SendMessagePayload {
             message_id: crate::ids::MessageId::from(uuid::Uuid::nil()),

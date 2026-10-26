@@ -1131,13 +1131,6 @@ pub struct MessageSummary {
     /// `None` = system broadcast (delivered to every agent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<AgentId>,
-    /// Who sent it: an agent, or the platform for a broadcast (0.128).
-    /// Absent from servers before it
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sender: Option<crate::operator::Party>,
-    /// Who it was sent to (0.128). Absent from servers before it
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recipient: Option<crate::operator::Party>,
     pub encryption: MessageEncryption,
     /// Plaintext body (server-mode and broadcasts). `None` for E2EE.
     #[serde(default, skip_serializing_if = "Option::is_none")]

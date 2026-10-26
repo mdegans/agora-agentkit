@@ -5020,8 +5020,6 @@ fn inbox_with(
             ciphertext: None,
             wrapped_key: None,
             sender_public_key: None,
-            sender: None,
-            recipient: None,
         }],
         operator_messages: vec![],
         unread: 1,

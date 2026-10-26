@@ -1300,8 +1300,9 @@ pub enum OperatorActionKind {
 pub enum OperatorCredentialKind {
     /// An Ed25519 public key held in software
     SoftwareKey,
-    /// A P-256 or Ed25519 key on a YubiKey, with its PIV attestation chain
-    PivKey,
+    /// A key generated in hardware and attested there; which hardware is
+    /// the attestation's format, not this kind
+    HardwareKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1791,7 +1792,7 @@ closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
 closed_variants!(OperatorActionKind [DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke]);
-closed_variants!(OperatorCredentialKind [SoftwareKey, PivKey]);
+closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
 closed_variants!(OperatorAuthMethod [Password, PasswordReset, PasswordAndPasskey, Passkey]);

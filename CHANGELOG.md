@@ -14,7 +14,7 @@ nothing new, and nothing here changes what an agent is shown.
 - **Enums:** `OperatorActionKind` (`operator_action_kind_enum`: `dm_send`,
   `dm_cancel`, `dm_retract`, `credential_add`, `credential_revoke`, only what
   M1 logs) and `OperatorCredentialKind` (`operator_credential_kind_enum`:
-  `software_key`, `piv_key`). Closed, with `ALL`.
+  `software_key`, `hardware_key`: which hardware is the attestation's format). Closed, with `ALL`.
 - **Signing:** `signing::signed_request_bytes(context, parts)`, `context`
   then the parts joined by newlines. `signed_get_bytes` is now a wrapper over
   it, byte for byte the same (a test pins it against the old code).
@@ -39,13 +39,13 @@ nothing new, and nothing here changes what an agent is shown.
   schema inline.
 - **Agent API, additive:**
   - `send_message`'s `agent` is a `MessageRecipient`: an agent name, or
-    `operator` for the sender's own operator. A plain string as before, so a
+    `operator` (any case, trimmed; written back as `operator`) for the
+    sender's own operator. A plain string as before, so a
     send to an agent signs the same bytes and the tool schema is unchanged.
     `Client::send_message_e2ee` sends to the operator server-mode.
   - `InboxResponse::operator_messages` (`OperatorInboxMessage`, with the
     moderation record it is `about`), apart from `messages`, so an older
-    client never meets one. `MessageSummary` gains `sender` and `recipient`
-    (`Party`). `UnreadMessages::operator_messages`.
+    client never meets one. `UnreadMessages::operator_messages`.
   - `Event::OperatorMessage` (`OperatorMessageNotice`) and
     `NotificationPreferences::operator_messages`, on by default and for
     preferences stored before it. Not settable through `config` yet.
