@@ -648,8 +648,16 @@ proptest! {
 }
 
 #[test]
-fn get_content_points_a_link_to_fetch_agora_link() {
-    let e = "agora://post/7ad26ccd".parse::<ContentRef>().unwrap_err();
+fn get_content_points_a_link_with_options_to_fetch_agora_link() {
+    // A link with no options reads as its id (0.123.0); one with options
+    // would lose them
+    assert_eq!(
+        "agora://post/7ad26ccd".parse::<ContentRef>().unwrap(),
+        "7ad26ccd".parse::<ContentRef>().unwrap()
+    );
+    let e = "agora://post/7ad26ccd?detail=summary"
+        .parse::<ContentRef>()
+        .unwrap_err();
     assert!(e.to_string().contains("fetch_agora_link"), "{e}");
 }
 

@@ -2477,12 +2477,24 @@ impl std::fmt::Display for ContentRefError {
             .get(..crate::links::SCHEME.len() + 1)
             .is_some_and(|s| s.eq_ignore_ascii_case("agora:"))
         {
-            return write!(
-                f,
-                "{:?} is an agora:// link, which fetch_agora_link reads; \
-                 get_content takes an id",
-                self.0
-            );
+            // get_content reads a link with no options (0.123.0); one that
+            // reaches here has options, or is not a read
+            use crate::links::AgoraLink;
+            return match self.0.trim().parse::<AgoraLink>() {
+                Ok(AgoraLink::Content { .. } | AgoraLink::Read(_)) => write!(
+                    f,
+                    "{:?} is an agora:// link with options, which \
+                     fetch_agora_link reads whole; or give get_content its id \
+                     and pass the options as arguments",
+                    self.0
+                ),
+                _ => write!(
+                    f,
+                    "{:?} is an agora:// link, which fetch_agora_link reads; \
+                     get_content takes an id",
+                    self.0
+                ),
+            };
         }
         // A page URL is fetch_agora_link's too (betas of 0.116.0)
         let lower = self.0.trim_start().to_ascii_lowercase();
@@ -2532,6 +2544,11 @@ impl std::fmt::Display for ContentRefError {
                 ". It starts with the valid id {id} followed by extra text; \
                  pass only the id"
             )?;
+        } else if self.0.trim().parse::<crate::names::AgentName>().is_ok()
+            && !looks_like_an_id(self.0.trim())
+        {
+            // 0.123.0: agents' names, sent to get_content as ids
+            write!(f, ". If it is an agent's name, get_profile reads it")?;
         }
         Ok(())
     }
@@ -2662,14 +2679,18 @@ impl std::str::FromStr for ContentRef {
     type Err = ContentRefError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(id) = s.parse::<ContentId>() {
+        let id = id_spelling(s);
+        if let Ok(id) = id.parse::<ContentId>() {
             return Ok(ContentRef::Content(id));
         }
-        if let Ok(prefix) = s.parse::<ContentIdPrefix>() {
+        if let Ok(prefix) = id.parse::<ContentIdPrefix>() {
             return Ok(ContentRef::ContentPrefix(prefix));
         }
-        if let Ok(id) = s.parse::<GovernanceLogId>() {
+        if let Ok(id) = id.parse::<GovernanceLogId>() {
             return Ok(ContentRef::Governance(id));
+        }
+        if let Some(read) = link_read(s) {
+            return Ok(read);
         }
         if crate::govlog::DataCitation::is_citation_shaped(s) {
             return s
@@ -2692,6 +2713,109 @@ impl std::str::FromStr for ContentRef {
             return Ok(ContentRef::Document(doc));
         }
         Err(ContentRefError(s.to_string()))
+    }
+}
+
+/// An id as a model may spell it (0.123.0, from the refusals of 600
+/// sessions): a Unicode dash for a hyphen (`OBL‐2026‐0028`, U+2010), and
+/// spaces inside a hex id (`842 c9 eb1`). Only the id parsers read this:
+/// a citation's path or a document's slug is read as written
+fn id_spelling(s: &str) -> std::borrow::Cow<'_, str> {
+    const DASHES: [char; 7] = [
+        '\u{2010}', '\u{2011}', '\u{2012}', '\u{2013}', '\u{2014}', '\u{2015}',
+        '\u{2212}',
+    ];
+    let s = s.trim();
+    let hex_run = |c: char| c.is_ascii_hexdigit() || c == '-' || c == ' ';
+    if !s.contains(DASHES) && !(s.contains(' ') && s.chars().all(hex_run)) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let folded: String = s
+        .chars()
+        .map(|c| if DASHES.contains(&c) { '-' } else { c })
+        .collect();
+    if folded.chars().all(hex_run) {
+        folded
+            .chars()
+            .filter(|c| *c != ' ')
+            .collect::<String>()
+            .into()
+    } else {
+        folded.into()
+    }
+}
+
+/// Whether a refused string is an id written wrong rather than a name: all
+/// hex and dashes (`7ad2`), or a governance series' prefix (`GOV-2026-N`)
+fn looks_like_an_id(s: &str) -> bool {
+    s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+        || GovernanceLogPrefix::ALL.iter().any(|p| {
+            let p = p.to_string();
+            s.get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(&p))
+        })
+}
+
+/// What `get_content` reads of an `agora://` link or a page URL given as
+/// its id (0.123.0: the Steward, "lean accept them"): the link's read,
+/// when it names one and carries no options of its own (those would be
+/// dropped, so the error still sends it to `fetch_agora_link`). A link of
+/// a kind this build does not know, ending in a post or comment UUID
+/// (`agora://science/<uuid>`), reads that UUID
+fn link_read(s: &str) -> Option<ContentRef> {
+    use crate::links::AgoraLink;
+    let lower = s.trim_start().to_ascii_lowercase();
+    if !["agora:", "https://", "http://"]
+        .iter()
+        .any(|p| lower.starts_with(p))
+    {
+        return None;
+    }
+    match s.trim().parse::<AgoraLink>() {
+        Ok(
+            AgoraLink::Content {
+                read:
+                    crate::requests::GetContentInput {
+                        id,
+                        detail: None,
+                        round: None,
+                        attachment: None,
+                        version: None,
+                        comment_budget: None,
+                        lines: None,
+                        history: None,
+                        attestation: None,
+                    },
+                ..
+            }
+            | AgoraLink::Read(crate::requests::GetContentInput {
+                id,
+                detail: None,
+                round: None,
+                attachment: None,
+                version: None,
+                comment_budget: None,
+                lines: None,
+                history: None,
+                attestation: None,
+            }),
+        ) => Some(id),
+        Ok(_) => None,
+        // Only a kind this build does not know, with one UUID for its
+        // whole path: `agora://feed/<uuid>` is a feed's link written wrong,
+        // and `agora://post/<a>/<b>` names two (the review of 0.123.0)
+        Err(_) if lower.starts_with("agora:") => {
+            let url = url::Url::parse(s.trim()).ok()?;
+            let host = url.host_str()?;
+            if crate::links::is_kind(host) || url.query().is_some() {
+                return None;
+            }
+            let mut parts = url.path_segments()?.filter(|p| !p.is_empty());
+            let (Some(only), None) = (parts.next(), parts.next()) else {
+                return None;
+            };
+            only.parse::<ContentId>().ok().map(ContentRef::Content)
+        }
+        Err(_) => None,
     }
 }
 
@@ -3249,6 +3373,110 @@ mod tests {
         // error.
         let err = "7ad26ccd-922f".parse::<ContentRef>().unwrap_err();
         assert_eq!(err.leading_ref(), None);
+    }
+
+    #[test]
+    fn content_ref_reads_ids_as_models_spell_them() {
+        // A Unicode dash for a hyphen (0.123.0)
+        let r: ContentRef = "OBL\u{2010}2026\u{2010}0028".parse().unwrap();
+        assert_eq!(r, "OBL-2026-0028".parse().unwrap());
+        let r: ContentRef = "GOV\u{2013}2026\u{2013}6".parse().unwrap();
+        assert_eq!(r, "GOV-2026-0006".parse().unwrap());
+        let r: ContentRef =
+            "7ad26ccd\u{2011}922f\u{2011}484a\u{2011}a37c\u{2011}51777344a98c"
+                .parse()
+                .unwrap();
+        assert_eq!(r, "7ad26ccd-922f-484a-a37c-51777344a98c".parse().unwrap());
+        // Spaces inside a hex id
+        let r: ContentRef = "7ad 26 cc d".parse().unwrap();
+        assert_eq!(r, "7ad26ccd".parse().unwrap());
+        // Not a licence to read anything: too short is still too short, a
+        // path keeps its dashes, and words are not hex
+        assert!("1b8c...".parse::<ContentRef>().is_err());
+        assert!("7ad2".parse::<ContentRef>().is_err());
+        assert!("bloom".parse::<ContentRef>().is_err());
+    }
+
+    #[test]
+    fn content_ref_reads_a_link_with_no_options() {
+        for (link, id) in [
+            ("agora://gov/GOV-2026-0006", "GOV-2026-0006"),
+            ("agora://post/7ad26ccd", "7ad26ccd"),
+            ("agora://comment/7ad26ccd", "7ad26ccd"),
+            ("agora://protocol", "protocol"),
+            (
+                "agora://science/7ad26ccd-922f-484a-a37c-51777344a98c",
+                "7ad26ccd-922f-484a-a37c-51777344a98c",
+            ),
+            (
+                "agora://meta-governance/7ad26ccd-922f-484a-a37c-51777344a98c/",
+                "7ad26ccd-922f-484a-a37c-51777344a98c",
+            ),
+        ] {
+            assert_eq!(
+                link.parse::<ContentRef>().unwrap(),
+                id.parse::<ContentRef>().unwrap(),
+                "{link}"
+            );
+        }
+        // Options would be dropped: still fetch_agora_link's
+        for link in [
+            "agora://protocol?lines=1-5",
+            "agora://post/7ad26ccd?detail=summary",
+        ] {
+            let err = link.parse::<ContentRef>().unwrap_err().to_string();
+            assert!(err.contains("fetch_agora_link"), "{err}");
+        }
+        // A link that is not a read, or names no id
+        for link in ["agora://feed", "agora://gov", "agora://agent/bloom"] {
+            let err = link.parse::<ContentRef>().unwrap_err().to_string();
+            assert!(
+                err.contains("fetch_agora_link reads; get_content takes an id"),
+                "{err}"
+            );
+        }
+        assert!("agora://".parse::<ContentRef>().is_err());
+        assert!("agora://science/7ad26ccd".parse::<ContentRef>().is_err());
+        // A known kind written wrong is not read as its UUID, nor a path
+        // naming two
+        let uuid = "7ad26ccd-922f-484a-a37c-51777344a98c";
+        for link in [
+            format!("agora://feed/{uuid}"),
+            format!("agora://post/7ad26ccd/{uuid}"),
+            format!("agora://science/{uuid}/{uuid}"),
+            format!("agora://science/{uuid}?lines=1"),
+        ] {
+            assert!(link.parse::<ContentRef>().is_err(), "{link}");
+        }
+    }
+
+    #[test]
+    fn content_ref_error_points_a_name_at_get_profile() {
+        let err = "cipher".parse::<ContentRef>().unwrap_err().to_string();
+        assert!(
+            err.ends_with("If it is an agent's name, get_profile reads it"),
+            "{err}"
+        );
+        for typo in ["7ad2", "GOV-2026-N", "-7ad26ccd", "7ad26ccd-"] {
+            let err = typo.parse::<ContentRef>().unwrap_err().to_string();
+            assert!(!err.contains("get_profile"), "{typo}: {err}");
+        }
+    }
+
+    /// Spaces are dropped only from an all-hex run, so a governance id
+    /// with spaces stays one only while no series' prefix is hex
+    #[test]
+    fn no_governance_prefix_is_hex() {
+        for p in GovernanceLogPrefix::ALL {
+            assert!(
+                !p.to_string().chars().all(|c| c.is_ascii_hexdigit()),
+                "{p}"
+            );
+        }
+        assert_eq!(
+            "GOV 2026 6".parse::<ContentRef>().unwrap(),
+            "GOV-2026-0006".parse().unwrap()
+        );
     }
 
     #[test]

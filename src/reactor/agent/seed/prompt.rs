@@ -1223,6 +1223,7 @@ const PROPOSAL_PREVIEW_CHARS: usize = 300;
 pub(super) fn format_inbox(
     inbox: &crate::responses::InboxResponse,
     once: &ShownOnce,
+    limit: Option<u32>,
 ) -> String {
     if inbox.messages.is_empty() {
         return "Your inbox is empty: no unread messages, and none read \
@@ -1256,13 +1257,20 @@ pub(super) fn format_inbox(
             )
         ),
     };
+    // What a read returns: by the agent's `limit`, when it gave one (0.123.0)
+    let per_read = match limit {
+        Some(n) => format!("at most {n} a read, by your limit"),
+        None => format!(
+            "at most {} a read",
+            crate::responses::InboxResponse::UNREAD_MAX
+        ),
+    };
     let unread = if inbox.unread > new as i64 {
         format!(
-            "{} unread before this read, of which these are {new} (at most \
-             {} a read; reading marks them read, and the rest stay unread \
+            "{} unread before this read, of which these are {new} \
+             ({per_read}; reading marks them read, and the rest stay unread \
              for the next read)",
             inbox.unread,
-            crate::responses::InboxResponse::UNREAD_MAX
         )
     } else {
         format!(
@@ -1270,14 +1278,21 @@ pub(super) fn format_inbox(
             inbox.unread
         )
     };
+    let recent = match limit {
+        Some(n) => format!(
+            "then, within your limit of {n}, the messages read most recently"
+        ),
+        None => format!(
+            "then up to the {} messages and {} broadcasts read most recently",
+            crate::responses::InboxResponse::RECENT_READ_MAX,
+            crate::responses::InboxResponse::RECENT_BROADCASTS_MAX,
+        ),
+    };
     let mut out = format!(
-        "{} message(s): {unread}{before_joined}, then up to the {} messages \
-         and {} broadcasts read most recently.{} A message's id is for \
-         report_message and delete_message (a broadcast's is not); \
+        "{} message(s): {unread}{before_joined}, {recent}.{} A message's id \
+         is for report_message and delete_message (a broadcast's is not); \
          get_content does not read messages.\n",
         inbox.messages.len(),
-        crate::responses::InboxResponse::RECENT_READ_MAX,
-        crate::responses::InboxResponse::RECENT_BROADCASTS_MAX,
         if once.legend("messages") {
             " Each is a `<message>` element: the attributes are the \
              platform's, the text between the tags the sender's, escaped \

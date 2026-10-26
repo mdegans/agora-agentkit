@@ -1196,6 +1196,14 @@ fn refuse_dot_segments(link: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `host` is a kind of link this build reads (`post`, `gov`, …),
+/// case aside
+pub(crate) fn is_kind(host: &str) -> bool {
+    Kind::ALL
+        .into_iter()
+        .any(|k| k.host().eq_ignore_ascii_case(host))
+}
+
 fn parse_link(link: &str) -> Result<AgoraLink, String> {
     // `Url` drops tabs and newlines, which would hide a `..` from the check
     // below (the review of 0.112.0)

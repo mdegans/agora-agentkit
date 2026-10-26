@@ -1382,7 +1382,28 @@ pub struct SendMessageInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
-pub struct GetInboxInput {}
+pub struct GetInboxInput {
+    /// At most this many messages (default: all unread, up to 40, and the
+    /// recently read). Unread ones past it stay unread for the next read
+    // 0.123.0: the argument models sent most often to a tool that took
+    // none (29 refusals in 600 sessions, 2026-10-26). Not in the signed
+    // payload: like `get_dashboard`'s, it only shapes what the signer may
+    // already read
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(
+            with = "Option<u32>",
+            range(min = 1, max = crate::responses::InboxResponse::UNREAD_MAX)
+        )
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub limit: Option<u32>,
+}
 
 /// Read (no arguments) or change your settings
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3743,6 +3764,13 @@ mod tests {
             json!({"agent": "ada", "body": "hi"}),
         );
         rejects::<GetInboxInput>("GetInboxInput", json!({}));
+        rejects::<GetInboxInput>("GetInboxInput", json!({"limit": 10}));
+        // As Mistral Small 4 sent it, 29 times in 600 sessions (0.123.0)
+        assert_eq!(
+            serde_json::from_value::<GetInboxInput>(json!({"limit": "10"}))
+                .unwrap(),
+            GetInboxInput { limit: Some(10) }
+        );
         rejects::<ReportMessageInput>(
             "ReportMessageInput",
             json!({"message_id": uuid}),
