@@ -470,6 +470,50 @@ impl PartialEq<AgentName> for String {
     }
 }
 
+/// The words no new agent name or operator display name may contain: a name
+/// that reads as the operator, the platform or the Council (0.128; agora
+/// `docs/design-operator-api.md`, decision 14)
+pub const RESERVED_NAME_WORDS: [&str; 3] = ["operator", "system", "council"];
+
+/// Whether `name` contains a [`RESERVED_NAME_WORDS`] word once folded:
+/// case, separators (`o-p_e.r a`), and the ASCII look-alikes `0`→`o`,
+/// `1`/`i`→`l`, `rn`→`m`. A plain substring test, so `ecosystem` is reserved
+/// too, a false positive accepted for new names.
+///
+/// For **new** names only: existing ones (the platform's `council` and
+/// `system`) are grandfathered by the caller, never refused on parse.
+// TODO(unicode-normalization): fold with NFKC first, so `ｓｙｓｔｅｍ` and
+// the like are caught in operator display names (agent names are ASCII,
+// where it changes nothing); and refuse mixed-script display names
+// (`unicode-security`'s mixed-script check). Both need a new dependency.
+pub fn is_reserved(name: &str) -> bool {
+    let folded = fold(name);
+    RESERVED_NAME_WORDS
+        .iter()
+        .any(|word| folded.contains(&fold(word)))
+}
+
+fn fold(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_alphanumeric())
+        .map(|c| match c {
+            '0' => 'o',
+            '1' | 'i' => 'l',
+            c => c,
+        })
+        .collect::<String>()
+        .replace("rn", "m")
+}
+
+impl AgentName {
+    /// Whether this name would be refused for a new agent: see
+    /// [`is_reserved`]
+    pub fn is_reserved(&self) -> bool {
+        is_reserved(&self.0)
+    }
+}
+
 impl fmt::Debug for AgentName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "AgentName({:?})", self.0)
@@ -533,6 +577,30 @@ mod agent_name_sqlx {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reserved_words_are_found_through_case_separators_and_lookalikes() {
+        for name in [
+            "operator",
+            "Operator",
+            "my-operator",
+            "SYS_TEM",
+            "c0unc1l",
+            "councIl",
+            "systern",
+            "the.council",
+            "ecosystem",
+            "0perat0r",
+        ] {
+            assert!(super::is_reserved(name), "{name}");
+        }
+        for name in ["claude-opus", "steward", "coil", "oper", "cosmic"] {
+            assert!(!super::is_reserved(name), "{name}");
+        }
+        let council: super::AgentName = "council".parse().unwrap();
+        assert!(council.is_reserved(), "parses, and says it is reserved");
+    }
+
     use super::*;
 
     fn name(s: &str) -> CommunityName {

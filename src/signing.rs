@@ -249,6 +249,141 @@ pub enum SignedAction<'a> {
     },
 }
 
+/// `context || part₁ \n part₂ \n … \n partₙ`: the bytes a signed HTTP
+/// request's signature covers, before the timestamp [`crate::crypto::sign`]
+/// adds (0.128). One function for [`signed_get`] and [`operator_request`],
+/// told apart by `context`.
+///
+/// Unambiguous only when no part can hold a newline: HTTP forbids one in a
+/// method, a header value and a request target, and a body enters as a
+/// fixed-length digest.
+pub fn signed_request_bytes(context: &[u8], parts: &[&str]) -> Vec<u8> {
+    let len = parts.iter().map(|p| p.len() + 1).sum::<usize>();
+    let mut bytes = Vec::with_capacity(context.len() + len);
+    bytes.extend_from_slice(context);
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            bytes.push(b'\n');
+        }
+        bytes.extend_from_slice(part.as_bytes());
+    }
+    bytes
+}
+
+/// Signed operator API requests (0.128): every request under
+/// `/api/operator/` is signed by one of the operator's registered
+/// credentials, with no bearer token.
+///
+/// The request carries [`CREDENTIAL_ID_HEADER`], [`TIMESTAMP_HEADER`] (Unix
+/// seconds) and [`SIGNATURE_HEADER`] (hex, through [`crate::crypto::sign`]
+/// with that timestamp) over [`operator_request_bytes`]. A write's body
+/// carries its client-generated [`OperatorActionId`], which is signed too:
+/// the log's primary key rejects a replay and makes a retry idempotent.
+/// Its [`CONTEXT`] differs from every other signed domain's, so a key
+/// registered both as an agent's and as an operator credential cannot have
+/// one signature stand for the other.
+pub mod operator_request {
+    use sha2::{Digest, Sha256};
+
+    use crate::ids::OperatorActionId;
+
+    /// What every signed operator request's bytes begin with
+    pub const CONTEXT: &[u8] = b"agora/operator/v1\n";
+    /// The signing credential's id
+    pub const CREDENTIAL_ID_HEADER: &str = "x-agora-operator-credential";
+    /// Unix seconds, part of the signed digest
+    pub const TIMESTAMP_HEADER: &str = "x-agora-timestamp";
+    /// Hex signature
+    pub const SIGNATURE_HEADER: &str = "x-agora-signature";
+
+    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n hex(SHA-256(body)) \n ACTION_ID`.
+    ///
+    /// `host` as for [`signed_get_bytes`](super::signed_get::signed_get_bytes)
+    /// ([`host_of`](super::signed_get::host_of)); `body` is the request body
+    /// exactly as sent, empty for a GET; `action_id` is the write's
+    /// [`OperatorActionId`] (lowercase hyphenated), empty for a read.
+    pub fn operator_request_bytes(
+        method: &str,
+        host: &str,
+        path_and_query: &str,
+        body: &[u8],
+        action_id: Option<OperatorActionId>,
+    ) -> Vec<u8> {
+        super::signed_request_bytes(
+            CONTEXT,
+            &[
+                &method.to_ascii_uppercase(),
+                &host.to_ascii_lowercase(),
+                path_and_query,
+                &hex::encode(Sha256::digest(body)),
+                &action_id.map(|id| id.to_string()).unwrap_or_default(),
+            ],
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_bytes_bind_method_host_url_body_and_action() {
+            let id: OperatorActionId =
+                "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f".parse().unwrap();
+            assert_eq!(
+                operator_request_bytes(
+                    "post",
+                    "Example.org",
+                    "/api/operator/messages",
+                    b"{}",
+                    Some(id),
+                ),
+                b"agora/operator/v1\nPOST\nexample.org\n/api/operator/messages\n\
+                  44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a\n\
+                  6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f"
+                    .to_vec()
+            );
+            // A read: the empty body's digest, no action
+            assert_eq!(
+                operator_request_bytes("GET", "a.org", "/api/operator/log", b"", None),
+                b"agora/operator/v1\nGET\na.org\n/api/operator/log\n\
+                  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n"
+                    .to_vec()
+            );
+            let base =
+                operator_request_bytes("POST", "a.org", "/p", b"x", Some(id));
+            for other in [
+                operator_request_bytes("PUT", "a.org", "/p", b"x", Some(id)),
+                operator_request_bytes("POST", "b.org", "/p", b"x", Some(id)),
+                operator_request_bytes("POST", "a.org", "/p?q", b"x", Some(id)),
+                operator_request_bytes("POST", "a.org", "/p", b"y", Some(id)),
+                operator_request_bytes("POST", "a.org", "/p", b"x", None),
+            ] {
+                assert_ne!(base, other);
+            }
+        }
+
+        /// No other signed domain's bytes can begin like an operator
+        /// request's, nor an operator request's like theirs
+        #[test]
+        fn the_context_is_its_own() {
+            for other in [
+                crate::signing::signed_get::CONTEXT,
+                crate::sse::EVENT_CONTEXT,
+                crate::govlog::ROOT_DOMAIN,
+                b"agora/msg/v1",
+                b"agora/enc-key/v1",
+                b"agora/wrap/v1",
+            ] {
+                assert!(
+                    !CONTEXT.starts_with(other) && !other.starts_with(CONTEXT)
+                );
+            }
+            // Signed actions are JSON objects
+            assert_ne!(CONTEXT[0], b'{');
+        }
+    }
+}
+
 /// Signed GETs (0.101): how an agent that holds a key, and no bearer
 /// token, proves who it is on a request with no body.
 ///
@@ -269,7 +404,8 @@ pub mod signed_get {
     /// Hex Ed25519 signature
     pub const SIGNATURE_HEADER: &str = "x-agora-signature";
 
-    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n LAST_EVENT_ID`.
+    /// `CONTEXT || METHOD \n HOST \n PATH_AND_QUERY \n LAST_EVENT_ID`,
+    /// through [`signed_request_bytes`](super::signed_request_bytes).
     ///
     /// `host` is the request's `Host` header: the URL's host, with its port
     /// when it is not the scheme's default. `last_event_id` is the header's
@@ -281,22 +417,15 @@ pub mod signed_get {
         path_and_query: &str,
         last_event_id: Option<&str>,
     ) -> Vec<u8> {
-        let mut bytes = CONTEXT.to_vec();
-        for (i, part) in [
-            method.to_ascii_uppercase().as_str(),
-            &host.to_ascii_lowercase(),
-            path_and_query,
-            last_event_id.unwrap_or(""),
-        ]
-        .iter()
-        .enumerate()
-        {
-            if i > 0 {
-                bytes.push(b'\n');
-            }
-            bytes.extend_from_slice(part.as_bytes());
-        }
-        bytes
+        super::signed_request_bytes(
+            CONTEXT,
+            &[
+                &method.to_ascii_uppercase(),
+                &host.to_ascii_lowercase(),
+                path_and_query,
+                last_event_id.unwrap_or(""),
+            ],
+        )
     }
 
     /// The `Host` header a client sends for `url`
@@ -342,6 +471,42 @@ pub mod signed_get {
                 "localhost:8080"
             );
             assert_eq!(host_of(&"https://a.org/x".parse().unwrap()), "a.org");
+        }
+
+        /// The bytes before 0.128 generalised them: the same for every
+        /// input, so every signed GET's signature still verifies
+        #[test]
+        fn the_generalised_bytes_are_the_old_bytes() {
+            fn before(m: &str, h: &str, p: &str, l: Option<&str>) -> Vec<u8> {
+                let mut bytes = CONTEXT.to_vec();
+                for (i, part) in [
+                    m.to_ascii_uppercase().as_str(),
+                    &h.to_ascii_lowercase(),
+                    p,
+                    l.unwrap_or(""),
+                ]
+                .iter()
+                .enumerate()
+                {
+                    if i > 0 {
+                        bytes.push(b'\n');
+                    }
+                    bytes.extend_from_slice(part.as_bytes());
+                }
+                bytes
+            }
+            for (m, h, p, l) in [
+                ("GET", "a.org", "/agora/events", None),
+                (
+                    "get",
+                    "Localhost:8080",
+                    "/agora/events?x=1&y=%20",
+                    Some("c1"),
+                ),
+                ("GET", "", "", Some("")),
+            ] {
+                assert_eq!(signed_get_bytes(m, h, p, l), before(m, h, p, l));
+            }
         }
     }
 }
