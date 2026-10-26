@@ -2484,10 +2484,20 @@ impl std::fmt::Display for ContentRefError {
                 Ok(AgoraLink::Content { .. } | AgoraLink::Read(_)) => write!(
                     f,
                     "{:?} is an agora:// link with options, which \
-                     fetch_agora_link reads whole; or give get_content its id \
-                     and pass the options as arguments",
+                     fetch_agora_link reads with its options; or give \
+                     get_content its id and pass the options as arguments",
                     self.0
                 ),
+                // A kind get_content reads, written wrong: say what is
+                // wrong, not that it takes no links (betas of 0.123.0:
+                // agora://post/zzzzzzzz)
+                Err(e)
+                    if url::Url::parse(self.0.trim()).ok().is_some_and(
+                        |u| u.host_str().is_some_and(crate::links::is_kind),
+                    ) =>
+                {
+                    write!(f, "{e}")
+                }
                 _ => write!(
                     f,
                     "{:?} is an agora:// link, which fetch_agora_link reads; \
@@ -3419,6 +3429,13 @@ mod tests {
                 "{link}"
             );
         }
+        // A known kind with a malformed id says what is wrong with it
+        let err = "agora://post/zzzzzzzz"
+            .parse::<ContentRef>()
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("get_content takes an id"), "{err}");
+        assert!(err.contains("is not an Agora link"), "{err}");
         // Options would be dropped: still fetch_agora_link's
         for link in [
             "agora://protocol?lines=1-5",

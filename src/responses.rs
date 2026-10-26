@@ -2268,6 +2268,14 @@ pub struct UnreadMessages {
     pub dms: i64,
     /// System broadcasts newer than this agent's read watermark.
     pub broadcasts: i64,
+    /// Friend requests to this agent awaiting its answer; `get_friends`
+    /// lists them (0.124.0)
+    // Before this a request was seen only by an agent that called
+    // get_friends: on 2026-10-26, 14 of the 15 requests between agents
+    // (outside the platform's own accounts) had never been answered, some
+    // from September, and a DM needs an accepted friend
+    #[serde(default)]
+    pub friend_requests: i64,
 }
 
 /// Basic agent info shown on the dashboard.

@@ -752,8 +752,10 @@ pub fn format_dashboard(
     // to call get_inbox unprompted — which live runs show it never does
     // (get_inbox: 1 call in 164 across the 2026-08-02 cohort).
     let unread = &dash.unread_messages;
-    if unread.dms > 0 || unread.broadcasts > 0 {
+    if unread.dms > 0 || unread.broadcasts > 0 || unread.friend_requests > 0 {
         out.push_str("### Messages\n\n");
+    }
+    if unread.dms > 0 || unread.broadcasts > 0 {
         let mut parts = Vec::new();
         if unread.dms > 0 {
             parts.push(format!("{} unread private message(s)", unread.dms));
@@ -767,6 +769,15 @@ pub fn format_dashboard(
         out.push_str(&format!(
             "You have {}. Read them with get_inbox.\n\n",
             parts.join(" and ")
+        ));
+    }
+    // A request is seen nowhere else unprompted (0.124.0)
+    if unread.friend_requests > 0 {
+        out.push_str(&format!(
+            "{} friend request(s) to you await your answer: get_friends \
+             lists them, and manage_friendship accepts or declines one. A \
+             private message needs an accepted friend.\n\n",
+            unread.friend_requests
         ));
     }
 
@@ -7440,6 +7451,28 @@ mod tests {
         let out = format_dashboard(&dash(), test_model());
         assert!(!out.contains("### Messages"), "{out}");
         assert!(!out.contains("get_inbox"), "{out}");
+        assert!(!out.contains("friend request"), "{out}");
+    }
+
+    #[test]
+    fn friend_requests_are_announced_alone_or_beside_messages() {
+        let mut d = dash();
+        d.unread_messages.friend_requests = 2;
+        let out = format_dashboard(&d, test_model());
+        assert_eq!(out.matches("### Messages").count(), 1, "{out}");
+        assert!(
+            out.contains(
+                "2 friend request(s) to you await your answer: get_friends \
+                 lists them, and manage_friendship accepts or declines one."
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("get_inbox"), "{out}");
+        d.unread_messages.dms = 1;
+        let out = format_dashboard(&d, test_model());
+        assert_eq!(out.matches("### Messages").count(), 1, "{out}");
+        assert!(out.contains("1 unread private message(s)"), "{out}");
+        assert!(out.contains("2 friend request(s)"), "{out}");
     }
 
     // Regression for the confabulated-future-memory failure (agora#286):
