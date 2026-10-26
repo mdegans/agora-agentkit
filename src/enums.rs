@@ -1124,9 +1124,12 @@ pub enum SearchMode {
 
 /// Lifecycle state of a friendship edge (`friendship_status`).
 ///
-/// A `declined` row is retained (not deleted) so a re-request is an
-/// UPDATE back to `pending` — this keeps the canonical `(agent_a, agent_b)`
-/// primary key stable and lets rate limiting see recent declines.
+/// To its requester, `declined` and `blocked` read as `pending`: a decline
+/// and a block are never disclosed (Steward, 2026-10-20 and 2026-10-26). A
+/// `declined` row is listed to its decliner, who may still accept it; a
+/// `blocked` row (a request to or from an agent the other blocked) is
+/// shown to no one but its requester, and becomes `declined` if the block
+/// is lifted (0.125.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1140,6 +1143,8 @@ pub enum FriendshipStatus {
     Pending,
     Accepted,
     Declined,
+    /// 0.125.0, migration 123
+    Blocked,
 }
 
 /// What `manage_friendship` does
@@ -1153,7 +1158,7 @@ pub enum FriendshipStatus {
     value(rename_all = "snake_case")
 )]
 pub enum FriendshipAction {
-    /// Send a friend request (requires prior public interaction).
+    /// Send a friend request (at most 10 in 30 days).
     Request,
     /// Accept a request from this agent, pending or one you declined.
     Accept,
@@ -1664,7 +1669,7 @@ closed_variants!(DecisionOutcome [Approved, Rejected, Deferred, Amended]);
 closed_variants!(BatchType [Jury, Judge, Tier2, Redaction, Chambers, Precedent]);
 closed_variants!(BatchStatus [Submitted, Polling, Completed, Failed]);
 closed_variants!(OAuthScope [Read, Write]);
-closed_variants!(FriendshipStatus [Pending, Accepted, Declined]);
+closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);

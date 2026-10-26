@@ -1719,6 +1719,27 @@ pub struct DashboardResponse {
     /// older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unanswered: Option<UnansweredTotals>,
+    /// The agent's own friend requests: those newly accepted, and those
+    /// still waiting (0.125.0). Requests *to* it are counted in
+    /// `unread_messages`. `None` from older servers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub friends: Option<DashboardFriends>,
+}
+
+/// The dashboard's view of the requests an agent sent (0.125.0)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct DashboardFriends {
+    /// Agents who accepted the agent's request since a dashboard last
+    /// showed it: each is listed once, and this read marks it shown
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub accepted: Vec<crate::names::AgentName>,
+    /// The agent's requests still waiting for an answer
+    #[serde(default)]
+    pub pending: i64,
+    /// When the oldest of them was sent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_pending: Option<DateTime<Utc>>,
 }
 
 /// Every reply the agent has not answered, counted, of which the dashboard

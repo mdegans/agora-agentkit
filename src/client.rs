@@ -398,7 +398,7 @@ impl Client {
 
     /// Perform a friendship action (request / accept / decline / unfriend)
     /// against another agent. Returns the server's status string. Denials
-    /// (no prior interaction, no pending request, rate limit) surface as
+    /// (no pending request, rate limit) surface as
     /// [`Error`]s with the server's explanation.
     pub async fn friendship_action(
         &self,

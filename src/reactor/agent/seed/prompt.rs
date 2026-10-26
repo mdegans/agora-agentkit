@@ -771,6 +771,43 @@ pub fn format_dashboard(
             parts.join(" and ")
         ));
     }
+    // The agent's own requests (0.125.0): an acceptance is announced once,
+    // since the last session, and a waiting request says how old it is
+    // (betas of 0.124.0: an acceptance arrived with no notice)
+    let friends = dash.friends.as_ref();
+    let accepted = friends.map_or(&[][..], |f| f.accepted.as_slice());
+    let pending = friends.map_or(0, |f| f.pending);
+    if (!accepted.is_empty() || pending > 0)
+        && unread.dms == 0
+        && unread.broadcasts == 0
+        && unread.friend_requests == 0
+    {
+        out.push_str("### Messages\n\n");
+    }
+    if !accepted.is_empty() {
+        out.push_str(&format!(
+            "Accepted your friend request: {}. You can send them private \
+             messages now.\n\n",
+            accepted
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if pending > 0 {
+        let oldest = friends
+            .and_then(|f| f.oldest_pending)
+            .map(|t| {
+                format!(", the oldest sent {}", days_ago(t, chrono::Utc::now()))
+            })
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "{} of yours not answered yet{oldest} (unfriend withdraws \
+             one).\n\n",
+            plural(pending as u64, "friend request", "friend requests"),
+        ));
+    }
     // A request is seen nowhere else unprompted (0.124.0)
     if unread.friend_requests > 0 {
         out.push_str(&format!(
@@ -1290,18 +1327,46 @@ pub(super) fn format_inbox(
             inbox.unread
         )
     };
-    let recent = match limit {
-        Some(n) => format!(
-            "then, within your limit of {n}, the messages read most recently"
-        ),
-        None => format!(
-            "then up to the {} messages and {} broadcasts read most recently",
-            crate::responses::InboxResponse::RECENT_READ_MAX,
-            crate::responses::InboxResponse::RECENT_BROADCASTS_MAX,
-        ),
+    // What was listed of the read, counted (betas of 0.123.0: "up to the
+    // 10 messages and 3 broadcasts" read as how many there were)
+    let read = |broadcast: bool| {
+        inbox
+            .messages
+            .iter()
+            .filter(|m| {
+                m.state_or_read_at() == InboxState::Read
+                    && m.recipient_id.is_none() == broadcast
+            })
+            .count() as u64
+    };
+    let (read_dms, read_broadcasts) = (read(false), read(true));
+    let recent = if read_dms + read_broadcasts == 0 {
+        String::new()
+    } else {
+        // A zero is left out ("1 message and 0 broadcasts")
+        let parts: Vec<String> = [
+            (read_dms, "message", "messages"),
+            (read_broadcasts, "broadcast", "broadcasts"),
+        ]
+        .into_iter()
+        .filter(|(n, ..)| *n > 0)
+        .map(|(n, one, many)| plural(n, one, many))
+        .collect();
+        format!(
+            ", then {} read before{}",
+            parts.join(" and "),
+            match limit {
+                Some(n) => format!(", within your limit of {n}"),
+                None => format!(
+                    " (the {} and {} read most recently, at most)",
+                    crate::responses::InboxResponse::RECENT_READ_MAX,
+                    crate::responses::InboxResponse::RECENT_BROADCASTS_MAX,
+                ),
+            }
+        )
     };
     let mut out = format!(
-        "{} message(s): {unread}{before_joined}, {recent}.{} A message's id \
+        "{} message(s): {unread}{before_joined}{recent}.{} A message's id \
          is for report_message and delete_message (a broadcast's is not); \
          get_content does not read messages.\n",
         inbox.messages.len(),
@@ -1376,10 +1441,36 @@ fn named(name: &str, display: Option<&str>) -> String {
 pub(super) fn format_friends(
     list: &crate::responses::FriendsResponse,
 ) -> String {
+    format_friends_at(list, chrono::Utc::now())
+}
+
+/// How long ago `then` was, in days, as of `now` (0.125.0)
+fn days_ago(
+    then: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    match (now.date_naive() - then.date_naive()).num_days() {
+        ..=0 => "today".to_string(),
+        1 => "yesterday".to_string(),
+        n => format!("{n} days ago"),
+    }
+}
+
+/// [`format_friends`] as of `now`: a request says how old it is (betas of
+/// 0.124.0)
+fn format_friends_at(
+    list: &crate::responses::FriendsResponse,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
     use crate::responses::FriendSummary;
     let line = |f: &FriendSummary, since: &str| {
+        let age = if since == "sent" {
+            format!(" ({})", days_ago(f.since, now))
+        } else {
+            String::new()
+        };
         format!(
-            "- {}, {since} {}",
+            "- {}, {since} {}{age}",
             named(&f.name, f.display_name.as_deref()),
             f.since.format("%Y-%m-%d")
         )
@@ -7470,6 +7561,38 @@ mod tests {
     }
 
     #[test]
+    fn the_agents_own_requests_are_on_the_dashboard() {
+        let mut d = dash();
+        d.friends = Some(crate::responses::DashboardFriends {
+            accepted: vec!["beta-social".parse().unwrap()],
+            pending: 2,
+            oldest_pending: Some(
+                chrono::Utc::now() - chrono::Duration::days(3),
+            ),
+        });
+        let out = format_dashboard(&d, test_model());
+        assert_eq!(out.matches("### Messages").count(), 1, "{out}");
+        assert!(
+            out.contains(
+                "Accepted your friend request: beta-social. You can send them \
+                 private messages now."
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "2 friend requests of yours not answered yet, the oldest sent 3 \
+                 days ago (unfriend withdraws one)."
+            ),
+            "{out}"
+        );
+        // Nothing to say, nothing said
+        d.friends = Some(Default::default());
+        let out = format_dashboard(&d, test_model());
+        assert!(!out.contains("### Messages"), "{out}");
+    }
+
+    #[test]
     fn friend_requests_are_announced_alone_or_beside_messages() {
         let mut d = dash();
         d.unread_messages.friend_requests = 2;
@@ -8838,7 +8961,8 @@ mod tests {
                 ],
             }))
             .unwrap();
-        let out = format_friends(&list);
+        let now = "2026-10-26T12:00:00Z".parse().unwrap();
+        let out = format_friends_at(&list, now);
         assert_eq!(
             out,
             "2 friend(s). A message to one marked \"not end-to-end encrypted\" \
@@ -8848,7 +8972,7 @@ mod tests {
              - (not end-to-end encrypted) bob, friends since 2026-09-02\n\
              1 friend request(s) to you, awaiting your answer \
              (manage_friendship with accept or decline):\n\
-             - carol, sent 2026-10-19\n\
+             - carol, sent 2026-10-19 (7 days ago)\n\
              No requests of yours pending.\n"
         );
         assert_eq!(
@@ -8856,6 +8980,18 @@ mod tests {
             "No friends yet.\nNo friend requests to you.\nNo requests of \
              yours pending.\n"
         );
+    }
+
+    #[test]
+    fn days_ago_reads_utc_calendar_days() {
+        let now: chrono::DateTime<chrono::Utc> =
+            "2026-10-26T00:01:00Z".parse().unwrap();
+        let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        assert_eq!(days_ago(at("2026-10-25T23:59:00Z"), now), "yesterday");
+        assert_eq!(days_ago(at("2026-10-26T00:00:30Z"), now), "today");
+        // A clock ahead of ours is no time from now
+        assert_eq!(days_ago(at("2026-10-27T12:00:00Z"), now), "today");
+        assert_eq!(days_ago(at("2026-10-16T12:00:00Z"), now), "10 days ago");
     }
 
     /// A request the agent declined is listed, so it can change its mind
@@ -8871,13 +9007,14 @@ mod tests {
                 ],
             }))
             .unwrap();
-        let out = format_friends(&list);
+        let now = "2026-10-26T12:00:00Z".parse().unwrap();
+        let out = format_friends_at(&list, now);
         assert!(
             out.ends_with(
                 "1 request(s) you declined (they still see theirs as \
                  pending; manage_friendship with accept still accepts \
                  one, and unfriend removes one, which they would see):\n\
-                 - dana, sent 2026-10-20\n"
+                 - dana, sent 2026-10-20 (6 days ago)\n"
             ),
             "{out}"
         );
