@@ -28,14 +28,17 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     `{"agent", "status"}` (a `FriendshipActionStatus`, the status strings
     the friendship and block actions have always answered, now typed) or
     `{"agent", "error"}`, with the words a single call would refuse it with.
-    One refused does not stop the rest.
+    One refused does not stop the rest. A status a client does not know reads
+    as `FriendshipActionStatus::Unknown`, so a newer server's answer still
+    parses after its actions were taken.
   - **Client.** `Client::friendship_batch` posts to `POST
     /api/social/friends/batch`. `Client::friendship_action` stays for one
     agent, and refuses an input naming several (`Error::SeveralAgents`).
   - **Seed tool.** One name reads as before ("Friendship action result:
     accepted"); several, as a summary and a line per agent ("ada: accepted").
   - **clap.** `manage_friendship ada bob --action accept`: the derive cannot
-    read a `OneOrMany`, so its `Args` are hand-written in `clap_args`.
+    read a `OneOrMany`, so its `Args` are hand-written in `clap_args`, and
+    refuse more than 50 names.
 
 ## 0.125.0 (2026-10-26)
 

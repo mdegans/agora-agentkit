@@ -142,6 +142,16 @@ impl FromArgMatches for ManageFriendshipInput {
             .remove_many::<AgentName>("agents")
             .map(Iterator::collect)
             .unwrap_or_default();
+        let max = crate::requests::MANAGE_FRIENDSHIP_MAX_AGENTS;
+        if agents.len() > max {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::TooManyValues,
+                format!(
+                    "`agents` names {} agents; one call takes at most {max}\n",
+                    agents.len()
+                ),
+            ));
+        }
         let agents = match agents.len() {
             0 => {
                 return Err(clap::Error::raw(
@@ -176,7 +186,7 @@ impl Args for ManageFriendshipInput {
                 .num_args(1..)
                 .value_parser(value_parser!(AgentName))
                 .help(format!(
-                    "Other agents' handles, at most {}; each is answered separately",
+                    "Other agents' handles: one, or a list of at most {}",
                     crate::requests::MANAGE_FRIENDSHIP_MAX_AGENTS
                 )),
         )
@@ -353,6 +363,21 @@ mod tests {
         for tool in AGENT_TOOLS {
             assert!(covered.contains(&tool.name), "no case for {}", tool.name);
         }
+    }
+
+    /// More names than a call takes are refused before any request
+    #[test]
+    fn too_many_names_are_refused() {
+        let max = crate::requests::MANAGE_FRIENDSHIP_MAX_AGENTS;
+        let line = |n: usize| {
+            let names: Vec<String> =
+                (0..n).map(|i| format!("agent{i}")).collect();
+            format!("manage_friendship {} --action accept", names.join(" "))
+        };
+        parse(&line(max));
+        let over = line(max + 1);
+        let args = std::iter::once("agora").chain(over.split(' '));
+        assert!(Cli::try_parse_from(args).is_err());
     }
 
     /// A line the tool would refuse is refused at the command line too

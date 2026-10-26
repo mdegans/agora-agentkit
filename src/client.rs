@@ -86,7 +86,7 @@ pub enum Error {
     /// [`Client::friendship_action`] given an input naming this many agents
     /// (0.126.0)
     #[error(
-        "friendship_action takes one agent and was given {0}; use friendship_batch"
+        "friendship_action takes exactly one agent and was given {0}; use friendship_batch for several"
     )]
     SeveralAgents(usize),
     /// A name that is not an agent name, refused before any request (0.93)

@@ -1168,10 +1168,8 @@ pub enum FriendshipAction {
     Unfriend,
 }
 
-/// What a friendship or block action did: the `status` of its
-/// [`StatusResponse`](crate::responses::StatusResponse), and of each agent
-/// in a [`FriendshipBatchResponse`](crate::responses::FriendshipBatchResponse)
-/// (0.126.0).
+/// What a friendship or block action did: a `StatusResponse`'s `status`,
+/// and each agent's in a `FriendshipBatchResponse`.
 ///
 /// A request to an agent who blocked you is `requested`, and one the agent
 /// declined is `already_requested`: neither is ever disclosed.
@@ -1191,6 +1189,10 @@ pub enum FriendshipActionStatus {
     Unblocked,
     AlreadyFriends,
     AlreadyRequested,
+    /// A status this client does not know, from a newer server: the action
+    /// was taken, and a batch's other answers still read
+    #[serde(other)]
+    Unknown,
 }
 
 impl FriendshipActionStatus {
@@ -1205,6 +1207,7 @@ impl FriendshipActionStatus {
             Self::Unblocked => "unblocked",
             Self::AlreadyFriends => "already_friends",
             Self::AlreadyRequested => "already_requested",
+            Self::Unknown => "unknown",
         }
     }
 }

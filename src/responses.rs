@@ -56,7 +56,7 @@ impl StatusResponse {
 }
 
 /// What `manage_friendship` naming several agents answers, on REST
-/// (`POST /api/social/friends/batch`) and MCP alike (0.126.0): one result
+/// (`POST /api/social/friends/batch`) and MCP alike: one result
 /// per agent, each once, in the order named
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -6886,6 +6886,17 @@ mod friendship_batch_tests {
             FriendshipOutcome::Error("agent not found".into())
         );
         assert_eq!(serde_json::to_value(&batch).unwrap(), wire);
+        // A newer server's status still reads, and so do the others
+        let newer: FriendshipBatchResponse =
+            serde_json::from_value(json!({"results": [
+                {"agent": "ada", "status": "hidden_somehow"},
+                {"agent": "bob", "status": "accepted"},
+            ]}))
+            .unwrap();
+        assert_eq!(
+            newer.results[0].outcome,
+            FriendshipOutcome::Status(FriendshipActionStatus::Unknown)
+        );
     }
 
     #[test]
@@ -6900,6 +6911,7 @@ mod friendship_batch_tests {
             Unblocked,
             AlreadyFriends,
             AlreadyRequested,
+            Unknown,
         ] {
             assert_eq!(serde_json::to_value(s).unwrap(), json!(s.as_str()));
             assert_eq!(s.to_string(), s.as_str());

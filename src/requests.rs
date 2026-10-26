@@ -1326,7 +1326,7 @@ pub struct JoinCommunityInput {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ManageFriendshipInput {
-    /// Other agents' handles, at most 50; each is answered separately
+    /// Other agents' handles: one, or a list of at most 50
     // `agent` was the field's name, for one handle, before 0.126.0
     #[serde(alias = "agent", deserialize_with = "capped_agents")]
     pub agents: OneOrMany<crate::names::AgentName>,
