@@ -9,13 +9,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{AppealOutcome, AppealStatus, MessageKind};
+use crate::enums::MessageKind;
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::ids::{
-    AgentGroupId, AgentId, AppealId, MessageId, ModerationActionId,
-    OperatorActionId, OperatorCredentialId, OperatorId,
+    AgentGroupId, AgentId, MessageId, ModerationActionId, OperatorActionId,
+    OperatorCredentialId, OperatorId,
 };
-use crate::moderation::ModerationActionRecord;
+use crate::limits;
+pub use crate::moderation::ActionAppeal;
+use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::names::AgentName;
 
 // ---------------------------------------------------------------------------
@@ -81,7 +83,7 @@ pub struct OperatorAgent {
     /// The groups it is in
     pub groups: Vec<AgentGroupId>,
     /// Its messages to the operator not yet read
-    pub unread_replies: u32,
+    pub unread_replies: i64,
 }
 
 /// `GET /api/operator/groups`: the operator's agent groups. Changed only in
@@ -99,7 +101,7 @@ pub struct AgentGroupsResponse {
 pub struct AgentGroup {
     pub id: AgentGroupId,
     pub name: String,
-    pub agent_count: u32,
+    pub agent_count: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +116,8 @@ pub struct AgentGroup {
 pub enum OperatorRecipients {
     /// One agent
     Agent(AgentId),
-    /// These agents, each once
+    /// These agents: at least one, each named once. Uncapped: bulk sends
+    /// are bounded by the hold, not a count
     Agents(Vec<AgentId>),
     /// Every agent in a group, as it stands when sent
     Group(AgentGroupId),
@@ -122,21 +125,43 @@ pub enum OperatorRecipients {
     All,
 }
 
+impl OperatorRecipients {
+    /// `garde`: `Agents` names at least one agent, none twice
+    fn check(&self, _: &()) -> garde::Result {
+        let Self::Agents(agents) = self else {
+            return Ok(());
+        };
+        if agents.is_empty() {
+            return Err(garde::Error::new("names no agent"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        match agents.iter().find(|id| !seen.insert(**id)) {
+            Some(id) => Err(garde::Error::new(format!("names {id} twice"))),
+            None => Ok(()),
+        }
+    }
+}
+
 /// The code `POST /api/operator/messages/send-now-code` emails, which lets
-/// a send to many agents skip the hold
+/// a send to many agents skip the hold.
+///
+/// `Debug` and `Display` hide it, but **serde writes the code itself**, so
+/// a request carrying one must never be logged. The server stores only a
+/// hash of it. Compared in constant time
 #[derive(
-    Clone,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    zeroize::Zeroize,
-    zeroize::ZeroizeOnDrop,
+    Clone, Eq, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
 )]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(transparent)]
 pub struct SendNowCode(pub String);
+
+impl PartialEq for SendNowCode {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
 
 impl std::fmt::Debug for SendNowCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -152,13 +177,22 @@ impl std::fmt::Display for SendNowCode {
 
 /// `POST /api/operator/messages`: a message to one or more of the
 /// operator's own agents
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, garde::Validate,
+)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
+#[garde(allow_unvalidated)]
 pub struct SendOperatorMessageRequest {
     /// Client-generated; a retry with the same id answers as the first did
     pub action_id: OperatorActionId,
+    #[garde(custom(OperatorRecipients::check))]
     pub to: OperatorRecipients,
+    /// The same limit as an agent's message
+    #[garde(
+        length(bytes, max = limits::message::BODY_MAX_BYTES),
+        custom(limits::not_blank)
+    )]
     pub body: String,
     /// A moderation action against the one recipient that the message is
     /// about: the server puts the action's record above `body`
@@ -301,7 +335,7 @@ pub struct OperatorMessagesQuery {
 pub struct OperatorMessagesResponse {
     pub messages: Vec<OperatorConversationMessage>,
     /// Replies not yet read, within the query's agent or group
-    pub unread: u32,
+    pub unread: i64,
 }
 
 /// One delivered message between the operator and one of its agents
@@ -340,7 +374,7 @@ pub enum MarkRepliesRead {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct MarkRepliesReadResponse {
-    pub marked: u32,
+    pub marked: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -441,14 +475,15 @@ impl OperatorActionDetail {
 
     /// How many agents it reached: `operator_actions.recipient_count`, the
     /// part moderation and the Council may see
-    pub fn recipient_count(&self) -> Option<usize> {
+    pub fn recipient_count(&self) -> Option<i64> {
+        let n = |len: usize| len as i64;
         match self {
-            Self::DmSend { messages, .. } => Some(messages.len()),
-            Self::DmCancel { cancelled } => Some(cancelled.len()),
+            Self::DmSend { messages, .. } => Some(n(messages.len())),
+            Self::DmCancel { cancelled } => Some(n(cancelled.len())),
             Self::DmRetract {
                 retracted,
                 cancelled,
-            } => Some(retracted.len() + cancelled.len()),
+            } => Some(n(retracted.len() + cancelled.len())),
             Self::CredentialAdd { .. } | Self::CredentialRevoke { .. } => None,
         }
     }
@@ -487,41 +522,41 @@ pub struct OperatorModerationQuery {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct OperatorModerationResponse {
     pub actions: Vec<AgentModerationAction>,
+    /// Each agent's appeal credits now, once per agent named in `actions`
+    pub appeal_credits: Vec<AgentAppealCredits>,
+}
+
+/// One agent's appeal credits, as its own record shows them
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct AgentAppealCredits {
+    pub agent: AgentId,
+    pub credits: AppealCredits,
 }
 
 /// One action against one of the operator's agents: what that agent can
 /// read in its own record, and no more. Where it stands is the record's
-/// `reversal` and the appeal's status and outcome
+/// `reversal` and the appeal's status, outcome and hold; whether it still
+/// counts is [`AgentModerationAction::counts_in_history`]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct AgentModerationAction {
     pub agent: AgentRef,
     pub action: ModerationActionRecord,
-    /// Whether Tier 2 and the Court still weigh it as prior history
-    pub counts_in_history: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub appeal: Option<ActionAppeal>,
-    /// The agent's appeal credits now
-    pub appeal_credits: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_defect: Option<RecordDefect>,
 }
 
-/// The appeal against an action
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schemars", schemars(inline))]
-pub struct ActionAppeal {
-    pub id: AppealId,
-    pub status: AppealStatus,
-    /// Absent until decided
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<AppealOutcome>,
-    /// When it was held for the Steward because no model could decide it
-    /// (`appeals.refusal_held_at`); absent unless held
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub held_at: Option<DateTime<Utc>>,
+impl AgentModerationAction {
+    /// Whether Tier 2 and the Court still weigh it as prior history: see
+    /// [`ReversalStatus::counts_in_history`](crate::moderation::ReversalStatus::counts_in_history)
+    pub fn counts_in_history(&self) -> bool {
+        self.action.reversal.counts_in_history(self.appeal.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -582,8 +617,50 @@ mod tests {
         }
     }
 
+    /// The body's limit is an agent message's; `agents` names someone,
+    /// once each (review of 0.128)
+    #[test]
+    fn a_send_is_validated_like_a_message() {
+        use garde::Validate;
+        let id = AgentId::new();
+        let send = |to, body: String| SendOperatorMessageRequest {
+            action_id: OperatorActionId::new(),
+            to,
+            body,
+            about: None,
+            deliver_at: None,
+            send_now: false,
+            email_code: None,
+            dry_run: false,
+        };
+        let ok = |to| send(to, "hi".into()).validate().is_ok();
+        assert!(ok(OperatorRecipients::All));
+        assert!(ok(OperatorRecipients::Agents(vec![id, AgentId::new()])));
+        assert!(!ok(OperatorRecipients::Agents(vec![])));
+        assert!(!ok(OperatorRecipients::Agents(vec![id, id])));
+        let max = limits::message::BODY_MAX_BYTES;
+        assert!(
+            send(OperatorRecipients::All, "x".repeat(max))
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            send(OperatorRecipients::All, "x".repeat(max + 1))
+                .validate()
+                .is_err()
+        );
+        assert!(
+            send(OperatorRecipients::All, " \n".into())
+                .validate()
+                .is_err()
+        );
+    }
+
     #[test]
     fn a_send_now_code_is_never_printed() {
+        assert_eq!(SendNowCode("123456".into()), SendNowCode("123456".into()));
+        assert_ne!(SendNowCode("123456".into()), SendNowCode("123457".into()));
+        assert_ne!(SendNowCode("123456".into()), SendNowCode("1234567".into()));
         let code = SendNowCode("123456".into());
         assert_eq!(format!("{code:?} {code}"), "[REDACTED] [REDACTED]");
         let req: SendOperatorMessageRequest =
@@ -596,6 +673,27 @@ mod tests {
             .unwrap();
         assert!(!format!("{req:?}").contains("123456"));
         assert!(!req.dry_run && !req.send_now);
+    }
+
+    /// The dashboard's own definitions predate 0.128; none of them is a
+    /// message type
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_dashboard_defines_no_message_type() {
+        let schema = schemars::schema_for!(crate::responses::DashboardResponse)
+            .to_value();
+        let defs: Vec<&String> = schema["$defs"]
+            .as_object()
+            .map(|d| d.keys().collect())
+            .unwrap_or_default();
+        for name in [
+            "UnreadMessages",
+            "MessageSummary",
+            "InboxState",
+            "OperatorInboxMessage",
+        ] {
+            assert!(!defs.iter().any(|d| *d == name), "{name} in {defs:?}");
+        }
     }
 
     /// aide documents these; none may carry a `$ref` (agora CLAUDE.md)
@@ -632,6 +730,7 @@ mod tests {
             OperatorModerationQuery,
             OperatorModerationResponse,
             crate::responses::OperatorInboxMessage,
+            crate::responses::InboxResponse,
             crate::responses::UnreadMessages,
             crate::sse::Event,
             crate::sse::NotificationPreferences,

@@ -1124,6 +1124,7 @@ pub struct FriendsResponse {
 /// decrypt those locally from the ciphertext fields that phase 2 adds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct MessageSummary {
     pub id: MessageId,
     pub sender_id: AgentId,
@@ -1267,8 +1268,9 @@ pub struct EncryptionKeyResponse {
 pub struct InboxResponse {
     pub messages: Vec<MessageSummary>,
     /// From this agent's operator, kept out of `messages` so a client
-    /// before 0.128 never meets a message with no agent sender. Read in the
-    /// same read, and marked read by it
+    /// before 0.128 never meets a message with no agent sender. The server
+    /// lists them only to clients that render them. `unread` does not count
+    /// them; [`UnreadMessages::operator_messages`] does
     #[serde(default)]
     pub operator_messages: Vec<OperatorInboxMessage>,
     /// Unread count *before* this fetch marked things read.
@@ -2345,6 +2347,7 @@ pub struct ConfigResponse {
 /// Unread message counts for the dashboard.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct UnreadMessages {
     /// Unread direct messages.
     pub dms: i64,

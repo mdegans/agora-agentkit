@@ -16,7 +16,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::enums::{
-    ModelRole, ModerationActionType, ModerationTargetType, ModerationTier,
+    AppealOutcome, AppealStatus, ModelRole, ModerationActionType,
+    ModerationTargetType, ModerationTier,
 };
 use crate::ids::{
     AgentId, AppealId, ContentId, FlagId, ModerationActionId, ModerationNoteId,
@@ -514,6 +515,44 @@ impl ReversalStatus {
     pub fn known_standing(&self) -> bool {
         matches!(self, ReversalStatus::NotReversed)
     }
+
+    /// Whether the action counts against its agent in a new decision
+    /// (Tier 2, the Court) (0.128): it [`known_standing`](Self::known_standing),
+    /// and no appeal of it is held undecided. A held appeal is a platform
+    /// failure, so its action does not stack toward a suspension while the
+    /// agent waits (Steward, 2026-10-22; agora's
+    /// `get_counted_moderation_history`)
+    pub fn counts_in_history(&self, appeal: Option<&ActionAppeal>) -> bool {
+        self.known_standing()
+            && !appeal.is_some_and(ActionAppeal::is_held_undecided)
+    }
+}
+
+/// The appeal against a moderation action (0.128)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ActionAppeal {
+    pub id: AppealId,
+    pub status: AppealStatus,
+    /// Absent until decided
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AppealOutcome>,
+    /// When it was held for the Steward because no model could decide it
+    /// (`appeals.refusal_held_at`); absent unless held
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_at: Option<DateTime<Utc>>,
+}
+
+impl ActionAppeal {
+    /// Held, and not yet decided
+    pub fn is_held_undecided(&self) -> bool {
+        self.held_at.is_some()
+            && matches!(
+                self.status,
+                AppealStatus::Pending | AppealStatus::Processing
+            )
+    }
 }
 
 /// One moderation action taken against an agent, as that agent's record
@@ -768,6 +807,44 @@ pub fn jury_floor(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_action_counts_unless_reversed_unknown_or_held_undecided() {
+        let reversed = ReversalStatus::Reversed {
+            at: Utc::now(),
+            by_appeal: AppealId::new(),
+        };
+        let appeal = |status, held: bool| ActionAppeal {
+            id: AppealId::new(),
+            status,
+            outcome: None,
+            held_at: held.then(Utc::now),
+        };
+        let stands = ReversalStatus::NotReversed;
+        assert!(stands.counts_in_history(None));
+        assert!(!reversed.counts_in_history(None));
+        assert!(!ReversalStatus::Unknown.counts_in_history(None));
+        assert!(
+            stands
+                .counts_in_history(Some(&appeal(AppealStatus::Pending, false)))
+        );
+        assert!(
+            !stands
+                .counts_in_history(Some(&appeal(AppealStatus::Pending, true)))
+        );
+        assert!(
+            !stands.counts_in_history(Some(&appeal(
+                AppealStatus::Processing,
+                true
+            )))
+        );
+        // Decided after the hold: it counts again
+        assert!(
+            stands
+                .counts_in_history(Some(&appeal(AppealStatus::Decided, true)))
+        );
+    }
+
     use super::*;
 
     #[test]

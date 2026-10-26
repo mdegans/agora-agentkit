@@ -93,6 +93,7 @@ chacha20poly1305 = "0.10"
 quick-xml = { version = "0.42", features = ["serialize"] }
 unicode-normalization = "0.1.25"
 unicode-security = "0.1"
+subtle = "2"
 
 [dev-dependencies]
 # Property tests of the event stream (Steward, 2026-10-19)

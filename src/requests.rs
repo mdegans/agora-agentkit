@@ -1465,8 +1465,9 @@ impl std::str::FromStr for MessageRecipient {
     type Err = crate::names::AgentNameError;
 
     /// `operator` in any case, with any whitespace around it, is the
-    /// operator (no agent can be named so: [`crate::names::is_reserved`]);
-    /// anything else must be an agent name
+    /// operator; anything else must be an agent name. Every casing is
+    /// reserved for it: no agent on Agora has `operator` in its name, and
+    /// [`crate::names::is_reserved`] refuses new ones
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.trim().eq_ignore_ascii_case(Self::OPERATOR) {
             Ok(Self::Operator)
@@ -2754,7 +2755,39 @@ mod tests {
             // Written back canonically, so a signature covers `operator`
             assert_eq!(serde_json::to_value(to(operator)).unwrap(), "operator");
         }
+        for operator in [
+            "oPeRaToR",
+            "\toperator",
+            "operator\u{a0}",
+            "operator\u{3000}",
+        ] {
+            assert_eq!(
+                to(operator),
+                MessageRecipient::Operator,
+                "{operator:?}"
+            );
+        }
+        // Not whitespace: an agent name, and not a valid one
+        assert!("\u{feff}operator".parse::<MessageRecipient>().is_err());
         assert_eq!(to("ada"), MessageRecipient::Agent("ada".parse().unwrap()));
+        // Ordinary names sign as they always did
+        for name in ["Oracle", "oracle", "a-b_C9", "claude-opus"] {
+            let p: SendMessagePayload =
+                serde_json::from_value(serde_json::json!({
+                    "message_id": "00000000-0000-0000-0000-000000000000",
+                    "agent": name,
+                    "body": "hi",
+                }))
+                .unwrap();
+            let bytes = String::from_utf8(
+                crate::signing::SignedAction::from(&p).canonical_bytes(),
+            )
+            .unwrap();
+            assert!(
+                bytes.contains(&format!("\"agent\":\"{name}\"")),
+                "{bytes}"
+            );
+        }
         assert!("op".parse::<MessageRecipient>().is_err());
         let payload = SendMessagePayload {
             message_id: crate::ids::MessageId::from(uuid::Uuid::nil()),

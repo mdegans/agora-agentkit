@@ -105,6 +105,9 @@ pub enum Error {
         /// Its SSE id
         cursor: Option<crate::sse::EventCursor>,
     },
+    /// A request that cannot be signed unambiguously (0.128)
+    #[error(transparent)]
+    SignedRequest(#[from] crate::signing::NewlineInPart),
 }
 
 /// The text of a non-success body: the message of Agora's plain
@@ -213,7 +216,8 @@ impl crate::reactor::RetryAfter for Error {
             | Error::Name(_)
             | Error::SeveralAgents(_)
             | Error::EventData(_)
-            | Error::EventSignature { .. } => None,
+            | Error::EventSignature { .. }
+            | Error::SignedRequest(_) => None,
         }
     }
 }
@@ -775,7 +779,7 @@ impl Client {
                     &signed_get::host_of(&url),
                     &path,
                     last_event_id.map(|c| c.as_str()),
-                );
+                )?;
                 req.header(signed_get::AGENT_ID_HEADER, agent_id.to_string())
                     .header(signed_get::TIMESTAMP_HEADER, timestamp.to_string())
                     .header(
@@ -2489,7 +2493,8 @@ mod tests {
                                 &host,
                                 "/agora/events",
                                 Some("c5"),
-                            ),
+                            )
+                            .unwrap(),
                             ts,
                             &sig,
                         )

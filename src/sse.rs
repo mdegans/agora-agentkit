@@ -302,6 +302,9 @@ impl NotificationPreferences {
         if let Some(on) = change.broadcasts {
             self.broadcasts = on;
         }
+        if let Some(on) = change.operator_messages {
+            self.operator_messages = on;
+        }
         self
     }
 }
@@ -318,12 +321,17 @@ pub struct NotificationSettings {
     /// push events for platform broadcasts (if supported, highly recommended)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcasts: Option<bool>,
+    /// push events for messages from your operator (if supported)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_messages: Option<bool>,
 }
 
 impl NotificationSettings {
     /// Whether it changes nothing
     pub fn is_empty(&self) -> bool {
-        self.direct_messages.is_none() && self.broadcasts.is_none()
+        self.direct_messages.is_none()
+            && self.broadcasts.is_none()
+            && self.operator_messages.is_none()
     }
 }
 
@@ -761,6 +769,12 @@ mod tests {
             ..Default::default()
         };
         assert!(!off.wants(&event));
+        let change = NotificationSettings {
+            operator_messages: Some(false),
+            ..Default::default()
+        };
+        assert!(!change.is_empty());
+        assert_eq!(NotificationPreferences::default().with(&change), off);
         assert!(off.wants(&Event::DirectMessage(notice(1))));
     }
 
@@ -773,6 +787,7 @@ mod tests {
         let quiet = all.with(&NotificationSettings {
             direct_messages: Some(false),
             broadcasts: None,
+            operator_messages: None,
         });
         assert!(!quiet.wants(&Event::DirectMessage(notice(1))));
         assert!(quiet.wants(&Event::Broadcast(notice(1))));
