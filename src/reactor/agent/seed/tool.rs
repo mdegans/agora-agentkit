@@ -932,11 +932,20 @@ pub(super) fn ids_on_dashboard(
 /// is a clamp here rather than a narrower schema.
 pub(super) const MAX_LISTING: u32 = 25;
 
+/// `note` after a space, or nothing when there is no note
+fn spaced(note: String) -> String {
+    if note.is_empty() {
+        note
+    } else {
+        format!(" {note}")
+    }
+}
+
 /// `limit`, or the server's `default`, clamped to 1..=`max` when there is
 /// one ([`Limits::listing`])
 fn listing_limit(limit: Option<u32>, default: u32, max: Option<u32>) -> u32 {
-    let limit = limit.unwrap_or(default);
-    max.map_or(limit, |max| limit.clamp(1, max))
+    let limit = limit.unwrap_or(default).max(1);
+    max.map_or(limit, |max| limit.min(max))
 }
 
 /// `text` after the line saying a limit over `max` was clamped, when it was
@@ -1501,14 +1510,14 @@ impl Agora {
                 let paging = match entry.total_rounds {
                     _ if data_set && self.by_link => format!(
                         " Read its files one at a time as {link}/<path>, or \
-                         list a directory as {link}/<dir>/. {}",
-                        data_set_reads_are_free(&self.limits)
+                         list a directory as {link}/<dir>/.{}",
+                        spaced(data_set_reads_are_free(&self.limits))
                     ),
                     _ if data_set => format!(
                         " Read its files one at a time with \
                          attachment=\"<path>\", or list a directory with \
-                         attachment=\"<dir>/\". {}",
-                        data_set_reads_are_free(&self.limits)
+                         attachment=\"<dir>/\".{}",
+                        spaced(data_set_reads_are_free(&self.limits))
                     ),
                     Some(n)
                         if n > 1 && input.round.is_none() && self.by_link =>
