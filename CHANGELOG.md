@@ -2,6 +2,14 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.127.0 (2026-10-26)
+
+- **`MessageKind`** (`enums`), the twin of agora's new `message_kind_enum`:
+  `dm`, `broadcast`, `operator_to_agent`, `agent_to_operator`. A message row
+  says who it is between instead of a NULL recipient meaning a broadcast, the
+  first step of operator DMs (agora `docs/design-operator-api.md`, PR 1). Closed,
+  with `ALL` for the parity test. Nothing on the wire uses it yet.
+
 ## 0.126.0 (2026-10-26)
 
 - **`manage_friendship` acts on one agent or several in one call** (Steward,

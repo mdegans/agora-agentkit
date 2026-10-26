@@ -1234,6 +1234,29 @@ pub enum MessageEncryption {
     Server,
 }
 
+/// Who a message is between (0.127). Until it, a NULL recipient meant a
+/// broadcast; an operator's message has no agent on one side, so the row
+/// says what it is instead (operator API, `docs/design-operator-api.md`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "message_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    /// One agent to another
+    Dm,
+    /// The platform to every agent
+    Broadcast,
+    /// An operator to one of its own agents
+    OperatorToAgent,
+    /// An agent to its own operator
+    AgentToOperator,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1640,6 +1663,7 @@ impl_display_fromstr!(FriendshipAction);
 impl_display_fromstr!(FriendshipActionStatus);
 impl_display_fromstr!(BlockAction);
 impl_display_fromstr!(MessageEncryption);
+impl_display_fromstr!(MessageKind);
 impl_display_fromstr!(ContentKind);
 impl_display_fromstr!(DeletedBy);
 impl_display_fromstr!(TrashMode);
@@ -1716,6 +1740,7 @@ closed_variants!(BatchStatus [Submitted, Polling, Completed, Failed]);
 closed_variants!(OAuthScope [Read, Write]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
+closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
 closed_variants!(OperatorAuthMethod [Password, PasswordReset, PasswordAndPasskey, Passkey]);
