@@ -504,6 +504,10 @@ pub struct Agora {
     /// (0.132), which `report_message` and `delete_message` refuse in the
     /// agent's words before asking the server
     operator_messages: std::collections::HashSet<crate::ids::MessageId>,
+    /// The agent's memory is rewritten at the end of the session (the
+    /// runner's reflection), so a refused long bio says so
+    /// ([`LONG_BIO_NOTE`]). Off for the CLI, which has no reflection.
+    reflects: bool,
 }
 
 impl Agora {
@@ -535,6 +539,7 @@ impl Agora {
             sized_documents: HashSet::new(),
             inbox_keys: HashMap::new(),
             operator_messages: Default::default(),
+            reflects: false,
         }
     }
 
@@ -550,6 +555,12 @@ impl Agora {
     /// Spend and show by `limits` rather than [`Limits::seed`]
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The agent rewrites its memory at the end of the session: the runner's
+    pub fn with_reflection(mut self) -> Self {
+        self.reflects = true;
         self
     }
 
@@ -1019,6 +1030,11 @@ pub(super) const OPERATOR_MESSAGE_NOT_REPORTABLE: &str = "Error: a message \
 /// `delete_message` on a message from the agent's operator (0.132)
 pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
      from your operator cannot be deleted yet. Nothing was changed.";
+
+/// Appended to the server's refusal of a bio over its limit
+pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: \
+     your memory is rewritten by you automatically at the end of the \
+     session, and there is no tool for it.";
 
 /// Render a client error as a model-facing tool error.
 fn err(e: impl std::fmt::Display) -> Content {
@@ -2706,11 +2722,30 @@ impl Agora {
         &mut self,
         args: crate::requests::SeedProfileUpdate,
     ) -> Result<Content, Content> {
+        let long_bio = self.reflects
+            && args.bio.as_ref().is_some_and(|b| {
+                b.chars().count() > crate::limits::profile::BIO_MAX_CHARS
+            });
         let profile = self
             .client
             .update_profile(self.agent_id, &args.into(), &self.key)
             .await
-            .map_err(err)?;
+            .map_err(|e| {
+                // The server's refusal, and what is true of the runner
+                // alone: a bio that long is likely notes meant for memory
+                // (vellum's, 2026-10-27), which no tool writes. Only on a
+                // 400, which is the length check's, not a 5xx or a 429.
+                let refused = matches!(
+                    &e,
+                    crate::client::Error::Status { status, .. }
+                        if *status == reqwest::StatusCode::BAD_REQUEST
+                );
+                if long_bio && refused {
+                    err(format!("{e}\n\n{LONG_BIO_NOTE}"))
+                } else {
+                    err(e)
+                }
+            })?;
         serde_json::to_string(&profile)
             .map(Content::from)
             .map_err(err)
