@@ -157,3 +157,117 @@ async fn empty_queue_changes_nothing() {
     let control = agent.handle(message(StopReason::EndTurn)).await.unwrap();
     assert_eq!(control, Control::Done(Outcome::Complete));
 }
+
+/// Fails its first `failures` requests (unreachable, or answered with a
+/// wait), pushing `note` on the first; records every request it is sent
+struct PushWhileHeld {
+    mailbox: Mailbox,
+    note: Option<&'static str>,
+    failures_left: AtomicUsize,
+    unreachable: bool,
+    sent: Arc<Mutex<Vec<String>>>,
+}
+
+impl PushWhileHeld {
+    fn new(
+        mailbox: Mailbox,
+        note: Option<&'static str>,
+        unreachable: bool,
+    ) -> Self {
+        Self {
+            mailbox,
+            note,
+            failures_left: AtomicUsize::new(2),
+            unreachable,
+            sent: Arc::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Inference for PushWhileHeld {
+    type Error = TestError;
+
+    // `fetch_update` is `try_update` from Rust 1.99, which 1.98 lacks
+    #[allow(deprecated)]
+    async fn infer<P>(&self, prompt: P) -> Result<response::Message, TestError>
+    where
+        P: Serialize + Send,
+    {
+        let first = self.sent.lock().unwrap().is_empty();
+        self.sent
+            .lock()
+            .unwrap()
+            .push(serde_json::to_string(&prompt).unwrap());
+        let failing = self
+            .failures_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                n.checked_sub(1)
+            })
+            .is_ok();
+        if !failing {
+            return Ok(message(StopReason::EndTurn));
+        }
+        if let (true, Some(note)) = (first, self.note) {
+            self.mailbox.send(note, vec![Role::User]).unwrap();
+        }
+        Err(if self.unreachable {
+            TestError::Unreachable
+        } else {
+            TestError::Transient(Duration::from_millis(1))
+        })
+    }
+
+    async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
+        Ok(offered_models())
+    }
+}
+
+/// Drive a fresh [`NotifyAgent`] through a [`PushWhileHeld`] holding its
+/// mailbox, holding on unreachable, and return the requests it was sent
+async fn sent_while_held(
+    note: Option<&'static str>,
+    unreachable: bool,
+) -> Vec<String> {
+    let agent = notify_agent();
+    let inference =
+        PushWhileHeld::new(agent.mailbox.clone(), note, unreachable);
+    let sent = inference.sent.clone();
+    let mut reactor: Reactor<_, _, NotifyAgent> =
+        Reactor::new(inference, MemStore::default(), vec![agent])
+            .with_unreachable_hold(Duration::from_millis(1));
+    let report = reactor.run().await.unwrap();
+    assert_eq!(report.done, 1, "{:?}", report.errors);
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3, "two failures, then the response");
+    sent
+}
+
+/// A push that arrives while the endpoint can't be reached is seated before
+/// the next attempt, not after the response (S2): the re-sent request
+/// carries it, the one already sent does not, and it is seated once
+#[tokio::test]
+async fn a_push_while_held_enters_the_next_attempt() {
+    let sent = sent_while_held(Some("arrived while held"), true).await;
+    assert!(!sent[0].contains("arrived while held"), "{}", sent[0]);
+    assert!(sent[1].contains("arrived while held"), "{}", sent[1]);
+    assert!(sent[1].contains("[notification: test_tool]"), "{}", sent[1]);
+    assert_eq!(sent[2].matches("arrived while held").count(), 1);
+}
+
+/// The same for a retry the endpoint asked for (a 429/529 with a wait)
+#[tokio::test]
+async fn a_push_during_a_retry_wait_enters_the_retry() {
+    let sent = sent_while_held(Some("arrived during the wait"), false).await;
+    assert!(!sent[0].contains("arrived during the wait"), "{}", sent[0]);
+    assert!(sent[1].contains("arrived during the wait"), "{}", sent[1]);
+}
+
+/// With nothing pushed, every re-attempt sends the very same request: the
+/// extra `on_turn` changes nothing, markers included, when nothing arrived
+#[tokio::test]
+async fn a_retry_with_nothing_new_resends_the_same_bytes() {
+    let sent = sent_while_held(None, true).await;
+    assert_eq!(sent[0], sent[1]);
+    assert_eq!(sent[1], sent[2]);
+}

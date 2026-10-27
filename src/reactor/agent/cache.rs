@@ -106,10 +106,26 @@ fn windowed(
         let Some(m) = anchor.checked_sub(2 * k) else {
             break;
         };
-        // An already-marked message keeps its marker (and TTL);
-        // `Content::cache_with` marks the last cacheable block.
-        if !prompt.messages[m].content.has_cache() {
-            prompt.messages[m].content.cache_with(cache_control.clone());
+        // An already-marked message keeps its marker (and TTL), moved to
+        // its last block if blocks were seated after it (a notification
+        // merged into the tail before a retry, say), so the cached prefix
+        // covers them. `Content::cache_with` marks the last cacheable block.
+        let content = &mut prompt.messages[m].content;
+        match content.iter().rposition(|b| b.cache_control().is_some()) {
+            None => {
+                content.cache_with(cache_control.clone());
+            }
+            Some(at) if at + 1 < content.len() => {
+                let kept = content[at]
+                    .cache_control()
+                    .cloned()
+                    .expect("the block rposition found carries one");
+                let last = content.len() - 1;
+                if content[last].cache_with(kept) {
+                    content[at].uncache();
+                }
+            }
+            Some(_) => {}
         }
         tail.insert(m);
     }
@@ -211,7 +227,7 @@ pub fn divergence(prev: &Prompt, next: &Prompt) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use misanthropic::prompt::message::Role;
+    use misanthropic::prompt::message::{Content, Role};
 
     fn quirks(f: impl FnOnce(&mut Quirks)) -> Quirks {
         let mut q = Quirks::default();
@@ -339,6 +355,87 @@ mod tests {
         roll_breakpoints(&Quirks::default(), &mut prompt);
         assert_eq!(marked(&prompt), first);
         assert!(total_markers(&prompt) <= MAX_CACHE_CONTROLS_PER_REQUEST);
+    }
+
+    /// A notification merged into the rolled tail (a retry's seat) moves the
+    /// tail's marker onto it, keeping its TTL; the message still carries
+    /// exactly one, and the budget holds
+    #[test]
+    fn a_block_seated_after_the_tail_marker_takes_it() {
+        let mut prompt = session(2);
+        roll_breakpoints(&Quirks::default(), &mut prompt);
+        let tail = prompt.messages.len() - 1;
+        let before = total_markers(&prompt);
+        prompt.messages[tail].extend(Content::from("[notification: x]"));
+        prompt.messages[tail].extend(Content::from("New message 1a2b3c4d."));
+        roll_breakpoints(&Quirks::default(), &mut prompt);
+
+        let content = &prompt.messages[tail].content;
+        let at: Vec<usize> = content
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.cache_control().is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at, vec![content.len() - 1], "{content:?}");
+        assert_eq!(
+            content.last().unwrap().cache_control(),
+            Some(&CacheControl::one_hour())
+        );
+        assert_eq!(total_markers(&prompt), before);
+    }
+
+    /// A 5-minute marker moved within its message stays 5-minute: the TTL
+    /// is the marker's, not the roll's
+    #[test]
+    fn a_moved_marker_keeps_its_ttl() {
+        let mut prompt = session(1);
+        let tail = prompt.messages.len() - 1;
+        prompt.messages[tail]
+            .content
+            .cache_with(CacheControl::ephemeral());
+        prompt.messages[tail].extend(Content::from("later"));
+        roll_breakpoints(&Quirks::default(), &mut prompt);
+        let content = &prompt.messages[tail].content;
+        assert_eq!(content[0].cache_control(), None);
+        assert_eq!(
+            content.last().unwrap().cache_control(),
+            Some(&CacheControl::ephemeral())
+        );
+    }
+
+    proptest::proptest! {
+        /// Rounds with notifications merged into the tail at random points,
+        /// rolled before each send and again on retries: never more than 4
+        /// markers, never more than one in a message, and the newest user
+        /// turn's marker always on its last block
+        #[test]
+        fn notifications_at_random_points_keep_the_budget(
+            plan in proptest::collection::vec((0usize..3, proptest::bool::ANY), 1..50)
+        ) {
+            let q = Quirks::default();
+            let mut prompt = session(0);
+            for (i, (notes, retry)) in plan.into_iter().enumerate() {
+                prompt.push_message((Role::Assistant, format!("asst {i}"))).unwrap();
+                prompt.push_message((Role::User, format!("results {i}"))).unwrap();
+                roll_breakpoints(&q, &mut prompt);
+                let tail = prompt.messages.len() - 1;
+                for n in 0..notes {
+                    prompt.messages[tail].extend(Content::from(format!("note {i}.{n}")));
+                    if retry {
+                        roll_breakpoints(&q, &mut prompt);
+                    }
+                }
+                roll_breakpoints(&q, &mut prompt);
+                proptest::prop_assert!(total_markers(&prompt) <= MAX_CACHE_CONTROLS_PER_REQUEST);
+                for m in &prompt.messages {
+                    let n = m.content.iter().filter(|b| b.cache_control().is_some()).count();
+                    proptest::prop_assert!(n <= 1, "{n} markers in one message");
+                }
+                let last = &prompt.messages[tail].content;
+                proptest::prop_assert!(last.last().unwrap().cache_control().is_some());
+            }
+        }
     }
 
     #[test]

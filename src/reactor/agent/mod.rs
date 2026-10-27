@@ -32,19 +32,16 @@ fn boxed<E: std::error::Error + Send + Sync + 'static>(
 
 /// Seat `content` as the trailing user turn: a new message after an
 /// assistant turn, or new blocks on the trailing user turn (turn order
-/// forbids two adjacent), never a change to a block already there
+/// forbids two adjacent), never a change to a block already there.
+/// [`Prompt::seat`] does the placing, so a merge that would put a tool result
+/// behind other content is refused rather than sent
 pub fn seat_user(
     prompt: &mut Prompt,
     content: impl Into<Content>,
 ) -> Result<(), TurnOrderError> {
-    let content = content.into();
-    match prompt.messages.last_mut() {
-        Some(last) if last.role == Role::User => {
-            last.extend(content);
-            Ok(())
-        }
-        _ => prompt.push_message((Role::User, content)).map(|_| ()),
-    }
+    prompt
+        .seat((Role::User, content.into()), &mut None)
+        .map(|_| ())
 }
 
 /// Seat a `reply` that can't be used (clipped, unparseable, a tool call
