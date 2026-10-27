@@ -1562,6 +1562,19 @@ pub struct GetInboxInput {
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
+    /// That the client shows the inbox's operator section (0.132), set by
+    /// the client, never the model (not in the tool schema). The server
+    /// lists, and marks read, the operator's messages only to a client that
+    /// says so: one built before it would have them marked read unseen.
+    /// Without it the inbox counts them (`operator_unread`) and warns. Sent
+    /// only when set, so a request without it reads as before; a server
+    /// before 0.132 refuses it (`deny_unknown_fields`), so a client that
+    /// sets it needs the server's step 6. Not in the signed payload, as
+    /// `limit`
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    #[cfg_attr(feature = "clap", arg(skip))]
+    pub operator_section: bool,
 }
 
 /// Read (no arguments) or change your settings
@@ -4024,7 +4037,10 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<GetInboxInput>(json!({"limit": "10"}))
                 .unwrap(),
-            GetInboxInput { limit: Some(10) }
+            GetInboxInput {
+                limit: Some(10),
+                ..Default::default()
+            }
         );
         rejects::<ReportMessageInput>(
             "ReportMessageInput",

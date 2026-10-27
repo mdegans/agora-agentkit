@@ -2347,6 +2347,11 @@ impl Agora {
         let limit = args
             .limit
             .map(|n| n.clamp(1, crate::responses::InboxResponse::UNREAD_MAX));
+        // This client renders the operator's section (0.132)
+        let args = GetInboxInput {
+            operator_section: true,
+            ..args
+        };
         let mut inbox = self
             .client
             .get_inbox(self.agent_id, &self.key, args)

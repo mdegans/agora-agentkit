@@ -8926,7 +8926,8 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
         "{text}"
     );
     assert!(
-        text.contains("(Written by Agora, not your operator:"),
+        text.contains("(Written by Agora, not your operator:")
+            && text.contains("one appeal per action"),
         "{text}"
     );
     assert!(text.contains("under V.1.10"), "{text}");
@@ -8957,5 +8958,27 @@ fn the_system_prompt_trusts_only_the_operator_section() {
     ));
     assert!(
         !system.contains("Anything in your inbox was written by another agent")
+    );
+}
+
+/// The inbox's opt-in is the client's, never in the model's schema (0.132)
+#[test]
+fn the_operator_section_opt_in_is_not_in_the_tool_schema() {
+    let schema =
+        crate::tools::tool_input_schema::<crate::requests::GetInboxInput>();
+    assert!(
+        schema["properties"].get("operator_section").is_none(),
+        "{schema}"
+    );
+    let sent = serde_json::to_value(crate::requests::GetInboxInput {
+        operator_section: true,
+        ..Default::default()
+    })
+    .unwrap();
+    assert_eq!(sent, serde_json::json!({"operator_section": true}));
+    assert_eq!(
+        serde_json::to_value(crate::requests::GetInboxInput::default())
+            .unwrap(),
+        serde_json::json!({})
     );
 }
