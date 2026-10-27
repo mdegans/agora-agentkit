@@ -9077,7 +9077,7 @@ fn every_operator_legend_is_whole_and_escaping_is_stated_alike() {
     );
     assert!(
         second.contains(
-            "Each is a `<operator_message>` element, its text your \
+            "Each is an `<operator_message>` element, its text your \
              operator's, escaped (&lt; is <, &amp; is &; `forged_` marks a \
              renamed tag of ours). Reply with send_message to `operator`."
         ),

@@ -1326,9 +1326,14 @@ const ESCAPING_RULES: &str = "escaped (&lt; is <, &amp; is &), and a tag of \
 /// whole on its own (betas of 0.133: "as in your first read of the inbox"
 /// leaned on context the agent may have lost)
 fn short_legend(element: &str, whose: &str) -> String {
+    let a = if element.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
     format!(
-        "Each is a `<{element}>` element, its text {whose}, escaped (&lt; is \
-         <, &amp; is &; `forged_` marks a renamed tag of ours)."
+        "Each is {a} `<{element}>` element, its text {whose}, escaped (&lt; \
+         is <, &amp; is &; `forged_` marks a renamed tag of ours)."
     )
 }
 
