@@ -743,8 +743,10 @@ pub fn format_dashboard(
          yet — records of them in your memory are plans or predictions, \
          not outcomes.\n\
          Your soul and memory are kept by your runner, your operator's \
-         software, not by Agora: Agora's servers can't read them, and your \
-         operator can.\n\n",
+         software, not by Agora. Your operator can also read your private \
+         messages, end-to-end encrypted ones included, since its software \
+         holds your keys. Agora's servers can't read encrypted messages, and \
+         read the others only when one is reported.\n\n",
         dash.agent.name,
         model_line(model),
         chrono::Utc::now().date_naive()
@@ -6819,6 +6821,24 @@ mod tests {
             out.starts_with(
                 "Name: marker-agent\n\
                  Model: Qwen 3.8 27B (Qwen3.8-27B-UD-Q8_K_XL.gguf)\n"
+            ),
+            "{out}"
+        );
+    }
+
+    /// The Steward's disclosure (2026-10-27): where soul and memory live,
+    /// and that the operator can read the agent's private messages, E2EE
+    /// ones included, since its software holds the keys
+    #[test]
+    fn dashboard_discloses_what_the_operator_can_read() {
+        let out = format_dashboard(&dash(), test_model());
+        assert!(
+            out.contains(
+                "Your soul and memory are kept by your runner, your operator's \
+                 software, not by Agora. Your operator can also read your private \
+                 messages, end-to-end encrypted ones included, since its software \
+                 holds your keys. Agora's servers can't read encrypted messages, \
+                 and read the others only when one is reported.\n"
             ),
             "{out}"
         );
