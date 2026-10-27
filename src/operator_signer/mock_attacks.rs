@@ -745,16 +745,17 @@ async fn e1_names() {
     // f9's issuer encoded PrintableString while the root's subject is UTF8.
     let root = MockRootCa::generate();
     let (device, slot, real) = setup(&root).await;
-    let st = device.lock();
-    let f9 = issue(
-        1,
-        &printable(&root.name),
-        &device_name(),
-        st.attestation_key.spki(),
-        f9_extensions(),
-        &root.key,
-    );
-    drop(st);
+    let f9 = {
+        let st = device.lock();
+        issue(
+            1,
+            &printable(&root.name),
+            &device_name(),
+            st.attestation_key.spki(),
+            f9_extensions(),
+            &root.key,
+        )
+    };
     let r = MockAttestationVerifier::new(&root).verify(
         &MockPivAttestation {
             slot_certificate: real.slot_certificate.clone(),
@@ -769,7 +770,35 @@ async fn e1_names() {
     let key = IssuerKey::EcdsaP256(random_p256());
     let pname = printable(&Name::from_str(MOCK_ROOT_SUBJECT).unwrap());
     let cert = issue(1, &pname, &pname, key.spki(), ca_extensions(), &key);
-    // The Yubico verifier refuses any anchor whose key isn't pinned.
+    // f9's subject re-encoded as a PrintableString is not the device
+    // subject, which is compared as DER.
+    let root = MockRootCa::generate();
+    let (device, slot, real) = setup(&root).await;
+    let f9 = {
+        let st = device.lock();
+        issue(
+            1,
+            &root.name,
+            &printable(&device_name()),
+            st.attestation_key.spki(),
+            f9_extensions(),
+            &root.key,
+        )
+    };
+    let r = MockAttestationVerifier::new(&root).verify(
+        &MockPivAttestation {
+            slot_certificate: real.slot_certificate.clone(),
+            device_chain: vec![f9],
+        },
+        &slot.public_key(),
+    );
+    assert!(
+        matches!(r, Err(AttestationError::NotADeviceCertificate { index: 1 })),
+        "{r:?}"
+    );
+
+    // The Yubico verifier refuses any anchor that isn't a pinned
+    // certificate.
     let r = YubicoAttestationVerifier::from_anchors(&[cert]);
     assert!(
         matches!(r, Err(AttestationError::RootRefused { .. })),

@@ -2,6 +2,18 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+- **PIV verifier tightening** (final review of 0.129.0):
+  - `YubicoAttestationVerifier::from_anchors` accepts only the pinned
+    certificates themselves, byte for byte, not any certificate with a
+    pinned key.
+  - `f9`'s subject is compared as DER against a fixed `Name`
+    (`CN=Yubico PIV Attestation` as a UTF8String, as on real keys), not as
+    text, so a re-encoded subject is refused.
+  - Docs say what the code checks: a trailing anchor copy is "the same
+    certificate (equal as parsed DER)".
+
 ## 0.130.0 (2026-10-26)
 
 - **Messages in the data export** (Constitution Art. II § 5; agora's operator
