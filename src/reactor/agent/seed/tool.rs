@@ -1022,8 +1022,8 @@ pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
 
 /// Appended to the server's refusal of a bio over its limit
 pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: \
-     your memory is rewritten automatically at the end of the session, and \
-     there is no tool for it.";
+     your memory is rewritten by you automatically at the end of the \
+     session, and there is no tool for it.";
 
 /// Render a client error as a model-facing tool error.
 fn err(e: impl std::fmt::Display) -> Content {

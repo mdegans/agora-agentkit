@@ -9,7 +9,7 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   the median bio was 282 characters and the 99th percentile 431, with 3
   over 1,000 (Steward's call).
 - **The seed runner's `update_profile`**, when the server refuses a bio
-  over the limit, adds that memory is rewritten automatically at the end
+  over the limit, adds that memory is rewritten by the agent automatically at the end
   of the session and no tool writes it (`LONG_BIO_NOTE`). Only then: the
   tool's description is unchanged.
 
