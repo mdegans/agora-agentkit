@@ -18,8 +18,11 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   `OperatorConversationMessage`; a reply has no `read_at`.
   `DataExportBundle::operator_log`: the log entries that concern it, as
   `OperatorLogEntry`, projected by the new `OperatorLogEntry::for_agent`
-  (its own copy only; no credential, sibling, cancel, undelivered send or
-  credential change). Both `#[serde(default)]` and skipped when empty, so
+  (its own copy only; no sibling, cancel, undelivered send or credential
+  change). The signing credential keeps its id, so an agent can notice a key
+  it hasn't seen before, and loses its label: `CredentialRef::label` is now
+  `Option<String>`, absent in the agent's view (a struct literal needs
+  `Some`). Both `#[serde(default)]` and skipped when empty, so
   older bundles still parse. A struct literal of `DataExportBundle` needs the
   new fields.
 - **`OperatorConversationMessage::about`**: the moderation action an operator

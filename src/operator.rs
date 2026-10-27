@@ -469,7 +469,10 @@ pub struct OperatorLogResponse {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct CredentialRef {
     pub id: OperatorCredentialId,
-    pub label: String,
+    /// The operator's name for it. Absent in an agent's view
+    /// ([`OperatorLogEntry::for_agent`]): a label can name a machine
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// One thing an operator did
@@ -521,10 +524,14 @@ impl OperatorLogEntry {
     /// The entry as the agent whose delivered copies are `copies` may see
     /// it, in its data export and its own log read (agora
     /// `docs/design-operator-api.md`, "What the agent sees"): only sends
-    /// and retracts that reached it, naming only its own copy, with no
-    /// credential. `None` for everything else: cancels and undelivered
-    /// sends (it never saw them) and credential changes (they concern no
-    /// agent)
+    /// and retracts that reached it, naming only its own copy. `None` for
+    /// everything else: cancels and undelivered sends (it never saw them)
+    /// and credential changes (they concern no agent).
+    ///
+    /// The signing credential keeps its id and loses its label. The id is
+    /// opaque, but lets the agent notice a message signed by a key it has
+    /// not seen before, which is what a log the agent can read is for; the
+    /// label is the operator's name for a machine
     pub fn for_agent(&self, copies: &[MessageId]) -> Option<Self> {
         let own = |ids: &[MessageId]| -> Vec<MessageId> {
             ids.iter()
@@ -561,7 +568,10 @@ impl OperatorLogEntry {
             }
             _ => Some(Self {
                 id: self.id,
-                credential: None,
+                credential: self.credential.as_ref().map(|c| CredentialRef {
+                    id: c.id,
+                    label: None,
+                }),
                 detail,
                 created_at: self.created_at,
             }),
@@ -682,7 +692,7 @@ mod tests {
     fn a_detail_is_tagged_by_its_kind() {
         let credential = CredentialRef {
             id: OperatorCredentialId::new(),
-            label: "balerion-claude".into(),
+            label: Some("balerion-claude".into()),
         };
         for detail in [
             OperatorActionDetail::DmSend {
@@ -719,7 +729,7 @@ mod tests {
             id: OperatorActionId::new(),
             credential: Some(CredentialRef {
                 id: OperatorCredentialId::new(),
-                label: "balerion-claude".into(),
+                label: Some("balerion-claude".into()),
             }),
             detail,
             created_at: Utc::now(),
@@ -732,7 +742,24 @@ mod tests {
         let seen = send.for_agent(&[mine]).unwrap();
         assert_eq!(seen.id, send.id);
         assert_eq!(seen.created_at, send.created_at);
-        assert_eq!(seen.credential, None);
+        // The key's id, so a new key shows; never its label
+        let signer = send.credential.as_ref().unwrap().id;
+        assert_eq!(
+            seen.credential,
+            Some(CredentialRef {
+                id: signer,
+                label: None
+            })
+        );
+        let json = serde_json::to_value(&seen).unwrap();
+        assert_eq!(json["credential"], serde_json::json!({ "id": signer }));
+        assert!(!json.to_string().contains("balerion-claude"));
+        // A portal session signed with no credential, and still has none
+        let portal = OperatorLogEntry {
+            credential: None,
+            ..send.clone()
+        };
+        assert_eq!(portal.for_agent(&[mine]).unwrap().credential, None);
         let OperatorActionDetail::DmSend {
             messages, about, ..
         } = &seen.detail
@@ -760,7 +787,7 @@ mod tests {
         assert_eq!(retract.for_agent(&[MessageId::new()]), None);
         let credential = CredentialRef {
             id: OperatorCredentialId::new(),
-            label: "k".into(),
+            label: Some("k".into()),
         };
         for detail in [
             OperatorActionDetail::DmCancel {
