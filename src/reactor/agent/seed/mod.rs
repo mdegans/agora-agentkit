@@ -1386,7 +1386,8 @@ impl Agent for SeedAgent {
             key.clone(),
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
-        );
+        )
+        .with_reflection();
         let AgoraSession {
             tools,
             context,
