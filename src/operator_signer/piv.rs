@@ -402,6 +402,31 @@ pub(crate) fn verify_attestation(
     read_slot_facts(&slot)
 }
 
+/// What a slot certificate **claims**, read without checking its chain or
+/// signature: for a device reading its own attestation (the key, policy,
+/// serial and firmware to show its owner), never for deciding anything.
+/// Only an [`AttestationVerifier`]'s [`AttestedKey`] is evidence.
+pub fn unverified_slot_facts(
+    slot_certificate: &DerCertificate,
+) -> Result<SlotFacts, AttestationError> {
+    read_slot_facts(&parse(0, slot_certificate)?)
+}
+
+/// The operator key a subject public key info holds (Ed25519 or P-256).
+#[cfg(feature = "yubikey")]
+pub(crate) fn operator_key(
+    spki: &SubjectPublicKeyInfoOwned,
+) -> Result<OperatorPublicKey, AttestationError> {
+    public_key(0, spki)
+}
+
+/// A P-256 ECDSA signature's `r ‖ s` from its DER form, as a PIV card
+/// returns it; `None` if it is not one.
+#[cfg(feature = "yubikey")]
+pub(crate) fn p256_signature_from_der(der: &[u8]) -> Option<[u8; 64]> {
+    ecdsa_from_der::<32>(der)?.try_into().ok()
+}
+
 fn parse(
     index: usize,
     der: &DerCertificate,
@@ -805,6 +830,19 @@ mod tests {
             assert_eq!(hex::encode(Sha256::digest(anchor.der)), anchor.sha256);
         }
         YubicoAttestationVerifier::new();
+    }
+
+    /// What a device reads of its own attestation, unchecked: the same
+    /// facts the verifier returns once the chain holds
+    #[test]
+    fn unverified_facts_are_the_slot_certificates_claims() {
+        let facts = unverified_slot_facts(&der(REAL_SLOT)).unwrap();
+        assert_eq!(facts.public_key, slot_key(REAL_SLOT));
+        assert_eq!(facts.serial, PivSerial::new(38_906_121));
+        assert_eq!(facts.firmware, FirmwareVersion::new(5, 7, 4));
+        assert_eq!(facts.policy.touch, TouchPolicy::Always);
+        // `f9` is no slot certificate: it has no policy
+        assert!(unverified_slot_facts(&der(REAL_F9)).is_err());
     }
 
     #[test]

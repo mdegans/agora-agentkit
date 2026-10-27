@@ -1310,6 +1310,68 @@ pub enum OperatorCredentialKind {
     HardwareKey,
 }
 
+/// When a hardware key asks for its PIN (`hardware_pin_policy_enum`,
+/// 0.135), as its attestation states it.
+///
+/// Vendor-neutral in meaning (FIDO calls it *user verification*). On PIV
+/// the codes are those of Yubico's policy extension: never 1, once 2,
+/// always 3. Re-exported as `operator_signer::PinPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "hardware_pin_policy_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PinPolicy {
+    /// Never: the key signs without a PIN.
+    Never,
+    /// Once per session: one PIN verification, until the device is
+    /// removed or reset.
+    Once,
+    /// Before every signature: the PIN is presented immediately before
+    /// each one. The sudo slot's optional "PIN too" (design, decision on
+    /// sudo); the attestation proves it.
+    Always,
+}
+
+/// When a hardware key needs a touch (`hardware_touch_policy_enum`, 0.135),
+/// as its attestation states it.
+///
+/// FIDO calls it *user presence*. On PIV the codes are those of Yubico's
+/// policy extension: never 1, always 2, cached 3. Re-exported as
+/// `operator_signer::TouchPolicy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "hardware_touch_policy_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TouchPolicy {
+    /// Never: the key signs unattended. Required above 5 agents.
+    Never,
+    /// Every signature needs a fresh touch. The sudo slot above 50 agents.
+    Always,
+    /// A touch covers the next 15 seconds of signatures. **Never** accepted
+    /// for sudo (design, "Hardware tiers"): one tap could cover a burst
+    /// nobody saw.
+    Cached,
+}
+
+impl TouchPolicy {
+    /// Whether the key can sign with nobody there: the > 5 agents tier.
+    pub const fn signs_unattended(self) -> bool {
+        matches!(self, Self::Never)
+    }
+
+    /// Whether each signature proves a person touched the key for it: the
+    /// sudo slot. `Cached` doesn't.
+    pub const fn proves_presence_per_signature(self) -> bool {
+        matches!(self, Self::Always)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1719,6 +1781,8 @@ impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(MessageKind);
 impl_display_fromstr!(OperatorActionKind);
 impl_display_fromstr!(OperatorCredentialKind);
+impl_display_fromstr!(PinPolicy);
+impl_display_fromstr!(TouchPolicy);
 impl_display_fromstr!(ContentKind);
 impl_display_fromstr!(DeletedBy);
 impl_display_fromstr!(TrashMode);
@@ -1798,6 +1862,8 @@ closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
 closed_variants!(OperatorActionKind [DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
+closed_variants!(PinPolicy [Never, Once, Always]);
+closed_variants!(TouchPolicy [Never, Always, Cached]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
 closed_variants!(OperatorAuthMethod [Password, PasswordReset, PasswordAndPasskey, Passkey]);
