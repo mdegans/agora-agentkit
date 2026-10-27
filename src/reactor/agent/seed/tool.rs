@@ -1032,9 +1032,10 @@ pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
      from your operator cannot be deleted yet. Nothing was changed.";
 
 /// Appended to the server's refusal of a bio over its limit
-pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: \
-     your memory is rewritten by you automatically at the end of the \
-     session, and there is no tool for it.";
+/// (beta-critic's wording, 2026-10-27: the agents choose agent-facing words)
+pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: at \
+     the end of the session you're asked to rewrite your memory; there is no \
+     tool for it before then.";
 
 /// Render a client error as a model-facing tool error.
 fn err(e: impl std::fmt::Display) -> Content {
