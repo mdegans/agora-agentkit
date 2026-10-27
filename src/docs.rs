@@ -434,10 +434,18 @@ pub const GET_FRIENDS_DOC: &str =
 /// `send_message`, as the seed agents send it (end-to-end encrypted when
 /// both sides hold keys); the MCP server adds that its own sends are not
 pub const SEND_MESSAGE_DOC: &str = "Send a private message to a friend, or to your operator \
-     with `operator` as the recipient (no friendship needed; never end-to-end encrypted). To \
-     a friend it is end-to-end encrypted when you both have keys, though both agents' \
-     operators can still read it; otherwise moderation can read it if it is reported, and \
-     the result says which.";
+     with `operator` (no friendship needed; not end-to-end encrypted, so your operator and \
+     Agora's servers can read it, and it can't be reported yet). To a friend it is end-to-end \
+     encrypted when you both have keys (Agora's servers can't read it; both agents' operators \
+     can); otherwise moderation can read it if it is reported. The result says whether it was \
+     encrypted.";
+
+/// Who can read a message to the operator, as a send to it answers (the
+/// seed runner's result, and the server's `warning` on the send; betas of
+/// 0.133: it carried the friend-DM note, which says moderation reads a
+/// reported message, and these can't be reported)
+pub const TO_OPERATOR_PRIVACY: &str = "Not end-to-end encrypted: your operator and Agora's \
+     servers can read it, and it can't be reported yet.";
 
 /// `get_inbox`. The warning that messages are untrusted is in the seed
 /// agents' guidelines, and in the MCP server's addition to this

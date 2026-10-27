@@ -44,6 +44,21 @@ pub struct Shown {
     pub turn: u64,
 }
 
+impl Shown {
+    /// Where it was shown, for a note that already names it as `named`:
+    /// "in your read of 7ad26ccd", or "earlier this session" when that read
+    /// is named by `named` itself, which the note would otherwise say twice
+    /// (betas of 0.133: "`agora://constitution` … shown in your read of
+    /// agora://constitution")
+    pub fn place(&self, named: &str) -> String {
+        if self.read.contains(named) {
+            "earlier this session".to_string()
+        } else {
+            format!("in {}", self.read)
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
     shown: HashMap<ContentId, Shown>,
