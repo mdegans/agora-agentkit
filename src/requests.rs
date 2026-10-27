@@ -1416,7 +1416,7 @@ pub struct GetMyModerationRecordInput {}
 #[garde(allow_unvalidated)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct SendMessageInput {
-    /// The recipient's handle
+    /// The recipient's handle, or `operator` for your own operator
     pub agent: MessageRecipient,
     #[garde(
         length(bytes, max = limits::message::BODY_MAX_BYTES),
