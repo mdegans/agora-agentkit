@@ -2036,38 +2036,142 @@ impl schemars::JsonSchema for WitnessQuestionId {
     }
 }
 
-/// The short form of a post or comment id: the first eight hex digits of
-/// its UUID, e.g. `7ad26ccd`.
+/// An id with a short form: the first eight hex digits of its UUID
+/// ([`IdPrefix`]), and an argument that takes either form ([`IdTarget`]).
+/// The rules are one copy for every id that has them; the words an agent
+/// reads in a schema or an error are the id's own.
+pub trait ShortId:
+    Copy
+    + Eq
+    + std::hash::Hash
+    + std::fmt::Debug
+    + std::fmt::Display
+    + From<Uuid>
+    + Send
+    + Sync
+    + 'static
+{
+    /// What the id names, as an error says it: "a post or comment id"
+    const NOUN: &'static str;
+    /// The [`IdPrefix`] schema's name
+    const PREFIX_SCHEMA_NAME: &'static str;
+    /// The [`IdPrefix`] schema's description
+    const PREFIX_DESCRIPTION: &'static str;
+    /// The [`IdTarget`] schema's name
+    const TARGET_SCHEMA_NAME: &'static str;
+    /// The [`IdTarget`] schema's description
+    const TARGET_DESCRIPTION: &'static str;
+
+    /// The UUID
+    fn uuid(&self) -> &Uuid;
+}
+
+impl ShortId for ContentId {
+    const NOUN: &'static str = "a post or comment id";
+    const PREFIX_SCHEMA_NAME: &'static str = "ContentIdPrefix";
+    const PREFIX_DESCRIPTION: &'static str = "A short post or comment id: the first eight hex \
+                                              digits of its UUID, e.g. \"7ad26ccd\".";
+    const TARGET_SCHEMA_NAME: &'static str = "ContentTarget";
+    const TARGET_DESCRIPTION: &'static str = "A post or comment id: its full UUID, or its first \
+                                              8 hex digits (e.g. \"7ad26ccd\") as shown by \
+                                              get_content and the dashboard. A short id works \
+                                              only on unsigned calls; a signed call must use \
+                                              the full UUID.";
+
+    fn uuid(&self) -> &Uuid {
+        self.as_uuid()
+    }
+}
+
+impl ShortId for MessageId {
+    const NOUN: &'static str = "a message id";
+    const PREFIX_SCHEMA_NAME: &'static str = "MessageIdPrefix";
+    const PREFIX_DESCRIPTION: &'static str = "A short message id: the first eight hex digits of \
+                                              its UUID, e.g. \"1a2b3c4d\".";
+    const TARGET_SCHEMA_NAME: &'static str = "MessageTarget";
+    const TARGET_DESCRIPTION: &'static str = "A message id: its full UUID, or its first 8 hex \
+                                              digits (e.g. \"1a2b3c4d\") as a notification \
+                                              shows it.";
+
+    fn uuid(&self) -> &Uuid {
+        self.as_uuid()
+    }
+}
+
+/// The short form of an id: the first eight hex digits of its UUID, e.g.
+/// `7ad26ccd` for a post or comment ([`ContentIdPrefix`]).
 ///
 /// Long lists of ids (a scheduling thread naming every eligible proposal)
 /// read far better short, and people already write them that way. A prefix
 /// is not an id: it may match nothing, or — rarely, at 32 bits over the
-/// whole content table — more than one row. Only the server can say which,
-/// so this type claims nothing beyond its shape, and every lookup must be
-/// ready for an ambiguous answer. [`ContentIdPrefix::bounds`] gives the
-/// inclusive UUID range it covers, for an index-friendly `BETWEEN`.
+/// whole table — more than one row. Only the server can say which, so this
+/// type claims nothing beyond its shape, and every lookup must be ready for
+/// an ambiguous answer. [`IdPrefix::bounds`] gives the inclusive UUID range
+/// it covers, for an index-friendly `BETWEEN`.
 ///
 /// Parsing is lenient on case and surrounding whitespace; the canonical
 /// form is lowercase. It is exactly eight digits and nothing else: a
 /// truncated or mangled full UUID is an error, never quietly read as the
 /// prefix it starts with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContentIdPrefix(u32);
+pub struct IdPrefix<I>(u32, std::marker::PhantomData<fn() -> I>);
+
+/// The short form of a post or comment id
+pub type ContentIdPrefix = IdPrefix<ContentId>;
+/// The short form of a message id, as a notification line shows it (0.135)
+pub type MessageIdPrefix = IdPrefix<MessageId>;
 
 /// A string that is not an eight-hex-digit short id.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "not a short id (the first eight hex digits of a UUID, e.g. \"7ad26ccd\"): {0:?}"
 )]
-pub struct ContentIdPrefixError(pub String);
+pub struct IdPrefixError(pub String);
 
-impl ContentIdPrefix {
+/// A string that is not an eight-hex-digit short id (the name before 0.135)
+pub type ContentIdPrefixError = IdPrefixError;
+
+// By hand rather than derived: a derive would bound each on `I`, which only
+// names the id the prefix is of
+impl<I> Clone for IdPrefix<I> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<I> Copy for IdPrefix<I> {}
+impl<I> PartialEq for IdPrefix<I> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl<I> Eq for IdPrefix<I> {}
+impl<I> PartialOrd for IdPrefix<I> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<I> Ord for IdPrefix<I> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(&other.0)
+    }
+}
+impl<I> std::hash::Hash for IdPrefix<I> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
+    }
+}
+impl<I: ShortId> std::fmt::Debug for IdPrefix<I> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({self})", I::PREFIX_SCHEMA_NAME)
+    }
+}
+
+impl<I> IdPrefix<I> {
     /// Number of hex digits in a short id
     pub const LEN: usize = 8;
 
     /// The short id of a full UUID
     pub fn of(id: &Uuid) -> Self {
-        Self((id.as_u128() >> 96) as u32)
+        Self((id.as_u128() >> 96) as u32, std::marker::PhantomData)
     }
 
     /// The lowest and highest UUIDs with this prefix, inclusive
@@ -2083,41 +2187,44 @@ impl ContentIdPrefix {
     }
 }
 
-impl std::fmt::Display for ContentIdPrefix {
+impl<I> std::fmt::Display for IdPrefix<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:08x}", self.0)
     }
 }
 
-impl std::str::FromStr for ContentIdPrefix {
-    type Err = ContentIdPrefixError;
+impl<I> std::str::FromStr for IdPrefix<I> {
+    type Err = IdPrefixError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let t = s.trim();
         if t.len() == Self::LEN && t.bytes().all(|b| b.is_ascii_hexdigit()) {
             // Eight hex digits always fit a u32.
-            Ok(Self(u32::from_str_radix(t, 16).expect("eight hex digits")))
+            Ok(Self(
+                u32::from_str_radix(t, 16).expect("eight hex digits"),
+                std::marker::PhantomData,
+            ))
         } else {
-            Err(ContentIdPrefixError(s.to_string()))
+            Err(IdPrefixError(s.to_string()))
         }
     }
 }
 
-impl TryFrom<String> for ContentIdPrefix {
-    type Error = ContentIdPrefixError;
+impl<I> TryFrom<String> for IdPrefix<I> {
+    type Error = IdPrefixError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
         s.parse()
     }
 }
 
-impl Serialize for ContentIdPrefix {
+impl<I> Serialize for IdPrefix<I> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(self)
     }
 }
 
-impl<'de> Deserialize<'de> for ContentIdPrefix {
+impl<'de, I> Deserialize<'de> for IdPrefix<I> {
     fn deserialize<D: serde::Deserializer<'de>>(
         d: D,
     ) -> Result<Self, D::Error> {
@@ -2126,79 +2233,89 @@ impl<'de> Deserialize<'de> for ContentIdPrefix {
     }
 }
 
-impl From<ContentId> for ContentIdPrefix {
-    fn from(id: ContentId) -> Self {
-        Self::of(id.as_uuid())
+impl<I: ShortId> From<I> for IdPrefix<I> {
+    fn from(id: I) -> Self {
+        Self::of(id.uuid())
     }
 }
 
 #[cfg(feature = "schemars")]
-impl schemars::JsonSchema for ContentIdPrefix {
+impl<I: ShortId> schemars::JsonSchema for IdPrefix<I> {
     fn inline_schema() -> bool {
         true
     }
 
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("ContentIdPrefix")
+        std::borrow::Cow::Borrowed(I::PREFIX_SCHEMA_NAME)
     }
 
     fn schema_id() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed(concat!(module_path!(), "::ContentIdPrefix"))
+        std::borrow::Cow::Owned(format!(
+            "{}::{}",
+            module_path!(),
+            I::PREFIX_SCHEMA_NAME
+        ))
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
             "pattern": CONTENT_ID_PREFIX_PATTERN,
-            "description": "A short post or comment id: the first eight hex \
-                            digits of its UUID, e.g. \"7ad26ccd\".",
+            "description": I::PREFIX_DESCRIPTION,
         })
     }
 }
 
-/// The pattern on a [`ContentTarget`]: a lowercase hyphenated UUID or its
+/// The pattern on an [`IdTarget`]: a lowercase hyphenated UUID or its
 /// first eight hex digits. A hint for the model, not a constraint — the
 /// tools that carry it are not strict, and parsing is more lenient than
 /// the pattern (case, braces, unhyphenated, Unicode dashes).
 pub const CONTENT_TARGET_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})$";
 
-/// A post or comment, named by its full id or its short id (the first
-/// eight hex digits) — the id an agent writes when it acts on one:
-/// `create_comment`'s `reply_to` and `cast_vote`'s `target`.
+/// An id named in either form, full or short (the first eight hex digits):
+/// the id an agent writes when it acts on something. For a post or comment
+/// ([`ContentTarget`]): `create_comment`'s `reply_to` and `cast_vote`'s
+/// `target`; for a message ([`MessageTarget`]): `get_inbox`'s `message`.
 ///
 /// Unresolved: a short id may match nothing, or more than one row, and only
-/// the server can say which. A signature covers a full [`ContentId`], so a
-/// short id must be resolved before a signed call (the server refuses a
-/// signed short id).
+/// the server can say which. A signature covers a full id, so a short id
+/// must be resolved before a signed call (the server refuses a signed short
+/// id).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ContentTarget {
-    /// A full post or comment id.
-    Id(ContentId),
+pub enum IdTarget<I: ShortId> {
+    /// A full id.
+    Id(I),
     /// The first eight hex digits of one.
-    Prefix(ContentIdPrefix),
+    Prefix(IdPrefix<I>),
 }
 
-impl ContentTarget {
+/// A post or comment, named by its full id or its short id
+pub type ContentTarget = IdTarget<ContentId>;
+/// A message, named by its full id or the short id a notification shows
+/// (0.135)
+pub type MessageTarget = IdTarget<MessageId>;
+
+impl<I: ShortId> IdTarget<I> {
     /// The full id, when that is what was given.
-    pub fn full(&self) -> Option<ContentId> {
+    pub fn full(&self) -> Option<I> {
         match self {
-            ContentTarget::Id(id) => Some(*id),
-            ContentTarget::Prefix(_) => None,
+            IdTarget::Id(id) => Some(*id),
+            IdTarget::Prefix(_) => None,
         }
     }
 }
 
-impl From<ContentId> for ContentTarget {
-    fn from(id: ContentId) -> Self {
-        ContentTarget::Id(id)
+impl<I: ShortId> From<I> for IdTarget<I> {
+    fn from(id: I) -> Self {
+        IdTarget::Id(id)
     }
 }
 
-impl std::fmt::Display for ContentTarget {
+impl<I: ShortId> std::fmt::Display for IdTarget<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ContentTarget::Id(id) => id.fmt(f),
-            ContentTarget::Prefix(prefix) => prefix.fmt(f),
+            IdTarget::Id(id) => std::fmt::Display::fmt(id, f),
+            IdTarget::Prefix(prefix) => prefix.fmt(f),
         }
     }
 }
@@ -2216,16 +2333,16 @@ fn ascii_dashes(s: &str) -> String {
         .collect()
 }
 
-impl std::str::FromStr for ContentTarget {
-    type Err = ContentTargetError;
+impl<I: ShortId> std::str::FromStr for IdTarget<I> {
+    type Err = TargetError<I>;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let t = ascii_dashes(s.trim());
         if let Ok(id) = t.parse::<Uuid>() {
-            return Ok(ContentTarget::Id(id.into()));
+            return Ok(IdTarget::Id(id.into()));
         }
-        if let Ok(prefix) = t.parse::<ContentIdPrefix>() {
-            return Ok(ContentTarget::Prefix(prefix));
+        if let Ok(prefix) = t.parse::<IdPrefix<I>>() {
+            return Ok(IdTarget::Prefix(prefix));
         }
         // A model writing on past the id: the UUID it starts with is
         // worth naming, but never quietly used.
@@ -2233,8 +2350,8 @@ impl std::str::FromStr for ContentTarget {
         let leading = t
             .get(..UUID_LEN)
             .and_then(|head| head.parse::<Uuid>().ok())
-            .map(ContentId::from);
-        Err(ContentTargetError {
+            .map(I::from);
+        Err(TargetError {
             field: None,
             input: s.to_string(),
             leading,
@@ -2242,19 +2359,22 @@ impl std::str::FromStr for ContentTarget {
     }
 }
 
-/// A string that is not a post or comment id in either form.
+/// A string that is not an id in either form.
 ///
 /// The message is the whole answer an agent gets, so it says what the
 /// field takes, with an example, and never repeats the uuid crate's
 /// grammar errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub struct ContentTargetError {
+pub struct TargetError<I: ShortId> {
     field: Option<&'static str>,
     input: String,
-    leading: Option<ContentId>,
+    leading: Option<I>,
 }
 
-impl ContentTargetError {
+/// A string that is not a post or comment id in either form
+pub type ContentTargetError = TargetError<ContentId>;
+
+impl<I: ShortId> TargetError<I> {
     /// The same error, naming the parameter it was given as.
     pub fn in_field(mut self, field: &'static str) -> Self {
         self.field = Some(field);
@@ -2262,15 +2382,16 @@ impl ContentTargetError {
     }
 }
 
-impl std::fmt::Display for ContentTargetError {
+impl<I: ShortId> std::fmt::Display for TargetError<I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.field {
             Some(field) => write!(f, "`{field}` must be")?,
             None => f.write_str("Expected")?,
         }
-        f.write_str(
-            " a post or comment id: a full UUID or its first 8 hex digits \
-             (e.g. \"7ad26ccd\")",
+        write!(
+            f,
+            " {}: a full UUID or its first 8 hex digits (e.g. \"7ad26ccd\")",
+            I::NOUN
         )?;
         write!(f, ", not \"{}\"", echo(&self.input))?;
         if let Some(id) = self.leading {
@@ -2283,13 +2404,13 @@ impl std::fmt::Display for ContentTargetError {
     }
 }
 
-impl Serialize for ContentTarget {
+impl<I: ShortId> Serialize for IdTarget<I> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(self)
     }
 }
 
-impl<'de> Deserialize<'de> for ContentTarget {
+impl<'de, I: ShortId> Deserialize<'de> for IdTarget<I> {
     fn deserialize<D: serde::Deserializer<'de>>(
         d: D,
     ) -> Result<Self, D::Error> {
@@ -2297,20 +2418,22 @@ impl<'de> Deserialize<'de> for ContentTarget {
     }
 }
 
-/// `#[serde(deserialize_with)]` helpers for [`ContentTarget`] fields, which
-/// name the field in every error
+/// `#[serde(deserialize_with)]` helpers for [`IdTarget`] fields, which name
+/// the field in every error
 pub mod content_target {
+    use std::marker::PhantomData;
+
     use serde::de::{self, Deserializer, Visitor};
 
-    use super::{ContentTarget, ContentTargetError};
+    use super::{ContentTarget, IdTarget, MessageTarget, ShortId, TargetError};
 
-    /// Deserializes a [`ContentTarget`], naming `field` in every error —
+    /// Deserializes an [`IdTarget`], naming `field` in every error —
     /// including a non-string value, which serde would otherwise describe
     /// in its own terms.
-    struct TargetVisitor(&'static str);
+    struct TargetVisitor<I>(&'static str, PhantomData<fn() -> I>);
 
-    impl Visitor<'_> for TargetVisitor {
-        type Value = ContentTarget;
+    impl<I: ShortId> Visitor<'_> for TargetVisitor<I> {
+        type Value = IdTarget<I>;
 
         fn expecting(
             &self,
@@ -2318,23 +2441,31 @@ pub mod content_target {
         ) -> std::fmt::Result {
             write!(
                 f,
-                "`{}` to be a post or comment id: a full UUID or its first 8 hex digits \
+                "`{}` to be {}: a full UUID or its first 8 hex digits \
                  (e.g. \"7ad26ccd\")",
-                self.0
+                self.0,
+                I::NOUN
             )
         }
 
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<ContentTarget, E> {
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<IdTarget<I>, E> {
             v.parse()
-                .map_err(|e: ContentTargetError| E::custom(e.in_field(self.0)))
+                .map_err(|e: TargetError<I>| E::custom(e.in_field(self.0)))
         }
     }
 
-    pub(super) fn deserialize_field<'de, D: Deserializer<'de>>(
+    pub(super) fn deserialize_field<'de, I: ShortId, D: Deserializer<'de>>(
         d: D,
         field: &'static str,
-    ) -> Result<ContentTarget, D::Error> {
-        d.deserialize_str(TargetVisitor(field))
+    ) -> Result<IdTarget<I>, D::Error> {
+        d.deserialize_str(TargetVisitor(field, PhantomData))
+    }
+
+    fn optional_field<'de, I: ShortId, D: Deserializer<'de>>(
+        d: D,
+        field: &'static str,
+    ) -> Result<Option<IdTarget<I>>, D::Error> {
+        d.deserialize_option(OptionalVisitor(field, PhantomData))
     }
 
     /// A post or comment id field of a type generic over how the id is
@@ -2402,20 +2533,28 @@ pub mod content_target {
     pub fn optional_target<'de, D: Deserializer<'de>>(
         d: D,
     ) -> Result<Option<ContentTarget>, D::Error> {
-        d.deserialize_option(OptionalVisitor("target"))
+        optional_field(d, "target")
+    }
+
+    /// For an optional `message` field (`get_inbox`, 0.135), forgiving as
+    /// [`optional_target`]
+    pub fn optional_message<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<MessageTarget>, D::Error> {
+        optional_field(d, "message")
     }
 
     /// [`TargetVisitor`] for an optional field
-    struct OptionalVisitor(&'static str);
+    struct OptionalVisitor<I>(&'static str, PhantomData<fn() -> I>);
 
-    impl<'de> Visitor<'de> for OptionalVisitor {
-        type Value = Option<ContentTarget>;
+    impl<'de, I: ShortId> Visitor<'de> for OptionalVisitor<I> {
+        type Value = Option<IdTarget<I>>;
 
         fn expecting(
             &self,
             f: &mut std::fmt::Formatter<'_>,
         ) -> std::fmt::Result {
-            TargetVisitor(self.0).expecting(f)?;
+            TargetVisitor::<I>(self.0, PhantomData).expecting(f)?;
             f.write_str(", or nothing")
         }
 
@@ -2438,7 +2577,9 @@ pub mod content_target {
             if v.is_empty() || v.trim().eq_ignore_ascii_case("null") {
                 return Ok(None);
             }
-            TargetVisitor(self.0).visit_str(v).map(Some)
+            TargetVisitor::<I>(self.0, PhantomData)
+                .visit_str(v)
+                .map(Some)
         }
     }
 }
@@ -2447,28 +2588,28 @@ pub mod content_target {
 // drops values whose schema is a `$ref`. No `format: uuid`, which a short
 // id would fail, and never in a strict schema (it carries a `pattern`).
 #[cfg(feature = "schemars")]
-impl schemars::JsonSchema for ContentTarget {
+impl<I: ShortId> schemars::JsonSchema for IdTarget<I> {
     fn inline_schema() -> bool {
         true
     }
 
     fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("ContentTarget")
+        std::borrow::Cow::Borrowed(I::TARGET_SCHEMA_NAME)
     }
 
     fn schema_id() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed(concat!(module_path!(), "::ContentTarget"))
+        std::borrow::Cow::Owned(format!(
+            "{}::{}",
+            module_path!(),
+            I::TARGET_SCHEMA_NAME
+        ))
     }
 
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
             "pattern": CONTENT_TARGET_PATTERN,
-            "description": "A post or comment id: its full UUID, or its first \
-                            8 hex digits (e.g. \"7ad26ccd\") as shown by \
-                            get_content and the dashboard. A short id works \
-                            only on unsigned calls; a signed call must use \
-                            the full UUID.",
+            "description": I::TARGET_DESCRIPTION,
         })
     }
 }
@@ -4230,5 +4371,99 @@ mod tests {
         assert!(v.get("$ref").is_none() && v.get("$defs").is_none(), "{v}");
         assert!(v.get("format").is_none(), "a short id is not format: uuid");
         assert_eq!(v["pattern"], CONTENT_TARGET_PATTERN);
+    }
+
+    /// The content schemas' words are unchanged by making the types generic
+    /// over the id (0.135): agents read them, and a change is a cache miss
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn content_schemas_keep_their_words() {
+        let target = schemars::schema_for!(ContentTarget);
+        assert_eq!(
+            target.as_value()["description"],
+            "A post or comment id: its full UUID, or its first 8 hex digits \
+             (e.g. \"7ad26ccd\") as shown by get_content and the dashboard. A \
+             short id works only on unsigned calls; a signed call must use the \
+             full UUID."
+        );
+        let prefix = schemars::schema_for!(ContentIdPrefix);
+        assert_eq!(
+            prefix.as_value()["description"],
+            "A short post or comment id: the first eight hex digits of its \
+             UUID, e.g. \"7ad26ccd\"."
+        );
+    }
+
+    /// A message id reads in both forms by the same rules as a post's, and
+    /// says "message" when it doesn't (0.135)
+    #[test]
+    fn message_targets_parse_and_speak_of_messages() {
+        let full: MessageTarget = FULL.parse().unwrap();
+        assert_eq!(full.full().unwrap().to_string(), FULL);
+        let short: MessageTarget = "1A2B3C4D".parse().unwrap();
+        assert_eq!(short.to_string(), "1a2b3c4d");
+        assert_eq!(
+            FULL.replace('-', "\u{2013}")
+                .parse::<MessageTarget>()
+                .unwrap(),
+            full
+        );
+        let msg = "nope"
+            .parse::<MessageTarget>()
+            .unwrap_err()
+            .in_field("message")
+            .to_string();
+        assert!(
+            msg.starts_with(
+                "`message` must be a message id: a full UUID or its first 8 hex digits"
+            ),
+            "{msg}"
+        );
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct MessageProbe {
+        #[serde(
+            default,
+            deserialize_with = "content_target::optional_message"
+        )]
+        message: Option<MessageTarget>,
+    }
+
+    #[test]
+    fn an_optional_message_forgives_null_and_names_the_field() {
+        for empty in [
+            r#"{}"#,
+            r#"{"message": null}"#,
+            r#"{"message": "null"}"#,
+            r#"{"message": ""}"#,
+        ] {
+            let probe: MessageProbe = serde_json::from_str(empty).unwrap();
+            assert!(probe.message.is_none(), "{empty}");
+        }
+        let probe: MessageProbe =
+            serde_json::from_str(r#"{"message": "1a2b3c4d"}"#).unwrap();
+        assert!(matches!(probe.message, Some(IdTarget::Prefix(_))));
+        let err = serde_json::from_str::<MessageProbe>(r#"{"message": 5}"#)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected `message` to be a message id"),
+            "{err}"
+        );
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn message_target_schema_is_inline() {
+        let schema = schemars::schema_for!(MessageTarget);
+        let v = schema.as_value();
+        assert!(v.get("$ref").is_none() && v.get("$defs").is_none(), "{v}");
+        assert!(
+            v["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("A message id")
+        );
     }
 }
