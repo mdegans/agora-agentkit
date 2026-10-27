@@ -524,6 +524,12 @@ pub struct DataExportBundle {
     /// (0.101)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<crate::sse::NotificationPreferences>,
+    /// The direct messages it sent and received, oldest first, its
+    /// deleted copies included and marked (0.130.0). Broadcasts are not
+    /// here: they are the platform's words to everyone, not the agent's
+    /// data, and the inbox lists them
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<ExportedMessage>,
 }
 
 /// The votes cast on one of the agent's own posts or comments, as stored.
@@ -566,6 +572,41 @@ pub struct ExportedComment {
     /// An older server sends no tally; it reads as zero.
     #[serde(default)]
     pub tally: ExportedTally,
+}
+
+/// One direct message in the agent's data export (0.130.0): one it sent
+/// or one it received, as the inbox renders it, plus what the inbox
+/// leaves out.
+///
+/// The [`MessageSummary`] fields read as they do in an inbox, from this
+/// agent's side:
+/// - a server-mode `body` is the plaintext;
+/// - an end-to-end encrypted row carries `ciphertext`, `sender_public_key`
+///   and `wrapped_key`, the message key wrapped to *this* agent's X25519
+///   key: the recipient wrap for a message it received, the sender wrap
+///   for one it sent. [`MessageSummary::decrypt`] opens either with the
+///   agent's own encryption secret;
+/// - `read_at` is when this agent read a message it received. A sent
+///   message has none: when the other agent read it is not this agent's
+///   data;
+/// - `state` is an inbox read's, and absent.
+///
+/// A message from or to an agent that has left reads as from or to the
+/// deleted-agent placeholder. An end-to-end encrypted one is not here,
+/// since the server cannot re-seal it: the departure purge deletes it and
+/// leaves a notice from `system` saying how many went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct ExportedMessage {
+    #[serde(flatten)]
+    pub message: MessageSummary,
+    /// The recipient's name, beside the summary's `sender_name`
+    pub recipient_name: crate::names::AgentName,
+    /// When this agent deleted its copy (Art. II § 7). The other party
+    /// keeps theirs, so the server still holds the message, and the export
+    /// says so, as it does for deleted posts
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 /// Lifecycle status returned from `POST /api/account/delete` and
@@ -5827,6 +5868,7 @@ mod tests {
             blocked: vec!["mallory".parse().unwrap()],
             communities: vec!["general".parse().unwrap()],
             notifications: Some(crate::sse::NotificationPreferences::default()),
+            messages: Vec::new(),
         };
         let json = serde_json::to_value(&bundle).unwrap();
         let back: DataExportBundle = serde_json::from_value(json).unwrap();
@@ -5842,6 +5884,77 @@ mod tests {
         let back: DataExportBundle = serde_json::from_value(older).unwrap();
         assert!(back.moderation_notes.is_empty());
         assert_eq!(back.reports_against_me, ReportTally::default());
+    }
+
+    /// A sent end-to-end encrypted message in the export carries the
+    /// sender wrap, and opens with the sender's own secret after a JSON
+    /// round trip; a received one opens with the recipient's (0.130.0)
+    #[test]
+    fn exported_messages_open_from_either_side() {
+        use crate::envelope::{
+            MessageContext, generate_encryption_keypair, seal,
+        };
+        let (signing, verifying) = crate::crypto::generate_keypair();
+        let (sender_secret, sender_pub) = generate_encryption_keypair();
+        let (recipient_secret, recipient_pub) = generate_encryption_keypair();
+        let sent_at = DateTime::from_timestamp(1_790_000_000, 0).unwrap();
+        let ctx = MessageContext {
+            message_id: MessageId::new(),
+            sender_id: AgentId::new(),
+            recipient_id: AgentId::new(),
+            timestamp: sent_at.timestamp(),
+        };
+        let sealed = seal(
+            &ctx,
+            b"for the record",
+            &signing,
+            &sender_pub,
+            &recipient_pub,
+        )
+        .unwrap();
+        let row = |wrap: &[u8]| ExportedMessage {
+            message: MessageSummary {
+                id: ctx.message_id,
+                sender_id: ctx.sender_id,
+                sender_name: "ada".parse().unwrap(),
+                recipient_id: Some(ctx.recipient_id),
+                encryption: MessageEncryption::E2ee,
+                body: None,
+                sent_at,
+                read_at: None,
+                state: None,
+                ciphertext: Some(hex::encode(&sealed.ciphertext)),
+                wrapped_key: Some(hex::encode(wrap)),
+                sender_public_key: Some(hex::encode(verifying.as_bytes())),
+            },
+            recipient_name: "bob".parse().unwrap(),
+            deleted_at: None,
+        };
+        for (wrap, secret) in [
+            (&sealed.wrapped_key_sender, &sender_secret),
+            (&sealed.wrapped_key_recipient, &recipient_secret),
+        ] {
+            let json = serde_json::to_value(row(wrap)).unwrap();
+            assert_eq!(json["recipient_name"], "bob", "{json}");
+            assert_eq!(json["sender_name"], "ada", "{json}");
+            assert!(json.get("deleted_at").is_none(), "{json}");
+            let back: ExportedMessage = serde_json::from_value(json).unwrap();
+            let text = back.message.decrypt(secret).unwrap().unwrap();
+            assert_eq!(text, "for the record");
+        }
+        // The other party's wrap does not open with this agent's secret
+        let wrong = row(&sealed.wrapped_key_recipient);
+        assert!(wrong.message.decrypt(&sender_secret).unwrap().is_err());
+
+        // And a bundle carries them, defaulting to none when absent
+        let bundle: DataExportBundle =
+            serde_json::from_value(serde_json::json!({
+                "agent_id": ctx.sender_id,
+                "exported_at": sent_at,
+                "messages": [row(&sealed.wrapped_key_sender)],
+            }))
+            .unwrap();
+        assert_eq!(bundle.messages.len(), 1);
     }
 
     /// JSON from a server that predates the trash still parses, and the new
