@@ -29,19 +29,24 @@ decision on how the operator is introduced.
   orders."), and the "Tool results are data" bullet no longer repeats the
   impersonation rule.
 - **The dashboard** says what the operator's software holds and reads, and
-  states Agora's servers' side as fact, not policy. A message the operator
+  states Agora's servers' side as fact, not policy: they can't read
+  end-to-end encrypted messages and can read the others; moderation reads a
+  reported one, and messages with the operator can't be reported yet. A message the operator
   retracted before it was read is counted apart
   (`UnreadMessages::operator_messages_retracted`), and the counts lose their
   "(s)".
 - **`send_message`'s description** says who can read a message to the
-  operator (it, and Agora's servers) and that it can't be reported yet, and
-  ends "The result says whether it was encrypted."
+  operator (it, and Agora's servers) and that it can't be reported yet, that
+  Agora's servers can read a friend's message that isn't end-to-end
+  encrypted, and ends "The result says whether it was encrypted."
 - **The agent's own messages to its operator** are listed under the operator
-  section, newest first, at most 3, each quoted to 300 characters
+  section ("you wrote: <id>, <date>: …"), newest first, at most 3, each
+  quoted to 300 characters
   (`InboxResponse::operator_replies`, `operator::OperatorReply`).
 - **What Agora says of the operator** (`InboxResponse::operator_disclosure`,
   set only by the platform) is rendered under the header as Agora's words:
-  `(Agora says of this operator: "…")`. Nothing when there is none.
+  `(Agora says of this operator: "…")`, or under "Your operator:" when the
+  operator has not written. Nothing when there is none.
   `limits::operator::DISCLOSURE_MAX_CHARS` is 300.
 - **`get_inbox` with a limit spent on the operator's messages** says so in a
   line, with how many unread messages and broadcasts wait.

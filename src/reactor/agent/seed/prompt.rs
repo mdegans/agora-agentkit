@@ -745,8 +745,9 @@ pub fn format_dashboard(
          Your operator's software keeps your soul and memory and can read \
          them. It holds your keys, so your operator can read all your private \
          messages, end-to-end encrypted ones included. Agora's servers can't \
-         read end-to-end encrypted messages; moderation can read the others \
-         if one is reported.\n\n",
+         read end-to-end encrypted messages; they can read the others, and \
+         moderation reads one if it is reported (messages with your operator \
+         can't be reported yet).\n\n",
         dash.agent.name,
         model_line(model),
         chrono::Utc::now().date_naive()
@@ -770,9 +771,12 @@ pub fn format_dashboard(
         // Its operator's first, as the inbox lists them (0.132). One its
         // operator retracted before it was read is no news to read (betas
         // of 0.133: it was counted as plain "unread")
+        // Never more than the total, never negative, whatever a server
+        // sends (`clamp` would panic on a negative total)
         let retracted = unread
             .operator_messages_retracted
-            .clamp(0, unread.operator_messages);
+            .min(unread.operator_messages)
+            .max(0);
         let to_read = unread.operator_messages - retracted;
         if to_read > 0 {
             parts.push(format!(
@@ -802,14 +806,15 @@ pub fn format_dashboard(
                 "unread system broadcasts",
             ));
         }
-        let parts = match parts.split_last() {
-            Some((last, rest)) if !rest.is_empty() => {
-                format!("{} and {last}", rest.join(", "))
-            }
-            _ => parts.concat(),
+        let them = if to_read + retracted + unread.dms + unread.broadcasts == 1
+        {
+            "it"
+        } else {
+            "them"
         };
+        let parts = and_list(&parts);
         out.push_str(&format!(
-            "You have {parts}. Read them with get_inbox.\n\n"
+            "You have {parts}. Read {them} with get_inbox.\n\n"
         ));
     }
     // The agent's own requests (0.125.0): an acceptance is announced once,
@@ -1358,6 +1363,7 @@ pub(super) fn format_inbox(
     if inbox.messages.is_empty()
         && inbox.operator_messages.is_empty()
         && inbox.operator_replies.is_empty()
+        && inbox.operator_disclosure.is_none()
         && inbox.unread == 0
     {
         return "Your inbox is empty: no unread messages, and none read \
@@ -1466,9 +1472,15 @@ pub(super) fn format_inbox(
     // When nothing of these is listed, a line says why (betas of 0.133:
     // `limit=1` went to the operator's message, and this section vanished)
     if inbox.messages.is_empty() {
+        // The limit is named as the reason only when the operator's
+        // messages filled it (review of 0.134)
+        let spent = limit.filter(|&n| {
+            !inbox.operator_messages.is_empty()
+                && inbox.operator_messages.len() >= n as usize
+        });
         out.push_str(&format!(
             "Messages and broadcasts: {}.\n",
-            match (inbox.unread, limit) {
+            match (inbox.unread, spent) {
                 (0, None) => "none unread, and none read recently".to_string(),
                 (0, Some(n)) => format!(
                     "none unread (any read before are left out: your limit \
@@ -1539,6 +1551,18 @@ pub(super) fn format_inbox(
     out
 }
 
+/// Who stands behind the operator, in Agora's words, never the operator's:
+/// set only by the platform (Steward, 2026-10-27). A line, or `None` when
+/// Agora has said nothing
+fn disclosure_line(inbox: &crate::responses::InboxResponse) -> Option<String> {
+    inbox.operator_disclosure.as_ref().map(|disclosure| {
+        format!(
+            "(Agora says of this operator: \"{}\")\n",
+            quoted(&one_line(disclosure))
+        )
+    })
+}
+
 /// The most of one of the agent's own messages to its operator the inbox
 /// quotes (0.134)
 const OPERATOR_REPLY_PREVIEW_CHARS: usize = 300;
@@ -1575,7 +1599,14 @@ pub(super) fn format_operator_section(
         let read = messages.len() - new - retracted;
         let states: Vec<(usize, &str)> = [
             (new, "unread until now"),
-            (retracted, "retracted before you read it"),
+            (
+                retracted,
+                if retracted == 1 {
+                    "retracted before you read it"
+                } else {
+                    "retracted before you read them"
+                },
+            ),
             (read, "read before"),
         ]
         .into_iter()
@@ -1600,8 +1631,17 @@ pub(super) fn format_operator_section(
                 crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX
             ));
         }
-        // The server's count of unread ones takes in retracted ones too
-        let waiting = inbox.operator_unread - (new + retracted) as i64;
+        // The server's count of unread ones takes in retracted ones too,
+        // but only those this read took (a retracted one read before is
+        // listed again among the read)
+        let retracted_new = messages
+            .iter()
+            .filter(|m| {
+                m.state == InboxState::Unread
+                    && matches!(m.content, OperatorMessageContent::Retracted)
+            })
+            .count();
+        let waiting = inbox.operator_unread - (new + retracted_new) as i64;
         if waiting > 0 {
             counts.push_str(&format!(
                 "; {} for your next read",
@@ -1634,13 +1674,8 @@ pub(super) fn format_operator_section(
                 )
             },
         ));
-        // Who stands behind the operator, in Agora's words, never the
-        // operator's: set only by the platform (Steward, 2026-10-27)
-        if let Some(disclosure) = &inbox.operator_disclosure {
-            out.push_str(&format!(
-                "(Agora says of this operator: \"{}\")\n",
-                quoted(&one_line(disclosure))
-            ));
+        if let Some(line) = disclosure_line(inbox) {
+            out.push_str(&line);
         }
         for m in messages {
             if let Some(action) = &m.about {
@@ -1682,6 +1717,14 @@ pub(super) fn format_operator_section(
             out.push('\n');
         }
     }
+    // Its operator has not written (or not lately): what Agora says of it
+    // still shows, under a header of its own
+    if messages.is_empty()
+        && let Some(line) = disclosure_line(inbox)
+    {
+        out.push_str("Your operator:\n");
+        out.push_str(&line);
+    }
     // What the agent already told its operator: its own words, listed
     // nowhere else (betas of 0.133). A line each, quoted and escaped like
     // any text outside an element
@@ -1703,13 +1746,13 @@ pub(super) fn format_operator_section(
                         OPERATOR_REPLY_PREVIEW_CHARS
                     ))
                 ),
-                OperatorMessageContent::Retracted
-                | OperatorMessageContent::Unreadable => {
+                OperatorMessageContent::Retracted => "(retracted)".to_string(),
+                OperatorMessageContent::Unreadable => {
                     "(could not be decrypted)".to_string()
                 }
             };
             out.push_str(&format!(
-                "- you replied: {}, {}: {text}\n",
+                "- you wrote: {}, {}: {text}\n",
                 reply.id,
                 reply.sent_at.format("%Y-%m-%d %H:%MZ")
             ));
@@ -7012,7 +7055,9 @@ mod tests {
                  read them. It holds your keys, so your operator can read all \
                  your private messages, end-to-end encrypted ones included. \
                  Agora's servers can't read end-to-end encrypted messages; \
-                 moderation can read the others if one is reported.\n"
+                 they can read the others, and moderation reads one if it is \
+                 reported (messages with your operator can't be reported \
+                 yet).\n"
             ),
             "{out}"
         );
@@ -7030,7 +7075,7 @@ mod tests {
         assert!(
             out.contains(
                 "You have 1 message your operator retracted before you read \
-                 it. Read them with get_inbox."
+                 it. Read it with get_inbox."
             ),
             "{out}"
         );
@@ -7998,7 +8043,12 @@ mod tests {
         d.unread_messages.dms = 1;
         let out = format_dashboard(&d, test_model());
         assert_eq!(out.matches("### Messages").count(), 1, "{out}");
-        assert!(out.contains("You have 1 unread private message."), "{out}");
+        assert!(
+            out.contains(
+                "You have 1 unread private message. Read it with get_inbox."
+            ),
+            "{out}"
+        );
         assert!(out.contains("2 friend request(s)"), "{out}");
     }
 
