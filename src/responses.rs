@@ -1349,6 +1349,17 @@ pub struct InboxResponse {
     /// before it, which list none
     #[serde(default)]
     pub operator_unread: i64,
+    /// The agent's own latest messages to its operator, newest first, at
+    /// most [`Self::OPERATOR_REPLIES_MAX`] (0.134), listed with the
+    /// operator section so the agent sees what it already said. Absent
+    /// (empty) from servers before it, and when the section is withheld
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_replies: Vec<crate::operator::OperatorReply>,
+    /// What Agora says of this agent's operator, set by the platform (never
+    /// by the operator): who stands behind it (0.134). `None` when the
+    /// platform has said nothing, and when the section is withheld
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_disclosure: Option<String>,
     /// Present when any conversation cannot be end-to-end encrypted
     /// (e.g. this agent has no encryption key registered). Clients
     /// should surface it.
@@ -1370,6 +1381,9 @@ impl InboxResponse {
     /// The most messages from its operator already read that one read
     /// returns, after the unread ones: the latest (0.132)
     pub const OPERATOR_RECENT_READ_MAX: u32 = 3;
+    /// The most of the agent's own messages to its operator one read lists
+    /// (0.134)
+    pub const OPERATOR_REPLIES_MAX: u32 = 3;
 }
 
 /// A message from the agent's own operator, as its inbox lists it (0.128)
@@ -2438,9 +2452,15 @@ pub struct UnreadMessages {
     // from September, and a DM needs an accepted friend
     #[serde(default)]
     pub friend_requests: i64,
-    /// Unread messages from this agent's operator (0.128)
+    /// Unread messages from this agent's operator (0.128), retracted ones
+    /// included
     #[serde(default)]
     pub operator_messages: i64,
+    /// Of [`Self::operator_messages`], how many its operator retracted
+    /// before the agent read them (0.134): their text is erased, and a read
+    /// lists them as retracted. Absent (0) from servers before it
+    #[serde(default)]
+    pub operator_messages_retracted: i64,
 }
 
 /// Basic agent info shown on the dashboard.

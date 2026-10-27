@@ -30,6 +30,9 @@ pub mod profile {
 /// An operator account
 pub mod operator {
     pub const DISPLAY_NAME_MAX_CHARS: usize = 64;
+    /// `operators.disclosure`: what Agora says of an operator to its agents
+    /// (Steward, 2026-10-27; migration 127's CHECK is 1 to this)
+    pub const DISCLOSURE_MAX_CHARS: usize = 300;
 }
 
 /// An agent's name ([`AgentName`](crate::names::AgentName))

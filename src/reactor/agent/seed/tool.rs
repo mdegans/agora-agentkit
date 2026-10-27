@@ -1077,10 +1077,10 @@ impl Agora {
         {
             // Named by its canonical link, whichever spelling was asked
             return Ok(format!(
-                "(`{}` is in your context already: shown in {}, {}. \
+                "(`{}` is in your context already: shown {}, {}. \
                  Nothing was read, and no full read was spent.)",
                 part_keys[0],
-                shown.read,
+                shown.place(&part_keys[0]),
                 crate::threads::about_tokens(shown.bytes)
             )
             .into());
@@ -1236,11 +1236,11 @@ impl Agora {
             self.shown_once
                 .mark_part(part_keys[0].clone(), shown.bytes as usize);
             return Ok(format!(
-                "{}(`{}` is in your context already, the same text: shown in \
+                "{}(`{}` is in your context already, the same text: shown \
                  {}, {}; {beside} Nothing was charged.)",
                 prompt::test_label_line(&entry),
                 part_keys[0],
-                shown.read,
+                shown.place(&part_keys[0]),
                 crate::threads::about_tokens(shown.bytes)
             )
             .into());
@@ -1322,9 +1322,9 @@ impl Agora {
                             .to_string();
                     if let Some(shown) = self.shown_once.earlier_part(&key) {
                         return Ok(format!(
-                            "(`{key}` is in your context already: shown in \
+                            "(`{key}` is in your context already: shown \
                              {}, {}. Nothing was read again.)",
-                            shown.read,
+                            shown.place(&key),
                             crate::threads::about_tokens(shown.bytes)
                         )
                         .into());
@@ -1986,8 +1986,8 @@ impl Agora {
         if let Some(earlier) = self.shown_once.earlier_part(&key) {
             return format!(
                 "(`{name}` is in your context already, the same text: shown \
-                 in {}, {}. Nothing was read.)",
-                earlier.read,
+                 {}, {}. Nothing was read.)",
+                earlier.place(name),
                 crate::threads::about_tokens(earlier.bytes)
             )
             .into();
@@ -2048,8 +2048,8 @@ impl Agora {
         if let Some(earlier) = self.shown_once.earlier_part(&key) {
             return format!(
                 "(`{name}` is in your context already, the same text: shown \
-                 in {}, {}. Nothing was read.)",
-                earlier.read,
+                 {}, {}. Nothing was read.)",
+                earlier.place(name),
                 crate::threads::about_tokens(earlier.bytes)
             )
             .into();
@@ -2316,18 +2316,34 @@ impl Agora {
                 .await
                 .map_err(err)?,
         };
-        let mut out = format!(
-            "Message sent ({}, {})",
-            resp.id,
-            match resp.encryption {
-                crate::enums::MessageEncryption::E2ee => "end-to-end encrypted",
-                crate::enums::MessageEncryption::Server => "server-mode",
+        // Who it went to, and who can read it, in words (betas of 0.133:
+        // a send to the operator carried the friend-DM note, and
+        // "server-mode" meant nothing to an agent)
+        use crate::enums::MessageEncryption;
+        use crate::requests::MessageRecipient;
+        let id = resp.id;
+        let mut out = match (&args.agent, resp.encryption) {
+            // The runner's own words, not the server's `warning`: a server
+            // before agora's 0.134 adoption sends the friend-DM one
+            (MessageRecipient::Operator, _) => format!(
+                "Sent to your operator ({id}). {}",
+                crate::docs::TO_OPERATOR_PRIVACY
+            ),
+            (MessageRecipient::Agent(name), MessageEncryption::E2ee) => {
+                format!(
+                    "Sent to {name} ({id}), end-to-end encrypted: Agora's \
+                     servers can't read it; both agents' operators can."
+                )
             }
-        );
-        if let Some(w) = resp.warning {
-            out.push_str("\nNote: ");
-            out.push_str(&w);
-        }
+            (MessageRecipient::Agent(name), MessageEncryption::Server) => {
+                match &resp.warning {
+                    Some(w) => format!("Sent to {name} ({id}).\nNote: {w}"),
+                    None => format!(
+                        "Sent to {name} ({id}), not end-to-end encrypted."
+                    ),
+                }
+            }
+        };
         if let Some(n) = resp.notice {
             out.push_str("\nNote: ");
             out.push_str(&n);

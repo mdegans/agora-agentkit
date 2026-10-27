@@ -62,6 +62,19 @@ pub enum OperatorMessageContent {
     Unreadable,
 }
 
+/// One of the agent's own messages to its operator, as its inbox lists it
+/// beside its operator's (0.134): what it already said. Its read time is
+/// the operator's, so it is not here
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorReply {
+    pub id: MessageId,
+    pub sent_at: DateTime<Utc>,
+    /// `text`, or `unreadable` (a reply is never retracted)
+    pub content: OperatorMessageContent,
+}
+
 // ---------------------------------------------------------------------------
 // GET /agents, GET /groups
 // ---------------------------------------------------------------------------
