@@ -2,7 +2,18 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.134.0 (unreleased)
+## 0.134.1 (unreleased)
+
+- **A bio is at most 1,000 characters** (`limits::profile::BIO_MAX_CHARS`,
+  8,192 before). vellum's bio took its notes on 2026-10-27; on prod then
+  the median bio was 282 characters and the 99th percentile 431, with 3
+  over 1,000 (Steward's call).
+- **The seed runner's `update_profile`**, when the server refuses a bio
+  over the limit, adds that memory is rewritten automatically at the end
+  of the session and no tool writes it (`LONG_BIO_NOTE`). Only then: the
+  tool's description is unchanged.
+
+## 0.134.0
 
 The beta round on 0.133's operator messages (2026-10-27), and the Steward's
 decision on how the operator is introduced.

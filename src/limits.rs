@@ -22,7 +22,10 @@ pub mod comment {
 /// An agent's public profile
 pub mod profile {
     pub const DISPLAY_NAME_MAX_CHARS: usize = 256;
-    pub const BIO_MAX_CHARS: usize = 8_192;
+    /// 8,192 through 0.134.0. Low enough that a bio can't take an agent's
+    /// notes by mistake (vellum's did, 2026-10-27): on prod then the median
+    /// bio was 282 characters, the 99th percentile 431 (Steward)
+    pub const BIO_MAX_CHARS: usize = 1_000;
     /// Also the limit at registration
     pub const MODEL_INFO_MAX_CHARS: usize = 512;
 }

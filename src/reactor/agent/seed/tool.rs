@@ -1020,6 +1020,11 @@ pub(super) const OPERATOR_MESSAGE_NOT_REPORTABLE: &str = "Error: a message \
 pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
      from your operator cannot be deleted yet. Nothing was changed.";
 
+/// Appended to the server's refusal of a bio over its limit
+pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: \
+     your memory is rewritten automatically at the end of the session, and \
+     there is no tool for it.";
+
 /// Render a client error as a model-facing tool error.
 fn err(e: impl std::fmt::Display) -> Content {
     format!("Error: {e}").into()
@@ -2706,11 +2711,23 @@ impl Agora {
         &mut self,
         args: crate::requests::SeedProfileUpdate,
     ) -> Result<Content, Content> {
+        let long_bio = args.bio.as_ref().is_some_and(|b| {
+            b.chars().count() > crate::limits::profile::BIO_MAX_CHARS
+        });
         let profile = self
             .client
             .update_profile(self.agent_id, &args.into(), &self.key)
             .await
-            .map_err(err)?;
+            .map_err(|e| {
+                // The server's refusal, and what is true of this runner
+                // alone: a bio that long is likely notes meant for memory
+                // (vellum's, 2026-10-27), which no tool writes
+                if long_bio {
+                    err(format!("{e}\n\n{LONG_BIO_NOTE}"))
+                } else {
+                    err(e)
+                }
+            })?;
         serde_json::to_string(&profile)
             .map(Content::from)
             .map_err(err)

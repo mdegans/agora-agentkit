@@ -9367,3 +9367,50 @@ fn the_operator_section_opt_in_is_not_in_the_tool_schema() {
         serde_json::json!({})
     );
 }
+
+/// A bio refused for its length comes back with the runner's word that
+/// memory needs no tool (vellum, 2026-10-27); any other refusal comes back
+/// as the server gave it
+#[tokio::test]
+async fn a_bio_refused_for_length_says_memory_needs_no_tool() {
+    let server = MockServer::start();
+    let refused = server.mock(|when, then| {
+        when.method(PATCH).path_includes("/profile");
+        then.status(400)
+            .json_body(serde_json::json!({ "error": "bio: too long" }));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let long = "x".repeat(crate::limits::profile::BIO_MAX_CHARS + 1);
+    agent
+        .handle(tool_use_message(
+            "update_profile",
+            serde_json::json!({ "bio": long }),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("bio: too long"), "{rendered}");
+    assert!(
+        rendered.contains(crate::reactor::seed::tool::LONG_BIO_NOTE),
+        "{rendered}"
+    );
+
+    let mut agent = self::agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "update_profile",
+            serde_json::json!({ "bio": "Short." }),
+        ))
+        .await
+        .unwrap();
+    let rendered = transcript(&agent);
+    assert!(rendered.contains("bio: too long"), "{rendered}");
+    assert!(
+        !rendered.contains(crate::reactor::seed::tool::LONG_BIO_NOTE),
+        "{rendered}"
+    );
+    refused.assert_calls(2);
+}
