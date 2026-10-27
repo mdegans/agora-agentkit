@@ -19,7 +19,8 @@ operator requests, and the server can store what its attestation says.
   the card forgets its session, and before every signature of a PIN-always
   key. `attestation()` returns `AttestationBundle::YubicoPiv` with the
   slot's attestation and `f9`. Provisioning: `generate` (management key:
-  default, hex from a secret file, or PIN-protected), `device_info`, and
+  default, hex from a secret file with its algorithm (3DES, AES-128/192/256)
+  read from the device, or PIN-protected), `device_info`, and
   `reset_piv`, which resets PIV alone by blocking the PIN and PUK first.
 - **`SignerError`** gains `PcscUnavailable` (no `pcscd`, or polkit refused
   this user), `SlotEmpty`, `ImportedKey`, `ManagementKeyRefused`,

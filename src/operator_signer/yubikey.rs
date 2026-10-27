@@ -38,7 +38,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ::yubikey::piv::{self as ykpiv, AlgorithmId, ManagementSlotId, SlotId};
-use ::yubikey::{MgmKey, Serial, YubiKey};
+use ::yubikey::{MgmAlgorithmId, MgmKey, Serial, YubiKey};
 use sha2::{Digest, Sha256};
 use x509_cert::der::Encode;
 
@@ -424,7 +424,11 @@ pub async fn generate(
                     hex::decode(secret.expose().trim())
                         .map_err(|_| SignerError::ManagementKeyRefused)?,
                 );
-                MgmKey::from_bytes(bytes.as_slice(), None)
+                // The key's algorithm as the device reports it: a 24-byte
+                // key is 3DES or AES-192, which its length can't tell
+                let algorithm =
+                    management_key_algorithm(&mut device, firmware)?;
+                MgmKey::from_bytes(bytes.as_slice(), Some(algorithm))
             }
             ManagementKey::Protected(pin) => {
                 verify_pin_on(&mut device, &pin)?;
@@ -678,6 +682,31 @@ fn open_device(serial: Option<PivSerial>) -> Result<YubiKey, SignerError> {
 fn firmware_of(device: &YubiKey) -> FirmwareVersion {
     let v = device.version();
     FirmwareVersion::new(v.major, v.minor, v.patch)
+}
+
+/// The algorithm of the device's management key: from the metadata
+/// command (firmware 5.3+), else 3DES, the only one older firmware has.
+fn management_key_algorithm(
+    device: &mut YubiKey,
+    firmware: FirmwareVersion,
+) -> Result<MgmAlgorithmId, SignerError> {
+    if firmware < METADATA_MIN_FIRMWARE {
+        return Ok(MgmAlgorithmId::ThreeDes);
+    }
+    let metadata = ykpiv::metadata(
+        device,
+        SlotId::Management(ManagementSlotId::Management),
+    )
+    .map_err(card_error)?;
+    match metadata.algorithm {
+        ykpiv::SlotAlgorithmId::Management(algorithm) => Ok(algorithm),
+        other => Err(SignerError::Transport {
+            error: format!(
+                "the management key slot reports a {other:?} key, not a \
+                 management key"
+            ),
+        }),
+    }
 }
 
 /// The slot's public key from the metadata command, if the firmware has it.
