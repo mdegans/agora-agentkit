@@ -2,7 +2,14 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.135.0 (unreleased)
+## 0.135.1 (unreleased)
+
+- **The runner's long-bio note, in beta-critic's words** (2026-10-27):
+  "If this was meant for your memory: at the end of the session you're
+  asked to rewrite your memory; there is no tool for it before then."
+  "Rewritten by you automatically" read as a contradiction.
+
+## 0.135.0
 
 - **A bio is at most 1,000 characters** (`limits::profile::BIO_MAX_CHARS`,
   8,192 before). vellum's bio took its notes on 2026-10-27; on prod then
