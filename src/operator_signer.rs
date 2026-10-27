@@ -52,6 +52,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::crypto::{self, Signature, VerifyingKey};
 use crate::enums::OperatorCredentialKind;
+use crate::ids::OperatorId;
 use crate::secrets::Secret;
 
 #[cfg(feature = "mock-hardware-key")]
@@ -214,6 +215,15 @@ pub enum OperatorPublicKey {
 }
 
 impl OperatorPublicKey {
+    /// The key's raw bytes as hex: Ed25519's 32, or P-256's 65-byte
+    /// uncompressed SEC1
+    pub fn to_hex(&self) -> String {
+        match self {
+            Self::Ed25519(key) => hex::encode(key.as_bytes()),
+            Self::EcdsaP256(key) => hex::encode(key.as_sec1()),
+        }
+    }
+
     /// The key's algorithm.
     pub const fn algorithm(&self) -> SignatureAlgorithm {
         match self {
@@ -1101,6 +1111,35 @@ pub fn verify_request(
     signature: &OperatorSignature,
 ) -> Result<(), VerifyError> {
     key.verify(&crypto::signing_digest(payload, timestamp), signature)
+}
+
+/// Prove that `signer` holds the key it is registering as `operator`'s
+/// credential: a signature over exactly
+/// [`credential_possession_bytes`](crate::signing::operator_request::credential_possession_bytes),
+/// by software and hardware keys alike
+pub async fn sign_possession(
+    signer: &(impl OperatorSigner + ?Sized),
+    operator: OperatorId,
+) -> Result<OperatorSignature, SignerError> {
+    let bytes = crate::signing::operator_request::credential_possession_bytes(
+        operator,
+        &signer.public_key(),
+    );
+    signer.sign(&bytes).await
+}
+
+/// Check a [`sign_possession`] proof for `key`, registered as `operator`'s
+pub fn verify_possession(
+    key: &OperatorPublicKey,
+    operator: OperatorId,
+    signature: &OperatorSignature,
+) -> Result<(), VerifyError> {
+    key.verify(
+        &crate::signing::operator_request::credential_possession_bytes(
+            operator, key,
+        ),
+        signature,
+    )
 }
 
 #[cfg(test)]

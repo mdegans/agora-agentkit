@@ -519,6 +519,8 @@ pub enum OperatorActionDetail {
     },
     DmCancel {
         cancelled: Vec<MessageId>,
+        /// What cancelled them
+        reason: CancelReason,
     },
     DmRetract {
         retracted: Vec<MessageId>,
@@ -599,6 +601,37 @@ impl OperatorLogEntry {
     }
 }
 
+/// Why undelivered operator messages were cancelled: a
+/// [`OperatorActionDetail::DmCancel`]'s cause. Stored in the log's `detail`
+/// JSON, so it has no Postgres twin. Closed: every cancel has one of these
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum CancelReason {
+    /// A signed cancel or batch retract by the operator
+    Operator,
+    /// The cancel link in the bulk-hold email
+    CancelLink,
+    /// The recipient left before delivery
+    AgentDeparted,
+    /// The operator was banned before delivery
+    OperatorBanned,
+    /// The credential that signed the send was revoked before delivery
+    CredentialRevoked,
+}
+
+impl CancelReason {
+    /// Every reason
+    pub const ALL: [Self; 5] = [
+        Self::Operator,
+        Self::CancelLink,
+        Self::AgentDeparted,
+        Self::OperatorBanned,
+        Self::CredentialRevoked,
+    ];
+}
+
 impl OperatorActionDetail {
     /// The `operator_actions.kind` this detail goes with
     pub fn kind(&self) -> OperatorActionKind {
@@ -619,7 +652,7 @@ impl OperatorActionDetail {
         let n = |len: usize| len as i64;
         match self {
             Self::DmSend { messages, .. } => Some(n(messages.len())),
-            Self::DmCancel { cancelled } => Some(n(cancelled.len())),
+            Self::DmCancel { cancelled, .. } => Some(n(cancelled.len())),
             Self::DmRetract {
                 retracted,
                 cancelled,
@@ -720,7 +753,10 @@ mod tests {
                 deliver_at: Utc::now(),
                 about: None,
             },
-            OperatorActionDetail::DmCancel { cancelled: vec![] },
+            OperatorActionDetail::DmCancel {
+                cancelled: vec![],
+                reason: CancelReason::CancelLink,
+            },
             OperatorActionDetail::DmRetract {
                 retracted: vec![],
                 cancelled: vec![],
@@ -812,6 +848,7 @@ mod tests {
         for detail in [
             OperatorActionDetail::DmCancel {
                 cancelled: vec![mine],
+                reason: CancelReason::Operator,
             },
             OperatorActionDetail::CredentialAdd {
                 credential: credential.clone(),
@@ -913,6 +950,49 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<OperatorConfigResponse>(json).unwrap(),
             config
+        );
+    }
+
+    /// Every cancel says why, spelled as written, and a cancel without a
+    /// reason does not read
+    #[test]
+    fn a_cancel_carries_its_reason() {
+        let id = MessageId::new();
+        for (reason, name) in CancelReason::ALL.into_iter().zip([
+            "operator",
+            "cancel_link",
+            "agent_departed",
+            "operator_banned",
+            "credential_revoked",
+        ]) {
+            let detail = OperatorActionDetail::DmCancel {
+                cancelled: vec![id],
+                reason,
+            };
+            let json = serde_json::to_value(&detail).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "kind": "dm_cancel",
+                    "cancelled": [id],
+                    "reason": name,
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+                detail
+            );
+        }
+        assert!(
+            serde_json::from_value::<OperatorActionDetail>(serde_json::json!({
+                "kind": "dm_cancel",
+                "cancelled": [id],
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CancelReason>(serde_json::json!("other"))
+                .is_err()
         );
     }
 

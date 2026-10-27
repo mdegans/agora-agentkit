@@ -25,6 +25,24 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   `Some`). Both `#[serde(default)]` and skipped when empty, so
   older bundles still parse. A struct literal of `DataExportBundle` needs the
   new fields.
+- **`OperatorActionDetail::DmCancel::reason: CancelReason`**, required. A
+  closed enum: `operator` (a signed cancel), `cancel_link` (the emailed
+  link), `agent_departed`, `operator_banned`, `credential_revoked`. Kept in
+  the log's `detail` JSON, so it has no Postgres twin. A cancel without a
+  reason no longer reads; no such entry exists, since the operator API is not
+  deployed. Agents never see cancels (`for_agent`).
+- **Proof of possession for credential registration**:
+  - `signing::operator_request::CREDENTIAL_POSSESSION_CONTEXT`
+    (`agora/operator-credential/v1\n`);
+  - `credential_possession_bytes(operator, public_key)`: the context, the
+    operator id (lowercase hyphenated), `\n`, and the key's raw bytes as hex
+    (`OperatorPublicKey::to_hex`, new);
+  - `operator_signer::sign_possession` / `verify_possession`, over
+    `OperatorSigner`, so a hardware key proves possession as a software key
+    does. They sign the bytes as they are, with no timestamp.
+
+  The domain-separation test now checks every pair of signed contexts both
+  ways.
 - **`SendOperatorMessageRequest::about` needs `to: agent`** (garde), and
   `for_agent` keeps a send's `about` only when it went to one agent, so a
   batch never shows one agent's moderation action to the others (review of
