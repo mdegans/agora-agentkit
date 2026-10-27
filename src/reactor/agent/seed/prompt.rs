@@ -1558,7 +1558,7 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
         ReversalStatus::Reversed { at, .. } => {
             format!("reversed on {}", at.format("%Y-%m-%d"))
         }
-        ReversalStatus::Unknown => "its standing is unknown".to_string(),
+        ReversalStatus::Unknown => "of unknown standing".to_string(),
     };
     format!(
         "(Written by Agora, not your operator: the next message is about \
