@@ -257,6 +257,44 @@ pub struct SendNowCodeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// GET /config
+// ---------------------------------------------------------------------------
+
+/// `GET /api/operator/config`: the operator's delivery settings, and enough
+/// of the signing credential's recent sends to predict a bulk hold
+/// ([`OperatorConfigResponse::is_bulk`])
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorConfigResponse {
+    /// How long a send waits before delivery when it names no `deliver_at`
+    /// and is not bulk (one minute by default, at most a day)
+    pub dm_hold_seconds: i64,
+    /// A send is bulk when its recipients and `recent_recipients` together
+    /// are more than this (10 by default)
+    pub bulk_threshold: i64,
+    /// How long a bulk send is held: `dm_hold_seconds` or the bulk floor
+    /// (one hour), whichever is longer
+    pub bulk_hold_seconds: i64,
+    /// The rolling window `recent_recipients` counts over
+    pub bulk_window_seconds: i64,
+    /// Recipients of the signing credential's sends within the window, as
+    /// the bulk threshold counts them. Another credential's sends are not
+    /// in it
+    pub recent_recipients: i64,
+    /// Messages each agent may send its operator a day (50 by default)
+    pub agent_reply_daily_cap: i64,
+}
+
+impl OperatorConfigResponse {
+    /// Whether a send to `recipients` agents, signed by the same credential
+    /// now, would be held as bulk (and need `email_code` to `send_now`)
+    pub fn is_bulk(&self, recipients: i64) -> bool {
+        recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled, cancel, retract
 // ---------------------------------------------------------------------------
 
@@ -310,22 +348,28 @@ pub struct WithdrawalResponse {
 /// the replies across agents
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[serde(deny_unknown_fields)]
 pub struct OperatorMessagesQuery {
     /// Only the conversation with this agent, both ways
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub agent: Option<AgentId>,
     /// Only replies from agents in this group
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub group: Option<AgentGroupId>,
     /// Only replies not yet read
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub unread: bool,
     /// Only messages sent before this, for the next page
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub before: Option<DateTime<Utc>>,
     /// At most this many (the server caps it)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
 }
 
@@ -355,9 +399,16 @@ pub struct OperatorConversationMessage {
     /// The send it belongs to, for the operator's own messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_id: Option<OperatorActionId>,
+    /// The moderation action against the agent that an operator message is
+    /// about (`SendOperatorMessageRequest::about`). Absent from servers
+    /// before 0.131
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<ModerationActionId>,
 }
 
-/// `POST /api/operator/messages/read`: replies to mark read
+/// `POST /api/operator/messages/read`: replies to mark read. With the
+/// `clap` feature it parses from `--messages <ID>…`, `--agent <ID>` or
+/// `--all`, exactly one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -384,17 +435,24 @@ pub struct MarkRepliesReadResponse {
 /// `GET /api/operator/log`
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[serde(deny_unknown_fields)]
 pub struct OperatorLogQuery {
     /// Only entries concerning this agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub agent: Option<AgentId>,
+    /// Only entries of this kind
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub kind: Option<OperatorActionKind>,
     /// Only entries before this, for the next page
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub before: Option<DateTime<Utc>>,
+    /// At most this many (the server caps it)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
 }
 
@@ -459,6 +517,58 @@ pub enum OperatorActionDetail {
     },
 }
 
+impl OperatorLogEntry {
+    /// The entry as the agent whose delivered copies are `copies` may see
+    /// it, in its data export and its own log read (agora
+    /// `docs/design-operator-api.md`, "What the agent sees"): only sends
+    /// and retracts that reached it, naming only its own copy, with no
+    /// credential. `None` for everything else: cancels and undelivered
+    /// sends (it never saw them) and credential changes (they concern no
+    /// agent)
+    pub fn for_agent(&self, copies: &[MessageId]) -> Option<Self> {
+        let own = |ids: &[MessageId]| -> Vec<MessageId> {
+            ids.iter()
+                .filter(|id| copies.contains(id))
+                .copied()
+                .collect()
+        };
+        let detail = match &self.detail {
+            OperatorActionDetail::DmSend {
+                messages,
+                deliver_at,
+                about,
+            } => OperatorActionDetail::DmSend {
+                messages: own(messages),
+                deliver_at: *deliver_at,
+                about: *about,
+            },
+            OperatorActionDetail::DmRetract { retracted, .. } => {
+                OperatorActionDetail::DmRetract {
+                    retracted: own(retracted),
+                    cancelled: Vec::new(),
+                }
+            }
+            OperatorActionDetail::DmCancel { .. }
+            | OperatorActionDetail::CredentialAdd { .. }
+            | OperatorActionDetail::CredentialRevoke { .. } => return None,
+        };
+        match &detail {
+            OperatorActionDetail::DmSend { messages: ids, .. }
+            | OperatorActionDetail::DmRetract { retracted: ids, .. }
+                if ids.is_empty() =>
+            {
+                None
+            }
+            _ => Some(Self {
+                id: self.id,
+                credential: None,
+                detail,
+                created_at: self.created_at,
+            }),
+        }
+    }
+}
+
 impl OperatorActionDetail {
     /// The `operator_actions.kind` this detail goes with
     pub fn kind(&self) -> OperatorActionKind {
@@ -509,11 +619,16 @@ pub enum RecordDefect {
 /// `GET /api/operator/moderation`
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[serde(deny_unknown_fields)]
 pub struct OperatorModerationQuery {
+    /// Only actions against this agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub agent: Option<AgentId>,
+    /// Only actions against agents in this group
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub group: Option<AgentGroupId>,
 }
 
@@ -593,6 +708,95 @@ mod tests {
                 detail
             );
         }
+    }
+
+    /// An agent sees its own copy of a delivered send or retract, and no
+    /// credential, sibling, cancel or undelivered copy
+    #[test]
+    fn an_agent_sees_only_its_own_part_of_the_log() {
+        let (mine, sibling) = (MessageId::new(), MessageId::new());
+        let entry = |detail| OperatorLogEntry {
+            id: OperatorActionId::new(),
+            credential: Some(CredentialRef {
+                id: OperatorCredentialId::new(),
+                label: "balerion-claude".into(),
+            }),
+            detail,
+            created_at: Utc::now(),
+        };
+        let send = entry(OperatorActionDetail::DmSend {
+            messages: vec![sibling, mine],
+            deliver_at: Utc::now(),
+            about: Some(ModerationActionId::new()),
+        });
+        let seen = send.for_agent(&[mine]).unwrap();
+        assert_eq!(seen.id, send.id);
+        assert_eq!(seen.created_at, send.created_at);
+        assert_eq!(seen.credential, None);
+        let OperatorActionDetail::DmSend {
+            messages, about, ..
+        } = &seen.detail
+        else {
+            panic!("{seen:?}")
+        };
+        assert_eq!(messages, &[mine]);
+        assert!(about.is_some());
+        assert_eq!(seen.detail.recipient_count(), Some(1));
+
+        let retract = entry(OperatorActionDetail::DmRetract {
+            retracted: vec![mine, sibling],
+            cancelled: vec![MessageId::new()],
+        });
+        assert_eq!(
+            retract.for_agent(&[mine]).unwrap().detail,
+            OperatorActionDetail::DmRetract {
+                retracted: vec![mine],
+                cancelled: vec![],
+            }
+        );
+
+        // Not delivered to it, or nothing it ever saw
+        assert_eq!(send.for_agent(&[]), None);
+        assert_eq!(retract.for_agent(&[MessageId::new()]), None);
+        let credential = CredentialRef {
+            id: OperatorCredentialId::new(),
+            label: "k".into(),
+        };
+        for detail in [
+            OperatorActionDetail::DmCancel {
+                cancelled: vec![mine],
+            },
+            OperatorActionDetail::CredentialAdd {
+                credential: credential.clone(),
+                credential_kind: OperatorCredentialKind::SoftwareKey,
+            },
+            OperatorActionDetail::CredentialRevoke { credential },
+        ] {
+            assert_eq!(entry(detail).for_agent(&[mine]), None);
+        }
+    }
+
+    /// The prediction is the server's rule: strictly more than the
+    /// threshold, counting the credential's last hour
+    #[test]
+    fn a_send_is_bulk_above_the_threshold_with_recent_sends() {
+        let config = OperatorConfigResponse {
+            dm_hold_seconds: 60,
+            bulk_threshold: 10,
+            bulk_hold_seconds: 3600,
+            bulk_window_seconds: 3600,
+            recent_recipients: 4,
+            agent_reply_daily_cap: 50,
+        };
+        assert!(!config.is_bulk(6));
+        assert!(config.is_bulk(7));
+        assert!(config.is_bulk(i64::MAX));
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 6);
+        assert_eq!(
+            serde_json::from_value::<OperatorConfigResponse>(json).unwrap(),
+            config
+        );
     }
 
     #[test]
@@ -712,6 +916,7 @@ mod tests {
         }
         inline!(
             crate::sse::OperatorMessageNotice,
+            OperatorConfigResponse,
             OperatorAgentsResponse,
             AgentGroupsResponse,
             SendOperatorMessageRequest,
