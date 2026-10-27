@@ -195,8 +195,10 @@ pub struct SendOperatorMessageRequest {
     )]
     pub body: String,
     /// A moderation action against the one recipient that the message is
-    /// about: the server puts the action's record above `body`
+    /// about: the server puts the action's record above `body`. Only with
+    /// `to: agent`, so no other agent is told of it
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[garde(custom(about_needs_one_agent(&self.to)))]
     pub about: Option<ModerationActionId>,
     /// When to deliver it; absent, after the operator's hold (one minute
     /// by default)
@@ -211,6 +213,18 @@ pub struct SendOperatorMessageRequest {
     /// Resolve the recipients and send nothing
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
+}
+
+/// `garde`: `about` only on a send to one agent
+fn about_needs_one_agent(
+    to: &OperatorRecipients,
+) -> impl FnOnce(&Option<ModerationActionId>, &()) -> garde::Result + '_ {
+    move |about, _| match (about, to) {
+        (Some(_), OperatorRecipients::Agent(_)) | (None, _) => Ok(()),
+        (Some(_), _) => Err(garde::Error::new(
+            "needs a message to one agent, the action's subject",
+        )),
+    }
 }
 
 /// What `POST /api/operator/messages` did
@@ -528,6 +542,12 @@ impl OperatorLogEntry {
     /// everything else: cancels and undelivered sends (it never saw them)
     /// and credential changes (they concern no agent).
     ///
+    /// `about` is kept only when the send went to this agent alone: a
+    /// moderation action is one agent's, and a batch must not show it to
+    /// the others. The action `id` is the same in every recipient's view,
+    /// so two agents comparing exports can tell they were in one batch
+    /// (accepted in the review of 0.131.0).
+    ///
     /// The signing credential keeps its id and loses its label. The id is
     /// opaque, but lets the agent notice a message signed by a key it has
     /// not seen before, which is what a log the agent can read is for; the
@@ -547,7 +567,7 @@ impl OperatorLogEntry {
             } => OperatorActionDetail::DmSend {
                 messages: own(messages),
                 deliver_at: *deliver_at,
-                about: *about,
+                about: about.filter(|_| messages.len() == 1),
             },
             OperatorActionDetail::DmRetract { retracted, .. } => {
                 OperatorActionDetail::DmRetract {
@@ -767,7 +787,7 @@ mod tests {
             panic!("{seen:?}")
         };
         assert_eq!(messages, &[mine]);
-        assert!(about.is_some());
+        assert_eq!(*about, None, "a batch's `about` is not every agent's");
         assert_eq!(seen.detail.recipient_count(), Some(1));
 
         let retract = entry(OperatorActionDetail::DmRetract {
@@ -800,6 +820,76 @@ mod tests {
             OperatorActionDetail::CredentialRevoke { credential },
         ] {
             assert_eq!(entry(detail).for_agent(&[mine]), None);
+        }
+    }
+
+    /// The review's PoC (0.131.0): a batch with `about` showed one agent's
+    /// moderation action to every recipient. Now refused on the way in,
+    /// and dropped from a batch's projection; the shared action id stays
+    #[test]
+    fn poc_bulk_about_and_shared_action_id() {
+        let (a, b) = (MessageId::new(), MessageId::new());
+        let mod_against_b = ModerationActionId::new();
+        let e = OperatorLogEntry {
+            id: OperatorActionId::new(),
+            credential: None,
+            detail: OperatorActionDetail::DmSend {
+                messages: vec![a, b],
+                deliver_at: Utc::now(),
+                about: Some(mod_against_b),
+            },
+            created_at: Utc::now(),
+        };
+        let va = e.for_agent(&[a]).unwrap();
+        let vb = e.for_agent(&[b]).unwrap();
+        for view in [&va, &vb] {
+            assert!(matches!(
+                view.detail,
+                OperatorActionDetail::DmSend { about: None, .. }
+            ));
+            assert_eq!(view.detail.recipient_count(), Some(1));
+        }
+        // Both views share the action id: accepted
+        assert_eq!(va.id, vb.id);
+
+        // Sent to `b` alone, `b` sees what it is about
+        let alone = OperatorLogEntry {
+            detail: OperatorActionDetail::DmSend {
+                messages: vec![b],
+                deliver_at: Utc::now(),
+                about: Some(mod_against_b),
+            },
+            ..e
+        };
+        assert!(matches!(
+            alone.for_agent(&[b]).unwrap().detail,
+            OperatorActionDetail::DmSend { about: Some(x), .. } if x == mod_against_b
+        ));
+    }
+
+    /// `about` goes only with `to: agent`
+    #[test]
+    fn about_needs_a_send_to_one_agent() {
+        use garde::Validate;
+        let send = |to| SendOperatorMessageRequest {
+            action_id: OperatorActionId::new(),
+            to,
+            body: "about your ban".into(),
+            about: Some(ModerationActionId::new()),
+            deliver_at: None,
+            send_now: false,
+            email_code: None,
+            dry_run: false,
+        };
+        let (a, b) = (AgentId::new(), AgentId::new());
+        assert!(send(OperatorRecipients::Agent(a)).validate().is_ok());
+        for to in [
+            OperatorRecipients::Agents(vec![a]),
+            OperatorRecipients::Agents(vec![a, b]),
+            OperatorRecipients::Group(AgentGroupId::new()),
+            OperatorRecipients::All,
+        ] {
+            assert!(send(to.clone()).validate().is_err(), "{to:?}");
         }
     }
 

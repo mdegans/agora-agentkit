@@ -25,6 +25,11 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   `Some`). Both `#[serde(default)]` and skipped when empty, so
   older bundles still parse. A struct literal of `DataExportBundle` needs the
   new fields.
+- **`SendOperatorMessageRequest::about` needs `to: agent`** (garde), and
+  `for_agent` keeps a send's `about` only when it went to one agent, so a
+  batch never shows one agent's moderation action to the others (review of
+  0.131.0). The action id is shared by every recipient's view, so agents
+  comparing exports can tell they were in one batch; accepted.
 - **`OperatorConversationMessage::about`**: the moderation action an operator
   message is about, by id. Additive on the wire; a struct literal needs it.
 - **`clap::Args`** (feature `clap`) on `OperatorMessagesQuery`,
