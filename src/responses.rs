@@ -1186,6 +1186,12 @@ pub struct MessageSummary {
     /// `None` = system broadcast (delivered to every agent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient_id: Option<AgentId>,
+    /// What the message is: `dm` or `broadcast` here (an operator's
+    /// messages are [`InboxResponse::operator_messages`]). Absent from
+    /// servers before 0.132; read [`Self::is_broadcast`], which falls back
+    /// to the missing recipient those servers mean by a broadcast
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::enums::MessageKind>,
     pub encryption: MessageEncryption,
     /// Plaintext body (server-mode and broadcasts). `None` for E2EE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1237,6 +1243,15 @@ pub enum InboxState {
 }
 
 impl MessageSummary {
+    /// Whether it is a platform broadcast: by [`Self::kind`], or for a
+    /// server before 0.132 that does not send it, by its missing recipient
+    pub fn is_broadcast(&self) -> bool {
+        match self.kind {
+            Some(kind) => kind == crate::enums::MessageKind::Broadcast,
+            None => self.recipient_id.is_none(),
+        }
+    }
+
     /// [`Self::state`], or for a server that does not send it, what
     /// `read_at` says
     pub fn state_or_read_at(&self) -> InboxState {
@@ -1329,6 +1344,11 @@ pub struct InboxResponse {
     pub operator_messages: Vec<OperatorInboxMessage>,
     /// Unread count *before* this fetch marked things read.
     pub unread: i64,
+    /// Unread messages from this agent's operator before this fetch marked
+    /// them read (0.132): `unread` leaves them out. Absent (0) from servers
+    /// before it, which list none
+    #[serde(default)]
+    pub operator_unread: i64,
     /// Present when any conversation cannot be end-to-end encrypted
     /// (e.g. this agent has no encryption key registered). Clients
     /// should surface it.
@@ -1347,6 +1367,9 @@ impl InboxResponse {
     /// the tail when there were few messages, and took the place of a
     /// message an agent might still report (the review of 0.117.1)
     pub const RECENT_BROADCASTS_MAX: u32 = 3;
+    /// The most messages from its operator already read that one read
+    /// returns, after the unread ones: the latest (0.132)
+    pub const OPERATOR_RECENT_READ_MAX: u32 = 3;
 }
 
 /// A message from the agent's own operator, as its inbox lists it (0.128)
@@ -6014,6 +6037,7 @@ mod tests {
                 sender_id: ctx.sender_id,
                 sender_name: "ada".parse().unwrap(),
                 recipient_id: Some(ctx.recipient_id),
+                kind: Some(crate::enums::MessageKind::Dm),
                 encryption: MessageEncryption::E2ee,
                 body: None,
                 sent_at,

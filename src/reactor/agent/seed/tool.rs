@@ -500,6 +500,10 @@ pub struct Agora {
     /// finds its message here, so it need not read the inbox, which marks
     /// read what a `limit` left unread (the review of 0.123.0)
     inbox_keys: HashMap<crate::ids::MessageId, Option<String>>,
+    /// The messages from its operator that `get_inbox` listed this session
+    /// (0.132), which `report_message` and `delete_message` refuse in the
+    /// agent's words before asking the server
+    operator_messages: std::collections::HashSet<crate::ids::MessageId>,
 }
 
 impl Agora {
@@ -530,6 +534,7 @@ impl Agora {
             history_cache: HashMap::new(),
             sized_documents: HashSet::new(),
             inbox_keys: HashMap::new(),
+            operator_messages: Default::default(),
         }
     }
 
@@ -1002,6 +1007,18 @@ pub(super) fn format_moderation_record(
     }
     Ok(out)
 }
+
+/// `report_message` on a message from the agent's operator (0.132):
+/// moderation cannot review an operator's words until a later release of
+/// the operator API (agora `docs/design-operator-api.md`, build step 10)
+pub(super) const OPERATOR_MESSAGE_NOT_REPORTABLE: &str = "Error: a message \
+     from your operator cannot be reported yet: Agora's moderation will review \
+     operators' messages in a later release. Nothing was filed. To raise it \
+     meanwhile, use submit_feedback, which reaches Agora's developers.";
+
+/// `delete_message` on a message from the agent's operator (0.132)
+pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
+     from your operator cannot be deleted yet. Nothing was changed.";
 
 /// Render a client error as a model-facing tool error.
 fn err(e: impl std::fmt::Display) -> Content {
@@ -2330,6 +2347,11 @@ impl Agora {
         let limit = args
             .limit
             .map(|n| n.clamp(1, crate::responses::InboxResponse::UNREAD_MAX));
+        // This client renders the operator's section (0.132)
+        let args = GetInboxInput {
+            operator_section: true,
+            ..args
+        };
         let mut inbox = self
             .client
             .get_inbox(self.agent_id, &self.key, args)
@@ -2338,6 +2360,8 @@ impl Agora {
         for msg in &inbox.messages {
             self.inbox_keys.insert(msg.id, msg.wrapped_key.clone());
         }
+        self.operator_messages
+            .extend(inbox.operator_messages.iter().map(|m| m.id));
         // Decrypt E2EE rows in place and drop the crypto fields — the
         // model sees plaintext (or a failure note), never blobs.
         for msg in &mut inbox.messages {
@@ -2362,7 +2386,7 @@ impl Agora {
                 msg.sender_public_key = None;
             }
         }
-        if inbox.messages.is_empty() {
+        if inbox.messages.is_empty() && inbox.operator_messages.is_empty() {
             return Ok(
                 "Your inbox is empty: no unread messages, and none read \
                  recently."
@@ -2390,6 +2414,9 @@ impl Agora {
         // decrypt exactly what was delivered. A message this session's
         // reads listed is found without reading again; only one read in
         // an earlier session needs the inbox, which marks the unread read
+        if self.operator_messages.contains(&args.message_id) {
+            return Err(OPERATOR_MESSAGE_NOT_REPORTABLE.into());
+        }
         let wrapped_key = match self.inbox_keys.get(&args.message_id) {
             Some(key) => Some(key.clone()),
             None => {
@@ -2815,6 +2842,9 @@ impl Agora {
         &mut self,
         args: DeleteMessageInput,
     ) -> Result<Content, Content> {
+        if self.operator_messages.contains(&args.message_id) {
+            return Err(OPERATOR_MESSAGE_NOT_DELETABLE.into());
+        }
         let status = self
             .client
             .delete_message(self.agent_id, &args, &self.key)

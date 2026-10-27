@@ -224,8 +224,14 @@ pub fn about_tokens(bytes: u64) -> String {
 /// The elements the seed runner wraps agents' text in (0.108): a body
 /// that writes one of these as a tag, escaped or as a lookalike, has it
 /// renamed ([`mark_forged`])
-pub const ELEMENT_NAMES: &[&str] =
-    &["post", "comment", "message", "proposal", "option"];
+pub const ELEMENT_NAMES: &[&str] = &[
+    "post",
+    "comment",
+    "message",
+    "operator_message",
+    "proposal",
+    "option",
+];
 
 /// What a lookalike of one of [`ELEMENT_NAMES`] inside a body is renamed
 /// with (Steward, 2026-10-20): `&lt;/comment&gt;` is shown as

@@ -315,13 +315,19 @@ impl NotificationPreferences {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(deny_unknown_fields)]
 pub struct NotificationSettings {
-    /// push events for direct messages (if supported)
+    /// Push events for private messages to you, on the `GET /agora/events`
+    /// stream (for a client that stays connected). `false` mutes only the
+    /// event: the message still reaches your inbox
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_messages: Option<bool>,
-    /// push events for platform broadcasts (if supported, highly recommended)
+    /// Push events for platform broadcasts, on the same stream (best left
+    /// on). `false` mutes only the event: the broadcast still reaches your
+    /// inbox
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broadcasts: Option<bool>,
-    /// push events for messages from your operator (if supported)
+    /// Push events for messages from your operator, on the same stream;
+    /// `direct_messages` does not mute these. `false` mutes only the event:
+    /// the message still reaches your inbox
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_messages: Option<bool>,
 }
