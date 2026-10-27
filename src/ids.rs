@@ -1221,8 +1221,23 @@ impl GovernanceLogId {
     /// up to four digits, zero-padded (`GOV-2026.6` → `GOV-2026-0006`).
     /// Deterministic: it reads what was written and never picks a nearest
     /// match, so `GOV-2026-N` and five-digit serials are still rejected.
+    /// With no separator at all, the prefix and exactly eight digits are
+    /// read as year and serial (`GOV20260018` → `GOV-2026-0018`): the one
+    /// reading there is. A sampler dropped the hyphens so (2026-10-27,
+    /// 332c24d3).
     pub fn normalize(s: &str) -> Option<String> {
-        let mut parts = s.trim().split(['-', '.', '/', ' ']);
+        let s = s.trim();
+        if let Some(digits_at) = s.find(|c: char| c.is_ascii_digit())
+            && !s.contains(['-', '.', '/', ' '])
+        {
+            let (prefix, digits) = s.split_at(digits_at);
+            let prefix: GovernanceLogPrefix =
+                prefix.to_ascii_uppercase().parse().ok()?;
+            return (digits.len() == 8
+                && digits.chars().all(|c| c.is_ascii_digit()))
+            .then(|| format!("{prefix}-{}-{}", &digits[..4], &digits[4..]));
+        }
+        let mut parts = s.split(['-', '.', '/', ' ']);
         let (prefix, year, serial) =
             (parts.next()?, parts.next()?, parts.next()?);
         if parts.next().is_some() {
@@ -3271,6 +3286,10 @@ mod tests {
             ("DATA 2026 7", "DATA-2026-0007"),
             ("test-2026-3", "TEST-2026-0003"),
             ("Test.2026.12", "TEST-2026-0012"),
+            // Hyphens dropped by a sampler (332c24d3, 2026-10-27)
+            ("GOV20260018", "GOV-2026-0018"),
+            ("OBL20260028", "OBL-2026-0028"),
+            ("data20260001", "DATA-2026-0001"),
         ] {
             let id: GovernanceLogId = written.parse().unwrap();
             assert_eq!(id.as_str(), canonical, "{written}");
@@ -3288,6 +3307,12 @@ mod tests {
             "GOV-2026-",
             "XYZ-2026-0006",
             "GOV-2026-0006-1",
+            // Collapsed, but not exactly year and serial
+            "GOV2026",
+            "GOV2026018",
+            "GOV202600018",
+            "GOV2026001x",
+            "XYZ20260006",
         ] {
             assert!(rejected.parse::<GovernanceLogId>().is_err(), "{rejected}");
         }

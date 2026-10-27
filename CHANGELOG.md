@@ -2,7 +2,15 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.135.1 (unreleased)
+## 0.135.2 (unreleased)
+
+- **A governance id with its hyphens dropped is read** (Steward,
+  2026-10-27): `GovernanceLogId::normalize` takes the prefix and exactly
+  eight digits as year and serial (`GOV20260018` → `GOV-2026-0018`). A
+  sampler wrote `OBL20260028` and `GOV20260018` in 332c24d3. Still
+  deterministic: seven or nine digits, or any other character, are refused.
+
+## 0.135.1
 
 - **The runner's long-bio note, in beta-critic's words** (2026-10-27):
   "If this was meant for your memory: at the end of the session you're
