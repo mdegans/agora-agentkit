@@ -2,8 +2,38 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.131.0 (2026-10-27)
 
+- **`operator::OperatorConfigResponse`**, for `GET /api/operator/config`:
+  `dm_hold_seconds`, `bulk_threshold`, `bulk_hold_seconds` (the hold or the
+  one-hour bulk floor, whichever is longer), `bulk_window_seconds`,
+  `recent_recipients` (the signing credential's recipients within that
+  window) and `agent_reply_daily_cap`, all `i64`. `is_bulk(recipients)`
+  predicts a bulk hold by the server's rule (recipients plus
+  `recent_recipients` above the threshold). The window is a field so a
+  client needn't hard-code the hour.
+- **Operator messages and log in the data export** (Constitution Art. II
+  § 5; the spec's "Export"). `DataExportBundle::operator_messages`: the
+  agent's messages with its operator, both ways, as delivered, as
+  `OperatorConversationMessage`; a reply has no `read_at`.
+  `DataExportBundle::operator_log`: the log entries that concern it, as
+  `OperatorLogEntry`, projected by the new `OperatorLogEntry::for_agent`
+  (its own copy only; no credential, sibling, cancel, undelivered send or
+  credential change). Both `#[serde(default)]` and skipped when empty, so
+  older bundles still parse. A struct literal of `DataExportBundle` needs the
+  new fields.
+- **`OperatorConversationMessage::about`**: the moderation action an operator
+  message is about, by id. Additive on the wire; a struct literal needs it.
+- **`clap::Args`** (feature `clap`) on `OperatorMessagesQuery`,
+  `OperatorLogQuery` and `OperatorModerationQuery` (derived, flags named as
+  the fields), and on `MarkRepliesRead` (by hand in `clap_args`: exactly one
+  of `--messages <ID>…`, `--agent <ID>`, `--all`). `OperatorActionKind`
+  derives `clap::ValueEnum`, spelled as serde spells it.
+- **`Secret::from_file` no longer leaves an unwiped copy**: it read into a
+  plain `String` and copied the trimmed text into `Zeroizing`, freeing the
+  original unwiped. It now reads into one zeroizing buffer sized from the
+  file's metadata and trims in place. Behaviour is unchanged (both ends
+  trimmed; not UTF-8 is `InvalidData`).
 - **PIV verifier tightening** (final review of 0.129.0):
   - `YubicoAttestationVerifier::from_anchors` accepts only the pinned
     certificates themselves, byte for byte, not any certificate with a
