@@ -1270,6 +1270,11 @@ pub enum MessageKind {
     sqlx(type_name = "operator_action_kind_enum", rename_all = "snake_case")
 )]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
 pub enum OperatorActionKind {
     /// A message to one or more of its agents, held, scheduled or sent
     DmSend,

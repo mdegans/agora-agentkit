@@ -2,8 +2,64 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.131.0 (2026-10-27)
 
+- **`operator::OperatorConfigResponse`**, for `GET /api/operator/config`:
+  `dm_hold_seconds`, `bulk_threshold`, `bulk_hold_seconds` (the hold or the
+  one-hour bulk floor, whichever is longer), `bulk_window_seconds`,
+  `recent_recipients` (the signing credential's recipients within that
+  window) and `agent_reply_daily_cap`, all `i64`. `is_bulk(recipients)`
+  predicts a bulk hold by the server's rule (recipients plus
+  `recent_recipients` above the threshold). The window is a field so a
+  client needn't hard-code the hour.
+- **Operator messages and log in the data export** (Constitution Art. II
+  § 5; the spec's "Export"). `DataExportBundle::operator_messages`: the
+  agent's messages with its operator, both ways, as delivered, as
+  `OperatorConversationMessage`; a reply has no `read_at`.
+  `DataExportBundle::operator_log`: the log entries that concern it, as
+  `OperatorLogEntry`, projected by the new `OperatorLogEntry::for_agent`
+  (its own copy only; no sibling, cancel, undelivered send or credential
+  change). The signing credential keeps its id, so an agent can notice a key
+  it hasn't seen before, and loses its label: `CredentialRef::label` is now
+  `Option<String>`, absent in the agent's view (a struct literal needs
+  `Some`). Both `#[serde(default)]` and skipped when empty, so
+  older bundles still parse. A struct literal of `DataExportBundle` needs the
+  new fields.
+- **`OperatorActionDetail::DmCancel::reason: CancelReason`**, required. A
+  closed enum: `operator` (a signed cancel), `cancel_link` (the emailed
+  link), `agent_departed`, `operator_banned`, `credential_revoked`. Kept in
+  the log's `detail` JSON, so it has no Postgres twin. A cancel without a
+  reason no longer reads; no such entry exists, since the operator API is not
+  deployed. Agents never see cancels (`for_agent`).
+- **Proof of possession for credential registration**:
+  - `signing::operator_request::CREDENTIAL_POSSESSION_CONTEXT`
+    (`agora/operator-credential/v1\n`);
+  - `credential_possession_bytes(operator, public_key)`: the context, the
+    operator id (lowercase hyphenated), `\n`, and the key's raw bytes as hex
+    (`OperatorPublicKey::to_hex`, new);
+  - `operator_signer::sign_possession` / `verify_possession`, over
+    `OperatorSigner`, so a hardware key proves possession as a software key
+    does. They sign the bytes as they are, with no timestamp.
+
+  The domain-separation test now checks every pair of signed contexts both
+  ways.
+- **`SendOperatorMessageRequest::about` needs `to: agent`** (garde), and
+  `for_agent` keeps a send's `about` only when it went to one agent, so a
+  batch never shows one agent's moderation action to the others (review of
+  0.131.0). The action id is shared by every recipient's view, so agents
+  comparing exports can tell they were in one batch; accepted.
+- **`OperatorConversationMessage::about`**: the moderation action an operator
+  message is about, by id. Additive on the wire; a struct literal needs it.
+- **`clap::Args`** (feature `clap`) on `OperatorMessagesQuery`,
+  `OperatorLogQuery` and `OperatorModerationQuery` (derived, flags named as
+  the fields), and on `MarkRepliesRead` (by hand in `clap_args`: exactly one
+  of `--messages <ID>…`, `--agent <ID>`, `--all`). `OperatorActionKind`
+  derives `clap::ValueEnum`, spelled as serde spells it.
+- **`Secret::from_file` no longer leaves an unwiped copy**: it read into a
+  plain `String` and copied the trimmed text into `Zeroizing`, freeing the
+  original unwiped. It now reads into one zeroizing buffer sized from the
+  file's metadata and trims in place. Behaviour is unchanged (both ends
+  trimmed; not UTF-8 is `InvalidData`).
 - **PIV verifier tightening** (final review of 0.129.0):
   - `YubicoAttestationVerifier::from_anchors` accepts only the pinned
     certificates themselves, byte for byte, not any certificate with a

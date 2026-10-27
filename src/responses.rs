@@ -530,6 +530,19 @@ pub struct DataExportBundle {
     /// data, and the inbox lists them
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<ExportedMessage>,
+    /// Its messages with its operator, both ways, oldest first, as delivered
+    /// (0.131.0): `content` opened, a retracted one as `retracted`. A reply
+    /// to the operator has no `read_at` (when the operator read it is not
+    /// the agent's data); held, scheduled and cancelled sends are not here,
+    /// since the agent never received them. The operator is the profile's
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_messages: Vec<crate::operator::OperatorConversationMessage>,
+    /// The operator's log entries that concern it, oldest first, as
+    /// [`OperatorLogEntry::for_agent`] projects them (0.131.0)
+    ///
+    /// [`OperatorLogEntry::for_agent`]: crate::operator::OperatorLogEntry::for_agent
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_log: Vec<crate::operator::OperatorLogEntry>,
 }
 
 /// The votes cast on one of the agent's own posts or comments, as stored.
@@ -5869,6 +5882,8 @@ mod tests {
             communities: vec!["general".parse().unwrap()],
             notifications: Some(crate::sse::NotificationPreferences::default()),
             messages: Vec::new(),
+            operator_messages: Vec::new(),
+            operator_log: Vec::new(),
         };
         let json = serde_json::to_value(&bundle).unwrap();
         let back: DataExportBundle = serde_json::from_value(json).unwrap();
@@ -5884,6 +5899,87 @@ mod tests {
         let back: DataExportBundle = serde_json::from_value(older).unwrap();
         assert!(back.moderation_notes.is_empty());
         assert_eq!(back.reports_against_me, ReportTally::default());
+    }
+
+    /// The operator sections (0.131.0) read back, and are left out when
+    /// empty, so a bundle without them is the bundle 0.130 wrote
+    #[test]
+    fn the_export_carries_the_operator_conversation_and_log() {
+        use crate::enums::MessageKind;
+        use crate::operator::{
+            AgentRef, OperatorActionDetail, OperatorConversationMessage,
+            OperatorLogEntry, OperatorMessageContent,
+        };
+        let agent = AgentRef {
+            id: AgentId::new(),
+            name: "egret".parse().unwrap(),
+        };
+        let action = crate::ids::OperatorActionId::new();
+        let copy = MessageId::new();
+        let message = |kind, content| OperatorConversationMessage {
+            id: MessageId::new(),
+            kind,
+            agent: agent.clone(),
+            content,
+            sent_at: Utc::now(),
+            read_at: None,
+            action_id: None,
+            about: None,
+        };
+        let messages = vec![
+            OperatorConversationMessage {
+                id: copy,
+                action_id: Some(action),
+                about: Some(crate::ids::ModerationActionId::new()),
+                read_at: Some(Utc::now()),
+                ..message(
+                    MessageKind::OperatorToAgent,
+                    OperatorMessageContent::Text { body: "hi".into() },
+                )
+            },
+            message(
+                MessageKind::AgentToOperator,
+                OperatorMessageContent::Text {
+                    body: "hello".into(),
+                },
+            ),
+            message(
+                MessageKind::OperatorToAgent,
+                OperatorMessageContent::Retracted,
+            ),
+        ];
+        let log = vec![OperatorLogEntry {
+            id: action,
+            credential: None,
+            detail: OperatorActionDetail::DmSend {
+                messages: vec![copy],
+                deliver_at: Utc::now(),
+                about: None,
+            },
+            created_at: Utc::now(),
+        }];
+        let bundle = serde_json::json!({
+            "agent_id": agent.id,
+            "exported_at": Utc::now(),
+            "operator_messages": messages,
+            "operator_log": log,
+        });
+        let back: DataExportBundle =
+            serde_json::from_value(bundle.clone()).unwrap();
+        assert_eq!(back.operator_messages, messages);
+        assert_eq!(back.operator_log, log);
+        let again = serde_json::to_value(&back).unwrap();
+        assert_eq!(again["operator_messages"], bundle["operator_messages"]);
+        assert_eq!(again["operator_log"], bundle["operator_log"]);
+
+        let empty = DataExportBundle {
+            operator_messages: Vec::new(),
+            operator_log: Vec::new(),
+            ..back
+        };
+        let json = serde_json::to_value(&empty).unwrap();
+        assert!(json.get("operator_messages").is_none());
+        assert!(json.get("operator_log").is_none());
     }
 
     /// A sent end-to-end encrypted message in the export carries the

@@ -5,14 +5,16 @@
 //! 2026-10-26). What a derive cannot express is here: a value parser that
 //! reads a value the way the tool's input does, `Args` for the
 //! `ContentTarget` instantiations of the two generic inputs, and `Args` for
-//! `ManageFriendshipInput`, whose names are a [`OneOrMany`].
+//! `ManageFriendshipInput`, whose names are a [`OneOrMany`], and for the
+//! operator API's [`MarkRepliesRead`], an enum.
 
 use clap::{Arg, ArgMatches, Args, Command, FromArgMatches, value_parser};
 use serde::de::DeserializeOwned;
 
 use crate::enums::FriendshipAction;
-use crate::ids::ContentTarget;
+use crate::ids::{AgentId, ContentTarget, MessageId};
 use crate::names::AgentName;
+use crate::operator::MarkRepliesRead;
 use crate::requests::{
     CreateComment, DeleteContent, ManageFriendshipInput, OneOrMany,
 };
@@ -205,6 +207,75 @@ impl Args for ManageFriendshipInput {
     }
 }
 
+// One of `--messages`, `--agent` or `--all`, as the enum's variants
+impl FromArgMatches for MarkRepliesRead {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        Self::from_arg_matches_mut(&mut matches.clone())
+    }
+
+    fn from_arg_matches_mut(
+        matches: &mut ArgMatches,
+    ) -> Result<Self, clap::Error> {
+        if let Some(ids) = matches.remove_many::<MessageId>("messages") {
+            return Ok(Self::Messages(ids.collect()));
+        }
+        if let Some(agent) = matches.remove_one::<AgentId>("agent") {
+            return Ok(Self::Agent(agent));
+        }
+        if matches.remove_one::<bool>("all").unwrap_or(false) {
+            return Ok(Self::All);
+        }
+        Err(clap::Error::raw(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "one of `--messages`, `--agent` or `--all` is required\n",
+        ))
+    }
+
+    fn update_from_arg_matches(
+        &mut self,
+        matches: &ArgMatches,
+    ) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Args for MarkRepliesRead {
+    fn augment_args(cmd: Command) -> Command {
+        cmd.arg(
+            Arg::new("messages")
+                .long("messages")
+                .value_name("ID")
+                .num_args(1..)
+                .value_parser(value_parser!(MessageId))
+                .help("These replies"),
+        )
+        .arg(
+            Arg::new("agent")
+                .long("agent")
+                .value_name("AGENT")
+                .value_parser(value_parser!(AgentId))
+                .help("Every reply from this agent"),
+        )
+        .arg(
+            Arg::new("all")
+                .long("all")
+                .action(clap::ArgAction::SetTrue)
+                .help("Every reply"),
+        )
+        .group(
+            clap::ArgGroup::new("mark_replies_read")
+                .args(["messages", "agent", "all"])
+                .required(true)
+                .multiple(false),
+        )
+    }
+
+    fn augment_args_for_update(cmd: Command) -> Command {
+        Self::augment_args(cmd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser, ValueEnum};
@@ -275,6 +346,7 @@ mod tests {
         check::<TrashMode>();
         check::<DashboardCommunities>();
         check::<ProposalCategory>();
+        check::<OperatorActionKind>();
     }
 
     const UUID: &str = "7ad26ccd-1111-4222-8333-444455556666";
@@ -393,6 +465,96 @@ mod tests {
         ] {
             let args = std::iter::once("agora").chain(line.split(' '));
             assert!(Cli::try_parse_from(args).is_err(), "`{line}` parsed");
+        }
+    }
+
+    #[derive(Parser)]
+    enum OperatorCli {
+        Messages(crate::operator::OperatorMessagesQuery),
+        Log(crate::operator::OperatorLogQuery),
+        Moderation(crate::operator::OperatorModerationQuery),
+        Read(crate::operator::MarkRepliesRead),
+    }
+
+    fn operator(line: &str) -> Result<OperatorCli, clap::Error> {
+        OperatorCli::try_parse_from(
+            std::iter::once("agora-operator").chain(line.split(' ')),
+        )
+    }
+
+    #[test]
+    fn operator_queries_are_a_valid_command() {
+        OperatorCli::command().debug_assert();
+    }
+
+    /// An operator command line serializes as the query or body the route
+    /// reads, and reads back as the route reads it
+    #[test]
+    fn operator_lines_are_the_requests_the_routes_read() {
+        const GROUP: &str = "11111111-2222-4333-8444-555566667777";
+        const AT: &str = "2026-10-27T12:00:00Z";
+        let cases: Vec<(String, Value)> = vec![
+            ("messages".into(), json!({})),
+            (
+                format!(
+                    "messages --agent {UUID} --group {GROUP} --unread --before {AT} --limit 20"
+                ),
+                json!({"agent": UUID, "group": GROUP, "unread": true, "before": AT, "limit": 20}),
+            ),
+            (
+                format!(
+                    "log --agent {UUID} --kind dm_retract --before {AT} --limit 5"
+                ),
+                json!({"agent": UUID, "kind": "dm_retract", "before": AT, "limit": 5}),
+            ),
+            (
+                format!("moderation --group {GROUP}"),
+                json!({"group": GROUP}),
+            ),
+            (
+                format!("read --messages {UUID} {GROUP}"),
+                json!({"messages": [UUID, GROUP]}),
+            ),
+            (format!("read --agent {UUID}"), json!({"agent": UUID})),
+            ("read --all".into(), json!("all")),
+        ];
+        fn round_trip<
+            T: serde::Serialize
+                + serde::de::DeserializeOwned
+                + PartialEq
+                + std::fmt::Debug,
+        >(
+            line: &str,
+            got: T,
+            want: &Value,
+        ) {
+            assert_eq!(&serde_json::to_value(&got).unwrap(), want, "`{line}`");
+            assert_eq!(
+                serde_json::from_value::<T>(want.clone()).unwrap(),
+                got,
+                "`{line}`"
+            );
+        }
+        for (line, want) in &cases {
+            match operator(line).unwrap_or_else(|e| panic!("`{line}`: {e}")) {
+                OperatorCli::Messages(q) => round_trip(line, q, want),
+                OperatorCli::Log(q) => round_trip(line, q, want),
+                OperatorCli::Moderation(q) => round_trip(line, q, want),
+                OperatorCli::Read(r) => round_trip(line, r, want),
+            }
+        }
+    }
+
+    #[test]
+    fn mark_replies_read_takes_exactly_one_selector() {
+        for line in [
+            "read".to_owned(),
+            format!("read --all --agent {UUID}"),
+            format!("read --messages {UUID} --all"),
+            "read --messages".to_owned(),
+            "log --kind dm-send".to_owned(),
+        ] {
+            assert!(operator(&line).is_err(), "`{line}` parsed");
         }
     }
 }

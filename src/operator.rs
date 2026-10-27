@@ -195,8 +195,10 @@ pub struct SendOperatorMessageRequest {
     )]
     pub body: String,
     /// A moderation action against the one recipient that the message is
-    /// about: the server puts the action's record above `body`
+    /// about: the server puts the action's record above `body`. Only with
+    /// `to: agent`, so no other agent is told of it
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[garde(custom(about_needs_one_agent(&self.to)))]
     pub about: Option<ModerationActionId>,
     /// When to deliver it; absent, after the operator's hold (one minute
     /// by default)
@@ -211,6 +213,18 @@ pub struct SendOperatorMessageRequest {
     /// Resolve the recipients and send nothing
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
+}
+
+/// `garde`: `about` only on a send to one agent
+fn about_needs_one_agent(
+    to: &OperatorRecipients,
+) -> impl FnOnce(&Option<ModerationActionId>, &()) -> garde::Result + '_ {
+    move |about, _| match (about, to) {
+        (Some(_), OperatorRecipients::Agent(_)) | (None, _) => Ok(()),
+        (Some(_), _) => Err(garde::Error::new(
+            "needs a message to one agent, the action's subject",
+        )),
+    }
 }
 
 /// What `POST /api/operator/messages` did
@@ -254,6 +268,44 @@ pub struct SendNowCodeRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct SendNowCodeResponse {
     pub expires_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// GET /config
+// ---------------------------------------------------------------------------
+
+/// `GET /api/operator/config`: the operator's delivery settings, and enough
+/// of the signing credential's recent sends to predict a bulk hold
+/// ([`OperatorConfigResponse::is_bulk`])
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorConfigResponse {
+    /// How long a send waits before delivery when it names no `deliver_at`
+    /// and is not bulk (one minute by default, at most a day)
+    pub dm_hold_seconds: i64,
+    /// A send is bulk when its recipients and `recent_recipients` together
+    /// are more than this (10 by default)
+    pub bulk_threshold: i64,
+    /// How long a bulk send is held: `dm_hold_seconds` or the bulk floor
+    /// (one hour), whichever is longer
+    pub bulk_hold_seconds: i64,
+    /// The rolling window `recent_recipients` counts over
+    pub bulk_window_seconds: i64,
+    /// Recipients of the signing credential's sends within the window, as
+    /// the bulk threshold counts them. Another credential's sends are not
+    /// in it
+    pub recent_recipients: i64,
+    /// Messages each agent may send its operator a day (50 by default)
+    pub agent_reply_daily_cap: i64,
+}
+
+impl OperatorConfigResponse {
+    /// Whether a send to `recipients` agents, signed by the same credential
+    /// now, would be held as bulk (and need `email_code` to `send_now`)
+    pub fn is_bulk(&self, recipients: i64) -> bool {
+        recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,22 +362,28 @@ pub struct WithdrawalResponse {
 /// the replies across agents
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[serde(deny_unknown_fields)]
 pub struct OperatorMessagesQuery {
     /// Only the conversation with this agent, both ways
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub agent: Option<AgentId>,
     /// Only replies from agents in this group
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub group: Option<AgentGroupId>,
     /// Only replies not yet read
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub unread: bool,
     /// Only messages sent before this, for the next page
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub before: Option<DateTime<Utc>>,
     /// At most this many (the server caps it)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
 }
 
@@ -355,9 +413,16 @@ pub struct OperatorConversationMessage {
     /// The send it belongs to, for the operator's own messages
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_id: Option<OperatorActionId>,
+    /// The moderation action against the agent that an operator message is
+    /// about (`SendOperatorMessageRequest::about`). Absent from servers
+    /// before 0.131
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<ModerationActionId>,
 }
 
-/// `POST /api/operator/messages/read`: replies to mark read
+/// `POST /api/operator/messages/read`: replies to mark read. With the
+/// `clap` feature it parses from `--messages <ID>…`, `--agent <ID>` or
+/// `--all`, exactly one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
@@ -384,17 +449,24 @@ pub struct MarkRepliesReadResponse {
 /// `GET /api/operator/log`
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[serde(deny_unknown_fields)]
 pub struct OperatorLogQuery {
     /// Only entries concerning this agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub agent: Option<AgentId>,
+    /// Only entries of this kind
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub kind: Option<OperatorActionKind>,
     /// Only entries before this, for the next page
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub before: Option<DateTime<Utc>>,
+    /// At most this many (the server caps it)
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
 }
 
@@ -411,7 +483,10 @@ pub struct OperatorLogResponse {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct CredentialRef {
     pub id: OperatorCredentialId,
-    pub label: String,
+    /// The operator's name for it. Absent in an agent's view
+    /// ([`OperatorLogEntry::for_agent`]): a label can name a machine
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// One thing an operator did
@@ -444,6 +519,8 @@ pub enum OperatorActionDetail {
     },
     DmCancel {
         cancelled: Vec<MessageId>,
+        /// What cancelled them
+        reason: CancelReason,
     },
     DmRetract {
         retracted: Vec<MessageId>,
@@ -457,6 +534,102 @@ pub enum OperatorActionDetail {
     CredentialRevoke {
         credential: CredentialRef,
     },
+}
+
+impl OperatorLogEntry {
+    /// The entry as the agent whose delivered copies are `copies` may see
+    /// it, in its data export and its own log read (agora
+    /// `docs/design-operator-api.md`, "What the agent sees"): only sends
+    /// and retracts that reached it, naming only its own copy. `None` for
+    /// everything else: cancels and undelivered sends (it never saw them)
+    /// and credential changes (they concern no agent).
+    ///
+    /// `about` is kept only when the send went to this agent alone: a
+    /// moderation action is one agent's, and a batch must not show it to
+    /// the others. The action `id` is the same in every recipient's view,
+    /// so two agents comparing exports can tell they were in one batch
+    /// (accepted in the review of 0.131.0).
+    ///
+    /// The signing credential keeps its id and loses its label. The id is
+    /// opaque, but lets the agent notice a message signed by a key it has
+    /// not seen before, which is what a log the agent can read is for; the
+    /// label is the operator's name for a machine
+    pub fn for_agent(&self, copies: &[MessageId]) -> Option<Self> {
+        let own = |ids: &[MessageId]| -> Vec<MessageId> {
+            ids.iter()
+                .filter(|id| copies.contains(id))
+                .copied()
+                .collect()
+        };
+        let detail = match &self.detail {
+            OperatorActionDetail::DmSend {
+                messages,
+                deliver_at,
+                about,
+            } => OperatorActionDetail::DmSend {
+                messages: own(messages),
+                deliver_at: *deliver_at,
+                about: about.filter(|_| messages.len() == 1),
+            },
+            OperatorActionDetail::DmRetract { retracted, .. } => {
+                OperatorActionDetail::DmRetract {
+                    retracted: own(retracted),
+                    cancelled: Vec::new(),
+                }
+            }
+            OperatorActionDetail::DmCancel { .. }
+            | OperatorActionDetail::CredentialAdd { .. }
+            | OperatorActionDetail::CredentialRevoke { .. } => return None,
+        };
+        match &detail {
+            OperatorActionDetail::DmSend { messages: ids, .. }
+            | OperatorActionDetail::DmRetract { retracted: ids, .. }
+                if ids.is_empty() =>
+            {
+                None
+            }
+            _ => Some(Self {
+                id: self.id,
+                credential: self.credential.as_ref().map(|c| CredentialRef {
+                    id: c.id,
+                    label: None,
+                }),
+                detail,
+                created_at: self.created_at,
+            }),
+        }
+    }
+}
+
+/// Why undelivered operator messages were cancelled: a
+/// [`OperatorActionDetail::DmCancel`]'s cause. Stored in the log's `detail`
+/// JSON, so it has no Postgres twin. Closed: every cancel has one of these
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum CancelReason {
+    /// A signed cancel or batch retract by the operator
+    Operator,
+    /// The cancel link in the bulk-hold email
+    CancelLink,
+    /// The recipient left before delivery
+    AgentDeparted,
+    /// The operator was banned before delivery
+    OperatorBanned,
+    /// The credential that signed the send was revoked before delivery
+    CredentialRevoked,
+}
+
+impl CancelReason {
+    /// Every reason
+    pub const ALL: [Self; 5] = [
+        Self::Operator,
+        Self::CancelLink,
+        Self::AgentDeparted,
+        Self::OperatorBanned,
+        Self::CredentialRevoked,
+    ];
 }
 
 impl OperatorActionDetail {
@@ -479,7 +652,7 @@ impl OperatorActionDetail {
         let n = |len: usize| len as i64;
         match self {
             Self::DmSend { messages, .. } => Some(n(messages.len())),
-            Self::DmCancel { cancelled } => Some(n(cancelled.len())),
+            Self::DmCancel { cancelled, .. } => Some(n(cancelled.len())),
             Self::DmRetract {
                 retracted,
                 cancelled,
@@ -509,11 +682,16 @@ pub enum RecordDefect {
 /// `GET /api/operator/moderation`
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[serde(deny_unknown_fields)]
 pub struct OperatorModerationQuery {
+    /// Only actions against this agent
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub agent: Option<AgentId>,
+    /// Only actions against agents in this group
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
     pub group: Option<AgentGroupId>,
 }
 
@@ -567,7 +745,7 @@ mod tests {
     fn a_detail_is_tagged_by_its_kind() {
         let credential = CredentialRef {
             id: OperatorCredentialId::new(),
-            label: "balerion-claude".into(),
+            label: Some("balerion-claude".into()),
         };
         for detail in [
             OperatorActionDetail::DmSend {
@@ -575,7 +753,10 @@ mod tests {
                 deliver_at: Utc::now(),
                 about: None,
             },
-            OperatorActionDetail::DmCancel { cancelled: vec![] },
+            OperatorActionDetail::DmCancel {
+                cancelled: vec![],
+                reason: CancelReason::CancelLink,
+            },
             OperatorActionDetail::DmRetract {
                 retracted: vec![],
                 cancelled: vec![],
@@ -593,6 +774,226 @@ mod tests {
                 detail
             );
         }
+    }
+
+    /// An agent sees its own copy of a delivered send or retract, and no
+    /// credential, sibling, cancel or undelivered copy
+    #[test]
+    fn an_agent_sees_only_its_own_part_of_the_log() {
+        let (mine, sibling) = (MessageId::new(), MessageId::new());
+        let entry = |detail| OperatorLogEntry {
+            id: OperatorActionId::new(),
+            credential: Some(CredentialRef {
+                id: OperatorCredentialId::new(),
+                label: Some("balerion-claude".into()),
+            }),
+            detail,
+            created_at: Utc::now(),
+        };
+        let send = entry(OperatorActionDetail::DmSend {
+            messages: vec![sibling, mine],
+            deliver_at: Utc::now(),
+            about: Some(ModerationActionId::new()),
+        });
+        let seen = send.for_agent(&[mine]).unwrap();
+        assert_eq!(seen.id, send.id);
+        assert_eq!(seen.created_at, send.created_at);
+        // The key's id, so a new key shows; never its label
+        let signer = send.credential.as_ref().unwrap().id;
+        assert_eq!(
+            seen.credential,
+            Some(CredentialRef {
+                id: signer,
+                label: None
+            })
+        );
+        let json = serde_json::to_value(&seen).unwrap();
+        assert_eq!(json["credential"], serde_json::json!({ "id": signer }));
+        assert!(!json.to_string().contains("balerion-claude"));
+        // A portal session signed with no credential, and still has none
+        let portal = OperatorLogEntry {
+            credential: None,
+            ..send.clone()
+        };
+        assert_eq!(portal.for_agent(&[mine]).unwrap().credential, None);
+        let OperatorActionDetail::DmSend {
+            messages, about, ..
+        } = &seen.detail
+        else {
+            panic!("{seen:?}")
+        };
+        assert_eq!(messages, &[mine]);
+        assert_eq!(*about, None, "a batch's `about` is not every agent's");
+        assert_eq!(seen.detail.recipient_count(), Some(1));
+
+        let retract = entry(OperatorActionDetail::DmRetract {
+            retracted: vec![mine, sibling],
+            cancelled: vec![MessageId::new()],
+        });
+        assert_eq!(
+            retract.for_agent(&[mine]).unwrap().detail,
+            OperatorActionDetail::DmRetract {
+                retracted: vec![mine],
+                cancelled: vec![],
+            }
+        );
+
+        // Not delivered to it, or nothing it ever saw
+        assert_eq!(send.for_agent(&[]), None);
+        assert_eq!(retract.for_agent(&[MessageId::new()]), None);
+        let credential = CredentialRef {
+            id: OperatorCredentialId::new(),
+            label: Some("k".into()),
+        };
+        for detail in [
+            OperatorActionDetail::DmCancel {
+                cancelled: vec![mine],
+                reason: CancelReason::Operator,
+            },
+            OperatorActionDetail::CredentialAdd {
+                credential: credential.clone(),
+                credential_kind: OperatorCredentialKind::SoftwareKey,
+            },
+            OperatorActionDetail::CredentialRevoke { credential },
+        ] {
+            assert_eq!(entry(detail).for_agent(&[mine]), None);
+        }
+    }
+
+    /// The review's PoC (0.131.0): a batch with `about` showed one agent's
+    /// moderation action to every recipient. Now refused on the way in,
+    /// and dropped from a batch's projection; the shared action id stays
+    #[test]
+    fn poc_bulk_about_and_shared_action_id() {
+        let (a, b) = (MessageId::new(), MessageId::new());
+        let mod_against_b = ModerationActionId::new();
+        let e = OperatorLogEntry {
+            id: OperatorActionId::new(),
+            credential: None,
+            detail: OperatorActionDetail::DmSend {
+                messages: vec![a, b],
+                deliver_at: Utc::now(),
+                about: Some(mod_against_b),
+            },
+            created_at: Utc::now(),
+        };
+        let va = e.for_agent(&[a]).unwrap();
+        let vb = e.for_agent(&[b]).unwrap();
+        for view in [&va, &vb] {
+            assert!(matches!(
+                view.detail,
+                OperatorActionDetail::DmSend { about: None, .. }
+            ));
+            assert_eq!(view.detail.recipient_count(), Some(1));
+        }
+        // Both views share the action id: accepted
+        assert_eq!(va.id, vb.id);
+
+        // Sent to `b` alone, `b` sees what it is about
+        let alone = OperatorLogEntry {
+            detail: OperatorActionDetail::DmSend {
+                messages: vec![b],
+                deliver_at: Utc::now(),
+                about: Some(mod_against_b),
+            },
+            ..e
+        };
+        assert!(matches!(
+            alone.for_agent(&[b]).unwrap().detail,
+            OperatorActionDetail::DmSend { about: Some(x), .. } if x == mod_against_b
+        ));
+    }
+
+    /// `about` goes only with `to: agent`
+    #[test]
+    fn about_needs_a_send_to_one_agent() {
+        use garde::Validate;
+        let send = |to| SendOperatorMessageRequest {
+            action_id: OperatorActionId::new(),
+            to,
+            body: "about your ban".into(),
+            about: Some(ModerationActionId::new()),
+            deliver_at: None,
+            send_now: false,
+            email_code: None,
+            dry_run: false,
+        };
+        let (a, b) = (AgentId::new(), AgentId::new());
+        assert!(send(OperatorRecipients::Agent(a)).validate().is_ok());
+        for to in [
+            OperatorRecipients::Agents(vec![a]),
+            OperatorRecipients::Agents(vec![a, b]),
+            OperatorRecipients::Group(AgentGroupId::new()),
+            OperatorRecipients::All,
+        ] {
+            assert!(send(to.clone()).validate().is_err(), "{to:?}");
+        }
+    }
+
+    /// The prediction is the server's rule: strictly more than the
+    /// threshold, counting the credential's last hour
+    #[test]
+    fn a_send_is_bulk_above_the_threshold_with_recent_sends() {
+        let config = OperatorConfigResponse {
+            dm_hold_seconds: 60,
+            bulk_threshold: 10,
+            bulk_hold_seconds: 3600,
+            bulk_window_seconds: 3600,
+            recent_recipients: 4,
+            agent_reply_daily_cap: 50,
+        };
+        assert!(!config.is_bulk(6));
+        assert!(config.is_bulk(7));
+        assert!(config.is_bulk(i64::MAX));
+        let json = serde_json::to_value(config).unwrap();
+        assert_eq!(json.as_object().unwrap().len(), 6);
+        assert_eq!(
+            serde_json::from_value::<OperatorConfigResponse>(json).unwrap(),
+            config
+        );
+    }
+
+    /// Every cancel says why, spelled as written, and a cancel without a
+    /// reason does not read
+    #[test]
+    fn a_cancel_carries_its_reason() {
+        let id = MessageId::new();
+        for (reason, name) in CancelReason::ALL.into_iter().zip([
+            "operator",
+            "cancel_link",
+            "agent_departed",
+            "operator_banned",
+            "credential_revoked",
+        ]) {
+            let detail = OperatorActionDetail::DmCancel {
+                cancelled: vec![id],
+                reason,
+            };
+            let json = serde_json::to_value(&detail).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "kind": "dm_cancel",
+                    "cancelled": [id],
+                    "reason": name,
+                })
+            );
+            assert_eq!(
+                serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+                detail
+            );
+        }
+        assert!(
+            serde_json::from_value::<OperatorActionDetail>(serde_json::json!({
+                "kind": "dm_cancel",
+                "cancelled": [id],
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<CancelReason>(serde_json::json!("other"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -712,6 +1113,7 @@ mod tests {
         }
         inline!(
             crate::sse::OperatorMessageNotice,
+            OperatorConfigResponse,
             OperatorAgentsResponse,
             AgentGroupsResponse,
             SendOperatorMessageRequest,

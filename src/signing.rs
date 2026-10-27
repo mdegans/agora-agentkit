@@ -297,7 +297,8 @@ pub mod operator_request {
     use sha2::{Digest, Sha256};
 
     use super::NewlineInPart;
-    use crate::ids::{OperatorActionId, OperatorCredentialId};
+    use crate::ids::{OperatorActionId, OperatorCredentialId, OperatorId};
+    use crate::operator_signer::OperatorPublicKey;
 
     /// What every signed operator request's bytes begin with
     pub const CONTEXT: &[u8] = b"agora/operator/v1\n";
@@ -349,9 +350,65 @@ pub mod operator_request {
         )
     }
 
+    /// What a proof of possession's bytes begin with: a key being
+    /// registered as an operator credential signs
+    /// [`credential_possession_bytes`] to show it holds the secret half
+    pub const CREDENTIAL_POSSESSION_CONTEXT: &[u8] =
+        b"agora/operator-credential/v1\n";
+
+    /// `CREDENTIAL_POSSESSION_CONTEXT || OPERATOR_ID \n hex(PUBLIC_KEY)`.
+    ///
+    /// The operator id is lowercase hyphenated. The key is its raw bytes
+    /// (Ed25519's 32, P-256's 65-byte uncompressed SEC1), whose lengths
+    /// differ, so the hex names the algorithm too. Signed as is, through
+    /// [`sign_possession`](crate::operator_signer::sign_possession): longer
+    /// than any 32-byte digest an agent's or a request's key signs
+    pub fn credential_possession_bytes(
+        operator: OperatorId,
+        public_key: &OperatorPublicKey,
+    ) -> Vec<u8> {
+        let mut bytes = CREDENTIAL_POSSESSION_CONTEXT.to_vec();
+        bytes.extend_from_slice(operator.to_string().as_bytes());
+        bytes.push(b'\n');
+        bytes.extend_from_slice(public_key.to_hex().as_bytes());
+        bytes
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn possession_bytes_bind_operator_and_key() {
+            let operator: OperatorId =
+                "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap();
+            let key = OperatorPublicKey::Ed25519(
+                crate::crypto::VerifyingKey::from_bytes(&[
+                    0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b,
+                    0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a, 0x0e, 0xe1, 0x72, 0xf3,
+                    0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+                    0x51, 0x1a,
+                ])
+                .unwrap(),
+            );
+            assert_eq!(
+                credential_possession_bytes(operator, &key),
+                b"agora/operator-credential/v1\n\
+                  0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10\n\
+                  d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+                    .to_vec()
+            );
+            let other =
+                OperatorPublicKey::Ed25519(crate::crypto::generate_keypair().1);
+            assert_ne!(
+                credential_possession_bytes(operator, &key),
+                credential_possession_bytes(OperatorId::new(), &key)
+            );
+            assert_ne!(
+                credential_possession_bytes(operator, &key),
+                credential_possession_bytes(operator, &other)
+            );
+        }
 
         #[test]
         fn the_bytes_bind_method_host_url_credential_body_and_action() {
@@ -438,24 +495,32 @@ pub mod operator_request {
             );
         }
 
-        /// No other signed domain's bytes can begin like an operator
-        /// request's, nor an operator request's like theirs
+        /// No signed domain's bytes can begin like another's: an operator
+        /// request's, a proof of possession's, and every other context
         #[test]
         fn the_context_is_its_own() {
-            for other in [
+            let domains: [&[u8]; 8] = [
+                CONTEXT,
+                CREDENTIAL_POSSESSION_CONTEXT,
                 crate::signing::signed_get::CONTEXT,
                 crate::sse::EVENT_CONTEXT,
                 crate::govlog::ROOT_DOMAIN,
                 b"agora/msg/v1",
                 b"agora/enc-key/v1",
                 b"agora/wrap/v1",
-            ] {
-                assert!(
-                    !CONTEXT.starts_with(other) && !other.starts_with(CONTEXT)
-                );
+            ];
+            for ours in [CONTEXT, CREDENTIAL_POSSESSION_CONTEXT] {
+                for other in domains.iter().filter(|d| **d != ours) {
+                    assert!(
+                        !ours.starts_with(other) && !other.starts_with(ours),
+                        "{:?} and {:?}",
+                        String::from_utf8_lossy(ours),
+                        String::from_utf8_lossy(other)
+                    );
+                }
+                // Signed actions are JSON objects
+                assert_ne!(ours[0], b'{');
             }
-            // Signed actions are JSON objects
-            assert_ne!(CONTEXT[0], b'{');
         }
     }
 }

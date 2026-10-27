@@ -161,4 +161,23 @@ mod tests {
         assert!(debug.contains("[REDACTED]") && !debug.contains(&hex));
         assert_eq!(display, "[REDACTED]");
     }
+
+    #[tokio::test]
+    async fn a_software_key_proves_possession() {
+        use crate::ids::OperatorId;
+        use crate::operator_signer::{sign_possession, verify_possession};
+        let (key, _) = crypto::generate_keypair();
+        let signer = SoftwareKeySigner::new(key);
+        let operator = OperatorId::new();
+        let proof = sign_possession(&signer, operator).await.unwrap();
+        verify_possession(&signer.public_key(), operator, &proof).unwrap();
+        let other = SoftwareKeySigner::new(crypto::generate_keypair().0);
+        assert!(
+            verify_possession(&other.public_key(), operator, &proof).is_err()
+        );
+        assert!(
+            verify_possession(&signer.public_key(), OperatorId::new(), &proof)
+                .is_err()
+        );
+    }
 }

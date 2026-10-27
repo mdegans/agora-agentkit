@@ -14,10 +14,36 @@ use zeroize::Zeroizing;
 pub struct Secret(Zeroizing<String>);
 
 impl Secret {
-    /// Load a secret from a file, trimming trailing whitespace.
+    /// Load a secret from a file, trimming whitespace at both ends.
+    ///
+    /// The file is read into one zeroizing buffer, sized from its metadata
+    /// so reading a file that does not grow meanwhile never reallocates, and trimmed in place: no copy of the
+    /// secret is freed unwiped. Not UTF-8 is `InvalidData`, as
+    /// `read_to_string` says
     pub fn from_file(path: &Path) -> Result<Self, std::io::Error> {
-        let contents = std::fs::read_to_string(path)?;
-        Ok(Self(Zeroizing::new(contents.trim().to_owned())))
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+        // One spare byte, so the read that finds the end needs no growth
+        let mut bytes = Zeroizing::new(Vec::with_capacity(len + 1));
+        file.read_to_end(&mut bytes)?;
+        let (start, end) = {
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                )
+            })?;
+            let trimmed = text.trim_start();
+            let start = text.len() - trimmed.len();
+            (start, start + trimmed.trim_end().len())
+        };
+        bytes.truncate(end);
+        bytes.drain(..start);
+        // Moves the buffer, leaving an empty one behind: nothing is copied
+        let text = String::from_utf8(std::mem::take(&mut *bytes))
+            .expect("checked above; trimming whitespace keeps it UTF-8");
+        Ok(Self(Zeroizing::new(text)))
     }
 
     /// Create a secret from a string value.
@@ -105,6 +131,37 @@ mod tests {
 
         let secret = Secret::from_file(file.path()).unwrap();
         assert_eq!(secret.expose(), "my-secret-value");
+    }
+
+    /// The in-place trim reads as `read_to_string` and `str::trim` did
+    #[test]
+    fn from_file_trims_as_before() {
+        for raw in [
+            &b"plain"[..],
+            b"",
+            b" \n\t ",
+            b"\n\n  key with inner  spaces \r\n",
+            "\u{3000}ключ-é\u{a0}\n".as_bytes(),
+            b"a",
+        ] {
+            let mut file = tempfile::NamedTempFile::new().unwrap();
+            file.write_all(raw).unwrap();
+            let want = std::str::from_utf8(raw).unwrap().trim();
+            let secret = Secret::from_file(file.path()).unwrap();
+            assert_eq!(secret.expose(), want, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_not_utf8_is_invalid_data() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"key\xff\n").unwrap();
+        let err = Secret::from_file(file.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.kind(),
+            std::fs::read_to_string(file.path()).unwrap_err().kind()
+        );
     }
 
     #[test]

@@ -973,6 +973,49 @@ mod tests {
         }
     }
 
+    /// A hardware key proves possession as a software key does, under
+    /// either algorithm, and the proof binds operator and key
+    #[tokio::test]
+    async fn a_hardware_key_proves_possession() {
+        use crate::ids::OperatorId;
+        use crate::operator_signer::{sign_possession, verify_possession};
+        for (firmware, algorithm) in [
+            (MockPivDevice::FIRMWARE_ED25519, SignatureAlgorithm::Ed25519),
+            (
+                MockPivDevice::FIRMWARE_P256_ONLY,
+                SignatureAlgorithm::EcdsaP256,
+            ),
+        ] {
+            let (_, device) = device(firmware);
+            let key = device
+                .generate_key(
+                    PivSlot::Authentication,
+                    algorithm,
+                    KeyPolicy {
+                        pin: PinPolicy::Never,
+                        touch: TouchPolicy::Never,
+                    },
+                )
+                .unwrap();
+            let operator = OperatorId::new();
+            let proof = sign_possession(&key, operator).await.unwrap();
+            verify_possession(&key.public_key(), operator, &proof).unwrap();
+            assert!(
+                verify_possession(&key.public_key(), OperatorId::new(), &proof)
+                    .is_err()
+            );
+            // Not a request signature over the same bytes
+            let bytes =
+                crate::signing::operator_request::credential_possession_bytes(
+                    operator,
+                    &key.public_key(),
+                );
+            assert!(
+                verify_request(&key.public_key(), &bytes, 0, &proof).is_err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn ed25519_mock_signatures_verify_with_crypto_verify() {
         let (_, device) = device(MockPivDevice::FIRMWARE_ED25519);
