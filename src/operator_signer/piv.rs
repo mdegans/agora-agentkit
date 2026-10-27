@@ -23,9 +23,10 @@
 //! batch keys directly; YubiKey 4 isn't supported).
 //!
 //! **What is checked.** PIV is a positive requirement:
-//! - the device chain is `[f9]`, or `[f9, anchor]` with the anchor a
-//!   byte-for-byte copy of a trusted one;
-//! - `f9` has exactly the device subject, is a CA (`cA=TRUE`, and
+//! - the device chain is `[f9]`, or `[f9, anchor]` with the anchor the same
+//!   certificate as a trusted one (equal as parsed DER);
+//! - `f9`'s subject is the device subject, compared as DER, so its string
+//!   type counts (a YubiKey's is a UTF8String); `f9` is a CA (`cA=TRUE`, and
 //!   `keyCertSign` if it has a `keyUsage`), carries no policy, and is
 //!   issued by a trust anchor whose `pathLenConstraint` allows it;
 //! - the slot certificate is not a CA and is issued by `f9`;
@@ -47,10 +48,13 @@
 //! [`AttestationError::UnsupportedAlgorithm`]. Slot keys may be Ed25519 or
 //! P-256.
 
+use std::str::FromStr;
+
 use x509_cert::Certificate;
 use x509_cert::der::asn1::{Null, ObjectIdentifier};
 use x509_cert::der::{Any, Decode, Encode};
 use x509_cert::ext::pkix::{BasicConstraints, KeyUsage};
+use x509_cert::name::Name;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
 
 use super::{
@@ -106,7 +110,8 @@ pub const MOCK_ROOT_SUBJECT: &str =
 /// A mock device's `f9`-style attestation certificate subject.
 pub const MOCK_DEVICE_SUBJECT: &str =
     "CN=Agora MOCK PIV Attestation - NOT A REAL DEVICE";
-/// A YubiKey's `f9` attestation certificate subject, exactly.
+/// A YubiKey's `f9` attestation certificate subject. Parsed into a `Name`
+/// (a UTF8String common name, as on real keys) and compared as DER.
 pub const YUBICO_DEVICE_SUBJECT: &str = "CN=Yubico PIV Attestation";
 
 /// The most certificates a device chain holds: `f9`, and optionally a copy
@@ -175,7 +180,7 @@ pub struct SlotFacts {
 #[derive(Clone)]
 pub(crate) struct TrustedRoots {
     anchors: Vec<Certificate>,
-    device_subject: &'static str,
+    device_subject: Name,
 }
 
 impl TrustedRoots {
@@ -199,7 +204,8 @@ impl TrustedRoots {
         }
         Ok(Self {
             anchors,
-            device_subject,
+            device_subject: Name::from_str(device_subject)
+                .expect("a valid device subject"),
         })
     }
 }
@@ -214,17 +220,6 @@ impl std::fmt::Debug for TrustedRoots {
             )
             .finish()
     }
-}
-
-/// SHA-256 of a certificate's subject public key info.
-fn key_fingerprint(cert: &Certificate) -> Result<[u8; 32], AttestationError> {
-    use sha2::{Digest, Sha256};
-    let spki = cert
-        .tbs_certificate()
-        .subject_public_key_info()
-        .to_der()
-        .map_err(|e| malformed(0, e))?;
-    Ok(Sha256::digest(spki).into())
 }
 
 /// Checks Yubico PIV attestations against Yubico's PIV attestation CAs,
@@ -247,28 +242,26 @@ impl YubicoAttestationVerifier {
         }
     }
 
-    /// Trust only these of the pinned CAs. Any certificate whose key isn't
-    /// a pinned CA's (a mock root, Root 1, a FIDO CA) is refused, whatever
-    /// its name.
+    /// Trust only these of the pinned CAs. Each must be one of the pinned
+    /// certificates byte for byte; anything else (a mock root, Root 1, a
+    /// FIDO CA, or a pinned CA's key in another certificate) is refused,
+    /// whatever its name.
     pub fn from_anchors(
         anchors: &[DerCertificate],
     ) -> Result<Self, AttestationError> {
-        let pinned = Self::new();
-        let pinned_keys = pinned
-            .roots
-            .anchors
-            .iter()
-            .map(key_fingerprint)
-            .collect::<Result<Vec<_>, _>>()?;
-        let roots = TrustedRoots::new(anchors, YUBICO_DEVICE_SUBJECT)?;
-        for anchor in &roots.anchors {
-            if !pinned_keys.contains(&key_fingerprint(anchor)?) {
-                return Err(AttestationError::RootRefused {
-                    reason: "not a pinned Yubico PIV attestation CA",
-                });
-            }
+        let pinned = |anchor: &DerCertificate| {
+            YUBICO_PIV_ANCHORS
+                .iter()
+                .any(|pinned| pinned.der == anchor.as_der())
+        };
+        if !anchors.iter().all(pinned) {
+            return Err(AttestationError::RootRefused {
+                reason: "not a pinned Yubico PIV attestation CA",
+            });
         }
-        Ok(Self { roots })
+        Ok(Self {
+            roots: TrustedRoots::new(anchors, YUBICO_DEVICE_SUBJECT)?,
+        })
     }
 }
 
@@ -339,8 +332,8 @@ pub(crate) fn verify_attestation(
     }
     let slot = parse(0, slot_certificate)?;
     let f9 = parse(1, &device_chain[0])?;
-    // A device may hand over its issuing CA too: only an exact copy of a
-    // trust anchor is accepted, and then ignored.
+    // A device may hand over its issuing CA too: only the same certificate
+    // as a trust anchor (equal as parsed DER) is accepted, and then ignored.
     if let Some(extra) = device_chain.get(1) {
         let extra = parse(2, extra)?;
         if !roots.anchors.contains(&extra) {
@@ -361,8 +354,7 @@ pub(crate) fn verify_attestation(
     if has_extension(&f9, OID_YUBICO_POLICY) {
         return Err(AttestationError::PolicyAboveLeaf { index: 1 });
     }
-    let f9_subject = f9.tbs_certificate().subject();
-    if f9_subject.len() != 1 || f9_subject.to_string() != roots.device_subject {
+    if *f9.tbs_certificate().subject() != roots.device_subject {
         return Err(AttestationError::NotADeviceCertificate { index: 1 });
     }
     if ca_path_length(1, &f9)?.is_none() {
@@ -961,6 +953,35 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn the_device_subject_is_the_real_f9s_as_der() {
+        let f9 = Certificate::from_der(REAL_F9).unwrap();
+        let expected = Name::from_str(YUBICO_DEVICE_SUBJECT).unwrap();
+        assert_eq!(
+            f9.tbs_certificate().subject().to_der().unwrap(),
+            expected.to_der().unwrap()
+        );
+    }
+
+    #[test]
+    fn from_anchors_takes_only_the_pinned_certificates_themselves() {
+        for anchor in &YUBICO_PIV_ANCHORS {
+            YubicoAttestationVerifier::from_anchors(&[der(anchor.der)])
+                .unwrap();
+        }
+        // The f9 (a CA, but not pinned) and a pinned CA's certificate with
+        // one byte changed are both refused.
+        let mut altered = YUBICO_PIV_ANCHORS[2].der.to_vec();
+        let last = altered.len() - 1;
+        altered[last] ^= 1;
+        for refused in [der(REAL_F9), DerCertificate::from_der(altered)] {
+            assert!(matches!(
+                YubicoAttestationVerifier::from_anchors(&[refused]),
+                Err(AttestationError::RootRefused { .. })
+            ));
+        }
     }
 
     #[test]

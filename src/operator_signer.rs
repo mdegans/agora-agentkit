@@ -766,8 +766,8 @@ pub enum AttestationError {
         /// The bundle's format.
         format: &'static str,
     },
-    /// The device chain isn't `[f9]`, or `[f9, anchor]` with the anchor a
-    /// byte-for-byte copy of a trusted one.
+    /// The device chain isn't `[f9]`, or `[f9, anchor]` with the anchor the
+    /// same certificate as a trusted one (equal as parsed DER).
     #[error(
         "the device chain has {len} certificates; expected the device \
          certificate, optionally followed by its trusted issuer"
@@ -777,8 +777,8 @@ pub enum AttestationError {
         len: usize,
     },
     /// The device certificate (index 1) isn't the vendor's PIV attestation
-    /// certificate: its subject is not the expected one (on a YubiKey,
-    /// exactly `CN=Yubico PIV Attestation`).
+    /// certificate: its subject, compared as DER, is not the expected one
+    /// (on a YubiKey, `CN=Yubico PIV Attestation` as a UTF8String).
     #[error("certificate {index} is not a PIV device attestation certificate")]
     NotADeviceCertificate {
         /// Position of the certificate.
