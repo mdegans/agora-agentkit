@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.135.2"
+version = "0.136.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -50,6 +50,11 @@ x509 = ["dep:x509-cert", "dep:rsa", "dep:p384", "p256"]
 # mock root CA. For tests and dev builds only, never production: a mock
 # attestation is its own type, and without this feature it can't be parsed.
 mock-hardware-key = ["x509"]
+# `operator_signer::yubikey`: a key in a YubiKey's PIV slot, over PC/SC
+# (Steward approved the `yubikey` crate, 2026-10-27). For operator clients
+# only: it links the system's PC/SC library (`libpcsclite` on Linux), so the
+# server and the runner never enable it.
+yubikey = ["x509", "dep:yubikey", "dep:pcsc", "dep:tokio", "tokio/rt"]
 
 [dependencies]
 anyhow = "1"
@@ -120,6 +125,16 @@ x509-cert = { version = "0.3", default-features = false, optional = true }
 # and `f9` certificates are RSA. The release candidate the server already
 # has through `webauthn_rp`, with its features (`encoding`: PKCS#1 keys;
 # `sha2`: SHA-256). Caret, so it unifies with the server's as that moves.
+# The YubiKey PIV driver (feature `yubikey`). Pure Rust over PC/SC, no TLS.
+# The 0.9 release candidate: its RustCrypto generation (p256 0.14,
+# x509-cert 0.3, der 0.8) is this crate's, where 0.8 would add a second copy
+# of each, and it is the first with Ed25519 in PIV (firmware 5.7). Exact
+# pin, as a release candidate's API may change.
+yubikey = { version = "=0.9.0-rc.0", optional = true }
+# `yubikey::Error::PcscError` carries a `pcsc::Error`: matched to tell "the
+# service is unreachable" from "the device is gone". The version `yubikey`
+# brings in.
+pcsc = { version = "2.9", optional = true }
 rsa = { version = "0.10.0-rc.19", default-features = false, features = ["encoding", "sha2"], optional = true }
 
 [dev-dependencies]

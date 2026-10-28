@@ -2,7 +2,41 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.135.2 (unreleased)
+## 0.136.0 (unreleased)
+
+The hardware-key path for operator credentials (agora
+`docs/design-operator-api.md`, "Hardware tiers"): a YubiKey PIV slot signs
+operator requests, and the server can store what its attestation says.
+
+- **`operator_signer::yubikey`** (feature `yubikey`, the `yubikey` crate
+  0.9.0-rc.0 over PC/SC; for clients only, as it links `libpcsclite`):
+  `YubikeySigner` implements `OperatorSigner` and `HardwareKey`. Every
+  device call runs in `spawn_blocking`. P-256 hashes with SHA-256, has the
+  card sign the digest, and turns its DER into `r ‖ s` with low `s`;
+  Ed25519 only on firmware 5.7+. Each signature is checked against the
+  slot's key before it is returned (`KeyChanged` otherwise). The PIN is a
+  `Pin` (from a file), kept by `open_with_pin` to present again once when
+  the card forgets its session, and before every signature of a PIN-always
+  key. `attestation()` returns `AttestationBundle::YubicoPiv` with the
+  slot's attestation and `f9`. Provisioning: `generate` (management key:
+  default, hex from a secret file with its algorithm (3DES, AES-128/192/256)
+  read from the device, or PIN-protected), `device_info`, and
+  `reset_piv`, which resets PIV alone by blocking the PIN and PUK first.
+- **`SignerError`** gains `PcscUnavailable` (no `pcscd`, or polkit refused
+  this user), `SlotEmpty`, `ImportedKey`, `ManagementKeyRefused`,
+  `SeveralDevices` and `Transport` (the driver's own words, for what none
+  of the others names).
+- **`PinPolicy` and `TouchPolicy` move to `enums`** (re-exported where they
+  were), with `sqlx::Type` twins `hardware_pin_policy_enum` and
+  `hardware_touch_policy_enum` (agora migration 128).
+- **`OperatorPublicKey::to_raw` / `from_raw`** (32 bytes Ed25519, 65 P-256)
+  and **`OperatorSignature::to_bytes` / `to_hex` / `from_bytes` /
+  `from_hex`** (by the key's algorithm; a high `s` refused): one codec for
+  the server's columns and headers and the CLI's output.
+- **`piv::unverified_slot_facts`**: what a slot certificate claims, read
+  without its chain, for a device describing itself.
+
+## 0.135.2
 
 - **A governance id with its hyphens dropped is read** (Steward,
   2026-10-27): `GovernanceLogId::normalize` takes the prefix and exactly

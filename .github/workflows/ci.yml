@@ -18,6 +18,11 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
+      # The `yubikey` feature links the system's PC/SC library, which
+      # `--all-features` builds (pcsc-sys finds it with pkg-config)
+      - name: PC/SC headers
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev pkgconf
+
       # One command, and it is the same one the pre-commit hook runs, so CI
       # and the local gate cannot drift. `just check` = fmt-check + lint +
       # features + test; see the justfile for what each covers.
@@ -91,6 +96,8 @@ jobs:
       # feature here enables. 0.10.0-rc (feature `x509`) verifies PIV
       # attestation signatures with public keys; it signs only in the
       # `mock-hardware-key` test model, and the attack recovers a private key
-      # from decryption or signing timings.
+      # from decryption or signing timings. The `yubikey` crate (feature
+      # `yubikey`) uses rsa in software only for public keys and key-parameter
+      # computation on import; decryption and signing happen on the device.
       - name: Security audit
         run: cargo audit --ignore RUSTSEC-2023-0071

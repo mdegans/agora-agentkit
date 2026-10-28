@@ -19,8 +19,12 @@
 //! - `mock` (feature `mock-hardware-key`): a software model of a PIV
 //!   device, with a mock root CA, for tests and dev builds.
 //! - `piv` (feature `x509`): parsing a PIV attestation certificate and
-//!   checking its chain, shared by the mock verifier and the Yubico one to
-//!   come.
+//!   checking its chain, shared by the mock verifier and
+//!   `piv::YubicoAttestationVerifier`.
+//! - `yubikey` (feature `yubikey`): `yubikey::YubikeySigner`, a key in a
+//!   YubiKey's PIV slot over PC/SC, and the provisioning calls an operator
+//!   CLI needs (generate, attest, reset PIV). Only a client enables it: it
+//!   links the system's PC/SC library.
 //!
 //! # Sync or async
 //!
@@ -60,6 +64,8 @@ pub mod mock;
 #[cfg(feature = "x509")]
 pub mod piv;
 mod software;
+#[cfg(feature = "yubikey")]
+pub mod yubikey;
 
 pub use software::SoftwareKeySigner;
 
@@ -224,6 +230,33 @@ impl OperatorPublicKey {
         }
     }
 
+    /// The key's raw bytes: Ed25519's 32, or P-256's 65-byte uncompressed
+    /// SEC1 (what [`to_hex`](Self::to_hex) encodes, and what the server
+    /// stores)
+    pub fn to_raw(&self) -> Vec<u8> {
+        match self {
+            Self::Ed25519(key) => key.as_bytes().to_vec(),
+            Self::EcdsaP256(key) => key.as_sec1().to_vec(),
+        }
+    }
+
+    /// From [`to_raw`](Self::to_raw)'s bytes. The lengths differ, so they
+    /// name the algorithm: 32 bytes are Ed25519, 65 are P-256 (uncompressed
+    /// SEC1, checked on the curve with the `p256` feature). Anything else,
+    /// or an Ed25519 encoding that is no point, is refused.
+    pub fn from_raw(bytes: &[u8]) -> Result<Self, KeyError> {
+        match bytes.len() {
+            32 => {
+                let array: &[u8; 32] = bytes.try_into().expect("32 bytes");
+                VerifyingKey::from_bytes(array)
+                    .map(Self::Ed25519)
+                    .map_err(|_| KeyError::InvalidEd25519Point)
+            }
+            65 => EcdsaP256PublicKey::from_sec1(bytes).map(Self::EcdsaP256),
+            got => Err(KeyError::KeyLength { got }),
+        }
+    }
+
     /// The key's algorithm.
     pub const fn algorithm(&self) -> SignatureAlgorithm {
         match self {
@@ -295,6 +328,52 @@ pub enum OperatorSignature {
 }
 
 impl OperatorSignature {
+    /// The signature's 64 bytes: Ed25519's, or P-256's `r ‖ s` (what the
+    /// signature header carries, as hex)
+    pub fn to_bytes(&self) -> [u8; 64] {
+        match self {
+            Self::Ed25519(signature) => signature.to_bytes(),
+            Self::EcdsaP256(signature) => signature.to_bytes(),
+        }
+    }
+
+    /// [`to_bytes`](Self::to_bytes) as lowercase hex.
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.to_bytes())
+    }
+
+    /// From [`to_bytes`](Self::to_bytes)'s bytes, read as `algorithm`'s
+    /// (the key's: both algorithms' signatures are 64 bytes). A P-256
+    /// signature with a high or zero `s` is refused.
+    pub fn from_bytes(
+        algorithm: SignatureAlgorithm,
+        bytes: &[u8],
+    ) -> Result<Self, KeyError> {
+        let array: [u8; 64] =
+            bytes.try_into().map_err(|_| KeyError::Length {
+                expected: 64,
+                got: bytes.len(),
+            })?;
+        match algorithm {
+            SignatureAlgorithm::Ed25519 => {
+                Ok(Self::Ed25519(Signature::from_bytes(&array)))
+            }
+            SignatureAlgorithm::EcdsaP256 => {
+                EcdsaP256Signature::from_bytes(array).map(Self::EcdsaP256)
+            }
+        }
+    }
+
+    /// From [`to_hex`](Self::to_hex)'s text (surrounding whitespace
+    /// ignored), read as `algorithm`'s.
+    pub fn from_hex(
+        algorithm: SignatureAlgorithm,
+        text: &str,
+    ) -> Result<Self, KeyError> {
+        let bytes = hex::decode(text.trim()).map_err(|_| KeyError::NotHex)?;
+        Self::from_bytes(algorithm, &bytes)
+    }
+
     /// The signature's algorithm.
     pub const fn algorithm(&self) -> SignatureAlgorithm {
         match self {
@@ -308,62 +387,7 @@ impl OperatorSignature {
 // Hardware policy and identity
 // ---------------------------------------------------------------------------
 
-/// When a hardware key asks for its PIN.
-///
-/// Vendor-neutral in meaning (FIDO calls it *user verification*). On PIV
-/// the codes are those of Yubico's policy extension: never 1, once 2,
-/// always 3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PinPolicy {
-    /// Never: the key signs without a PIN.
-    Never,
-    /// Once per session: one PIN verification, until the device is
-    /// removed or reset.
-    Once,
-    /// Before every signature: the PIN is presented immediately before
-    /// each one. The sudo slot's optional "PIN too" (design, decision on
-    /// sudo); the attestation proves it.
-    Always,
-}
-
-impl PinPolicy {
-    /// Every policy, in declaration order.
-    pub const ALL: [Self; 3] = [Self::Never, Self::Once, Self::Always];
-}
-
-/// When a hardware key needs a touch.
-///
-/// FIDO calls it *user presence*. On PIV the codes are those of Yubico's
-/// policy extension: never 1, always 2, cached 3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TouchPolicy {
-    /// Never: the key signs unattended. Required above 5 agents.
-    Never,
-    /// Every signature needs a fresh touch. The sudo slot above 50 agents.
-    Always,
-    /// A touch covers the next 15 seconds of signatures. **Never** accepted
-    /// for sudo (design, "Hardware tiers"): one tap could cover a burst
-    /// nobody saw.
-    Cached,
-}
-
-impl TouchPolicy {
-    /// Every policy, in declaration order.
-    pub const ALL: [Self; 3] = [Self::Never, Self::Always, Self::Cached];
-
-    /// Whether the key can sign with nobody there: the > 5 agents tier.
-    pub const fn signs_unattended(self) -> bool {
-        matches!(self, Self::Never)
-    }
-
-    /// Whether each signature proves a person touched the key for it: the
-    /// sudo slot. `Cached` doesn't.
-    pub const fn proves_presence_per_signature(self) -> bool {
-        matches!(self, Self::Always)
-    }
-}
+pub use crate::enums::{PinPolicy, TouchPolicy};
 
 /// A hardware key's PIN and touch policies, fixed when the key was made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -938,9 +962,9 @@ impl fmt::Debug for SignerKind<'_> {
 
 /// Something that signs as an operator credential.
 ///
-/// Implemented by [`SoftwareKeySigner`], `mock::MockHardwareKey`, and,
-/// later, a key on a YubiKey or another vendor's device. No method returns
-/// a private key.
+/// Implemented by [`SoftwareKeySigner`], `mock::MockHardwareKey`,
+/// `yubikey::YubikeySigner` and, later, other vendors' devices. No method
+/// returns a private key.
 #[async_trait::async_trait]
 pub trait OperatorSigner: Send + Sync {
     /// The credential's public key, as registered.
@@ -1043,6 +1067,44 @@ pub enum SignerError {
     /// leak the key into logs.
     #[error("the key file is not an Ed25519 key in hex (64 hex digits)")]
     KeyFormat,
+    /// The smart-card service (PC/SC: `pcscd` on Linux) can't be reached,
+    /// or refused this user. Nothing was sent to a device.
+    #[error(
+        "the smart-card service (pcscd) is not reachable or refused this user: \
+         {reason}. Is pcscd running, and may this user use it (polkit's \
+         org.debian.pcsc-lite.access_pcsc and access_card)?"
+    )]
+    PcscUnavailable {
+        /// The PC/SC error.
+        reason: String,
+    },
+    /// The device has no key in the slot.
+    #[error("the hardware key has no key in slot {slot}")]
+    SlotEmpty {
+        /// The slot.
+        slot: PivSlot,
+    },
+    /// The key in the slot was imported, not generated on the device, so
+    /// nothing can attest it: it may exist elsewhere.
+    #[error("the key in slot {slot} was imported, not generated on the device")]
+    ImportedKey {
+        /// The slot.
+        slot: PivSlot,
+    },
+    /// The device refused the management key (needed to generate a key or
+    /// change the device's PIV settings).
+    #[error("the hardware key refused the management key")]
+    ManagementKeyRefused,
+    /// More than one device is connected and none was named.
+    #[error("more than one hardware key is connected: name one by its serial")]
+    SeveralDevices,
+    /// The device, or the transport to it, failed in a way none of the
+    /// variants above names (the driver's code and words).
+    #[error("the hardware key failed: {error}")]
+    Transport {
+        /// What the driver said.
+        error: String,
+    },
 }
 
 /// Why a signature didn't verify.
@@ -1083,6 +1145,21 @@ pub enum KeyError {
     /// Not a point on P-256.
     #[error("not a valid P-256 public key")]
     InvalidP256Point,
+    /// Not an Ed25519 public key.
+    #[error("not a valid Ed25519 public key")]
+    InvalidEd25519Point,
+    /// Not hexadecimal.
+    #[error("not hexadecimal")]
+    NotHex,
+    /// A raw public key of neither algorithm's length.
+    #[error(
+        "a public key is 32 bytes (Ed25519) or 65 (P-256, uncompressed), \
+         not {got}"
+    )]
+    KeyLength {
+        /// Its length.
+        got: usize,
+    },
     /// An ECDSA signature with a high (or zero) `s`.
     #[error("not a canonical (low-s) P-256 signature")]
     NonCanonicalSignature,
@@ -1230,6 +1307,69 @@ mod tests {
         assert_eq!(
             EcdsaP256Signature::from_bytes(bytes),
             Err(KeyError::NonCanonicalSignature)
+        );
+    }
+
+    #[test]
+    fn raw_keys_name_their_algorithm_by_length() {
+        let (_, vk) = crypto::generate_keypair();
+        let ed = OperatorPublicKey::Ed25519(vk);
+        assert_eq!(OperatorPublicKey::from_raw(&ed.to_raw()), Ok(ed));
+        assert_eq!(hex::encode(ed.to_raw()), ed.to_hex());
+        assert_eq!(
+            OperatorPublicKey::from_raw(&[0; 33]),
+            Err(KeyError::KeyLength { got: 33 })
+        );
+        assert_eq!(
+            OperatorPublicKey::from_raw(&[0x05; 65]),
+            Err(KeyError::InvalidP256Point)
+        );
+        #[cfg(feature = "p256")]
+        {
+            let key = p256::ecdsa::SigningKey::from_slice(&[9; 32]).unwrap();
+            let p = OperatorPublicKey::EcdsaP256(
+                EcdsaP256PublicKey::from_p256(key.verifying_key()),
+            );
+            assert_eq!(p.to_raw().len(), 65);
+            assert_eq!(OperatorPublicKey::from_raw(&p.to_raw()), Ok(p));
+        }
+    }
+
+    #[test]
+    fn signatures_round_trip_through_hex_and_refuse_high_s() {
+        let (key, vk) = crypto::generate_keypair();
+        let signature = OperatorSignature::Ed25519(crypto::sign(&key, b"m", 1));
+        assert_eq!(
+            OperatorSignature::from_hex(
+                SignatureAlgorithm::Ed25519,
+                &format!(" {} ", signature.to_hex())
+            ),
+            Ok(signature)
+        );
+        assert!(
+            OperatorPublicKey::Ed25519(vk)
+                .verify(&crypto::signing_digest(b"m", 1), &signature)
+                .is_ok()
+        );
+        let mut high = [0xffu8; 64];
+        high[0] = 1;
+        assert_eq!(
+            OperatorSignature::from_bytes(SignatureAlgorithm::EcdsaP256, &high),
+            Err(KeyError::NonCanonicalSignature)
+        );
+        assert_eq!(
+            OperatorSignature::from_hex(SignatureAlgorithm::Ed25519, "zz"),
+            Err(KeyError::NotHex)
+        );
+        assert_eq!(
+            OperatorSignature::from_bytes(
+                SignatureAlgorithm::Ed25519,
+                &[0; 63]
+            ),
+            Err(KeyError::Length {
+                expected: 64,
+                got: 63
+            })
         );
     }
 
