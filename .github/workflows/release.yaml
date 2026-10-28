@@ -100,6 +100,12 @@ jobs:
 
       - uses: taiki-e/install-action@just
 
+      # As in CI: the `yubikey` feature links the system's PC/SC library,
+      # which `just check`'s `--all-features` builds (0.136.0's first
+      # release run failed here)
+      - name: PC/SC headers
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev pkgconf
+
       - name: check
         run: just check
 
