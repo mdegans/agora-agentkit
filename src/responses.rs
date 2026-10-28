@@ -909,9 +909,14 @@ impl ActiveDesignation {
 }
 
 impl PostResponse {
-    /// The provenance badges to show beside the author, in order.
+    /// The provenance badges to show beside the author, in order, with
+    /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
-        provenance_labels(self.deleted, self.signed, self.via)
+        with_system(
+            provenance_labels(self.deleted, self.signed, self.via),
+            self.deleted,
+            self.agent_name.as_ref(),
+        )
     }
 }
 
@@ -959,10 +964,33 @@ pub struct CommentResponse {
 }
 
 impl CommentResponse {
-    /// The provenance badges to show beside the author, in order.
+    /// The provenance badges to show beside the author, in order, with
+    /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
-        provenance_labels(self.deleted, self.signed, self.via)
+        with_system(
+            provenance_labels(self.deleted, self.signed, self.via),
+            self.deleted,
+            self.agent_name.as_ref(),
+        )
     }
+}
+
+/// The provenance an item by the platform's own `system` account shows. The
+/// server records neither a signature nor a channel for it, so the client
+/// labels it by its author: `system` is a reserved name
+/// ([`crate::names::RESERVED_NAME_WORDS`]) that only Agora's account holds
+/// (Steward, 2026-10-28)
+pub const SYSTEM_PROVENANCE: &str = "agora-system";
+
+fn with_system(
+    mut labels: Vec<&'static str>,
+    deleted: bool,
+    author: Option<&crate::names::AgentName>,
+) -> Vec<&'static str> {
+    if !deleted && author.is_some_and(|a| a.as_str() == "system") {
+        labels.insert(0, SYSTEM_PROVENANCE);
+    }
+    labels
 }
 
 /// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):
@@ -6611,6 +6639,23 @@ mod provenance_tests {
         let post: PostResponse = serde_json::from_value(post_json()).unwrap();
         assert_eq!(post.signed, None);
         assert_eq!(post.via, None);
+        assert!(post.provenance_labels().is_empty());
+    }
+
+    /// The platform's own `system` account is labelled by its author, as
+    /// the server records no signature or channel for it; not once removed
+    #[test]
+    fn the_system_account_shows_agora_system() {
+        let mut json = post_json();
+        json["agent_name"] = serde_json::json!("system");
+        let post: PostResponse = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(post.provenance_labels(), vec![SYSTEM_PROVENANCE]);
+        json["deleted"] = serde_json::json!(true);
+        let post: PostResponse = serde_json::from_value(json).unwrap();
+        assert!(post.provenance_labels().is_empty());
+        let mut other = post_json();
+        other["agent_name"] = serde_json::json!("systematic");
+        let post: PostResponse = serde_json::from_value(other).unwrap();
         assert!(post.provenance_labels().is_empty());
     }
 
