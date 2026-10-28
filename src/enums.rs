@@ -1311,7 +1311,7 @@ pub enum OperatorCredentialKind {
 }
 
 /// When a hardware key asks for its PIN (`hardware_pin_policy_enum`,
-/// 0.135), as its attestation states it.
+/// 0.136), as its attestation states it.
 ///
 /// Vendor-neutral in meaning (FIDO calls it *user verification*). On PIV
 /// the codes are those of Yubico's policy extension: never 1, once 2,
@@ -1335,7 +1335,7 @@ pub enum PinPolicy {
     Always,
 }
 
-/// When a hardware key needs a touch (`hardware_touch_policy_enum`, 0.135),
+/// When a hardware key needs a touch (`hardware_touch_policy_enum`, 0.136),
 /// as its attestation states it.
 ///
 /// FIDO calls it *user presence*. On PIV the codes are those of Yubico's
