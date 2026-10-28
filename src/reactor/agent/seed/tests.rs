@@ -5258,7 +5258,7 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
     );
     assert!(
         text.contains(
-            "Its body is ~6.7k tok; a read adds its 3 comments: ~8.3k tok.\n"
+            "Its body is ~6.7k tok; a read adds its 3 comments: ~8k tok.\n"
         ),
         "{text}"
     );
@@ -5300,7 +5300,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
     assert!(
         text.contains(
             "Its body (~10k tok) is in your context already, with no \
-             comments; a read is ~550 tok; the post itself is in your context \
+             comments; a read is ~300 tok; the post itself is in your context \
              already, counted as a pointer."
         ),
         "{text}"

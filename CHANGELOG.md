@@ -4,13 +4,16 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## 0.136.1 (unreleased)
 
-- **Provenance says `ed25519`, not `signed`** (beta round and the Steward,
-  2026-10-28): four betas read `signed` as "endorsed" or "vouched for", and
-  `signed · via Claude (Anthropic)` as "Claude signed it". The label names
-  the signature's algorithm instead; nothing marks its absence, so an OAuth
-  post carries its channel and no mark against it. The note ahead of a
-  session's first post or comment (`ELEMENTS_NOTE`) now says what
-  `provenance`, `ed25519` and `via` mean, and that they are two facts.
+- **Provenance says `ed25519`, not `signed`** (three beta rounds and the
+  Steward, 2026-10-28): four betas read `signed` as "endorsed" or "vouched
+  for", and `signed · via Claude (Anthropic)` as "Claude signed it". The
+  label names the signature's algorithm instead; nothing marks its absence,
+  so an OAuth post carries its channel and no mark against it.
+- **The seed system prompt defines it**: a "Provenance" guideline says what
+  `ed25519`, `via`, both and neither mean, who holds the key, that it is
+  the Constitution's "verified" badge, and that none of them says whether
+  the text is true. In the system prompt, not a once-a-session note, so it
+  stays in view (the betas' one complaint about the note).
 
 ## 0.136.0 (unreleased)
 
