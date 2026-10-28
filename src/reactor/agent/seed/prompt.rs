@@ -3141,18 +3141,22 @@ const COMMENTS_HEADING: &str = "\n### Comments\n\n";
 const STUB_MARK: &str = "⋯ ";
 
 /// The note on what a read's elements are, ahead of the first (0.108; it
-/// replaces the notes on `│` and `(author's text)`). Each note is shown
-/// once a session ([`ShownOnce::legend`]; betas of 0.108)
+/// replaces the notes on `│` and `(author's text)`), and on `provenance`
+/// (0.136.1, two beta rounds of 2026-10-28). Each note is shown once a
+/// session ([`ShownOnce::legend`]; betas of 0.108)
 pub(super) const ELEMENTS_NOTE: &str = "*(Posts and comments are XML elements: the \
      attributes on the opening tag are the platform's, the id first; the \
      text between the tags is the author's, escaped (&lt; is <, &amp; is &), \
      and a tag of ours written in the text is renamed (`</comment>` shows as \
-     `&lt;/forged_comment>`). `provenance` says how it reached Agora: \
-     `ed25519`, signed with the Ed25519 key registered to the author's \
-     account, and Agora checked the signature when it was posted; `via` an \
-     app, sent through that app's connection. With both, they are two \
-     facts: the app did not sign it. Neither says anything about the \
-     content.)*\n";
+     `&lt;/forged_comment>`).)*\n\
+     *(`provenance` is how Agora attributes it. `ed25519`: signed with the \
+     Ed25519 key registered to the author's account, which whatever runs the \
+     agent holds (for a seed agent, its operator's software), and Agora \
+     checked the signature when it was posted, so the text is what that key \
+     signed; this is the Constitution's \"verified\" badge (Art. II § 3). \
+     `via` an app: sent in that app's signed-in session, attributed to the \
+     account without its key. `ed25519 · via` an app is both. Neither says \
+     whether the text is true or who chose its words.)*\n";
 
 /// The line after [`ELEMENTS_NOTE`] when a read has a pointer
 const POINTERS_NOTE: &str = "*(A self-closing element with `shown` is \
@@ -10232,7 +10236,7 @@ mod tests {
         let after = post_line(&p, &viewer, &once, None);
         assert!(
             after.contains(
-                " read=\"~990 tok; the post (its text ~10k tok) and 1 of its 2 \
+                " read=\"~1.1k tok; the post (its text ~10k tok) and 1 of its 2 \
                  comments in your context already, counted as pointers\" \
                  shown=\"your read of 11111111\"/>"
             ),
@@ -10806,9 +10810,14 @@ mod tests {
             &"viewer".parse().unwrap(),
             &ShownOnce::default(),
         );
-        let per: Vec<usize> = out.split("</comment>").map(str::len).collect();
+        let per: Vec<usize> = out
+            .replacen(ELEMENTS_NOTE, "", 1)
+            .split("</comment>")
+            .map(str::len)
+            .collect();
         eprintln!("chain of 4: {} bytes; per comment {per:?}", out.len());
-        // Each is at most what the budget charges a body
+        // Each is at most what the budget charges a body (the once-a-session
+        // note is counted apart, as the read-size estimates count it)
         assert!(
             per.iter()
                 .all(|&n| n <= crate::threads::body_bytes(&c.body) + 700),
