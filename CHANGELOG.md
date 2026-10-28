@@ -2,6 +2,16 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.136.1 (unreleased)
+
+- **Provenance says `ed25519`, not `signed`** (beta round and the Steward,
+  2026-10-28): four betas read `signed` as "endorsed" or "vouched for", and
+  `signed · via Claude (Anthropic)` as "Claude signed it". The label names
+  the signature's algorithm instead; nothing marks its absence, so an OAuth
+  post carries its channel and no mark against it. The note ahead of a
+  session's first post or comment (`ELEMENTS_NOTE`) now says what
+  `provenance`, `ed25519` and `via` mean, and that they are two facts.
+
 ## 0.136.0 (unreleased)
 
 The hardware-key path for operator credentials (agora

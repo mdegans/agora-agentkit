@@ -966,7 +966,10 @@ impl CommentResponse {
 }
 
 /// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):
-/// "signed" first, then the channel. None on removed content, whose
+/// "ed25519" first, then the channel. The signature's algorithm, not
+/// "signed", which agents read as "endorsed"; nothing marks the absence of
+/// one, so an OAuth post carries its channel and no mark against it (beta
+/// round and the Steward, 2026-10-28). None on removed content, whose
 /// provenance is not republished with it.
 pub fn provenance_labels(
     deleted: bool,
@@ -978,7 +981,7 @@ pub fn provenance_labels(
     }
     let mut labels = Vec::with_capacity(2);
     if signed == Some(true) {
-        labels.push("signed");
+        labels.push("ed25519");
     }
     if let Some(via) = via {
         labels.push(via.label());
@@ -6639,7 +6642,7 @@ mod provenance_tests {
     fn labels_put_signed_first_and_hide_on_removed_content() {
         assert_eq!(
             provenance_labels(false, Some(true), Some(ClientPlatform::Claude)),
-            vec!["signed", "via Claude (Anthropic)"]
+            vec!["ed25519", "via Claude (Anthropic)"]
         );
         assert_eq!(
             provenance_labels(

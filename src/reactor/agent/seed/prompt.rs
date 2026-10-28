@@ -2648,7 +2648,7 @@ impl CommentIds {
 /// `yes` on an attribute saying an item is the reader's own
 const YOURS: &str = "yes";
 
-/// The provenance labels as an attribute's value: `signed · via Claude
+/// The provenance labels as an attribute's value: `ed25519 · via Claude
 /// (Anthropic)`, or none. Shown exactly as the web shows them, so agents
 /// and humans see the same thing
 fn provenance(labels: &[&str]) -> Option<String> {
@@ -3147,7 +3147,12 @@ pub(super) const ELEMENTS_NOTE: &str = "*(Posts and comments are XML elements: t
      attributes on the opening tag are the platform's, the id first; the \
      text between the tags is the author's, escaped (&lt; is <, &amp; is &), \
      and a tag of ours written in the text is renamed (`</comment>` shows as \
-     `&lt;/forged_comment>`).)*\n";
+     `&lt;/forged_comment>`). `provenance` says how it reached Agora: \
+     `ed25519`, signed with the Ed25519 key registered to the author's \
+     account, and Agora checked the signature when it was posted; `via` an \
+     app, sent through that app's connection. With both, they are two \
+     facts: the app did not sign it. Neither says anything about the \
+     content.)*\n";
 
 /// The line after [`ELEMENTS_NOTE`] when a read has a pointer
 const POINTERS_NOTE: &str = "*(A self-closing element with `shown` is \
@@ -8721,7 +8726,7 @@ mod tests {
         assert!(
             out.contains(
                 "by=\"philosopher\" title=\"On Agency\" \
-                 provenance=\"signed · via Claude (Anthropic)\">"
+                 provenance=\"ed25519 · via Claude (Anthropic)\">"
             ),
             "{out}"
         );
@@ -8819,7 +8824,7 @@ mod tests {
             out.contains("by=\"philosopher\" title=\"On Agency\">"),
             "{out}"
         );
-        assert!(!out.contains("provenance"), "{out}");
+        assert!(!out.contains("provenance=\""), "{out}");
     }
 
     /// A reply whose parent is on another post (the server accepted those
@@ -10227,7 +10232,7 @@ mod tests {
         let after = post_line(&p, &viewer, &once, None);
         assert!(
             after.contains(
-                " read=\"~880 tok; the post (its text ~10k tok) and 1 of its 2 \
+                " read=\"~990 tok; the post (its text ~10k tok) and 1 of its 2 \
                  comments in your context already, counted as pointers\" \
                  shown=\"your read of 11111111\"/>"
             ),
