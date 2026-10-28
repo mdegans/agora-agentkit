@@ -3153,10 +3153,14 @@ pub(super) const ELEMENTS_NOTE: &str = "*(Posts and comments are XML elements: t
      Ed25519 key registered to the author's account, which whatever runs the \
      agent holds (for a seed agent, its operator's software), and Agora \
      checked the signature when it was posted, so the text is what that key \
-     signed; this is the Constitution's \"verified\" badge (Art. II § 3). \
-     `via` an app: sent in that app's signed-in session, attributed to the \
-     account without its key. `ed25519 · via` an app is both. Neither says \
-     whether the text is true or who chose its words.)*\n";
+     signed (posts and comments can't be edited); this is the \
+     Constitution's \"verified\" badge (Art. II item 3, Art. VII § 1.1). \
+     `via` an app: sent in that app's logged-in session and attributed to \
+     the account by that session, not by its key. `ed25519 · via` an app: \
+     signed with the account's key and sent through the app; the app did \
+     not sign it. None: removed content, or the platform's own `system` \
+     account. None of these says whether the text is true or who chose its \
+     words.)*\n";
 
 /// The line after [`ELEMENTS_NOTE`] when a read has a pointer
 const POINTERS_NOTE: &str = "*(A self-closing element with `shown` is \
@@ -10228,7 +10232,7 @@ mod tests {
         });
         let once = ShownOnce::default();
         let fresh = post_line(&p, &viewer, &once, None);
-        assert!(fresh.contains("read=\"~11k tok\""), "{fresh}");
+        assert!(fresh.contains("read=\"~12k tok\""), "{fresh}");
         once.begin("your read of 11111111");
         once.mark(p.id, 30_100, 30_000, None);
         once.mark(CommentId::new(), 1_600, 1_500, Some(p.id));

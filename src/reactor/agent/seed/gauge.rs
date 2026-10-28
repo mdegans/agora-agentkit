@@ -1033,7 +1033,7 @@ mod tests {
         // budget (a 262144 budget's 87k tokens is more than the read)
         // and each of the 30 full comments at a stub line's cost, since at a
         // smaller budget it is one (the review of 0.94.1)
-        assert!((12_000..18_000).contains(&fixed), "{fixed}");
+        assert!((12_000..18_500).contains(&fixed), "{fixed}");
         assert_eq!(estimate_tokens(&text).saturating_sub(262_144 / 3), 0);
 
         let gauge = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
