@@ -3392,6 +3392,7 @@ impl World {
 /// vacuous: how often each kind of event applied over as many runs as
 /// the property test has cases
 #[test]
+#[ignore = "slow (~16 s, one thread): CI runs it through `just test-slow`"]
 fn the_generator_reaches_every_machine() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;

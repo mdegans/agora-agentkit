@@ -10,7 +10,7 @@ install-hooks:
 # The same gate the pre-commit hook runs: formatting, lints, the feature
 # matrix, tests — both implementations' tests, since the Python verifier is
 # only worth having if it is held to the same vectors.
-check: fmt-check no-openssl lint features test test-python
+check: fmt-check no-openssl lint features test test-slow test-python
 
 # Compile every feature in isolation, plus no-default.
 #
@@ -90,6 +90,12 @@ lint:
 # Full test suite across all features.
 test:
     cargo test --all-features
+
+# Tests too slow for the pre-commit hook on the shared dev box, `#[ignore]`d
+# there and run by CI (`check`): the reachability check of the operator
+# security property tests (1024 generated runs, ~16 s on one thread).
+test-slow:
+    cargo test --all-features --lib operator_security::tests::the_generator_reaches_every_machine -- --ignored --exact
 
 # The live API tests: the `#[ignore]`d `live_*` tests, on Claude Haiku 5.5
 # at low effort (Steward, 2026-10-19). Paid, but cents per run. Run it
