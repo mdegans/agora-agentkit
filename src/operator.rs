@@ -316,16 +316,13 @@ pub struct OperatorConfigResponse {
     /// agentkit 0.137, which had no sudo
     #[serde(default)]
     pub bulk_requires_sudo: bool,
-    /// A `send_now` whose recipients and `recent_recipients` together are
-    /// more than this needs sudo, whatever `bulk_requires_sudo` says (100
-    /// by default). Absent (no limit) from a server built before agentkit
-    /// 0.137
-    #[serde(default = "no_sudo_threshold")]
-    pub send_now_sudo_threshold: i64,
-}
-
-fn no_sudo_threshold() -> i64 {
-    i64::MAX
+    /// A send delivered at once (`send_now`, or a `deliver_at` sooner than
+    /// the hold) whose recipients and `recent_recipients` together are more
+    /// than this needs sudo, whatever `bulk_requires_sudo` says (100 by
+    /// default). Absent from a server built before agentkit 0.137, which
+    /// had no sudo
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_now_sudo_threshold: Option<i64>,
 }
 
 impl OperatorConfigResponse {
@@ -336,16 +333,27 @@ impl OperatorConfigResponse {
     }
 
     /// Whether a send to `recipients` agents needs sudo: a request signed
-    /// by a hardware key attested with touch policy `always`, so the
-    /// operator's tap on the device is bound to this one request (from
-    /// the portal: a step-up for it). A bulk send needs it when
-    /// `bulk_requires_sudo`; a `send_now` past `send_now_sudo_threshold`
-    /// always does
-    pub fn needs_sudo(&self, recipients: i64, send_now: bool) -> bool {
+    /// by a key that [`gives_sudo`], each of whose signatures took a tap
+    /// on the device (the portal can't give it). A bulk send needs it when
+    /// `bulk_requires_sudo`; a send delivered at once (`immediate`:
+    /// `send_now`, or a `deliver_at` sooner than the hold) past
+    /// `send_now_sudo_threshold` always does
+    pub fn needs_sudo(&self, recipients: i64, immediate: bool) -> bool {
         let counted = recipients.saturating_add(self.recent_recipients);
         (self.bulk_requires_sudo && self.is_bulk(recipients))
-            || (send_now && counted > self.send_now_sudo_threshold)
+            || (immediate
+                && self.send_now_sudo_threshold.is_some_and(|m| counted > m))
     }
+}
+
+/// Whether a credential's signatures are sudo: a hardware key attested
+/// with touch policy `always`. The one test, for the server and any client
+pub fn gives_sudo(
+    kind: OperatorCredentialKind,
+    touch: Option<crate::enums::TouchPolicy>,
+) -> bool {
+    kind == OperatorCredentialKind::HardwareKey
+        && touch == Some(crate::enums::TouchPolicy::Always)
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,7 +1036,7 @@ mod tests {
             recent_recipients: 4,
             agent_reply_daily_cap: 50,
             bulk_requires_sudo: false,
-            send_now_sudo_threshold: 100,
+            send_now_sudo_threshold: Some(100),
         };
         assert!(!config.needs_sudo(7, false), "bulk, but not asked for");
         assert!(!config.needs_sudo(96, true), "4 + 96 is not past 100");
@@ -1039,6 +1047,24 @@ mod tests {
         assert!(!config.needs_sudo(6, false), "not bulk");
         assert!(config.needs_sudo(7, false));
         assert!(config.needs_sudo(7, true));
+    }
+
+    /// Only an attested hardware key with touch policy `always` gives sudo
+    #[test]
+    fn only_a_touch_always_hardware_key_gives_sudo() {
+        use crate::enums::TouchPolicy;
+        assert!(gives_sudo(
+            OperatorCredentialKind::HardwareKey,
+            Some(TouchPolicy::Always)
+        ));
+        for touch in [None, Some(TouchPolicy::Never), Some(TouchPolicy::Cached)]
+        {
+            assert!(!gives_sudo(OperatorCredentialKind::HardwareKey, touch));
+        }
+        assert!(!gives_sudo(
+            OperatorCredentialKind::SoftwareKey,
+            Some(TouchPolicy::Always)
+        ));
     }
 
     /// A server built before 0.137 sends neither sudo field: nothing needs
@@ -1071,7 +1097,7 @@ mod tests {
             recent_recipients: 4,
             agent_reply_daily_cap: 50,
             bulk_requires_sudo: false,
-            send_now_sudo_threshold: 100,
+            send_now_sudo_threshold: Some(100),
         };
         assert!(!config.is_bulk(6));
         assert!(config.is_bulk(7));
