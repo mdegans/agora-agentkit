@@ -15,6 +15,7 @@
 //! - **Operator API** wire types, and who is on either side of a message ([`operator`])
 //! - **Operation prose** every surface shows an agent ([`docs`])
 //! - **Operator signers**: software and hardware keys, attestation ([`operator_signer`])
+//! - **Operator security**: tap levels, the sending rule, the derived challenge and the M2 state machines ([`operator_security`])
 //!
 //! # Feature Flags
 //!
@@ -44,6 +45,7 @@ pub mod names;
 pub mod oauth;
 pub mod one_or_many;
 pub mod operator;
+pub mod operator_security;
 pub mod operator_signer;
 pub mod polls;
 #[cfg(feature = "misanthropic")]

@@ -297,7 +297,9 @@ pub mod operator_request {
     use sha2::{Digest, Sha256};
 
     use super::NewlineInPart;
-    use crate::ids::{OperatorActionId, OperatorCredentialId, OperatorId};
+    use crate::ids::{
+        OperatorActionId, OperatorCredentialId, OperatorEnrolmentId, OperatorId,
+    };
     use crate::operator_signer::OperatorPublicKey;
 
     /// What every signed operator request's bytes begin with
@@ -374,9 +376,69 @@ pub mod operator_request {
         bytes
     }
 
+    /// What a device-flow enrolment's proof of possession begins with
+    /// (0.140)
+    pub const ENROLMENT_CONTEXT: &[u8] = b"agora/enrol/v1\n";
+
+    /// `ENROLMENT_CONTEXT || HOST \n ENROLMENT_ID \n TIMESTAMP`: what the
+    /// key being enrolled signs, as is, to show it holds the secret half
+    /// (`POST /api/operator/enrolments`). `host` as for
+    /// [`operator_request_bytes`]; the id lowercase hyphenated; the
+    /// timestamp Unix seconds, accepted within ±300 s. The id is unique, so
+    /// a proof can't be replayed
+    pub fn enrolment_possession_bytes(
+        host: &str,
+        enrolment: OperatorEnrolmentId,
+        timestamp: i64,
+    ) -> Result<Vec<u8>, NewlineInPart> {
+        // SPEC: the spec lists the timestamp among the signed parts here
+        // (*Adding a credential*), unlike a request's, which goes in through
+        // `crypto::sign`
+        super::signed_request_bytes(
+            ENROLMENT_CONTEXT,
+            &[
+                &host.to_ascii_lowercase(),
+                &enrolment.to_string(),
+                &timestamp.to_string(),
+            ],
+        )
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn enrolment_bytes_bind_host_id_and_time() {
+            let id: OperatorEnrolmentId =
+                "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f".parse().unwrap();
+            assert_eq!(
+                enrolment_possession_bytes("Agora.Example", id, 1_761_782_400)
+                    .unwrap(),
+                b"agora/enrol/v1\nagora.example\n\
+                  6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f\n1761782400"
+                    .to_vec()
+            );
+            let base = enrolment_possession_bytes("a.org", id, 1).unwrap();
+            assert_ne!(
+                base,
+                enrolment_possession_bytes("b.org", id, 1).unwrap()
+            );
+            assert_ne!(
+                base,
+                enrolment_possession_bytes(
+                    "a.org",
+                    OperatorEnrolmentId::new(),
+                    1
+                )
+                .unwrap()
+            );
+            assert_ne!(
+                base,
+                enrolment_possession_bytes("a.org", id, 2).unwrap()
+            );
+            assert!(enrolment_possession_bytes("a\norg", id, 1).is_err());
+        }
 
         #[test]
         fn possession_bytes_bind_operator_and_key() {
