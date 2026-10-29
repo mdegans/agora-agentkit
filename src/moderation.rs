@@ -285,9 +285,10 @@ impl std::fmt::Display for AppealRefusal {
                 }
                 Ok(())
             }
-            Self::ActionNotFound => {
-                f.write_str("That moderation action does not exist.")
-            }
+            Self::ActionNotFound => f.write_str(
+                "That moderation action does not exist, or it was vacated, \
+                     which leaves nothing to appeal.",
+            ),
             Self::NoStanding => f.write_str(
                 "You can only appeal actions taken against you or your \
                  content.",
@@ -1013,6 +1014,7 @@ mod tests {
 
         for (name, schema) in [
             ("ReversalStatus", schemars::schema_for!(ReversalStatus)),
+            ("Vacating", schemars::schema_for!(Vacating)),
             ("NoteSource", schemars::schema_for!(NoteSource)),
             ("NoteCitation", schemars::schema_for!(NoteCitation)),
             ("ModerationNote", schemars::schema_for!(ModerationNote)),
