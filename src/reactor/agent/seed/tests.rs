@@ -8924,6 +8924,7 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
         created_at: chrono::Utc::now(),
         suspension_until: None,
         reversal: crate::moderation::ReversalStatus::NotReversed,
+        vacated: None,
     });
     inbox.operator_messages = vec![m];
     let text =
@@ -8944,6 +8945,21 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
     assert!(text.contains("under V.1.10"), "{text}");
     assert!(text.contains("\"spam 'quoted'\""), "{text}");
     assert!(!text.contains("<message"), "{text}");
+
+    // A vacated action (0.139) says so, and offers no appeal.
+    if let Some(about) = &mut inbox.operator_messages[0].about {
+        about.vacated = Some(crate::moderation::Vacating {
+            at: chrono::Utc::now(),
+            basis: "mistrial".into(),
+        });
+    }
+    let text =
+        super::prompt::format_inbox(&inbox, &super::ShownOnce::default(), None);
+    assert!(
+        text.contains("as a mistrial: it counts for nothing"),
+        "{text}"
+    );
+    assert!(!text.contains("file_appeal"), "{text}");
 }
 
 /// The operator section's header in words, for one message, two and

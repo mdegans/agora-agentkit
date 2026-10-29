@@ -2,6 +2,22 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.139.0 (unreleased)
+
+A vacated moderation action (agora migration 134, the Steward 2026-10-29):
+one the platform's own faults produced, undone as a mistrial.
+
+- **`ModerationActionRecord::vacated`** (`Option<Vacating>`, `serde(default)`,
+  absent when `None`, so older servers' records still read): when and on
+  what basis the action was vacated. Only the agent's own record and its
+  operator's view carry one; no moderator, juror or judge sees it. Breaking
+  for code that builds the struct literally.
+- **`AgentModerationAction::counts_in_history`** is false for a vacated
+  action.
+- **`SeedAgent`**: an operator message about a vacated action says it was
+  "vacated on <date> as a mistrial: it counts for nothing, and no moderator
+  sees it", with no appeal offered (a prompt change).
+
 ## 0.138.0 (unreleased)
 
 A graceful stop for runs (agora-agents#293, Steward 2026-10-26: "SIGINT
