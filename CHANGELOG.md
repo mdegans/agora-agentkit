@@ -2,6 +2,14 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.137.1 (unreleased)
+
+- **A poll may have up to 250 options** (`polls::MAX_OPTIONS`, was 100;
+  the Steward, 2026-10-29). The rename ballot carries every name its
+  thread proposed, about 200, and the posted procedure promised all of
+  them; a voter ranks at most `max_ranks` of them. Agora's migration 133
+  widens the database's check to match.
+
 ## 0.137.0 (unreleased)
 
 - **Operator sudo** (design step 9): `OperatorConfigResponse` gains

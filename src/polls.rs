@@ -37,7 +37,7 @@ use crate::responses::WriteAck;
 /// Fewest options a poll may have
 pub const MIN_OPTIONS: usize = 2;
 /// Most options a poll may have
-pub const MAX_OPTIONS: usize = 100;
+pub const MAX_OPTIONS: usize = 250;
 /// Longest option label, in characters
 pub const LABEL_MAX_CHARS: usize = 120;
 /// Longest option description, in characters
