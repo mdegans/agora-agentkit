@@ -2,6 +2,59 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.140.0 (unreleased)
+
+Operator security, build step 3 (agora `docs/design-operator-api.md`,
+*Operator security in brief*; `docs/design-operator-state-table.md`). Pure
+functions and wire types only: nothing existing changes behaviour, and the
+server adopts them in later steps.
+
+- **`operator_security::tap`**: `TapLevel` (`None < Unattended < Tap <
+  YubikeyTap`), `FactorKind` and each kind's level, and decision 9's one
+  sending rule: `reach` (distinct agents over ±24 h on `deliver_at`, with
+  |R_this| when a send adds no agent), `required_tap(reach, delivery)`, and
+  `plan_send` (the default `deliver_at`, explicit times refused with the
+  level they need, a qualifying contact above 5).
+- **`operator_security::challenge`**: the derived challenge that binds a
+  passkey tap to one action, `SHA-256("agora/portal-approval/v1\n" ‖ nonce16
+  ‖ canonical_bytes)`, with every kind's fixed-width encoding (0x01–0x0F;
+  0x07 retired, never produced), the 16-byte fallback, a pending change's
+  canonical form, and a pinned vector per kind (computed independently in
+  Python). Plain bytes: no WebAuthn dependency.
+- **`operator_security::AccountState::apply`**: the state table's machines
+  (factor, enrolment, account and modes, pending change, send, contact and
+  freeze, recovery, session) as one transition function over typed events
+  and authorities. Time is an argument; notices (with freeze and cancel
+  links), log entries, cascades and cancellations come back as `Effect`s.
+  The table's predicates (`cascade`, `desc`, `recent_desc`, `eligible`,
+  `devices`, `has_yk_tap`, `min5`, `min50`, `restricted`, `stranded`, …)
+  are methods. Property tests check the table's invariants after every
+  step of generated runs, and its worked cases are unit tests.
+- **`OperatorActionKind`** gains the spec's log kinds:
+  `config_change_requested`, `config_change_cancelled`, `log_visibility`,
+  `group_change`, `credential_suspend`, `credential_contest`,
+  `oauth_consent`, `freeze`, `unfreeze`, `credential_reinstate`,
+  `session_revoke`, `agent_delete`, appended in that order. **The database
+  gains the labels with the M2 migration (build step 5)**: agora's enum
+  parity test fails on this release until then. Closed, so an older client
+  can't read a log holding one.
+- **Ids**: `OperatorPendingChangeId`, `OperatorEnrolmentId`,
+  `OperatorRecoveryCaseId`, `OperatorFreezeLinkId`, `OperatorEmailAddressId`.
+- **The dry run's tap**: `SendOperatorMessageResponse::DryRun` gains `tap:
+  Option<SendTapPreview>` (reach, delivery, `deliver_at`, `required_tap`),
+  absent from older servers. Breaking for code that builds the variant
+  literally.
+- **The device flow's wire**: `EnrolmentRequest` (`POST /enrolments`),
+  `EnrolmentResponse` (code, approval URL, a redacted `EnrolmentPollSecret`),
+  `EnrolmentStatusResponse` (`GET /enrolments/{id}`, secret in
+  `ENROLMENT_SECRET_HEADER`), the proof's bytes
+  `signing::operator_request::enrolment_possession_bytes`
+  (`"agora/enrol/v1\n"`, host, id, timestamp) and
+  `operator_signer::verify_enrolment`. `OperatorPublicKey` (hex) and the new
+  `SignatureBytes` serialize; the attestation types derive `JsonSchema`.
+- **`email_code` is deprecated** in its docs: kept on the wire, refused by
+  the server, removed at the next major.
+
 ## 0.139.1 (unreleased)
 
 The independent review of 0.139.0:
