@@ -311,6 +311,18 @@ pub struct OperatorConfigResponse {
     pub recent_recipients: i64,
     /// Messages each agent may send its operator a day (50 by default)
     pub agent_reply_daily_cap: i64,
+    /// Whether every bulk send needs sudo (off by default: an operator
+    /// that delegates to agents can't tap). Absent from a server before
+    /// agentkit 0.137, which had no sudo
+    #[serde(default)]
+    pub bulk_requires_sudo: bool,
+    /// A send delivered at once (`send_now`, or a `deliver_at` sooner than
+    /// the hold) whose recipients and `recent_recipients` together are more
+    /// than this needs sudo, whatever `bulk_requires_sudo` says (100 by
+    /// default). Absent from a server built before agentkit 0.137, which
+    /// had no sudo
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_now_sudo_threshold: Option<i64>,
 }
 
 impl OperatorConfigResponse {
@@ -319,6 +331,55 @@ impl OperatorConfigResponse {
     pub fn is_bulk(&self, recipients: i64) -> bool {
         recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
     }
+
+    /// Whether a send to `recipients` agents needs sudo: a request signed
+    /// by a key that [`gives_sudo`], each of whose signatures took a tap
+    /// on the device (the portal can't give it). A bulk send needs it when
+    /// `bulk_requires_sudo`; a send delivered at once (`immediate`:
+    /// `send_now`, or a `deliver_at` sooner than the hold) past
+    /// `send_now_sudo_threshold` always does
+    pub fn needs_sudo(&self, recipients: i64, immediate: bool) -> bool {
+        let counted = recipients.saturating_add(self.recent_recipients);
+        (self.bulk_requires_sudo && self.is_bulk(recipients))
+            || (immediate
+                && self.send_now_sudo_threshold.is_some_and(|m| counted > m))
+    }
+}
+
+/// Whether a credential's signatures are sudo: a hardware key attested
+/// with touch policy `always`. The one test, for the server and any client
+pub fn gives_sudo(
+    kind: OperatorCredentialKind,
+    touch: Option<crate::enums::TouchPolicy>,
+) -> bool {
+    kind == OperatorCredentialKind::HardwareKey
+        && touch == Some(crate::enums::TouchPolicy::Always)
+}
+
+// ---------------------------------------------------------------------------
+// POST /config/bulk-sudo
+// ---------------------------------------------------------------------------
+
+/// `POST /api/operator/config/bulk-sudo`: turn
+/// [`OperatorConfigResponse::bulk_requires_sudo`] on or off. Either way the
+/// request must be sudo itself (signed by a key that [`gives_sudo`], with a
+/// tap), so a stolen password, mailbox or unattended key can do neither,
+/// and turning it off gives the tap nothing it didn't have
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct BulkSudoRequest {
+    pub action_id: OperatorActionId,
+    pub on: bool,
+}
+
+/// The setting after the request, and whether it changed (a change is
+/// logged as `config_change_effective` and emailed)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct BulkSudoResponse {
+    pub bulk_requires_sudo: bool,
+    pub changed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -547,6 +608,20 @@ pub enum OperatorActionDetail {
     CredentialRevoke {
         credential: CredentialRef,
     },
+    ConfigChangeEffective {
+        change: OperatorConfigChange,
+    },
+}
+
+/// A change to the operator's settings, as the log records it
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "setting", rename_all = "snake_case")]
+pub enum OperatorConfigChange {
+    /// [`OperatorConfigResponse::bulk_requires_sudo`], set by a sudo
+    /// request ([`BulkSudoRequest`]), so immediate both ways
+    BulkRequiresSudo { value: bool },
 }
 
 impl OperatorLogEntry {
@@ -555,7 +630,7 @@ impl OperatorLogEntry {
     /// `docs/design-operator-api.md`, "What the agent sees"): only sends
     /// and retracts that reached it, naming only its own copy. `None` for
     /// everything else: cancels and undelivered sends (it never saw them)
-    /// and credential changes (they concern no agent).
+    /// credential and configuration changes (they concern no agent).
     ///
     /// `about` is kept only when the send went to this agent alone: a
     /// moderation action is one agent's, and a batch must not show it to
@@ -592,7 +667,10 @@ impl OperatorLogEntry {
             }
             OperatorActionDetail::DmCancel { .. }
             | OperatorActionDetail::CredentialAdd { .. }
-            | OperatorActionDetail::CredentialRevoke { .. } => return None,
+            | OperatorActionDetail::CredentialRevoke { .. }
+            | OperatorActionDetail::ConfigChangeEffective { .. } => {
+                return None;
+            }
         };
         match &detail {
             OperatorActionDetail::DmSend { messages: ids, .. }
@@ -656,6 +734,9 @@ impl OperatorActionDetail {
             Self::CredentialRevoke { .. } => {
                 OperatorActionKind::CredentialRevoke
             }
+            Self::ConfigChangeEffective { .. } => {
+                OperatorActionKind::ConfigChangeEffective
+            }
         }
     }
 
@@ -670,7 +751,9 @@ impl OperatorActionDetail {
                 retracted,
                 cancelled,
             } => Some(n(retracted.len() + cancelled.len())),
-            Self::CredentialAdd { .. } | Self::CredentialRevoke { .. } => None,
+            Self::CredentialAdd { .. }
+            | Self::CredentialRevoke { .. }
+            | Self::ConfigChangeEffective { .. } => None,
         }
     }
 }
@@ -943,6 +1026,90 @@ mod tests {
         }
     }
 
+    /// A configuration change names its setting and value, and no agent
+    /// sees it
+    #[test]
+    fn a_config_change_is_logged_by_setting_and_concerns_no_agent() {
+        let detail = OperatorActionDetail::ConfigChangeEffective {
+            change: OperatorConfigChange::BulkRequiresSudo { value: true },
+        };
+        assert_eq!(detail.kind(), OperatorActionKind::ConfigChangeEffective);
+        assert_eq!(detail.recipient_count(), None);
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "config_change_effective",
+                "change": { "setting": "bulk_requires_sudo", "value": true },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+            detail
+        );
+    }
+
+    /// Sudo: bulk sends only when the operator asked for it; a send-now
+    /// past the larger threshold always, both counting the last hour
+    #[test]
+    fn a_send_needs_sudo_when_bulk_and_asked_or_sent_now_past_the_threshold() {
+        let mut config = OperatorConfigResponse {
+            dm_hold_seconds: 60,
+            bulk_threshold: 10,
+            bulk_hold_seconds: 3600,
+            bulk_window_seconds: 3600,
+            recent_recipients: 4,
+            agent_reply_daily_cap: 50,
+            bulk_requires_sudo: false,
+            send_now_sudo_threshold: Some(100),
+        };
+        assert!(!config.needs_sudo(7, false), "bulk, but not asked for");
+        assert!(!config.needs_sudo(96, true), "4 + 96 is not past 100");
+        assert!(config.needs_sudo(97, true));
+        assert!(!config.needs_sudo(97, false), "held, not sent now");
+        assert!(config.needs_sudo(i64::MAX, true));
+        config.bulk_requires_sudo = true;
+        assert!(!config.needs_sudo(6, false), "not bulk");
+        assert!(config.needs_sudo(7, false));
+        assert!(config.needs_sudo(7, true));
+    }
+
+    /// Only an attested hardware key with touch policy `always` gives sudo
+    #[test]
+    fn only_a_touch_always_hardware_key_gives_sudo() {
+        use crate::enums::TouchPolicy;
+        assert!(gives_sudo(
+            OperatorCredentialKind::HardwareKey,
+            Some(TouchPolicy::Always)
+        ));
+        for touch in [None, Some(TouchPolicy::Never), Some(TouchPolicy::Cached)]
+        {
+            assert!(!gives_sudo(OperatorCredentialKind::HardwareKey, touch));
+        }
+        assert!(!gives_sudo(
+            OperatorCredentialKind::SoftwareKey,
+            Some(TouchPolicy::Always)
+        ));
+    }
+
+    /// A server built before 0.137 sends neither sudo field: nothing needs
+    /// sudo there
+    #[test]
+    fn a_config_without_the_sudo_fields_needs_no_sudo() {
+        let config: OperatorConfigResponse =
+            serde_json::from_value(serde_json::json!({
+                "dm_hold_seconds": 60,
+                "bulk_threshold": 10,
+                "bulk_hold_seconds": 3600,
+                "bulk_window_seconds": 3600,
+                "recent_recipients": 0,
+                "agent_reply_daily_cap": 50,
+            }))
+            .unwrap();
+        assert!(!config.bulk_requires_sudo);
+        assert!(!config.needs_sudo(i64::MAX, true));
+    }
+
     /// The prediction is the server's rule: strictly more than the
     /// threshold, counting the credential's last hour
     #[test]
@@ -954,12 +1121,14 @@ mod tests {
             bulk_window_seconds: 3600,
             recent_recipients: 4,
             agent_reply_daily_cap: 50,
+            bulk_requires_sudo: false,
+            send_now_sudo_threshold: Some(100),
         };
         assert!(!config.is_bulk(6));
         assert!(config.is_bulk(7));
         assert!(config.is_bulk(i64::MAX));
         let json = serde_json::to_value(config).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 6);
+        assert_eq!(json.as_object().unwrap().len(), 8);
         assert_eq!(
             serde_json::from_value::<OperatorConfigResponse>(json).unwrap(),
             config

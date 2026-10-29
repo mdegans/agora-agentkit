@@ -1258,9 +1258,9 @@ pub enum MessageKind {
 }
 
 /// What an operator did, as its action log records it
-/// (`operator_action_kind_enum`, 0.128). Only what milestone M1 logs;
-/// configuration, sudo and group changes join with the features that make
-/// them (agora `docs/design-operator-api.md`, "The action log")
+/// (`operator_action_kind_enum`, 0.128). What milestone M1 logs, and a
+/// configuration change that takes effect at once (0.137); time-locked
+/// changes and group changes join with the features that make them (agora `docs/design-operator-api.md`, "The action log")
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1286,6 +1286,9 @@ pub enum OperatorActionKind {
     CredentialAdd,
     /// A signing credential revoked
     CredentialRevoke,
+    /// A setting changed, taking effect at once (0.137: bulk sudo, set by
+    /// a sudo request; agora `docs/design-operator-api.md`, "Sudo")
+    ConfigChangeEffective,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -1860,7 +1863,7 @@ closed_variants!(OAuthScope [Read, Write]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
-closed_variants!(OperatorActionKind [DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke]);
+closed_variants!(OperatorActionKind [DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke, ConfigChangeEffective]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);

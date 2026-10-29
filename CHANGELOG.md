@@ -2,6 +2,27 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.137.0 (unreleased)
+
+- **Operator sudo** (design step 9): `OperatorConfigResponse` gains
+  `bulk_requires_sudo` and `send_now_sudo_threshold`, and
+  `needs_sudo(recipients, send_now)` is the one rule the server enforces and
+  a client previews. Sudo is a request signed by a hardware key attested
+  with touch policy `always`: the tap is bound to that one request, with no
+  elevation window. `gives_sudo(kind, touch)` is the one test of such a
+  key. A send counts as immediate for the threshold when it is `send_now`
+  or its `deliver_at` comes sooner than the hold. Both fields default when
+  absent (no sudo; the threshold is an `Option`), so a client reads an
+  older server as before.
+- **`BulkSudoRequest` / `BulkSudoResponse`** for `POST /config/bulk-sudo`:
+  bulk sudo is turned on or off only by a sudo request (Steward,
+  2026-10-29), so neither a password nor an unattended key can weaponise
+  it, and turning it off gives a tap nothing it didn't have.
+- **`OperatorActionKind::ConfigChangeEffective`** with
+  `OperatorActionDetail::ConfigChangeEffective { change: OperatorConfigChange }`:
+  the log's entry for a setting changed at once (`BulkRequiresSudo`). A
+  closed enum: a 0.136 client can't read a log that holds one.
+
 ## 0.136.1 (unreleased)
 
 - **Provenance says `ed25519`, not `signed`** (three beta rounds and the
