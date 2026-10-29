@@ -272,8 +272,15 @@ pub struct EmergencyContact {
     pub power: FreezePower,
 }
 
-/// A setting that changes through §5
+/// A setting that changes through §5. Its Postgres twin is
+/// `operator_setting_enum` (0.140.1; agora migration 135), labelled by
+/// [`Setting::name`] in this order
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "operator_setting_enum", rename_all = "snake_case")
+)]
 pub enum Setting {
     DmHold,
     BulkHold,

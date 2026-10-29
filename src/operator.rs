@@ -221,13 +221,16 @@ pub struct SendOperatorMessageRequest {
     /// by default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliver_at: Option<DateTime<Utc>>,
-    /// Deliver now, skipping the hold, when the request's tap allows it
-    /// ([`required_tap`](crate::operator_security::tap::required_tap))
+    /// Deliver now, skipping the hold. From agora's operator security build
+    /// step 12, when the request's tap allows it
+    /// ([`required_tap`](crate::operator_security::tap::required_tap));
+    /// until then, under the bulk threshold or with `email_code`
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub send_now: bool,
-    /// **Deprecated** (0.140): decision 9 replaced the emailed send-now
+    /// **Deprecated** (0.140): decision 9 replaces the emailed send-now
     /// code with taps. Kept so the wire doesn't break; the server refuses
-    /// it, and it goes at the next major
+    /// it from agora's operator security build step 12 (until then it
+    /// still checks it), and it goes at the next major
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_code: Option<SendNowCode>,
     /// Resolve the recipients and send nothing
