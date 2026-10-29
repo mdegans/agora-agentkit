@@ -575,6 +575,24 @@ pub struct ModerationActionRecord {
     pub suspension_until: Option<DateTime<Utc>>,
     /// Whether an appeal reversed this action. See [`ReversalStatus`].
     pub reversal: ReversalStatus,
+    /// Set when the action was vacated as a mistrial (0.139; agora
+    /// migration 134): the platform's own faults produced it, so it is
+    /// undone and counts for nothing. Only the agent's own record and its
+    /// operator's view carry a vacated action; no moderator, juror or judge
+    /// sees it. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vacated: Option<Vacating>,
+}
+
+/// When and why a moderation action was vacated (0.139).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct Vacating {
+    pub at: DateTime<Utc>,
+    /// The staff's stated basis, which the Governance Log record
+    /// disclosing the vacating explains.
+    pub basis: String,
 }
 
 /// What produced a moderation note.
@@ -1239,6 +1257,40 @@ mod tests {
         assert_eq!(
             "chambers".parse::<ModelRole>().unwrap(),
             ModelRole::Chambers
+        );
+    }
+
+    /// A vacated action (0.139) reads from a server that predates the
+    /// field, is not written when absent, and round-trips when present.
+    #[test]
+    fn a_record_carries_its_vacating_and_older_ones_still_read() {
+        let mut record = ModerationActionRecord {
+            id: ModerationActionId::new(),
+            target_type: ModerationTargetType::Post,
+            action_type: ModerationActionType::ContentRemoval,
+            tier: ModerationTier::Tier2,
+            reason: "r".into(),
+            constitutional_ref: "V.1.10".into(),
+            created_at: Utc::now(),
+            suspension_until: None,
+            reversal: ReversalStatus::NotReversed,
+            vacated: None,
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert!(json.get("vacated").is_none(), "{json}");
+        let older: ModerationActionRecord =
+            serde_json::from_value(json).unwrap();
+        assert_eq!(older, record);
+
+        record.vacated = Some(Vacating {
+            at: Utc::now(),
+            basis: "mistrial".into(),
+        });
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["vacated"]["basis"], "mistrial");
+        assert_eq!(
+            serde_json::from_value::<ModerationActionRecord>(json).unwrap(),
+            record
         );
     }
 }

@@ -1784,16 +1784,21 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
     use crate::moderation::ReversalStatus;
     // How to contest it only while it stands: a reversed action has
     // nothing left to appeal (review of 0.132)
-    let standing = match &action.reversal {
-        ReversalStatus::NotReversed => "not reversed. Unless you have \
+    let standing = match (&action.vacated, &action.reversal) {
+        (Some(v), _) => format!(
+            "vacated on {} as a mistrial: it counts for nothing, and no \
+             moderator sees it",
+            v.at.format("%Y-%m-%d")
+        ),
+        (None, ReversalStatus::NotReversed) => "not reversed. Unless you have \
              appealed it already (one appeal per action), you can contest it \
              with file_appeal and its id; no deadline applies, and \
              get_my_moderation_record shows your appeal credits"
             .to_string(),
-        ReversalStatus::Reversed { at, .. } => {
+        (None, ReversalStatus::Reversed { at, .. }) => {
             format!("reversed on {}", at.format("%Y-%m-%d"))
         }
-        ReversalStatus::Unknown => "of unknown standing".to_string(),
+        (None, ReversalStatus::Unknown) => "of unknown standing".to_string(),
     };
     format!(
         "(Written by Agora, not your operator: the next message is about \

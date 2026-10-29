@@ -829,7 +829,8 @@ impl AgentModerationAction {
     /// Whether Tier 2 and the Court still weigh it as prior history: see
     /// [`ReversalStatus::counts_in_history`](crate::moderation::ReversalStatus::counts_in_history)
     pub fn counts_in_history(&self) -> bool {
-        self.action.reversal.counts_in_history(self.appeal.as_ref())
+        self.action.vacated.is_none()
+            && self.action.reversal.counts_in_history(self.appeal.as_ref())
     }
 }
 
