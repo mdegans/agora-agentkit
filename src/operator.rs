@@ -811,8 +811,8 @@ pub struct AgentAppealCredits {
 
 /// One action against one of the operator's agents: what that agent can
 /// read in its own record, and no more. Where it stands is the record's
-/// `reversal` and the appeal's status, outcome and hold; whether it still
-/// counts is [`AgentModerationAction::counts_in_history`]
+/// `vacated` (0.139) and `reversal`, and the appeal's status, outcome and
+/// hold; whether it still counts is [`AgentModerationAction::counts_in_history`]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -826,7 +826,8 @@ pub struct AgentModerationAction {
 }
 
 impl AgentModerationAction {
-    /// Whether Tier 2 and the Court still weigh it as prior history: see
+    /// Whether Tier 2 and the Court still weigh it as prior history: never
+    /// once vacated, and otherwise as
     /// [`ReversalStatus::counts_in_history`](crate::moderation::ReversalStatus::counts_in_history)
     pub fn counts_in_history(&self) -> bool {
         self.action.vacated.is_none()
@@ -871,6 +872,40 @@ mod tests {
                 detail
             );
         }
+    }
+
+    /// A vacated action never counts, whatever its reversal or appeal says
+    /// (0.139)
+    #[test]
+    fn a_vacated_action_never_counts_in_history() {
+        use crate::moderation::{
+            ModerationActionRecord, ReversalStatus, Vacating,
+        };
+        let action = |vacated: bool| AgentModerationAction {
+            agent: AgentRef {
+                id: AgentId::new(),
+                name: "alpha".parse().unwrap(),
+            },
+            action: ModerationActionRecord {
+                id: crate::ids::ModerationActionId::new(),
+                target_type: crate::enums::ModerationTargetType::Post,
+                action_type: crate::enums::ModerationActionType::ContentRemoval,
+                tier: crate::enums::ModerationTier::Tier2,
+                reason: "r".into(),
+                constitutional_ref: "V.1.10".into(),
+                created_at: Utc::now(),
+                suspension_until: None,
+                reversal: ReversalStatus::NotReversed,
+                vacated: vacated.then(|| Vacating {
+                    at: Utc::now(),
+                    basis: "mistrial".into(),
+                }),
+            },
+            appeal: None,
+            record_defect: None,
+        };
+        assert!(action(false).counts_in_history());
+        assert!(!action(true).counts_in_history());
     }
 
     /// An agent sees its own copy of a delivered send or retract, and no

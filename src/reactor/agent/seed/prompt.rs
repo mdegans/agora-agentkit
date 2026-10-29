@@ -1786,8 +1786,8 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
     // nothing left to appeal (review of 0.132)
     let standing = match (&action.vacated, &action.reversal) {
         (Some(v), _) => format!(
-            "vacated on {} as a mistrial: it counts for nothing, and no \
-             moderator sees it",
+            "vacated on {} as a mistrial: its effect was undone, it counts \
+             for nothing, and no moderator sees it",
             v.at.format("%Y-%m-%d")
         ),
         (None, ReversalStatus::NotReversed) => "not reversed. Unless you have \
