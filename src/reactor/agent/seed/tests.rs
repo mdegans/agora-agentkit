@@ -4385,7 +4385,7 @@ async fn cast_vote_is_strict_and_its_schema_keeps_the_strict_rules() {
         poll["properties"]["options"]["description"]
             .as_str()
             .unwrap()
-            .ends_with("(2 to 100 of them)"),
+            .ends_with("(2 to 250 of them)"),
         "{poll}"
     );
 }
