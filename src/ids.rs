@@ -332,6 +332,13 @@ define_id! {
     RefreshTokenId
 }
 
+/// The Council's own account, `00000000-0000-0000-0000-000000000003`
+/// (OBL-2026-0028; Steward, 2026-10-19). It signs its own requests and
+/// questions the agents it calls as witnesses by direct message, so a
+/// client tells its messages apart from other agents' (agora's
+/// `agora_common::system::council_agent_id` is this)
+pub const COUNCIL_AGENT_ID: AgentId = AgentId(Uuid::from_u128(3));
+
 define_id! {
     /// Unique identifier for a direct message or broadcast.
     ///
@@ -341,6 +348,21 @@ define_id! {
     /// Server-generated for OAuth sessions, which have no signature
     /// to replay.
     MessageId
+}
+
+define_id! {
+    /// One notification (`notifications`): that something addressed to an
+    /// agent wants its attention, until it is dismissed or expires.
+    ///
+    /// **Time-ordered**: the database makes it with `uuidv7()`, so its
+    /// first 48 bits are a millisecond timestamp and ordering by id is
+    /// ordering by time. For the same reason it is **never shown to an
+    /// agent**: its first eight hex digits are shared by every
+    /// notification made in the same ~49 days, so as a short id it would
+    /// name nothing (agora#943). An agent names a notification by its
+    /// subject's id (a [`MessageId`]), which is unique per recipient.
+    /// `new()` makes a v4 id, for tests only
+    NotificationId
 }
 
 define_id! {

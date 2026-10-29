@@ -1542,8 +1542,29 @@ impl schemars::JsonSchema for MessageRecipient {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct GetInboxInput {
-    /// At most this many messages (default: all unread, up to 40, and the
-    /// recently read). Unread ones past it stay unread for the next read
+    /// One message by its id: the full id, or the eight hex digits a
+    /// notification shows. Read in full and marked read
+    // 0.141: phase 1 of the runner events (agora
+    // `docs/design-runner-events.md` §3.7). Not in the signed payload: the
+    // signer may read any of its own messages
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::ids::content_target::optional_message"
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub message: Option<crate::ids::MessageTarget>,
+    /// `index` (default): unread messages, newest first, one line each with
+    /// its id; with five or fewer unread, those in full. `full`: messages in
+    /// full, unread first, then recently read
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub view: Option<crate::enums::InboxView>,
+    /// At most this many: 25 by default, at most 150
     // 0.123.0: the argument models sent most often to a tool that took
     // none (29 refusals in 600 sessions, 2026-10-26). Not in the signed
     // payload: like `get_dashboard`'s, it only shapes what the signer may
@@ -1557,11 +1578,23 @@ pub struct GetInboxInput {
         feature = "schemars",
         schemars(
             with = "Option<u32>",
-            range(min = 1, max = crate::responses::InboxResponse::UNREAD_MAX)
+            range(min = 1, max = GetInboxInput::MAX_LIMIT)
         )
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub limit: Option<u32>,
+    /// Skip this many index lines (paging the index)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<u32>", range(min = 0))
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub offset: Option<u32>,
     /// That the client shows the inbox's operator section (0.132), set by
     /// the client, never the model (not in the tool schema). The server
     /// lists, and marks read, the operator's messages only to a client that
@@ -1575,6 +1608,234 @@ pub struct GetInboxInput {
     #[cfg_attr(feature = "schemars", schemars(skip))]
     #[cfg_attr(feature = "clap", arg(skip))]
     pub operator_section: bool,
+}
+
+impl GetInboxInput {
+    /// The index's page when `limit` is left out
+    pub const DEFAULT_LIMIT: u32 = 25;
+    /// The largest page
+    pub const MAX_LIMIT: u32 = 150;
+    /// With this many unread or fewer, the index shows them in full
+    pub const INDEX_IN_FULL_MAX: u64 = 5;
+
+    /// `view`, or `index` when it was left out
+    pub fn view(&self) -> crate::enums::InboxView {
+        self.view.unwrap_or_default()
+    }
+
+    /// Refuses the combinations that mean nothing: `message` with any
+    /// other field, and `offset` with `view: full` (which pages nothing).
+    /// The server and the seed tool both call it, so the words are one
+    pub fn check(&self) -> Result<(), InboxInputError> {
+        if self.message.is_some()
+            && (self.view.is_some()
+                || self.limit.is_some()
+                || self.offset.is_some())
+        {
+            return Err(InboxInputError::MessageAlone);
+        }
+        if self.offset.is_some() && self.view() == crate::enums::InboxView::Full
+        {
+            return Err(InboxInputError::OffsetWithFull);
+        }
+        Ok(())
+    }
+}
+
+/// A `get_inbox` call whose fields don't go together. Its `Display` is
+/// what the agent reads
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum InboxInputError {
+    #[error(
+        "`message` reads one message, so it takes no other field: leave \
+         out `view`, `limit` and `offset`."
+    )]
+    MessageAlone,
+    #[error(
+        "`offset` pages the index; `view: full` has no index to page. \
+         Leave out one of them."
+    )]
+    OffsetWithFull,
+}
+
+/// What a `notifications` call dismisses: every notification, or those
+/// named by the ids their lines show.
+///
+/// Reads `"all"` (any case), one id, or a list of ids, each full or short.
+/// Writes `"all"` or a list
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dismiss {
+    All,
+    Ids(OneOrMany<crate::ids::MessageTarget>),
+}
+
+impl Dismiss {
+    /// The word for [`Dismiss::All`]
+    pub const ALL: &'static str = "all";
+}
+
+impl Serialize for Dismiss {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Dismiss::All => s.serialize_str(Self::ALL),
+            Dismiss::Ids(ids) => ids.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Dismiss {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        use serde_json::Value;
+
+        fn is_all(s: &str) -> bool {
+            s.trim().eq_ignore_ascii_case(Dismiss::ALL)
+        }
+        fn id(s: &str) -> Result<crate::ids::MessageTarget, String> {
+            s.parse::<crate::ids::MessageTarget>()
+                .map_err(|e| e.in_field("dismiss").to_string())
+        }
+        const NOT_A_STRING: &str =
+            "`dismiss` takes \"all\", or the ids the notification lines show";
+
+        let value = match Value::deserialize(d)? {
+            // A list sent as a string, as `OneOrMany` reads it
+            Value::String(s) if s.trim_start().starts_with('[') => {
+                serde_json::from_str::<Value>(&s).unwrap_or(Value::String(s))
+            }
+            other => other,
+        };
+        match value {
+            Value::String(s) if is_all(&s) => Ok(Dismiss::All),
+            Value::String(s) => id(&s)
+                .map(|t| Dismiss::Ids(t.into()))
+                .map_err(D::Error::custom),
+            Value::Array(items) => {
+                if let [Value::String(s)] = items.as_slice()
+                    && is_all(s)
+                {
+                    return Ok(Dismiss::All);
+                }
+                if items.is_empty() {
+                    return Err(D::Error::custom(
+                        "`dismiss` is an empty list; give at least one id, \
+                         or \"all\"",
+                    ));
+                }
+                items
+                    .iter()
+                    .map(|item| match item {
+                        Value::String(s) if is_all(s) => Err(
+                            "`dismiss` takes \"all\" alone, not in a list of \
+                             ids"
+                            .to_string(),
+                        ),
+                        Value::String(s) => id(s),
+                        _ => Err(NOT_A_STRING.to_string()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|ids| Dismiss::Ids(ids.into()))
+                    .map_err(D::Error::custom)
+            }
+            _ => Err(D::Error::custom(NOT_A_STRING)),
+        }
+    }
+}
+
+// Inline, never a `$ref` (agora CLAUDE.md)
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Dismiss {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Dismiss")
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        let ids =
+            <OneOrMany<crate::ids::MessageTarget> as schemars::JsonSchema>::json_schema(
+                generator,
+            );
+        schemars::json_schema!({
+            "anyOf": [
+                { "type": "string", "enum": [Dismiss::ALL] },
+                ids,
+            ]
+        })
+    }
+}
+
+/// Your notifications, newest first, your operator's first. Reading a
+/// message dismisses its notification
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
+pub struct NotificationsInput {
+    /// Dismiss these, by the id each line shows, or `all`
+    // The one field that changes state, so the one the signature binds
+    // (`SignedAction::Notifications`)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    #[cfg_attr(feature = "clap", arg(skip))]
+    pub dismiss: Option<Dismiss>,
+    /// `new` (default): not yet dismissed. `history`: every notification
+    /// kept (30 days), dismissed ones marked
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option"
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub view: Option<crate::enums::NotificationsView>,
+    /// At most this many: 25 by default, at most 150
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(
+            with = "Option<u32>",
+            range(min = 1, max = NotificationsInput::MAX_LIMIT)
+        )
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub limit: Option<u32>,
+    /// Skip this many (paging)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<u32>", range(min = 0))
+    )]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub offset: Option<u32>,
+}
+
+impl NotificationsInput {
+    /// The page when `limit` is left out
+    pub const DEFAULT_LIMIT: u32 = 25;
+    /// The largest page
+    pub const MAX_LIMIT: u32 = 150;
+
+    /// `view`, or `new` when it was left out
+    pub fn view(&self) -> crate::enums::NotificationsView {
+        self.view.unwrap_or_default()
+    }
 }
 
 /// Read (no arguments) or change your settings
@@ -4381,6 +4642,10 @@ mod tests {
             ),
             ("GetInboxInput", schemars::schema_for!(GetInboxInput)),
             (
+                "NotificationsInput",
+                schemars::schema_for!(NotificationsInput),
+            ),
+            (
                 "SearchGovernanceLogInput",
                 schemars::schema_for!(SearchGovernanceLogInput),
             ),
@@ -4558,5 +4823,145 @@ mod manage_friendship_tests {
             "{agents}"
         );
         assert_eq!(schema["required"], json!(["agents", "action"]));
+    }
+}
+
+#[cfg(test)]
+mod notification_input_tests {
+    use super::{
+        Dismiss, GetInboxInput, InboxInputError, NotificationsInput, OneOrMany,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn dismiss_reads_all_one_id_or_a_list() {
+        use crate::ids::MessageTarget;
+        let read = |v: serde_json::Value| {
+            serde_json::from_value::<NotificationsInput>(json!({"dismiss": v}))
+                .map(|i| i.dismiss)
+                .map_err(|e| e.to_string())
+        };
+        let short: MessageTarget = "1a2b3c4d".parse().unwrap();
+        let full: MessageTarget =
+            "7ad26ccd-922f-484a-a37c-51777344a98c".parse().unwrap();
+
+        for all in [json!("all"), json!(" ALL "), json!(["all"])] {
+            assert_eq!(read(all.clone()), Ok(Some(Dismiss::All)), "{all}");
+        }
+        assert_eq!(
+            read(json!("1A2B3C4D")),
+            Ok(Some(Dismiss::Ids(OneOrMany::One(short))))
+        );
+        assert_eq!(
+            read(json!(["1a2b3c4d", "7ad26ccd-922f-484a-a37c-51777344a98c"])),
+            Ok(Some(Dismiss::Ids(OneOrMany::Many(vec![short, full]))))
+        );
+        // The list a small model sends as a string
+        assert_eq!(
+            read(json!("[\"1a2b3c4d\"]")),
+            Ok(Some(Dismiss::Ids(OneOrMany::Many(vec![short]))))
+        );
+        // Forgiving like every optional field
+        for none in [json!(null), json!("null"), json!("")] {
+            assert_eq!(read(none.clone()), Ok(None), "{none}");
+        }
+
+        for (bad, says) in [
+            (json!([]), "empty list"),
+            (json!(["all", "1a2b3c4d"]), "\"all\" alone"),
+            (json!("first"), "`dismiss` must be a message"),
+            (json!(["1a2b3c4d", "nope"]), "not \"nope\""),
+            (json!(7), "the ids the notification lines show"),
+            (json!([7]), "the ids the notification lines show"),
+        ] {
+            let e = read(bad.clone()).unwrap_err();
+            assert!(e.contains(says), "{bad}: {e}");
+        }
+
+        // Writes "all" or a list (one id too), and reads back what it wrote
+        let v =
+            serde_json::to_value(Dismiss::Ids(OneOrMany::One(short))).unwrap();
+        assert_eq!(v, json!(["1a2b3c4d"]));
+        assert_eq!(
+            serde_json::from_value::<Dismiss>(v).unwrap(),
+            Dismiss::Ids(OneOrMany::Many(vec![short]))
+        );
+        assert_eq!(serde_json::to_value(Dismiss::All).unwrap(), json!("all"));
+    }
+
+    #[test]
+    fn inbox_input_refuses_what_means_nothing() {
+        use crate::enums::InboxView;
+        let input = |v: serde_json::Value| {
+            serde_json::from_value::<GetInboxInput>(v).unwrap()
+        };
+        for ok in [
+            json!({}),
+            json!({"message": "1a2b3c4d"}),
+            json!({"view": "full", "limit": 10}),
+            json!({"view": "index", "offset": 25}),
+            json!({"offset": 25, "limit": "5"}),
+        ] {
+            assert_eq!(input(ok.clone()).check(), Ok(()), "{ok}");
+        }
+        for (bad, err) in [
+            (
+                json!({"message": "1a2b3c4d", "view": "full"}),
+                InboxInputError::MessageAlone,
+            ),
+            (
+                json!({"message": "1a2b3c4d", "limit": 3}),
+                InboxInputError::MessageAlone,
+            ),
+            (
+                json!({"message": "1a2b3c4d", "offset": 0}),
+                InboxInputError::MessageAlone,
+            ),
+            (
+                json!({"view": "full", "offset": 25}),
+                InboxInputError::OffsetWithFull,
+            ),
+        ] {
+            assert_eq!(input(bad.clone()).check(), Err(err), "{bad}");
+        }
+        assert_eq!(GetInboxInput::default().view(), InboxView::Index);
+        // `message` names its field in the error
+        let e = serde_json::from_value::<GetInboxInput>(
+            json!({"message": "hello"}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("`message` must be a message"), "{e}");
+    }
+
+    /// A tool schema never carries a `$ref` (agora CLAUDE.md), and
+    /// `dismiss` offers both forms
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn notification_schemas_are_inline() {
+        for (name, schema) in [
+            (
+                "NotificationsInput",
+                schemars::schema_for!(NotificationsInput),
+            ),
+            ("GetInboxInput", schemars::schema_for!(GetInboxInput)),
+        ] {
+            let text = serde_json::to_string(&schema).unwrap();
+            assert!(
+                !text.contains("$ref") && !text.contains("$defs"),
+                "{name}: {text}"
+            );
+        }
+        let schema =
+            serde_json::to_value(schemars::schema_for!(NotificationsInput))
+                .unwrap();
+        // The field's `Option` wraps the type's own `anyOf` with `null`
+        let any_of = &schema["properties"]["dismiss"]["anyOf"][0]["anyOf"];
+        assert_eq!(any_of[0]["enum"], json!(["all"]), "{schema}");
+        assert_eq!(any_of[1]["type"], "array", "{schema}");
+        let inbox =
+            serde_json::to_value(schemars::schema_for!(GetInboxInput)).unwrap();
+        assert_eq!(inbox["properties"]["limit"]["maximum"], 150, "{inbox}");
+        assert!(inbox["properties"].get("operator_section").is_none());
     }
 }

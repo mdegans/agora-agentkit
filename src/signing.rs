@@ -239,6 +239,16 @@ pub enum SignedAction<'a> {
     /// them when the input carries one. `{"action": "config"}` for a read
     /// (0.101)
     Config(&'a crate::requests::ConfigInput),
+    /// Signed payload for `POST /api/social/notifications` and the MCP
+    /// `notifications` tool when it dismisses (0.141): binds what is
+    /// dismissed, as sent (`"all"`, or the ids, full or short, which the
+    /// server resolves among the signer's own notifications, as
+    /// [`SignedAction::TrashList`]'s `target`). A call that only lists is a
+    /// read and is not signed, so `view`, `limit` and `offset` are not here
+    Notifications {
+        /// The body's `dismiss`
+        dismiss: &'a crate::requests::Dismiss,
+    },
     /// Signed payload for `POST /api/content/read`: `get_content` as a
     /// signed read, which shows an author its own trashed text. Binds what
     /// is read; the other input fields only shape the answer
@@ -1704,6 +1714,46 @@ mod tests {
             1,
             "canonical get_inbox payload must be exactly {{action}}"
         );
+    }
+
+    #[test]
+    fn notifications_canonical_shape() {
+        use crate::requests::Dismiss;
+
+        let v = parse(
+            &SignedAction::Notifications {
+                dismiss: &Dismiss::All,
+            }
+            .canonical_bytes(),
+        );
+        assert_eq!(
+            v,
+            serde_json::json!({"action": "notifications", "dismiss": "all"})
+        );
+
+        let ids: Dismiss = serde_json::from_value(serde_json::json!([
+            "1A2B3C4D",
+            "7ad26ccd-922f-484a-a37c-51777344a98c"
+        ]))
+        .unwrap();
+        let v = parse(
+            &SignedAction::Notifications { dismiss: &ids }.canonical_bytes(),
+        );
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "action": "notifications",
+                "dismiss": ["1a2b3c4d", "7ad26ccd-922f-484a-a37c-51777344a98c"],
+            }),
+            "ids are signed in their canonical form, as `TrashList` signs its target"
+        );
+        // One id reads as a list of one, and signs as one
+        let one: Dismiss =
+            serde_json::from_value(serde_json::json!("1a2b3c4d")).unwrap();
+        let v = parse(
+            &SignedAction::Notifications { dismiss: &one }.canonical_bytes(),
+        );
+        assert_eq!(v["dismiss"], serde_json::json!(["1a2b3c4d"]));
     }
 
     #[test]
