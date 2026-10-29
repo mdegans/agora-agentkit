@@ -39,6 +39,9 @@ pub use journal::SessionJournal;
 
 pub mod inference;
 
+pub mod stop;
+pub use stop::{Stop, StopLevel};
+
 mod orchestrator;
 pub use orchestrator::{Orchestrator, OrchestratorReport};
 
@@ -235,6 +238,30 @@ struct Persist<I: Inference, S: Storage, A: Agent> {
     result: Result<Outcome, ReactorError<I, S, A>>,
     /// Already committed by [`settle`](Reactor::settle); `persist_all` skips it
     saved: bool,
+    /// The session began. One that didn't (the run was stopping) is neither
+    /// saved nor counted: the agent goes back to the reactor's queue.
+    started: bool,
+}
+
+impl<I: Inference, S: Storage, A: Agent> Persist<I, S, A> {
+    /// An agent whose session the stopping run never began
+    fn unstarted(agent: A) -> Self {
+        Self {
+            agent,
+            result: Ok(Outcome::Failed),
+            saved: false,
+            started: false,
+        }
+    }
+}
+
+/// How a drive ended besides its result, for `settle`
+#[derive(Debug, Clone, Copy, Default)]
+struct Drive {
+    /// On the stall cap
+    stalled: bool,
+    /// Asked to close by [`Agent::on_stop`]: the run was stopping
+    stopped: bool,
 }
 
 /// [`Storage`] shared by the two run-paths, so each agent saves as it finishes
@@ -349,6 +376,12 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
     rejected: BTreeMap<AgentId, serde_json::Value>,
     /// See [`with_unreachable_hold`](Self::with_unreachable_hold)
     unreachable_hold: Option<Duration>,
+    /// See [`with_stop`](Self::with_stop)
+    stop: Stop,
+    /// Agents the last [`run`](Run::run) didn't start because it was
+    /// stopping; they are back in `agents`. Reported in
+    /// [`Report::unstarted`].
+    unstarted: usize,
 }
 
 /// A [`Reactor`] using an [`anthropic::Client`] for [`Inference`].
@@ -420,6 +453,8 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             unsaved: BTreeMap::new(),
             rejected: BTreeMap::new(),
             unreachable_hold: None,
+            stop: Stop::new(),
+            unstarted: 0,
         }
         .with_agents(agents)
     }
@@ -433,6 +468,17 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// the agent-major path; a batch submission is not a session.
     pub fn with_unreachable_hold(mut self, every: Duration) -> Self {
         self.unreachable_hold = Some(every);
+        self
+    }
+
+    /// Stop gracefully when `stop` rises (see [`stop`](self::stop)): at
+    /// [`StopLevel::Drain`] no new session starts, and at
+    /// [`StopLevel::EndTurn`] each session in flight closes after its current
+    /// turn ([`Agent::on_stop`]). An agent whose session never started stays
+    /// seated in the reactor, unsaved, and is counted in
+    /// [`Report::unstarted`]. Without one, a run never stops early.
+    pub fn with_stop(mut self, stop: Stop) -> Self {
+        self.stop = stop;
         self
     }
 
@@ -468,6 +514,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 .collect(),
             unsaved: self.unsaved.clone(),
             rejected: self.rejected.clone(),
+            unstarted: self.unstarted,
         }
     }
 
@@ -476,20 +523,24 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// ends — a stateful tool may hold real resources — and its error never
     /// clobbers the drive's own.
     ///
-    /// Returns whether the drive ended on the stall cap, alongside the result.
+    /// Returns how the drive ended (the stall cap, a stop) alongside the
+    /// result.
     async fn drive_one(
         inference: &I,
         agent: &mut A,
         hold: Option<Duration>,
-    ) -> (Result<Outcome, ReactorError<I, S, A>>, bool) {
-        let driven = Self::drive_inner(inference, agent, hold).await;
+        stop: &Stop,
+    ) -> (Result<Outcome, ReactorError<I, S, A>>, Drive) {
+        let mut stopped = false;
+        let driven =
+            Self::drive_inner(inference, agent, hold, stop, &mut stopped).await;
         let stalled = matches!(driven, Ok(None));
         let driven = driven.map(|o| o.unwrap_or(Outcome::Failed));
         let teardown =
             agent.on_teardown().await.map_err(ReactorError::AgentError);
         (
             driven.and_then(|outcome| teardown.map(|()| outcome)),
-            stalled,
+            Drive { stalled, stopped },
         )
     }
 
@@ -502,9 +553,10 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         // `&mut` only because `&A` isn't `Send` across the save's await.
         agent: &mut A,
         result: &Result<Outcome, ReactorError<I, S, A>>,
-        stalled: bool,
+        drive: Drive,
         started: Started,
     ) -> bool {
+        let Drive { stalled, stopped } = drive;
         let id = agent.id();
         let saved = match serde_json::to_value(agent.state()) {
             Ok(value) => match storage.lock().await.save_raw(id, value).await {
@@ -553,6 +605,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 started_at,
                 duration_secs,
                 saved,
+                stopped,
                 "session finished"
             ),
             Some(error) => tracing::error!(
@@ -563,6 +616,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 started_at,
                 duration_secs,
                 saved,
+                stopped,
                 error,
                 "session finished without completing"
             ),
@@ -584,14 +638,43 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
 
     /// The init + drive loop of [`drive_one`](Self::drive_one), split out so
     /// teardown can run no matter how it ends. `None` is the stall cap.
+    /// `stopped` is set once [`Agent::on_stop`] has been asked.
+    ///
+    /// The stop is honoured only after a first turn: a session whose stop
+    /// arrived during its `on_init` still acts once, so it never closes
+    /// having done nothing (its "last results" would be none).
     async fn drive_inner(
         inference: &I,
         agent: &mut A,
         hold: Option<Duration>,
+        stop: &Stop,
+        stopped: &mut bool,
     ) -> Result<Option<Outcome>, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
         let mut stalls = 0usize;
+        let mut turned = false;
         loop {
+            // A turn boundary: a run stopping after the turn asks the agent
+            // to close, at every boundary until it has (`on_stop` is
+            // idempotent), so a phase that can't close yet closes later.
+            if turned && stop.ending_turns() {
+                if !*stopped {
+                    *stopped = true;
+                    log_stopping(agent.id());
+                }
+                match agent.on_stop().await.map_err(ReactorError::AgentError)? {
+                    Control::Done(outcome) => break Ok(Some(outcome)),
+                    // Stalls are the turn's to count, not the stop's
+                    Control::Continue => {}
+                    // Counted, so a stalling close still ends.
+                    Control::Stalled => {
+                        stalls += 1;
+                        if stalls >= Self::MAX_STALLS {
+                            break Ok(None);
+                        }
+                    }
+                }
+            }
             agent.on_turn().await.map_err(ReactorError::AgentError)?;
             // Retry inference while the error advertises a wait (a 429/529
             // with — or courtesy-defaulted to — a backoff), scaling the wait
@@ -613,7 +696,13 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                         }
                         break response;
                     }
-                    Err(e) if hold.is_some() && e.unreachable() => {
+                    // A run stopping after the turn doesn't wait for the
+                    // endpoint: the error goes on as it would unheld.
+                    Err(e)
+                        if hold.is_some()
+                            && e.unreachable()
+                            && !stop.ending_turns() =>
+                    {
                         let every = hold.expect("checked");
                         held += 1;
                         tracing::warn!(
@@ -647,6 +736,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             };
             log_usage(agent.id(), &response, agent.prompt());
             let model = response.model.clone();
+            turned = true;
             match agent
                 .handle(response)
                 .await
@@ -678,21 +768,27 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         storage: &SharedStorage<'_, S>,
         agents: Vec<A>,
         hold: Option<Duration>,
+        stop: &Stop,
     ) -> Vec<Persist<I, S, A>> {
         let limit = inference.max_concurrency().get();
         futures::stream::iter(agents)
             .map(|mut agent| async move {
+                // Checked as the session's slot opens, not when the cohort
+                // was queued.
+                if stop.draining() {
+                    return Persist::unstarted(agent);
+                }
                 let started = Started::now();
-                let (result, stalled) =
-                    Self::drive_one(inference, &mut agent, hold).await;
-                let saved = Self::settle(
-                    storage, &mut agent, &result, stalled, started,
-                )
-                .await;
+                let (result, drive) =
+                    Self::drive_one(inference, &mut agent, hold, stop).await;
+                let saved =
+                    Self::settle(storage, &mut agent, &result, drive, started)
+                        .await;
                 Persist {
                     agent,
                     result,
                     saved,
+                    started: true,
                 }
             })
             .buffer_unordered(limit)
@@ -709,7 +805,13 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         inference: &I,
         storage: &SharedStorage<'_, S>,
         mut agents: Vec<A>,
+        stop: &Stop,
     ) -> Vec<Persist<I, S, A>> {
+        // The cohort's sessions all begin together: draining before then,
+        // none does.
+        if stop.draining() {
+            return agents.into_iter().map(Persist::unstarted).collect();
+        }
         let started = Started::now();
         // All keyed by the agent's index in `agents` (which stays full-length).
         let mut errors: HashMap<usize, ReactorError<I, S, A>> = HashMap::new();
@@ -722,6 +824,10 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         // Consecutive `Stalled` rounds, and consecutive per-item failures.
         let mut stalls: HashMap<usize, usize> = HashMap::new();
         let mut item_failures: HashMap<usize, usize> = HashMap::new();
+        // Agents asked to close because the run is stopping (`on_stop`).
+        let mut stopped: BTreeSet<usize> = BTreeSet::new();
+        // Rounds scattered so far
+        let mut rounds = 0usize;
 
         for (i, agent) in agents.iter_mut().enumerate() {
             if let Err(e) = agent.on_init().await {
@@ -769,6 +875,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 &mut errors,
                 &finished,
                 &stall_capped,
+                &stopped,
                 &mut settled,
                 started,
             )
@@ -780,6 +887,40 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             }));
             if live.is_empty() {
                 break;
+            }
+
+            // A round boundary: a run stopping after the turn asks each live
+            // session to close, every round until it has, and only after a
+            // first round (as on the sequential path).
+            if rounds > 0 && stop.ending_turns() {
+                for &i in &live {
+                    if stopped.insert(i) {
+                        log_stopping(agents[i].id());
+                    }
+                    match agents[i].on_stop().await {
+                        Err(e) => {
+                            errors.insert(i, ReactorError::AgentError(e));
+                        }
+                        Ok(Control::Done(outcome)) => {
+                            finished.insert(i, outcome);
+                        }
+                        Ok(Control::Continue) => {}
+                        Ok(Control::Stalled) => {
+                            let n = stalls.entry(i).or_insert(0);
+                            *n += 1;
+                            if *n >= Self::MAX_STALLS {
+                                finished.insert(i, Outcome::Failed);
+                                stall_capped.insert(i);
+                            }
+                        }
+                    }
+                }
+                live.retain(|i| {
+                    !errors.contains_key(i) && !finished.contains_key(i)
+                });
+                if live.is_empty() {
+                    continue;
+                }
             }
 
             for &i in &live {
@@ -821,6 +962,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 }
             };
 
+            rounds += 1;
             // Scatter: `resps` is aligned to `live` by input order.
             for (&i, resp) in live.iter().zip(resps) {
                 match resp {
@@ -877,6 +1019,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             &mut errors,
             &finished,
             &stall_capped,
+            &stopped,
             &mut settled,
             started,
         )
@@ -893,6 +1036,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                     None => Ok(finished.remove(&i).unwrap_or(Outcome::Failed)),
                 },
                 saved: settled.get(&i).copied().unwrap_or(false),
+                started: true,
                 agent,
             })
             .collect()
@@ -901,12 +1045,15 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// Tear down (best-effort, without clobbering a prior error) and
     /// [`settle`](Self::settle) every round-major agent that has left the
     /// cohort since the last call.
+    // The cohort's bookkeeping, one map or set per concern
+    #[allow(clippy::too_many_arguments)]
     async fn settle_round_major(
         storage: &SharedStorage<'_, S>,
         agents: &mut [A],
         errors: &mut HashMap<usize, ReactorError<I, S, A>>,
         finished: &HashMap<usize, Outcome>,
         stall_capped: &BTreeSet<usize>,
+        stopped: &BTreeSet<usize>,
         settled: &mut HashMap<usize, bool>,
         started: Started,
     ) {
@@ -928,7 +1075,10 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 storage,
                 agent,
                 &result,
-                stall_capped.contains(&i),
+                Drive {
+                    stalled: stall_capped.contains(&i),
+                    stopped: stopped.contains(&i),
+                },
                 started,
             )
             .await;
@@ -940,6 +1090,12 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// failed, etc. for a [`Report`]. Of particular interest are the
     /// [`unsaved`](Self::unsaved).
     async fn persist_all(&mut self, agent_results: Vec<Persist<I, S, A>>) {
+        // A session the stopping run never began: back in the queue, as it
+        // was, unsaved and uncounted.
+        let (agent_results, unstarted): (Vec<_>, Vec<_>) =
+            agent_results.into_iter().partition(|p| p.started);
+        self.unstarted = unstarted.len();
+        self.agents.extend(unstarted.into_iter().map(|p| p.agent));
         // Serialize each snapshot once. A serialize failure is itself a storage
         // error — that agent can be neither persisted nor recovered.
         let mut values: Vec<(AgentId, serde_json::Value)> = Vec::new();
@@ -989,6 +1145,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             mut agent,
             result,
             saved: settled,
+            ..
         } in agent_results
         {
             let id = agent.id();
@@ -1096,6 +1253,10 @@ pub struct Report {
     /// for the caller to re-route.
     #[serde(default)]
     pub rejected: BTreeMap<AgentId, serde_json::Value>,
+    /// Agents whose sessions didn't start because the run was stopping
+    /// ([`Reactor::with_stop`]). They stay seated in the reactor, unsaved.
+    #[serde(default)]
+    pub unstarted: usize,
 }
 
 impl std::ops::Add<Report> for Report {
@@ -1114,6 +1275,7 @@ impl std::ops::AddAssign<Report> for Report {
         self.errors.extend(rhs.errors);
         self.unsaved.extend(rhs.unsaved);
         self.rejected.extend(rhs.rejected);
+        self.unstarted += rhs.unstarted;
     }
 }
 
@@ -1245,13 +1407,15 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
         // as soon as its session ends.
         let inference = &self.inference;
         let storage = futures::lock::Mutex::new(&mut self.storage);
+        let stop = &self.stop;
         let (mut to_persist, seq_persist) = futures::join!(
-            Self::run_round_major(inference, &storage, batch),
+            Self::run_round_major(inference, &storage, batch, stop),
             Self::run_agent_major(
                 inference,
                 &storage,
                 sequential,
                 self.unreachable_hold,
+                stop,
             ),
         );
         drop(storage);
@@ -1333,6 +1497,15 @@ fn stop_reason_str(response: &misanthropic::response::Message) -> String {
         .ok()
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "none".to_owned())
+}
+
+/// One `session_stopping` per session the stopping run asks to close
+fn log_stopping(agent_id: AgentId) {
+    tracing::info!(
+        event_type = "session_stopping",
+        agent_id = %agent_id,
+        "the run is stopping; the session closes after this turn"
+    );
 }
 
 /// A `session_stalled` warning: the agent went [`MAX_STALLS`] rounds without

@@ -2,6 +2,32 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.138.0 (unreleased)
+
+A graceful stop for runs (agora-agents#293, Steward 2026-10-26: "SIGINT
+might stop at the agent session end, SIGTERM might stop at the next turn").
+
+- **`reactor::Stop`** / **`StopLevel`**: a shared level that only rises,
+  given to a reactor with `Reactor::with_stop`. At `Drain` no new session
+  starts; sessions in flight run to their own end. At `EndTurn` each session
+  in flight also closes after its current turn. An agent whose session never
+  started stays seated in the reactor, unsaved and untouched, and is counted
+  in the new `Report::unstarted` (`serde(default)`). A session held on an
+  unreachable endpoint stops holding at `EndTurn` (its error goes on as it
+  would unheld). The reactor only reads the level; the caller bounds a stop.
+- **`Agent::on_stop`**, asked at every turn boundary after `EndTurn` (so it
+  is idempotent, and a phase that can't close yet closes later), but never
+  before the session's first turn: a stop during `on_init` still lets it act
+  once. Taken as `handle`'s answer would be. The default ends
+  the session as `Failed`, saved as it stands. **`SeedAgent`** ends acting
+  the way a spent round budget does: the turn's results stay, a note says
+  the runner is stopping, and the memory rewrite and the rest of the tail
+  follow (a prompt change; the Steward's wording, approved 2026-10-29: "going down for a routine stop", so no stop reads as long-term, which Agora announces).
+  A paused server-tool turn is abandoned first, as the pause cap does.
+- `session_finished` carries `stopped` (asked by `on_stop`), and each
+  session asked logs `session_stopping`; the seed agent's close logs
+  `acting_stopped` with the rounds it had left.
+
 ## 0.137.1 (unreleased)
 
 - **A poll may have up to 250 options** (`polls::MAX_OPTIONS`, was 100;

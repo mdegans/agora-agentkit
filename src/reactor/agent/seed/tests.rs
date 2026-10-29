@@ -9406,3 +9406,100 @@ async fn a_bio_refused_for_length_says_memory_needs_no_tool() {
         );
     }
 }
+
+/// A run stopping after the turn ends acting the way a spent round budget
+/// does (agora-agents#293): the turn's tool results stay, the agent is told
+/// why, its memory turn follows, and the session completes. Asked again in
+/// the tail, it changes nothing.
+#[tokio::test]
+async fn a_stop_ends_acting_after_the_turn_and_the_memory_turn_follows() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        mutation_chance: 0,
+        ..logging_config(&dir)
+    };
+    let mut agent = session_agent(&server, config).await;
+    let mut requests = Vec::new();
+
+    agent.on_turn().await.unwrap();
+    requests.push(agent.prompt().clone());
+    let control = agent
+        .handle(post_call("toolu_1", "Stopping well"))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
+    assert_eq!(
+        agent.state.ledger.read().unwrap().created_posts.len(),
+        1,
+        "the turn's call ran"
+    );
+
+    // The signal arrived during that turn: the reactor asks at the boundary.
+    let control = agent.on_stop().await.unwrap();
+    assert_eq!(control, Control::Continue);
+    assert!(matches!(agent.phase, Phase::Reflect), "{:?}", agent.phase);
+    let text = transcript(&agent);
+    let stop_at = text.find(super::RUNNER_STOPPING).expect("told why");
+    let memory_at = text.find("update your `## Your Memory`").unwrap();
+    assert!(stop_at < memory_at, "the reason, then the memory turn");
+    // With the turn's results, in the user turn they started
+    let last =
+        serde_json::to_string(agent.prompt().messages.last().unwrap()).unwrap();
+    let result_at = last.find("tool_result").expect("results seated");
+    assert!(
+        result_at < last.find("the runner that hosts it").unwrap(),
+        "{last}"
+    );
+
+    // In the tail, a stop is already being honoured.
+    let before = agent.prompt().clone();
+    assert_eq!(agent.on_stop().await.unwrap(), Control::Continue);
+    assert_eq!(agent.prompt(), &before);
+
+    agent.on_turn().await.unwrap();
+    requests.push(agent.prompt().clone());
+    let control = agent
+        .handle(text_message(MEMORY, StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(agent.state.completed);
+    assert_eq!(
+        agent.state.memory.content,
+        "I posted about compilers and tests."
+    );
+    assert_append_only(&requests);
+}
+
+/// A stop while a server-tool turn is paused abandons the paused turn, as
+/// the pause cap does, so the request still ends on a user turn
+#[tokio::test]
+async fn a_stop_during_a_paused_turn_abandons_it() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let before = agent.prompt().messages.len();
+    assert_eq!(
+        agent.handle(paused_message()).await.unwrap(),
+        Control::Continue
+    );
+    assert_eq!(agent.prompt().messages.len(), before + 1);
+
+    assert_eq!(agent.on_stop().await.unwrap(), Control::Continue);
+    assert!(matches!(agent.phase, Phase::Reflect));
+    assert_eq!(
+        agent.prompt().messages.len(),
+        before,
+        "{:?}",
+        agent.prompt()
+    );
+    assert!(
+        agent
+            .prompt()
+            .messages
+            .last()
+            .is_some_and(|m| m.role == Role::User)
+    );
+    assert!(transcript(&agent).contains(super::RUNNER_STOPPING));
+}

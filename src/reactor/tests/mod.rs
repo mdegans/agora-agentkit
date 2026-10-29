@@ -36,8 +36,8 @@ use crate::ids::AgentId;
 // Reactor types the test submodules reach through `use super::*` but the harness
 // itself doesn't touch — re-exported so the submodules stay a bare glob import.
 pub(crate) use super::{
-    ErrorKind, ErrorReport, MAX_INFER_RETRIES, Reactor, Report, Run,
-    load_agents,
+    ErrorKind, ErrorReport, MAX_INFER_RETRIES, Reactor, Report, Run, Stop,
+    StopLevel, load_agents,
 };
 
 mod errors;
@@ -45,6 +45,7 @@ mod mixed_models;
 mod notifications;
 mod persistence;
 mod scheduling;
+mod stopping;
 // The tool tests build a `#[tool]`-macro tool, which needs its argument struct's
 // `schemars::JsonSchema` — gated on that feature (`--all-features` covers it).
 #[cfg(feature = "schemars")]
@@ -148,6 +149,14 @@ struct TestAgent {
     ctx: &'static str,
     /// What [`Agent::on_admit`] received, for asserting the handshake.
     admitted: Arc<Mutex<Option<Quirks>>>,
+    /// Times [`Agent::on_stop`] ran: at most once a session.
+    stops: Arc<AtomicUsize>,
+    /// `on_stop` closes with one more turn, then completes, as the seed
+    /// agent's memory turn does. Otherwise it does as the default does.
+    closes: bool,
+    /// Raised to `EndTurn` in `on_init`: the signal arriving while the
+    /// session is being set up.
+    stop_on_init: Option<Stop>,
 }
 
 impl TestAgent {
@@ -180,6 +189,9 @@ impl Agent for TestAgent {
             saves: Arc::new(AtomicUsize::new(0)),
             ctx: context,
             admitted: Arc::new(Mutex::new(None)),
+            stops: Arc::new(AtomicUsize::new(0)),
+            closes: false,
+            stop_on_init: None,
         };
         // Establish the "ends in a user turn" invariant.
         agent.push_user("start")?;
@@ -222,6 +234,26 @@ impl Agent for TestAgent {
     async fn on_saved(&mut self) -> Result<(), TestError> {
         self.saves.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+
+    async fn on_init(&mut self) -> Result<(), TestError> {
+        if let Some(stop) = &self.stop_on_init {
+            stop.request(StopLevel::EndTurn);
+        }
+        let (tools, prompt) = self.parts();
+        tools.prepare(prompt).await?;
+        Ok(())
+    }
+
+    async fn on_stop(&mut self) -> Result<Control, TestError> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        if !self.closes {
+            // The trait default
+            return Ok(Control::Done(Outcome::Failed));
+        }
+        // The prompt already ends in the user turn `on_quiesce` seated.
+        self.state.turns_left = 1;
+        Ok(Control::Continue)
     }
 
     async fn on_quiesce(

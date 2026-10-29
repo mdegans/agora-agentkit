@@ -548,6 +548,11 @@ pub(crate) const NO_ROUNDS_LEFT: &str = "That was your last round this session: 
      your next reply won't run. Reply without tool calls to finish; your memory update comes \
      next.";
 
+/// Acting ends early because the run is stopping ([`Agent::on_stop`])
+pub(crate) const RUNNER_STOPPING: &str = "Your session ends early: the runner that hosts it is \
+     going down for a routine stop. The results above are your last this session. Your memory \
+     update comes next.";
+
 /// What the agent is told with a round's results about the rounds left,
 /// when it is about to run out
 fn rounds_notice(left: usize) -> Option<&'static str> {
@@ -1824,6 +1829,30 @@ impl Agent for SeedAgent {
             matches!(self.phase, Phase::Acting { .. }),
             "on_quiesce fires only from the acting phase's default_handle"
         );
+        self.begin_reflect()
+    }
+
+    /// The run is stopping: acting ends here, as a spent round budget ends
+    /// it. The turn's results stay seated, a note says why, and the memory
+    /// rewrite follows, then the rest of the tail as usual
+    /// (agora-agents#293). Past acting, the tail is already the session's
+    /// close, and it goes on.
+    async fn on_stop(&mut self) -> Result<Control, SeedError> {
+        let Phase::Acting { rounds_left } = self.phase else {
+            return Ok(Control::Continue);
+        };
+        tracing::info!(
+            event_type = "acting_stopped",
+            agent = %self.state.soul.name,
+            agent_id = %self.id,
+            rounds_left,
+            "the run is stopping; acting ends early"
+        );
+        // A paused server-tool turn waits on an assistant continuation; a
+        // user turn can't follow it. Abandoned, as the pause cap does.
+        self.drop_abandoned_turn();
+        seat_user(&mut self.state.prompt, RUNNER_STOPPING.to_string())
+            .map_err(|e| SeedError::Prompt(e.to_string()))?;
         self.begin_reflect()
     }
 
