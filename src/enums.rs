@@ -1258,9 +1258,10 @@ pub enum MessageKind {
 }
 
 /// What an operator did, as its action log records it
-/// (`operator_action_kind_enum`, 0.128). What milestone M1 logs, and a
-/// configuration change that takes effect at once (0.137); time-locked
-/// changes and group changes join with the features that make them (agora `docs/design-operator-api.md`, "The action log")
+/// (`operator_action_kind_enum`, 0.128). What milestone M1 logs, a
+/// configuration change that takes effect at once (0.137), and the kinds
+/// operator security logs (0.140; agora `docs/design-operator-api.md`, "The
+/// action log"). The database gains the 0.140 labels with the M2 migration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1289,6 +1290,30 @@ pub enum OperatorActionKind {
     /// A setting changed, taking effect at once (0.137: bulk sudo, set by
     /// a sudo request; agora `docs/design-operator-api.md`, "Sudo")
     ConfigChangeEffective,
+    /// A setting change requested, waiting 72 hours (0.140)
+    ConfigChangeRequested,
+    /// A pending setting change cancelled (0.140)
+    ConfigChangeCancelled,
+    /// The action log made public or withdrawn (0.140)
+    LogVisibility,
+    /// An agent group's members changed (0.140)
+    GroupChange,
+    /// A factor suspended, one entry per target, whatever the cause (0.140)
+    CredentialSuspend,
+    /// A suspended factor contested its suspension (0.140)
+    CredentialContest,
+    /// An OAuth client granted access to an agent, by a tap (0.140)
+    OauthConsent,
+    /// The emergency contact froze the account (0.140)
+    Freeze,
+    /// A frozen account unfrozen (0.140)
+    Unfreeze,
+    /// A contested factor reinstated by manual recovery (0.140)
+    CredentialReinstate,
+    /// Other sessions signed out (0.140)
+    SessionRevoke,
+    /// An agent deleted, by a tap (0.140)
+    AgentDelete,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -1863,7 +1888,13 @@ closed_variants!(OAuthScope [Read, Write]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
-closed_variants!(OperatorActionKind [DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke, ConfigChangeEffective]);
+closed_variants!(OperatorActionKind [
+    DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke,
+    ConfigChangeEffective, ConfigChangeRequested, ConfigChangeCancelled,
+    LogVisibility, GroupChange, CredentialSuspend, CredentialContest,
+    OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
+    AgentDelete
+]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);

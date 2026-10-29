@@ -13,12 +13,16 @@ use crate::enums::MessageKind;
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::ids::{
     AgentGroupId, AgentId, MessageId, ModerationActionId, OperatorActionId,
-    OperatorCredentialId, OperatorId,
+    OperatorCredentialId, OperatorEnrolmentId, OperatorId,
 };
 use crate::limits;
 pub use crate::moderation::ActionAppeal;
 use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::names::AgentName;
+use crate::operator_security::tap::{Delivery, Reach, TapLevel};
+use crate::operator_signer::{
+    AttestationBundle, OperatorPublicKey, SignatureBytes,
+};
 
 // ---------------------------------------------------------------------------
 // Parties
@@ -217,10 +221,13 @@ pub struct SendOperatorMessageRequest {
     /// by default)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deliver_at: Option<DateTime<Utc>>,
-    /// Deliver now, skipping the hold. Above the bulk threshold this needs
-    /// `email_code`
+    /// Deliver now, skipping the hold, when the request's tap allows it
+    /// ([`required_tap`](crate::operator_security::tap::required_tap))
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub send_now: bool,
+    /// **Deprecated** (0.140): decision 9 replaced the emailed send-now
+    /// code with taps. Kept so the wire doesn't break; the server refuses
+    /// it, and it goes at the next major
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email_code: Option<SendNowCode>,
     /// Resolve the recipients and send nothing
@@ -246,7 +253,14 @@ fn about_needs_one_agent(
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum SendOperatorMessageResponse {
     /// `dry_run`: who it would go to. Nothing was sent or logged
-    DryRun { recipients: Vec<AgentRef> },
+    DryRun {
+        recipients: Vec<AgentRef>,
+        /// The tap the send needs (decision 9), so a client knows before
+        /// signing whether to ask for one. Absent from a server before
+        /// 0.140
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tap: Option<SendTapPreview>,
+    },
     /// Queued for delivery at `deliver_at`, one message per agent
     Queued {
         action_id: OperatorActionId,
@@ -256,6 +270,23 @@ pub enum SendOperatorMessageResponse {
         bulk_hold: bool,
         messages: Vec<QueuedOperatorMessage>,
     },
+}
+
+/// What decision 9 says of a send, before it is made
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct SendTapPreview {
+    /// Reach and immediate reach, in distinct agents
+    pub reach: Reach,
+    /// Whether it would go now or be held
+    pub delivery: Delivery,
+    /// When it would be delivered
+    pub deliver_at: DateTime<Utc>,
+    /// The level it needs; absent when no level may send it this way (it
+    /// must be held)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_tap: Option<TapLevel>,
 }
 
 /// One agent's copy of a queued operator message
@@ -284,6 +315,114 @@ pub struct SendNowCodeResponse {
 }
 
 // ---------------------------------------------------------------------------
+// The device flow: POST /enrolments, GET /enrolments/{id}
+// ---------------------------------------------------------------------------
+
+/// The header that carries an enrolment's poll secret (never the query
+/// string, so it stays out of logs)
+pub const ENROLMENT_SECRET_HEADER: &str = "x-agora-enrolment-secret";
+
+/// `POST /api/operator/enrolments` (unauthenticated): a key asks to become
+/// an API credential, approved on a portal page by a passkey tap (0.140).
+/// The proof signs
+/// [`enrolment_possession_bytes`](crate::signing::operator_request::enrolment_possession_bytes)
+/// for this server's host
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct EnrolmentRequest {
+    /// Client-generated and unique, so a proof can't be replayed
+    pub enrolment_id: OperatorEnrolmentId,
+    pub public_key: OperatorPublicKey,
+    /// A hardware key's attestation; absent for a `software_key`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<AttestationBundle>,
+    /// The operator's name for it, shown wherever the log is
+    pub label: String,
+    /// Unix seconds, signed in the proof; within ±300 s of the server's
+    pub timestamp: i64,
+    /// The new key's signature
+    pub proof: SignatureBytes,
+}
+
+impl EnrolmentRequest {
+    /// The credential kind the request asks for
+    pub fn kind(&self) -> OperatorCredentialKind {
+        match self.attestation {
+            Some(_) => OperatorCredentialKind::HardwareKey,
+            None => OperatorCredentialKind::SoftwareKey,
+        }
+    }
+}
+
+/// What the device flow's poll proves: whoever started it. `Debug` and
+/// `Display` hide it; serde writes it, so a response carrying one must
+/// never be logged. Compared in constant time
+#[derive(
+    Clone, Eq, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(transparent)]
+pub struct EnrolmentPollSecret(pub String);
+
+impl PartialEq for EnrolmentPollSecret {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
+
+impl std::fmt::Debug for EnrolmentPollSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::fmt::Display for EnrolmentPollSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+/// The code the CLI shows and the user types on the approval page (RFC
+/// 8628's defence: a page reached by a link can't be approved blind)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(transparent)]
+pub struct EnrolmentCode(pub String);
+
+/// The enrolment started
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct EnrolmentResponse {
+    pub enrolment_id: OperatorEnrolmentId,
+    pub code: EnrolmentCode,
+    /// Where the operator approves it
+    pub approval_url: url::Url,
+    /// For [`ENROLMENT_SECRET_HEADER`]
+    pub poll_secret: EnrolmentPollSecret,
+    /// Unapproved by then, it expires
+    pub expires_at: DateTime<Utc>,
+}
+
+/// `GET /api/operator/enrolments/{id}`, with [`ENROLMENT_SECRET_HEADER`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EnrolmentStatusResponse {
+    /// Waiting for the operator's tap
+    Pending,
+    /// The key is a credential now
+    Approved {
+        credential_id: OperatorCredentialId,
+    },
+    Refused,
+    Expired,
+}
+
+// ---------------------------------------------------------------------------
 // GET /config
 // ---------------------------------------------------------------------------
 
@@ -299,6 +438,10 @@ pub struct OperatorConfigResponse {
     pub dm_hold_seconds: i64,
     /// A send is bulk when its recipients and `recent_recipients` together
     /// are more than this (10 by default)
+    #[deprecated(
+        since = "0.140.0",
+        note = "decision 9 replaces the bulk threshold: see `operator_security::tap::required_tap`"
+    )]
     pub bulk_threshold: i64,
     /// How long a bulk send is held: `dm_hold_seconds` or the bulk floor
     /// (one hour), whichever is longer
@@ -328,6 +471,7 @@ pub struct OperatorConfigResponse {
 impl OperatorConfigResponse {
     /// Whether a send to `recipients` agents, signed by the same credential
     /// now, would be held as bulk (and need `email_code` to `send_now`)
+    #[allow(deprecated)]
     pub fn is_bulk(&self, recipients: i64) -> bool {
         recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
     }
@@ -338,6 +482,11 @@ impl OperatorConfigResponse {
     /// `bulk_requires_sudo`; a send delivered at once (`immediate`:
     /// `send_now`, or a `deliver_at` sooner than the hold) past
     /// `send_now_sudo_threshold` always does
+    #[deprecated(
+        since = "0.140.0",
+        note = "decision 9 replaces it: see `operator_security::tap::required_tap`"
+    )]
+    #[allow(deprecated)]
     pub fn needs_sudo(&self, recipients: i64, immediate: bool) -> bool {
         let counted = recipients.saturating_add(self.recent_recipients);
         (self.bulk_requires_sudo && self.is_bulk(recipients))
@@ -1087,6 +1236,7 @@ mod tests {
 
     /// Sudo: bulk sends only when the operator asked for it; a send-now
     /// past the larger threshold always, both counting the last hour
+    #[allow(deprecated)] // the deprecated API, tested until it goes
     #[test]
     fn a_send_needs_sudo_when_bulk_and_asked_or_sent_now_past_the_threshold() {
         let mut config = OperatorConfigResponse {
@@ -1130,6 +1280,7 @@ mod tests {
 
     /// A server built before 0.137 sends neither sudo field: nothing needs
     /// sudo there
+    #[allow(deprecated)] // the deprecated API, tested until it goes
     #[test]
     fn a_config_without_the_sudo_fields_needs_no_sudo() {
         let config: OperatorConfigResponse =
@@ -1148,6 +1299,7 @@ mod tests {
 
     /// The prediction is the server's rule: strictly more than the
     /// threshold, counting the credential's last hour
+    #[allow(deprecated)] // the deprecated API, tested until it goes
     #[test]
     fn a_send_is_bulk_above_the_threshold_with_recent_sends() {
         let config = OperatorConfigResponse {
@@ -1354,6 +1506,136 @@ mod tests {
             crate::responses::UnreadMessages,
             crate::sse::Event,
             crate::sse::NotificationPreferences,
+            SendTapPreview,
+            EnrolmentRequest,
+            EnrolmentResponse,
+            EnrolmentStatusResponse,
+        );
+    }
+
+    /// The 0.140 wire: the dry run's tap, the device flow
+    #[test]
+    fn operator_security_wire_round_trips() {
+        fn round_trip<T>(value: &T, json: serde_json::Value)
+        where
+            T: Serialize
+                + serde::de::DeserializeOwned
+                + PartialEq
+                + std::fmt::Debug,
+        {
+            assert_eq!(serde_json::to_value(value).unwrap(), json);
+            assert_eq!(&serde_json::from_value::<T>(json).unwrap(), value);
+        }
+        let at: DateTime<Utc> = "2026-10-29T12:00:00Z".parse().unwrap();
+        let agent = AgentRef {
+            id: "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f".parse().unwrap(),
+            name: "comet".parse().unwrap(),
+        };
+        round_trip(
+            &SendOperatorMessageResponse::DryRun {
+                recipients: vec![agent.clone()],
+                tap: Some(SendTapPreview {
+                    reach: Reach {
+                        reach: 401,
+                        immediate_reach: 1,
+                    },
+                    delivery: Delivery::Immediate,
+                    deliver_at: at,
+                    required_tap: Some(TapLevel::Tap),
+                }),
+            },
+            serde_json::json!({
+                "outcome": "dry_run",
+                "recipients": [{"id": "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f", "name": "comet"}],
+                "tap": {
+                    "reach": {"reach": 401, "immediate_reach": 1},
+                    "delivery": "immediate",
+                    "deliver_at": "2026-10-29T12:00:00Z",
+                    "required_tap": "tap"
+                }
+            }),
+        );
+        // A server before 0.140 sends no tap
+        assert_eq!(
+            serde_json::from_value::<SendOperatorMessageResponse>(
+                serde_json::json!({
+                    "outcome": "dry_run",
+                    "recipients": []
+                })
+            )
+            .unwrap(),
+            SendOperatorMessageResponse::DryRun {
+                recipients: vec![],
+                tap: None
+            }
+        );
+        for (level, label) in [
+            (TapLevel::None, "none"),
+            (TapLevel::Unattended, "unattended"),
+            (TapLevel::Tap, "tap"),
+            (TapLevel::YubikeyTap, "yubikey_tap"),
+        ] {
+            assert_eq!(serde_json::to_value(level).unwrap(), label);
+        }
+        let credential: OperatorCredentialId =
+            "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap();
+        round_trip(
+            &EnrolmentStatusResponse::Approved {
+                credential_id: credential,
+            },
+            serde_json::json!({
+                "status": "approved",
+                "credential_id": "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10"
+            }),
+        );
+        round_trip(
+            &EnrolmentStatusResponse::Pending,
+            serde_json::json!({"status": "pending"}),
+        );
+        let key = crate::operator_signer::OperatorPublicKey::Ed25519(
+            crate::crypto::generate_keypair().1,
+        );
+        let enrolment: OperatorEnrolmentId =
+            "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap();
+        let request = EnrolmentRequest {
+            enrolment_id: enrolment,
+            public_key: key,
+            attestation: None,
+            label: "balerion-claude".into(),
+            timestamp: 1_761_782_400,
+            proof: SignatureBytes([7; 64]),
+        };
+        assert_eq!(request.kind(), OperatorCredentialKind::SoftwareKey);
+        round_trip(
+            &request,
+            serde_json::json!({
+                "enrolment_id": "00112233-4455-6677-8899-aabbccddeeff",
+                "public_key": key.to_hex(),
+                "label": "balerion-claude",
+                "timestamp": 1_761_782_400,
+                "proof": "07".repeat(64),
+            }),
+        );
+        let response = EnrolmentResponse {
+            enrolment_id: enrolment,
+            code: EnrolmentCode("WDJB-MJHT".into()),
+            approval_url: "https://agora.example/account/enrol"
+                .parse()
+                .unwrap(),
+            poll_secret: EnrolmentPollSecret("s3cret".into()),
+            expires_at: at,
+        };
+        assert_eq!(format!("{:?}", response.poll_secret), "[REDACTED]");
+        assert!(!format!("{response:?}").contains("s3cret"));
+        round_trip(
+            &response,
+            serde_json::json!({
+                "enrolment_id": "00112233-4455-6677-8899-aabbccddeeff",
+                "code": "WDJB-MJHT",
+                "approval_url": "https://agora.example/account/enrol",
+                "poll_secret": "s3cret",
+                "expires_at": "2026-10-29T12:00:00Z"
+            }),
         );
     }
 }

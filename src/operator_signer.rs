@@ -288,6 +288,42 @@ impl OperatorPublicKey {
     }
 }
 
+/// Hex of [`OperatorPublicKey::to_raw`] on the wire (0.140)
+impl Serialize for OperatorPublicKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for OperatorPublicKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let text = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+        let bytes =
+            hex::decode(text.trim()).map_err(serde::de::Error::custom)?;
+        Self::from_raw(&bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for OperatorPublicKey {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "OperatorPublicKey".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "hex: Ed25519's 32 bytes, or P-256's 65-byte uncompressed SEC1",
+        })
+    }
+}
+
 #[cfg(feature = "p256")]
 fn verify_p256(
     key: &EcdsaP256PublicKey,
@@ -316,6 +352,63 @@ fn verify_p256(
         algorithm: SignatureAlgorithm::EcdsaP256,
         feature: "p256",
     })
+}
+
+/// A signature's 64 bytes, read as an algorithm's once the key is known
+/// ([`OperatorSignature::to_bytes`]); hex on the wire (0.140)
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(transparent)]
+pub struct SignatureBytes(
+    #[serde(with = "hex_array_64")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    pub [u8; 64],
+);
+
+impl SignatureBytes {
+    /// As `algorithm`'s signature ([`OperatorSignature::from_bytes`])
+    pub fn read_as(
+        &self,
+        algorithm: SignatureAlgorithm,
+    ) -> Result<OperatorSignature, KeyError> {
+        OperatorSignature::from_bytes(algorithm, &self.0)
+    }
+}
+
+impl From<OperatorSignature> for SignatureBytes {
+    fn from(signature: OperatorSignature) -> Self {
+        Self(signature.to_bytes())
+    }
+}
+
+impl fmt::Debug for SignatureBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SignatureBytes({})", hex::encode(self.0))
+    }
+}
+
+/// 64 bytes as a hex string
+mod hex_array_64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        bytes: &[u8; 64],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<[u8; 64], D::Error> {
+        let text = <std::borrow::Cow<'de, str>>::deserialize(d)?;
+        let bytes =
+            hex::decode(text.as_ref()).map_err(serde::de::Error::custom)?;
+        bytes
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("a signature is 64 bytes"))
+    }
 }
 
 /// A signature by an operator credential.
@@ -626,7 +719,13 @@ mod hex_bytes {
 /// A DER-encoded X.509 certificate, as bytes. Not parsed or checked until a
 /// verifier does (feature `x509`, `piv`). Hex on the wire.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DerCertificate(#[serde(with = "hex_bytes")] Vec<u8>);
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DerCertificate(
+    #[serde(with = "hex_bytes")]
+    #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+    Vec<u8>,
+);
 
 impl DerCertificate {
     /// From DER bytes.
@@ -654,6 +753,8 @@ impl fmt::Debug for DerCertificate {
 /// supplies the roots; it must never trust `f9` itself, which users can
 /// overwrite.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct PivAttestation {
     /// The slot's attestation certificate: its subject key is the slot's
     /// key, and its extensions carry serial, firmware and policy.
@@ -666,6 +767,8 @@ pub struct PivAttestation {
 /// and deliberately not the same type. Only the mock verifier (feature
 /// `mock-hardware-key`) reads it; every other verifier refuses it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct MockPivAttestation {
     /// The slot's attestation certificate.
     pub slot_certificate: DerCertificate,
@@ -679,6 +782,8 @@ pub struct MockPivAttestation {
 /// own variant and type, which every verifier but the mock one refuses
 /// ([`AttestationError::WrongFormat`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(tag = "format", rename_all = "snake_case")]
 pub enum AttestationBundle {
     /// Yubico PIV attestation (X.509), checked against Yubico's roots.
@@ -1219,9 +1324,57 @@ pub fn verify_possession(
     )
 }
 
+/// Check a device-flow enrolment's proof of possession: `proof`, by `key`
+/// itself, over exactly
+/// [`enrolment_possession_bytes`](crate::signing::operator_request::enrolment_possession_bytes)
+/// (0.140). The ±300 s window and the id's uniqueness are the server's
+pub fn verify_enrolment(
+    key: &OperatorPublicKey,
+    host: &str,
+    enrolment: crate::ids::OperatorEnrolmentId,
+    timestamp: i64,
+    proof: &OperatorSignature,
+) -> Result<(), VerifyError> {
+    let bytes = crate::signing::operator_request::enrolment_possession_bytes(
+        host, enrolment, timestamp,
+    )
+    .map_err(|_| VerifyError::BadSignature)?;
+    key.verify(&bytes, proof)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_enrolment_proof_verifies_with_its_own_key_only() {
+        let (secret, public) = crypto::generate_keypair();
+        let key = OperatorPublicKey::Ed25519(public);
+        let id = crate::ids::OperatorEnrolmentId::new();
+        let bytes =
+            crate::signing::operator_request::enrolment_possession_bytes(
+                "a.org", id, 7,
+            )
+            .unwrap();
+        use ed25519_dalek::Signer;
+        let proof = OperatorSignature::Ed25519(secret.sign(&bytes));
+        assert_eq!(verify_enrolment(&key, "a.org", id, 7, &proof), Ok(()));
+        assert!(verify_enrolment(&key, "a.org", id, 8, &proof).is_err());
+        assert!(verify_enrolment(&key, "b.org", id, 7, &proof).is_err());
+        // The wire's forms round-trip
+        let json = serde_json::to_string(&key).unwrap();
+        assert_eq!(json, format!("\"{}\"", key.to_hex()));
+        assert_eq!(
+            serde_json::from_str::<OperatorPublicKey>(&json).unwrap(),
+            key
+        );
+        let wire = SignatureBytes::from(proof);
+        let back: SignatureBytes =
+            serde_json::from_str(&serde_json::to_string(&wire).unwrap())
+                .unwrap();
+        assert_eq!(back.read_as(SignatureAlgorithm::Ed25519).unwrap(), proof);
+        assert!(serde_json::from_str::<OperatorPublicKey>("\"abcd\"").is_err());
+    }
 
     #[test]
     fn pin_is_redacted() {

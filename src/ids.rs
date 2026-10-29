@@ -538,6 +538,37 @@ define_id! {
 }
 
 define_id! {
+    /// A setting change an operator requested, waiting out its 72 hours
+    /// (`operator_pending_changes`) (0.140)
+    OperatorPendingChangeId
+}
+
+define_id! {
+    /// One run of the device flow that adds an API credential
+    /// (`operator_enrolments`): client-generated, inside its proof of
+    /// possession (0.140)
+    OperatorEnrolmentId
+}
+
+define_id! {
+    /// A manual-recovery case: one per contest, or per account with no
+    /// usable factor left (0.140)
+    OperatorRecoveryCaseId
+}
+
+define_id! {
+    /// One freeze link in a notice to an operator's emergency contact,
+    /// single-use (0.140)
+    OperatorFreezeLinkId
+}
+
+define_id! {
+    /// An email address an operator registered: its primary or its
+    /// emergency contact (0.140)
+    OperatorEmailAddressId
+}
+
+define_id! {
     /// A correct operator password waiting for its passkey
     /// (`operator_pending_logins`). The token lives in a cookie; the row
     /// holds its hash (0.74)
