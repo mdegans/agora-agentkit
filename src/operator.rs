@@ -311,6 +311,21 @@ pub struct OperatorConfigResponse {
     pub recent_recipients: i64,
     /// Messages each agent may send its operator a day (50 by default)
     pub agent_reply_daily_cap: i64,
+    /// Whether every bulk send needs sudo (off by default: an operator
+    /// that delegates to agents can't tap). Absent from a server before
+    /// agentkit 0.137, which had no sudo
+    #[serde(default)]
+    pub bulk_requires_sudo: bool,
+    /// A `send_now` whose recipients and `recent_recipients` together are
+    /// more than this needs sudo, whatever `bulk_requires_sudo` says (100
+    /// by default). Absent (no limit) from a server built before agentkit
+    /// 0.137
+    #[serde(default = "no_sudo_threshold")]
+    pub send_now_sudo_threshold: i64,
+}
+
+fn no_sudo_threshold() -> i64 {
+    i64::MAX
 }
 
 impl OperatorConfigResponse {
@@ -318,6 +333,18 @@ impl OperatorConfigResponse {
     /// now, would be held as bulk (and need `email_code` to `send_now`)
     pub fn is_bulk(&self, recipients: i64) -> bool {
         recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
+    }
+
+    /// Whether a send to `recipients` agents needs sudo: a request signed
+    /// by a hardware key attested with touch policy `always`, so the
+    /// operator's tap on the device is bound to this one request (from
+    /// the portal: a step-up for it). A bulk send needs it when
+    /// `bulk_requires_sudo`; a `send_now` past `send_now_sudo_threshold`
+    /// always does
+    pub fn needs_sudo(&self, recipients: i64, send_now: bool) -> bool {
+        let counted = recipients.saturating_add(self.recent_recipients);
+        (self.bulk_requires_sudo && self.is_bulk(recipients))
+            || (send_now && counted > self.send_now_sudo_threshold)
     }
 }
 
@@ -943,6 +970,49 @@ mod tests {
         }
     }
 
+    /// Sudo: bulk sends only when the operator asked for it; a send-now
+    /// past the larger threshold always, both counting the last hour
+    #[test]
+    fn a_send_needs_sudo_when_bulk_and_asked_or_sent_now_past_the_threshold() {
+        let mut config = OperatorConfigResponse {
+            dm_hold_seconds: 60,
+            bulk_threshold: 10,
+            bulk_hold_seconds: 3600,
+            bulk_window_seconds: 3600,
+            recent_recipients: 4,
+            agent_reply_daily_cap: 50,
+            bulk_requires_sudo: false,
+            send_now_sudo_threshold: 100,
+        };
+        assert!(!config.needs_sudo(7, false), "bulk, but not asked for");
+        assert!(!config.needs_sudo(96, true), "4 + 96 is not past 100");
+        assert!(config.needs_sudo(97, true));
+        assert!(!config.needs_sudo(97, false), "held, not sent now");
+        assert!(config.needs_sudo(i64::MAX, true));
+        config.bulk_requires_sudo = true;
+        assert!(!config.needs_sudo(6, false), "not bulk");
+        assert!(config.needs_sudo(7, false));
+        assert!(config.needs_sudo(7, true));
+    }
+
+    /// A server built before 0.137 sends neither sudo field: nothing needs
+    /// sudo there
+    #[test]
+    fn a_config_without_the_sudo_fields_needs_no_sudo() {
+        let config: OperatorConfigResponse =
+            serde_json::from_value(serde_json::json!({
+                "dm_hold_seconds": 60,
+                "bulk_threshold": 10,
+                "bulk_hold_seconds": 3600,
+                "bulk_window_seconds": 3600,
+                "recent_recipients": 0,
+                "agent_reply_daily_cap": 50,
+            }))
+            .unwrap();
+        assert!(!config.bulk_requires_sudo);
+        assert!(!config.needs_sudo(i64::MAX, true));
+    }
+
     /// The prediction is the server's rule: strictly more than the
     /// threshold, counting the credential's last hour
     #[test]
@@ -954,12 +1024,14 @@ mod tests {
             bulk_window_seconds: 3600,
             recent_recipients: 4,
             agent_reply_daily_cap: 50,
+            bulk_requires_sudo: false,
+            send_now_sudo_threshold: 100,
         };
         assert!(!config.is_bulk(6));
         assert!(config.is_bulk(7));
         assert!(config.is_bulk(i64::MAX));
         let json = serde_json::to_value(config).unwrap();
-        assert_eq!(json.as_object().unwrap().len(), 6);
+        assert_eq!(json.as_object().unwrap().len(), 8);
         assert_eq!(
             serde_json::from_value::<OperatorConfigResponse>(json).unwrap(),
             config

@@ -2,6 +2,16 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.137.0 (unreleased)
+
+- **Operator sudo** (design step 9): `OperatorConfigResponse` gains
+  `bulk_requires_sudo` and `send_now_sudo_threshold`, and
+  `needs_sudo(recipients, send_now)` is the one rule the server enforces and
+  a client previews. Sudo is a request signed by a hardware key attested
+  with touch policy `always`: the tap is bound to that one request, with no
+  elevation window for another request to ride. Both fields default when
+  absent (no sudo), so a client reads an older server as before.
+
 ## 0.136.1 (unreleased)
 
 - **Provenance says `ed25519`, not `signed`** (three beta rounds and the
