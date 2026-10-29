@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::ids::{
     AgentId, OAuthClientId, OperatorActionId, OperatorCredentialId,
     OperatorEmailAddressId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
-    OperatorPendingChangeId,
+    OperatorPendingChangeId, OperatorRecoveryCaseId,
 };
 
 /// What every derived challenge's preimage begins with
@@ -40,11 +40,13 @@ pub enum TapKind {
     FirstContact = 0x0D,
     ReArm = 0x0E,
     CompromiseNotice = 0x0F,
+    /// A counter-claim against a decided recovery case (0.140)
+    CounterClaim = 0x10,
 }
 
 impl TapKind {
     /// Every kind, by tag
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
@@ -59,6 +61,7 @@ impl TapKind {
         Self::FirstContact,
         Self::ReArm,
         Self::CompromiseNotice,
+        Self::CounterClaim,
     ];
 
     pub const fn tag(self) -> u8 {
@@ -148,6 +151,11 @@ pub enum Approval {
         operator: OperatorId,
         freeze_entry: OperatorActionId,
     },
+    /// 0x10
+    CounterClaim {
+        operator: OperatorId,
+        case: OperatorRecoveryCaseId,
+    },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -171,6 +179,7 @@ impl Approval {
             Self::FirstContact { .. } => TapKind::FirstContact,
             Self::ReArm { .. } => TapKind::ReArm,
             Self::CompromiseNotice { .. } => TapKind::CompromiseNotice,
+            Self::CounterClaim { .. } => TapKind::CounterClaim,
         }
     }
 
@@ -255,52 +264,56 @@ impl Approval {
                 out.extend(uuid_bytes(*operator));
                 out.extend(uuid_bytes(*freeze_entry));
             }
+            Self::CounterClaim { operator, case } => {
+                out.extend(uuid_bytes(*operator));
+                out.extend(uuid_bytes(*case));
+            }
         }
         out
     }
 
     /// [`derived_challenge`] over this approval's canonical bytes
-    pub fn challenge(&self, nonce: &[u8; 16]) -> [u8; 32] {
+    pub fn challenge(&self, nonce: &[u8; 16]) -> [u8; 16] {
         derived_challenge(nonce, &self.canonical_bytes())
     }
 }
 
-/// `SHA-256(CONTEXT ‖ nonce ‖ canonical_bytes)`: 32 bytes. The nonce is 16
-/// fresh random bytes the server draws after the canonical bytes are fixed
-pub fn derived_challenge(nonce: &[u8; 16], canonical_bytes: &[u8]) -> [u8; 32] {
+/// `SHA-256(CONTEXT ‖ nonce ‖ canonical_bytes)[..16]`. The nonce is 16
+/// fresh random bytes the server draws after the canonical bytes are fixed.
+/// 16 bytes because webauthn_rp's challenge is a `u128` (the spec's
+/// *Challenge size*)
+pub fn derived_challenge(nonce: &[u8; 16], canonical_bytes: &[u8]) -> [u8; 16] {
     let mut hash = Sha256::new();
     hash.update(CONTEXT);
     hash.update(nonce);
     hash.update(canonical_bytes);
-    hash.finalize().into()
-}
-
-/// The 16-byte fallback, `[..16]` of [`derived_challenge`], should the
-/// webauthn_rp fork stay at 16 bytes (the spec's *Challenge size*: the
-/// fork's PR records which it is)
-pub fn derived_challenge_16(
-    nonce: &[u8; 16],
-    canonical_bytes: &[u8],
-) -> [u8; 16] {
-    let full = derived_challenge(nonce, canonical_bytes);
+    let full: [u8; 32] = hash.finalize().into();
     let mut out = [0; 16];
     out.copy_from_slice(&full[..16]);
     out
 }
 
 /// A pending change's canonical form (0x06): the setting's name, then its
-/// new value, each a big-endian `u32` length then UTF-8. A bool is
-/// `true`/`false`, a duration its seconds, an address normalised (by the
-/// caller)
-pub fn change_canonical_form(setting: &str, value: &str) -> Vec<u8> {
+/// new value, each a big-endian `u32` length then UTF-8. The one encoding
+/// of each setting's value is
+/// [`SettingChange::canonical_form`](super::SettingChange::canonical_form)
+pub fn change_canonical_form(
+    setting: &str,
+    value: &str,
+) -> Result<Vec<u8>, PartTooLong> {
     let mut out = Vec::with_capacity(8 + setting.len() + value.len());
     for part in [setting, value] {
-        let len = u32::try_from(part.len()).expect("a setting fits in u32");
+        let len = u32::try_from(part.len()).map_err(|_| PartTooLong)?;
         out.extend(len.to_be_bytes());
         out.extend(part.as_bytes());
     }
-    out
+    Ok(out)
 }
+
+/// A canonical form's part longer than a `u32` length can say
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a canonical form's part is longer than 4 GiB")]
+pub struct PartTooLong;
 
 #[cfg(test)]
 mod tests {
@@ -347,9 +360,9 @@ mod tests {
             },
             Approval::PendingChange {
                 change: id(A),
-                canonical_sha256: sha256(&change_canonical_form(
-                    "dm_hold", "60",
-                )),
+                canonical_sha256: sha256(
+                    &change_canonical_form("dm_hold", "60").unwrap(),
+                ),
             },
             Approval::Unfreeze {
                 freeze_entry: id(A),
@@ -373,6 +386,10 @@ mod tests {
                 operator: id(A),
                 freeze_entry: id(B),
             },
+            Approval::CounterClaim {
+                operator: id(A),
+                case: id(B),
+            },
         ]
     }
 
@@ -381,11 +398,14 @@ mod tests {
         let tags: Vec<u8> = TapKind::ALL.iter().map(|k| k.tag()).collect();
         assert_eq!(
             tags,
-            [1, 2, 3, 4, 5, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F]
+            [
+                1, 2, 3, 4, 5, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+                0x10
+            ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x10), None);
+        assert_eq!(TapKind::from_tag(0x11), None);
         for k in TapKind::ALL {
             assert_eq!(TapKind::from_tag(k.tag()), Some(k));
             assert!(!RETIRED_TAGS.contains(&k.tag()));
@@ -418,6 +438,7 @@ mod tests {
                 1 + 16 + 32,
                 1 + 16 + 16,
                 1 + 16 + 16,
+                1 + 16 + 16,
             ]
         );
     }
@@ -440,7 +461,7 @@ mod tests {
     #[test]
     fn change_form_is_length_prefixed() {
         assert_eq!(
-            change_canonical_form("dm_hold", "60"),
+            change_canonical_form("dm_hold", "60").unwrap(),
             b"\0\0\0\x07dm_hold\0\0\0\x0260".to_vec()
         );
         // The prefix keeps a boundary from moving
@@ -450,19 +471,26 @@ mod tests {
         );
     }
 
-    /// Pinned test vectors, one per kind: hex of the 32-byte challenge
-    /// over [`NONCE`] and the fields in [`every_kind`]
+    /// Pinned test vectors, one per kind: the full SHA-256 over [`NONCE`]
+    /// and the fields in [`every_kind`]; the challenge is its first 16 bytes
     #[test]
     fn challenge_vectors() {
+        assert_eq!(VECTORS.len(), TapKind::ALL.len());
         for (approval, want) in every_kind().iter().zip(VECTORS) {
-            let got = hex::encode(approval.challenge(&NONCE));
-            assert_eq!(got, want, "{:?}", approval.kind());
+            let mut preimage = CONTEXT.to_vec();
+            preimage.extend(NONCE);
+            preimage.extend(approval.canonical_bytes());
             assert_eq!(
-                hex::encode(derived_challenge_16(
-                    &NONCE,
-                    &approval.canonical_bytes()
-                )),
-                want[..32]
+                hex::encode(sha256(&preimage)),
+                want,
+                "{:?}",
+                approval.kind()
+            );
+            assert_eq!(
+                hex::encode(approval.challenge(&NONCE)),
+                want[..32],
+                "{:?}",
+                approval.kind()
             );
         }
     }
@@ -474,14 +502,14 @@ mod tests {
         let mut preimage = b"agora/portal-approval/v1\n".to_vec();
         preimage.extend(NONCE);
         preimage.extend(approval.canonical_bytes());
-        assert_eq!(approval.challenge(&NONCE), sha256(&preimage));
+        assert_eq!(approval.challenge(&NONCE), sha256(&preimage)[..16]);
         let mut other = NONCE;
         other[0] ^= 1;
         assert_ne!(approval.challenge(&NONCE), approval.challenge(&other));
     }
 
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 14] = [
+    const VECTORS: [&str; 15] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
@@ -496,5 +524,6 @@ mod tests {
         "3db852cf63852ea9503a9022843ac4852b04750b29b17692964f3ca122878836",
         "f7ffe9ecaaf866cf58fabf8f4cbeb93419b3a158228b8bb2c2b9aea2b01c01de",
         "9f8a8ea4904c1fd8a9d9fcb6097be539dd66b4b58d419623bda57ff4fe0858d4",
+        "503e9692af58b3013f1401a73aa707ac7053cf915033358e03b4ac9b444dc700",
     ];
 }

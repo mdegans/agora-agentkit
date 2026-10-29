@@ -47,6 +47,7 @@ fn addr_id(i: u8) -> OperatorEmailAddressId {
 fn address(i: u8, tenant: &str) -> EmailAddress {
     EmailAddress {
         id: addr_id(i),
+        address: NormalisedEmail(format!("a{i}@{tenant}")),
         tenant: MailTenant(tenant.into()),
     }
 }
@@ -618,7 +619,13 @@ fn a_suspended_yubikey_counts_until_revoked() {
     );
     // After its 72 h it is revoked, and a plain tap may add one (a Known
     // hole's remedy)
+    // A contest at the deadline's instant would win: revocation is after
     w.wait(Duration::hours(72));
+    assert_eq!(
+        w.try_do(Event::Deadline { factor: p(1) }, Authority::Platform),
+        Err(Refusal::TooEarly)
+    );
+    w.wait(Duration::seconds(1));
     w.ok(Event::Deadline { factor: p(1) }, Authority::Platform);
     assert!(!w.s.has_yk_tap());
     w.ok(
@@ -944,6 +951,283 @@ fn agent_six_needs_the_minimum() {
     assert_eq!(w.s.count, 6);
 }
 
+/// The Steward, 2026-10-29: every send that takes a tap is announced,
+/// including one that goes now with reach above 5 and immediate reach ≤ 5
+#[test]
+fn a_tapped_send_that_goes_now_is_announced() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 6),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    assert_eq!(w.s.sends[&send_id(0)].delivery, Delivery::Held);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(1),
+            recipients: agents(100, 1),
+            when: When::Now,
+        },
+        tap(1, TapKind::Send),
+    );
+    let sent = &w.s.sends[&send_id(1)];
+    assert_eq!(sent.delivery, Delivery::Immediate);
+    assert_eq!(
+        sent.reach,
+        Reach {
+            reach: 7,
+            immediate_reach: 1
+        }
+    );
+    let notices: Vec<&Notice> = w
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Notice(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.subject == NoticeSubject::SendTapped(send_id(1))
+                && n.to == Audience::Both
+                && n.freeze_link.map(|(_, f)| f) == Some(p(1)))
+    );
+}
+
+/// 0x10: a counter-claim takes its own tap kind, not cancel-pending's; and
+/// the losing side of round 2 can't contest (it is final)
+#[test]
+fn a_counter_claim_has_its_own_tap_and_round_2_is_final() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0, 0);
+    w.ok(Event::Suspend { target: p(2) }, tap(1, TapKind::Suspend));
+    w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
+    let case = *w.s.cases.keys().next().unwrap();
+    w.ok(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::Reinstate,
+            losing: None,
+        },
+        Authority::Staff,
+    );
+    assert_eq!(
+        w.try_do(
+            Event::RecoveryCancel { case },
+            tap(1, TapKind::CancelPending)
+        ),
+        Err(Refusal::WrongTapKind)
+    );
+    w.ok(
+        Event::RecoveryCancel { case },
+        tap(1, TapKind::CounterClaim),
+    );
+    // Round 2: P1, the counter-claimant, loses
+    w.ok(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::Reinstate,
+            losing: Some(p(1)),
+        },
+        Authority::Staff,
+    );
+    assert!(matches!(
+        w.state(p(1)),
+        CredentialState::Suspended(Suspension {
+            cause: SuspensionCause::Recovery { .. },
+            ..
+        })
+    ));
+    assert_eq!(
+        w.try_do(Event::Contest { factor: p(1) }, tap(1, TapKind::Contest)),
+        Err(Refusal::Final)
+    );
+    assert_eq!(
+        w.try_do(
+            Event::RecoveryCancel { case },
+            tap(0, TapKind::CounterClaim)
+        ),
+        Err(Refusal::WrongState),
+        "the second call's decision is final"
+    );
+}
+
+/// Replacing the contact voids every unused freeze link sent to the old
+/// address
+#[test]
+fn a_contact_change_voids_the_old_addresses_links() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.contact(0);
+    w.add_passkey(2, DEVICE, 0, 0);
+    let old = w.link();
+    w.ok(
+        Event::ChangeRequest {
+            change: change_id(0),
+            setting: SettingChange::EmergencyContact(Some(address(
+                2,
+                "other.example",
+            ))),
+        },
+        tap(1, TapKind::PendingChange),
+    );
+    w.ok(
+        Event::AddressVerify {
+            address: addr_id(2),
+        },
+        Authority::Email(addr_id(2)),
+    );
+    w.wait(Duration::hours(72));
+    w.ok(
+        Event::ChangeEffective {
+            change: change_id(0),
+        },
+        Authority::Platform,
+    );
+    let link = w.s.freeze_links[&old];
+    assert!(link.void && !link.used);
+}
+
+/// One encoding of each setting's value (0x06); removing the contact is
+/// the empty string
+#[test]
+fn each_setting_has_one_canonical_form() {
+    let form = |c: SettingChange| c.canonical_form().unwrap();
+    let both = |name: &str, value: &str| {
+        super::challenge::change_canonical_form(name, value).unwrap()
+    };
+    assert_eq!(
+        form(SettingChange::DmHold(Duration::minutes(2))),
+        both("dm_hold", "120")
+    );
+    assert_eq!(
+        form(SettingChange::BulkHold(Duration::hours(2))),
+        both("bulk_hold", "7200")
+    );
+    assert_eq!(
+        form(SettingChange::AgentReplyDailyCap(50)),
+        both("agent_reply_daily_cap", "50")
+    );
+    assert_eq!(
+        form(SettingChange::EmergencyContact(Some(address(
+            2,
+            "x.example"
+        )))),
+        both("emergency_contact", "a2@x.example")
+    );
+    assert_eq!(
+        form(SettingChange::EmergencyContact(None)),
+        b"\0\0\0\x11emergency_contact\0\0\0\0".to_vec()
+    );
+    assert_eq!(
+        form(SettingChange::PrimaryEmail(address(3, "y.example"))),
+        both("primary_email", "a3@y.example")
+    );
+    assert_eq!(
+        form(SettingChange::PublishLog),
+        both("action_log_public", "true")
+    );
+}
+
+/// Hold values are bounded, so no hold runs past the end of time
+#[test]
+fn hold_changes_are_bounded() {
+    let mut w = registered(DEVICE);
+    for (i, setting) in [
+        SettingChange::DmHold(Duration::days(2)),
+        SettingChange::DmHold(Duration::seconds(-1)),
+        SettingChange::BulkHold(Duration::minutes(59)),
+        SettingChange::BulkHold(Duration::days(8)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            w.try_do(
+                Event::ChangeRequest {
+                    change: change_id(i as u8),
+                    setting
+                },
+                tap(0, TapKind::PendingChange)
+            ),
+            Err(Refusal::OutOfRange)
+        );
+    }
+    let far = DateTime::<Utc>::MAX_UTC - Duration::seconds(30);
+    let one = agents(0, 1);
+    let mut late = request(&one, When::Default, TapLevel::None, &[]);
+    late.now = far;
+    assert_eq!(plan_send(&late), Err(SendRefusal::OutOfRange));
+}
+
+/// Automatic endings name no actor; the factor they concern is the target
+#[test]
+fn automatic_endings_log_their_target_not_an_actor() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.sign_in(1, 1);
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 1),
+            when: When::At(t0() + Duration::days(1)),
+        },
+        tap(1, TapKind::Send),
+    );
+    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
+    let logs: Vec<LogEntry> = w
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(*l),
+            _ => None,
+        })
+        .collect();
+    for kind in [
+        OperatorActionKind::SessionRevoke,
+        OperatorActionKind::DmCancel,
+    ] {
+        let entry = logs.iter().find(|l| l.kind == kind).expect("logged");
+        assert_eq!(
+            (entry.by, entry.target),
+            (Some(p(0)), Some(p(1))),
+            "{kind:?}"
+        );
+    }
+    // A freeze's cancellations have no actor
+    w.add_passkey(2, DEVICE, 0, 0);
+    let link = w.link();
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(1),
+            recipients: agents(0, 1),
+            when: When::At(t0() + Duration::days(1)),
+        },
+        Authority::Session(sess(0)),
+    );
+    w.ok(Event::Freeze { link }, Authority::Email(addr_id(1)));
+    let cancel = w
+        .effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::Log(l) if l.kind == OperatorActionKind::DmCancel => {
+                Some(*l)
+            }
+            _ => None,
+        })
+        .expect("cancelled");
+    assert_eq!(cancel.by, None);
+}
+
 // ---------------------------------------------------------------------------
 // Property tests: §11's invariants after every step
 // ---------------------------------------------------------------------------
@@ -1069,6 +1353,9 @@ enum EventGen {
     AddPasskey(u8, PasskeyClass, Pick),
     /// Start an enrolment and approve it with a tap
     AddKey(u8, FactorKind, Pick),
+    /// Whatever the state invites: a frozen account's moves, a decided
+    /// case's counter-claim, a held send's cancel link, …
+    Smart(Pick, Pick),
     /// A pending passkey
     Approve,
     Suspend(Pick),
@@ -1124,6 +1411,7 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
     let fixed = G::Fixed;
     let platform = Authority::Platform;
     let steps = prop_oneof![
+        40 => (0usize..64, pick()).prop_map(|(i, j)| (G::Smart(i, j), AuthGen::Fixed(Authority::Platform))),
         // §2
         5 => (1u8..6, passkey_class(), pick(), by_tap(TapKind::PasskeyEnrolment))
             .prop_map(|(i, class, session, a)| (G::AddPasskey(i, class, session), a)),
@@ -1223,7 +1511,7 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
               proptest::option::weighted(0.3, pick()),
               by(Authority::Staff))
             .prop_map(|(i, o, l, a)| (G::Decide(i, o, l), a)),
-        1 => (pick(), by_tap(TapKind::CancelPending)).prop_map(|(i, a)| (G::CounterClaim(i), a)),
+        1 => (pick(), by_tap(TapKind::CounterClaim)).prop_map(|(i, a)| (G::CounterClaim(i), a)),
         2 => (pick(), by(platform)).prop_map(|(i, a)| (G::RecoveryEffective(i), a)),
         // §10
         3 => (0u8..6, pick()).prop_map(move |(s, i)| {
@@ -1266,6 +1554,292 @@ fn credential_of(f: FactorId) -> Option<OperatorCredentialId> {
         FactorId::Credential(c) => Some(c),
         FactorId::Passkey(_) => None,
     }
+}
+
+/// The steps the state invites, each with a plausible authority; `j` picks
+/// among the factors and items where there is a choice
+fn invited(s: &AccountState, j: Pick) -> Vec<Vec<(Event, Authority)>> {
+    let mut groups: Vec<Vec<(Event, Authority)>> = Vec::new();
+    let mut out = Vec::new();
+    let active_passkeys: Vec<OperatorPasskeyId> = s
+        .factors
+        .iter()
+        .filter(|(_, f)| f.state.is_active())
+        .filter_map(|(id, _)| passkey_of(*id))
+        .collect();
+    let tapper = nth(&active_passkeys, j);
+    let tap_by =
+        |p: OperatorPasskeyId, kind| Authority::PasskeyTap { passkey: p, kind };
+    let session = s
+        .sessions
+        .iter()
+        .filter(|(_, x)| x.open)
+        .map(|(id, _)| *id)
+        .nth(j % s.sessions.len().max(1))
+        .or_else(|| s.sessions.iter().find(|(_, x)| x.open).map(|(id, _)| *id));
+    groups.push(std::mem::take(&mut out));
+    // A frozen account's moves, by every active passkey (the eligible one
+    // among them)
+    if let Some(frozen) = s.frozen() {
+        for p in &active_passkeys {
+            if s.eligible(FactorId::Passkey(*p), frozen.excluded, frozen.at) {
+                // The compromise notice first, then the unfreeze
+                if frozen.notice_sent || s.banned() {
+                    out.push((Event::Unfreeze, tap_by(*p, TapKind::Unfreeze)));
+                } else {
+                    out.push((
+                        Event::CompromiseNotice,
+                        tap_by(*p, TapKind::CompromiseNotice),
+                    ));
+                }
+                groups.push(std::mem::take(&mut out));
+            }
+        }
+    }
+    if let (Some(c), Some(p)) = (&s.contact, tapper)
+        && c.power == FreezePower::Disarmed
+    {
+        out.push((Event::ReArm, tap_by(p, TapKind::ReArm)));
+    }
+    groups.push(std::mem::take(&mut out));
+    // An unused freeze link
+    if s.frozen().is_none()
+        && let Some(c) = &s.contact
+    {
+        for (id, l) in &s.freeze_links {
+            if !l.used && l.address == c.address.id {
+                out.push((
+                    Event::Freeze { link: *id },
+                    Authority::Email(c.address.id),
+                ));
+                break;
+            }
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // Recovery: decide, counter-claim, round 2 with a loser, take effect
+    for (case, c) in &s.cases {
+        match (c.state, c.subject) {
+            (CaseState::Open { round }, CaseSubject::Contest(_)) => {
+                let outcome = if j.is_multiple_of(2) {
+                    RecoveryOutcome::Reinstate
+                } else {
+                    RecoveryOutcome::Revoke
+                };
+                // In round 2, a loser that is still active, or none
+                let losers: Vec<FactorId> = c
+                    .effective_at_open
+                    .iter()
+                    .copied()
+                    .filter(|f| s.effective(*f))
+                    .collect();
+                let losing = (round == 2 && !j.is_multiple_of(5))
+                    .then(|| nth(&losers, j))
+                    .flatten();
+                out.push((
+                    Event::RecoveryDecide {
+                        case: *case,
+                        outcome,
+                        losing,
+                    },
+                    Authority::Staff,
+                ));
+            }
+            (CaseState::Open { .. }, CaseSubject::NoFactor) => out.push((
+                Event::RecoveryDecide {
+                    case: *case,
+                    outcome: RecoveryOutcome::NewPasskey {
+                        passkey: pk(7),
+                        class: DEVICE,
+                    },
+                    losing: None,
+                },
+                Authority::Staff,
+            )),
+            (CaseState::Decided { round: 1, .. }, _) => {
+                // A counter-claim (three times in four), or the outcome
+                // taking effect
+                let claimant = active_passkeys.iter().find(|p| {
+                    c.effective_at_open.contains(&FactorId::Passkey(**p))
+                });
+                match claimant {
+                    Some(p) if !j.is_multiple_of(4) => out.push((
+                        Event::RecoveryCancel { case: *case },
+                        tap_by(*p, TapKind::CounterClaim),
+                    )),
+                    _ => out.push((
+                        Event::RecoveryEffective { case: *case },
+                        Authority::Platform,
+                    )),
+                }
+            }
+            (CaseState::Decided { .. }, _) => {
+                out.push((
+                    Event::RecoveryEffective { case: *case },
+                    Authority::Platform,
+                ));
+            }
+            _ => {}
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // A suspended factor contests
+    for (id, f) in &s.factors {
+        if let CredentialState::Suspended(_) = f.state {
+            let by = match id {
+                FactorId::Passkey(p) => tap_by(*p, TapKind::Contest),
+                FactorId::Credential(c) => Authority::Signed(*c),
+            };
+            out.push((Event::Contest { factor: *id }, by));
+            break;
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // Sends: the cancel link of a held one, a retract, a delivery
+    for (id, m) in &s.sends {
+        match m.state {
+            SendState::Scheduled
+                if m.delivery == Delivery::Held
+                    && m.reach.reach > UNTAPPED_REACH =>
+            {
+                out.push((
+                    Event::SendCancel { send: *id },
+                    Authority::Email(s.primary.id),
+                ));
+            }
+            SendState::Delivered => {
+                if let Some(x) = session {
+                    out.push((
+                        Event::Retract { send: *id },
+                        Authority::Session(x),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // A change requested by a plain passkey (one that waits), cancelled by
+    // another, or taking effect
+    if !s.changes.values().any(|c| c.state == ChangeState::Pending)
+        && let Some(p) = active_passkeys.iter().find(|p| {
+            s.factor(FactorId::Passkey(**p))
+                .is_some_and(|f| !f.kind.is_yubikey_passkey())
+        })
+    {
+        out.push((
+            Event::ChangeRequest {
+                change: change_id(20 + (j % 8) as u8),
+                setting: SettingChange::AgentReplyDailyCap(j as u32),
+            },
+            tap_by(*p, TapKind::PendingChange),
+        ));
+    }
+    for (id, c) in &s.changes {
+        if c.state != ChangeState::Pending {
+            continue;
+        }
+        let other = active_passkeys
+            .iter()
+            .find(|p| FactorId::Passkey(**p) != c.requested_by);
+        match other {
+            Some(p) if j.is_multiple_of(2) => out.push((
+                Event::ChangeCancel { change: *id },
+                tap_by(*p, TapKind::CancelPending),
+            )),
+            _ => out.push((
+                Event::ChangeEffective { change: *id },
+                Authority::Platform,
+            )),
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // A factor that added others, suspended by an active passkey outside
+    // what it added: a cascade
+    for id in s.factors.keys() {
+        if !s.effective(*id) || !s.children(*id).any(|c| s.effective(c)) {
+            continue;
+        }
+        let below = s.desc(*id);
+        if let Some(p) = active_passkeys.iter().find(|p| {
+            let f = FactorId::Passkey(**p);
+            f != *id && !below.contains(&f)
+        }) {
+            out.push((
+                Event::Suspend { target: *id },
+                tap_by(*p, TapKind::Suspend),
+            ));
+            break;
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // A tapped send above 5, held; and, beside a held one, a chat with a new
+    // agent that goes now (reach above 5, immediate reach 1: I-40's case)
+    if let Some(p) = tapper {
+        out.push((
+            Event::SendAdmit {
+                send: send_id(30 + (j % 4) as u8),
+                recipients: agents(2000 + 10 * j as u32, 6),
+                when: When::Default,
+            },
+            tap_by(p, TapKind::Send),
+        ));
+        if s.sends.values().any(|m| {
+            m.state == SendState::Scheduled && m.reach.reach > UNTAPPED_REACH
+        }) {
+            groups.push(std::mem::take(&mut out));
+            out.push((
+                Event::SendAdmit {
+                    send: send_id(40 + (j % 4) as u8),
+                    recipients: agents(3000 + j as u32, 1),
+                    when: When::Now,
+                },
+                tap_by(p, TapKind::Send),
+            ));
+        }
+    }
+    groups.push(std::mem::take(&mut out));
+    // A send to more than 500, by a YubiKey passkey
+    if let Some(yk) = s
+        .factors
+        .iter()
+        .find(|(_, f)| f.state.is_active() && f.kind.is_yubikey_passkey())
+        .and_then(|(id, _)| passkey_of(*id))
+    {
+        out.push((
+            Event::SendAdmit {
+                send: send_id(10 + (j % 4) as u8),
+                recipients: agents(1000 * (j as u32 % 3), 501),
+                when: When::Default,
+            },
+            tap_by(yk, TapKind::Send),
+        ));
+    }
+    groups.push(std::mem::take(&mut out));
+    // The contact, where there is none
+    if s.contact.is_none()
+        && let Some(p) = tapper
+    {
+        out.push((
+            Event::ContactSetFirst {
+                address: address(1, "contact.example"),
+            },
+            tap_by(p, TapKind::FirstContact),
+        ));
+    }
+    if let Some(c) = &s.contact
+        && c.state == ContactState::Unverified
+    {
+        out.push((
+            Event::AddressVerify {
+                address: c.address.id,
+            },
+            Authority::Email(c.address.id),
+        ));
+    }
+    groups.push(out);
+    groups.retain(|g| !g.is_empty());
+    groups
 }
 
 /// Resolve a generated step against the state
@@ -1311,6 +1885,15 @@ fn resolve(
             );
             return Some([vec![start], approve].concat());
         }
+        G::Smart(i, j) => {
+            let groups = invited(s, *j);
+            let n = groups.len();
+            if n == 0 {
+                return None;
+            }
+            let group = &groups[*i % n];
+            return Some(vec![group[*j % group.len()].clone()]);
+        }
         _ => {}
     }
     let active = |f: &Factor| f.state.is_active();
@@ -1319,7 +1902,9 @@ fn resolve(
     let any_factor = ordered(&s.factors, |_| true, active);
     let event = match event {
         G::Fixed(e) => e.clone(),
-        G::AddPasskey(..) | G::AddKey(..) => unreachable!("expanded above"),
+        G::AddPasskey(..) | G::AddKey(..) | G::Smart(..) => {
+            unreachable!("expanded above")
+        }
         G::Approve => {
             let pending = ordered(
                 &s.factors,
@@ -1589,6 +2174,19 @@ fn start() -> impl Strategy<Value = AccountState> {
 struct History {
     /// Every freeze, by address
     freezes: BTreeMap<OperatorEmailAddressId, Vec<DateTime<Utc>>>,
+    /// When each factor last became suspended, seen by the harness
+    suspended_at: BTreeMap<FactorId, DateTime<Utc>>,
+}
+
+impl History {
+    fn record(&mut self, a: &Applied) {
+        for (id, before, after) in a.changed() {
+            let was = before.is_some_and(|b| b.state.suspension().is_some());
+            if !was && after.state.suspension().is_some() {
+                self.suspended_at.insert(id, a.now);
+            }
+        }
+    }
 }
 
 /// Which step applied, for the invariants
@@ -1752,7 +2350,32 @@ fn i5_terminal_states(a: &Applied) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-fn i6_and_i7_revocation(a: &Applied) -> Result<(), TestCaseError> {
+/// The decided case a `RecoveryEffective` applied, and its subject
+fn effective_case(
+    a: &Applied,
+) -> Option<(RecoveryOutcome, DateTime<Utc>, FactorId)> {
+    let Event::RecoveryEffective { case } = a.event else {
+        return None;
+    };
+    let c = a.pre.cases.get(case)?;
+    match (c.state, c.subject) {
+        (CaseState::Decided { outcome, at, .. }, CaseSubject::Contest(f)) => {
+            Some((outcome, at, f))
+        }
+        _ => None,
+    }
+}
+
+/// `id` is `subject`, or followed it as root before the step
+fn subject_or_follower(a: &Applied, id: FactorId, subject: FactorId) -> bool {
+    id == subject
+        || matches!(
+            a.pre.factor(id).map(|f| f.state),
+            Some(CredentialState::Suspended(s)) if s.follows_root == Some(subject)
+        )
+}
+
+fn i6_and_i7_revocation(a: &Applied, h: &History) -> Result<(), TestCaseError> {
     for (id, before, after) in a.changed() {
         if after.state != CredentialState::Revoked {
             continue;
@@ -1766,13 +2389,20 @@ fn i6_and_i7_revocation(a: &Applied) -> Result<(), TestCaseError> {
                         "I-6: revoked a factor not suspended",
                     ));
                 };
-                prop_assert!(a.now >= sus.deadline, "I-7: before the deadline");
-                if sus.follows_root.is_none() {
-                    prop_assert_eq!(
-                        sus.deadline,
-                        sus.at + suspension_deadline()
-                    );
-                }
+                prop_assert!(
+                    a.now > sus.deadline,
+                    "I-7: at or before the deadline"
+                );
+                // ≥ 72 h after its own suspension, or its root's, as the
+                // harness saw them happen
+                let clock = sus.follows_root.unwrap_or(id);
+                let started = h.suspended_at.get(&clock).copied();
+                prop_assert!(
+                    started.is_some_and(|t| a.now >= t + suspension_deadline()),
+                    "I-7: {:?} revoked under 72 h after {:?}'s suspension",
+                    id,
+                    clock
+                );
                 if let Some(root) = sus.follows_root {
                     prop_assert!(
                         !matches!(
@@ -1783,7 +2413,21 @@ fn i6_and_i7_revocation(a: &Applied) -> Result<(), TestCaseError> {
                     );
                 }
             }
-            Event::RecoveryEffective { .. } => {}
+            Event::RecoveryEffective { .. } => {
+                let Some((outcome, at, subject)) = effective_case(a) else {
+                    return Err(TestCaseError::fail("I-7: no decided case"));
+                };
+                prop_assert_eq!(outcome, RecoveryOutcome::Revoke, "I-7");
+                prop_assert!(
+                    a.now >= at + recovery_lock(),
+                    "I-7: within the lock"
+                );
+                prop_assert!(
+                    subject_or_follower(a, id, subject),
+                    "I-7: {:?} isn't the case's subject or a follower",
+                    id
+                );
+            }
             other => {
                 return Err(TestCaseError::fail(format!(
                     "I-7: {id:?} revoked by {other:?}"
@@ -1799,11 +2443,18 @@ fn i8_reinstatement(a: &Applied) -> Result<(), TestCaseError> {
         let was_suspended =
             before.is_some_and(|b| b.state.suspension().is_some());
         if was_suspended && after.state.is_active() {
+            let Some((outcome, at, subject)) = effective_case(a) else {
+                return Err(TestCaseError::fail(format!(
+                    "I-8: {id:?} reinstated by {:?}",
+                    a.event
+                )));
+            };
+            prop_assert_eq!(outcome, RecoveryOutcome::Reinstate, "I-8");
+            prop_assert!(a.now >= at + recovery_lock(), "I-8: within the lock");
             prop_assert!(
-                matches!(a.event, Event::RecoveryEffective { .. }),
-                "I-8: {:?} reinstated by {:?}",
-                id,
-                a.event
+                subject_or_follower(a, id, subject),
+                "I-8: {:?} isn't the case's subject or a follower",
+                id
             );
         }
     }
@@ -2003,17 +2654,119 @@ fn i21_no_add_below_a_minimum(a: &Applied) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// §1's eight taking-away events, each with a valid authority where the
+/// state has one
+fn taking_away(s: &AccountState) -> Vec<(Event, Authority)> {
+    let passkey = s
+        .factors
+        .iter()
+        .find(|(id, f)| {
+            matches!(id, FactorId::Passkey(_)) && f.state.is_active()
+        })
+        .and_then(|(id, _)| passkey_of(*id));
+    let session = s
+        .sessions
+        .iter()
+        .find(|(_, x)| {
+            x.open
+                && match x.opener {
+                    SessionOpener::Passkey(p) => {
+                        s.effective(FactorId::Passkey(p))
+                    }
+                    SessionOpener::Password => s.password_usable(),
+                }
+        })
+        .map(|(id, _)| *id);
+    let send = s.sends.keys().next().copied().unwrap_or(send_id(99));
+    let change = s.changes.keys().next().copied().unwrap_or(change_id(99));
+    let target = s.factors.keys().next().copied().unwrap_or(p(99));
+    let mut out = Vec::new();
+    if let Some(t) = passkey {
+        let by = |kind| Authority::PasskeyTap { passkey: t, kind };
+        out.push((Event::Suspend { target }, by(TapKind::Suspend)));
+        out.push((Event::ChangeCancel { change }, by(TapKind::CancelPending)));
+        out.push((Event::LogWithdraw, by(TapKind::LogPrivate)));
+    }
+    if let Some(x) = session {
+        let by = Authority::Session(x);
+        out.push((Event::SendCancel { send }, by));
+        out.push((Event::Retract { send }, by));
+        out.push((Event::SignOutOthers, by));
+        out.push((
+            Event::ConsentRevoke {
+                client: "client".parse().unwrap(),
+                agent: agent(0),
+            },
+            by,
+        ));
+        out.push((
+            Event::EnrolRefuse {
+                enrolment: enrol(0),
+            },
+            by,
+        ));
+    }
+    out
+}
+
+/// I-23: in a restricted, frozen or banned state, no taking-away event is
+/// refused by the mode check
 fn i23_taking_away_passes_every_mode(
     s: &AccountState,
-) -> Result<(), TestCaseError> {
-    prop_assert!(s.mode_allows(ModeClass::TakeAway), "I-23");
-    prop_assert!(s.mode_allows(ModeClass::Dispute), "I-23");
-    Ok(())
+    now: DateTime<Utc>,
+) -> Result<(u32, u32), TestCaseError> {
+    if !(s.restricted() || s.frozen().is_some() || s.banned()) {
+        return Ok((0, 0));
+    }
+    let mut tried = 0;
+    let mut applied = 0;
+    for (event, by) in taking_away(s) {
+        tried += 1;
+        match s.apply(&event, by, now, &mut Counter::default()) {
+            Err(Refusal::Mode(class)) => {
+                return Err(TestCaseError::fail(format!(
+                    "I-23: {event:?} refused by the mode ({class:?})"
+                )));
+            }
+            Ok(_) => applied += 1,
+            Err(_) => {}
+        }
+    }
+    Ok((tried, applied))
 }
 
 fn i24_flags_are_monotone(a: &Applied) -> Result<(), TestCaseError> {
     prop_assert!(a.pre.flags.none_turned_off(&a.post.flags), "I-24");
     Ok(())
+}
+
+/// `eligible(u, X, t)` from §1's words, independently of
+/// `AccountState::eligible`: u is active, isn't X, was added a week before
+/// t, and didn't add X (directly or through what it added) in that week
+fn eligible_restated(
+    s: &AccountState,
+    u: FactorId,
+    x: FactorId,
+    t: DateTime<Utc>,
+) -> bool {
+    let week = Duration::days(7);
+    let Some(fu) = s.factor(u) else { return false };
+    if !fu.state.is_active() || u == x || fu.added_at > t - week {
+        return false;
+    }
+    let Some(fx) = s.factor(x) else { return true };
+    let recent = fx.added_at > t - week && fx.added_at <= t;
+    // Walk X's parents up: is u among them?
+    let mut ancestor = fx.parent;
+    let mut added_by_u = false;
+    while let Some(p) = ancestor {
+        if p == u {
+            added_by_u = true;
+            break;
+        }
+        ancestor = s.factor(p).and_then(|f| f.parent);
+    }
+    !(recent && added_by_u)
 }
 
 fn i25_to_i30_freezes(
@@ -2055,7 +2808,10 @@ fn i25_to_i30_freezes(
         let frozen = a.pre.frozen().expect("was frozen");
         let u = a.pre.factor_behind(a.by).expect("a tap");
         // I-27
-        prop_assert!(a.pre.eligible(u, frozen.excluded, frozen.at), "I-27");
+        prop_assert!(
+            eligible_restated(a.pre, u, frozen.excluded, frozen.at),
+            "I-27"
+        );
         // I-28
         if let Some(c) = a
             .post
@@ -2073,7 +2829,10 @@ fn i25_to_i30_freezes(
     if a.effects.contains(&Effect::DeliverCompromiseNotice) {
         let frozen = a.pre.frozen().expect("I-30: notice while open");
         let t = a.pre.factor_behind(a.by).expect("a tap");
-        prop_assert!(a.pre.eligible(t, frozen.excluded, frozen.at), "I-30");
+        prop_assert!(
+            eligible_restated(a.pre, t, frozen.excluded, frozen.at),
+            "I-30"
+        );
         prop_assert!(!frozen.notice_sent && !a.pre.banned(), "I-30");
     }
     Ok(())
@@ -2147,10 +2906,13 @@ fn announced_factor(a: &Applied) -> Option<FactorId> {
         }
         Event::SendAdmit { send, .. } => {
             let s = &a.post.sends[send];
+            let tapped = required_tap(s.reach, s.delivery)
+                .is_some_and(|r| r >= TapLevel::Tap);
             let announced = (s.delivery == Delivery::Held
                 && s.reach.reach > UNTAPPED_REACH)
                 || (s.delivery == Delivery::Immediate
-                    && s.reach.immediate_reach > UNTAPPED_REACH);
+                    && s.reach.immediate_reach > UNTAPPED_REACH)
+                || tapped;
             announced.then_some(behind).flatten()
         }
         Event::Suspend { .. } if !a.newly_suspended().is_empty() => behind,
@@ -2161,6 +2923,47 @@ fn announced_factor(a: &Applied) -> Option<FactorId> {
         }
         _ => None,
     }
+}
+
+/// I-40: every send whose required tap is a passkey tap or more is
+/// announced, to the primary and (with a contact) to the contact with a
+/// freeze link excluding the factor that admitted it
+fn i40_every_tapped_send_is_announced(
+    a: &Applied,
+) -> Result<(), TestCaseError> {
+    for (id, send) in a.new_sends() {
+        let required = required_tap(send.reach, send.delivery);
+        if !required.is_some_and(|r| r >= TapLevel::Tap) {
+            continue;
+        }
+        let about = |n: &&Notice| {
+            matches!(
+                n.subject,
+                NoticeSubject::SendHeld(s) | NoticeSubject::SendNow(s) | NoticeSubject::SendTapped(s)
+                    if s == *id
+            )
+        };
+        prop_assert!(
+            a.notices()
+                .filter(about)
+                .any(|n| matches!(n.to, Audience::Primary | Audience::Both)),
+            "I-40: the primary wasn't told of {:?}",
+            id
+        );
+        if a.pre.verified_contact().is_some() {
+            let admitter = a.pre.factor_behind(a.by);
+            prop_assert!(
+                a.notices().filter(about).any(|n| n
+                    .freeze_link
+                    .map(|(_, x)| x)
+                    == admitter
+                    && admitter.is_some()),
+                "I-40: the contact got no link for {:?}",
+                id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn i34_announced_with_a_link(a: &Applied) -> Result<(), TestCaseError> {
@@ -2281,18 +3084,19 @@ fn i37_and_i38_sessions(a: &Applied) -> Result<(), TestCaseError> {
 }
 
 fn check(a: &Applied, h: &mut History) -> Result<(), TestCaseError> {
+    h.record(a);
     i1_and_i3_the_cascade(a)?;
     i2_a_freeze_changes_one_factor(a)?;
     i4_and_i9_status_at_execution(a)?;
     i5_terminal_states(a)?;
-    i6_and_i7_revocation(a)?;
+    i6_and_i7_revocation(a, h)?;
     i8_reinstatement(a)?;
     i10_a_suspension_ends_what_it_authorised(a)?;
     i11_to_i15_adds(a)?;
     i16_to_i19_and_i39_changes(a)?;
     i20_minimum_means_mode(a.post)?;
     i21_no_add_below_a_minimum(a)?;
-    i23_taking_away_passes_every_mode(a.post)?;
+    i23_taking_away_passes_every_mode(a.post, a.now)?;
     i24_flags_are_monotone(a)?;
     i25_to_i30_freezes(a, h)?;
     i31_to_i33_sends(a)?;
@@ -2300,6 +3104,7 @@ fn check(a: &Applied, h: &mut History) -> Result<(), TestCaseError> {
     i35_email_never_widens(a)?;
     i36_links_name_an_active_factor(a)?;
     i37_and_i38_sessions(a)?;
+    i40_every_tapped_send_is_announced(a)?;
     Ok(())
 }
 
@@ -2346,7 +3151,7 @@ fn run(
 }
 
 /// Proptest cases per property; `PROPTEST_CASES` overrides
-const CASES: u32 = 512;
+const CASES: u32 = 1024;
 
 fn cases() -> u32 {
     std::env::var("PROPTEST_CASES")
@@ -2584,14 +3389,15 @@ impl World {
 }
 
 /// The generator reaches the interesting states, so the properties aren't
-/// vacuous: how often each kind of event applied over 600 runs
+/// vacuous: how often each kind of event applied over as many runs as
+/// the property test has cases
 #[test]
 fn the_generator_reaches_every_machine() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     let mut runner = TestRunner::deterministic();
     let mut seen: BTreeMap<&'static str, u32> = BTreeMap::new();
-    for _ in 0..600 {
+    for _ in 0..CASES {
         let start = start().new_tree(&mut runner).unwrap().current();
         let steps = proptest::collection::vec(gen_step(), 80)
             .new_tree(&mut runner)
@@ -2612,6 +3418,11 @@ fn the_generator_reaches_every_machine() {
                     })
                     .count()
             };
+            let decided_round =
+                |case: &OperatorRecoveryCaseId| match a.pre.cases[case].state {
+                    CaseState::Open { round } => round,
+                    _ => 0,
+                };
             let name = match a.event {
                 Event::Suspend { .. } if cascaded(a.post) > cascaded(a.pre) => {
                     "cascade"
@@ -2620,21 +3431,70 @@ fn the_generator_reaches_every_machine() {
                 Event::Freeze { .. } => "freeze",
                 Event::Unfreeze => "unfreeze",
                 Event::CompromiseNotice => "compromise notice",
+                Event::ReArm => "re-arm",
                 Event::Contest { .. } => "contest",
                 Event::Deadline { .. } => "deadline",
+                Event::RecoveryCancel { .. } => "counter-claim",
+                Event::RecoveryDecide { case, losing, .. }
+                    if decided_round(case) == 2 =>
+                {
+                    let suspended = losing.is_some_and(|l| {
+                        a.pre.effective(l)
+                            && matches!(
+                                a.post.factor(l).map(|f| f.state),
+                                Some(CredentialState::Suspended(Suspension {
+                                    cause: SuspensionCause::Recovery { .. },
+                                    ..
+                                }))
+                            )
+                    });
+                    if suspended {
+                        *seen.entry("recovery suspend").or_default() += 1;
+                    }
+                    "round 2"
+                }
+                Event::RecoveryDecide { .. } => "decide",
+                Event::RecoveryEffective { .. }
+                    if matches!(
+                        effective_case(a),
+                        Some((RecoveryOutcome::Reinstate, ..))
+                    ) =>
+                {
+                    "reinstate"
+                }
                 Event::RecoveryEffective { .. } => "recovery effective",
                 Event::ChangeEffective { .. } => "change effective",
+                Event::ChangeCancel { .. } => "change cancel",
                 Event::EnrolApprove { .. } => "enrol approve",
                 Event::PasskeyApprove { .. } => "passkey approve",
                 Event::FirstPasskey { .. } => "first passkey",
+                Event::SendAdmit { recipients, .. }
+                    if recipients.len() > 500 =>
+                {
+                    "send > 500"
+                }
+                Event::SendAdmit { send, .. }
+                    if a.notices().any(|n| {
+                        n.subject == NoticeSubject::SendTapped(*send)
+                    }) =>
+                {
+                    "tapped now (I-40)"
+                }
                 Event::SendAdmit { recipients, .. } if recipients.len() > 5 => {
                     "send > 5"
                 }
+                Event::SendCancel { .. }
+                    if matches!(a.by, Authority::Email(_)) =>
+                {
+                    "cancel link"
+                }
+                Event::Retract { .. } => "retract",
                 Event::SendDeliver { .. } => "deliver",
                 Event::AgentAdd => "agent add",
-                Event::ReArm => "re-arm",
                 _ => "other",
             };
+            let (tried, _) = i23_taking_away_passes_every_mode(a.post, a.now)?;
+            *seen.entry("I-23 attempts").or_default() += tried;
             *seen.entry(name).or_default() += 1;
             Ok(())
         })
@@ -2642,20 +3502,32 @@ fn the_generator_reaches_every_machine() {
     }
     eprintln!("{seen:?}");
     for (name, at_least) in [
-        ("cascade", 15),
+        ("cascade", 20),
         ("suspend", 100),
         ("freeze", 20),
-        ("unfreeze", 5),
-        ("contest", 10),
+        ("unfreeze", 20),
+        ("compromise notice", 20),
+        ("re-arm", 20),
+        ("contest", 20),
         ("deadline", 50),
-        ("change effective", 10),
+        ("counter-claim", 20),
+        ("round 2", 20),
+        ("recovery suspend", 20),
+        ("reinstate", 20),
+        ("recovery effective", 20),
+        ("change effective", 20),
+        ("change cancel", 20),
         ("enrol approve", 50),
         ("passkey approve", 100),
         ("first passkey", 10),
-        ("send > 5", 10),
+        ("send > 5", 20),
+        ("send > 500", 20),
+        ("tapped now (I-40)", 20),
+        ("cancel link", 20),
+        ("retract", 20),
         ("deliver", 50),
         ("agent add", 20),
-        ("recovery effective", 3),
+        ("I-23 attempts", 1000),
     ] {
         let got = seen.get(name).copied().unwrap_or(0);
         assert!(got >= at_least, "{name}: {got} < {at_least} ({seen:?})");

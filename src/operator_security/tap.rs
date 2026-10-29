@@ -170,10 +170,9 @@ impl Delivery {
     ) -> Self {
         // SPEC: decision 9, "held: deliver_at ≥ now + the bulk hold"; so
         // anything sooner is a send that goes now, `dm_hold` included
-        if deliver_at >= now + bulk_hold {
-            Self::Held
-        } else {
-            Self::Immediate
+        match now.checked_add_signed(bulk_hold) {
+            Some(held) if deliver_at >= held => Self::Held,
+            _ => Self::Immediate,
         }
     }
 }
@@ -322,6 +321,18 @@ impl SendPlan {
             && self.reach.immediate_reach > UNTAPPED_REACH
     }
 
+    /// Any send that took a tap (its required level is a passkey tap or
+    /// more) is announced, the contact's copy with a freeze link; this is
+    /// the case the other two miss: now, reach 6–500, immediate reach ≤ 5
+    pub fn announced_tapped(&self) -> bool {
+        self.required >= TapLevel::Tap
+    }
+
+    /// Whether the send is announced at all
+    pub fn announced(&self) -> bool {
+        self.announced_held() || self.announced_now() || self.announced_tapped()
+    }
+
     /// Above 500: the contact also gets the count and the first names
     pub fn names_to_contact(&self) -> bool {
         self.reach.reach > TAPPED_REACH
@@ -346,6 +357,9 @@ pub enum SendRefusal {
     /// A send to nobody
     #[error("a send needs at least one recipient")]
     NoRecipients,
+    /// A hold that runs past the end of time
+    #[error("the delivery time is out of range")]
+    OutOfRange,
 }
 
 /// Decision 9 for one send: where it lands, and whether `level` may make it.
@@ -380,8 +394,13 @@ pub fn plan_send(request: &SendRequest<'_>) -> Result<SendPlan, SendRefusal> {
         // SPEC: decision 9's default is "now + dm_hold when the send may go
         // now", and the window is on deliver_at, so the "may go now" test
         // is made at now + dm_hold and the held one at now + the bulk hold
-        When::Default => plan(now + request.dm_hold)
-            .or_else(|_| plan(now + request.bulk_hold)),
+        When::Default => {
+            let after = |hold| {
+                now.checked_add_signed(hold).ok_or(SendRefusal::OutOfRange)
+            };
+            plan(after(request.dm_hold)?)
+                .or_else(|_| plan(after(request.bulk_hold)?))
+        }
     }?;
     if planned.reach.reach > UNTAPPED_REACH && !request.contact_ok {
         return Err(SendRefusal::NeedsContact {

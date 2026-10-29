@@ -438,6 +438,10 @@ pub struct OperatorConfigResponse {
     pub dm_hold_seconds: i64,
     /// A send is bulk when its recipients and `recent_recipients` together
     /// are more than this (10 by default)
+    #[deprecated(
+        since = "0.140.0",
+        note = "decision 9 replaces the bulk threshold: see `operator_security::tap::required_tap`"
+    )]
     pub bulk_threshold: i64,
     /// How long a bulk send is held: `dm_hold_seconds` or the bulk floor
     /// (one hour), whichever is longer
@@ -467,6 +471,7 @@ pub struct OperatorConfigResponse {
 impl OperatorConfigResponse {
     /// Whether a send to `recipients` agents, signed by the same credential
     /// now, would be held as bulk (and need `email_code` to `send_now`)
+    #[allow(deprecated)]
     pub fn is_bulk(&self, recipients: i64) -> bool {
         recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
     }
@@ -477,6 +482,11 @@ impl OperatorConfigResponse {
     /// `bulk_requires_sudo`; a send delivered at once (`immediate`:
     /// `send_now`, or a `deliver_at` sooner than the hold) past
     /// `send_now_sudo_threshold` always does
+    #[deprecated(
+        since = "0.140.0",
+        note = "decision 9 replaces it: see `operator_security::tap::required_tap`"
+    )]
+    #[allow(deprecated)]
     pub fn needs_sudo(&self, recipients: i64, immediate: bool) -> bool {
         let counted = recipients.saturating_add(self.recent_recipients);
         (self.bulk_requires_sudo && self.is_bulk(recipients))
@@ -1226,6 +1236,7 @@ mod tests {
 
     /// Sudo: bulk sends only when the operator asked for it; a send-now
     /// past the larger threshold always, both counting the last hour
+    #[allow(deprecated)] // the deprecated API, tested until it goes
     #[test]
     fn a_send_needs_sudo_when_bulk_and_asked_or_sent_now_past_the_threshold() {
         let mut config = OperatorConfigResponse {
@@ -1269,6 +1280,7 @@ mod tests {
 
     /// A server built before 0.137 sends neither sudo field: nothing needs
     /// sudo there
+    #[allow(deprecated)] // the deprecated API, tested until it goes
     #[test]
     fn a_config_without_the_sudo_fields_needs_no_sudo() {
         let config: OperatorConfigResponse =
@@ -1287,6 +1299,7 @@ mod tests {
 
     /// The prediction is the server's rule: strictly more than the
     /// threshold, counting the credential's last hour
+    #[allow(deprecated)] // the deprecated API, tested until it goes
     #[test]
     fn a_send_is_bulk_above_the_threshold_with_recent_sends() {
         let config = OperatorConfigResponse {

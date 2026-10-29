@@ -220,6 +220,9 @@ pub enum NoticeSubject {
     SendHeld(OperatorActionId),
     /// Now, immediate reach above 5
     SendNow(OperatorActionId),
+    /// Any other send that took a tap (now, reach 6–500, immediate reach
+    /// ≤ 5)
+    SendTapped(OperatorActionId),
     /// Cancelled when its authority ended or its recheck failed
     SendCancelled(OperatorActionId),
     SessionEnded(OperatorSessionId),
@@ -332,12 +335,14 @@ pub enum Refusal {
     SameDomain,
     #[error("the contact can't be removed above 5 agents")]
     ContactRequired,
-    #[error("below the floor")]
-    BelowFloor,
+    #[error("outside the setting's range")]
+    OutOfRange,
     #[error("a sudo request is needed")]
     NeedsSudo,
     #[error("the account is banned")]
     Banned,
+    #[error("a recovery case's second decision is final")]
+    Final,
 }
 
 /// The rows of §4.2's mode table
@@ -513,6 +518,7 @@ impl<I: IdSource> Tx<'_, I> {
                     factor,
                     sent_at: self.now,
                     used: false,
+                    void: false,
                 };
                 self.s.freeze_links.insert(id, link);
                 Some((id, factor))
@@ -591,7 +597,16 @@ impl<I: IdSource> Tx<'_, I> {
 
     // -- shared transitions -----------------------------------------------
 
-    fn cancel_send(&mut self, send: OperatorActionId, notice: bool) {
+    /// Cancel a scheduled send. `by` is the factor whose act caused it (a
+    /// suspender, a signing-out session's passkey), `None` for an automatic
+    /// ending (a freeze, a ban, a failed recheck); the admitting factor is
+    /// the entry's target
+    fn cancel_send(
+        &mut self,
+        send: OperatorActionId,
+        notice: bool,
+        by: Option<FactorId>,
+    ) {
         let Some(s) = self.s.sends.get_mut(&send) else {
             return;
         };
@@ -599,11 +614,11 @@ impl<I: IdSource> Tx<'_, I> {
             return;
         }
         s.state = SendState::Cancelled;
-        let by = match s.admitted_by {
+        let target = match s.admitted_by {
             AdmittedBy::Factor(f) => Some(f),
             AdmittedBy::Session(_) => None,
         };
-        self.log(OperatorActionKind::DmCancel, by, None);
+        self.log(OperatorActionKind::DmCancel, by, target);
         if notice {
             self.notify(
                 Audience::Both,
@@ -613,7 +628,13 @@ impl<I: IdSource> Tx<'_, I> {
         }
     }
 
-    fn cancel_change(&mut self, change: OperatorPendingChangeId) {
+    /// Cancel a pending change; `by` as for [`Self::cancel_send`], the
+    /// requester the target
+    fn cancel_change(
+        &mut self,
+        change: OperatorPendingChangeId,
+        by: Option<FactorId>,
+    ) {
         let Some(c) = self.s.changes.get_mut(&change) else {
             return;
         };
@@ -621,8 +642,8 @@ impl<I: IdSource> Tx<'_, I> {
             return;
         }
         c.state = ChangeState::Cancelled;
-        let by = c.requested_by;
-        self.log(OperatorActionKind::ConfigChangeCancelled, Some(by), None);
+        let target = c.requested_by;
+        self.log(OperatorActionKind::ConfigChangeCancelled, by, Some(target));
         self.notify(
             Audience::Both,
             NoticeSubject::ChangeCancelled(change),
@@ -632,7 +653,12 @@ impl<I: IdSource> Tx<'_, I> {
 
     /// End a session other than by expiry: its scheduled sends are
     /// cancelled, its pending passkeys discarded
-    fn end_session(&mut self, session: OperatorSessionId, by_expiry: bool) {
+    fn end_session(
+        &mut self,
+        session: OperatorSessionId,
+        by_expiry: bool,
+        by: Option<FactorId>,
+    ) {
         let Some(s) = self.s.sessions.get_mut(&session) else {
             return;
         };
@@ -656,12 +682,13 @@ impl<I: IdSource> Tx<'_, I> {
             .map(|(id, _)| *id)
             .collect();
         for send in sends {
-            self.cancel_send(send, true);
+            self.cancel_send(send, true, by);
         }
     }
 
-    /// `EndAuthorised(F)`: whenever F becomes suspended, whatever the cause
-    fn end_authorised(&mut self, f: FactorId) {
+    /// `EndAuthorised(F)`: whenever F becomes suspended, whatever the cause.
+    /// `by` is the suspender, if any; `f` is each entry's target
+    fn end_authorised(&mut self, f: FactorId, by: Option<FactorId>) {
         let sessions: Vec<_> = self
             .s
             .sessions
@@ -673,8 +700,8 @@ impl<I: IdSource> Tx<'_, I> {
             .map(|(id, _)| *id)
             .collect();
         for session in sessions {
-            self.end_session(session, false);
-            self.log(OperatorActionKind::SessionRevoke, Some(f), None);
+            self.end_session(session, false, by);
+            self.log(OperatorActionKind::SessionRevoke, by, Some(f));
             self.notify(
                 Audience::Both,
                 NoticeSubject::SessionEnded(session),
@@ -691,7 +718,7 @@ impl<I: IdSource> Tx<'_, I> {
             .map(|(id, _)| *id)
             .collect();
         for change in changes {
-            self.cancel_change(change);
+            self.cancel_change(change, by);
         }
         let sends: Vec<_> = self
             .s
@@ -701,7 +728,7 @@ impl<I: IdSource> Tx<'_, I> {
             .map(|(id, _)| *id)
             .collect();
         for send in sends {
-            self.cancel_send(send, true);
+            self.cancel_send(send, true, by);
         }
         let grants: Vec<_> = self
             .s
@@ -746,7 +773,7 @@ impl<I: IdSource> Tx<'_, I> {
             deadline,
             follows_root,
         });
-        self.end_authorised(f);
+        self.end_authorised(f, flag);
         self.notify(Audience::Both, NoticeSubject::Suspended(f), flag);
     }
 
@@ -794,7 +821,7 @@ impl<I: IdSource> Tx<'_, I> {
             .map(|(id, _)| *id)
             .collect();
         for session in sessions {
-            self.end_session(session, false);
+            self.end_session(session, false, None);
         }
     }
 
@@ -849,11 +876,11 @@ impl<I: IdSource> Tx<'_, I> {
     fn freeze_cancels_everything(&mut self) {
         let changes: Vec<_> = self.s.changes.keys().copied().collect();
         for change in changes {
-            self.cancel_change(change);
+            self.cancel_change(change, None);
         }
         let sends: Vec<_> = self.s.sends.keys().copied().collect();
         for send in sends {
-            self.cancel_send(send, false);
+            self.cancel_send(send, false, None);
         }
     }
 
@@ -1016,12 +1043,9 @@ impl<I: IdSource> Tx<'_, I> {
                 self.mode(ModeClass::TakeAway)?;
                 let f = *self.s.factor(*target).ok_or(Refusal::Unknown)?;
                 let hour_ago = self.now - chrono::Duration::hours(1);
-                let recent = self
-                    .s
-                    .direct_suspensions
-                    .iter()
-                    .filter(|t| **t > hour_ago)
-                    .count();
+                // Only the rate window is kept
+                self.s.direct_suspensions.retain(|t| *t > hour_ago);
+                let recent = self.s.direct_suspensions.len();
                 match f.state {
                     CredentialState::Active => {
                         guard(
@@ -1097,6 +1121,11 @@ impl<I: IdSource> Tx<'_, I> {
                 let CredentialState::Suspended(sus) = f.state else {
                     return Err(Refusal::WrongState);
                 };
+                // The losing side of a decided case: round 2 is final
+                guard(
+                    !matches!(sus.cause, SuspensionCause::Recovery { .. }),
+                    Refusal::Final,
+                )?;
                 // At the deadline itself a contest wins
                 guard(self.now <= sus.deadline, Refusal::TooLate)?;
                 let case = self.open_case(CaseSubject::Contest(*factor));
@@ -1126,7 +1155,9 @@ impl<I: IdSource> Tx<'_, I> {
                 let CredentialState::Suspended(sus) = f.state else {
                     return Err(Refusal::WrongState);
                 };
-                guard(self.now >= sus.deadline, Refusal::TooEarly)?;
+                // A contest at the deadline's instant wins, so the revocation
+                // comes strictly after it
+                guard(self.now > sus.deadline, Refusal::TooEarly)?;
                 if let Some(root) = sus.follows_root {
                     let root_contested = self.s.factor(root).is_some_and(|r| {
                         matches!(r.state, CredentialState::Contested { .. })
@@ -1158,7 +1189,7 @@ impl<I: IdSource> Tx<'_, I> {
                     *enrolment,
                     Enrolment {
                         kind: *kind,
-                        state: EnrolmentState::Started,
+                        state: EnrolmentState::Pending,
                     },
                 );
                 Ok(())
@@ -1174,7 +1205,7 @@ impl<I: IdSource> Tx<'_, I> {
                     .enrolments
                     .get(enrolment)
                     .ok_or(Refusal::Unknown)?;
-                guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
+                guard(e.state == EnrolmentState::Pending, Refusal::WrongState)?;
                 guard(
                     !(e.kind.is_software_key()
                         && self.s.count > 5
@@ -1210,7 +1241,7 @@ impl<I: IdSource> Tx<'_, I> {
                     .enrolments
                     .get_mut(enrolment)
                     .ok_or(Refusal::Unknown)?;
-                guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
+                guard(e.state == EnrolmentState::Pending, Refusal::WrongState)?;
                 e.state = EnrolmentState::Refused;
                 Ok(())
             }
@@ -1221,7 +1252,7 @@ impl<I: IdSource> Tx<'_, I> {
                     .enrolments
                     .get_mut(enrolment)
                     .ok_or(Refusal::Unknown)?;
-                guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
+                guard(e.state == EnrolmentState::Pending, Refusal::WrongState)?;
                 e.state = EnrolmentState::Expired;
                 Ok(())
             }
@@ -1298,11 +1329,11 @@ impl<I: IdSource> Tx<'_, I> {
                 self.s.standing = AccountStanding::Banned;
                 let changes: Vec<_> = self.s.changes.keys().copied().collect();
                 for change in changes {
-                    self.cancel_change(change);
+                    self.cancel_change(change, None);
                 }
                 let sends: Vec<_> = self.s.sends.keys().copied().collect();
                 for send in sends {
-                    self.cancel_send(send, false);
+                    self.cancel_send(send, false, None);
                 }
                 Ok(())
             }
@@ -1361,10 +1392,11 @@ impl<I: IdSource> Tx<'_, I> {
                 guard(pending.requested_by != c, Refusal::SameFactor)?;
                 let pending = self.s.changes.get_mut(change).expect("found");
                 pending.state = ChangeState::Cancelled;
+                let requester = pending.requested_by;
                 self.log(
                     OperatorActionKind::ConfigChangeCancelled,
                     Some(c),
-                    None,
+                    Some(requester),
                 );
                 self.notify(
                     Audience::Both,
@@ -1399,7 +1431,7 @@ impl<I: IdSource> Tx<'_, I> {
                     self.log(
                         OperatorActionKind::ConfigChangeCancelled,
                         None,
-                        None,
+                        Some(r),
                     );
                     self.notify(
                         Audience::Both,
@@ -1423,6 +1455,13 @@ impl<I: IdSource> Tx<'_, I> {
                     Some(r),
                 );
                 if let SettingChange::EmergencyContact(new) = &pending.change {
+                    // Every unused freeze link sent to the old address is
+                    // void (the address check at use is the second guard)
+                    for link in self.s.freeze_links.values_mut() {
+                        if Some(link.address) == old_contact && !link.used {
+                            link.void = true;
+                        }
+                    }
                     if let Some(old) = old_contact {
                         self.notify(
                             Audience::Address(old),
@@ -1609,7 +1648,7 @@ impl<I: IdSource> Tx<'_, I> {
                         SendState::Delivered;
                     self.effects.push(Effect::Deliver(*send));
                 } else {
-                    self.cancel_send(*send, true);
+                    self.cancel_send(*send, true, None);
                 }
                 Ok(())
             }
@@ -1738,10 +1777,7 @@ impl<I: IdSource> Tx<'_, I> {
                 Ok(())
             }
             RecoveryCancel { case } => {
-                // SPEC: §9 names no tap kind for a counter-claim; the
-                // encoding's 0x0C ("cancel pending: pending item id") is
-                // the nearest, so a passkey tap of that kind
-                let t = self.tap(by, TapKind::CancelPending)?;
+                let t = self.tap(by, TapKind::CounterClaim)?;
                 self.mode(ModeClass::Dispute)?;
                 let c = self.s.cases.get(case).ok_or(Refusal::Unknown)?;
                 guard(c.effective_at_open.contains(&t), Refusal::NotEligible)?;
@@ -1803,7 +1839,7 @@ impl<I: IdSource> Tx<'_, I> {
                     self.now >= s.last_used + session_ttl(),
                     Refusal::TooEarly,
                 )?;
-                self.end_session(*session, true);
+                self.end_session(*session, true, None);
                 Ok(())
             }
             SignOutOthers => {
@@ -1816,8 +1852,9 @@ impl<I: IdSource> Tx<'_, I> {
                     .filter(|(id, s)| s.open && **id != me)
                     .map(|(id, _)| *id)
                     .collect();
+                let caller = self.s.session_factor(me);
                 for other in others {
-                    self.end_session(other, false);
+                    self.end_session(other, false, caller);
                 }
                 self.log(
                     OperatorActionKind::SessionRevoke,
@@ -1874,12 +1911,14 @@ impl<I: IdSource> Tx<'_, I> {
                     Refusal::ContactRequired,
                 )?;
             }
-            SettingChange::BulkHold(d) => {
-                guard(*d >= bulk_hold_floor(), Refusal::BelowFloor)?
-            }
-            SettingChange::DmHold(d) => {
-                guard(*d >= chrono::Duration::zero(), Refusal::BelowFloor)?
-            }
+            SettingChange::BulkHold(d) => guard(
+                *d >= bulk_hold_floor() && *d <= max_bulk_hold(),
+                Refusal::OutOfRange,
+            )?,
+            SettingChange::DmHold(d) => guard(
+                *d >= chrono::Duration::zero() && *d <= max_dm_hold(),
+                Refusal::OutOfRange,
+            )?,
             _ => {}
         }
         guard(self.domains_ok_after(setting), Refusal::SameDomain)?;
@@ -1938,6 +1977,7 @@ impl<I: IdSource> Tx<'_, I> {
         let contact = self.s.contact.as_ref().ok_or(Refusal::VoidLink)?;
         guard(
             !l.used
+                && !l.void
                 && l.address == address
                 && contact.address.id == address
                 && self.now < l.sent_at + freeze_link_life(),
@@ -2039,6 +2079,8 @@ impl<I: IdSource> Tx<'_, I> {
         }
         if plan.announced_now() {
             self.notify(Audience::Both, NoticeSubject::SendNow(send), flag);
+        } else if plan.announced_tapped() && !plan.announced_held() {
+            self.notify(Audience::Both, NoticeSubject::SendTapped(send), flag);
         }
         if plan.names_to_contact() {
             for e in self.effects.iter_mut().rev() {

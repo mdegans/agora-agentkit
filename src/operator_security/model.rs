@@ -21,6 +21,19 @@ pub fn suspension_deadline() -> Duration {
     Duration::hours(72)
 }
 
+/// The longest default hold a change may set (the operator config's "at
+/// most a day")
+pub fn max_dm_hold() -> Duration {
+    Duration::days(1)
+}
+
+/// The longest bulk hold a change may set
+pub fn max_bulk_hold() -> Duration {
+    // SPEC: the spec bounds the bulk hold below (≥ 1 h) but names no upper
+    // bound; a week, the longest hold its threat discussion mentions
+    Duration::days(7)
+}
+
 /// A pending change's wait (decision 10)
 pub fn change_wait() -> Duration {
     Duration::hours(72)
@@ -224,10 +237,16 @@ impl Flags {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MailTenant(pub String);
 
+/// An address as the server normalised it: what a change's canonical form
+/// and the first contact's tap (0x0D) bind
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NormalisedEmail(pub String);
+
 /// An email address the operator registered
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EmailAddress {
     pub id: OperatorEmailAddressId,
+    pub address: NormalisedEmail,
     pub tenant: MailTenant,
 }
 
@@ -312,6 +331,25 @@ impl SettingChange {
                 | Setting::PrimaryEmail
                 | Setting::ActionLogPublic
         )
+    }
+
+    /// Its canonical form for the 0x06 tap
+    /// ([`change_canonical_form`](super::challenge::change_canonical_form)):
+    /// a duration in seconds, a count in decimal, an address normalised,
+    /// publishing the log `true`, and removing the contact the empty string
+    pub fn canonical_form(
+        &self,
+    ) -> Result<Vec<u8>, super::challenge::PartTooLong> {
+        let value = match self {
+            Self::DmHold(d) | Self::BulkHold(d) => d.num_seconds().to_string(),
+            Self::AgentReplyDailyCap(n) => n.to_string(),
+            Self::EmergencyContact(Some(a)) | Self::PrimaryEmail(a) => {
+                a.address.0.clone()
+            }
+            Self::EmergencyContact(None) => String::new(),
+            Self::PublishLog => "true".into(),
+        };
+        super::challenge::change_canonical_form(self.setting().name(), &value)
     }
 
     /// The address it brings in, which must be verified by the effective
@@ -411,7 +449,8 @@ pub struct Send {
 /// The device flow's states (§3)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EnrolmentState {
-    Started,
+    /// Waiting for the operator's tap (the wire's `pending`)
+    Pending,
     Approved(OperatorCredentialId),
     Refused,
     Expired,
@@ -480,6 +519,8 @@ pub struct FreezeLink {
     pub factor: FactorId,
     pub sent_at: DateTime<Utc>,
     pub used: bool,
+    /// Its address stopped being the contact
+    pub void: bool,
 }
 
 /// An operator account, as the state table models it
