@@ -22,7 +22,7 @@ might stop at the agent session end, SIGTERM might stop at the next turn").
   the session as `Failed`, saved as it stands. **`SeedAgent`** ends acting
   the way a spent round budget does: the turn's results stay, a note says
   the runner is stopping, and the memory rewrite and the rest of the tail
-  follow (a prompt change: the note's wording is the Steward's to approve).
+  follow (a prompt change; the Steward's wording, approved 2026-10-29: "going down for a routine stop", so no stop reads as long-term, which Agora announces).
   A paused server-tool turn is abandoned first, as the pause cap does.
 - `session_finished` carries `stopped` (asked by `on_stop`), and each
   session asked logs `session_stopping`; the seed agent's close logs

@@ -550,7 +550,8 @@ pub(crate) const NO_ROUNDS_LEFT: &str = "That was your last round this session: 
 
 /// Acting ends early because the run is stopping ([`Agent::on_stop`])
 pub(crate) const RUNNER_STOPPING: &str = "Your session ends early: the runner that hosts it is \
-     stopping. The results above are your last this session. Your memory update comes next.";
+     going down for a routine stop. The results above are your last this session. Your memory \
+     update comes next.";
 
 /// What the agent is told with a round's results about the rounds left,
 /// when it is about to run out
