@@ -574,6 +574,21 @@ pub enum OperatorActionDetail {
     CredentialRevoke {
         credential: CredentialRef,
     },
+    ConfigChangeEffective {
+        change: OperatorConfigChange,
+    },
+}
+
+/// A change to the operator's settings, as the log records it
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "setting", rename_all = "snake_case")]
+pub enum OperatorConfigChange {
+    /// [`OperatorConfigResponse::bulk_requires_sudo`]. Turning it on is a
+    /// tightening and immediate; turning it off is a weakening, which waits
+    /// for the time lock (M2)
+    BulkRequiresSudo { value: bool },
 }
 
 impl OperatorLogEntry {
@@ -582,7 +597,7 @@ impl OperatorLogEntry {
     /// `docs/design-operator-api.md`, "What the agent sees"): only sends
     /// and retracts that reached it, naming only its own copy. `None` for
     /// everything else: cancels and undelivered sends (it never saw them)
-    /// and credential changes (they concern no agent).
+    /// credential and configuration changes (they concern no agent).
     ///
     /// `about` is kept only when the send went to this agent alone: a
     /// moderation action is one agent's, and a batch must not show it to
@@ -619,7 +634,10 @@ impl OperatorLogEntry {
             }
             OperatorActionDetail::DmCancel { .. }
             | OperatorActionDetail::CredentialAdd { .. }
-            | OperatorActionDetail::CredentialRevoke { .. } => return None,
+            | OperatorActionDetail::CredentialRevoke { .. }
+            | OperatorActionDetail::ConfigChangeEffective { .. } => {
+                return None;
+            }
         };
         match &detail {
             OperatorActionDetail::DmSend { messages: ids, .. }
@@ -683,6 +701,9 @@ impl OperatorActionDetail {
             Self::CredentialRevoke { .. } => {
                 OperatorActionKind::CredentialRevoke
             }
+            Self::ConfigChangeEffective { .. } => {
+                OperatorActionKind::ConfigChangeEffective
+            }
         }
     }
 
@@ -697,7 +718,9 @@ impl OperatorActionDetail {
                 retracted,
                 cancelled,
             } => Some(n(retracted.len() + cancelled.len())),
-            Self::CredentialAdd { .. } | Self::CredentialRevoke { .. } => None,
+            Self::CredentialAdd { .. }
+            | Self::CredentialRevoke { .. }
+            | Self::ConfigChangeEffective { .. } => None,
         }
     }
 }
@@ -968,6 +991,29 @@ mod tests {
         ] {
             assert!(send(to.clone()).validate().is_err(), "{to:?}");
         }
+    }
+
+    /// A configuration change names its setting and value, and no agent
+    /// sees it
+    #[test]
+    fn a_config_change_is_logged_by_setting_and_concerns_no_agent() {
+        let detail = OperatorActionDetail::ConfigChangeEffective {
+            change: OperatorConfigChange::BulkRequiresSudo { value: true },
+        };
+        assert_eq!(detail.kind(), OperatorActionKind::ConfigChangeEffective);
+        assert_eq!(detail.recipient_count(), None);
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "config_change_effective",
+                "change": { "setting": "bulk_requires_sudo", "value": true },
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+            detail
+        );
     }
 
     /// Sudo: bulk sends only when the operator asked for it; a send-now
