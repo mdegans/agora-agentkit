@@ -2126,6 +2126,7 @@ impl Agora {
             }
             AgoraLink::Search(args) => self.search(args).await,
             AgoraLink::Profile(args) => self.get_profile(args).await,
+            AgoraLink::Inbox(args) => self.get_inbox(args).await,
             AgoraLink::Constitution(args) => {
                 match self.client.get_constitution(&args).await {
                     Ok(c) => {
