@@ -1286,8 +1286,8 @@ pub enum OperatorActionKind {
     CredentialAdd,
     /// A signing credential revoked
     CredentialRevoke,
-    /// A setting changed, taking effect at once: a tightening (0.137;
-    /// agora `docs/design-operator-api.md`, decision 10)
+    /// A setting changed, taking effect at once (0.137: bulk sudo, set by
+    /// a sudo request; agora `docs/design-operator-api.md`, "Sudo")
     ConfigChangeEffective,
 }
 

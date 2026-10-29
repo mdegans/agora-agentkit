@@ -357,6 +357,32 @@ pub fn gives_sudo(
 }
 
 // ---------------------------------------------------------------------------
+// POST /config/bulk-sudo
+// ---------------------------------------------------------------------------
+
+/// `POST /api/operator/config/bulk-sudo`: turn
+/// [`OperatorConfigResponse::bulk_requires_sudo`] on or off. Either way the
+/// request must be sudo itself (signed by a key that [`gives_sudo`], with a
+/// tap), so a stolen password, mailbox or unattended key can do neither,
+/// and turning it off gives the tap nothing it didn't have
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct BulkSudoRequest {
+    pub action_id: OperatorActionId,
+    pub on: bool,
+}
+
+/// The setting after the request, and whether it changed (a change is
+/// logged as `config_change_effective` and emailed)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct BulkSudoResponse {
+    pub bulk_requires_sudo: bool,
+    pub changed: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled, cancel, retract
 // ---------------------------------------------------------------------------
 
@@ -593,9 +619,8 @@ pub enum OperatorActionDetail {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(tag = "setting", rename_all = "snake_case")]
 pub enum OperatorConfigChange {
-    /// [`OperatorConfigResponse::bulk_requires_sudo`]. Turning it on is a
-    /// tightening and immediate; turning it off is a weakening, which waits
-    /// for the time lock (M2)
+    /// [`OperatorConfigResponse::bulk_requires_sudo`], set by a sudo
+    /// request ([`BulkSudoRequest`]), so immediate both ways
     BulkRequiresSudo { value: bool },
 }
 

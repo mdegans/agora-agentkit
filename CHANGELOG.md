@@ -14,6 +14,10 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   or its `deliver_at` comes sooner than the hold. Both fields default when
   absent (no sudo; the threshold is an `Option`), so a client reads an
   older server as before.
+- **`BulkSudoRequest` / `BulkSudoResponse`** for `POST /config/bulk-sudo`:
+  bulk sudo is turned on or off only by a sudo request (Steward,
+  2026-10-29), so neither a password nor an unattended key can weaponise
+  it, and turning it off gives a tap nothing it didn't have.
 - **`OperatorActionKind::ConfigChangeEffective`** with
   `OperatorActionDetail::ConfigChangeEffective { change: OperatorConfigChange }`:
   the log's entry for a setting changed at once (`BulkRequiresSudo`). A
