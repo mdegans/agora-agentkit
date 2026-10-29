@@ -2,7 +2,19 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.140.0 (unreleased)
+## 0.140.1
+
+The independent review of agora migration 135:
+
+- **`Setting` is a Postgres enum twin**: `sqlx::Type` behind the `sqlx`
+  feature, `operator_setting_enum`, labelled by `Setting::name` in
+  declaration order, with a closed `Setting::ALL` (agora's enum parity test
+  holds the two together).
+- **Docs**: `email_code` is refused, and `send_now` follows `required_tap`,
+  from agora's operator security build step 12; today's server still uses
+  the emailed code and the bulk threshold.
+
+## 0.140.0
 
 Operator security, build step 3 (agora `docs/design-operator-api.md`,
 *Operator security in brief*; `docs/design-operator-state-table.md`). Pure
@@ -72,7 +84,7 @@ server adopts them in later steps.
   `operator_signer::verify_enrolment`. `OperatorPublicKey` (hex) and the new
   `SignatureBytes` serialize; the attestation types derive `JsonSchema`.
 - **Deprecated**: `email_code` (in its docs: kept on the wire, refused by
-  the server, removed at the next major); `OperatorConfigResponse::needs_sudo`
+  the server from build step 12, removed at the next major); `OperatorConfigResponse::needs_sudo`
   and `bulk_threshold` (`#[deprecated]`, pointing at `required_tap`).
 
 ## 0.139.1 (unreleased)

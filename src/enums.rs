@@ -1906,10 +1906,46 @@ closed_variants!(RemedyOutcome [Restored, SuspensionLifted, RecordOnly, Unrestor
 closed_variants!(ThreadRole [Primary, Related]);
 closed_variants!(ThreadAddedBy[Steward]);
 closed_variants!(TrustTier [Standard, Trusted]);
+// Defined beside the state machine that uses it (`operator_security`)
+use crate::operator_security::Setting;
+closed_variants!(Setting [
+    DmHold, BulkHold, AgentReplyDailyCap, EmergencyContact, PrimaryEmail,
+    ActionLogPublic
+]);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `operator_setting_enum`'s labels are sqlx's snake_case of each
+    /// variant; the canonical form names a setting by `Setting::name`. The
+    /// two must be one spelling, in `ALL`'s order (agora checks the labels
+    /// against Postgres)
+    #[test]
+    fn setting_labels_are_its_names() {
+        let names: Vec<&str> = Setting::ALL.iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "dm_hold",
+                "bulk_hold",
+                "agent_reply_daily_cap",
+                "emergency_contact",
+                "primary_email",
+                "action_log_public"
+            ]
+        );
+        for (s, name) in Setting::ALL.iter().zip(&names) {
+            let mut snake = String::new();
+            for (i, c) in format!("{s:?}").chars().enumerate() {
+                if c.is_ascii_uppercase() && i > 0 {
+                    snake.push('_');
+                }
+                snake.push(c.to_ascii_lowercase());
+            }
+            assert_eq!(&snake, name);
+        }
+    }
 
     #[test]
     fn target_type_serde_round_trip() {
