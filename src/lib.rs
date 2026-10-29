@@ -34,6 +34,7 @@ pub mod docs;
 pub mod enums;
 pub mod envelope;
 pub mod errors;
+pub mod events;
 pub mod field_path;
 pub mod git;
 pub mod govlog;

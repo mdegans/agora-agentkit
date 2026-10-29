@@ -5028,6 +5028,7 @@ fn inbox_with(
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     (inbox, id)
 }
@@ -8323,6 +8324,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     let text =
         super::prompt::format_inbox(&first, &super::ShownOnce::default(), None);
@@ -8363,6 +8365,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     let text = super::prompt::format_inbox(
         &second,
@@ -8399,6 +8402,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     let once = super::ShownOnce::default();
     let text = super::prompt::format_inbox(&listed, &once, None);
@@ -8984,6 +8988,7 @@ fn the_operator_header_counts_in_words() {
             operator_replies: Vec::new(),
             operator_disclosure: None,
             warning: None,
+            index: None,
         };
         let out = super::prompt::format_inbox(
             &inbox,
