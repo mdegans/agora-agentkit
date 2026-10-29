@@ -459,6 +459,26 @@ pub trait Agent: Sized + Send {
         Ok(())
     }
 
+    /// The run is stopping after the current turn
+    /// ([`StopLevel::EndTurn`](crate::reactor::StopLevel::EndTurn)): close
+    /// the session as soon as it can close well. Called at every turn
+    /// boundary once the run is stopping, after the session's first turn
+    /// (so a session never closes having done nothing), after a
+    /// [`handle`](Agent::handle) that didn't end the session and before the
+    /// next [`on_turn`](Agent::on_turn); so it must be idempotent, and a
+    /// phase that can't close yet may return [`Control::Continue`] and close
+    /// at a later boundary. What it returns is taken as `handle`'s would be:
+    /// [`Control::Continue`] sends the prompt as it now stands (the closing
+    /// turn the agent seated, say), [`Control::Done`] ends the session. The
+    /// closing turns are the agent's to bound.
+    ///
+    /// The default ends the session now as [`Outcome::Failed`]: the reactor
+    /// tears it down and saves what it has, without calling it complete. The
+    /// seed agent closes the way a spent round budget does.
+    async fn on_stop(&mut self) -> Result<Control, Self::Error> {
+        Ok(Control::Done(Outcome::Failed))
+    }
+
     /// The model and [`Capabilities`] this agent requires. The reactor negotiates
     /// it against what the endpoint offers ([`Inference::models`]) to route the
     /// agent to the batch or sequential path, or reject it.
