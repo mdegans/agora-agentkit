@@ -2,6 +2,21 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.144.0
+
+Operator security build steps 6 and 7 (agora `docs/design-operator-api.md`,
+`docs/design-operator-state-table.md`). Nothing reaches an agent: the seed
+runner builds none of the FIDO code and uses none of the new types.
+
+- **FIDO attestation**: `operator_signer::fido` verifies packed attestation
+  against pinned Yubico FIDO roots, kept apart from the PIV anchors. This is
+  what makes a passkey a YubiKey.
+- **Wire**: passkey adds, suspension and contest in `OperatorActionDetail`, with
+  the `PasswordRetired` and `FactorNotEffective` cancel reasons.
+- **`operator_security`**: `RecoveryDecide` refuses a loser that isn't `Active`,
+  since RecoverySuspend is defined from `Active` only.
+- **Removed**: `pinned_anchor_der`, which nothing called.
+
 ## 0.143.0
 
 The dashboard's polls block, now that only polls the platform listed appear
