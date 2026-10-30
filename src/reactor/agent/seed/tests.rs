@@ -3912,7 +3912,11 @@ fn seed_tools_match_the_agent_tool_registry() {
         let tool = agent_tool(&name).unwrap_or_else(|| {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
-        let shared = (tool.input_schema)();
+        let mut shared = (tool.input_schema)();
+        // Until phase 4: `crate::before_index`
+        if name == "get_inbox" {
+            crate::before_index::hide_index_fields(&mut shared);
+        }
         match tool.seed {
             Seed::Tool => {
                 for field in ["properties", "required"] {
@@ -9569,7 +9573,14 @@ async fn the_inbox_index_isnt_offered_before_it_renders() {
     for field in ["message", "view", "offset"] {
         assert!(!props.contains_key(field), "{field} is offered");
     }
-    assert!(props.contains_key("limit"));
+    assert_eq!(
+        serde_json::Value::Object(props.clone()),
+        serde_json::json!({"limit": {
+            "description": "At most this many messages (default: all unread, up to 40, and the\nrecently read). Unread ones past it stay unread for the next read (1 to 40)",
+            "type": "integer",
+        }}),
+        "as 0.141 seated it"
+    );
 
     for input in [
         serde_json::json!({"view": "index"}),
@@ -9595,6 +9606,12 @@ async fn the_inbox_index_isnt_offered_before_it_renders() {
     }
     assert!(text.contains("\"inbox\" is not a kind of link"), "{text}");
     assert!(!text.contains("git and inbox"), "{text}");
+    // Refused in parsing, as 0.141 refused them: free, and saying so
+    assert_eq!(
+        text.matches("Refused; nothing was charged").count(),
+        4,
+        "{text}"
+    );
 
     // A plain read is as it was: no `view` on the wire
     agent

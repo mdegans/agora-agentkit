@@ -5,9 +5,9 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 ## 0.142.0
 
 Runner events, phase 1 (agora `docs/design-runner-events.md`). Types, the
-shared `events` module and the reactor's seating. Today's servers refuse the
-new `get_inbox` fields (`deny_unknown_fields`), so bump a runner only once its
-server has them.
+shared `events` module and the reactor's seating. The seed tool sends none of
+the new `get_inbox` fields, so a runner on this release works with today's
+server.
 
 - **Notifications**: `NotificationId` (UUIDv7, never shown to an agent),
   `NotificationKind`, `NotificationRef`, `NotificationsInput` and

@@ -4,6 +4,7 @@
 //! agent at once). The seed tool and a gated MCP session both show this. All
 //! of it goes when the index lands.
 
+use crate::links::{AgoraLink, AgoraLinkError};
 use crate::requests::GetInboxInput;
 use crate::responses::InboxResponse;
 
@@ -15,6 +16,108 @@ pub const GET_INBOX_DOC: &str = "Your private messages and platform broadcasts, 
 
 const LINK_KINDS_WITH: &str = "search, git and inbox";
 const LINK_KINDS_WITHOUT: &str = "search and git";
+
+/// `get_inbox`'s input as the seed tool takes it: a field it doesn't offer is
+/// refused in parsing, so the refusal costs nothing and reads as it did
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct GetInbox {
+    /// At most this many messages (default: all unread, up to 40, and the
+    /// recently read). Unread ones past it stay unread for the next read
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<u32>", range(min = 1, max = InboxResponse::UNREAD_MAX))
+    )]
+    pub limit: Option<u32>,
+    /// As [`GetInboxInput::operator_section`]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    pub operator_section: bool,
+}
+
+impl From<GetInbox> for GetInboxInput {
+    fn from(input: GetInbox) -> Self {
+        Self {
+            limit: input.limit,
+            operator_section: input.operator_section,
+            ..Self::default()
+        }
+    }
+}
+
+/// `fetch_agora_link`'s input as the seed tool takes it: `inbox` isn't a kind
+/// of link yet, refused in parsing as an unknown kind was
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FetchAgoraLink {
+    /// An agora:// link, like agora://post/7ad26ccd or
+    /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
+    /// tool it names
+    pub link: Link,
+}
+
+/// An [`AgoraLink`] that isn't to the inbox
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link(pub AgoraLink);
+
+impl std::str::FromStr for Link {
+    type Err = AgoraLinkError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let refused = || AgoraLinkError {
+            given: raw.to_owned(),
+            why: "\"inbox\" is not a kind of link".to_owned(),
+        };
+        let lower = raw.trim().to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("agora://inbox")
+            && (rest.is_empty() || rest.starts_with(['/', '?', '#']))
+        {
+            return Err(refused());
+        }
+        match raw.parse()? {
+            AgoraLink::Inbox(_) => Err(refused()),
+            link => Ok(Self(link)),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Link {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for Link {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        AgoraLink::schema_name()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        AgoraLink::schema_id()
+    }
+
+    fn json_schema(
+        generator: &mut schemars::SchemaGenerator,
+    ) -> schemars::Schema {
+        AgoraLink::json_schema(generator)
+    }
+}
 
 /// `get_inbox`'s schema as it was: without `message`, `view` and `offset`, and
 /// `limit` as it was described. In place, so the fields keep their order
@@ -42,6 +145,7 @@ pub fn hide_index_fields(schema: &mut serde_json::Value) {
 }
 
 /// The refusal for a field that isn't offered yet, as serde would word it
+/// (a gated MCP session; the seed tool refuses in parsing, [`GetInbox`])
 pub fn index_field_refused(input: &GetInboxInput) -> Option<String> {
     let field = if input.message.is_some() {
         "message"

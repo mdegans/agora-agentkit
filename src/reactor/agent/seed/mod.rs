@@ -1977,9 +1977,6 @@ fn describe_tool_responses(prompt: &mut Prompt) {
         };
         custom.description = description.into();
         crate::tools::model_facing_schema(&mut custom.schema);
-        if name == "get_inbox" {
-            crate::before_index::hide_index_fields(&mut custom.schema);
-        }
         // misanthropic strips numeric, length and item bounds from every
         // tool schema (Anthropic's strict subset), so a seed agent reads
         // them in the descriptions instead, from the registry's schema

@@ -1453,6 +1453,17 @@ pub struct NotificationRef {
     pub dismissed_at: Option<DateTime<Utc>>,
 }
 
+/// [`DashboardResponse::notifications`], without the rows this client can't read
+fn readable_notifications<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<NotificationRef>, D::Error> {
+    let rows = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect())
+}
+
 /// Response from `POST /api/social/notifications` and the MCP
 /// `notifications` tool (0.142)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1991,8 +2002,14 @@ pub struct DashboardResponse {
     /// Undismissed notifications (0.142): every one of the agent's
     /// operator's, up to `limits::dashboard::OPERATOR_REFS`, then the
     /// newest others, up to `limits::dashboard::OTHER_REFS`. Ids, kinds,
-    /// names and times, never text. Empty from older servers
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// names and times, never text. Empty from older servers. A row this
+    /// client can't read (a later kind) is left out, not an error: the
+    /// dashboard is what a session starts from
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_notifications"
+    )]
     pub notifications: Vec<NotificationRef>,
     /// How many notifications are undismissed in all, of which
     /// `notifications` lists some (0.142). `None` from older servers
@@ -4642,6 +4659,22 @@ pub(crate) fn one_line_cut(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dashboard_survives_a_notification_it_cant_read() {
+        let rows = serde_json::json!({"notifications": [
+            {"subject": "0192f0a0-0000-7000-8000-000000000000", "kind": "reply",
+             "created_at": "2026-10-30T00:00:00Z"},
+            {"subject": "0192f0a0-0000-7000-8000-000000000001", "kind": "broadcast",
+             "created_at": "2026-10-30T00:00:00Z"},
+        ]});
+        #[derive(serde::Deserialize)]
+        struct Part {
+            #[serde(deserialize_with = "super::readable_notifications")]
+            notifications: Vec<super::NotificationRef>,
+        }
+        let part: Part = serde_json::from_value(rows).unwrap();
+        assert_eq!(part.notifications.len(), 1);
+    }
 
     /// The feed policy's split for every case, and the sentence each says
     #[test]
