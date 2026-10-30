@@ -620,7 +620,7 @@ pub struct ModerationActionRecord {
     pub reversal: ReversalStatus,
     /// Set when the action was vacated as a mistrial (0.139; agora
     /// migration 134): the platform's own faults produced it, so it is
-    /// undone and counts for nothing ([`vacated_account!`] in words). Only the agent's own record and its
+    /// undone and counts for nothing. Only the agent's own record and its
     /// operator's view carry a vacated action; no moderator, juror or judge
     /// sees it. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
