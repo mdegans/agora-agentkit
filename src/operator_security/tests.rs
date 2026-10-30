@@ -2532,7 +2532,7 @@ fn i11_to_i15_adds(a: &Applied) -> Result<(), TestCaseError> {
             prop_assert_eq!(before.parent, a.post.factors[id].parent, "I-14");
         }
     }
-    // I-13: no use but taking away
+    // I-13: no use but taking away, or its own contest
     if let Authority::Signed(k) = a.by {
         let soft = a
             .pre
@@ -2542,7 +2542,9 @@ fn i11_to_i15_adds(a: &Applied) -> Result<(), TestCaseError> {
             prop_assert!(
                 matches!(
                     a.event,
-                    Event::SendCancel { .. } | Event::Retract { .. }
+                    Event::SendCancel { .. }
+                        | Event::Retract { .. }
+                        | Event::Contest { .. }
                 ),
                 "I-13: a software key's {:?}",
                 a.event

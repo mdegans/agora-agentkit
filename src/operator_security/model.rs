@@ -21,9 +21,9 @@ pub fn suspension_deadline() -> Duration {
     Duration::hours(72)
 }
 
-/// `SUSPEND_LIMIT`: direct suspensions per account per hour; cascades don't
-/// count. High enough that a thief who burns it can't keep the owner from
-/// suspending, on an account with a normal number of factors
+/// `SUSPEND_LIMIT`: direct suspensions per suspending factor per hour; cascades
+/// don't count. Per factor (Steward, 2026-10-30), so a thief who burns its own
+/// budget can't keep the owner's passkey from suspending
 pub const SUSPEND_LIMIT: u32 = 10;
 
 /// `cascade(T, S)` over any store of factors: `target`, and every effective
@@ -589,10 +589,10 @@ pub struct AccountState {
     pub freeze_links: BTreeMap<OperatorFreezeLinkId, FreezeLink>,
     /// Each address's last freeze
     pub last_freeze: BTreeMap<OperatorEmailAddressId, DateTime<Utc>>,
-    /// When each direct suspension happened, for the rate limit
-    pub direct_suspensions: Vec<DateTime<Utc>>,
+    /// When each factor's direct suspensions happened, for the rate limit
+    pub direct_suspensions: BTreeMap<FactorId, Vec<DateTime<Utc>>>,
     pub settings: Settings,
-    /// `SUSPEND_LIMIT`: direct suspensions per account per hour
+    /// `SUSPEND_LIMIT`: direct suspensions per suspending factor per hour
     pub suspend_limit: u32,
 }
 
@@ -638,7 +638,7 @@ impl AccountState {
             cases: BTreeMap::new(),
             freeze_links: BTreeMap::new(),
             last_freeze: BTreeMap::new(),
-            direct_suspensions: Vec::new(),
+            direct_suspensions: BTreeMap::new(),
             settings: Settings::default(),
             suspend_limit,
         }

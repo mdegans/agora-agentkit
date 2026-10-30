@@ -558,7 +558,12 @@ impl<I: IdSource> Tx<'_, I> {
             if self.s.factor(FactorId::Credential(c)).is_some_and(|f| f.kind.is_software_key()));
         let enforced = self.s.count > 5 && self.s.flags.tier;
         guard(
-            !(soft && enforced && class != ModeClass::TakeAway),
+            // A contest is a suspended factor's only request: it restores
+            // nothing, and refusing it would leave the factor no way to dispute
+            !(soft
+                && enforced
+                && class != ModeClass::TakeAway
+                && class != ModeClass::Dispute),
             Refusal::TierOne,
         )
     }
@@ -1044,15 +1049,20 @@ impl<I: IdSource> Tx<'_, I> {
                 let f = *self.s.factor(*target).ok_or(Refusal::Unknown)?;
                 let hour_ago = self.now - chrono::Duration::hours(1);
                 // Only the rate window is kept
-                self.s.direct_suspensions.retain(|t| *t > hour_ago);
-                let recent = self.s.direct_suspensions.len();
+                let spent = self.s.direct_suspensions.entry(s).or_default();
+                spent.retain(|t| *t > hour_ago);
+                let recent = spent.len();
                 match f.state {
                     CredentialState::Active => {
                         guard(
                             (recent as u64) < u64::from(self.s.suspend_limit),
                             Refusal::RateLimited,
                         )?;
-                        self.s.direct_suspensions.push(self.now);
+                        self.s
+                            .direct_suspensions
+                            .entry(s)
+                            .or_default()
+                            .push(self.now);
                         let deadline = self.now + suspension_deadline();
                         let cascade = self.s.cascade(*target, Some(s));
                         self.suspend_one(
@@ -1087,7 +1097,11 @@ impl<I: IdSource> Tx<'_, I> {
                             (recent as u64) < u64::from(self.s.suspend_limit),
                             Refusal::RateLimited,
                         )?;
-                        self.s.direct_suspensions.push(self.now);
+                        self.s
+                            .direct_suspensions
+                            .entry(s)
+                            .or_default()
+                            .push(self.now);
                         let factor =
                             self.s.factors.get_mut(target).expect("found");
                         factor.state = CredentialState::Suspended(Suspension {

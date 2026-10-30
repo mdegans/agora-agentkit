@@ -62,6 +62,8 @@ these entries.
   `CredentialContestResponse`.
 - **`operator_security::model`**: `provenance_cascade`, which
   `AccountState::cascade` now calls (behaviour unchanged), and `SUSPEND_LIMIT`.
+- **`SUSPEND_LIMIT` is per suspending factor** (`direct_suspensions` is keyed by
+  it; Steward, 2026-10-30). The tier-1 guard exempts a contest.
 
 ## 0.141.0
 
