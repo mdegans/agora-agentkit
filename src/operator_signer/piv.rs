@@ -450,7 +450,7 @@ fn unsupported(index: usize, oid: ObjectIdentifier) -> AttestationError {
 
 /// No extension twice, and no critical extension this module doesn't
 /// process.
-fn check_extensions(
+pub(crate) fn check_extensions(
     index: usize,
     cert: &Certificate,
 ) -> Result<(), AttestationError> {
@@ -620,7 +620,7 @@ fn p384_issuer_key(
 
 /// An ECDSA signature's `r ‖ s` (each `N` bytes) from its DER form,
 /// `SEQUENCE { r, s }`.
-fn ecdsa_from_der<const N: usize>(der: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn ecdsa_from_der<const N: usize>(der: &[u8]) -> Option<Vec<u8>> {
     use x509_cert::der::asn1::Uint;
     let integers = Vec::<Uint>::from_der(der).ok()?;
     if integers.len() != 2 {
@@ -647,6 +647,13 @@ pub(crate) fn ecdsa_to_der(r_s: &[u8]) -> Vec<u8> {
         .map(|half| Uint::new(half).expect("a half is an integer"))
         .collect();
     integers.to_der().expect("two integers encode")
+}
+
+/// The operator key a leaf certificate holds (Ed25519 or P-256).
+pub(crate) fn leaf_public_key(
+    cert: &Certificate,
+) -> Result<OperatorPublicKey, AttestationError> {
+    public_key(0, cert.tbs_certificate().subject_public_key_info())
 }
 
 /// The operator key a certificate's subject key is.

@@ -2,6 +2,21 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.144.0
+
+Operator security build steps 6 and 7 (agora `docs/design-operator-api.md`,
+`docs/design-operator-state-table.md`). Nothing reaches an agent: the seed
+runner builds none of the FIDO code and uses none of the new types.
+
+- **FIDO attestation**: `operator_signer::fido` verifies packed attestation
+  against pinned Yubico FIDO roots, kept apart from the PIV anchors. This is
+  what makes a passkey a YubiKey.
+- **Wire**: passkey adds, suspension and contest in `OperatorActionDetail`, with
+  the `PasswordRetired` and `FactorNotEffective` cancel reasons.
+- **`operator_security`**: `RecoveryDecide` refuses a loser that isn't `Active`,
+  since RecoverySuspend is defined from `Active` only.
+- **Removed**: `pinned_anchor_der`, which nothing called.
+
 ## 0.143.0
 
 The dashboard's polls block, now that only polls the platform listed appear
@@ -31,6 +46,39 @@ server.
 - **`AgoraLink::Inbox`**: `agora://inbox` is `get_inbox`'s input.
 - **Reactor**: pushes seat before every re-attempt, with the tail's cache
   marker moved onto them, and one label per source per seat.
+## Unreleased (a minor; the number is being agreed)
+
+Operator security, build step 6 (agora `docs/design-operator-api.md`,
+*YubiKey passkeys: FIDO attestation*). **Not a patch:** it adds variants to
+exhaustive enums (`OperatorActionDetail`, `CancelReason`), so a `match` on
+them stops compiling, and an old `agora-operator log` fails on the **whole
+response** once the log holds a `passkey_add` entry.
+
+- **`operator_signer::fido`** (feature `x509`): `FidoTrustStore`, the pinned
+  Yubico FIDO CAs (U2F Root CA 457200631, FIDO Attestation A 1, B 1, B2 1),
+  kept apart from the PIV anchors; a packed attestation's signature, §8.2.1
+  and AAGUID checks, and its chain. Never Yubico Attestation Root 1. Reads a
+  COSE key and AAGUID out of authenticator data with no CBOR dependency.
+- **`mock`**: `MockRootCa::issue_fido_attestation`, a batch key and its
+  certificate, breakable per §8.2.1.
+- **Wire**: `OperatorActionDetail::PasskeyAdd`, whose `kind` is
+  `credential_add`; `CancelReason::PasswordRetired`;
+  `FirstPasskeyConfirmRequest` and its response (`POST
+  /api/operator/passkeys/{id}/confirm`).
+- `AttestationError` is `Clone`, `PartialEq` and `Eq`.
+
+Operator security, build step 7 (*Credential disputes*). The same warning: an
+old `agora-operator log` fails on the whole response once the log holds one of
+these entries.
+
+- **Wire**: `OperatorActionDetail::CredentialSuspend`, `CredentialContest`,
+  `PasskeyRevoke` (`kind` `credential_revoke`); `FactorRef`,
+  `SuspensionCauseRecord`; `CancelReason::FactorNotEffective`;
+  `CredentialContestResponse`.
+- **`operator_security::model`**: `provenance_cascade`, which
+  `AccountState::cascade` now calls (behaviour unchanged), and `SUSPEND_LIMIT`.
+- **`SUSPEND_LIMIT` is per suspending factor** (`direct_suspensions` is keyed by
+  it; Steward, 2026-10-30). The tier-1 guard exempts a contest.
 
 ## 0.141.0
 

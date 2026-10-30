@@ -248,6 +248,139 @@ impl MockRootCa {
     }
 }
 
+/// What a mock FIDO attestation certificate looks like, so tests can break
+/// each of WebAuthn §8.2.1's requirements.
+#[derive(Debug, Clone)]
+pub struct FidoLeafOptions {
+    /// The AAGUID extension's value; `None` leaves it out
+    pub aaguid: Option<[u8; 16]>,
+    /// Mark the AAGUID extension critical
+    pub aaguid_critical: bool,
+    /// The subject, as an RFC 4514 string
+    pub subject: &'static str,
+    /// `basicConstraints cA=TRUE`
+    pub ca: bool,
+    /// No `basicConstraints` at all
+    pub omit_basic_constraints: bool,
+    /// Signed by its own key, with its own name as issuer
+    pub self_signed: bool,
+    /// An X.509 v1 certificate: no version field, no extensions
+    pub version_1: bool,
+    /// These bytes as the AAGUID extension's value, instead of a well-formed one
+    pub raw_aaguid: Option<Vec<u8>>,
+    /// These bytes as `basicConstraints`' value, instead of a well-formed one
+    pub raw_basic_constraints: Option<Vec<u8>>,
+    /// This DER as the subject's key, instead of its own P-256 key
+    pub raw_spki: Option<Vec<u8>>,
+}
+
+impl FidoLeafOptions {
+    /// A certificate meeting §8.2.1, with this AAGUID
+    pub fn good(aaguid: [u8; 16]) -> Self {
+        Self {
+            aaguid: Some(aaguid),
+            aaguid_critical: false,
+            subject: "C=SE,O=Agora MOCK,OU=Authenticator Attestation,CN=Mock FIDO EE",
+            ca: false,
+            omit_basic_constraints: false,
+            self_signed: false,
+            version_1: false,
+            raw_aaguid: None,
+            raw_basic_constraints: None,
+            raw_spki: None,
+        }
+    }
+}
+
+/// A mock batch attestation key and its certificate.
+pub struct MockFidoAttestation {
+    key: p256::ecdsa::SigningKey,
+    certificate: DerCertificate,
+}
+
+impl fmt::Debug for MockFidoAttestation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MockFidoAttestation(..)")
+    }
+}
+
+impl MockFidoAttestation {
+    /// The attestation certificate (`x5c[0]`)
+    pub fn certificate(&self) -> &DerCertificate {
+        &self.certificate
+    }
+
+    /// An ES256 signature over `data`, in DER, as a packed `attStmt` holds it
+    pub fn sign_es256(&self, data: &[u8]) -> Vec<u8> {
+        use p256::ecdsa::signature::Signer;
+        let signature: p256::ecdsa::Signature = self.key.sign(data);
+        piv::ecdsa_to_der(&signature.to_bytes())
+    }
+}
+
+impl MockRootCa {
+    /// Issue a FIDO batch attestation certificate directly under this CA
+    pub fn issue_fido_attestation(
+        &self,
+        options: FidoLeafOptions,
+    ) -> MockFidoAttestation {
+        let key = random_p256();
+        let mut extensions = Vec::new();
+        if let Some(aaguid) = options.aaguid {
+            let value = OctetString::new(aaguid.to_vec()).expect("short");
+            let value =
+                options.raw_aaguid.clone().unwrap_or_else(|| der(&value));
+            let mut extension = extension(piv_fido_aaguid_oid(), value);
+            extension.critical = options.aaguid_critical;
+            extensions.push(extension);
+        }
+        if let Some(raw) = options.raw_basic_constraints.clone() {
+            let mut extension = extension(OID_BASIC_CONSTRAINTS, raw);
+            extension.critical = true;
+            extensions.push(extension);
+        } else if !options.omit_basic_constraints {
+            extensions.push(critical_extension(
+                &BasicConstraints {
+                    ca: options.ca,
+                    path_len_constraint: None,
+                },
+                OID_BASIC_CONSTRAINTS,
+            ));
+        }
+        let spki = options.raw_spki.as_ref().map_or_else(
+            || p256_spki(&key),
+            |raw| {
+                SubjectPublicKeyInfoOwned::from_der(raw).expect("a valid SPKI")
+            },
+        );
+        let subject = Name::from_str(options.subject).expect("a valid name");
+        let own_key = IssuerKey::EcdsaP256(key.clone());
+        let (issuer, issuer_key) = if options.self_signed {
+            (&subject, &own_key)
+        } else {
+            (&self.name, &self.key)
+        };
+        let certificate = if options.version_1 {
+            let algorithm = issuer_key.algorithm();
+            let tbs = tbs_certificate_v1(
+                &algorithm,
+                issuer,
+                &subject,
+                p256_spki(&key),
+            );
+            let signature = issuer_key.sign(&tbs);
+            assemble(tbs, &algorithm, &signature)
+        } else {
+            issue(3, issuer, &subject, spki, extensions, issuer_key)
+        };
+        MockFidoAttestation { key, certificate }
+    }
+}
+
+fn piv_fido_aaguid_oid() -> x509_cert::der::asn1::ObjectIdentifier {
+    super::fido::OID_FIDO_AAGUID
+}
+
 /// A mock intermediate CA's subject.
 const MOCK_INTERMEDIATE_SUBJECT: &str =
     "CN=Agora MOCK PIV Intermediate CA - NOT A REAL DEVICE";
@@ -861,6 +994,37 @@ fn tbs_certificate(
     if !extensions.is_empty() {
         tbs.extend(tlv(0xa3, &der(&extensions))); // [3] EXPLICIT
     }
+    let tbs = tlv(0x30, &tbs);
+    TbsCertificate::from_der(&tbs).expect("a well-formed TBS certificate");
+    tbs
+}
+
+/// A v1 TBS certificate's DER: no version field, no extensions.
+fn tbs_certificate_v1(
+    algorithm: &AlgorithmIdentifierOwned,
+    issuer: &Name,
+    subject: &Name,
+    subject_public_key_info: SubjectPublicKeyInfoOwned,
+) -> Vec<u8> {
+    let validity = Validity::<x509_cert::certificate::Rfc5280>::new(
+        Time::UtcTime(
+            UtcTime::from_unix_duration(Duration::from_secs(1_767_225_600))
+                .expect("in UTCTime's range"),
+        ),
+        Time::GeneralTime(GeneralizedTime::from_date_time(
+            x509_cert::der::DateTime::new(9999, 12, 31, 23, 59, 59)
+                .expect("a valid date"),
+        )),
+    );
+    let mut tbs = der(&SerialNumber::<x509_cert::certificate::Rfc5280>::new(
+        &4u64.to_be_bytes(),
+    )
+    .expect("a valid serial"));
+    tbs.extend(der(algorithm));
+    tbs.extend(der(issuer));
+    tbs.extend(der(&validity));
+    tbs.extend(der(subject));
+    tbs.extend(der(&subject_public_key_info));
     let tbs = tlv(0x30, &tbs);
     TbsCertificate::from_der(&tbs).expect("a well-formed TBS certificate");
     tbs

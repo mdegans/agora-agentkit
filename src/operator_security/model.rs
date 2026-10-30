@@ -21,6 +21,40 @@ pub fn suspension_deadline() -> Duration {
     Duration::hours(72)
 }
 
+/// `SUSPEND_LIMIT`: direct suspensions per suspending factor per hour; cascades
+/// don't count. Per factor (Steward, 2026-10-30), so a thief who burns its own
+/// budget can't keep the owner's passkey from suspending
+pub const SUSPEND_LIMIT: u32 = 10;
+
+/// `cascade(T, S)` over any store of factors: `target`, and every effective
+/// factor reached from it along approvals without passing through
+/// `suspender`. With the suspender the target itself, only the target. The
+/// one copy of the rule: [`AccountState::cascade`] and the server's
+/// transaction both call it
+pub fn provenance_cascade(
+    target: FactorId,
+    suspender: Option<FactorId>,
+    children: impl Fn(FactorId) -> Vec<FactorId>,
+    effective: impl Fn(FactorId) -> bool,
+) -> BTreeSet<FactorId> {
+    let mut out = BTreeSet::from([target]);
+    if suspender == Some(target) {
+        return out;
+    }
+    let mut seen = BTreeSet::new();
+    let mut todo = children(target);
+    while let Some(next) = todo.pop() {
+        if Some(next) == suspender || !seen.insert(next) {
+            continue;
+        }
+        if effective(next) {
+            out.insert(next);
+        }
+        todo.extend(children(next));
+    }
+    out
+}
+
 /// The longest default hold a change may set (the operator config's "at
 /// most a day")
 pub fn max_dm_hold() -> Duration {
@@ -555,10 +589,10 @@ pub struct AccountState {
     pub freeze_links: BTreeMap<OperatorFreezeLinkId, FreezeLink>,
     /// Each address's last freeze
     pub last_freeze: BTreeMap<OperatorEmailAddressId, DateTime<Utc>>,
-    /// When each direct suspension happened, for the rate limit
-    pub direct_suspensions: Vec<DateTime<Utc>>,
+    /// When each factor's direct suspensions happened, for the rate limit
+    pub direct_suspensions: BTreeMap<FactorId, Vec<DateTime<Utc>>>,
     pub settings: Settings,
-    /// `SUSPEND_LIMIT`: direct suspensions per account per hour
+    /// `SUSPEND_LIMIT`: direct suspensions per suspending factor per hour
     pub suspend_limit: u32,
 }
 
@@ -604,7 +638,7 @@ impl AccountState {
             cases: BTreeMap::new(),
             freeze_links: BTreeMap::new(),
             last_freeze: BTreeMap::new(),
-            direct_suspensions: Vec::new(),
+            direct_suspensions: BTreeMap::new(),
             settings: Settings::default(),
             suspend_limit,
         }
@@ -669,22 +703,12 @@ impl AccountState {
         target: FactorId,
         suspender: Option<FactorId>,
     ) -> BTreeSet<FactorId> {
-        let mut out = BTreeSet::from([target]);
-        if suspender == Some(target) {
-            return out;
-        }
-        let mut seen = BTreeSet::new();
-        let mut todo: Vec<FactorId> = self.children(target).collect();
-        while let Some(next) = todo.pop() {
-            if Some(next) == suspender || !seen.insert(next) {
-                continue;
-            }
-            if self.effective(next) {
-                out.insert(next);
-            }
-            todo.extend(self.children(next));
-        }
-        out
+        provenance_cascade(
+            target,
+            suspender,
+            |id| self.children(id).collect(),
+            |id| self.effective(id),
+        )
     }
 
     /// `recent_desc(u, t)`: what `u` added, through anything, in the 7
