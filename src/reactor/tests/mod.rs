@@ -5,6 +5,7 @@
 //!
 //! - [`scheduling`] — round-major lockstep, the stall cap, `PauseTurn`
 //!   continuation, the turn-order invariant, and mixed-cohort routing.
+//! - [`cache_stability`] — whole sessions replayed through two cache models.
 //! - [`errors`] — one agent's failure doesn't abort the cohort, and per-item
 //!   retry classification.
 //! - [`mixed_models`] — one reactor, an endpoint offering several models:
@@ -40,6 +41,9 @@ pub(crate) use super::{
     StopLevel, load_agents,
 };
 
+// Its echo tool is a `#[tool]`-macro tool, gated as in [`tools`].
+#[cfg(feature = "schemars")]
+mod cache_stability;
 mod errors;
 mod mixed_models;
 mod notifications;
