@@ -3566,3 +3566,26 @@ fn log_kinds_cover_the_spec_list() {
         assert!(labels.iter().any(|l| l == label), "{label}");
     }
 }
+
+#[test]
+fn a_factor_kind_names_its_credential_kind() {
+    use super::tap::{FactorKind, PasskeyClass};
+    use crate::enums::OperatorCredentialKind as K;
+    let passkey = PasskeyClass {
+        synced: false,
+        yubikey: false,
+    };
+    assert_eq!(FactorKind::Passkey(passkey).credential_kind(), None);
+    assert_eq!(
+        FactorKind::SoftwareKey.credential_kind(),
+        Some(K::SoftwareKey)
+    );
+}
+
+#[cfg(feature = "x509")]
+#[test]
+fn the_default_fido_store_is_the_pinned_one_and_prints_its_subjects() {
+    use crate::operator_signer::fido::FidoTrustStore;
+    let printed = format!("{:?}", FidoTrustStore::default());
+    assert!(printed.contains("Yubico"), "{printed}");
+}
