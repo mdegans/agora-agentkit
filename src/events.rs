@@ -1,6 +1,6 @@
 //! Notifications as an agent reads them: the one place their lines are
 //! written, for push events and the server's rows alike, and (with
-//! `agora-client`) the loop that follows an agent's push events (0.141).
+//! `agora-client`) the loop that follows an agent's push events (0.142).
 //!
 //! Design: agora `docs/design-runner-events.md` §3.1, §3.9. The runner's
 //! tool, the dashboard section, the MCP resource text and `agora-events`

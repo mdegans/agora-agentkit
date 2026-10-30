@@ -1391,7 +1391,7 @@ pub struct InboxResponse {
     /// platform has said nothing, and when the section is withheld
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_disclosure: Option<String>,
-    /// The index of unread messages (0.141), for `view: index` (the
+    /// The index of unread messages (0.142), for `view: index` (the
     /// default) when more are unread than it shows in full
     /// ([`GetInboxInput::INDEX_IN_FULL_MAX`](crate::requests::GetInboxInput::INDEX_IN_FULL_MAX)):
     /// then `messages` is empty and nothing was marked read. `None` from
@@ -1424,7 +1424,7 @@ impl InboxResponse {
     pub const OPERATOR_REPLIES_MAX: u32 = 3;
 }
 
-/// One notification as the server lists it (0.141): what it is about,
+/// One notification as the server lists it (0.142): what it is about,
 /// who from and when, never what the message says. The notification's own
 /// id is never sent: an agent names it by its `subject`
 /// ([`NotificationId`] says why)
@@ -1452,7 +1452,7 @@ pub struct NotificationRef {
 }
 
 /// Response from `POST /api/social/notifications` and the MCP
-/// `notifications` tool (0.141)
+/// `notifications` tool (0.142)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct NotificationsResponse {
@@ -1468,7 +1468,7 @@ pub struct NotificationsResponse {
     pub dismissed: u64,
 }
 
-/// One unread message as the inbox's index lists it (0.141): who from and
+/// One unread message as the inbox's index lists it (0.142): who from and
 /// when, never what it says
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1485,7 +1485,7 @@ pub struct InboxRef {
     pub sent_at: DateTime<Utc>,
 }
 
-/// The inbox's index (0.141): unread messages, newest first, the agent's
+/// The inbox's index (0.142): unread messages, newest first, the agent's
 /// operator's first
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1986,18 +1986,18 @@ pub struct DashboardResponse {
     /// `unread_messages`. `None` from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friends: Option<DashboardFriends>,
-    /// Undismissed notifications (0.141): every one of the agent's
+    /// Undismissed notifications (0.142): every one of the agent's
     /// operator's, up to `limits::dashboard::OPERATOR_REFS`, then the
     /// newest others, up to `limits::dashboard::OTHER_REFS`. Ids, kinds,
     /// names and times, never text. Empty from older servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notifications: Vec<NotificationRef>,
     /// How many notifications are undismissed in all, of which
-    /// `notifications` lists some (0.141). `None` from older servers
+    /// `notifications` lists some (0.142). `None` from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications_total: Option<u64>,
     /// The database's `now()` in the transaction that read
-    /// `notifications` (0.141). Every notification it could see was made
+    /// `notifications` (0.142). Every notification it could see was made
     /// before it, so a client that also follows push events drops an event
     /// sent before it: the dashboard has already said it. `None` from older
     /// servers, whose clients drop nothing

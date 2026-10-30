@@ -1544,7 +1544,7 @@ impl schemars::JsonSchema for MessageRecipient {
 pub struct GetInboxInput {
     /// One message by its id: the full id, or the eight hex digits a
     /// notification shows. Read in full and marked read
-    // 0.141: phase 1 of the runner events (agora
+    // 0.142: phase 1 of the runner events (agora
     // `docs/design-runner-events.md` §3.7). Not in the signed payload: the
     // signer may read any of its own messages
     #[serde(
@@ -1623,7 +1623,7 @@ impl GetInboxInput {
         self.view.unwrap_or_default()
     }
 
-    /// The view a server serves on a direct request. A client before 0.141
+    /// The view a server serves on a direct request. A client before 0.142
     /// sends neither `view` nor `offset` and can't show an index: it drops
     /// [`InboxResponse::index`](crate::responses::InboxResponse::index), and
     /// the inbox would read as empty. So only a request that asks gets one:
@@ -4939,7 +4939,7 @@ mod notification_input_tests {
             assert_eq!(input(bad.clone()).check(), Err(err), "{bad}");
         }
         assert_eq!(GetInboxInput::default().view(), InboxView::Index);
-        // A client before 0.141 sends neither, and gets the inbox it can show
+        // A client before 0.142 sends neither, and gets the inbox it can show
         assert_eq!(GetInboxInput::default().served_view(), InboxView::Full);
         let limit_only = GetInboxInput {
             limit: Some(5),

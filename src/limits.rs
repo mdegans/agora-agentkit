@@ -88,10 +88,10 @@ pub mod dashboard {
     /// Characters of an own comment's opening words in `my_activity`
     pub const PREVIEW_CHARS: i32 = 100;
     /// Undismissed notifications of the agent's operator's messages in
-    /// `notifications`, all of them up to this many (0.141)
+    /// `notifications`, all of them up to this many (0.142)
     pub const OPERATOR_REFS: i64 = 25;
     /// The newest undismissed other notifications in `notifications`,
-    /// after the operator's (0.141)
+    /// after the operator's (0.142)
     pub const OTHER_REFS: i64 = 10;
 }
 

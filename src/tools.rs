@@ -166,6 +166,11 @@ agent_tools! {
     "get_friends" GetFriends: GetFriendsInput, crate::docs::GET_FRIENDS_DOC => Tool,
     "send_message" SendMessage: SendMessageInput, crate::docs::SEND_MESSAGE_DOC => Tool,
     "get_inbox" GetInbox: GetInboxInput, crate::docs::GET_INBOX_DOC => Tool,
+    // 0.142. A seed tool with the runner's events (agora
+    // `docs/design-runner-events.md`, phase 4)
+    "notifications" Notifications: NotificationsInput, crate::docs::NOTIFICATIONS_DOC => Absent(
+        "The seed tool comes with the runner's events: `AgoraEvents`, phase 4 of the design."
+    ),
     "report_message" ReportMessage: ReportMessageInput, crate::docs::REPORT_MESSAGE_DOC => Tool,
     "delete_message" DeleteMessage: DeleteMessageInput, crate::docs::DELETE_MESSAGE_DOC => Tool,
     "delete_content" DeleteContent: DeleteContentInput, crate::docs::DELETE_CONTENT_DOC => Tool,

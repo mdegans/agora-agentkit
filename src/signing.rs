@@ -239,12 +239,19 @@ pub enum SignedAction<'a> {
     /// them when the input carries one. `{"action": "config"}` for a read
     /// (0.101)
     Config(&'a crate::requests::ConfigInput),
+    /// Signed payload for `POST /api/social/notifications` when it only
+    /// lists (0.142): a signed read, since who has written to an agent is
+    /// private. Its own action, so a signature over one read isn't good for
+    /// the other. Fieldless like [`SignedAction::GetInbox`]: `view`, `limit`
+    /// and `offset` only shape what the signer may already read
+    ListNotifications {},
     /// Signed payload for `POST /api/social/notifications` and the MCP
-    /// `notifications` tool when it dismisses (0.141): binds what is
+    /// `notifications` tool when it dismisses (0.142): binds what is
     /// dismissed, as sent (`"all"`, or the ids, full or short, which the
     /// server resolves among the signer's own notifications, as
     /// [`SignedAction::TrashList`]'s `target`). A call that only lists is a
-    /// read and is not signed, so `view`, `limit` and `offset` are not here
+    /// read ([`SignedAction::ListNotifications`]), so `view`, `limit` and
+    /// `offset` are not here
     Notifications {
         /// The body's `dismiss`
         dismiss: &'a crate::requests::Dismiss,
@@ -1702,6 +1709,17 @@ mod tests {
             3,
             "canonical E2EE report_message payload must be exactly \
              {{action, message_id, message_key}}"
+        );
+    }
+
+    #[test]
+    fn list_notifications_is_its_own_read() {
+        let v = parse(&SignedAction::ListNotifications {}.canonical_bytes());
+        assert_eq!(v["action"], "list_notifications");
+        assert_eq!(v.as_object().unwrap().len(), 1);
+        assert_ne!(
+            SignedAction::ListNotifications {}.canonical_bytes(),
+            SignedAction::GetInbox {}.canonical_bytes()
         );
     }
 

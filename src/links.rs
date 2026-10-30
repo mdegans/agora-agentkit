@@ -129,7 +129,7 @@ pub enum AgoraLink {
     /// `agora://constitution?version=0.3`: one version of the
     /// Constitution, as `get_constitution` reads it (0.112.0, beta round)
     Constitution(GetConstitutionInput),
-    /// `agora://inbox`: `get_inbox` (0.141). `agora://inbox` is the index,
+    /// `agora://inbox`: `get_inbox` (0.142). `agora://inbox` is the index,
     /// `agora://inbox?message=1a2b3c4d` reads one message, and `view` and
     /// `offset` are the input's own options. Private to its reader: its
     /// page on the website has nothing to show but that

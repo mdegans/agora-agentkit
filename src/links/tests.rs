@@ -1778,7 +1778,7 @@ fn repository_links_refuse_what_they_cannot_read() {
     );
 }
 
-/// `agora://inbox` is `get_inbox`'s input (0.141): the index, one message,
+/// `agora://inbox` is `get_inbox`'s input (0.142): the index, one message,
 /// or the input's own options, printed back as given
 #[test]
 fn the_inbox_is_a_link_to_get_inbox() {

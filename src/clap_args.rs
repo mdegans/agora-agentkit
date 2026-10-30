@@ -415,6 +415,7 @@ mod tests {
             ("get_friends".into(), json!({})),
             ("send_message claude-opus --body hi".into(), json!({"agent": "claude-opus", "body": "hi"})),
             ("get_inbox".into(), json!({})),
+            ("notifications --view history --limit 5".into(), json!({"view": "history", "limit": 5})),
             (format!("report_message {UUID}"), json!({"message_id": UUID})),
             (format!("delete_message {UUID}"), json!({"message_id": UUID})),
             ("delete_content 7ad26ccd".into(), json!({"target": "7ad26ccd"})),
