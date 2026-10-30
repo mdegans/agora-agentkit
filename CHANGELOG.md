@@ -34,7 +34,10 @@ server.
 ## Unreleased (a minor; the number is being agreed)
 
 Operator security, build step 6 (agora `docs/design-operator-api.md`,
-*YubiKey passkeys: FIDO attestation*). Additive.
+*YubiKey passkeys: FIDO attestation*). **Not a patch:** it adds variants to
+exhaustive enums (`OperatorActionDetail`, `CancelReason`), so a `match` on
+them stops compiling, and an old `agora-operator log` fails on the **whole
+response** once the log holds a `passkey_add` entry.
 
 - **`operator_signer::fido`** (feature `x509`): `FidoTrustStore`, the pinned
   Yubico FIDO CAs (U2F Root CA 457200631, FIDO Attestation A 1, B 1, B2 1),
@@ -46,8 +49,7 @@ Operator security, build step 6 (agora `docs/design-operator-api.md`,
 - **Wire**: `OperatorActionDetail::PasskeyAdd`, whose `kind` is
   `credential_add`; `CancelReason::PasswordRetired`;
   `FirstPasskeyConfirmRequest` and its response (`POST
-  /api/operator/passkeys/{id}/confirm`). An old client reading a log with
-  `passkey_add` in it fails to parse that entry.
+  /api/operator/passkeys/{id}/confirm`).
 - `AttestationError` is `Clone`, `PartialEq` and `Eq`.
 
 ## 0.141.0

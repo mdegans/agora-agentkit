@@ -793,6 +793,9 @@ pub enum OperatorActionDetail {
         /// account's first passkey, before the cutover)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approved_by: Option<OperatorPasskeyId>,
+        /// The passkey it replaced, removed in the same transaction
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaced: Option<OperatorPasskeyId>,
     },
     CredentialRevoke {
         credential: CredentialRef,

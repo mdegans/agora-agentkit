@@ -744,6 +744,87 @@ mod tests {
     }
 
     #[test]
+    fn a_real_piv_chained_leaf_is_not_a_yubikey() {
+        // A real YubiKey's PIV slot certificate, with its real `f9`: Yubico
+        // made them, and neither reaches a FIDO anchor
+        let slot: &[u8] = include_bytes!(
+            "../../tests/fixtures/operator_signer/yubikey-5.7.4-slot-9c.der"
+        );
+        let f9: &[u8] = include_bytes!(
+            "../../tests/fixtures/operator_signer/yubikey-5.7.4-f9.der"
+        );
+        let store = FidoTrustStore::yubico();
+        let data = signed(&AAGUID);
+        let root = MockRootCa::generate();
+        let (_, signature) =
+            attest(&root, FidoLeafOptions::good(AAGUID), &data);
+        assert_eq!(
+            store.verify(&signature, &[slot], &data),
+            Err(FidoAttestationError::UntrustedRoot)
+        );
+        assert_eq!(
+            store.verify(&signature, &[f9], &data),
+            Err(FidoAttestationError::UntrustedRoot)
+        );
+        assert_eq!(
+            store.verify(&signature, &[slot, f9], &data),
+            Err(FidoAttestationError::ForeignCertificate)
+        );
+    }
+
+    #[test]
+    fn a_self_signed_leaf_is_not_a_yubikey() {
+        let root = MockRootCa::generate();
+        let store = FidoTrustStore::mock(&root);
+        let data = signed(&AAGUID);
+        let (leaf, signature) = attest(
+            &root,
+            FidoLeafOptions {
+                self_signed: true,
+                ..FidoLeafOptions::good(AAGUID)
+            },
+            &data,
+        );
+        assert_eq!(
+            store.verify(&signature, &[leaf.as_der()], &data),
+            Err(FidoAttestationError::UntrustedRoot)
+        );
+    }
+
+    #[test]
+    fn a_missing_subject_field_or_old_version_is_refused() {
+        let root = MockRootCa::generate();
+        let store = FidoTrustStore::mock(&root);
+        let data = signed(&AAGUID);
+        let check = |options| {
+            let (leaf, signature) = attest(&root, options, &data);
+            store.verify(&signature, &[leaf.as_der()], &data)
+        };
+        let good = FidoLeafOptions::good(AAGUID);
+        assert_eq!(
+            check(FidoLeafOptions {
+                subject: "C=SE,OU=Authenticator Attestation,CN=x",
+                ..good.clone()
+            }),
+            Err(FidoAttestationError::Subject { field: "O" })
+        );
+        assert_eq!(
+            check(FidoLeafOptions {
+                subject: "C=SE,O=Yubico AB,OU=Authenticator Attestation",
+                ..good.clone()
+            }),
+            Err(FidoAttestationError::Subject { field: "CN" })
+        );
+        assert_eq!(
+            check(FidoLeafOptions {
+                version_1: true,
+                ..good
+            }),
+            Err(FidoAttestationError::NotVersion3)
+        );
+    }
+
+    #[test]
     fn x5c_is_a_leaf_and_at_most_its_anchor() {
         let root = MockRootCa::generate();
         let store = FidoTrustStore::mock(&root);

@@ -262,6 +262,10 @@ pub struct FidoLeafOptions {
     pub ca: bool,
     /// No `basicConstraints` at all
     pub omit_basic_constraints: bool,
+    /// Signed by its own key, with its own name as issuer
+    pub self_signed: bool,
+    /// An X.509 v1 certificate: no version field, no extensions
+    pub version_1: bool,
 }
 
 impl FidoLeafOptions {
@@ -273,6 +277,8 @@ impl FidoLeafOptions {
             subject: "C=SE,O=Agora MOCK,OU=Authenticator Attestation,CN=Mock FIDO EE",
             ca: false,
             omit_basic_constraints: false,
+            self_signed: false,
+            version_1: false,
         }
     }
 }
@@ -326,14 +332,26 @@ impl MockRootCa {
                 OID_BASIC_CONSTRAINTS,
             ));
         }
-        let certificate = issue(
-            3,
-            &self.name,
-            &Name::from_str(options.subject).expect("a valid name"),
-            p256_spki(&key),
-            extensions,
-            &self.key,
-        );
+        let subject = Name::from_str(options.subject).expect("a valid name");
+        let own_key = IssuerKey::EcdsaP256(key.clone());
+        let (issuer, issuer_key) = if options.self_signed {
+            (&subject, &own_key)
+        } else {
+            (&self.name, &self.key)
+        };
+        let certificate = if options.version_1 {
+            let algorithm = issuer_key.algorithm();
+            let tbs = tbs_certificate_v1(
+                &algorithm,
+                issuer,
+                &subject,
+                p256_spki(&key),
+            );
+            let signature = issuer_key.sign(&tbs);
+            assemble(tbs, &algorithm, &signature)
+        } else {
+            issue(3, issuer, &subject, p256_spki(&key), extensions, issuer_key)
+        };
         MockFidoAttestation { key, certificate }
     }
 }
@@ -955,6 +973,37 @@ fn tbs_certificate(
     if !extensions.is_empty() {
         tbs.extend(tlv(0xa3, &der(&extensions))); // [3] EXPLICIT
     }
+    let tbs = tlv(0x30, &tbs);
+    TbsCertificate::from_der(&tbs).expect("a well-formed TBS certificate");
+    tbs
+}
+
+/// A v1 TBS certificate's DER: no version field, no extensions.
+fn tbs_certificate_v1(
+    algorithm: &AlgorithmIdentifierOwned,
+    issuer: &Name,
+    subject: &Name,
+    subject_public_key_info: SubjectPublicKeyInfoOwned,
+) -> Vec<u8> {
+    let validity = Validity::<x509_cert::certificate::Rfc5280>::new(
+        Time::UtcTime(
+            UtcTime::from_unix_duration(Duration::from_secs(1_767_225_600))
+                .expect("in UTCTime's range"),
+        ),
+        Time::GeneralTime(GeneralizedTime::from_date_time(
+            x509_cert::der::DateTime::new(9999, 12, 31, 23, 59, 59)
+                .expect("a valid date"),
+        )),
+    );
+    let mut tbs = der(&SerialNumber::<x509_cert::certificate::Rfc5280>::new(
+        &4u64.to_be_bytes(),
+    )
+    .expect("a valid serial"));
+    tbs.extend(der(algorithm));
+    tbs.extend(der(issuer));
+    tbs.extend(der(&validity));
+    tbs.extend(der(subject));
+    tbs.extend(der(&subject_public_key_info));
     let tbs = tlv(0x30, &tbs);
     TbsCertificate::from_der(&tbs).expect("a well-formed TBS certificate");
     tbs
