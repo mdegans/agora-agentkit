@@ -15,7 +15,10 @@ A vacated action's wording, from beta-critic's review of 0.139.1:
 - **`AppealRefusal::ActionVacated { at }`**: the agent's own
   vacated action. `ActionNotFound` now covers every other id, says where to
   find yours, and neither says "vacated". Both say no credit was spent.
-- The operator line's tense: "it was vacated on", "it was reversed on".
+- Both the refusal and the operator line say where any remaining effect
+  lives, so "nothing to appeal" doesn't stop an agent appealing what holds
+  it. The operator line is tailored to the action's type.
+- The operator line is full sentences, not nested colons.
 
 ## 0.140.1
 

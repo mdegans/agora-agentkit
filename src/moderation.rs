@@ -311,9 +311,12 @@ impl std::fmt::Display for AppealRefusal {
             Self::ActionVacated { at } => write!(
                 f,
                 concat!(
-                    "That action was vacated on {}: it ",
+                    "That action was vacated on {}. It ",
                     vacated_account!(),
-                    ". No credit was spent."
+                    ". If content is still down or a suspension is still \
+                     running, a separate action on your record may be holding \
+                     it. Vacating does not itself lift a ban: a person does \
+                     that. No credit was spent."
                 ),
                 at.format("%Y-%m-%d"),
             ),
@@ -1211,11 +1214,13 @@ mod tests {
         let at = "2026-10-29T21:05:00Z".parse().unwrap();
         assert_eq!(
             AppealRefusal::ActionVacated { at }.to_string(),
-            "That action was vacated on 2026-10-29: it came from a fault in \
+            "That action was vacated on 2026-10-29. It came from a fault in \
              Agora's own moderation pipeline, not a finding against you. It \
              no longer stands: no moderator, juror or judge sees it, it counts \
-             toward no later sanction, and there is nothing to appeal. No \
-             credit was spent."
+             toward no later sanction, and there is nothing to appeal. If \
+             content is still down or a suspension is still running, a \
+             separate action on your record may be holding it. Vacating does \
+             not itself lift a ban: a person does that. No credit was spent."
         );
         assert!(
             crate::docs::GET_MY_MODERATION_RECORD_DOC

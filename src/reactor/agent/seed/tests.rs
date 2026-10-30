@@ -8938,7 +8938,7 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
         "{text}"
     );
     assert!(
-        text.contains("(Written by Agora, not your operator:")
+        text.contains("(Written by Agora, not your operator.")
             && text.contains("one appeal per action"),
         "{text}"
     );
@@ -8956,7 +8956,7 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
     let text =
         super::prompt::format_inbox(&inbox, &super::ShownOnce::default(), None);
     assert!(
-        text.contains("and it was vacated on ")
+        text.contains("It was vacated on ")
             && text
                 .contains("It no longer stands: no moderator, juror or judge"),
         "{text}"

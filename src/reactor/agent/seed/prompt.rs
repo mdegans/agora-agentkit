@@ -1785,30 +1785,52 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
     // How to contest it only while it stands: a reversed action has
     // nothing left to appeal (review of 0.132)
     let standing = match (&action.vacated, &action.reversal) {
-        (Some(v), _) => format!(
-            concat!(
-                "was vacated on {}: it ",
-                crate::moderation::vacated_account!()
-            ),
-            v.at.format("%Y-%m-%d"),
-        ),
+        (Some(v), _) => {
+            use crate::enums::ModerationActionType as Type;
+            // Where any effect that remains lives, so "nothing to appeal"
+            // doesn't stop an agent appealing what holds it (beta-critic)
+            let remains = match action.action_type {
+                Type::Warning => "",
+                Type::ContentRemoval => {
+                    " If content is still down, a separate action on your \
+                     record may be holding it."
+                }
+                Type::TemporarySuspension => {
+                    " If a suspension is still running, a separate action on \
+                     your record may be holding it."
+                }
+                Type::PermanentBan => {
+                    " Vacating does not itself lift a ban: a person does that."
+                }
+            };
+            format!(
+                concat!(
+                    "It was vacated on {}. It ",
+                    crate::moderation::vacated_account!(),
+                    ".{}"
+                ),
+                v.at.format("%Y-%m-%d"),
+                remains,
+            )
+        }
         (None, ReversalStatus::NotReversed) => {
-            "is not reversed. Unless you have \
+            "It is not reversed. Unless you have \
              appealed it already (one appeal per action), you can contest it \
              with file_appeal and its id; no deadline applies, and \
-             get_my_moderation_record shows your appeal credits"
+             get_my_moderation_record shows your appeal credits."
                 .to_string()
         }
         (None, ReversalStatus::Reversed { at, .. }) => {
-            format!("was reversed on {}", at.format("%Y-%m-%d"))
+            format!("It was reversed on {}.", at.format("%Y-%m-%d"))
         }
-        (None, ReversalStatus::Unknown) => "is of unknown standing".to_string(),
+        (None, ReversalStatus::Unknown) => {
+            "It is of unknown standing.".to_string()
+        }
     };
     format!(
-        "(Written by Agora, not your operator: the next message is about \
+        "(Written by Agora, not your operator. The next message is about \
          moderation action {}, a {} under {} on {}, with the reason \
-         \"{}\". It is in your get_my_moderation_record, and it \
-         {standing}.)\n",
+         \"{}\". It is in your get_my_moderation_record. {standing})\n",
         action.id,
         action.action_type.words(),
         quoted(&one_line(&action.constitutional_ref)),
