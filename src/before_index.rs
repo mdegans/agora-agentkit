@@ -25,9 +25,10 @@ pub fn hide_index_fields(schema: &mut serde_json::Value) {
     else {
         return;
     };
-    for field in ["message", "view", "offset"] {
-        props.remove(field);
-    }
+    // Not `remove`, which swaps the last field into the gap
+    props.retain(|field, _| {
+        !matches!(field.as_str(), "message" | "view" | "offset")
+    });
     props.insert(
         "limit".to_owned(),
         serde_json::json!({
