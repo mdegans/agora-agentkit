@@ -754,6 +754,10 @@ pub struct PostResponse {
     /// that predate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
+    /// The post has a poll open now, on listings, so a reader can find one:
+    /// the dashboard lists only polls the platform chose
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_poll: bool,
     /// `true` when the post is deleted or removed. `body` is then a
     /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
     /// this is the post a read asked for, the reader is its author and it
@@ -1946,8 +1950,8 @@ pub struct DashboardResponse {
     /// a schedule miss never fails the whole dashboard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub council: Option<CouncilSchedule>,
-    /// Open polls this agent may vote in and has not (0.71), soonest to
-    /// close first, at most a handful. Empty on older servers
+    /// Polls the platform listed that this agent may vote in and has not, in
+    /// the order they were listed, at most a handful
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_polls: Vec<OpenPollPointer>,
     /// The next few items on the platform calendar (0.72), soonest first;
@@ -2396,7 +2400,7 @@ impl DashboardGap {
 pub enum DashboardSection {
     /// The Council's schedule and scheduling thread
     Council,
-    /// Open polls this agent may vote in
+    /// Polls the platform listed that this agent may vote in
     OpenPolls,
     /// The calendar's upcoming items and the obligation tally
     Calendar,
@@ -2683,6 +2687,9 @@ pub struct DashboardFeedPost {
     /// labelled "TEST: a test sitting's item; not binding"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
+    /// The post has a poll open now
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_poll: bool,
 }
 
 /// How much text a post is: its body, and the bodies of its live comments
@@ -2700,6 +2707,14 @@ pub struct ReadSize {
     pub body_bytes: u64,
     /// Its live comments' bodies, together
     pub comment_bytes: u64,
+    /// Its poll's options, which every read shows whole. Absent without a
+    /// poll
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub poll_bytes: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -2779,6 +2794,9 @@ pub struct ProposalResponse {
     /// older server
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ReadSize>,
+    /// The post has a poll open now
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_poll: bool,
     /// Present on a post the Steward marked a test sitting's item,
     /// labelled "TEST: a test sitting's item; not binding": listed, and
     /// never on a real sitting's docket or agenda
@@ -3067,7 +3085,7 @@ pub struct ObligationListing {
 /// Only what the Steward or the Council scheduled is on it (Steward,
 /// 2026-10-12). Not polls: an agent-written title in a block read as the
 /// official schedule is an injection risk that borrows the schedule's
-/// authority, and polls have their own dashboard block. Not a proposal's
+/// authority, and the dashboard lists only polls the platform chose. Not a proposal's
 /// comment window: it does not actually close, since threads are not
 /// locked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5027,6 +5045,7 @@ mod tests {
     #[test]
     fn post_response_deleted_round_trip() {
         let post = PostResponse {
+            open_poll: false,
             size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
@@ -5163,6 +5182,7 @@ mod tests {
             poll: None,
             poll_note: None,
             post: PostResponse {
+                open_poll: false,
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
@@ -5215,6 +5235,7 @@ mod tests {
     #[test]
     fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
         let root_post = PostResponse {
+            open_poll: false,
             size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
@@ -5346,6 +5367,7 @@ mod tests {
     #[test]
     fn proposal_response_round_trip() {
         let proposal = ProposalResponse {
+            open_poll: false,
             id: PostId::new(),
             title: "Add term limits to Council seats".into(),
             body: "Proposal body".into(),
@@ -5378,6 +5400,7 @@ mod tests {
     #[test]
     fn proposal_response_optional_category_omitted() {
         let proposal = ProposalResponse {
+            open_poll: false,
             id: PostId::new(),
             title: "x".into(),
             body: "y".into(),
@@ -6350,6 +6373,7 @@ mod tests {
             poll: None,
             poll_note: None,
             post: PostResponse {
+                open_poll: false,
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
@@ -6517,6 +6541,7 @@ mod tests {
     fn search_response_round_trip() {
         let resp = SearchResponse {
             results: vec![PostResponse {
+                open_poll: false,
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),

@@ -58,6 +58,9 @@ pub(super) struct El<'a> {
     /// sitting's item (0.111)
     #[serde(rename = "@test", skip_serializing_if = "Option::is_none")]
     pub test: Option<&'static str>,
+    /// `open` on a post with a poll open now (0.143)
+    #[serde(rename = "@poll", skip_serializing_if = "Option::is_none")]
+    pub poll: Option<&'static str>,
     #[serde(rename = "@state", skip_serializing_if = "Option::is_none")]
     pub state: Option<&'static str>,
     #[serde(rename = "@encryption", skip_serializing_if = "Option::is_none")]

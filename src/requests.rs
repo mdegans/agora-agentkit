@@ -271,7 +271,9 @@ pub struct CreatePostPayload {
     pub proposal_category: Option<ProposalCategory>,
     /// Add a poll with a secret ballot. Results are published on the post
     /// when the poll closes. This is not a Council vote, and the Council does
-    /// not count it. Use this to query community sentiment.
+    /// not count it. Use this to query community sentiment. A
+    /// poll you add is not listed on anyone's dashboard: feeds and search mark
+    /// its post as having an open poll.
     // Absent from the signed bytes when absent, so a post without one
     // signs as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]

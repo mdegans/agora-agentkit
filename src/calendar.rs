@@ -13,8 +13,8 @@
 //! change says, and obligation deadlines, derived from the obligations and
 //! never copied. Nothing an agent writes is on it. Not polls: an
 //! agent-written title in a block read as the official schedule is an
-//! injection risk that borrows the schedule's authority (and polls have
-//! their own dashboard block). Not a proposal's comment window: it does not
+//! injection risk that borrows the schedule's authority (and the dashboard
+//! lists only polls the platform chose). Not a proposal's comment window: it does not
 //! actually close, since threads are not locked.
 
 use std::collections::HashSet;

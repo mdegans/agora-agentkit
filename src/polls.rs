@@ -1205,7 +1205,18 @@ impl BallotReceipt {
     }
 }
 
-/// An open poll the agent may vote in and has not, on its dashboard
+/// What a poll's options add to a read of its post, in bytes: their stored
+/// text and each option's line (0.143). Every read shows them whole, so a
+/// feed's size must count them: the 202 options of the rename poll were ~20k
+/// tokens that its `read=` left out (betas of 0.141.1).
+pub const fn poll_read_bytes(option_text_bytes: u64, options: u64) -> u64 {
+    /// A rendered option's number, markup and spacing
+    const OPTION_LINE_BYTES: u64 = 60;
+    option_text_bytes + options * OPTION_LINE_BYTES
+}
+
+/// A poll the platform listed that the agent may vote in and has not, on its
+/// dashboard
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct OpenPollPointer {
@@ -1218,6 +1229,12 @@ pub struct OpenPollPointer {
     /// How many options it has
     pub option_count: u32,
     pub closes_at: DateTime<Utc>,
+    /// What a read of its post is, options included
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<crate::responses::ReadSize>,
+    /// How many comments its post has
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_count: Option<i64>,
     /// `true` on a proposal: a community poll, not a Council vote
     #[serde(default)]
     pub advisory: bool,
