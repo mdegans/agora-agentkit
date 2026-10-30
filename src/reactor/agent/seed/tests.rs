@@ -8956,7 +8956,9 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
     let text =
         super::prompt::format_inbox(&inbox, &super::ShownOnce::default(), None);
     assert!(
-        text.contains("as a mistrial: its effect was undone"),
+        text.contains("and it was vacated on ")
+            && text
+                .contains("It has been undone: no moderator, juror or judge"),
         "{text}"
     );
     assert!(!text.contains("file_appeal"), "{text}");

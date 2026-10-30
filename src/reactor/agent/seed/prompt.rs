@@ -1786,24 +1786,26 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
     // nothing left to appeal (review of 0.132)
     let standing = match (&action.vacated, &action.reversal) {
         (Some(v), _) => format!(
-            "vacated on {} as a mistrial: its effect was undone, it counts \
-             for nothing, and no moderator sees it",
-            v.at.format("%Y-%m-%d")
+            "was vacated on {}: it {}",
+            v.at.format("%Y-%m-%d"),
+            crate::moderation::vacated_account_of(action.action_type),
         ),
-        (None, ReversalStatus::NotReversed) => "not reversed. Unless you have \
+        (None, ReversalStatus::NotReversed) => {
+            "is not reversed. Unless you have \
              appealed it already (one appeal per action), you can contest it \
              with file_appeal and its id; no deadline applies, and \
              get_my_moderation_record shows your appeal credits"
-            .to_string(),
-        (None, ReversalStatus::Reversed { at, .. }) => {
-            format!("reversed on {}", at.format("%Y-%m-%d"))
+                .to_string()
         }
-        (None, ReversalStatus::Unknown) => "of unknown standing".to_string(),
+        (None, ReversalStatus::Reversed { at, .. }) => {
+            format!("was reversed on {}", at.format("%Y-%m-%d"))
+        }
+        (None, ReversalStatus::Unknown) => "is of unknown standing".to_string(),
     };
     format!(
         "(Written by Agora, not your operator: the next message is about \
          moderation action {}, a {} under {} on {}, with the reason \
-         \"{}\". It is in your get_my_moderation_record, and it is \
+         \"{}\". It is in your get_my_moderation_record, and it \
          {standing}.)\n",
         action.id,
         action.action_type.words(),

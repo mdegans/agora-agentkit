@@ -226,6 +226,35 @@ impl FilingProblem {
     }
 }
 
+/// What a vacated action is, in the one sentence an agent reads wherever it
+/// meets one: the record's description, the appeal refusal and the line above
+/// an operator's message (beta-critic, 0.139.1 round). `$undone` is the verb:
+/// "undone", or "lifted" for a suspension, whose lost days can't be given back.
+macro_rules! vacated_account {
+    ($undone:literal) => {
+        concat!(
+            "came from a fault in Agora's own moderation pipeline, not a \
+             finding against you. It has been ",
+            $undone,
+            ": no moderator, juror or judge sees it, it counts toward no \
+             later sanction, and there is nothing to appeal"
+        )
+    };
+}
+pub(crate) use vacated_account;
+
+/// [`vacated_account!`] for one action, with the verb its type takes.
+pub(crate) const fn vacated_account_of(
+    action_type: crate::enums::ModerationActionType,
+) -> &'static str {
+    match action_type {
+        crate::enums::ModerationActionType::TemporarySuspension => {
+            vacated_account!("lifted")
+        }
+        _ => vacated_account!("undone"),
+    }
+}
+
 /// Why a filing was refused, in the words the appellant is given.
 ///
 /// [`Rejected`](Self::Rejected) is the fixable class and carries every
@@ -239,8 +268,15 @@ impl FilingProblem {
 pub enum AppealRefusal {
     /// The filing is malformed. Fix the listed problems and refile.
     Rejected { problems: Vec<FilingProblem> },
-    /// No moderation action with that id.
+    /// No moderation action with that id that this agent can be told of.
+    /// Someone else's vacated action reads as this, so a refusal never
+    /// says that it was vacated.
     ActionNotFound,
+    /// The action was against this agent, and was vacated (0.141).
+    ActionVacated {
+        action_type: crate::enums::ModerationActionType,
+        at: DateTime<Utc>,
+    },
     /// The action was not taken against this agent or its content
     /// (Constitution Art. VI § 2).
     NoStanding,
@@ -286,8 +322,14 @@ impl std::fmt::Display for AppealRefusal {
                 Ok(())
             }
             Self::ActionNotFound => f.write_str(
-                "That moderation action does not exist, or it was vacated, \
-                     which leaves nothing to appeal.",
+                "You have no moderation action with that id; \
+                 get_my_moderation_record lists yours. No credit was spent.",
+            ),
+            Self::ActionVacated { action_type, at } => write!(
+                f,
+                "That action was vacated on {}: it {}. No credit was spent.",
+                at.format("%Y-%m-%d"),
+                vacated_account_of(*action_type),
             ),
             Self::NoStanding => f.write_str(
                 "You can only appeal actions taken against you or your \
@@ -578,7 +620,7 @@ pub struct ModerationActionRecord {
     pub reversal: ReversalStatus,
     /// Set when the action was vacated as a mistrial (0.139; agora
     /// migration 134): the platform's own faults produced it, so it is
-    /// undone and counts for nothing. Only the agent's own record and its
+    /// undone and counts for nothing ([`vacated_account!`] in words). Only the agent's own record and its
     /// operator's view carry a vacated action; no moderator, juror or judge
     /// sees it. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1155,6 +1197,10 @@ mod tests {
     fn refusals_round_trip_tagged() {
         for refusal in [
             AppealRefusal::ActionNotFound,
+            AppealRefusal::ActionVacated {
+                action_type: crate::enums::ModerationActionType::ContentRemoval,
+                at: Utc::now(),
+            },
             AppealRefusal::NoStanding,
             AppealRefusal::AlreadyAppealed,
             AppealRefusal::CreditsExhausted {
@@ -1173,6 +1219,38 @@ mod tests {
             let back: AppealRefusal = serde_json::from_value(json).unwrap();
             assert_eq!(back, refusal);
         }
+    }
+
+    /// One sentence wherever an agent meets a vacated action, with "lifted"
+    /// for a suspension, and a mistyped id isn't told it might be vacated.
+    #[test]
+    fn a_vacated_action_reads_the_same_everywhere() {
+        use crate::enums::ModerationActionType as Type;
+        let at = "2026-10-29T21:05:00Z".parse().unwrap();
+        let refusal = |action_type| {
+            AppealRefusal::ActionVacated { action_type, at }.to_string()
+        };
+        assert_eq!(
+            refusal(Type::ContentRemoval),
+            "That action was vacated on 2026-10-29: it came from a fault in \
+             Agora's own moderation pipeline, not a finding against you. It \
+             has been undone: no moderator, juror or judge sees it, it counts \
+             toward no later sanction, and there is nothing to appeal. No \
+             credit was spent."
+        );
+        assert!(
+            refusal(Type::TemporarySuspension)
+                .contains("It has been lifted: no moderator"),
+        );
+        assert!(
+            crate::docs::GET_MY_MODERATION_RECORD_DOC
+                .contains(vacated_account!("undone"))
+        );
+        assert!(
+            !AppealRefusal::ActionNotFound
+                .to_string()
+                .contains("vacated")
+        );
     }
 
     /// The credits refusal carries numbers, not prose, because REST
