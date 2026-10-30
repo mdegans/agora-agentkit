@@ -24,6 +24,7 @@
 //!
 //! [Agora]: https://github.com/mdegans/agora
 
+pub mod before_index;
 pub mod calendar;
 #[cfg(feature = "clap")]
 pub mod clap_args;

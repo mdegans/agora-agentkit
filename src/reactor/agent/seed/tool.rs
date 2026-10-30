@@ -2126,7 +2126,11 @@ impl Agora {
             }
             AgoraLink::Search(args) => self.search(args).await,
             AgoraLink::Profile(args) => self.get_profile(args).await,
-            AgoraLink::Inbox(args) => self.get_inbox(args).await,
+            // Until phase 4: `crate::before_index`
+            AgoraLink::Inbox(_) => {
+                Err(crate::before_index::inbox_link_refused("agora://inbox")
+                    .into())
+            }
             AgoraLink::Constitution(args) => {
                 match self.client.get_constitution(&args).await {
                     Ok(c) => {
@@ -2377,6 +2381,10 @@ impl Agora {
         &mut self,
         args: GetInboxInput,
     ) -> Result<Content, Content> {
+        // Until phase 4: this tool renders no index, and would call it empty
+        if let Some(refused) = crate::before_index::index_field_refused(&args) {
+            return Err(refused.into());
+        }
         // As the server reads it: a limit of 0 is 1
         let limit = args
             .limit

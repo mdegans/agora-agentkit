@@ -4542,7 +4542,7 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
             _ => None,
         })
         .expect("get_inbox is installed");
-    assert_eq!(inbox.description, crate::docs::GET_INBOX_DOC);
+    assert_eq!(inbox.description, crate::before_index::GET_INBOX_DOC);
     assert_eq!(tool.schema["required"], serde_json::json!(["body"]));
 
     agent
@@ -4944,7 +4944,8 @@ async fn seed_tool_definitions_carry_no_developer_text() {
         );
         let registered = crate::tools::agent_tool(&c.name)
             .unwrap_or_else(|| panic!("{} is not in the registry", c.name));
-        if c.name != "update_profile" {
+        // Until phase 4: `crate::before_index`
+        if c.name != "update_profile" && c.name != "get_inbox" {
             assert!(
                 c.description.starts_with(registered.description),
                 "{}: {}",
@@ -5915,12 +5916,12 @@ async fn a_link_says_what_it_read() {
         agent.handle(link("agora://nowhere/x")).await.unwrap();
     }
     let rendered = transcript(&agent);
-    assert_eq!(
-        rendered.matches(crate::links::FORM).count(),
-        1,
-        "{rendered}"
-    );
-    assert!(rendered.contains(crate::links::FORM_AGAIN), "{rendered}");
+    // Until phase 4 they don't name `inbox`: `crate::before_index`
+    let form = crate::before_index::without_inbox_kind(crate::links::FORM);
+    let again =
+        crate::before_index::without_inbox_kind(crate::links::FORM_AGAIN);
+    assert_eq!(rendered.matches(&form).count(), 1, "{rendered}");
+    assert!(rendered.contains(&again), "{rendered}");
     agent.handle(link("agora://community/tech")).await.unwrap();
     assert!(
         transcript(&agent).contains(
@@ -9525,4 +9526,80 @@ async fn a_stop_during_a_paused_turn_abandons_it() {
             .is_some_and(|m| m.role == Role::User)
     );
     assert!(transcript(&agent).contains(super::RUNNER_STOPPING));
+}
+
+/// Until phase 4 a seed agent sees today's `get_inbox`: no word of the index,
+/// no request for one, and a link that isn't offered yet is refused. Without
+/// this, `view: index` with more than five unread reads as an empty inbox
+#[tokio::test]
+async fn the_inbox_index_isnt_offered_before_it_renders() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let inbox = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/messages/inbox");
+        then.status(200).json_body(serde_json::json!({
+            "messages": [],
+            "unread": 0,
+        }));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    agent.on_init().await.unwrap();
+    let tool = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "get_inbox" =>
+            {
+                Some(c.clone())
+            }
+            _ => None,
+        })
+        .expect("get_inbox is installed");
+    assert_eq!(tool.description, crate::before_index::GET_INBOX_DOC);
+    let props = tool.schema["properties"].as_object().unwrap();
+    for field in ["message", "view", "offset"] {
+        assert!(!props.contains_key(field), "{field} is offered");
+    }
+    assert!(props.contains_key("limit"));
+
+    for input in [
+        serde_json::json!({"view": "index"}),
+        serde_json::json!({"offset": 25}),
+        serde_json::json!({"message": "1a2b3c4d"}),
+    ] {
+        agent
+            .handle(tool_use_message("get_inbox", input))
+            .await
+            .unwrap();
+    }
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://inbox"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inbox.calls(), 0, "nothing refused reaches the server");
+    let text = transcript(&agent);
+    for field in ["view", "offset", "message"] {
+        assert!(text.contains(&format!("unknown field `{field}`")), "{text}");
+    }
+    assert!(text.contains("\"inbox\" is not a kind of link"), "{text}");
+    assert!(!text.contains("git and inbox"), "{text}");
+
+    // A plain read is as it was: no `view` on the wire
+    agent
+        .handle(tool_use_message("get_inbox", serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(inbox.calls(), 1);
 }

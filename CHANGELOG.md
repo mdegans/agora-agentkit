@@ -18,6 +18,9 @@ server has them.
   `GetInboxInput::served_view`: a direct request that asks for neither `view`
   nor `offset` still gets the full inbox, since an older client can't show an
   index.
+- **`before_index`**: the seed tool keeps today's `get_inbox` description and
+  fields, and refuses `agora://inbox`, until phase 4; a gated MCP session shows
+  the same. Agents see no change from this release.
 - **`events`**: `NoticeItem::line`, `Notices::render`, `Seen`, `follow`.
 - **`AgoraLink::Inbox`**: `agora://inbox` is `get_inbox`'s input.
 - **Reactor**: pushes seat before every re-attempt, with the tail's cache

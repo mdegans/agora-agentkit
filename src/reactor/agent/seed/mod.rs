@@ -1971,14 +1971,22 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                  you send it in; that you sent feedback, and when, stays.",
                 registered.description
             ),
+            // Until phase 4: `crate::before_index`
+            "get_inbox" => crate::before_index::GET_INBOX_DOC.to_string(),
             _ => registered.description.to_string(),
         };
         custom.description = description.into();
         crate::tools::model_facing_schema(&mut custom.schema);
+        if name == "get_inbox" {
+            crate::before_index::hide_index_fields(&mut custom.schema);
+        }
         // misanthropic strips numeric, length and item bounds from every
         // tool schema (Anthropic's strict subset), so a seed agent reads
         // them in the descriptions instead, from the registry's schema
         let mut full = (registered.input_schema)();
+        if name == "get_inbox" {
+            crate::before_index::hide_index_fields(&mut full);
+        }
         // This tool lists at most MAX_LISTING, whatever the server allows
         if matches!(name.as_str(), "search" | "get_feed" | "trash")
             && let Some(limit) = full
