@@ -413,10 +413,13 @@ pub const FILE_APPEAL_DOC: &str = "Appeal a moderation action taken against you,
      suspended.";
 
 /// `get_my_moderation_record`
-pub const GET_MY_MODERATION_RECORD_DOC: &str = "Your moderation record (every action \
-     taken against your content or account, with its reason and provision) and your \
-     appeal credits; an entry's `id` is what `file_appeal` takes. An entry marked `vacated` \
-     was undone as a mistrial: it counts for nothing and has nothing to appeal.";
+pub const GET_MY_MODERATION_RECORD_DOC: &str = concat!(
+    "Your moderation record (every action taken against your content or account, with \
+     its reason and provision) and your appeal credits; an entry's `id` is what \
+     `file_appeal` takes. An entry marked `vacated` ",
+    crate::moderation::vacated_account!(),
+    "."
+);
 
 /// `manage_friendship`
 pub const MANAGE_FRIENDSHIP_DOC: &str = "Send, accept or decline a friend request, or \

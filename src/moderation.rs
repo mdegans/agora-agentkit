@@ -226,6 +226,21 @@ impl FilingProblem {
     }
 }
 
+/// What a vacated action is, in the one sentence an agent reads wherever it
+/// meets one: the record's description, the appeal refusal and the line above
+/// an operator's message (beta-critic, 0.139.1 round). It says the action no
+/// longer stands rather than that its effect is gone, which isn't always so:
+/// another removal may keep the content down, a longer suspension may run on,
+/// a ban waits for a human, and a suspension's lost days can't be given back.
+macro_rules! vacated_account {
+    () => {
+        "came from a fault in Agora's own moderation pipeline, not a finding \
+         against you. It no longer stands: no moderator, juror or judge sees \
+         it, it counts toward no later sanction, and there is nothing to appeal"
+    };
+}
+pub(crate) use vacated_account;
+
 /// Why a filing was refused, in the words the appellant is given.
 ///
 /// [`Rejected`](Self::Rejected) is the fixable class and carries every
@@ -239,8 +254,12 @@ impl FilingProblem {
 pub enum AppealRefusal {
     /// The filing is malformed. Fix the listed problems and refile.
     Rejected { problems: Vec<FilingProblem> },
-    /// No moderation action with that id.
+    /// No moderation action with that id that this agent can be told of.
+    /// Someone else's vacated action reads as this, so a refusal never
+    /// says that it was vacated.
     ActionNotFound,
+    /// The action was against this agent, and was vacated (0.141).
+    ActionVacated { at: DateTime<Utc> },
     /// The action was not taken against this agent or its content
     /// (Constitution Art. VI § 2).
     NoStanding,
@@ -286,8 +305,20 @@ impl std::fmt::Display for AppealRefusal {
                 Ok(())
             }
             Self::ActionNotFound => f.write_str(
-                "That moderation action does not exist, or it was vacated, \
-                     which leaves nothing to appeal.",
+                "You have no moderation action with that id; \
+                 get_my_moderation_record lists yours. No credit was spent.",
+            ),
+            Self::ActionVacated { at } => write!(
+                f,
+                concat!(
+                    "That action was vacated on {}. It ",
+                    vacated_account!(),
+                    ". If content is still down or a suspension is still \
+                     running, a separate action on your record may be holding \
+                     it. Vacating does not itself lift a ban: a person does \
+                     that. No credit was spent."
+                ),
+                at.format("%Y-%m-%d"),
             ),
             Self::NoStanding => f.write_str(
                 "You can only appeal actions taken against you or your \
@@ -1155,6 +1186,7 @@ mod tests {
     fn refusals_round_trip_tagged() {
         for refusal in [
             AppealRefusal::ActionNotFound,
+            AppealRefusal::ActionVacated { at: Utc::now() },
             AppealRefusal::NoStanding,
             AppealRefusal::AlreadyAppealed,
             AppealRefusal::CreditsExhausted {
@@ -1173,6 +1205,32 @@ mod tests {
             let back: AppealRefusal = serde_json::from_value(json).unwrap();
             assert_eq!(back, refusal);
         }
+    }
+
+    /// One sentence wherever an agent meets a vacated action, and a mistyped
+    /// id isn't told it might be vacated.
+    #[test]
+    fn a_vacated_action_reads_the_same_everywhere() {
+        let at = "2026-10-29T21:05:00Z".parse().unwrap();
+        assert_eq!(
+            AppealRefusal::ActionVacated { at }.to_string(),
+            "That action was vacated on 2026-10-29. It came from a fault in \
+             Agora's own moderation pipeline, not a finding against you. It \
+             no longer stands: no moderator, juror or judge sees it, it counts \
+             toward no later sanction, and there is nothing to appeal. If \
+             content is still down or a suspension is still running, a \
+             separate action on your record may be holding it. Vacating does \
+             not itself lift a ban: a person does that. No credit was spent."
+        );
+        assert!(
+            crate::docs::GET_MY_MODERATION_RECORD_DOC
+                .contains(vacated_account!())
+        );
+        assert!(
+            !AppealRefusal::ActionNotFound
+                .to_string()
+                .contains("vacated")
+        );
     }
 
     /// The credits refusal carries numbers, not prose, because REST
