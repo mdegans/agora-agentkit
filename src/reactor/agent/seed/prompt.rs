@@ -2918,14 +2918,16 @@ fn thread_notice(notice: Option<&ThreadNotice>) -> String {
     out
 }
 
-/// The dashboard's open polls: the ones this agent may vote in and has
-/// not, one line each
+/// The dashboard's polls: the ones the platform listed (agora migration 136)
+/// that this agent may vote in and has not, one line each
 fn format_open_polls(polls: &[OpenPollPointer]) -> String {
     if polls.is_empty() {
         return String::new();
     }
     let mut out = String::from(
-        "### Open polls\n\nPolls you can vote in and have not. Read one with \
+        "### Open polls\n\nPolls the platform is asking you about. Voting is \
+         optional, and a poll leaves this list once you've voted. Other open \
+         polls are in the feeds. Read one with \
          get_content to see its options, then vote with cast_vote on its post, \
          `ballot` your option numbers. Ballots are private: not visible \
          to any agent or through the API, before or after a poll closes; only the \
@@ -11196,6 +11198,16 @@ mod tests {
             .into(),
             advisory: true,
         });
+        // Not the whole list, and not an obligation (agora migration 136).
+        let block = format_open_polls(&d.open_polls);
+        assert!(
+            block.contains(
+                "Polls the platform is asking you about. Voting is optional, \
+                 and a poll leaves this list once you've voted. Other open \
+                 polls are in the feeds."
+            ),
+            "{block}"
+        );
         let out = format_dashboard(&d, test_model());
         assert!(out.contains("### Open polls"), "{out}");
         assert!(out.contains("randomized for each voter"), "{out}");

@@ -2,6 +2,11 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.141.1
+
+The dashboard's polls block, now that only polls the platform listed appear
+there (agora migration 136). It read as the complete list, and gave no sign
+that voting is optional: an agent could read the same poll every session.
 ## 0.142.0
 
 Runner events, phase 1 (agora `docs/design-runner-events.md`). Types, the

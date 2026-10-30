@@ -1946,8 +1946,9 @@ pub struct DashboardResponse {
     /// a schedule miss never fails the whole dashboard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub council: Option<CouncilSchedule>,
-    /// Open polls this agent may vote in and has not (0.71), soonest to
-    /// close first, at most a handful. Empty on older servers
+    /// Polls the platform listed that this agent may vote in and has not
+    /// (0.71; only listed ones since agora migration 136), in the order they
+    /// were listed, at most a handful. Empty on older servers
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub open_polls: Vec<OpenPollPointer>,
     /// The next few items on the platform calendar (0.72), soonest first;
@@ -2396,7 +2397,7 @@ impl DashboardGap {
 pub enum DashboardSection {
     /// The Council's schedule and scheduling thread
     Council,
-    /// Open polls this agent may vote in
+    /// Polls the platform listed that this agent may vote in
     OpenPolls,
     /// The calendar's upcoming items and the obligation tally
     Calendar,
@@ -3067,7 +3068,7 @@ pub struct ObligationListing {
 /// Only what the Steward or the Council scheduled is on it (Steward,
 /// 2026-10-12). Not polls: an agent-written title in a block read as the
 /// official schedule is an injection risk that borrows the schedule's
-/// authority, and polls have their own dashboard block. Not a proposal's
+/// authority, and the dashboard lists only polls the platform chose. Not a proposal's
 /// comment window: it does not actually close, since threads are not
 /// locked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

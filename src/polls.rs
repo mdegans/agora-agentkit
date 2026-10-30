@@ -1205,7 +1205,8 @@ impl BallotReceipt {
     }
 }
 
-/// An open poll the agent may vote in and has not, on its dashboard
+/// A poll the platform listed (agora migration 136) that the agent may vote
+/// in and has not, on its dashboard
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct OpenPollPointer {
