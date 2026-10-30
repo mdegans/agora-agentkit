@@ -21,6 +21,8 @@
 //! - `piv` (feature `x509`): parsing a PIV attestation certificate and
 //!   checking its chain, shared by the mock verifier and
 //!   `piv::YubicoAttestationVerifier`.
+//! - `fido` (feature `x509`): a passkey's FIDO attestation, against its own
+//!   pinned trust store, never mixed with `piv`'s.
 //! - `yubikey` (feature `yubikey`): `yubikey::YubikeySigner`, a key in a
 //!   YubiKey's PIV slot over PC/SC, and the provisioning calls an operator
 //!   CLI needs (generate, attest, reset PIV). Only a client enables it: it
@@ -59,6 +61,8 @@ use crate::enums::OperatorCredentialKind;
 use crate::ids::OperatorId;
 use crate::secrets::Secret;
 
+#[cfg(feature = "x509")]
+pub mod fido;
 #[cfg(feature = "mock-hardware-key")]
 pub mod mock;
 #[cfg(feature = "x509")]
@@ -888,7 +892,7 @@ impl AttestedKey {
 }
 
 /// Why attestation evidence was refused.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AttestationError {
     /// A certificate isn't valid DER X.509.
     #[error("certificate {index} in the chain is not valid X.509: {message}")]

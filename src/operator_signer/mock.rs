@@ -248,6 +248,100 @@ impl MockRootCa {
     }
 }
 
+/// What a mock FIDO attestation certificate looks like, so tests can break
+/// each of WebAuthn §8.2.1's requirements.
+#[derive(Debug, Clone)]
+pub struct FidoLeafOptions {
+    /// The AAGUID extension's value; `None` leaves it out
+    pub aaguid: Option<[u8; 16]>,
+    /// Mark the AAGUID extension critical
+    pub aaguid_critical: bool,
+    /// The subject, as an RFC 4514 string
+    pub subject: &'static str,
+    /// `basicConstraints cA=TRUE`
+    pub ca: bool,
+    /// No `basicConstraints` at all
+    pub omit_basic_constraints: bool,
+}
+
+impl FidoLeafOptions {
+    /// A certificate meeting §8.2.1, with this AAGUID
+    pub fn good(aaguid: [u8; 16]) -> Self {
+        Self {
+            aaguid: Some(aaguid),
+            aaguid_critical: false,
+            subject: "C=SE,O=Agora MOCK,OU=Authenticator Attestation,CN=Mock FIDO EE",
+            ca: false,
+            omit_basic_constraints: false,
+        }
+    }
+}
+
+/// A mock batch attestation key and its certificate.
+pub struct MockFidoAttestation {
+    key: p256::ecdsa::SigningKey,
+    certificate: DerCertificate,
+}
+
+impl fmt::Debug for MockFidoAttestation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MockFidoAttestation(..)")
+    }
+}
+
+impl MockFidoAttestation {
+    /// The attestation certificate (`x5c[0]`)
+    pub fn certificate(&self) -> &DerCertificate {
+        &self.certificate
+    }
+
+    /// An ES256 signature over `data`, in DER, as a packed `attStmt` holds it
+    pub fn sign_es256(&self, data: &[u8]) -> Vec<u8> {
+        use p256::ecdsa::signature::Signer;
+        let signature: p256::ecdsa::Signature = self.key.sign(data);
+        piv::ecdsa_to_der(&signature.to_bytes())
+    }
+}
+
+impl MockRootCa {
+    /// Issue a FIDO batch attestation certificate directly under this CA
+    pub fn issue_fido_attestation(
+        &self,
+        options: FidoLeafOptions,
+    ) -> MockFidoAttestation {
+        let key = random_p256();
+        let mut extensions = Vec::new();
+        if let Some(aaguid) = options.aaguid {
+            let value = OctetString::new(aaguid.to_vec()).expect("short");
+            let mut extension = extension(piv_fido_aaguid_oid(), der(&value));
+            extension.critical = options.aaguid_critical;
+            extensions.push(extension);
+        }
+        if !options.omit_basic_constraints {
+            extensions.push(critical_extension(
+                &BasicConstraints {
+                    ca: options.ca,
+                    path_len_constraint: None,
+                },
+                OID_BASIC_CONSTRAINTS,
+            ));
+        }
+        let certificate = issue(
+            3,
+            &self.name,
+            &Name::from_str(options.subject).expect("a valid name"),
+            p256_spki(&key),
+            extensions,
+            &self.key,
+        );
+        MockFidoAttestation { key, certificate }
+    }
+}
+
+fn piv_fido_aaguid_oid() -> x509_cert::der::asn1::ObjectIdentifier {
+    super::fido::OID_FIDO_AAGUID
+}
+
 /// A mock intermediate CA's subject.
 const MOCK_INTERMEDIATE_SUBJECT: &str =
     "CN=Agora MOCK PIV Intermediate CA - NOT A REAL DEVICE";

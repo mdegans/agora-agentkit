@@ -31,6 +31,24 @@ server.
 - **`AgoraLink::Inbox`**: `agora://inbox` is `get_inbox`'s input.
 - **Reactor**: pushes seat before every re-attempt, with the tail's cache
   marker moved onto them, and one label per source per seat.
+## Unreleased (a minor; the number is being agreed)
+
+Operator security, build step 6 (agora `docs/design-operator-api.md`,
+*YubiKey passkeys: FIDO attestation*). Additive.
+
+- **`operator_signer::fido`** (feature `x509`): `FidoTrustStore`, the pinned
+  Yubico FIDO CAs (U2F Root CA 457200631, FIDO Attestation A 1, B 1, B2 1),
+  kept apart from the PIV anchors; a packed attestation's signature, §8.2.1
+  and AAGUID checks, and its chain. Never Yubico Attestation Root 1. Reads a
+  COSE key and AAGUID out of authenticator data with no CBOR dependency.
+- **`mock`**: `MockRootCa::issue_fido_attestation`, a batch key and its
+  certificate, breakable per §8.2.1.
+- **Wire**: `OperatorActionDetail::PasskeyAdd`, whose `kind` is
+  `credential_add`; `CancelReason::PasswordRetired`;
+  `FirstPasskeyConfirmRequest` and its response (`POST
+  /api/operator/passkeys/{id}/confirm`). An old client reading a log with
+  `passkey_add` in it fails to parse that entry.
+- `AttestationError` is `Clone`, `PartialEq` and `Eq`.
 
 ## 0.141.0
 

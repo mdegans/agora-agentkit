@@ -13,7 +13,7 @@ use crate::enums::MessageKind;
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::ids::{
     AgentGroupId, AgentId, MessageId, ModerationActionId, OperatorActionId,
-    OperatorCredentialId, OperatorEnrolmentId, OperatorId,
+    OperatorCredentialId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
 };
 use crate::limits;
 pub use crate::moderation::ActionAppeal;
@@ -703,6 +703,28 @@ pub struct OperatorLogResponse {
     pub entries: Vec<OperatorLogEntry>,
 }
 
+/// `POST /api/operator/passkeys/{id}/confirm`: a sudo request approving an
+/// account's first passkey, before the password cutover (agora
+/// `docs/design-operator-api.md`, *The password cutover*). Binds the passkey's
+/// id (the path) and the SHA-256 of its COSE key, as the portal's 0x05 does
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct FirstPasskeyConfirmRequest {
+    pub action_id: OperatorActionId,
+    /// SHA-256 of the passkey's COSE key, in hex, as the Security page shows it
+    pub cose_key_sha256: String,
+}
+
+/// What [`FirstPasskeyConfirmRequest`] did
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct FirstPasskeyConfirmResponse {
+    pub passkey: OperatorPasskeyId,
+    /// The sessions the password opened, ended with it
+    pub password_sessions_ended: u64,
+}
+
 /// A credential, as the log names it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -756,6 +778,21 @@ pub enum OperatorActionDetail {
     CredentialAdd {
         credential: CredentialRef,
         credential_kind: OperatorCredentialKind,
+    },
+    /// A passkey became effective (0.140.2): a factor add, logged once as
+    /// `credential_add`, carrying the approving assertion or signature
+    PasskeyAdd {
+        passkey: OperatorPasskeyId,
+        nickname: String,
+        /// Verified FIDO attestation to a pinned Yubico root
+        yubikey: bool,
+        /// A synced passkey (its own backup-eligible claim)
+        synced: bool,
+        /// The approving passkey's tap; `None` when a sudo request approved
+        /// it (the entry's credential) or a password session did (an
+        /// account's first passkey, before the cutover)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved_by: Option<OperatorPasskeyId>,
     },
     CredentialRevoke {
         credential: CredentialRef,
@@ -819,6 +856,7 @@ impl OperatorLogEntry {
             }
             OperatorActionDetail::DmCancel { .. }
             | OperatorActionDetail::CredentialAdd { .. }
+            | OperatorActionDetail::PasskeyAdd { .. }
             | OperatorActionDetail::CredentialRevoke { .. }
             | OperatorActionDetail::ConfigChangeEffective { .. } => {
                 return None;
@@ -862,16 +900,20 @@ pub enum CancelReason {
     OperatorBanned,
     /// The credential that signed the send was revoked before delivery
     CredentialRevoked,
+    /// The account's first passkey retired its password, ending the session
+    /// that admitted the send (0.140.2)
+    PasswordRetired,
 }
 
 impl CancelReason {
     /// Every reason
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Operator,
         Self::CancelLink,
         Self::AgentDeparted,
         Self::OperatorBanned,
         Self::CredentialRevoked,
+        Self::PasswordRetired,
     ];
 }
 
@@ -882,7 +924,9 @@ impl OperatorActionDetail {
             Self::DmSend { .. } => OperatorActionKind::DmSend,
             Self::DmCancel { .. } => OperatorActionKind::DmCancel,
             Self::DmRetract { .. } => OperatorActionKind::DmRetract,
-            Self::CredentialAdd { .. } => OperatorActionKind::CredentialAdd,
+            Self::CredentialAdd { .. } | Self::PasskeyAdd { .. } => {
+                OperatorActionKind::CredentialAdd
+            }
             Self::CredentialRevoke { .. } => {
                 OperatorActionKind::CredentialRevoke
             }
@@ -904,6 +948,7 @@ impl OperatorActionDetail {
                 cancelled,
             } => Some(n(retracted.len() + cancelled.len())),
             Self::CredentialAdd { .. }
+            | Self::PasskeyAdd { .. }
             | Self::CredentialRevoke { .. }
             | Self::ConfigChangeEffective { .. } => None,
         }
