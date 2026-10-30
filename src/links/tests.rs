@@ -1522,10 +1522,14 @@ fn content_takes_any_id_get_content_takes_as_one_segment() {
 #[test]
 fn the_kinds_are_exported_and_named_in_both_forms() {
     assert_eq!(KINDS.len(), Kind::ALL.len());
+    // `inbox` joins the forms when it lands: `crate::before_index`
     for kind in KINDS {
         // A kind the parser reads, whatever else it then asks for
         if let Err(e) = format!("agora://{kind}").parse::<AgoraLink>() {
             assert!(!e.to_string().contains("not a kind"), "{kind}: {e}");
+        }
+        if *kind == "inbox" {
+            continue;
         }
         for form in [FORM, FORM_AGAIN] {
             assert!(
@@ -1776,4 +1780,86 @@ fn repository_links_refuse_what_they_cannot_read() {
         )
         .is_err()
     );
+}
+
+/// `agora://inbox` is `get_inbox`'s input (0.142): the index, one message,
+/// or the input's own options, printed back as given
+#[test]
+fn the_inbox_is_a_link_to_get_inbox() {
+    use crate::enums::InboxView;
+    use crate::requests::GetInboxInput;
+
+    assert_eq!(
+        link("agora://inbox"),
+        AgoraLink::Inbox(GetInboxInput::default())
+    );
+    let one = link("agora://inbox?message=1A2B3C4D");
+    assert_eq!(
+        one,
+        AgoraLink::Inbox(GetInboxInput {
+            message: Some("1a2b3c4d".parse().unwrap()),
+            ..Default::default()
+        })
+    );
+    assert_eq!(one.to_string(), "agora://inbox?message=1a2b3c4d");
+    assert_eq!(one.tool(), "get_inbox");
+    let full = "agora://inbox?message=7ad26ccd-922f-484a-a37c-51777344a98c";
+    assert_eq!(link(full).to_string(), full);
+    let paged = link("agora://inbox?offset=25&limit=10");
+    assert_eq!(
+        paged,
+        AgoraLink::Inbox(GetInboxInput {
+            offset: Some(25),
+            limit: Some(10),
+            ..Default::default()
+        })
+    );
+    assert_eq!(paged.to_string(), "agora://inbox?limit=10&offset=25");
+    assert_eq!(
+        link("agora://inbox?view=full"),
+        AgoraLink::Inbox(GetInboxInput {
+            view: Some(InboxView::Full),
+            ..Default::default()
+        })
+    );
+    // As a page URL and a site path, both reading back
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    assert_eq!(
+        one.page_url(&site).as_str(),
+        "https://subliminal.technology/agora/inbox?message=1a2b3c4d"
+    );
+    assert_eq!(
+        AgoraLink::parse_at(one.page_url(&site).as_str(), Some(&site)).unwrap(),
+        one
+    );
+    assert_eq!(
+        AgoraLink::from_site_path(&one.site_path())
+            .unwrap()
+            .unwrap(),
+        one
+    );
+    // The client's own field is never written into a link, nor read from one
+    let section = AgoraLink::Inbox(GetInboxInput {
+        operator_section: true,
+        ..Default::default()
+    });
+    assert_eq!(section.to_string(), "agora://inbox");
+
+    for (bad, says) in [
+        (
+            "agora://inbox?operator_section=true",
+            "not an option of a link",
+        ),
+        (
+            "agora://inbox?message=1a2b3c4d&view=full",
+            "takes no other field",
+        ),
+        ("agora://inbox?view=full&offset=25", "has no index to page"),
+        ("agora://inbox?message=hello", "must be a message id"),
+        ("agora://inbox/1a2b3c4d", "nothing follows inbox"),
+        ("agora://inbox?bogus=1", "bogus"),
+    ] {
+        let why = refused(bad);
+        assert!(why.contains(says), "{bad}: {why}");
+    }
 }

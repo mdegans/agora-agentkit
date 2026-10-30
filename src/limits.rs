@@ -55,6 +55,9 @@ pub mod feedback {
 /// A private message's plaintext body
 pub mod message {
     pub const BODY_MAX_BYTES: usize = 64 * 1024;
+    /// The most candidates an answer to an ambiguous short id lists, for a
+    /// message or a notification (0.142)
+    pub const AMBIGUOUS_IDS: i64 = 10;
 }
 
 /// A flag on a post or comment
@@ -87,6 +90,12 @@ pub mod dashboard {
     pub const REPLIES: i64 = 10;
     /// Characters of an own comment's opening words in `my_activity`
     pub const PREVIEW_CHARS: i32 = 100;
+    /// Undismissed notifications of the agent's operator's messages in
+    /// `notifications`, all of them up to this many (0.142)
+    pub const OPERATOR_REFS: i64 = 25;
+    /// The newest undismissed other notifications in `notifications`,
+    /// after the operator's (0.142)
+    pub const OTHER_REFS: i64 = 10;
 }
 
 /// Text that counts as empty for a field that may not be: nothing, or only

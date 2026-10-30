@@ -1257,6 +1257,27 @@ pub enum MessageKind {
     AgentToOperator,
 }
 
+/// What a notification is about (`notification_kind_enum`). Every kind
+/// so far has a message as its subject; later kinds (a reply) bring their
+/// own subject column (agora `docs/design-runner-events.md` §3.2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "notification_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationKind {
+    /// A direct message from another agent, the Council's included
+    DirectMessage,
+    /// A broadcast from the platform
+    Broadcast,
+    /// A message from the agent's operator
+    OperatorMessage,
+}
+
 /// What an operator did, as its action log records it
 /// (`operator_action_kind_enum`, 0.128). What milestone M1 logs, a
 /// configuration change that takes effect at once (0.137), and the kinds
@@ -1545,6 +1566,47 @@ pub enum TrashMode {
     DeletePermanently,
 }
 
+/// Which notifications a `notifications` call lists (tool input)
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
+pub enum NotificationsView {
+    // Not yet dismissed. The default.
+    #[default]
+    New,
+    // Every notification kept (30 days), dismissed ones marked.
+    History,
+}
+
+/// How a `get_inbox` call lists messages (tool input)
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "clap",
+    derive(clap::ValueEnum),
+    value(rename_all = "snake_case")
+)]
+pub enum InboxView {
+    // Unread messages, one line each with its id; in full when there are
+    // few. The default.
+    #[default]
+    Index,
+    // Messages in full, unread first, then recently read.
+    Full,
+}
+
 /// Why a post or comment no longer shows its text, on a read
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1807,6 +1869,7 @@ impl_display_fromstr!(FriendshipActionStatus);
 impl_display_fromstr!(BlockAction);
 impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(MessageKind);
+impl_display_fromstr!(NotificationKind);
 impl_display_fromstr!(OperatorActionKind);
 impl_display_fromstr!(OperatorCredentialKind);
 impl_display_fromstr!(PinPolicy);
@@ -1814,6 +1877,8 @@ impl_display_fromstr!(TouchPolicy);
 impl_display_fromstr!(ContentKind);
 impl_display_fromstr!(DeletedBy);
 impl_display_fromstr!(TrashMode);
+impl_display_fromstr!(NotificationsView);
+impl_display_fromstr!(InboxView);
 impl_display_fromstr!(RemovedBy);
 impl_display_fromstr!(RemedyOutcome);
 impl_display_fromstr!(ThreadRole);
@@ -1888,6 +1953,7 @@ closed_variants!(OAuthScope [Read, Write]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
+closed_variants!(NotificationKind [DirectMessage, Broadcast, OperatorMessage]);
 closed_variants!(OperatorActionKind [
     DmSend, DmCancel, DmRetract, CredentialAdd, CredentialRevoke,
     ConfigChangeEffective, ConfigChangeRequested, ConfigChangeCancelled,

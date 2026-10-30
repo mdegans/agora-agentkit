@@ -3912,7 +3912,11 @@ fn seed_tools_match_the_agent_tool_registry() {
         let tool = agent_tool(&name).unwrap_or_else(|| {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
-        let shared = (tool.input_schema)();
+        let mut shared = (tool.input_schema)();
+        // Until phase 4: `crate::before_index`
+        if name == "get_inbox" {
+            crate::before_index::hide_index_fields(&mut shared);
+        }
         match tool.seed {
             Seed::Tool => {
                 for field in ["properties", "required"] {
@@ -4542,7 +4546,7 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
             _ => None,
         })
         .expect("get_inbox is installed");
-    assert_eq!(inbox.description, crate::docs::GET_INBOX_DOC);
+    assert_eq!(inbox.description, crate::before_index::GET_INBOX_DOC);
     assert_eq!(tool.schema["required"], serde_json::json!(["body"]));
 
     agent
@@ -4944,7 +4948,8 @@ async fn seed_tool_definitions_carry_no_developer_text() {
         );
         let registered = crate::tools::agent_tool(&c.name)
             .unwrap_or_else(|| panic!("{} is not in the registry", c.name));
-        if c.name != "update_profile" {
+        // Until phase 4: `crate::before_index`
+        if c.name != "update_profile" && c.name != "get_inbox" {
             assert!(
                 c.description.starts_with(registered.description),
                 "{}: {}",
@@ -5028,6 +5033,7 @@ fn inbox_with(
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     (inbox, id)
 }
@@ -8323,6 +8329,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     let text =
         super::prompt::format_inbox(&first, &super::ShownOnce::default(), None);
@@ -8363,6 +8370,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     let text = super::prompt::format_inbox(
         &second,
@@ -8399,6 +8407,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
+        index: None,
     };
     let once = super::ShownOnce::default();
     let text = super::prompt::format_inbox(&listed, &once, None);
@@ -8984,6 +8993,7 @@ fn the_operator_header_counts_in_words() {
             operator_replies: Vec::new(),
             operator_disclosure: None,
             warning: None,
+            index: None,
         };
         let out = super::prompt::format_inbox(
             &inbox,
@@ -9520,4 +9530,103 @@ async fn a_stop_during_a_paused_turn_abandons_it() {
             .is_some_and(|m| m.role == Role::User)
     );
     assert!(transcript(&agent).contains(super::RUNNER_STOPPING));
+}
+
+/// Until phase 4 a seed agent sees today's `get_inbox`: no word of the index,
+/// no request for one, and a link that isn't offered yet is refused. Without
+/// this, `view: index` with more than five unread reads as an empty inbox
+#[tokio::test]
+async fn the_inbox_index_isnt_offered_before_it_renders() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let inbox = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/messages/inbox");
+        then.status(200).json_body(serde_json::json!({
+            "messages": [],
+            "unread": 0,
+        }));
+    });
+    let mut agent = agent(
+        &server,
+        SeedConfig {
+            max_rounds: 30,
+            ..quiet_config()
+        },
+    );
+    agent.on_init().await.unwrap();
+    let tool = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c)
+                if c.name == "get_inbox" =>
+            {
+                Some(c.clone())
+            }
+            _ => None,
+        })
+        .expect("get_inbox is installed");
+    assert_eq!(tool.description, crate::before_index::GET_INBOX_DOC);
+    let props = tool.schema["properties"].as_object().unwrap();
+    for field in ["message", "view", "offset"] {
+        assert!(!props.contains_key(field), "{field} is offered");
+    }
+    assert_eq!(
+        serde_json::Value::Object(props.clone()),
+        serde_json::json!({"limit": {
+            "description": "At most this many messages (default: all unread, up to 40, and the\nrecently read). Unread ones past it stay unread for the next read (1 to 40)",
+            "type": "integer",
+        }}),
+        "as 0.141 seated it"
+    );
+
+    for input in [
+        serde_json::json!({"view": "index"}),
+        serde_json::json!({"offset": 25}),
+        serde_json::json!({"message": "1a2b3c4d"}),
+    ] {
+        agent
+            .handle(tool_use_message("get_inbox", input))
+            .await
+            .unwrap();
+    }
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://inbox"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(inbox.calls(), 0, "nothing refused reaches the server");
+    let text = transcript(&agent);
+    for field in ["view", "offset", "message"] {
+        assert!(text.contains(&format!("unknown field `{field}`")), "{text}");
+    }
+    assert!(text.contains("\"inbox\" is not a kind of link"), "{text}");
+    assert!(!text.contains("git and inbox"), "{text}");
+    // Refused in parsing, as 0.141 refused them: free, and saying so
+    assert_eq!(
+        text.matches("Refused; nothing was charged").count(),
+        4,
+        "{text}"
+    );
+
+    // An unknown field stays a free refusal, not a dropped option
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0016", "round": 2}),
+        ))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("unknown field `round`"));
+
+    // A plain read is as it was: no `view` on the wire
+    agent
+        .handle(tool_use_message("get_inbox", serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(inbox.calls(), 1);
 }

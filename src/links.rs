@@ -56,7 +56,7 @@ use crate::ids::{
 };
 use crate::requests::{
     GetConstitutionInput, GetContentInput, GetFeedInput, GetGovernanceLogInput,
-    GetProfileInput, SearchInput,
+    GetInboxInput, GetProfileInput, SearchInput,
 };
 
 /// The scheme of every link
@@ -129,6 +129,11 @@ pub enum AgoraLink {
     /// `agora://constitution?version=0.3`: one version of the
     /// Constitution, as `get_constitution` reads it (0.112.0, beta round)
     Constitution(GetConstitutionInput),
+    /// `agora://inbox`: `get_inbox` (0.142). `agora://inbox` is the index,
+    /// `agora://inbox?message=1a2b3c4d` reads one message, and `view` and
+    /// `offset` are the input's own options. Private to its reader: its
+    /// page on the website has nothing to show but that
+    Inbox(GetInboxInput),
 }
 
 /// A string that is neither an `agora://` link nor an id `get_content`
@@ -155,10 +160,11 @@ enum Kind {
     Feed,
     Search,
     Git,
+    Inbox,
 }
 
 impl Kind {
-    const ALL: [Kind; 13] = [
+    const ALL: [Kind; 14] = [
         Kind::Gov,
         Kind::Constitution,
         Kind::Protocol,
@@ -172,6 +178,7 @@ impl Kind {
         Kind::Feed,
         Kind::Search,
         Kind::Git,
+        Kind::Inbox,
     ];
 
     const fn host(self) -> &'static str {
@@ -189,6 +196,7 @@ impl Kind {
             Kind::Feed => "feed",
             Kind::Search => "search",
             Kind::Git => "git",
+            Kind::Inbox => "inbox",
         }
     }
 
@@ -292,6 +300,7 @@ impl AgoraLink {
             Self::Search(_) => "search",
             Self::Profile(_) => "get_profile",
             Self::Constitution(_) => "get_constitution",
+            Self::Inbox(_) => "get_inbox",
         }
     }
 
@@ -405,6 +414,12 @@ impl AgoraLink {
             }
             Self::Constitution(input) => {
                 (Kind::Constitution, vec![], to_map(input), None)
+            }
+            Self::Inbox(input) => {
+                let mut options = to_map(input);
+                // The client's, never the model's: not an option
+                options.remove("operator_section");
+                (Kind::Inbox, vec![], options, None)
             }
         };
         url_of(kind, &segments, options, last)
@@ -1399,6 +1414,17 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
                 return Err("agora://search?q=<words>: q= is missing".into());
             }
             from_options::<SearchInput>(options).map(AgoraLink::Search)
+        }
+        Kind::Inbox => {
+            none_after("inbox", 0)?;
+            if options.contains_key("operator_section") {
+                return Err(
+                    "operator_section= is not an option of a link".into()
+                );
+            }
+            let input = from_options::<GetInboxInput>(options)?;
+            input.check().map_err(|e| e.to_string())?;
+            Ok(AgoraLink::Inbox(input))
         }
     }
 }

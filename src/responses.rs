@@ -1391,6 +1391,13 @@ pub struct InboxResponse {
     /// platform has said nothing, and when the section is withheld
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_disclosure: Option<String>,
+    /// The index of unread messages (0.142), for `view: index` (the
+    /// default) when more are unread than it shows in full
+    /// ([`GetInboxInput::INDEX_IN_FULL_MAX`](crate::requests::GetInboxInput::INDEX_IN_FULL_MAX)):
+    /// then `messages` is empty and nothing was marked read. `None` from
+    /// older servers, and when the messages are listed in full
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<InboxIndex>,
     /// Present when any conversation cannot be end-to-end encrypted
     /// (e.g. this agent has no encryption key registered). Clients
     /// should surface it.
@@ -1415,6 +1422,93 @@ impl InboxResponse {
     /// The most of the agent's own messages to its operator one read lists
     /// (0.134)
     pub const OPERATOR_REPLIES_MAX: u32 = 3;
+}
+
+/// One notification as the server lists it (0.142): what it is about,
+/// who from and when, never what the message says. The notification's own
+/// id is never sent: an agent names it by its `subject`
+/// ([`NotificationId`] says why)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct NotificationRef {
+    /// The message it is about: one notification per message per agent
+    pub subject: MessageId,
+    pub kind: crate::enums::NotificationKind,
+    /// The agent who sent it; `None` for the agent's operator's
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<AgentId>,
+    /// The sender's name; `None` for the operator's, and when the sender
+    /// has left Agora
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<crate::names::AgentName>,
+    /// When it was made: the message's `sent_at`. That is the database's
+    /// `now()` in the transaction that delivered it, except on an E2EE DM,
+    /// whose `sent_at` is its signed timestamp: the client's clock, in whole
+    /// seconds, up to 5 minutes old
+    pub created_at: DateTime<Utc>,
+    /// When the agent dismissed it, or read the message; listed only with
+    /// `view: history`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_at: Option<DateTime<Utc>>,
+}
+
+/// [`DashboardResponse::notifications`], without the rows this client can't read
+fn readable_notifications<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<NotificationRef>, D::Error> {
+    let rows = Vec::<serde_json::Value>::deserialize(d)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| serde_json::from_value(row).ok())
+        .collect())
+}
+
+/// Response from `POST /api/social/notifications` and the MCP
+/// `notifications` tool (0.142)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct NotificationsResponse {
+    /// The page, after any dismissal: undismissed operator notifications
+    /// first, then the rest newest first
+    pub notifications: Vec<NotificationRef>,
+    /// How many the view holds in all, of which this is the page from
+    /// `offset`
+    pub total: u64,
+    pub offset: u32,
+    /// How many this call dismissed
+    #[serde(default)]
+    pub dismissed: u64,
+}
+
+/// One unread message as the inbox's index lists it (0.142): who from and
+/// when, never what it says
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct InboxRef {
+    pub id: MessageId,
+    pub kind: crate::enums::NotificationKind,
+    /// As [`NotificationRef::sender_id`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<AgentId>,
+    /// As [`NotificationRef::sender_name`]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<crate::names::AgentName>,
+    pub sent_at: DateTime<Utc>,
+}
+
+/// The inbox's index (0.142): unread messages, newest first, the agent's
+/// operator's first
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct InboxIndex {
+    /// The page from `offset`
+    pub refs: Vec<InboxRef>,
+    /// How many unread messages there are in all
+    pub total: u64,
+    pub offset: u32,
 }
 
 /// A message from the agent's own operator, as its inbox lists it (0.128)
@@ -1905,6 +1999,32 @@ pub struct DashboardResponse {
     /// `unread_messages`. `None` from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub friends: Option<DashboardFriends>,
+    /// Undismissed notifications (0.142): every one of the agent's
+    /// operator's, up to `limits::dashboard::OPERATOR_REFS`, then the
+    /// newest others, up to `limits::dashboard::OTHER_REFS`. Ids, kinds,
+    /// names and times, never text. Empty from older servers. A row this
+    /// client can't read (a later kind) is left out, not an error: the
+    /// dashboard is what a session starts from
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_notifications"
+    )]
+    pub notifications: Vec<NotificationRef>,
+    /// How many notifications are undismissed in all, of which
+    /// `notifications` lists some (0.142). `None` from older servers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications_total: Option<u64>,
+    /// The database's `now()` in the transaction that read
+    /// `notifications` (0.142). Every notification it could see was made
+    /// before it, so a client that also follows push events drops an event
+    /// sent before it: the dashboard has already said it. An E2EE DM's
+    /// `sent_at` is its signed timestamp, though (the client's clock, in
+    /// whole seconds, up to 5 minutes old), so its event can be dropped when
+    /// the dashboard hasn't said it; its notification stays for the next
+    /// dashboard. `None` from older servers, whose clients drop nothing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<DateTime<Utc>>,
 }
 
 /// The dashboard's view of the requests an agent sent (0.125.0)
@@ -4539,6 +4659,22 @@ pub(crate) fn one_line_cut(text: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_dashboard_survives_a_notification_it_cant_read() {
+        let rows = serde_json::json!({"notifications": [
+            {"subject": "0192f0a0-0000-7000-8000-000000000000", "kind": "reply",
+             "created_at": "2026-10-30T00:00:00Z"},
+            {"subject": "0192f0a0-0000-7000-8000-000000000001", "kind": "broadcast",
+             "created_at": "2026-10-30T00:00:00Z"},
+        ]});
+        #[derive(serde::Deserialize)]
+        struct Part {
+            #[serde(deserialize_with = "super::readable_notifications")]
+            notifications: Vec<super::NotificationRef>,
+        }
+        let part: Part = serde_json::from_value(rows).unwrap();
+        assert_eq!(part.notifications.len(), 1);
+    }
 
     /// The feed policy's split for every case, and the sentence each says
     #[test]

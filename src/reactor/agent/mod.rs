@@ -32,19 +32,16 @@ fn boxed<E: std::error::Error + Send + Sync + 'static>(
 
 /// Seat `content` as the trailing user turn: a new message after an
 /// assistant turn, or new blocks on the trailing user turn (turn order
-/// forbids two adjacent), never a change to a block already there
+/// forbids two adjacent), never a change to a block already there.
+/// [`Prompt::seat`] does the placing, so a merge that would put a tool result
+/// behind other content is refused rather than sent
 pub fn seat_user(
     prompt: &mut Prompt,
     content: impl Into<Content>,
 ) -> Result<(), TurnOrderError> {
-    let content = content.into();
-    match prompt.messages.last_mut() {
-        Some(last) if last.role == Role::User => {
-            last.extend(content);
-            Ok(())
-        }
-        _ => prompt.push_message((Role::User, content)).map(|_| ()),
-    }
+    prompt
+        .seat((Role::User, content.into()), &mut None)
+        .map(|_| ())
 }
 
 /// Seat a `reply` that can't be used (clipped, unparseable, a tool call
@@ -106,18 +103,30 @@ pub fn seat_unused_reply(
     Ok(())
 }
 
-/// Seat drained `notes` as [`Role::User`] content, each labeled with its
-/// authoritative source, via [`seat_user`]
+/// Seat drained `notes` as [`Role::User`] content via [`seat_user`]: one
+/// label per source, naming its authoritative source, before everything
+/// that source sent, in the order the sources first sent (agora
+/// `docs/design-runner-events.md` §3.3)
 // TODO: honor `Notification::preferred_roles` (via `Prompt::resolve_role`)
 // once a tool actually prefers something other than `User`.
 fn seat_notifications(
     prompt: &mut Prompt,
     notes: Vec<Notification>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut sources: Vec<(std::sync::Arc<str>, Vec<Block>)> = Vec::new();
+    for note in notes {
+        match sources
+            .iter_mut()
+            .find(|(source, _)| *source == note.source)
+        {
+            Some((_, blocks)) => blocks.extend(note.content.0),
+            None => sources.push((note.source, note.content.0)),
+        }
+    }
     let mut blocks: Vec<Block> = Vec::new();
-    for mut note in notes {
-        blocks.push(format!("[notification: {}]", note.source).into());
-        blocks.append(&mut note.content);
+    for (source, mut content) in sources {
+        blocks.push(format!("[notification: {source}]").into());
+        blocks.append(&mut content);
     }
     seat_user(prompt, blocks).map_err(boxed)
 }
@@ -608,6 +617,77 @@ mod tests {
         ));
         assert_eq!(types(&turn), ["thinking", "text"], "{turn}");
         assert_eq!(turn["content"][1]["text"], "partial answ");
+    }
+
+    fn note(source: &str, text: &str) -> Notification {
+        Notification {
+            source: source.into(),
+            content: text.to_string().into(),
+            preferred_roles: vec![Role::User],
+        }
+    }
+
+    fn texts(turn: &serde_json::Value) -> Vec<String> {
+        turn["content"]
+            .as_array()
+            .expect("block array")
+            .iter()
+            .map(|b| match b["type"].as_str().unwrap() {
+                "text" => b["text"].as_str().unwrap().to_string(),
+                other => format!("<{other}>"),
+            })
+            .collect()
+    }
+
+    /// A tool's pushes are seated after the tool results they arrive
+    /// behind, merged into that turn with the results still leading, and
+    /// labelled once per source however many each sent (design §3.3)
+    #[test]
+    fn pushes_follow_tool_results_labelled_once_per_source() {
+        let mut prompt = Prompt::default();
+        prompt.push_message((Role::User, "act")).unwrap();
+        let turn: misanthropic::prompt::Message =
+            serde_json::from_value(serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1",
+                             "name": "agora", "input": {}}]
+            }))
+            .unwrap();
+        prompt.push_message(turn).unwrap();
+        let results: misanthropic::prompt::Message =
+            serde_json::from_value(serde_json::json!({
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
+                             "content": "done"}]
+            }))
+            .unwrap();
+        prompt.push_message(results).unwrap();
+
+        seat_notifications(
+            &mut prompt,
+            vec![
+                note("agora_events", "New direct message 1a2b3c4d from alice."),
+                note("other", "something else"),
+                note("agora_events", "New broadcast 5e6f7a8b from bob."),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(prompt.messages.len(), 3, "merged, not a new turn");
+        let tail =
+            serde_json::to_value(prompt.messages.last().unwrap()).unwrap();
+        assert_eq!(
+            texts(&tail),
+            [
+                "<tool_result>",
+                "[notification: agora_events]",
+                "New direct message 1a2b3c4d from alice.",
+                "New broadcast 5e6f7a8b from bob.",
+                "[notification: other]",
+                "something else",
+            ],
+            "{tail}"
+        );
     }
 
     /// An unclipped thinking-only reply keeps its thought, closed by the

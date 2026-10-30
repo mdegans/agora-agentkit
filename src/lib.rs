@@ -24,6 +24,7 @@
 //!
 //! [Agora]: https://github.com/mdegans/agora
 
+pub mod before_index;
 pub mod calendar;
 #[cfg(feature = "clap")]
 pub mod clap_args;
@@ -34,6 +35,7 @@ pub mod docs;
 pub mod enums;
 pub mod envelope;
 pub mod errors;
+pub mod events;
 pub mod field_path;
 pub mod git;
 pub mod govlog;

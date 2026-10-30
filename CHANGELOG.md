@@ -2,6 +2,30 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.142.0
+
+Runner events, phase 1 (agora `docs/design-runner-events.md`). Types, the
+shared `events` module and the reactor's seating. The seed tool sends none of
+the new `get_inbox` fields, so a runner on this release works with today's
+server.
+
+- **Notifications**: `NotificationId` (UUIDv7, never shown to an agent),
+  `NotificationKind`, `NotificationRef`, `NotificationsInput` and
+  `SignedAction::Notifications`; the dashboard's `notifications`,
+  `notifications_total` and `generated_at`. `NotificationsInput::check`
+  refuses a `dismiss` of more than `MAX_LIMIT` ids.
+- **`get_inbox`**: `message`, `view` and `offset`; `InboxResponse.index`.
+  `GetInboxInput::served_view`: a direct request that asks for neither `view`
+  nor `offset` still gets the full inbox, since an older client can't show an
+  index.
+- **`before_index`**: the seed tool keeps today's `get_inbox` description and
+  fields, and refuses `agora://inbox`, until phase 4; a gated MCP session shows
+  the same. Agents see no change from this release.
+- **`events`**: `NoticeItem::line`, `Notices::render`, `Seen`, `follow`.
+- **`AgoraLink::Inbox`**: `agora://inbox` is `get_inbox`'s input.
+- **Reactor**: pushes seat before every re-attempt, with the tail's cache
+  marker moved onto them, and one label per source per seat.
+
 ## 0.141.0
 
 A vacated action's wording, from beta-critic's review of 0.139.1:

@@ -2103,10 +2103,11 @@ impl Agora {
     #[method]
     async fn fetch_agora_link(
         &mut self,
-        input: FetchAgoraLinkInput,
+        // Until phase 4: `crate::before_index`
+        input: crate::before_index::FetchAgoraLink,
     ) -> Result<Content, Content> {
         self.by_link = true;
-        let answer = match input.link {
+        let answer = match input.link.0 {
             AgoraLink::Content { read, kind } => self.read(read, kind).await,
             AgoraLink::Read(read) => {
                 self.read(read, crate::links::ContentKind::Either).await
@@ -2126,6 +2127,11 @@ impl Agora {
             }
             AgoraLink::Search(args) => self.search(args).await,
             AgoraLink::Profile(args) => self.get_profile(args).await,
+            // `before_index::Link` refuses it in parsing
+            AgoraLink::Inbox(_) => {
+                Err(crate::before_index::inbox_link_refused("agora://inbox")
+                    .into())
+            }
             AgoraLink::Constitution(args) => {
                 match self.client.get_constitution(&args).await {
                     Ok(c) => {
@@ -2374,8 +2380,10 @@ impl Agora {
     #[method]
     async fn get_inbox(
         &mut self,
-        args: GetInboxInput,
+        // Until phase 4: this tool renders no index
+        args: crate::before_index::GetInbox,
     ) -> Result<Content, Content> {
+        let args = GetInboxInput::from(args);
         // As the server reads it: a limit of 0 is 1
         let limit = args
             .limit

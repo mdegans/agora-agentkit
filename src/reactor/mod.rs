@@ -714,6 +714,12 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                             "endpoint unreachable; holding the session"
                         );
                         tokio::time::sleep(every).await;
+                        // Before each re-attempt, as before every infer:
+                        // what arrived while held is seated now
+                        agent
+                            .on_turn()
+                            .await
+                            .map_err(ReactorError::AgentError)?;
                     }
                     Err(e) => match e.retry_after() {
                         Some(wait) if attempt < MAX_INFER_RETRIES => {
@@ -727,6 +733,10 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                                 "retryable inference error"
                             );
                             tokio::time::sleep(wait).await;
+                            agent
+                                .on_turn()
+                                .await
+                                .map_err(ReactorError::AgentError)?;
                         }
                         _ => {
                             return Err(ReactorError::InferenceError(e));
