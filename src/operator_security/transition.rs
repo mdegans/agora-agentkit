@@ -1756,6 +1756,16 @@ impl<I: IdSource> Tx<'_, I> {
                 );
                 guard(fits, Refusal::WrongState)?;
                 guard(losing.is_none() || round == 2, Refusal::WrongState)?;
+                // RecoverySuspend is from `Active` only: not the contested
+                // factor itself, nor anything else suspended or gone
+                if let Some(l) = losing {
+                    guard(
+                        self.s.factor(*l).is_some_and(|f| {
+                            f.state == CredentialState::Active
+                        }),
+                        Refusal::WrongState,
+                    )?;
+                }
                 if let Some(l) = losing {
                     // RecoverySuspend: cascade with no suspender exclusion
                     let deadline = self.now + suspension_deadline();

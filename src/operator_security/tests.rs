@@ -3673,6 +3673,10 @@ fn a_send_to_nobody_and_what_is_announced() {
     let loud =
         plan_send(&request(&many, When::Default, TapLevel::Tap, &[])).unwrap();
     assert!(loud.announced());
+    // Going now to as many: announced because it goes now
+    let now = plan_send(&request(&many, When::Now, TapLevel::YubikeyTap, &[]))
+        .unwrap();
+    assert!(now.announced_now() && !now.announced_held() && now.announced());
 }
 
 /// What a request's factor is as a credential
@@ -3728,44 +3732,43 @@ fn a_recovery_loser_cascades_to_what_it_approved() {
     ));
 }
 
-/// FINDING, for the Steward: the state table has RecoverySuspend from `Active`
-/// only and says nothing of a decision naming a factor that isn't. The model
-/// accepts it and takes no action on that factor. Pinned, not endorsed
+/// RecoverySuspend is from `Active` only: a round 2 decision naming the
+/// contested factor itself, a suspended factor or an unknown one is refused,
+/// and changes nothing
 #[test]
-fn a_contested_factor_named_the_loser_of_its_own_case() {
+fn a_recovery_loser_must_be_active() {
     let mut w = registered(DEVICE);
     w.add_passkey(1, DEVICE, 0, 0);
     w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(3, DEVICE, 0, 0);
+    w.ok(Event::Suspend { target: p(3) }, tap(0, TapKind::Suspend));
     w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
     w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
     let case = *w.s.cases.keys().next().unwrap();
-    w.ok(
-        Event::RecoveryDecide {
-            case,
-            outcome: RecoveryOutcome::Reinstate,
-            losing: None,
-        },
-        Authority::Staff,
-    );
+    let decide = |losing| Event::RecoveryDecide {
+        case,
+        outcome: RecoveryOutcome::Reinstate,
+        losing,
+    };
+    w.ok(decide(None), Authority::Staff);
     w.ok(
         Event::RecoveryCancel { case },
         tap(1, TapKind::CounterClaim),
     );
-    let decided = w.try_do(
-        Event::RecoveryDecide {
-            case,
-            outcome: RecoveryOutcome::Reinstate,
-            losing: Some(p(2)),
-        },
-        Authority::Staff,
-    );
-    assert_eq!(decided, Ok(()));
-    // Not `Active`, so no RecoverySuspend: it stays contested...
+    for loser in [p(2), p(3), p(9)] {
+        assert_eq!(
+            w.try_do(decide(Some(loser)), Authority::Staff),
+            Err(Refusal::WrongState),
+            "{loser:?}"
+        );
+    }
     assert!(matches!(w.state(p(2)), CredentialState::Contested { .. }));
-    // ...and the outcome stands, so "the loser" is reinstated
-    w.wait(Duration::days(30));
-    w.ok(Event::RecoveryEffective { case }, Authority::Platform);
-    assert_eq!(w.state(p(2)), CredentialState::Active);
+    assert!(matches!(
+        w.s.cases[&case].state,
+        CaseState::Open { round: 2 }
+    ));
+    w.ok(decide(Some(p(1))), Authority::Staff);
+    assert!(matches!(w.state(p(1)), CredentialState::Suspended(_)));
 }
 
 /// A pending passkey expires; nothing else does

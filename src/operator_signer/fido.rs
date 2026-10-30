@@ -46,7 +46,7 @@ use x509_cert::der::asn1::ObjectIdentifier;
 use x509_cert::ext::pkix::BasicConstraints;
 
 use super::piv::{check_extensions, check_signature, leaf_public_key};
-use super::{AttestationError, DerCertificate, OperatorPublicKey};
+use super::{AttestationError, OperatorPublicKey};
 
 /// `id-fido-gen-ce-aaguid`, the AAGUID extension of §8.2.1.
 pub const OID_FIDO_AAGUID: ObjectIdentifier =
@@ -520,13 +520,9 @@ fn cbor_item_len(bytes: &[u8], depth: u8) -> Option<usize> {
     (len <= bytes.len()).then_some(len)
 }
 
-/// The DER of a pinned anchor, by index: for the tests of the store.
-pub fn pinned_anchor_der(anchor: &PinnedFidoAnchor) -> DerCertificate {
-    DerCertificate::from_der(anchor.der.to_vec())
-}
-
 #[cfg(all(test, feature = "mock-hardware-key"))]
 mod tests {
+    use super::super::DerCertificate;
     use super::super::mock::{FidoLeafOptions, MockRootCa};
     use super::*;
 
