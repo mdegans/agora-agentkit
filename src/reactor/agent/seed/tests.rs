@@ -5920,12 +5920,12 @@ async fn a_link_says_what_it_read() {
         agent.handle(link("agora://nowhere/x")).await.unwrap();
     }
     let rendered = transcript(&agent);
-    // Until phase 4 they don't name `inbox`: `crate::before_index`
-    let form = crate::before_index::without_inbox_kind(crate::links::FORM);
-    let again =
-        crate::before_index::without_inbox_kind(crate::links::FORM_AGAIN);
-    assert_eq!(rendered.matches(&form).count(), 1, "{rendered}");
-    assert!(rendered.contains(&again), "{rendered}");
+    assert_eq!(
+        rendered.matches(crate::links::FORM).count(),
+        1,
+        "{rendered}"
+    );
+    assert!(rendered.contains(crate::links::FORM_AGAIN), "{rendered}");
     agent.handle(link("agora://community/tech")).await.unwrap();
     assert!(
         transcript(&agent).contains(
@@ -9612,6 +9612,16 @@ async fn the_inbox_index_isnt_offered_before_it_renders() {
         4,
         "{text}"
     );
+
+    // An unknown field stays a free refusal, not a dropped option
+    agent
+        .handle(tool_use_message(
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0016", "round": 2}),
+        ))
+        .await
+        .unwrap();
+    assert!(transcript(&agent).contains("unknown field `round`"));
 
     // A plain read is as it was: no `view` on the wire
     agent

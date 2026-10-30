@@ -14,9 +14,6 @@ pub const GET_INBOX_DOC: &str = "Your private messages and platform broadcasts, 
      operator come first, in their own section. `limit` returns fewer, and unread ones past \
      it stay unread.";
 
-const LINK_KINDS_WITH: &str = "search, git and inbox";
-const LINK_KINDS_WITHOUT: &str = "search and git";
-
 /// `get_inbox`'s input as the seed tool takes it: a field it doesn't offer is
 /// refused in parsing, so the refusal costs nothing and reads as it did
 #[derive(
@@ -57,6 +54,7 @@ impl From<GetInbox> for GetInboxInput {
 /// of link yet, refused in parsing as an unknown kind was
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
 pub struct FetchAgoraLink {
     /// An agora:// link, like agora://post/7ad26ccd or
     /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
@@ -161,16 +159,11 @@ pub fn index_field_refused(input: &GetInboxInput) -> Option<String> {
     ))
 }
 
-/// A link's refusal, without the kind that isn't offered yet
-pub fn without_inbox_kind(text: &str) -> String {
-    text.replace(LINK_KINDS_WITH, LINK_KINDS_WITHOUT)
-}
-
 /// The refusal for `agora://inbox`
 pub fn inbox_link_refused(given: &str) -> String {
     format!(
         "{given:?} is not an Agora link: \"inbox\" is not a kind of link. {}",
-        without_inbox_kind(crate::links::FORM)
+        crate::links::FORM
     )
 }
 
@@ -183,9 +176,7 @@ mod tests {
         let text = inbox_link_refused("agora://inbox");
         assert!(text.contains("search and git"), "{text}");
         assert!(!text.contains("git and inbox"), "{text}");
-        assert!(
-            !without_inbox_kind(crate::links::FORM_AGAIN).contains("inbox")
-        );
+        assert!(!crate::links::FORM_AGAIN.contains("inbox"));
     }
 
     #[test]

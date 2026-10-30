@@ -627,12 +627,6 @@ impl<T: Tool> Tool for Gauged<T> {
                 t.replace(crate::links::FORM, crate::links::FORM_AGAIN)
             });
         }
-        // Until phase 4: `crate::before_index`
-        if super::tool::raw_text(&result.content).contains("git and inbox") {
-            super::tool::map_text(&mut result.content, |t| {
-                crate::before_index::without_inbox_kind(t)
-            });
-        }
         if let Some(client) = &self.prompt_check {
             check_prompt_link(client, &name, &input, &mut result).await;
         }

@@ -67,7 +67,7 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
      agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds are \
      gov, constitution, protocol, calendar, prompts, post, comment, content, \
-     community, agent, feed, search, git and inbox. A repository's file is \
+     community, agent, feed, search and git. A repository's file is \
      agora://git/<repository>/<path>. A page URL of this site reads as the link it shows. An id as \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
      DATA-2026-0001:<commit>:<path>, git:<repository>:/<path>, \
@@ -77,7 +77,7 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
 /// after a session's first refusal
 pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
      the kinds are gov, constitution, protocol, calendar, prompts, post, \
-     comment, content, community, agent, feed, search, git and inbox.";
+     comment, content, community, agent, feed, search and git.";
 
 /// Every kind word, a link's host: the site routes `/agora/<kind>/…` on
 /// them
