@@ -988,7 +988,9 @@ mod tests {
             0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21,
             0x00,
         ];
-        ed25519.extend([7u8; 32]);
+        // Ed25519's base point: a valid key, of the wrong type
+        ed25519.push(0x58);
+        ed25519.extend([0x66u8; 31]);
         for raw in [unknown, ed25519] {
             assert_eq!(
                 check(FidoLeafOptions {
