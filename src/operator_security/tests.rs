@@ -3589,3 +3589,97 @@ fn the_default_fido_store_is_the_pinned_one_and_prints_its_subjects() {
     let printed = format!("{:?}", FidoTrustStore::default());
     assert!(printed.contains("Yubico"), "{printed}");
 }
+
+// ---------------------------------------------------------------------------
+// The rarer arms
+// ---------------------------------------------------------------------------
+
+/// A use is the session's own, and moves only its clock
+#[test]
+fn a_session_use_is_its_own() {
+    let mut w = registered(DEVICE);
+    w.sign_in(1, 0);
+    w.wait(Duration::hours(1));
+    let before = w.s.sessions[&sess(1)].last_used;
+    assert_eq!(
+        w.try_do(
+            Event::SessionUse { session: sess(0) },
+            Authority::Session(sess(1)),
+        ),
+        Err(Refusal::WrongAuthority)
+    );
+    assert_eq!(w.s.sessions[&sess(0)].last_used, t0());
+    w.ok(
+        Event::SessionUse { session: sess(0) },
+        Authority::Session(sess(0)),
+    );
+    assert_eq!(w.s.sessions[&sess(0)].last_used, t0() + Duration::hours(1));
+    assert_eq!(w.s.sessions[&sess(1)].last_used, before);
+}
+
+/// A change of primary address takes effect after its wait
+#[test]
+fn the_primary_address_changes_when_its_change_takes_effect() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.wait(Duration::days(8));
+    let new = address(3, "new.example");
+    w.ok(
+        Event::ChangeRequest {
+            change: change_id(0),
+            setting: SettingChange::PrimaryEmail(new.clone()),
+        },
+        tap(1, TapKind::PendingChange),
+    );
+    w.ok(
+        Event::AddressVerify {
+            address: addr_id(3),
+        },
+        Authority::Email(addr_id(3)),
+    );
+    assert_ne!(w.s.primary, new);
+    w.wait(Duration::hours(72));
+    w.ok(
+        Event::ChangeEffective {
+            change: change_id(0),
+        },
+        Authority::Platform,
+    );
+    assert_eq!(w.s.primary, new);
+}
+
+/// Normal mode: none of frozen, banned or restricted
+#[test]
+fn normal_mode_and_the_freeze_interval() {
+    let w = registered(DEVICE);
+    assert!(w.s.normal());
+    assert_eq!(freeze_interval(), Duration::hours(24));
+}
+
+/// A send to nobody is refused; a tapped one is announced
+#[test]
+fn a_send_to_nobody_and_what_is_announced() {
+    let nobody = BTreeSet::new();
+    assert_eq!(
+        plan_send(&request(&nobody, When::Default, TapLevel::Tap, &[]))
+            .map(|_| ()),
+        Err(SendRefusal::NoRecipients)
+    );
+    let few = agents(0, 2);
+    let quiet =
+        plan_send(&request(&few, When::Default, TapLevel::None, &[])).unwrap();
+    assert!(!quiet.announced());
+    let many = agents(0, 6);
+    let loud =
+        plan_send(&request(&many, When::Default, TapLevel::Tap, &[])).unwrap();
+    assert!(loud.announced());
+}
+
+/// What a request's factor is as a credential
+#[test]
+fn a_hardware_factor_is_a_hardware_credential() {
+    assert_eq!(
+        SUDO.credential_kind(),
+        Some(crate::enums::OperatorCredentialKind::HardwareKey)
+    );
+}

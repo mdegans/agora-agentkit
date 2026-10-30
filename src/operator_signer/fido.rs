@@ -931,4 +931,78 @@ mod tests {
         // A nesting bomb doesn't overflow the stack
         assert!(cbor_item_len(&[0x81; 4096], 0).is_none());
     }
+
+    #[test]
+    fn cbor_heads_and_items_of_every_width() {
+        // Four and eight byte arguments, and the reserved infos
+        assert_eq!(cbor_head(&[0x1a, 0, 1, 0, 0]), Some((0, 65536, 5)));
+        assert_eq!(
+            cbor_head(&[0x1b, 0, 0, 0, 1, 0, 0, 0, 0]),
+            Some((0, 1 << 32, 9))
+        );
+        for reserved in [0x1c, 0x1d, 0x1e, 0x1f] {
+            assert_eq!(cbor_head(&[reserved]), None);
+        }
+        assert_eq!(cbor_head(&[0x1a, 0, 1]), None, "cut short");
+        // A tag takes its item; a tag with none is no item
+        assert_eq!(cbor_item_len(&[0xc1, 0x01], 0), Some(2));
+        assert_eq!(cbor_item_len(&[0xc1], 0), None);
+        // A length past the end isn't one
+        assert_eq!(cbor_item_len(&[0x5a, 0, 1, 0, 0, 1], 0), None);
+    }
+
+    #[test]
+    fn auth_data_is_found_only_as_a_byte_string_in_a_map() {
+        let bad = Err(FidoAttestationError::AuthData);
+        // Not a map
+        assert_eq!(auth_data_of(&[0x81, 0x01]), bad);
+        // {"authData": 1}: a key with the wrong kind of value
+        let mut key = vec![0x68];
+        key.extend(b"authData");
+        let wrong = [&[0xa1][..], &key, &[0x01]].concat();
+        assert_eq!(auth_data_of(&wrong), bad);
+        // {"fmt": 1}: no such key
+        let none = [&[0xa1, 0x63][..], b"fmt", &[0x01]].concat();
+        assert_eq!(auth_data_of(&none), bad);
+        // {"fmt": 1, "authData": h'0102'}: past the other keys
+        let mut found = [&none[..], &key, &[0x42, 1, 2]].concat();
+        found[0] = 0xa2;
+        assert_eq!(auth_data_of(&found), Ok([1u8, 2].as_slice()));
+        // Too short to carry a flags byte
+        assert!(aaguid_of(&[0; 10]).is_err());
+    }
+
+    #[test]
+    fn a_subject_is_read_past_what_it_does_not_ask_for() {
+        let root = MockRootCa::generate();
+        let store = FidoTrustStore::mock(&root);
+        let data = signed(&AAGUID);
+        let good = FidoLeafOptions::good(AAGUID);
+        let check = |subject| {
+            let options = FidoLeafOptions {
+                subject,
+                ..good.clone()
+            };
+            let (leaf, signature) = attest(&root, options, &data);
+            store.verify(&signature, &[leaf.as_der()], &data)
+        };
+        // A locality isn't asked about
+        assert!(
+            check(
+                "CN=Batch,OU=Authenticator Attestation,O=Maker,C=SE,L=Stockholm"
+            )
+            .is_ok()
+        );
+        // A country is two letters
+        for country in ["SEX", "S1"] {
+            let subject = format!(
+                "CN=Batch,OU=Authenticator Attestation,O=Maker,C={country}"
+            );
+            let subject: &'static str = Box::leak(subject.into_boxed_str());
+            assert!(matches!(
+                check(subject),
+                Err(FidoAttestationError::Subject { .. })
+            ));
+        }
+    }
 }
