@@ -14,6 +14,7 @@ pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::ids::{
     AgentGroupId, AgentId, MessageId, ModerationActionId, OperatorActionId,
     OperatorCredentialId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
+    OperatorRecoveryCaseId,
 };
 use crate::limits;
 pub use crate::moderation::ActionAppeal;
@@ -716,6 +717,14 @@ pub struct FirstPasskeyConfirmRequest {
     pub cose_key_sha256: String,
 }
 
+/// What `POST /credentials/{id}/contest` did: the suspension's clock stopped,
+/// and the dispute went to manual recovery. The credential stays suspended
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CredentialContestResponse {
+    pub case: OperatorRecoveryCaseId,
+}
+
 /// What [`FirstPasskeyConfirmRequest`] did
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -735,6 +744,43 @@ pub struct CredentialRef {
     /// ([`OperatorLogEntry::for_agent`]): a label can name a machine
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+/// A passkey or an API credential, as the log names it. A passkey's nickname
+/// and a credential's label are the operator's own, and an agent's view never
+/// carries a factor entry ([`OperatorLogEntry::for_agent`])
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "factor", rename_all = "snake_case")]
+pub enum FactorRef {
+    Passkey {
+        id: OperatorPasskeyId,
+        nickname: String,
+    },
+    Credential {
+        id: OperatorCredentialId,
+        label: String,
+    },
+}
+
+/// Why a factor was suspended: a `credential_suspend` entry's cause
+/// (state table §2). Freezes and recovery add their variants with the steps
+/// that build them
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "cause", rename_all = "snake_case")]
+pub enum SuspensionCauseRecord {
+    /// A passkey tap named this factor; the entry carries the assertion
+    Direct { by: FactorRef },
+    /// It was approved, through any number of factors, by the root
+    Cascade {
+        root: FactorRef,
+        /// The root's own `credential_suspend` entry
+        root_entry: OperatorActionId,
+        by: FactorRef,
+    },
 }
 
 /// One thing an operator did
@@ -800,8 +846,29 @@ pub enum OperatorActionDetail {
     CredentialRevoke {
         credential: CredentialRef,
     },
+    /// A passkey was revoked, its suspension's 72 hours over: `kind`
+    /// `credential_revoke`
+    PasskeyRevoke {
+        passkey: OperatorPasskeyId,
+        nickname: String,
+    },
     ConfigChangeEffective {
         change: OperatorConfigChange,
+    },
+    /// A factor was suspended: one entry per target, whatever the cause
+    CredentialSuspend {
+        target: FactorRef,
+        cause: SuspensionCauseRecord,
+        /// When it is revoked unless contested; a cascaded one shares its
+        /// root's
+        deadline: DateTime<Utc>,
+    },
+    /// A suspended factor contested its suspension, opening a recovery case
+    CredentialContest {
+        target: FactorRef,
+        /// The `credential_suspend` entry it contests
+        suspension: OperatorActionId,
+        case: OperatorRecoveryCaseId,
     },
 }
 
@@ -861,7 +928,10 @@ impl OperatorLogEntry {
             | OperatorActionDetail::CredentialAdd { .. }
             | OperatorActionDetail::PasskeyAdd { .. }
             | OperatorActionDetail::CredentialRevoke { .. }
-            | OperatorActionDetail::ConfigChangeEffective { .. } => {
+            | OperatorActionDetail::PasskeyRevoke { .. }
+            | OperatorActionDetail::ConfigChangeEffective { .. }
+            | OperatorActionDetail::CredentialSuspend { .. }
+            | OperatorActionDetail::CredentialContest { .. } => {
                 return None;
             }
         };
@@ -906,17 +976,21 @@ pub enum CancelReason {
     /// The account's first passkey retired its password, ending the session
     /// that admitted the send (0.140.2)
     PasswordRetired,
+    /// The factor that admitted the send was suspended, contested or revoked,
+    /// when it happened or when the send fell due (the state table's §6)
+    FactorNotEffective,
 }
 
 impl CancelReason {
     /// Every reason
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Operator,
         Self::CancelLink,
         Self::AgentDeparted,
         Self::OperatorBanned,
         Self::CredentialRevoked,
         Self::PasswordRetired,
+        Self::FactorNotEffective,
     ];
 }
 
@@ -930,11 +1004,17 @@ impl OperatorActionDetail {
             Self::CredentialAdd { .. } | Self::PasskeyAdd { .. } => {
                 OperatorActionKind::CredentialAdd
             }
-            Self::CredentialRevoke { .. } => {
+            Self::CredentialRevoke { .. } | Self::PasskeyRevoke { .. } => {
                 OperatorActionKind::CredentialRevoke
             }
             Self::ConfigChangeEffective { .. } => {
                 OperatorActionKind::ConfigChangeEffective
+            }
+            Self::CredentialSuspend { .. } => {
+                OperatorActionKind::CredentialSuspend
+            }
+            Self::CredentialContest { .. } => {
+                OperatorActionKind::CredentialContest
             }
         }
     }
@@ -953,7 +1033,10 @@ impl OperatorActionDetail {
             Self::CredentialAdd { .. }
             | Self::PasskeyAdd { .. }
             | Self::CredentialRevoke { .. }
-            | Self::ConfigChangeEffective { .. } => None,
+            | Self::PasskeyRevoke { .. }
+            | Self::ConfigChangeEffective { .. }
+            | Self::CredentialSuspend { .. }
+            | Self::CredentialContest { .. } => None,
         }
     }
 }
@@ -1064,6 +1147,33 @@ mod tests {
                 credential_kind: OperatorCredentialKind::SoftwareKey,
             },
             OperatorActionDetail::CredentialRevoke { credential },
+            OperatorActionDetail::CredentialSuspend {
+                target: FactorRef::Passkey {
+                    id: OperatorPasskeyId::new(),
+                    nickname: "y".into(),
+                },
+                cause: SuspensionCauseRecord::Cascade {
+                    root: FactorRef::Credential {
+                        id: OperatorCredentialId::new(),
+                        label: "k".into(),
+                    },
+                    root_entry: OperatorActionId::new(),
+                    by: FactorRef::Passkey {
+                        id: OperatorPasskeyId::new(),
+                        nickname: "q".into(),
+                    },
+                },
+                deadline: chrono::DateTime::from_timestamp(1_800_000_000, 0)
+                    .unwrap(),
+            },
+            OperatorActionDetail::CredentialContest {
+                target: FactorRef::Credential {
+                    id: OperatorCredentialId::new(),
+                    label: "k".into(),
+                },
+                suspension: OperatorActionId::new(),
+                case: OperatorRecoveryCaseId::new(),
+            },
         ] {
             let json = serde_json::to_value(&detail).unwrap();
             assert_eq!(json["kind"], detail.kind().to_string());

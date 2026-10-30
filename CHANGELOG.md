@@ -52,6 +52,17 @@ response** once the log holds a `passkey_add` entry.
   /api/operator/passkeys/{id}/confirm`).
 - `AttestationError` is `Clone`, `PartialEq` and `Eq`.
 
+Operator security, build step 7 (*Credential disputes*). The same warning: an
+old `agora-operator log` fails on the whole response once the log holds one of
+these entries.
+
+- **Wire**: `OperatorActionDetail::CredentialSuspend`, `CredentialContest`,
+  `PasskeyRevoke` (`kind` `credential_revoke`); `FactorRef`,
+  `SuspensionCauseRecord`; `CancelReason::FactorNotEffective`;
+  `CredentialContestResponse`.
+- **`operator_security::model`**: `provenance_cascade`, which
+  `AccountState::cascade` now calls (behaviour unchanged), and `SUSPEND_LIMIT`.
+
 ## 0.141.0
 
 A vacated action's wording, from beta-critic's review of 0.139.1:

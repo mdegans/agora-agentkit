@@ -21,6 +21,40 @@ pub fn suspension_deadline() -> Duration {
     Duration::hours(72)
 }
 
+/// `SUSPEND_LIMIT`: direct suspensions per account per hour; cascades don't
+/// count. High enough that a thief who burns it can't keep the owner from
+/// suspending, on an account with a normal number of factors
+pub const SUSPEND_LIMIT: u32 = 10;
+
+/// `cascade(T, S)` over any store of factors: `target`, and every effective
+/// factor reached from it along approvals without passing through
+/// `suspender`. With the suspender the target itself, only the target. The
+/// one copy of the rule: [`AccountState::cascade`] and the server's
+/// transaction both call it
+pub fn provenance_cascade(
+    target: FactorId,
+    suspender: Option<FactorId>,
+    children: impl Fn(FactorId) -> Vec<FactorId>,
+    effective: impl Fn(FactorId) -> bool,
+) -> BTreeSet<FactorId> {
+    let mut out = BTreeSet::from([target]);
+    if suspender == Some(target) {
+        return out;
+    }
+    let mut seen = BTreeSet::new();
+    let mut todo = children(target);
+    while let Some(next) = todo.pop() {
+        if Some(next) == suspender || !seen.insert(next) {
+            continue;
+        }
+        if effective(next) {
+            out.insert(next);
+        }
+        todo.extend(children(next));
+    }
+    out
+}
+
 /// The longest default hold a change may set (the operator config's "at
 /// most a day")
 pub fn max_dm_hold() -> Duration {
@@ -669,22 +703,12 @@ impl AccountState {
         target: FactorId,
         suspender: Option<FactorId>,
     ) -> BTreeSet<FactorId> {
-        let mut out = BTreeSet::from([target]);
-        if suspender == Some(target) {
-            return out;
-        }
-        let mut seen = BTreeSet::new();
-        let mut todo: Vec<FactorId> = self.children(target).collect();
-        while let Some(next) = todo.pop() {
-            if Some(next) == suspender || !seen.insert(next) {
-                continue;
-            }
-            if self.effective(next) {
-                out.insert(next);
-            }
-            todo.extend(self.children(next));
-        }
-        out
+        provenance_cascade(
+            target,
+            suspender,
+            |id| self.children(id).collect(),
+            |id| self.effective(id),
+        )
     }
 
     /// `recent_desc(u, t)`: what `u` added, through anything, in the 7
