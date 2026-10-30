@@ -266,6 +266,12 @@ pub struct FidoLeafOptions {
     pub self_signed: bool,
     /// An X.509 v1 certificate: no version field, no extensions
     pub version_1: bool,
+    /// These bytes as the AAGUID extension's value, instead of a well-formed one
+    pub raw_aaguid: Option<Vec<u8>>,
+    /// These bytes as `basicConstraints`' value, instead of a well-formed one
+    pub raw_basic_constraints: Option<Vec<u8>>,
+    /// This DER as the subject's key, instead of its own P-256 key
+    pub raw_spki: Option<Vec<u8>>,
 }
 
 impl FidoLeafOptions {
@@ -279,6 +285,9 @@ impl FidoLeafOptions {
             omit_basic_constraints: false,
             self_signed: false,
             version_1: false,
+            raw_aaguid: None,
+            raw_basic_constraints: None,
+            raw_spki: None,
         }
     }
 }
@@ -319,11 +328,17 @@ impl MockRootCa {
         let mut extensions = Vec::new();
         if let Some(aaguid) = options.aaguid {
             let value = OctetString::new(aaguid.to_vec()).expect("short");
-            let mut extension = extension(piv_fido_aaguid_oid(), der(&value));
+            let value =
+                options.raw_aaguid.clone().unwrap_or_else(|| der(&value));
+            let mut extension = extension(piv_fido_aaguid_oid(), value);
             extension.critical = options.aaguid_critical;
             extensions.push(extension);
         }
-        if !options.omit_basic_constraints {
+        if let Some(raw) = options.raw_basic_constraints.clone() {
+            let mut extension = extension(OID_BASIC_CONSTRAINTS, raw);
+            extension.critical = true;
+            extensions.push(extension);
+        } else if !options.omit_basic_constraints {
             extensions.push(critical_extension(
                 &BasicConstraints {
                     ca: options.ca,
@@ -332,6 +347,12 @@ impl MockRootCa {
                 OID_BASIC_CONSTRAINTS,
             ));
         }
+        let spki = options.raw_spki.as_ref().map_or_else(
+            || p256_spki(&key),
+            |raw| {
+                SubjectPublicKeyInfoOwned::from_der(raw).expect("a valid SPKI")
+            },
+        );
         let subject = Name::from_str(options.subject).expect("a valid name");
         let own_key = IssuerKey::EcdsaP256(key.clone());
         let (issuer, issuer_key) = if options.self_signed {
@@ -350,7 +371,7 @@ impl MockRootCa {
             let signature = issuer_key.sign(&tbs);
             assemble(tbs, &algorithm, &signature)
         } else {
-            issue(3, issuer, &subject, p256_spki(&key), extensions, issuer_key)
+            issue(3, issuer, &subject, spki, extensions, issuer_key)
         };
         MockFidoAttestation { key, certificate }
     }

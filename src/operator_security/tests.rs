@@ -3683,3 +3683,473 @@ fn a_hardware_factor_is_a_hardware_credential() {
         Some(crate::enums::OperatorCredentialKind::HardwareKey)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fixed sequences for arms only the property tests reached
+// ---------------------------------------------------------------------------
+
+/// Round 2's loser takes what it approved with it, and the follower's root is
+/// the loser
+#[test]
+fn a_recovery_loser_cascades_to_what_it_approved() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(3, DEVICE, 1, 0);
+    w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
+    w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
+    let case = *w.s.cases.keys().next().unwrap();
+    w.ok(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::Reinstate,
+            losing: None,
+        },
+        Authority::Staff,
+    );
+    w.ok(
+        Event::RecoveryCancel { case },
+        tap(1, TapKind::CounterClaim),
+    );
+    w.ok(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::Reinstate,
+            losing: Some(p(1)),
+        },
+        Authority::Staff,
+    );
+    assert!(matches!(
+        w.state(p(3)),
+        CredentialState::Suspended(Suspension {
+            cause: SuspensionCause::Cascade { root, by: None },
+            ..
+        }) if root == p(1)
+    ));
+}
+
+/// FINDING, for the Steward: the state table has RecoverySuspend from `Active`
+/// only and says nothing of a decision naming a factor that isn't. The model
+/// accepts it and takes no action on that factor. Pinned, not endorsed
+#[test]
+fn a_contested_factor_named_the_loser_of_its_own_case() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0, 0);
+    w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
+    w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
+    let case = *w.s.cases.keys().next().unwrap();
+    w.ok(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::Reinstate,
+            losing: None,
+        },
+        Authority::Staff,
+    );
+    w.ok(
+        Event::RecoveryCancel { case },
+        tap(1, TapKind::CounterClaim),
+    );
+    let decided = w.try_do(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::Reinstate,
+            losing: Some(p(2)),
+        },
+        Authority::Staff,
+    );
+    assert_eq!(decided, Ok(()));
+    // Not `Active`, so no RecoverySuspend: it stays contested...
+    assert!(matches!(w.state(p(2)), CredentialState::Contested { .. }));
+    // ...and the outcome stands, so "the loser" is reinstated
+    w.wait(Duration::days(30));
+    w.ok(Event::RecoveryEffective { case }, Authority::Platform);
+    assert_eq!(w.state(p(2)), CredentialState::Active);
+}
+
+/// A pending passkey expires; nothing else does
+#[test]
+fn only_a_pending_passkey_expires() {
+    let mut w = registered(DEVICE);
+    assert_eq!(
+        w.try_do(Event::PendingExpire { passkey: pk(0) }, Authority::Platform),
+        Err(Refusal::WrongState)
+    );
+}
+
+/// A sudo key that is gone no longer has to confirm a first passkey
+#[test]
+fn a_revoked_sudo_key_does_not_have_to_confirm_a_first_passkey() {
+    let s = AccountState::migrated(
+        OperatorId::from(uuid(0, 1)),
+        address(0, "primary.example"),
+        AuthMode::PasswordOnly,
+        [(c(0), SUDO, t0())],
+        3,
+    );
+    let mut w = World::new(s);
+    w.ok(
+        Event::PasswordSignIn { session: sess(0) },
+        Authority::Password,
+    );
+    let first = Event::FirstPasskey {
+        passkey: pk(0),
+        class: DEVICE,
+        confirm: None,
+    };
+    assert_eq!(
+        w.try_do(first.clone(), Authority::Session(sess(0))),
+        Err(Refusal::NeedsSudo)
+    );
+    w.s.factors.get_mut(&c(0)).unwrap().state = CredentialState::Revoked;
+    w.ok(first, Authority::Session(sess(0)));
+}
+
+fn a_contact_change(i: u8, to: u8, domain: &str) -> Event {
+    Event::ChangeRequest {
+        change: change_id(i),
+        setting: SettingChange::EmergencyContact(Some(address(to, domain))),
+    }
+}
+
+/// Two changes, each fine alone, that together would share a domain: the
+/// second is cancelled when its time comes
+#[test]
+fn a_change_that_would_now_share_a_domain_is_cancelled_at_its_time() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.contact(0);
+    w.ok(
+        a_contact_change(0, 2, "shared.example"),
+        tap(1, TapKind::PendingChange),
+    );
+    w.ok(
+        Event::AddressVerify {
+            address: addr_id(2),
+        },
+        Authority::Email(addr_id(2)),
+    );
+    w.ok(
+        Event::ChangeRequest {
+            change: change_id(1),
+            setting: SettingChange::PrimaryEmail(address(3, "shared.example")),
+        },
+        tap(1, TapKind::PendingChange),
+    );
+    w.ok(
+        Event::AddressVerify {
+            address: addr_id(3),
+        },
+        Authority::Email(addr_id(3)),
+    );
+    w.wait(Duration::hours(72));
+    w.ok(
+        Event::ChangeEffective {
+            change: change_id(0),
+        },
+        Authority::Platform,
+    );
+    w.ok(
+        Event::ChangeEffective {
+            change: change_id(1),
+        },
+        Authority::Platform,
+    );
+    assert_eq!(w.s.changes[&change_id(1)].state, ChangeState::Cancelled);
+    assert_ne!(w.s.primary.id, addr_id(3));
+}
+
+/// A freeze a day apart at most, and a used link stays used through a change
+/// of contact; a freeze blocks changing the contact, so unfreezing always
+/// finds the address that froze
+#[test]
+fn a_second_freeze_within_the_interval_and_a_used_link_through_a_change() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0, 0);
+    w.contact(1);
+    w.wait(Duration::days(10));
+    let send = |i| Event::SendAdmit {
+        send: send_id(i),
+        recipients: agents(0, 6),
+        when: When::Default,
+    };
+    w.ok(send(0), tap(0, TapKind::Send));
+    let first = w.link();
+    w.ok(Event::Freeze { link: first }, Authority::Email(addr_id(1)));
+    // Frozen: the contact can't be changed
+    assert!(
+        w.try_do(
+            a_contact_change(0, 2, "other.example"),
+            tap(1, TapKind::PendingChange)
+        )
+        .is_err()
+    );
+    w.ok(Event::Unfreeze, tap(1, TapKind::Unfreeze));
+    w.ok(Event::ReArm, tap(1, TapKind::ReArm));
+    w.ok(send(1), tap(2, TapKind::Send));
+    let second = w.link();
+    assert_eq!(
+        w.try_do(Event::Freeze { link: second }, Authority::Email(addr_id(1))),
+        Err(Refusal::RateLimited)
+    );
+    w.ok(
+        a_contact_change(0, 2, "other.example"),
+        tap(1, TapKind::PendingChange),
+    );
+    w.ok(
+        Event::AddressVerify {
+            address: addr_id(2),
+        },
+        Authority::Email(addr_id(2)),
+    );
+    w.wait(Duration::hours(72));
+    w.ok(
+        Event::ChangeEffective {
+            change: change_id(0),
+        },
+        Authority::Platform,
+    );
+    assert!(w.s.freeze_links[&first].used && !w.s.freeze_links[&first].void);
+    assert!(w.s.freeze_links[&second].void);
+}
+
+fn deliver_cancelled(w: &mut World, i: u8) {
+    w.ok(Event::SendDeliver { send: send_id(i) }, Authority::Platform);
+    assert_eq!(w.s.sends[&send_id(i)].state, SendState::Cancelled);
+}
+
+/// A session's send outlives the session's expiry, and delivery rechecks what
+/// opened it: a passkey since suspended
+#[test]
+fn delivery_rechecks_an_expired_sessions_passkey() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.sign_in(1, 1);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 2),
+            when: When::At(t0() + Duration::days(60)),
+        },
+        Authority::Session(sess(1)),
+    );
+    w.wait(session_ttl());
+    w.ok(
+        Event::SessionExpire { session: sess(1) },
+        Authority::Platform,
+    );
+    assert_eq!(w.s.sends[&send_id(0)].state, SendState::Scheduled);
+    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
+    w.wait(Duration::days(60));
+    deliver_cancelled(&mut w, 0);
+}
+
+/// ...or a password since retired
+#[test]
+fn delivery_rechecks_an_expired_sessions_password() {
+    let s = AccountState::migrated(
+        OperatorId::from(uuid(0, 1)),
+        address(0, "primary.example"),
+        AuthMode::PasswordOnly,
+        [],
+        3,
+    );
+    let mut w = World::new(s);
+    w.ok(
+        Event::PasswordSignIn { session: sess(0) },
+        Authority::Password,
+    );
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 2),
+            when: When::At(t0() + Duration::days(60)),
+        },
+        Authority::Session(sess(0)),
+    );
+    w.wait(session_ttl());
+    w.ok(
+        Event::SessionExpire { session: sess(0) },
+        Authority::Platform,
+    );
+    w.ok(
+        Event::PasswordSignIn { session: sess(1) },
+        Authority::Password,
+    );
+    w.ok(
+        Event::FirstPasskey {
+            passkey: pk(0),
+            class: DEVICE,
+            confirm: None,
+        },
+        Authority::Session(sess(1)),
+    );
+    w.wait(Duration::days(60));
+    deliver_cancelled(&mut w, 0);
+}
+
+/// A large send held past its contact's removal doesn't go
+#[test]
+fn delivery_rechecks_the_contact_for_a_large_send() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.contact(0);
+    w.wait(Duration::days(10));
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 6),
+            when: When::At(w.now + Duration::days(5)),
+        },
+        tap(0, TapKind::Send),
+    );
+    w.ok(
+        Event::ChangeRequest {
+            change: change_id(0),
+            setting: SettingChange::EmergencyContact(None),
+        },
+        tap(1, TapKind::PendingChange),
+    );
+    w.wait(Duration::hours(72));
+    w.ok(
+        Event::ChangeEffective {
+            change: change_id(0),
+        },
+        Authority::Platform,
+    );
+    assert!(w.s.contact.is_none());
+    w.wait(Duration::days(5));
+    deliver_cancelled(&mut w, 0);
+}
+
+// -- The model's own functions ------------------------------------------------
+
+#[test]
+fn a_flag_turned_off_is_seen_whichever_it_is() {
+    let on = Flags {
+        tier: true,
+        minimum: true,
+        yubikey: true,
+        cutover: true,
+    };
+    assert!(on.none_turned_off(&on));
+    for off in [
+        Flags { tier: false, ..on },
+        Flags {
+            minimum: false,
+            ..on
+        },
+        Flags {
+            yubikey: false,
+            ..on
+        },
+        Flags {
+            cutover: false,
+            ..on
+        },
+    ] {
+        assert!(!on.none_turned_off(&off), "{off:?}");
+        assert!(off.none_turned_off(&on), "{off:?}");
+    }
+}
+
+/// The rule is written over any graph: a shared child is visited once, and the
+/// suspender is not passed
+#[test]
+fn the_cascade_rule_on_a_shared_child() {
+    let children = |id: FactorId| {
+        if id == p(0) {
+            vec![p(1), p(2)]
+        } else if id == p(1) || id == p(2) {
+            vec![p(3)]
+        } else {
+            vec![]
+        }
+    };
+    assert_eq!(
+        provenance_cascade(p(0), None, children, |_| true),
+        BTreeSet::from([p(0), p(1), p(2), p(3)])
+    );
+    assert_eq!(
+        provenance_cascade(p(0), Some(p(1)), children, |_| true),
+        BTreeSet::from([p(0), p(2), p(3)])
+    );
+}
+
+/// `authorised(F)`: each of what it counts, alone
+#[test]
+fn what_a_factor_has_authorised() {
+    let mut w = registered(DEVICE);
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(3, DEVICE, 0, 0);
+    w.add_passkey(4, DEVICE, 0, 0);
+    assert!(w.s.authorised_is_empty(p(1)));
+    // An open session it opened; session 0 is P0's
+    assert!(!w.s.authorised_is_empty(p(0)));
+    // A pending change it requested
+    w.ok(
+        Event::ChangeRequest {
+            change: change_id(0),
+            setting: SettingChange::DmHold(Duration::minutes(5)),
+        },
+        tap(1, TapKind::PendingChange),
+    );
+    assert!(!w.s.authorised_is_empty(p(1)));
+    // A scheduled send it admitted
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 2),
+            when: When::At(t0() + Duration::days(1)),
+        },
+        tap(2, TapKind::Send),
+    );
+    assert!(!w.s.authorised_is_empty(p(2)));
+    // A grant it consented
+    w.ok(
+        Event::OAuthConsent {
+            client: agora_client(),
+            agent: agent(0),
+        },
+        tap(3, TapKind::OAuthConsent),
+    );
+    assert!(!w.s.authorised_is_empty(p(3)));
+    assert!(w.s.authorised_is_empty(p(4)));
+}
+
+/// The minimums and normal mode, each way they fail
+#[test]
+fn the_minimums_and_normal_mode_fail_each_way() {
+    let mut w = registered(DEVICE);
+    assert!(!w.s.min5() && !w.s.min50());
+    assert!(w.s.normal());
+    w.ok(Event::Ban, Authority::Platform);
+    assert!(!w.s.normal());
+    w.ok(Event::Unban, Authority::Platform);
+    w.s.count = 6;
+    w.s.flags.minimum = true;
+    assert!(w.s.restricted() && !w.s.normal());
+    w.s.count = 3;
+    w.s.flags.minimum = false;
+    w.add_passkey(1, DEVICE, 0, 0);
+    w.contact(1);
+    w.wait(Duration::days(10));
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 6),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    let link = w.link();
+    w.ok(Event::Freeze { link }, Authority::Email(addr_id(1)));
+    assert!(!w.s.normal());
+}
+
+fn agora_client() -> OAuthClientId {
+    OAuthClientId::generate()
+}

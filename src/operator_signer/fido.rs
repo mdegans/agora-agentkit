@@ -932,6 +932,74 @@ mod tests {
         assert!(cbor_item_len(&[0x81; 4096], 0).is_none());
     }
 
+    /// Certificates are untrusted input: what doesn't parse is refused, by name
+    #[test]
+    fn malformed_leaves_are_refused() {
+        let root = MockRootCa::generate();
+        let store = FidoTrustStore::mock(&root);
+        let data = signed(&AAGUID);
+        let good = FidoLeafOptions::good(AAGUID);
+        let check = |options| {
+            let (leaf, signature) = attest(&root, options, &data);
+            store.verify(&signature, &[leaf.as_der()], &data)
+        };
+        // Not a certificate at all, in either place
+        let (leaf, signature) = attest(&root, good.clone(), &data);
+        assert!(matches!(
+            store.verify(&signature, &[b"not der".as_slice()], &data),
+            Err(FidoAttestationError::Certificate(
+                AttestationError::Malformed { .. }
+            ))
+        ));
+        assert!(matches!(
+            store.verify(
+                &signature,
+                &[leaf.as_der(), b"not der".as_slice()],
+                &data
+            ),
+            Err(FidoAttestationError::Certificate(
+                AttestationError::Malformed { .. }
+            ))
+        ));
+        // basicConstraints that isn't a SEQUENCE
+        assert_eq!(
+            check(FidoLeafOptions {
+                raw_basic_constraints: Some(vec![0x02, 0x01, 0x01]),
+                ..good.clone()
+            }),
+            Err(FidoAttestationError::NotCaFalse)
+        );
+        // An AAGUID extension that isn't an OCTET STRING, or isn't 16 bytes
+        for raw in [vec![0x02, 0x01, 0x01], vec![0x04, 0x02, 1, 2]] {
+            assert_eq!(
+                check(FidoLeafOptions {
+                    raw_aaguid: Some(raw),
+                    ..good.clone()
+                }),
+                Err(FidoAttestationError::AaguidExtension)
+            );
+        }
+        // A leaf key of a type no one supports (OID 1.2.3), and an Ed25519 one
+        let unknown = vec![
+            0x30, 0x0b, 0x30, 0x04, 0x06, 0x02, 0x2a, 0x03, 0x03, 0x03, 0x00,
+            1, 2,
+        ];
+        let mut ed25519 = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21,
+            0x00,
+        ];
+        ed25519.extend([7u8; 32]);
+        for raw in [unknown, ed25519] {
+            assert_eq!(
+                check(FidoLeafOptions {
+                    raw_spki: Some(raw),
+                    ..good.clone()
+                }),
+                Err(FidoAttestationError::UnsupportedAlgorithm)
+            );
+        }
+    }
+
     #[test]
     fn cbor_heads_and_items_of_every_width() {
         // Four and eight byte arguments, and the reserved infos
