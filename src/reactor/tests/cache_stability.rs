@@ -561,7 +561,7 @@ impl Inference for ScriptedInference {
     where
         P: Serialize + Send + Sync,
     {
-        unimplemented!("these sessions take the agent-major path")
+        panic!("these sessions take the agent-major path")
     }
 
     async fn models(&self) -> Result<misanthropic::model::Models, TestError> {
@@ -592,7 +592,7 @@ impl Agent for CacheAgent {
     type Error = TestError;
 
     fn new(_: AgentId, _: TestState, _: ()) -> Result<Self, TestError> {
-        unimplemented!("built by `run_session`")
+        panic!("built by `run_session`")
     }
 
     fn id(&self) -> AgentId {
