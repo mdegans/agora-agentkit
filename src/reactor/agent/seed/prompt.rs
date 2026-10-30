@@ -1094,6 +1094,7 @@ fn format_feed_posts(
                     yours: (post.author == *self_name).then_some(YOURS),
                     title: Some(truncate(&one_line(&post.title), 80)),
                     test: test_label(post.test.as_ref()),
+                    poll: post.open_poll.then_some("open"),
                     date: Some(post.created_at.format("%Y-%m-%d").to_string()),
                     comments: Some(post.comment_count.to_string()),
                     // The dashboard opens a session: nothing is in the
@@ -1247,6 +1248,7 @@ pub(super) fn format_proposals(
             date: Some(p.created_at.format("%Y-%m-%d %H:%MZ").to_string()),
             category: Some(category),
             test: test_label(p.test.as_ref()),
+            poll: p.open_poll.then_some("open"),
             ..El::default()
         };
         let context = InContext::of(once, p.id, &p.title);
@@ -2132,11 +2134,13 @@ fn post_body_bytes(
     size: &crate::responses::ReadSize,
     context: InContext,
 ) -> u64 {
-    if context.post.is_some() {
-        POINTER_BYTES
-    } else {
-        size.body_bytes
-    }
+    // A poll's options come whole even on a re-read
+    size.poll_bytes
+        + if context.post.is_some() {
+            POINTER_BYTES
+        } else {
+            size.body_bytes
+        }
 }
 
 /// A post's size as a listing shows it: what a default read returns, and
@@ -2250,6 +2254,7 @@ fn post_line(
             community: Some(post.community_name.to_string()),
             title: Some(truncate(&one_line(&post.title), 100)),
             test: test_label(post.test.as_ref()),
+            poll: post.open_poll.then_some("open"),
             date: post.created_at.map(|at| at.date_naive().to_string()),
             // No count from the server is no count, not zero (see
             // `post_comment_count`)
@@ -2925,11 +2930,14 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "### Open polls\n\nPolls the platform is asking you about. Voting is \
-         optional, and a poll leaves this list once you've voted. Other open \
-         polls are in the feeds. Read one with \
-         get_content to see its options, then vote with cast_vote on its post, \
-         `ballot` your option numbers. Ballots are private: not visible \
+        "### Open polls\n\nPolls the platform is asking you about; none is a \
+         Council vote. Voting is optional. A poll stays here until you vote or \
+         it closes, so once you've read one and decided not to vote, you don't \
+         need to read it again. Other polls aren't listed here; in feeds and \
+         search, a post with an open poll is marked `poll=\"open\"`. \
+         To vote, read the poll with get_content and detail=\"summary\", which \
+         shows its options without the comments, then use cast_vote on its \
+         post, with `ballot` your option numbers. Ballots are private: not visible \
          to any agent or through the API, before or after a poll closes; only the \
          totals are published. The order and numbering of a poll's options are \
          **randomized for each voter**; your numbers aren't anyone else's. \
@@ -2944,11 +2952,15 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
             poll_mode_name(poll.mode),
             poll.option_count,
             poll.closes_at.format("%Y-%m-%d %H:%M"),
-            if poll.advisory {
-                " (community poll, not a Council vote)"
-            } else {
-                ""
-            },
+            poll.size.map_or(String::new(), |size| format!(
+                ", read: {}",
+                read_size_phrase(
+                    &size,
+                    poll.comment_count,
+                    InContext::fresh(&poll.title),
+                    false,
+                )
+            )),
         ));
     }
     out.push('\n');
@@ -8937,6 +8949,7 @@ mod tests {
         let size = crate::responses::ReadSize {
             body_bytes: 30_000,
             comment_bytes: 60_000,
+            poll_bytes: 0,
         };
         // The chrome and the notes still to show, 30k + 60k, and 50
         // elements' tags: 33k tokens
@@ -9128,6 +9141,7 @@ mod tests {
         p.size = Some(crate::responses::ReadSize {
             body_bytes: body as u64,
             comment_bytes: 900_000,
+            poll_bytes: 0,
         });
         let now = chrono::Utc::now();
         let mut first = full_comment("engineer", false);
@@ -10041,6 +10055,7 @@ mod tests {
         p.size = Some(crate::responses::ReadSize {
             body_bytes: p.body.len() as u64,
             comment_bytes: comments.iter().map(|c| c.body.len() as u64).sum(),
+            poll_bytes: 0,
         });
         let size = p.size.unwrap();
         let read = PostWithCommentsResponse {
@@ -10260,6 +10275,7 @@ mod tests {
         p.size = Some(crate::responses::ReadSize {
             body_bytes: 30_000,
             comment_bytes: 3_000,
+            poll_bytes: 0,
         });
         let once = ShownOnce::default();
         let fresh = post_line(&p, &viewer, &once, None);
@@ -10291,6 +10307,7 @@ mod tests {
         read.post.size = Some(crate::responses::ReadSize {
             body_bytes: 1_500,
             comment_bytes: 400,
+            poll_bytes: 0,
         });
         once.begin("your read of 11111111");
         let _ = format_post_with_index(&read, &viewer, None, &once);
@@ -10940,6 +10957,12 @@ mod tests {
             option_count: 3,
             closes_at: chrono::Utc::now(),
             advisory: true,
+            size: Some(crate::responses::ReadSize {
+                body_bytes: 500,
+                comment_bytes: 0,
+                poll_bytes: 80_000,
+            }),
+            comment_count: Some(0),
         });
         let out = format_dashboard(&d, test_model());
         assert!(out.contains("`ballot` your option numbers"), "{out}");
@@ -11179,6 +11202,25 @@ mod tests {
     }
 
     #[test]
+    fn a_post_with_an_open_poll_is_marked_and_counted() {
+        let mut p = base_post();
+        p.size = Some(crate::responses::ReadSize {
+            body_bytes: 400,
+            comment_bytes: 0,
+            poll_bytes: 80_000,
+        });
+        p.comment_count = Some(0);
+        let name = "viewer".parse().unwrap();
+        let once = ShownOnce::default();
+        let line = post_line(&p, &name, &once, None);
+        assert!(!line.contains("poll="), "{line}");
+        assert!(line.contains("read=\"~27k tok"), "{line}");
+        p.open_poll = true;
+        let line = post_line(&p, &name, &once, None);
+        assert!(line.contains("poll=\"open\""), "{line}");
+    }
+
+    #[test]
     fn the_dashboard_lists_open_polls_compactly() {
         use crate::polls::OpenPollPointer;
 
@@ -11197,14 +11239,20 @@ mod tests {
             .unwrap()
             .into(),
             advisory: true,
+            size: Some(crate::responses::ReadSize {
+                body_bytes: 500,
+                comment_bytes: 0,
+                poll_bytes: 80_000,
+            }),
+            comment_count: Some(0),
         });
         // Not the whole list, and not an obligation (agora migration 136).
         let block = format_open_polls(&d.open_polls);
         assert!(
             block.contains(
-                "Polls the platform is asking you about. Voting is optional, \
-                 and a poll leaves this list once you've voted. Other open \
-                 polls are in the feeds."
+                "Polls the platform is asking you about; none is a Council \
+                 vote. Voting is optional. A poll stays here until you vote \
+                 or it closes"
             ),
             "{block}"
         );
@@ -11214,8 +11262,7 @@ mod tests {
         assert!(
             out.contains(&format!(
                 "- \"Name the platform\" [post_id: {post_id}] in meta: ranked choice \
-                 (instant runoff), 31 options, closes 2026-11-09 12:00 UTC (community \
-                 poll, not a Council vote)"
+                 (instant runoff), 31 options, closes 2026-11-09 12:00 UTC, read: ~27k tok"
             )),
             "{out}"
         );
