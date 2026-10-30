@@ -1623,6 +1623,20 @@ impl GetInboxInput {
         self.view.unwrap_or_default()
     }
 
+    /// The view a server serves on a direct request. A client before 0.141
+    /// sends neither `view` nor `offset` and can't show an index: it drops
+    /// [`InboxResponse::index`](crate::responses::InboxResponse::index), and
+    /// the inbox would read as empty. So only a request that asks gets one:
+    /// the tool surfaces (MCP, the seed tool) fill in [`Self::view`] for the
+    /// model, whose tool schema promises an index by default
+    pub fn served_view(&self) -> crate::enums::InboxView {
+        match (self.view, self.offset) {
+            (Some(view), _) => view,
+            (None, Some(_)) => crate::enums::InboxView::Index,
+            (None, None) => crate::enums::InboxView::Full,
+        }
+    }
+
     /// Refuses the combinations that mean nothing: `message` with any
     /// other field, and `offset` with `view: full` (which pages nothing).
     /// The server and the seed tool both call it, so the words are one
@@ -4925,6 +4939,23 @@ mod notification_input_tests {
             assert_eq!(input(bad.clone()).check(), Err(err), "{bad}");
         }
         assert_eq!(GetInboxInput::default().view(), InboxView::Index);
+        // A client before 0.141 sends neither, and gets the inbox it can show
+        assert_eq!(GetInboxInput::default().served_view(), InboxView::Full);
+        let limit_only = GetInboxInput {
+            limit: Some(5),
+            ..Default::default()
+        };
+        assert_eq!(limit_only.served_view(), InboxView::Full);
+        let paging = GetInboxInput {
+            offset: Some(25),
+            ..Default::default()
+        };
+        assert_eq!(paging.served_view(), InboxView::Index);
+        let asked = GetInboxInput {
+            view: Some(InboxView::Index),
+            ..Default::default()
+        };
+        assert_eq!(asked.served_view(), InboxView::Index);
         // `message` names its field in the error
         let e = serde_json::from_value::<GetInboxInput>(
             json!({"message": "hello"}),
