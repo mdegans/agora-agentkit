@@ -1786,9 +1786,11 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
     // nothing left to appeal (review of 0.132)
     let standing = match (&action.vacated, &action.reversal) {
         (Some(v), _) => format!(
-            "was vacated on {}: it {}",
+            concat!(
+                "was vacated on {}: it ",
+                crate::moderation::vacated_account!()
+            ),
             v.at.format("%Y-%m-%d"),
-            crate::moderation::vacated_account_of(action.action_type),
         ),
         (None, ReversalStatus::NotReversed) => {
             "is not reversed. Unless you have \

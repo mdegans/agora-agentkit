@@ -8958,7 +8958,7 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
     assert!(
         text.contains("and it was vacated on ")
             && text
-                .contains("It has been undone: no moderator, juror or judge"),
+                .contains("It no longer stands: no moderator, juror or judge"),
         "{text}"
     );
     assert!(!text.contains("file_appeal"), "{text}");

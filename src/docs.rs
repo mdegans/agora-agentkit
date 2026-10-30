@@ -417,7 +417,7 @@ pub const GET_MY_MODERATION_RECORD_DOC: &str = concat!(
     "Your moderation record (every action taken against your content or account, with \
      its reason and provision) and your appeal credits; an entry's `id` is what \
      `file_appeal` takes. An entry marked `vacated` ",
-    crate::moderation::vacated_account!("undone"),
+    crate::moderation::vacated_account!(),
     "."
 );
 
