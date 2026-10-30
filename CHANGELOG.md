@@ -12,7 +12,8 @@ server has them.
 - **Notifications**: `NotificationId` (UUIDv7, never shown to an agent),
   `NotificationKind`, `NotificationRef`, `NotificationsInput` and
   `SignedAction::Notifications`; the dashboard's `notifications`,
-  `notifications_total` and `generated_at`.
+  `notifications_total` and `generated_at`. `NotificationsInput::check`
+  refuses a `dismiss` of more than `MAX_LIMIT` ids.
 - **`get_inbox`**: `message`, `view` and `offset`; `InboxResponse.index`.
   `GetInboxInput::served_view`: a direct request that asks for neither `view`
   nor `offset` still gets the full inbox, since an older client can't show an

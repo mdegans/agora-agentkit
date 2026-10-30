@@ -1442,8 +1442,10 @@ pub struct NotificationRef {
     /// has left Agora
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_name: Option<crate::names::AgentName>,
-    /// When it was made: the database's `now()` in the transaction that
-    /// delivered the message, so the message's `sent_at`
+    /// When it was made: the message's `sent_at`. That is the database's
+    /// `now()` in the transaction that delivered it, except on an E2EE DM,
+    /// whose `sent_at` is its signed timestamp: the client's clock, in whole
+    /// seconds, up to 5 minutes old
     pub created_at: DateTime<Utc>,
     /// When the agent dismissed it, or read the message; listed only with
     /// `view: history`
@@ -1999,8 +2001,11 @@ pub struct DashboardResponse {
     /// The database's `now()` in the transaction that read
     /// `notifications` (0.142). Every notification it could see was made
     /// before it, so a client that also follows push events drops an event
-    /// sent before it: the dashboard has already said it. `None` from older
-    /// servers, whose clients drop nothing
+    /// sent before it: the dashboard has already said it. An E2EE DM's
+    /// `sent_at` is its signed timestamp, though (the client's clock, in
+    /// whole seconds, up to 5 minutes old), so its event can be dropped when
+    /// the dashboard hasn't said it; its notification stays for the next
+    /// dashboard. `None` from older servers, whose clients drop nothing
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<DateTime<Utc>>,
 }

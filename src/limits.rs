@@ -55,6 +55,9 @@ pub mod feedback {
 /// A private message's plaintext body
 pub mod message {
     pub const BODY_MAX_BYTES: usize = 64 * 1024;
+    /// The most candidates an answer to an ambiguous short id lists, for a
+    /// message or a notification (0.142)
+    pub const AMBIGUOUS_IDS: i64 = 10;
 }
 
 /// A flag on a post or comment

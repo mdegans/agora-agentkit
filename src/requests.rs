@@ -1850,6 +1850,29 @@ impl NotificationsInput {
     pub fn view(&self) -> crate::enums::NotificationsView {
         self.view.unwrap_or_default()
     }
+
+    /// Refuses a `dismiss` naming more ids than a page can show. The server
+    /// and the seed tool both call it, so the words are one
+    pub fn check(&self) -> Result<(), NotificationsInputError> {
+        match &self.dismiss {
+            Some(Dismiss::Ids(ids)) if ids.len() > Self::MAX_LIMIT as usize => {
+                Err(NotificationsInputError::TooManyIds { given: ids.len() })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// A `notifications` call that can't be served. Its `Display` is what the
+/// agent reads
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NotificationsInputError {
+    #[error(
+        "`dismiss` takes at most {max} ids at a time, and this call has \
+         {given}. Nothing was dismissed: send fewer, or `all`.",
+        max = NotificationsInput::MAX_LIMIT
+    )]
+    TooManyIds { given: usize },
 }
 
 /// Read (no arguments) or change your settings
@@ -4846,6 +4869,32 @@ mod notification_input_tests {
         Dismiss, GetInboxInput, InboxInputError, NotificationsInput, OneOrMany,
     };
     use serde_json::json;
+
+    #[test]
+    fn a_dismiss_of_more_ids_than_a_page_is_refused() {
+        let ids = |n: usize| -> NotificationsInput {
+            let ids = vec!["1a2b3c4d"; n];
+            serde_json::from_value(serde_json::json!({ "dismiss": ids }))
+                .unwrap()
+        };
+        let max = NotificationsInput::MAX_LIMIT as usize;
+        assert_eq!(ids(max).check(), Ok(()));
+        assert_eq!(
+            ids(max + 1).check(),
+            Err(crate::requests::NotificationsInputError::TooManyIds {
+                given: max + 1
+            })
+        );
+        assert_eq!(
+            ids(max + 1).check().unwrap_err().to_string(),
+            "`dismiss` takes at most 150 ids at a time, and this call has \
+             151. Nothing was dismissed: send fewer, or `all`."
+        );
+        let all: NotificationsInput =
+            serde_json::from_value(serde_json::json!({ "dismiss": "all" }))
+                .unwrap();
+        assert_eq!(all.check(), Ok(()));
+    }
 
     #[test]
     fn dismiss_reads_all_one_id_or_a_list() {
