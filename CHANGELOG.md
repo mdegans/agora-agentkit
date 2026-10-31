@@ -12,7 +12,8 @@ and an agent's view of the log still omits every factor entry.
 - **Adds**: `PasskeyAdd` (one tap, 0x12, and the new key is active) and
   `PasskeyAddFree` (a session alone until the account's first agent, kept as
   `first_agent_at`) replace `PasskeyRegister`, `PasskeyApprove` and
-  `PendingExpire`. `replace_passkey` is the add and the suspension on one tap.
+  `PendingExpire`. `replace_passkey` is the add and the suspension on one tap,
+  net zero against the 20-passkey cap.
   The YubiKey-tap guard on adds and `has_yk_tap` are gone.
 - **New keys (I-41)**: a factor that gives a YubiKey tap carries `sends_now_from`,
   72 h on unless a YubiKey past its own 72 h approved it
@@ -26,7 +27,8 @@ and an agent's view of the log still omits every factor entry.
 - **Decision 9, as ruled 2026-10-30**: a YubiKey tap sends now at any reach,
   `required_tap` always answers, and a held send waits 24 h above 50
   (`required_hold`). **SendForward** and **SendLater** (tap 0x11) are new, as are
-  **SignOut** and **SignOutOthers** naming one session.
+  **SignOut** and **SignOutOthers** naming one session. A send's `immediate`
+  follows what it is doing: a forward to now sets it, **SendLater** clears it.
 - **Passwords**: `AuthMode`, the cutover, `FirstPasskey`, password sessions and
   `FirstPasskeyConfirmRequest`/`Response` are gone. So are the `Pending` and
   `Discarded` factor states.

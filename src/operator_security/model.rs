@@ -530,6 +530,9 @@ pub struct Send {
     pub level: TapLevel,
     /// It was announced, so a move is announced again
     pub announced: bool,
+    /// A notice to the primary carried a cancel link for it, which stays good
+    /// wherever it is moved
+    pub cancel_link: bool,
 }
 
 /// The device flow's states (§3)
@@ -796,7 +799,12 @@ impl AccountState {
     pub fn is_last_passkey(&self, id: FactorId) -> bool {
         self.effective(id)
             && self.factor(id).is_some_and(|f| f.kind.is_passkey())
-            && self.passkeys().filter(|(_, f)| f.state.is_active()).count() == 1
+            && self.effective_passkeys() == 1
+    }
+
+    /// Passkeys that are `Active`
+    pub fn effective_passkeys(&self) -> usize {
+        self.passkeys().filter(|(_, f)| f.state.is_active()).count()
     }
 
     /// Passkeys counted by [`MAX_PASSKEYS`]: every one not revoked

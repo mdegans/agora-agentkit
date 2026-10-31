@@ -12,6 +12,7 @@ use super::model::*;
 use super::tap::{
     Delivery, FactorKind, NAMED_REACH, PasskeyClass, SendRefusal, SendRequest,
     TapLevel, UNTAPPED_REACH, When, bulk_hold_floor, plan_send, reach,
+    required_hold,
 };
 use crate::enums::OperatorActionKind;
 use crate::ids::{
@@ -429,7 +430,8 @@ impl AccountState {
 
     /// Replacing a passkey: no event of its own, but **PasskeyAdd** of `passkey`
     /// and **Suspend** of `old`, all or nothing, on one tap of `tapper` that binds
-    /// the old row (0x04). `tapper` is never `old`
+    /// the old row (0x04). `tapper` is never `old`. It is net zero, so at the
+    /// cap what this suspension takes out of use doesn't count
     pub fn replace_passkey(
         &self,
         passkey: OperatorPasskeyId,
@@ -451,13 +453,15 @@ impl AccountState {
             ids,
         };
         let t = tx.tap(by, TapKind::Suspend)?;
-        tx.passkey_add(t, passkey, class)?;
+        let effective = tx.s.effective_passkeys();
         tx.event(
             &Event::Suspend {
                 target: FactorId::Passkey(old),
             },
             by,
         )?;
+        let freed = effective - tx.s.effective_passkeys();
+        tx.passkey_add(t, passkey, class, tx.s.counted_passkeys() - freed)?;
         Ok(Transition {
             state: tx.s,
             effects: tx.effects,
@@ -925,12 +929,10 @@ impl<I: IdSource> Tx<'_, I> {
         t: FactorId,
         passkey: OperatorPasskeyId,
         class: PasskeyClass,
+        counted: usize,
     ) -> R {
         self.mode(ModeClass::PasskeyAdd)?;
-        guard(
-            self.s.counted_passkeys() < MAX_PASSKEYS,
-            Refusal::TooManyPasskeys,
-        )?;
+        guard(counted < MAX_PASSKEYS, Refusal::TooManyPasskeys)?;
         let id = FactorId::Passkey(passkey);
         let kind = FactorKind::Passkey(class);
         let from = self.sends_now_from(kind, t)?;
@@ -1021,7 +1023,7 @@ impl<I: IdSource> Tx<'_, I> {
         match event {
             PasskeyAdd { passkey, class } => {
                 let t = self.tap(by, TapKind::PasskeyAdd)?;
-                self.passkey_add(t, *passkey, *class)
+                self.passkey_add(t, *passkey, *class, self.s.counted_passkeys())
             }
             PasskeyAddFree { passkey, class } => {
                 self.session(by)?;
@@ -1666,11 +1668,7 @@ impl<I: IdSource> Tx<'_, I> {
                         guard(a == self.s.primary.id, Refusal::VoidLink)?;
                         // SPEC: the cancel link is in the held notice only
                         // (D9: "a held send with reach above 5")
-                        guard(
-                            m.delivery == Delivery::Held
-                                && m.reach.reach > UNTAPPED_REACH,
-                            Refusal::VoidLink,
-                        )?;
+                        guard(m.cancel_link, Refusal::VoidLink)?;
                     }
                     Authority::Session(_) | Authority::Signed(_) => {
                         self.authority_live(by)?;
@@ -2131,6 +2129,7 @@ impl<I: IdSource> Tx<'_, I> {
                 admitted_at: self.now,
                 level,
                 announced: plan.announced(),
+                cancel_link: plan.announced_held(),
             },
         );
         let flag = self.s.factor_behind(by);
@@ -2193,8 +2192,16 @@ impl<I: IdSource> Tx<'_, I> {
                 && deliver_at < m.admitted_at + super::tap::long_hold()),
             SendRefusal::NewAccount { reach: at_new }.into(),
         )?;
+        let now = self.now;
+        let hold = required_hold(
+            at_new,
+            self.s.settings.bulk_hold,
+            self.s.new_account(now),
+        );
         let moved = self.s.sends.get_mut(&send).ok_or_else(|| gone("send"))?;
         moved.deliver_at = deliver_at;
+        // What it now does, so it counts toward later sends' immediate reach
+        moved.delivery = Delivery::of(deliver_at, now, hold);
         moved.reach = widest(m.reach, at_new);
         moved.admitted_by = AdmittedBy::Factor(t);
         moved.level = TapLevel::YubikeyTap;
@@ -2253,6 +2260,7 @@ impl<I: IdSource> Tx<'_, I> {
         moved.deliver_at = deliver_at;
         moved.delivery = Delivery::Held;
         moved.reach = widest(m.reach, plan.reach);
+        moved.cancel_link |= m.announced;
         if m.announced {
             let flag = admitter.filter(|f| self.s.effective(*f));
             self.effects.push(Effect::Notice(Notice {
@@ -2359,11 +2367,53 @@ impl<I: IdSource> Tx<'_, I> {
     }
 }
 
-/// The wider of a send's reaches, so moving it never voids its cancel link or
-/// its contact recheck
+/// The wider of a send's reaches, so moving it never loosens its contact recheck
 fn widest(a: super::tap::Reach, b: super::tap::Reach) -> super::tap::Reach {
     super::tap::Reach {
         reach: a.reach.max(b.reach),
         immediate_reach: a.immediate_reach.max(b.immediate_reach),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::OperatorId;
+
+    /// The arms believed unreachable refuse; they don't panic
+    #[test]
+    fn a_vanished_item_is_refused() {
+        assert_eq!(gone("factor"), Refusal::Unknown);
+        let at = DateTime::<Utc>::UNIX_EPOCH;
+        let address = EmailAddress {
+            id: OperatorEmailAddressId::new(),
+            address: NormalisedEmail("a@b.example".into()),
+            tenant: MailTenant("b.example".into()),
+        };
+        let mut ids = FreshIds;
+        let tx = Tx {
+            s: AccountState::migrated(
+                OperatorId::from(uuid::Uuid::nil()),
+                address,
+                at,
+                [],
+                Limits::default(),
+            ),
+            effects: Vec::new(),
+            now: at,
+            ids: &mut ids,
+        };
+        let nobody = FactorId::Passkey(OperatorPasskeyId::new());
+        assert_eq!(
+            tx.sends_now_from(FactorKind::SoftwareKey, nobody),
+            Err(Refusal::Unknown)
+        );
+    }
+
+    #[test]
+    fn the_default_limits_are_the_named_ones() {
+        let limits = Limits::default();
+        assert_eq!(limits.suspend, SUSPEND_LIMIT);
+        assert_eq!(limits.new_account_days, NEW_ACCOUNT_DAYS);
     }
 }
