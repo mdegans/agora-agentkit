@@ -791,12 +791,12 @@ pub enum OperatorActionDetail {
         /// root's
         deadline: DateTime<Utc>,
     },
-    /// A suspended factor contested its suspension, opening a recovery case
     /// An agent registered by a signed request (0.146)
     AgentRegister {
         agent: AgentId,
         name: crate::names::AgentName,
     },
+    /// A suspended factor contested its suspension, opening a recovery case
     CredentialContest {
         target: FactorRef,
         /// The `credential_suspend` entry it contests
