@@ -430,8 +430,8 @@ impl AccountState {
 
     /// Replacing a passkey: no event of its own, but **PasskeyAdd** of `passkey`
     /// and **Suspend** of `old`, all or nothing, on one tap of `tapper` that binds
-    /// the old row (0x04). `tapper` is never `old`. It is net zero, so at the
-    /// cap what this suspension takes out of use doesn't count
+    /// the old row (0x04). `tapper` is never `old`. It is net zero, so the old
+    /// row, if this suspends it, doesn't count toward the cap: at most 21 live rows
     pub fn replace_passkey(
         &self,
         passkey: OperatorPasskeyId,
@@ -453,14 +453,13 @@ impl AccountState {
             ids,
         };
         let t = tx.tap(by, TapKind::Suspend)?;
-        let effective = tx.s.effective_passkeys();
+        let freed = usize::from(tx.s.effective(FactorId::Passkey(old)));
         tx.event(
             &Event::Suspend {
                 target: FactorId::Passkey(old),
             },
             by,
         )?;
-        let freed = effective - tx.s.effective_passkeys();
         tx.passkey_add(t, passkey, class, tx.s.counted_passkeys() - freed)?;
         Ok(Transition {
             state: tx.s,
@@ -2182,6 +2181,8 @@ impl<I: IdSource> Tx<'_, I> {
             ModeClass::SendSmall
         })?;
         let above_5 = at_new.immediate_reach > UNTAPPED_REACH;
+        // A new key can't forward a large send even to a time still held: the
+        // row's guard as written, and the safe direction
         guard(
             !above_5 || self.s.sends_now(t, self.now),
             SendRefusal::NewKey { reach: at_new }.into(),
@@ -2207,6 +2208,11 @@ impl<I: IdSource> Tx<'_, I> {
         moved.level = TapLevel::YubikeyTap;
         moved.announced = true;
         self.notify(Audience::Both, NoticeSubject::SendMoved(send), Some(t));
+        if at_new.reach > NAMED_REACH
+            && let Some(Effect::Notice(n)) = self.effects.last_mut()
+        {
+            n.names = true;
+        }
         self.log(OperatorActionKind::DmSend, Some(t), None);
         Ok(())
     }
@@ -2240,7 +2246,10 @@ impl<I: IdSource> Tx<'_, I> {
             when: When::At(deliver_at),
             level: m.level,
             contact_ok: self.s.contact_ok(),
-            sends_now: admitter.is_none_or(|f| self.s.sends_now(f, self.now)),
+            sends_now: admitter
+                .into_iter()
+                .chain(mover.filter(|_| m.level == TapLevel::YubikeyTap))
+                .all(|f| self.s.sends_now(f, self.now)),
             new_account: self.s.new_account(self.now),
             now: m.admitted_at,
             dm_hold: self.s.settings.dm_hold,
@@ -2258,10 +2267,14 @@ impl<I: IdSource> Tx<'_, I> {
         self.mode(class)?;
         let moved = self.s.sends.get_mut(&send).ok_or_else(|| gone("send"))?;
         moved.deliver_at = deliver_at;
-        moved.delivery = Delivery::Held;
+        // From its admission, so it stops counting as immediate only once it has
+        // really waited its hold
+        moved.delivery = plan.delivery;
         moved.reach = widest(m.reach, plan.reach);
-        moved.cancel_link |= m.announced;
-        if m.announced {
+        let announced = m.announced || plan.announced();
+        moved.announced = announced;
+        moved.cancel_link |= announced;
+        if announced {
             let flag = admitter.filter(|f| self.s.effective(*f));
             self.effects.push(Effect::Notice(Notice {
                 to: Audience::Primary,
