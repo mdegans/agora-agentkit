@@ -2,6 +2,13 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.144.1
+
+0.144.0 as described below, which never reached crates.io: its release run
+failed the todo gate after tagging, and a version with a tag doesn't release.
+The stubs that failed the gate now panic, and the release workflow tags only
+after publishing.
+
 ## 0.144.0
 
 Operator security build steps 6 and 7 (agora `docs/design-operator-api.md`,

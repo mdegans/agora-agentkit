@@ -2,11 +2,11 @@
 #
 # **Releasing is merging a version bump.** On every push to `main` the
 # `version` job reads the crate version; if tag `v<version>` does not exist
-# yet, it tags that commit and this same run publishes. No hand tagging, no
-# publishing from a laptop. (It has to be one run: a tag pushed with the
-# workflow's GITHUB_TOKEN deliberately triggers no further workflows.) Pushing
-# a `v*` tag by hand still works and must match the version. A main push that
-# doesn't change the version does nothing here.
+# yet, this run publishes it and then tags that commit, so a run that fails
+# its gate leaves no tag and the next push to `main` tries again. No hand
+# tagging, no publishing from a laptop. Pushing a `v*` tag by hand still works
+# and must match the version. A main push that doesn't change the version does
+# nothing here.
 #
 # The release runs `just check` itself before publishing: CI's run on the
 # same commit starts at the same moment, and a publish must not outrun it.
@@ -32,13 +32,11 @@ permissions: {}
 jobs:
   # Decide whether this run releases:
   #  - a `v*` tag push releases iff the tag matches the version exactly;
-  #  - a push to main releases iff `v<version>` doesn't exist yet, and tags
-  #    the commit first.
+  #  - a push to main releases iff `v<version>` doesn't exist yet.
   version:
     runs-on: ubuntu-latest
     permissions:
-      # Pushing the release tag.
-      contents: write
+      contents: read
     outputs:
       version: ${{ steps.meta.outputs.version }}
       release: ${{ steps.decide.outputs.release }}
@@ -52,7 +50,7 @@ jobs:
           [ -n "$VERSION" ] || { echo "::error::no version in Cargo.toml"; exit 1; }
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Decide whether this run releases (and tag it if from main)
+      - name: Decide whether this run releases
         id: decide
         env:
           VERSION: ${{ steps.meta.outputs.version }}
@@ -71,9 +69,7 @@ jobs:
                 echo "$TAG already exists; nothing to release."
                 echo "release=false" >> "$GITHUB_OUTPUT"
               else
-                git tag "$TAG" "$GITHUB_SHA"
-                git push origin "refs/tags/$TAG"
-                echo "Tagged $TAG at $GITHUB_SHA; releasing."
+                echo "Releasing $TAG from $GITHUB_SHA."
                 echo "release=true" >> "$GITHUB_OUTPUT"
               fi
               ;;
@@ -135,3 +131,22 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish
+
+  # Only after the publish, and in its own job: the publish job doesn't need to
+  # write to the repository.
+  tag:
+    needs: [version, publish]
+    if: needs.version.outputs.release == 'true' && github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      # Pushing the release tag.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag the release
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          git tag "v$VERSION" "$GITHUB_SHA"
+          git push origin "refs/tags/v$VERSION"
