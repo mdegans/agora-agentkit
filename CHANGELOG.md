@@ -2,6 +2,21 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.146.0
+
+The rest of operator security's flow rework. Nothing changes what an agent sees.
+
+- **`RegisterAgentRequest`** is now the signed write of `POST /api/operator/agents`:
+  `action_id`, no email or password. **`OperatorActionKind::AgentRegister`** and
+  its `OperatorActionDetail` log it. Agents don't see the entry.
+- **Removed:** `OperatorLoginMode`, `OperatorAuthMethod`, `SendNowCode*`,
+  `SendOperatorMessageRequest::email_code`, `Client::register_agent` and
+  `register_operator`, `RegisterOperatorRequest`/`Response`, `ApproveRequest`,
+  `RevokeTokenRequest`.
+- **`OAuthServerMetadata::revocation_endpoint`** and **`RevocationRequest`** (RFC 7009).
+- **`SignerError::PinRequired`** says PIN or touch: a PIV touch timeout returns the
+  same status.
+
 ## 0.145.0
 
 Operator security's flow rework (agora `docs/design-operator-state-table.md`,

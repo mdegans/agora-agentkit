@@ -1335,6 +1335,8 @@ pub enum OperatorActionKind {
     SessionRevoke,
     /// An agent deleted, by a tap (0.140)
     AgentDelete,
+    /// An agent registered by a signed request (0.146)
+    AgentRegister,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -1658,90 +1660,6 @@ impl From<DeletedBy> for RemovedBy {
 // The server's bookkeeping, moved here so each Postgres enum has exactly
 // one Rust twin (agora CLAUDE.md rule 8, "One Copy of Everything").
 
-/// How an operator session was authenticated (`operator_auth_method_enum`)
-///
-/// [`OperatorAuthMethod::PasswordReset`] is the recovery rule: a session
-/// created by redeeming an emailed reset link counts as having passed the
-/// second factor once, so an operator who lost their passkey can remove it
-/// and enrol another (never under Advanced Protection, where email reset
-/// is off).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(
-    feature = "sqlx",
-    sqlx(type_name = "operator_auth_method_enum", rename_all = "snake_case")
-)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorAuthMethod {
-    /// Email and password on the login page
-    Password,
-    /// A redeemed password-reset link (full account recovery)
-    PasswordReset,
-    /// The password, then a passkey assertion
-    /// ([`OperatorLoginMode::PasswordAndPasskey`])
-    PasswordAndPasskey,
-    /// A discoverable passkey alone ([`OperatorLoginMode::Passkey`])
-    Passkey,
-}
-
-impl fmt::Display for OperatorAuthMethod {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Password => "password",
-            Self::PasswordReset => "password reset link",
-            Self::PasswordAndPasskey => "password and passkey",
-            Self::Passkey => "passkey",
-        })
-    }
-}
-
-/// What signing in takes for an operator (`operator_login_mode_enum`)
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
-)]
-#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(
-    feature = "sqlx",
-    sqlx(type_name = "operator_login_mode_enum", rename_all = "snake_case")
-)]
-#[serde(rename_all = "snake_case")]
-pub enum OperatorLoginMode {
-    /// Email and password
-    #[default]
-    Password,
-    /// Email and password, then a passkey (a second factor)
-    PasswordAndPasskey,
-    /// A passkey alone, chosen from the browser's list (no email, no
-    /// password). A correct password does not sign in
-    Passkey,
-}
-
-impl OperatorLoginMode {
-    /// Whether signing in in this mode needs a passkey
-    pub fn needs_passkey(self) -> bool {
-        !matches!(self, Self::Password)
-    }
-
-    /// The form value (`snake_case`, as serde and Postgres spell it)
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Password => "password",
-            Self::PasswordAndPasskey => "password_and_passkey",
-            Self::Passkey => "passkey",
-        }
-    }
-}
-
-impl fmt::Display for OperatorLoginMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Password => "password only",
-            Self::PasswordAndPasskey => "password, then a passkey",
-            Self::Passkey => "passkey only",
-        })
-    }
-}
-
 /// What carrying out an appeal's remedy (a reversal or a modification)
 /// amounted to (`remedy_outcome_enum`). It drives the appellant's outcome
 /// notice
@@ -1959,15 +1877,13 @@ closed_variants!(OperatorActionKind [
     ConfigChangeEffective, ConfigChangeRequested, ConfigChangeCancelled,
     LogVisibility, GroupChange, CredentialSuspend, CredentialContest,
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
-    AgentDelete
+    AgentDelete, AgentRegister
 ]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
 closed_variants!(DeletedBy [Author, Operator] never_written [Unknown]);
-closed_variants!(OperatorAuthMethod [Password, PasswordReset, PasswordAndPasskey, Passkey]);
-closed_variants!(OperatorLoginMode [Password, PasswordAndPasskey, Passkey]);
 closed_variants!(RemedyOutcome [Restored, SuspensionLifted, RecordOnly, Unrestorable, HumanRequired]);
 closed_variants!(ThreadRole [Primary, Related]);
 closed_variants!(ThreadAddedBy[Steward]);

@@ -658,24 +658,6 @@ pub struct RegisterAgentResponse {
     pub operator_id: OperatorId,
 }
 
-/// Response from registering an operator.
-///
-/// Distinct from [`OperatorResponse`] because `email_verification_sent`
-/// describes the registration attempt, not the operator.
-#[derive(Debug, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct RegisterOperatorResponse {
-    pub id: OperatorId,
-    /// Normalized address (any `+alias` stripped) the account is keyed on
-    pub email: String,
-    pub email_verified: bool,
-    /// `false` means the account exists but no link was sent — offer a resend
-    pub email_verification_sent: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
 /// Full operator profile.
 #[derive(Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -5342,26 +5324,6 @@ mod tests {
         let back: RegisterAgentResponse =
             serde_json::from_value(value).unwrap();
         assert_eq!(back.name, "claude-opus");
-    }
-
-    #[test]
-    fn register_operator_response_round_trip() {
-        let resp = RegisterOperatorResponse {
-            id: OperatorId::new(),
-            email: "operator@example.com".into(),
-            email_verified: false,
-            email_verification_sent: true,
-            display_name: Some("mdegans".into()),
-            created_at: Utc::now(),
-        };
-        let value = serde_json::to_value(&resp).unwrap();
-        // Wire shape: the registration-only field must be present, and must
-        // not have been folded into `OperatorResponse`.
-        assert_eq!(value["email_verification_sent"], true);
-        assert_eq!(value["email_verified"], false);
-        let back: RegisterOperatorResponse =
-            serde_json::from_value(value).unwrap();
-        assert_eq!(back.display_name.as_deref(), Some("mdegans"));
     }
 
     #[test]

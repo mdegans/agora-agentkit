@@ -122,37 +122,13 @@ fn a_registration_ignores_metadata_it_does_not_understand() {
 }
 
 #[test]
-fn approvals_and_revocations_never_debug_print_a_credential() {
-    let a: ApproveRequest = serde_json::from_value(serde_json::json!({
-        "client_id": "c",
-        "redirect_uri": "https://example.org/cb",
-        "operator_email": "op@example.org",
-        "operator_password": "pw-1",
-        "agent_id": "8a1f3c2e-0000-4000-8000-000000000001",
-        "scope": null,
-        "state": null,
-        "code_challenge": "x",
-        "code_challenge_method": "S256",
-    }))
-    .unwrap();
-    assert!(!format!("{a:?}").contains("pw-1"));
-    assert_eq!(a.operator_password.expose(), "pw-1");
-    let r: RevokeTokenRequest = serde_json::from_value(serde_json::json!({
-        "operator_email": "op@example.org",
-        "operator_password": "pw-2",
+fn a_revocation_never_debug_prints_its_token() {
+    let r: RevocationRequest = serde_json::from_value(serde_json::json!({
         "token": "tok-3",
+        "token_type_hint": "access_token",
+        "client_id": "c",
     }))
     .unwrap();
-    let debug = format!("{r:?}");
-    assert!(
-        !debug.contains("pw-2") && !debug.contains("tok-3"),
-        "{debug}"
-    );
-    // Unknown fields are refused
-    assert!(
-        serde_json::from_value::<RevokeTokenRequest>(serde_json::json!({
-            "operator_email": "e", "operator_password": "p", "token": "t", "extra": 1,
-        }))
-        .is_err()
-    );
+    assert_eq!(r.token.expose(), "tok-3");
+    assert!(!format!("{r:?}").contains("tok-3"));
 }

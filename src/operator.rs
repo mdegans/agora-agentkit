@@ -160,39 +160,6 @@ impl OperatorRecipients {
     }
 }
 
-/// The code `POST /api/operator/messages/send-now-code` emails, which lets
-/// a send to many agents skip the hold.
-///
-/// `Debug` and `Display` hide it, but **serde writes the code itself**, so
-/// a request carrying one must never be logged. The server stores only a
-/// hash of it. Compared in constant time
-#[derive(
-    Clone, Eq, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
-)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[cfg_attr(feature = "schemars", schemars(inline))]
-#[serde(transparent)]
-pub struct SendNowCode(pub String);
-
-impl PartialEq for SendNowCode {
-    fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
-    }
-}
-
-impl std::fmt::Debug for SendNowCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
-impl std::fmt::Display for SendNowCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[REDACTED]")
-    }
-}
-
 /// `POST /api/operator/messages`: a message to one or more of the
 /// operator's own agents
 #[derive(
@@ -225,15 +192,9 @@ pub struct SendOperatorMessageRequest {
     /// Deliver now, skipping the hold. From agora's operator security build
     /// step 12, when the request's tap allows it
     /// ([`required_tap`](crate::operator_security::tap::required_tap));
-    /// until then, under the bulk threshold or with `email_code`
+    /// until then, under the bulk threshold or by a sudo key
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub send_now: bool,
-    /// **Deprecated** (0.140): decision 9 replaces the emailed send-now
-    /// code with taps. Kept so the wire doesn't break; the server refuses
-    /// it from agora's operator security build step 12 (until then it
-    /// still checks it), and it goes at the next major
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub email_code: Option<SendNowCode>,
     /// Resolve the recipients and send nothing
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
@@ -300,22 +261,6 @@ pub struct SendTapPreview {
 pub struct QueuedOperatorMessage {
     pub id: MessageId,
     pub agent: AgentRef,
-}
-
-/// `POST /api/operator/messages/send-now-code`: email a code that lets the
-/// held send `action_id` be delivered now
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct SendNowCodeRequest {
-    pub action_id: OperatorActionId,
-}
-
-/// The code was emailed
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct SendNowCodeResponse {
-    pub expires_at: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +419,7 @@ pub struct OperatorConfigResponse {
 
 impl OperatorConfigResponse {
     /// Whether a send to `recipients` agents, signed by the same credential
-    /// now, would be held as bulk (and need `email_code` to `send_now`)
+    /// now, would be held as bulk (and need a sudo key to `send_now`)
     #[allow(deprecated)]
     pub fn is_bulk(&self, recipients: i64) -> bool {
         recipients.saturating_add(self.recent_recipients) > self.bulk_threshold
@@ -847,6 +792,11 @@ pub enum OperatorActionDetail {
         deadline: DateTime<Utc>,
     },
     /// A suspended factor contested its suspension, opening a recovery case
+    /// An agent registered by a signed request (0.146)
+    AgentRegister {
+        agent: AgentId,
+        name: crate::names::AgentName,
+    },
     CredentialContest {
         target: FactorRef,
         /// The `credential_suspend` entry it contests
@@ -914,6 +864,7 @@ impl OperatorLogEntry {
             | OperatorActionDetail::PasskeyRevoke { .. }
             | OperatorActionDetail::ConfigChangeEffective { .. }
             | OperatorActionDetail::CredentialSuspend { .. }
+            | OperatorActionDetail::AgentRegister { .. }
             | OperatorActionDetail::CredentialContest { .. } => {
                 return None;
             }
@@ -997,6 +948,7 @@ impl OperatorActionDetail {
             Self::CredentialSuspend { .. } => {
                 OperatorActionKind::CredentialSuspend
             }
+            Self::AgentRegister { .. } => OperatorActionKind::AgentRegister,
             Self::CredentialContest { .. } => {
                 OperatorActionKind::CredentialContest
             }
@@ -1020,6 +972,7 @@ impl OperatorActionDetail {
             | Self::PasskeyRevoke { .. }
             | Self::ConfigChangeEffective { .. }
             | Self::CredentialSuspend { .. }
+            | Self::AgentRegister { .. }
             | Self::CredentialContest { .. } => None,
         }
     }
@@ -1341,7 +1294,6 @@ mod tests {
             about: Some(ModerationActionId::new()),
             deliver_at: None,
             send_now: false,
-            email_code: None,
             dry_run: false,
         };
         let (a, b) = (AgentId::new(), AgentId::new());
@@ -1546,7 +1498,6 @@ mod tests {
             about: None,
             deliver_at: None,
             send_now: false,
-            email_code: None,
             dry_run: false,
         };
         let ok = |to| send(to, "hi".into()).validate().is_ok();
@@ -1573,22 +1524,18 @@ mod tests {
     }
 
     #[test]
-    fn a_send_now_code_is_never_printed() {
-        assert_eq!(SendNowCode("123456".into()), SendNowCode("123456".into()));
-        assert_ne!(SendNowCode("123456".into()), SendNowCode("123457".into()));
-        assert_ne!(SendNowCode("123456".into()), SendNowCode("1234567".into()));
-        let code = SendNowCode("123456".into());
-        assert_eq!(format!("{code:?} {code}"), "[REDACTED] [REDACTED]");
-        let req: SendOperatorMessageRequest =
-            serde_json::from_value(serde_json::json!({
-                "action_id": OperatorActionId::new(),
-                "to": "all",
-                "body": "hello",
-                "email_code": "123456",
-            }))
-            .unwrap();
-        assert!(!format!("{req:?}").contains("123456"));
-        assert!(!req.dry_run && !req.send_now);
+    fn an_emailed_code_is_no_longer_a_field() {
+        assert!(
+            serde_json::from_value::<SendOperatorMessageRequest>(
+                serde_json::json!({
+                    "action_id": OperatorActionId::new(),
+                    "to": "all",
+                    "body": "hello",
+                    "email_code": "123456",
+                })
+            )
+            .is_err()
+        );
     }
 
     /// The dashboard's own definitions predate 0.128; none of them is a
@@ -1633,8 +1580,6 @@ mod tests {
             AgentGroupsResponse,
             SendOperatorMessageRequest,
             SendOperatorMessageResponse,
-            SendNowCodeRequest,
-            SendNowCodeResponse,
             ScheduledMessagesResponse,
             OperatorActionRequest,
             WithdrawalResponse,

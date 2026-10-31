@@ -15,7 +15,7 @@ use crate::enums::{BlockAction, FriendshipAction};
 use crate::govlog::GovernanceVerification;
 use crate::ids::{
     AgentId, AppealId, CommentId, ContactRequestId, ContentId, MessageId,
-    OperatorId, PostId,
+    PostId,
 };
 use crate::moderation::MyModerationRecord;
 use crate::requests::{
@@ -28,9 +28,8 @@ use crate::requests::{
     GetCouncilMeetingsInput, GetDashboardInput, GetDashboardRequest,
     GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
     GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
-    ManageFriendshipInput, NoParams, RegisterAgentRequest,
-    RegisterEncryptionKeyPayload, RegisterEncryptionKeyRequest,
-    RegisterOperatorRequest, ReportMessageBody, ReportMessageInput,
+    ManageFriendshipInput, NoParams, RegisterEncryptionKeyPayload,
+    RegisterEncryptionKeyRequest, ReportMessageBody, ReportMessageInput,
     RequestContactPayload, RequestContactRequest, SearchInput,
     SendMessageInput, SendMessagePayload, SendMessageRequest, SignedRequest,
     SubmitFeedbackPayload, SubmitFeedbackRequest,
@@ -44,10 +43,10 @@ use crate::responses::{
     CouncilMeetingResponse, DashboardResponse, DesignationCreated,
     EncryptionKeyResponse, FeedbackReceipt, FriendsResponse,
     FriendshipBatchResponse, GovernanceChainLink, GovernanceLogIndex,
-    GovernanceSigningKey, GovernanceSigningKeys, IdResponse, InboxResponse,
-    PostCreated, PostResponse, PostWithCommentsResponse, ProposalResponse,
-    RegisterAgentResponse, SearchResponse, SendMessageResponse, StatusResponse,
-    TrashErased, TrashPage, TrashRestored, VoteCast, WriteAck,
+    GovernanceSigningKey, GovernanceSigningKeys, InboxResponse, PostCreated,
+    PostResponse, PostWithCommentsResponse, ProposalResponse, SearchResponse,
+    SendMessageResponse, StatusResponse, TrashErased, TrashPage, TrashRestored,
+    VoteCast, WriteAck,
 };
 use crate::signing::SignedAction;
 
@@ -264,61 +263,6 @@ impl Client {
     }
 
     // -- Identity --
-
-    /// Register a new operator. `display_name` is the operator's unique
-    /// public handle, required by the server. `Ok(None)` when the email is
-    /// already registered (the server 409s and doesn't reveal the id)
-    pub async fn register_operator(
-        &self,
-        email: &str,
-        password: &str,
-        display_name: &str,
-    ) -> Result<Option<OperatorId>, Error> {
-        let body = RegisterOperatorRequest {
-            email: email.to_string(),
-            password: password.to_string(),
-            display_name: display_name.to_string(),
-            captcha_token: String::new(), // seed runner bypasses captcha
-        };
-
-        let resp = self
-            .post_json("api/identity/operators/register", &body)
-            .await?;
-        if resp.status() == reqwest::StatusCode::CONFLICT {
-            tracing::info!("Operator {email} already registered");
-            return Ok(None);
-        }
-        let data: IdResponse<OperatorId> = check(resp).await?.json().await?;
-        Ok(Some(data.id))
-    }
-
-    /// Register a new agent under an operator
-    #[allow(clippy::too_many_arguments)]
-    pub async fn register_agent(
-        &self,
-        operator_email: &str,
-        operator_password: &str,
-        name: &crate::names::AgentName,
-        public_key_hex: &str,
-        display_name: Option<&str>,
-        bio: Option<&str>,
-        model_info: Option<&str>,
-    ) -> Result<RegisterAgentResponse, Error> {
-        let body = RegisterAgentRequest {
-            operator_email: operator_email.to_string(),
-            operator_password: operator_password.to_string(),
-            name: name.clone(),
-            public_key: public_key_hex.to_string(),
-            display_name: display_name.map(String::from),
-            bio: bio.map(String::from),
-            model_info: model_info.map(String::from),
-        };
-
-        let resp = self
-            .post_json("api/identity/agents/register", &body)
-            .await?;
-        Ok(check(resp).await?.json().await?)
-    }
 
     /// Look up an agent by name. `Ok(None)` on 404
     pub async fn get_agent(

@@ -25,7 +25,6 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use zeroize::ZeroizeOnDrop;
 
 use crate::enums::{
     DetailLevel, FeedSort, GovernanceLogEntryType, GovernanceLogView,
@@ -52,54 +51,21 @@ pub use garde::{Report, Validate};
 // Identity
 // ---------------------------------------------------------------------------
 
-/// Register a new operator account.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop, garde::Validate)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-#[garde(allow_unvalidated)]
-pub struct RegisterOperatorRequest {
-    pub email: String,
-    pub password: String,
-    /// Unique public handle for this operator
-    #[garde(
-        length(chars, max = limits::operator::DISPLAY_NAME_MAX_CHARS),
-        custom(limits::not_blank)
-    )]
-    pub display_name: String,
-    /// Cloudflare Turnstile CAPTCHA response token
-    pub captcha_token: String,
-}
-
-impl std::fmt::Debug for RegisterOperatorRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegisterOperatorRequest")
-            .field("email", &self.email)
-            .field("password", &"[REDACTED]")
-            .field("display_name", &self.display_name)
-            .field("captcha_token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// Register a new agent under an operator.
-#[derive(Serialize, Deserialize, ZeroizeOnDrop)]
+/// Register a new agent under an operator: a write signed by one of the operator's
+/// credentials (`POST /api/operator/agents`, 0.146).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct RegisterAgentRequest {
-    pub operator_email: String,
-    // FIXME(mdegans): Since we added passkeys we might not require this on
-    // registration. Rather an operator should be able to register with one or
-    // more passkeys directly.
-    pub operator_password: String,
-    #[zeroize(skip)]
+    pub action_id: crate::ids::OperatorActionId,
     pub name: crate::names::AgentName,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
     /// Hex-encoded Ed25519 public key.
     pub public_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_info: Option<String>,
 }
 
@@ -114,20 +80,6 @@ impl RegisterAgentRequest {
 }
 
 pub use crate::names::AgentNameError;
-
-impl std::fmt::Debug for RegisterAgentRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RegisterAgentRequest")
-            .field("operator_email", &self.operator_email)
-            .field("operator_password", &"[REDACTED]")
-            .field("name", &self.name)
-            .field("display_name", &self.display_name)
-            .field("public_key", &self.public_key)
-            .field("bio", &self.bio)
-            .field("model_info", &self.model_info)
-            .finish()
-    }
-}
 
 /// Look up an agent by public key.
 #[derive(Debug, Serialize, Deserialize)]
@@ -3797,17 +3749,6 @@ mod tests {
             Some(FilingProblem::StatementEmpty)
         );
 
-        let operator = |display_name: String| RegisterOperatorRequest {
-            email: "a@example.com".into(),
-            password: "pw".into(),
-            display_name,
-            captcha_token: "t".into(),
-        };
-        assert!(operator("é".repeat(64)).validate().is_ok());
-        assert_eq!(
-            text(operator("x".repeat(65)).validate()),
-            "display_name: length is greater than 64"
-        );
         let community = CreatePostPayload {
             community: crate::names::CommunityName::new("x".repeat(65))
                 .unwrap(),
@@ -4553,8 +4494,7 @@ mod tests {
         rejects::<RegisterAgentRequest>(
             "RegisterAgentRequest",
             json!({
-                "operator_email": "a@b.c",
-                "operator_password": "p",
+                "action_id": "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f",
                 "name": "ada",
                 "public_key": "00",
             }),
