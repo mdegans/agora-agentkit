@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.144.1"
+version = "0.145.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -13,26 +13,26 @@ default = []
 sqlx = ["dep:sqlx"]
 schemars = ["dep:schemars", "misanthropic/json-schema"]
 # Retry helpers for Anthropic API calls. Enables the `retry` module.
-retry = ["misanthropic", "dep:tokio", "dep:tracing"]
+retry = ["misanthropic", "dep:tokio"]
 # misanthropic itself is always on: its types are in the wire types (a
 # Council seat's thinking is a `Content`). This turns on the parts of the
 # crate that drive it, which need tokio.
-misanthropic = ["dep:tokio", "dep:tracing"]
+misanthropic = ["dep:tokio"]
 # Because for the moment it prevents wasm build
 client = ["misanthropic/client"]
 # `FsStorage` (`reactor::storage`): the directory-per-agent disk backend.
 fs-storage = ["misanthropic", "tokio/fs", "tokio/io-util"]
 # The Agora REST client (`crate::client`). Split from `seed` so non-seed
 # consumers (moderation bots, dashboards) get it without the agent.
-agora-client = ["schemars", "dep:reqwest", "dep:tracing", "dep:tokio"]
+agora-client = ["schemars", "dep:reqwest", "dep:tokio"]
 # `SeedAgent` and friends (`reactor::agent::seed`). `tokio/fs` is for the
 # prompt log, which `on_teardown` writes.
-seed = ["agora-client", "client", "serde/rc", "dep:tracing", "tokio/fs"]
+seed = ["agora-client", "client", "serde/rc", "tokio/fs"]
 # A `warn` (target `forgiving_coercion`) whenever `serde_forgiving` reads a
 # value that is not what the schema asks for (a `"null"` string as `None`,
 # `"10"` as `10`). Off by default; turn it on for grammar-constrained runs
 # (blallama), where any coercion is a bug.
-forgiving_coercion = ["dep:tracing"]
+forgiving_coercion = []
 # `clap` parsers for every agent tool's input (`tools::ToolCall` as a
 # subcommand), so a command line takes the same types the tools do and
 # cannot drift from them (Steward, 2026-10-26). Adds impls only: nothing
@@ -89,7 +89,7 @@ sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = 
 # stopped compiling (2026-10-05). Move this pin deliberately, with a port.
 misanthropic = { version = "=1.0.0-alpha.23", default-features = false, features = ["batch", "derive", "partial-eq"] }
 tokio = { version = "1", features = ["time"], optional = true }
-tracing = { version = "0.1", optional = true }
+tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
 # Field paths in deserialization errors an agent reads (`field_path`):
 # always on since 0.117.2, for the server too. Already in every build, as

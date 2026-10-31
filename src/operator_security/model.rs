@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Duration, Utc};
 
 use super::tap::{
-    Delivery, FactorKind, PasskeyClass, Reach, WindowMessage, bulk_hold_floor,
+    Delivery, FactorKind, PasskeyClass, Reach, TapLevel, WindowMessage,
+    bulk_hold_floor,
 };
 use crate::ids::{
     AgentId, OAuthClientId, OperatorActionId, OperatorCredentialId,
@@ -26,25 +27,65 @@ pub fn suspension_deadline() -> Duration {
 /// budget can't keep the owner's passkey from suspending
 pub const SUSPEND_LIMIT: u32 = 10;
 
-/// `cascade(T, S)` over any store of factors: `target`, and every effective
-/// factor reached from it along approvals without passing through
-/// `suspender`. With the suspender the target itself, only the target. The
-/// one copy of the rule: [`AccountState::cascade`] and the server's
-/// transaction both call it
+/// How far back a suspension's cascade reaches, and how long a new key that can
+/// send immediately waits to (*Adding a credential*)
+pub fn new_factor_window() -> Duration {
+    Duration::hours(72)
+}
+
+/// `NEW_ACCOUNT_DAYS`'s default: an account this young is held above 5 agents
+/// (decision 9)
+pub const NEW_ACCOUNT_DAYS: u32 = 7;
+
+/// An account's most passkeys, not counting revoked ones
+pub const MAX_PASSKEYS: usize = 20;
+
+/// The server's settings the rules read
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Limits {
+    /// [`SUSPEND_LIMIT`]
+    pub suspend: u32,
+    /// [`NEW_ACCOUNT_DAYS`]
+    pub new_account_days: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            suspend: SUSPEND_LIMIT,
+            new_account_days: NEW_ACCOUNT_DAYS,
+        }
+    }
+}
+
+/// `cascade(T, S, t)` over any store of factors: `target`, and every effective
+/// factor reached from it along approvals without passing through `suspender`,
+/// with each factor after `target` added after `since`. A walk stops at its first
+/// older link; `since` is `None` only for a staff suspension. With the suspender
+/// the target itself, only the target. The one copy of the rule:
+/// [`AccountState::cascade`] and the server's transaction both call it
 pub fn provenance_cascade(
     target: FactorId,
     suspender: Option<FactorId>,
+    since: Option<DateTime<Utc>>,
     children: impl Fn(FactorId) -> Vec<FactorId>,
     effective: impl Fn(FactorId) -> bool,
+    added_at: impl Fn(FactorId) -> Option<DateTime<Utc>>,
 ) -> BTreeSet<FactorId> {
     let mut out = BTreeSet::from([target]);
     if suspender == Some(target) {
         return out;
     }
+    let recent = |id| match since {
+        // SPEC: §1 "added in the 72 h before t": the complement of
+        // `sends_now`, so a key is in the window until the moment it may send
+        Some(since) => added_at(id).is_some_and(|at| at > since),
+        None => true,
+    };
     let mut seen = BTreeSet::new();
     let mut todo = children(target);
     while let Some(next) = todo.pop() {
-        if Some(next) == suspender || !seen.insert(next) {
+        if Some(next) == suspender || !recent(next) || !seen.insert(next) {
             continue;
         }
         if effective(next) {
@@ -53,6 +94,20 @@ pub fn provenance_cascade(
         todo.extend(children(next));
     }
     out
+}
+
+/// `sends_now_from` for a factor of kind `new` approved by a tap from a factor of
+/// kind `tap`: 72 h on, if it gives a YubiKey tap and the approver isn't a
+/// `free_tap`. The one copy of the rule (*Adding a credential*)
+pub fn sends_now_from_for_add(
+    new: FactorKind,
+    tap: FactorKind,
+    tap_sends_now_from: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let free =
+        tap.gives_yubikey_tap() && tap_sends_now_from.is_none_or(|t| t <= now);
+    (new.gives_yubikey_tap() && !free).then(|| now + new_factor_window())
 }
 
 /// The longest default hold a change may set (the operator config's "at
@@ -139,10 +194,6 @@ pub struct Suspension {
 /// A factor's state (§2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CredentialState {
-    /// A passkey registered in this session, not yet approved
-    Pending {
-        session: OperatorSessionId,
-    },
     Active,
     Suspended(Suspension),
     /// Suspended, clock stopped, in manual recovery
@@ -151,8 +202,6 @@ pub enum CredentialState {
         case: OperatorRecoveryCaseId,
     },
     Revoked,
-    /// A pending passkey never approved
-    Discarded,
 }
 
 impl CredentialState {
@@ -161,7 +210,7 @@ impl CredentialState {
         matches!(self, Self::Active)
     }
 
-    /// `live`: not revoked (nor discarded or pending)
+    /// `live`: not revoked
     pub const fn is_live(&self) -> bool {
         matches!(
             self,
@@ -175,12 +224,12 @@ impl CredentialState {
             Self::Suspended(s) | Self::Contested { suspension: s, .. } => {
                 Some(s)
             }
-            _ => None,
+            Self::Active | Self::Revoked => None,
         }
     }
 
     pub const fn is_terminal(&self) -> bool {
-        matches!(self, Self::Revoked | Self::Discarded)
+        matches!(self, Self::Revoked)
     }
 }
 
@@ -194,14 +243,15 @@ pub struct Factor {
     pub added_at: DateTime<Utc>,
     /// A passkey has signed in before (its first sign-in is announced)
     pub signed_in: bool,
+    /// When it may first send now above 5 agents; `None`, unrestricted
+    pub sends_now_from: Option<DateTime<Utc>>,
 }
 
-/// How the account signs in (§4.1 `auth`)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AuthMode {
-    /// With a password; no passkey yet
-    PasswordOnly,
-    Passkeys,
+impl Factor {
+    /// `sends_now(F, t)`
+    pub fn sends_now(&self, t: DateTime<Utc>) -> bool {
+        self.sends_now_from.is_none_or(|from| from <= t)
+    }
 }
 
 /// A freeze in force
@@ -232,8 +282,7 @@ pub enum AccountStanding {
     Banned,
 }
 
-/// The three enforcement flags and the password cutover: platform-wide,
-/// each off → on only
+/// The three enforcement flags: platform-wide, each off → on only
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Flags {
     /// `AGORA_OPERATOR_TIER_ENFORCEMENT`: no `software_key` above 5
@@ -243,8 +292,6 @@ pub struct Flags {
     pub minimum: bool,
     /// `AGORA_OPERATOR_YUBIKEY_MINIMUM_ENFORCEMENT`: a YubiKey above 50
     pub yubikey: bool,
-    /// The password cutover has happened
-    pub cutover: bool,
 }
 
 /// A flag the platform turns on
@@ -261,7 +308,6 @@ impl Flags {
         (!self.tier || later.tier)
             && (!self.minimum || later.minimum)
             && (!self.yubikey || later.yubikey)
-            && (!self.cutover || later.cutover)
     }
 }
 
@@ -443,17 +489,11 @@ impl Default for Settings {
     }
 }
 
-/// What opened a session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SessionOpener {
-    Passkey(OperatorPasskeyId),
-    Password,
-}
-
 /// A portal session (§10)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Session {
-    pub opener: SessionOpener,
+    /// The passkey that opened it
+    pub passkey: OperatorPasskeyId,
     pub last_used: DateTime<Utc>,
     pub open: bool,
 }
@@ -485,13 +525,21 @@ pub struct Send {
     pub reach: Reach,
     pub admitted_by: AdmittedBy,
     pub state: SendState,
+    pub admitted_at: DateTime<Utc>,
+    /// The level of what admitted it, or last brought it forward
+    pub level: TapLevel,
+    /// It was announced, so a move is announced again
+    pub announced: bool,
+    /// A notice to the primary carried a cancel link for it, which stays good
+    /// wherever it is moved
+    pub cancel_link: bool,
 }
 
 /// The device flow's states (§3)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EnrolmentState {
     /// Waiting for the operator's tap (the wire's `pending`)
-    Pending,
+    Started,
     Approved(OperatorCredentialId),
     Refused,
     Expired,
@@ -510,7 +558,7 @@ pub struct Enrolment {
 pub enum CaseSubject {
     /// A contested factor
     Contest(FactorId),
-    /// No usable factor left: stranded or locked out
+    /// No usable factor left: stranded
     NoFactor,
 }
 
@@ -568,7 +616,10 @@ pub struct FreezeLink {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountState {
     pub operator: OperatorId,
-    pub auth: AuthMode,
+    pub created_at: DateTime<Utc>,
+    /// The account's first agent, ever (`first_agent_at`); deleting every agent
+    /// doesn't clear it
+    pub first_agent_at: Option<DateTime<Utc>>,
     pub hold: Hold,
     pub standing: AccountStanding,
     /// `tier_agent_count`: live agents and those in their departure grace
@@ -592,8 +643,7 @@ pub struct AccountState {
     /// When each factor's direct suspensions happened, for the rate limit
     pub direct_suspensions: BTreeMap<FactorId, Vec<DateTime<Utc>>>,
     pub settings: Settings,
-    /// `SUSPEND_LIMIT`: direct suspensions per suspending factor per hour
-    pub suspend_limit: u32,
+    pub limits: Limits,
 }
 
 impl AccountState {
@@ -603,13 +653,14 @@ impl AccountState {
     pub fn migrated(
         operator: OperatorId,
         primary: EmailAddress,
-        auth: AuthMode,
+        created_at: DateTime<Utc>,
         factors: impl IntoIterator<Item = (FactorId, FactorKind, DateTime<Utc>)>,
-        suspend_limit: u32,
+        limits: Limits,
     ) -> Self {
         Self {
             operator,
-            auth,
+            created_at,
+            first_agent_at: None,
             hold: Hold::Open,
             standing: AccountStanding::Good,
             count: 0,
@@ -626,6 +677,7 @@ impl AccountState {
                         parent: None,
                         added_at,
                         signed_in: false,
+                        sends_now_from: None,
                     };
                     (id, factor)
                 })
@@ -640,25 +692,25 @@ impl AccountState {
             last_freeze: BTreeMap::new(),
             direct_suspensions: BTreeMap::new(),
             settings: Settings::default(),
-            suspend_limit,
+            limits,
         }
     }
 
-    /// **Register**: sign-up with a passkey, the one add without a tap
+    /// **Register**: sign-up with a passkey
     pub fn register(
         operator: OperatorId,
         primary: EmailAddress,
         passkey: OperatorPasskeyId,
         class: PasskeyClass,
         now: DateTime<Utc>,
-        suspend_limit: u32,
+        limits: Limits,
     ) -> Self {
         Self::migrated(
             operator,
             primary,
-            AuthMode::Passkeys,
+            now,
             [(FactorId::Passkey(passkey), FactorKind::Passkey(class), now)],
-            suspend_limit,
+            limits,
         )
     }
 
@@ -695,20 +747,69 @@ impl AccountState {
         out
     }
 
-    /// `cascade(T, S)`: `target`, and every effective factor reached from it
-    /// along approvals without passing through `suspender`. With the
-    /// suspender the target itself, only the target
+    /// `cascade(T, S, t)`: [`provenance_cascade`] over this account, reaching
+    /// back from `t`
     pub fn cascade(
         &self,
         target: FactorId,
         suspender: Option<FactorId>,
+        t: DateTime<Utc>,
+    ) -> BTreeSet<FactorId> {
+        self.cascade_since(target, suspender, Some(t - new_factor_window()))
+    }
+
+    fn cascade_since(
+        &self,
+        target: FactorId,
+        suspender: Option<FactorId>,
+        since: Option<DateTime<Utc>>,
     ) -> BTreeSet<FactorId> {
         provenance_cascade(
             target,
             suspender,
+            since,
             |id| self.children(id).collect(),
             |id| self.effective(id),
+            |id| self.factor(id).map(|f| f.added_at),
         )
+    }
+
+    /// A staff suspension's cascade: no suspender and no time limit
+    pub fn recovery_cascade(&self, target: FactorId) -> BTreeSet<FactorId> {
+        self.cascade_since(target, None, None)
+    }
+
+    /// `no_agents(A)`
+    pub fn no_agents(&self) -> bool {
+        self.first_agent_at.is_none()
+    }
+
+    /// `new_account(A, t)`
+    pub fn new_account(&self, t: DateTime<Utc>) -> bool {
+        t - self.created_at
+            < Duration::days(i64::from(self.limits.new_account_days))
+    }
+
+    /// `sends_now(F, t)`; an unknown factor doesn't
+    pub fn sends_now(&self, id: FactorId, t: DateTime<Utc>) -> bool {
+        self.factor(id).is_some_and(|f| f.sends_now(t))
+    }
+
+    /// `id` is the account's only effective passkey: it can't suspend itself
+    pub fn is_last_passkey(&self, id: FactorId) -> bool {
+        self.effective(id)
+            && self.factor(id).is_some_and(|f| f.kind.is_passkey())
+            && self.effective_passkeys() == 1
+    }
+
+    /// Passkeys that are `Active`
+    pub fn effective_passkeys(&self) -> usize {
+        self.passkeys().filter(|(_, f)| f.state.is_active()).count()
+    }
+
+    /// Passkeys counted by [`MAX_PASSKEYS`]: every one not revoked
+    pub fn counted_passkeys(&self) -> usize {
+        self.passkeys().filter(|(_, f)| f.state.is_live()).count()
     }
 
     /// `recent_desc(u, t)`: what `u` added, through anything, in the 7
@@ -749,10 +850,10 @@ impl AccountState {
     /// `authorised(F)` is empty: no open session it opened, pending change
     /// it requested, scheduled send it admitted or grant it consented
     pub fn authorised_is_empty(&self, id: FactorId) -> bool {
-        let sessions = self.sessions.values().any(|s| {
-            s.open
-                && matches!((s.opener, id), (SessionOpener::Passkey(p), FactorId::Passkey(q)) if p == q)
-        });
+        let sessions = self
+            .sessions
+            .values()
+            .any(|s| s.open && FactorId::Passkey(s.passkey) == id);
         let changes = self
             .changes
             .values()
@@ -783,14 +884,6 @@ impl AccountState {
             }
         }
         n + u32::from(synced)
-    }
-
-    /// `has_yk_tap(A)`: a live factor gives YubiKey taps (suspended and
-    /// contested count until revoked)
-    pub fn has_yk_tap(&self) -> bool {
-        self.factors
-            .values()
-            .any(|f| f.state.is_live() && f.kind.gives_yubikey_tap())
     }
 
     /// `has_yk_passkey(A)`: an effective YubiKey passkey
@@ -849,17 +942,9 @@ impl AccountState {
             || (above50 && self.flags.yubikey && !self.has_yk_passkey())
     }
 
-    /// `stranded(A)`: no effective passkey, and no password
+    /// `stranded(A)`: no effective passkey
     pub fn stranded(&self) -> bool {
-        let has_passkey = self.passkeys().any(|(_, f)| f.state.is_active());
-        let has_password =
-            self.auth == AuthMode::PasswordOnly && !self.flags.cutover;
-        !has_passkey && !has_password
-    }
-
-    /// Locked out: password-only after the cutover
-    pub fn locked_out(&self) -> bool {
-        self.auth == AuthMode::PasswordOnly && self.flags.cutover
+        !self.passkeys().any(|(_, f)| f.state.is_active())
     }
 
     pub fn frozen(&self) -> Option<&Frozen> {
@@ -881,10 +966,20 @@ impl AccountState {
     /// Decision 9's window: every recipient copy of every send that isn't
     /// cancelled
     pub fn window_messages(&self) -> Vec<WindowMessage> {
+        self.window_without(None)
+    }
+
+    /// The window as a send being moved sees it: without its own copies
+    pub fn window_without(
+        &self,
+        send: Option<OperatorActionId>,
+    ) -> Vec<WindowMessage> {
         self.sends
-            .values()
-            .filter(|s| s.state != SendState::Cancelled)
-            .flat_map(|s| {
+            .iter()
+            .filter(|(id, s)| {
+                s.state != SendState::Cancelled && Some(**id) != send
+            })
+            .flat_map(|(_, s)| {
                 s.recipients.iter().map(|recipient| WindowMessage {
                     recipient: *recipient,
                     deliver_at: s.deliver_at,
@@ -896,14 +991,6 @@ impl AccountState {
 
     /// The factor behind a session: the passkey that opened it
     pub fn session_factor(&self, id: OperatorSessionId) -> Option<FactorId> {
-        match self.sessions.get(&id)?.opener {
-            SessionOpener::Passkey(p) => Some(FactorId::Passkey(p)),
-            SessionOpener::Password => None,
-        }
-    }
-
-    /// The password still signs in
-    pub fn password_usable(&self) -> bool {
-        self.auth == AuthMode::PasswordOnly && !self.flags.cutover
+        Some(FactorId::Passkey(self.sessions.get(&id)?.passkey))
     }
 }

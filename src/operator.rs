@@ -704,34 +704,12 @@ pub struct OperatorLogResponse {
     pub entries: Vec<OperatorLogEntry>,
 }
 
-/// `POST /api/operator/passkeys/{id}/confirm`: a sudo request approving an
-/// account's first passkey, before the password cutover (agora
-/// `docs/design-operator-api.md`, *The password cutover*). Binds the passkey's
-/// id (the path) and the SHA-256 of its COSE key, as the portal's 0x05 does
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct FirstPasskeyConfirmRequest {
-    pub action_id: OperatorActionId,
-    /// SHA-256 of the passkey's COSE key, in hex, as the Security page shows it
-    pub cose_key_sha256: String,
-}
-
 /// What `POST /credentials/{id}/contest` did: the suspension's clock stopped,
 /// and the dispute went to manual recovery. The credential stays suspended
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CredentialContestResponse {
     pub case: OperatorRecoveryCaseId,
-}
-
-/// What [`FirstPasskeyConfirmRequest`] did
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-pub struct FirstPasskeyConfirmResponse {
-    pub passkey: OperatorPasskeyId,
-    /// The sessions the password opened, ended with it
-    pub password_sessions_ended: u64,
 }
 
 /// A credential, as the log names it
@@ -834,11 +812,16 @@ pub enum OperatorActionDetail {
         yubikey: bool,
         /// A synced passkey (its own backup-eligible claim)
         synced: bool,
-        /// The approving passkey's tap; `None` when a sudo request approved
-        /// it (the entry's credential) or a password session did (an
-        /// account's first passkey, before the cutover)
+        /// The approving passkey's tap; `None` for an add with no tap (no
+        /// agents yet, manual recovery), and in entries from before the flow
+        /// rework, a sudo request's (the entry's credential) or a password
+        /// session's
         #[serde(default, skip_serializing_if = "Option::is_none")]
         approved_by: Option<OperatorPasskeyId>,
+        /// SHA-256 of its COSE key, in hex: the server's record, since the tap
+        /// names no key. Absent in entries from before the flow rework
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_sha256: Option<String>,
         /// The passkey it replaced, removed in the same transaction
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaced: Option<OperatorPasskeyId>,
@@ -974,7 +957,8 @@ pub enum CancelReason {
     /// The credential that signed the send was revoked before delivery
     CredentialRevoked,
     /// The account's first passkey retired its password, ending the session
-    /// that admitted the send (0.140.2)
+    /// that admitted the send (0.140.2). Passwords are gone; only stored entries
+    /// have this
     PasswordRetired,
     /// The factor that admitted the send was suspended, contested or revoked,
     /// when it happened or when the send fell due (the state table's §6)
@@ -1797,6 +1781,70 @@ mod tests {
                 "poll_secret": "s3cret",
                 "expires_at": "2026-10-29T12:00:00Z"
             }),
+        );
+    }
+
+    /// Entries from before the flow rework are stored in production, and stay
+    /// readable: a passkey add with no key digest, approved by a sudo request or
+    /// a password session, and a cancel the retired password caused
+    #[test]
+    fn stored_log_entries_from_before_the_flow_rework_read() {
+        let old_add = serde_json::json!({
+            "kind": "passkey_add",
+            "passkey": "00112233-4455-6677-8899-aabbccddeeff",
+            "nickname": "Bio",
+            "yubikey": true,
+            "synced": false,
+        });
+        let detail: OperatorActionDetail =
+            serde_json::from_value(old_add.clone()).unwrap();
+        let OperatorActionDetail::PasskeyAdd {
+            approved_by,
+            key_sha256,
+            ..
+        } = &detail
+        else {
+            panic!("{detail:?}")
+        };
+        assert_eq!((approved_by, key_sha256), (&None, &None));
+        assert_eq!(detail.kind(), OperatorActionKind::CredentialAdd);
+        // ... and write back as they were
+        assert_eq!(serde_json::to_value(&detail).unwrap(), old_add);
+
+        let cancelled: OperatorActionDetail =
+            serde_json::from_value(serde_json::json!({
+                "kind": "dm_cancel",
+                "cancelled": [],
+                "reason": "password_retired",
+            }))
+            .unwrap();
+        assert!(matches!(
+            cancelled,
+            OperatorActionDetail::DmCancel {
+                reason: CancelReason::PasswordRetired,
+                ..
+            }
+        ));
+    }
+
+    /// A new add's record: the digest the tap can't bind
+    #[test]
+    fn a_passkey_add_records_the_keys_digest() {
+        let digest = "ab".repeat(32);
+        let detail = OperatorActionDetail::PasskeyAdd {
+            passkey: "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap(),
+            nickname: "5Ci".into(),
+            yubikey: true,
+            synced: false,
+            approved_by: None,
+            key_sha256: Some(digest.clone()),
+            replaced: None,
+        };
+        let json = serde_json::to_value(&detail).unwrap();
+        assert_eq!(json["key_sha256"], digest.as_str());
+        assert_eq!(
+            serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+            detail
         );
     }
 }
