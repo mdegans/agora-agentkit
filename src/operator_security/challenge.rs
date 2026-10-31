@@ -18,8 +18,9 @@ use crate::ids::{
 /// What every derived challenge's preimage begins with
 pub const CONTEXT: &[u8] = b"agora/portal-approval/v1\n";
 
-/// Kind tags never produced again: 0x07 was retired
-pub const RETIRED_TAGS: [u8; 1] = [0x07];
+/// Kind tags never produced again: 0x05 was the two-tap passkey add, whose rows
+/// stay in the action log, and 0x07 was retired before any
+pub const RETIRED_TAGS: [u8; 2] = [0x05, 0x07];
 
 /// What a passkey tap approves: its canonical bytes' first byte
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -29,7 +30,8 @@ pub enum TapKind {
     OAuthConsent = 0x02,
     EnrolmentApproval = 0x03,
     Suspend = 0x04,
-    PasskeyEnrolment = 0x05,
+    /// Retired: only stored assertions have it, and no event accepts it
+    RetiredPasskeyEnrolment = 0x05,
     PendingChange = 0x06,
     // 0x07 retired, never reused
     Unfreeze = 0x08,
@@ -42,16 +44,19 @@ pub enum TapKind {
     CompromiseNotice = 0x0F,
     /// A counter-claim against a decided recovery case (0.140)
     CounterClaim = 0x10,
+    /// Moving a send: earlier, or later when a YubiKey tap made it
+    MoveSend = 0x11,
+    /// Opening a passkey add's grant
+    PasskeyAdd = 0x12,
 }
 
 impl TapKind {
-    /// Every kind, by tag
-    pub const ALL: [Self; 15] = [
+    /// Every kind still produced, by tag
+    pub const ALL: [Self; 16] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
         Self::Suspend,
-        Self::PasskeyEnrolment,
         Self::PendingChange,
         Self::Unfreeze,
         Self::Contest,
@@ -62,15 +67,25 @@ impl TapKind {
         Self::ReArm,
         Self::CompromiseNotice,
         Self::CounterClaim,
+        Self::MoveSend,
+        Self::PasskeyAdd,
     ];
 
     pub const fn tag(self) -> u8 {
         self as u8
     }
 
-    /// The kind with this tag; `None` for a retired or unknown one
+    /// The kind with this tag, 0x05 included, for reading stored assertions;
+    /// `None` for 0x07 and unknown ones
     pub fn from_tag(tag: u8) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.tag() == tag)
+        Self::ALL
+            .into_iter()
+            .chain([Self::RetiredPasskeyEnrolment])
+            .find(|k| k.tag() == tag)
+    }
+
+    pub const fn is_retired(self) -> bool {
+        matches!(self, Self::RetiredPasskeyEnrolment)
     }
 }
 
@@ -110,11 +125,6 @@ pub enum Approval {
     },
     /// 0x04
     Suspend { target: SuspendTarget },
-    /// 0x05
-    PasskeyEnrolment {
-        passkey: OperatorPasskeyId,
-        cose_key_sha256: [u8; 32],
-    },
     /// 0x06: covers a change that waits and one a YubiKey tap makes at once
     PendingChange {
         change: OperatorPendingChangeId,
@@ -156,6 +166,13 @@ pub enum Approval {
         operator: OperatorId,
         case: OperatorRecoveryCaseId,
     },
+    /// 0x11
+    MoveSend {
+        action: OperatorActionId,
+        deliver_at: DateTime<Utc>,
+    },
+    /// 0x12: names no key, which doesn't exist yet
+    PasskeyAdd { operator: OperatorId },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -169,7 +186,6 @@ impl Approval {
             Self::OAuthConsent { .. } => TapKind::OAuthConsent,
             Self::EnrolmentApproval { .. } => TapKind::EnrolmentApproval,
             Self::Suspend { .. } => TapKind::Suspend,
-            Self::PasskeyEnrolment { .. } => TapKind::PasskeyEnrolment,
             Self::PendingChange { .. } => TapKind::PendingChange,
             Self::Unfreeze { .. } => TapKind::Unfreeze,
             Self::Contest { .. } => TapKind::Contest,
@@ -180,6 +196,8 @@ impl Approval {
             Self::ReArm { .. } => TapKind::ReArm,
             Self::CompromiseNotice { .. } => TapKind::CompromiseNotice,
             Self::CounterClaim { .. } => TapKind::CounterClaim,
+            Self::MoveSend { .. } => TapKind::MoveSend,
+            Self::PasskeyAdd { .. } => TapKind::PasskeyAdd,
         }
     }
 
@@ -219,13 +237,6 @@ impl Approval {
                     out.push(1);
                 }
             },
-            Self::PasskeyEnrolment {
-                passkey,
-                cose_key_sha256,
-            } => {
-                out.extend(uuid_bytes(*passkey));
-                out.extend(cose_key_sha256);
-            }
             Self::PendingChange {
                 change,
                 canonical_sha256,
@@ -268,6 +279,11 @@ impl Approval {
                 out.extend(uuid_bytes(*operator));
                 out.extend(uuid_bytes(*case));
             }
+            Self::MoveSend { action, deliver_at } => {
+                out.extend(uuid_bytes(*action));
+                out.extend(deliver_at.timestamp_micros().to_be_bytes());
+            }
+            Self::PasskeyAdd { operator } => out.extend(uuid_bytes(*operator)),
         }
         out
     }
@@ -354,10 +370,6 @@ mod tests {
             Approval::Suspend {
                 target: SuspendTarget::Passkey(id(A)),
             },
-            Approval::PasskeyEnrolment {
-                passkey: id(A),
-                cose_key_sha256: digest,
-            },
             Approval::PendingChange {
                 change: id(A),
                 canonical_sha256: sha256(
@@ -390,24 +402,36 @@ mod tests {
                 operator: id(A),
                 case: id(B),
             },
+            Approval::MoveSend {
+                action: id(A),
+                deliver_at: DateTime::from_timestamp_micros(
+                    1_761_782_400_123_456,
+                )
+                .unwrap(),
+            },
+            Approval::PasskeyAdd { operator: id(A) },
         ]
     }
 
     #[test]
-    fn tags_are_the_spec_table_and_0x07_is_retired() {
+    fn tags_are_the_spec_table_and_0x05_and_0x07_are_retired() {
         let tags: Vec<u8> = TapKind::ALL.iter().map(|k| k.tag()).collect();
         assert_eq!(
             tags,
             [
-                1, 2, 3, 4, 5, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
-                0x10
+                1, 2, 3, 4, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+                0x11, 0x12
             ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x11), None);
+        assert_eq!(TapKind::from_tag(0x13), None);
+        // 0x05 still reads, so stored assertions do, and isn't produced
+        let retired = TapKind::from_tag(0x05).unwrap();
+        assert!(retired.is_retired() && !TapKind::ALL.contains(&retired));
         for k in TapKind::ALL {
             assert_eq!(TapKind::from_tag(k.tag()), Some(k));
+            assert!(!k.is_retired());
             assert!(!RETIRED_TAGS.contains(&k.tag()));
         }
         let kinds: Vec<TapKind> =
@@ -429,7 +453,6 @@ mod tests {
                 1 + 16 + 32,
                 1 + 16 + 1,
                 1 + 16 + 32,
-                1 + 16 + 32,
                 1 + 16,
                 1 + 16 + 16,
                 1 + 16,
@@ -439,6 +462,8 @@ mod tests {
                 1 + 16 + 16,
                 1 + 16 + 16,
                 1 + 16 + 16,
+                1 + 16 + 8,
+                1 + 16,
             ]
         );
     }
@@ -498,7 +523,7 @@ mod tests {
     /// The challenge is SHA-256 over context, nonce and bytes, nothing else
     #[test]
     fn challenge_is_the_spec_preimage() {
-        let approval = &every_kind()[6];
+        let approval = &every_kind()[5];
         let mut preimage = b"agora/portal-approval/v1\n".to_vec();
         preimage.extend(NONCE);
         preimage.extend(approval.canonical_bytes());
@@ -508,13 +533,25 @@ mod tests {
         assert_ne!(approval.challenge(&NONCE), approval.challenge(&other));
     }
 
+    /// A stored 0x05 assertion stays verifiable from its own bytes, which are
+    /// all a reader needs: the digest of a kind nothing produces any more
+    #[test]
+    fn a_stored_0x05_challenge_still_derives() {
+        let mut bytes = vec![0x05];
+        bytes.extend(uuid_bytes(id::<OperatorPasskeyId>(A)));
+        bytes.extend(sha256(b"digest"));
+        assert_eq!(
+            hex::encode(derived_challenge(&NONCE, &bytes)),
+            "cac0483fde1848a473d4a63edb7975be"
+        );
+    }
+
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 15] = [
+    const VECTORS: [&str; 16] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
         "c5108e5d7fc822bb58bcdcaffdf620167c793de11a408181ce68381943a66f91",
-        "cac0483fde1848a473d4a63edb7975beac6551514007fc0f936551735ff36f46",
         "36ccbd6e1a321935c842b90a1ce25470df00e721cfb59f80023703a642c51658",
         "38573fdcbd3e51d270a83649e191d42482d6f3b6c58f303b5a62f70b662b9938",
         "2d300dda2a14bd49d8317b955b271623601e812407ca5d7366dc7c99688c0a58",
@@ -525,5 +562,7 @@ mod tests {
         "f7ffe9ecaaf866cf58fabf8f4cbeb93419b3a158228b8bb2c2b9aea2b01c01de",
         "9f8a8ea4904c1fd8a9d9fcb6097be539dd66b4b58d419623bda57ff4fe0858d4",
         "503e9692af58b3013f1401a73aa707ac7053cf915033358e03b4ac9b444dc700",
+        "4a187c9157d8c8d42fb3c38380e2d96869c2697d16347ba716a8b96704114ed4",
+        "1b8688cf24d1c7db7b53257c3d9b51ffbde4658f67f57486a148f1ebfad9ec8f",
     ];
 }

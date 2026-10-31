@@ -10,8 +10,8 @@ use chrono::{DateTime, Utc};
 use super::challenge::TapKind;
 use super::model::*;
 use super::tap::{
-    FactorKind, PasskeyClass, SendRefusal, SendRequest, TapLevel,
-    UNTAPPED_REACH, When, bulk_hold_floor, plan_send,
+    Delivery, FactorKind, NAMED_REACH, PasskeyClass, SendRefusal, SendRequest,
+    TapLevel, UNTAPPED_REACH, When, bulk_hold_floor, plan_send, reach,
 };
 use crate::enums::OperatorActionKind;
 use crate::ids::{
@@ -26,10 +26,8 @@ use crate::ids::{
 pub enum Authority {
     /// A link in a mail to this address
     Email(OperatorEmailAddressId),
-    /// A portal session (opened by a passkey, or by the password)
+    /// A portal session
     Session(OperatorSessionId),
-    /// The password itself, at sign-in
-    Password,
     /// A request signed by an API credential: `Soft`, `Unattended`, `Sudo`
     /// or the API's YubiKey tap, by the credential's kind
     Signed(OperatorCredentialId),
@@ -46,7 +44,7 @@ pub enum Authority {
     Agent,
     /// The manual-recovery call (CD6)
     Staff,
-    /// The server: clocks, flags, the cutover, bans
+    /// The server: clocks, flags, bans
     Platform,
 }
 
@@ -54,22 +52,16 @@ pub enum Authority {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     // §2, factors
-    PasskeyRegister {
+    /// A grant's registration: `PasskeyTap(t, 0x12)`. The grant's secret, session
+    /// and expiry are the server's, as a ceremony is
+    PasskeyAdd {
         passkey: OperatorPasskeyId,
         class: PasskeyClass,
     },
-    PasskeyApprove {
-        passkey: OperatorPasskeyId,
-    },
-    PendingExpire {
-        passkey: OperatorPasskeyId,
-    },
-    /// A password-only account's first passkey; `confirm` is the sudo
-    /// request `POST /passkeys/{id}/confirm`
-    FirstPasskey {
+    /// A session's add, while the account has never had an agent
+    PasskeyAddFree {
         passkey: OperatorPasskeyId,
         class: PasskeyClass,
-        confirm: Option<OperatorCredentialId>,
     },
     Suspend {
         target: FactorId,
@@ -103,10 +95,6 @@ pub enum Event {
     },
     AgentGraceEnd,
     FlagOn(Flag),
-    Cutover,
-    PasswordSignIn {
-        session: OperatorSessionId,
-    },
     Ban,
     Unban,
     OAuthConsent {
@@ -154,6 +142,16 @@ pub enum Event {
     SendCancel {
         send: OperatorActionId,
     },
+    /// Earlier, by a YubiKey tap (0x11)
+    SendForward {
+        send: OperatorActionId,
+        deliver_at: DateTime<Utc>,
+    },
+    /// Later, by what cancelling takes, or a YubiKey tap (0x11) if one made it
+    SendLater {
+        send: OperatorActionId,
+        deliver_at: DateTime<Utc>,
+    },
     Retract {
         send: OperatorActionId,
     },
@@ -161,7 +159,7 @@ pub enum Event {
         send: OperatorActionId,
     },
     // §9, recovery
-    /// The operator asks for recovery, stranded or locked out
+    /// The operator asks for recovery, stranded
     RecoveryRequest,
     RecoveryDecide {
         case: OperatorRecoveryCaseId,
@@ -186,7 +184,12 @@ pub enum Event {
     SessionExpire {
         session: OperatorSessionId,
     },
-    SignOutOthers,
+    /// The session's own: its scheduled sends stand
+    SignOut,
+    /// Every other session, or the one it names
+    SignOutOthers {
+        session: Option<OperatorSessionId>,
+    },
 }
 
 /// Where a notice goes
@@ -223,6 +226,8 @@ pub enum NoticeSubject {
     /// Any other send that took a tap (now, reach 6–500, immediate reach
     /// ≤ 5)
     SendTapped(OperatorActionId),
+    /// Moved, and announced again with its new time
+    SendMoved(OperatorActionId),
     /// Cancelled when its authority ended or its recheck failed
     SendCancelled(OperatorActionId),
     SessionEnded(OperatorSessionId),
@@ -277,10 +282,6 @@ pub enum Effect {
     DeliverCompromiseNotice,
     /// A setting now has its new value
     SettingChanged(SettingChange),
-    /// Password sign-in off for the account; its hash deleted
-    PasswordRetired,
-    /// Every password hash deleted, the confirm route gone (the cutover)
-    PasswordsRetired,
 }
 
 /// The new state and what to do about it
@@ -313,8 +314,14 @@ pub enum Refusal {
     Exists,
     #[error("too many suspensions in the last hour")]
     RateLimited,
-    #[error("adding this factor takes a YubiKey tap")]
+    #[error("this takes a YubiKey tap")]
     NeedsYubikeyTap,
+    #[error("this is your last passkey: add another one first")]
+    LastPasskey,
+    #[error("the account has its most passkeys")]
+    TooManyPasskeys,
+    #[error("the account has had an agent, so an add takes a tap")]
+    HasHadAgent,
     #[error("a factor can't approve or cancel its own item")]
     SameFactor,
     #[error("too early")]
@@ -366,7 +373,7 @@ pub enum ModeClass {
     ContactRestore,
     /// A **ChangeRequest** replacing a contact that fails `contact_ok`
     ContactReplace,
-    /// **PasskeyRegister**, **PasskeyApprove**, **FirstPasskey**
+    /// **PasskeyAdd**, **PasskeyAddFree**
     PasskeyAdd,
     EnrolApprove,
     /// Any other **ChangeRequest**
@@ -414,6 +421,43 @@ impl AccountState {
             ids,
         };
         tx.event(event, by)?;
+        Ok(Transition {
+            state: tx.s,
+            effects: tx.effects,
+        })
+    }
+
+    /// Replacing a passkey: no event of its own, but **PasskeyAdd** of `passkey`
+    /// and **Suspend** of `old`, all or nothing, on one tap of `tapper` that binds
+    /// the old row (0x04). `tapper` is never `old`
+    pub fn replace_passkey(
+        &self,
+        passkey: OperatorPasskeyId,
+        class: PasskeyClass,
+        old: OperatorPasskeyId,
+        tapper: OperatorPasskeyId,
+        now: DateTime<Utc>,
+        ids: &mut impl IdSource,
+    ) -> Result<Transition, Refusal> {
+        guard(tapper != old, Refusal::SameFactor)?;
+        let by = Authority::PasskeyTap {
+            passkey: tapper,
+            kind: TapKind::Suspend,
+        };
+        let mut tx = Tx {
+            s: self.clone(),
+            effects: Vec::new(),
+            now,
+            ids,
+        };
+        let t = tx.tap(by, TapKind::Suspend)?;
+        tx.passkey_add(t, passkey, class)?;
+        tx.event(
+            &Event::Suspend {
+                target: FactorId::Passkey(old),
+            },
+            by,
+        )?;
         Ok(Transition {
             state: tx.s,
             effects: tx.effects,
@@ -482,6 +526,12 @@ fn guard(ok: bool, refusal: Refusal) -> R {
     if ok { Ok(()) } else { Err(refusal) }
 }
 
+/// An item a guard just found has gone: believed impossible, so said loudly
+fn gone(item: &'static str) -> Refusal {
+    tracing::error!(item, "operator security: an item vanished mid-transition");
+    Refusal::Unknown
+}
+
 impl<I: IdSource> Tx<'_, I> {
     // -- effects ----------------------------------------------------------
 
@@ -537,14 +587,11 @@ impl<I: IdSource> Tx<'_, I> {
     // -- guards -----------------------------------------------------------
 
     /// The factor behind `by` is effective, and a session is open (I-4,
-    /// I-9, I-37, I-38)
+    /// I-9, I-37)
     fn authority_live(&self, by: Authority) -> R {
         if let Authority::Session(s) = by {
             let session = self.s.sessions.get(&s).ok_or(Refusal::Unknown)?;
             guard(session.open, Refusal::SessionClosed)?;
-            if session.opener == SessionOpener::Password {
-                return guard(self.s.password_usable(), Refusal::SessionClosed);
-            }
         }
         match self.s.factor_behind(by) {
             Some(f) => guard(self.s.effective(f), Refusal::NotEffective),
@@ -583,6 +630,29 @@ impl<I: IdSource> Tx<'_, I> {
             }
             _ => Err(Refusal::WrongAuthority),
         }
+    }
+
+    /// A YubiKey tap of `kind`: a YubiKey passkey's, or a signature by a key that
+    /// gives one
+    fn yubikey_tap(
+        &self,
+        by: Authority,
+        kind: TapKind,
+    ) -> Result<FactorId, Refusal> {
+        let id = match by {
+            Authority::PasskeyTap { .. } => self.tap(by, kind)?,
+            Authority::Signed(k) => {
+                let k = FactorId::Credential(k);
+                guard(self.s.effective(k), Refusal::NotEffective)?;
+                k
+            }
+            _ => return Err(Refusal::WrongAuthority),
+        };
+        guard(
+            self.s.level(by) == TapLevel::YubikeyTap,
+            Refusal::NeedsYubikeyTap,
+        )?;
+        Ok(id)
     }
 
     /// A session of the account
@@ -656,12 +726,12 @@ impl<I: IdSource> Tx<'_, I> {
         );
     }
 
-    /// End a session other than by expiry: its scheduled sends are
-    /// cancelled, its pending passkeys discarded
+    /// End a session; unless `sends_stand` (expiry, signing itself out), the
+    /// sends it admitted are cancelled
     fn end_session(
         &mut self,
         session: OperatorSessionId,
-        by_expiry: bool,
+        sends_stand: bool,
         by: Option<FactorId>,
     ) {
         let Some(s) = self.s.sessions.get_mut(&session) else {
@@ -671,12 +741,7 @@ impl<I: IdSource> Tx<'_, I> {
             return;
         }
         s.open = false;
-        for f in self.s.factors.values_mut() {
-            if f.state == (CredentialState::Pending { session }) {
-                f.state = CredentialState::Discarded;
-            }
-        }
-        if by_expiry {
+        if sends_stand {
             return;
         }
         let sends: Vec<_> = self
@@ -698,10 +763,7 @@ impl<I: IdSource> Tx<'_, I> {
             .s
             .sessions
             .iter()
-            .filter(|(_, s)| {
-                s.open
-                    && matches!((s.opener, f), (SessionOpener::Passkey(p), FactorId::Passkey(q)) if p == q)
-            })
+            .filter(|(_, s)| s.open && FactorId::Passkey(s.passkey) == f)
             .map(|(id, _)| *id)
             .collect();
         for session in sessions {
@@ -770,7 +832,10 @@ impl<I: IdSource> Tx<'_, I> {
         }
         let entry =
             self.log(OperatorActionKind::CredentialSuspend, flag, Some(f));
-        let factor = self.s.factors.get_mut(&f).expect("effective");
+        let Some(factor) = self.s.factors.get_mut(&f) else {
+            gone("factor");
+            return;
+        };
         factor.state = CredentialState::Suspended(Suspension {
             cause,
             entry,
@@ -789,7 +854,7 @@ impl<I: IdSource> Tx<'_, I> {
         suspender: Option<FactorId>,
         deadline: DateTime<Utc>,
     ) {
-        let targets = self.s.cascade(root, suspender);
+        let targets = self.s.cascade(root, suspender, self.now);
         for g in targets.into_iter().filter(|g| *g != root) {
             self.suspend_one(
                 g,
@@ -816,33 +881,15 @@ impl<I: IdSource> Tx<'_, I> {
             .collect()
     }
 
-    /// The password retires: its sessions end, cancelling their sends
-    fn retire_password_sessions(&mut self) {
-        let sessions: Vec<_> = self
-            .s
-            .sessions
-            .iter()
-            .filter(|(_, s)| s.open && s.opener == SessionOpener::Password)
-            .map(|(id, _)| *id)
-            .collect();
-        for session in sessions {
-            self.end_session(session, false, None);
-        }
-    }
-
+    /// A new factor, `Active`
     fn add_factor(
         &mut self,
         id: FactorId,
         kind: FactorKind,
         parent: Option<FactorId>,
+        sends_now_from: Option<DateTime<Utc>>,
     ) -> R {
-        if let Some(existing) = self.s.factors.get(&id) {
-            // A pending passkey becomes active; anything else is taken
-            guard(
-                matches!(existing.state, CredentialState::Pending { .. }),
-                Refusal::Exists,
-            )?;
-        }
+        guard(!self.s.factors.contains_key(&id), Refusal::Exists)?;
         self.s.factors.insert(
             id,
             Factor {
@@ -851,8 +898,45 @@ impl<I: IdSource> Tx<'_, I> {
                 parent,
                 added_at: self.now,
                 signed_in: false,
+                sends_now_from,
             },
         );
+        Ok(())
+    }
+
+    /// `sends_now_from` of a factor of kind `new` that `t` approved
+    fn sends_now_from(
+        &self,
+        new: FactorKind,
+        t: FactorId,
+    ) -> Result<Option<DateTime<Utc>>, Refusal> {
+        let tap = self.s.factor(t).ok_or_else(|| gone("tapper"))?;
+        Ok(sends_now_from_for_add(
+            new,
+            tap.kind,
+            tap.sends_now_from,
+            self.now,
+        ))
+    }
+
+    /// **PasskeyAdd**, with its tap already checked
+    fn passkey_add(
+        &mut self,
+        t: FactorId,
+        passkey: OperatorPasskeyId,
+        class: PasskeyClass,
+    ) -> R {
+        self.mode(ModeClass::PasskeyAdd)?;
+        guard(
+            self.s.counted_passkeys() < MAX_PASSKEYS,
+            Refusal::TooManyPasskeys,
+        )?;
+        let id = FactorId::Passkey(passkey);
+        let kind = FactorKind::Passkey(class);
+        let from = self.sends_now_from(kind, t)?;
+        self.add_factor(id, kind, Some(t), from)?;
+        self.log(OperatorActionKind::CredentialAdd, Some(t), Some(id));
+        self.notify(Audience::Both, NoticeSubject::FactorAdded(id), Some(t));
         Ok(())
     }
 
@@ -935,111 +1019,25 @@ impl<I: IdSource> Tx<'_, I> {
     fn event(&mut self, event: &Event, by: Authority) -> R {
         use Event::*;
         match event {
-            PasskeyRegister { passkey, class } => {
-                let session = self.session(by)?;
-                guard(
-                    self.s.session_factor(session).is_some(),
-                    Refusal::WrongAuthority,
-                )?;
-                self.mode(ModeClass::PasskeyAdd)?;
-                let id = FactorId::Passkey(*passkey);
-                guard(!self.s.factors.contains_key(&id), Refusal::Exists)?;
-                self.s.factors.insert(
-                    id,
-                    Factor {
-                        kind: FactorKind::Passkey(*class),
-                        state: CredentialState::Pending { session },
-                        parent: None,
-                        added_at: self.now,
-                        signed_in: false,
-                    },
-                );
-                Ok(())
+            PasskeyAdd { passkey, class } => {
+                let t = self.tap(by, TapKind::PasskeyAdd)?;
+                self.passkey_add(t, *passkey, *class)
             }
-            PasskeyApprove { passkey } => {
-                let t = self.tap(by, TapKind::PasskeyEnrolment)?;
+            PasskeyAddFree { passkey, class } => {
+                self.session(by)?;
                 self.mode(ModeClass::PasskeyAdd)?;
-                let id = FactorId::Passkey(*passkey);
-                guard(t != id, Refusal::SameFactor)?;
-                let new = self.s.factor(id).ok_or(Refusal::Unknown)?;
+                guard(self.s.no_agents(), Refusal::HasHadAgent)?;
                 guard(
-                    matches!(new.state, CredentialState::Pending { .. }),
-                    Refusal::WrongState,
+                    self.s.counted_passkeys() < MAX_PASSKEYS,
+                    Refusal::TooManyPasskeys,
                 )?;
-                let kind = new.kind;
-                if kind.gives_yubikey_tap() && self.s.has_yk_tap() {
-                    guard(
-                        self.s.level(by) == TapLevel::YubikeyTap,
-                        Refusal::NeedsYubikeyTap,
-                    )?;
-                }
-                self.add_factor(id, kind, Some(t))?;
-                self.log(OperatorActionKind::CredentialAdd, Some(t), Some(id));
+                let id = FactorId::Passkey(*passkey);
+                self.add_factor(id, FactorKind::Passkey(*class), None, None)?;
+                self.log(OperatorActionKind::CredentialAdd, None, Some(id));
                 self.notify(
                     Audience::Both,
                     NoticeSubject::FactorAdded(id),
-                    Some(t),
-                );
-                Ok(())
-            }
-            PendingExpire { passkey } => {
-                Self::platform(by)?;
-                let f = self
-                    .s
-                    .factors
-                    .get_mut(&FactorId::Passkey(*passkey))
-                    .ok_or(Refusal::Unknown)?;
-                guard(
-                    matches!(f.state, CredentialState::Pending { .. }),
-                    Refusal::WrongState,
-                )?;
-                f.state = CredentialState::Discarded;
-                Ok(())
-            }
-            FirstPasskey {
-                passkey,
-                class,
-                confirm,
-            } => {
-                let session = self.session(by)?;
-                guard(
-                    self.s.sessions[&session].opener == SessionOpener::Password,
-                    Refusal::WrongAuthority,
-                )?;
-                guard(self.s.password_usable(), Refusal::WrongState)?;
-                self.mode(ModeClass::PasskeyAdd)?;
-                let sudo_live = self
-                    .s
-                    .factors
-                    .values()
-                    .any(|f| f.state.is_live() && f.kind.gives_sudo());
-                let parent = match confirm {
-                    Some(k) => {
-                        let k = FactorId::Credential(*k);
-                        guard(self.s.effective(k), Refusal::NotEffective)?;
-                        guard(
-                            self.s
-                                .factor(k)
-                                .is_some_and(|f| f.kind.gives_sudo()),
-                            Refusal::NeedsSudo,
-                        )?;
-                        Some(k)
-                    }
-                    None => {
-                        guard(!sudo_live, Refusal::NeedsSudo)?;
-                        None
-                    }
-                };
-                let id = FactorId::Passkey(*passkey);
-                self.add_factor(id, FactorKind::Passkey(*class), parent)?;
-                self.s.auth = AuthMode::Passkeys;
-                self.effects.push(Effect::PasswordRetired);
-                self.retire_password_sessions();
-                self.log(OperatorActionKind::CredentialAdd, parent, Some(id));
-                self.notify(
-                    Audience::Both,
-                    NoticeSubject::FactorAdded(id),
-                    parent,
+                    None,
                 );
                 Ok(())
             }
@@ -1047,6 +1045,12 @@ impl<I: IdSource> Tx<'_, I> {
                 let s = self.tap(by, TapKind::Suspend)?;
                 self.mode(ModeClass::TakeAway)?;
                 let f = *self.s.factor(*target).ok_or(Refusal::Unknown)?;
+                // A suspender is spared, so only suspending itself can leave
+                // none (I-42)
+                guard(
+                    !(s == *target && self.s.is_last_passkey(s)),
+                    Refusal::LastPasskey,
+                )?;
                 let hour_ago = self.now - chrono::Duration::hours(1);
                 // Only the rate window is kept
                 let spent = self.s.direct_suspensions.entry(s).or_default();
@@ -1055,7 +1059,7 @@ impl<I: IdSource> Tx<'_, I> {
                 match f.state {
                     CredentialState::Active => {
                         guard(
-                            (recent as u64) < u64::from(self.s.suspend_limit),
+                            (recent as u64) < u64::from(self.s.limits.suspend),
                             Refusal::RateLimited,
                         )?;
                         self.s
@@ -1064,7 +1068,8 @@ impl<I: IdSource> Tx<'_, I> {
                             .or_default()
                             .push(self.now);
                         let deadline = self.now + suspension_deadline();
-                        let cascade = self.s.cascade(*target, Some(s));
+                        let cascade =
+                            self.s.cascade(*target, Some(s), self.now);
                         self.suspend_one(
                             *target,
                             SuspensionCause::Direct { by: s },
@@ -1094,7 +1099,7 @@ impl<I: IdSource> Tx<'_, I> {
                         ) =>
                     {
                         guard(
-                            (recent as u64) < u64::from(self.s.suspend_limit),
+                            (recent as u64) < u64::from(self.s.limits.suspend),
                             Refusal::RateLimited,
                         )?;
                         self.s
@@ -1102,8 +1107,11 @@ impl<I: IdSource> Tx<'_, I> {
                             .entry(s)
                             .or_default()
                             .push(self.now);
-                        let factor =
-                            self.s.factors.get_mut(target).expect("found");
+                        let factor = self
+                            .s
+                            .factors
+                            .get_mut(target)
+                            .ok_or_else(|| gone("target"))?;
                         factor.state = CredentialState::Suspended(Suspension {
                             cause: SuspensionCause::Direct { by: s },
                             ..sus
@@ -1143,14 +1151,17 @@ impl<I: IdSource> Tx<'_, I> {
                 // At the deadline itself a contest wins
                 guard(self.now <= sus.deadline, Refusal::TooLate)?;
                 let case = self.open_case(CaseSubject::Contest(*factor));
-                self.s.factors.get_mut(factor).expect("found").state =
-                    CredentialState::Contested {
-                        suspension: Suspension {
-                            follows_root: None,
-                            ..sus
-                        },
-                        case,
-                    };
+                self.s
+                    .factors
+                    .get_mut(factor)
+                    .ok_or_else(|| gone("factor"))?
+                    .state = CredentialState::Contested {
+                    suspension: Suspension {
+                        follows_root: None,
+                        ..sus
+                    },
+                    case,
+                };
                 self.log(
                     OperatorActionKind::CredentialContest,
                     Some(*factor),
@@ -1178,8 +1189,11 @@ impl<I: IdSource> Tx<'_, I> {
                     });
                     guard(!root_contested, Refusal::WrongState)?;
                 }
-                self.s.factors.get_mut(factor).expect("found").state =
-                    CredentialState::Revoked;
+                self.s
+                    .factors
+                    .get_mut(factor)
+                    .ok_or_else(|| gone("factor"))?
+                    .state = CredentialState::Revoked;
                 self.log(
                     OperatorActionKind::CredentialRevoke,
                     None,
@@ -1203,7 +1217,7 @@ impl<I: IdSource> Tx<'_, I> {
                     *enrolment,
                     Enrolment {
                         kind: *kind,
-                        state: EnrolmentState::Pending,
+                        state: EnrolmentState::Started,
                     },
                 );
                 Ok(())
@@ -1219,24 +1233,21 @@ impl<I: IdSource> Tx<'_, I> {
                     .enrolments
                     .get(enrolment)
                     .ok_or(Refusal::Unknown)?;
-                guard(e.state == EnrolmentState::Pending, Refusal::WrongState)?;
+                guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
                 guard(
                     !(e.kind.is_software_key()
                         && self.s.count > 5
                         && self.s.flags.tier),
                     Refusal::TierOne,
                 )?;
-                if e.kind.gives_yubikey_tap() && self.s.has_yk_tap() {
-                    guard(
-                        self.s.level(by) == TapLevel::YubikeyTap,
-                        Refusal::NeedsYubikeyTap,
-                    )?;
-                }
                 let id = FactorId::Credential(*credential);
-                guard(!self.s.factors.contains_key(&id), Refusal::Exists)?;
-                self.add_factor(id, e.kind, Some(t))?;
-                self.s.enrolments.get_mut(enrolment).expect("found").state =
-                    EnrolmentState::Approved(*credential);
+                let from = self.sends_now_from(e.kind, t)?;
+                self.add_factor(id, e.kind, Some(t), from)?;
+                self.s
+                    .enrolments
+                    .get_mut(enrolment)
+                    .ok_or_else(|| gone("enrolment"))?
+                    .state = EnrolmentState::Approved(*credential);
                 self.log(OperatorActionKind::CredentialAdd, Some(t), Some(id));
                 self.notify(
                     Audience::Both,
@@ -1255,7 +1266,7 @@ impl<I: IdSource> Tx<'_, I> {
                     .enrolments
                     .get_mut(enrolment)
                     .ok_or(Refusal::Unknown)?;
-                guard(e.state == EnrolmentState::Pending, Refusal::WrongState)?;
+                guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
                 e.state = EnrolmentState::Refused;
                 Ok(())
             }
@@ -1266,7 +1277,7 @@ impl<I: IdSource> Tx<'_, I> {
                     .enrolments
                     .get_mut(enrolment)
                     .ok_or(Refusal::Unknown)?;
-                guard(e.state == EnrolmentState::Pending, Refusal::WrongState)?;
+                guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
                 e.state = EnrolmentState::Expired;
                 Ok(())
             }
@@ -1276,6 +1287,7 @@ impl<I: IdSource> Tx<'_, I> {
                 let count = self.s.count + 1;
                 self.minimum_for(count)?;
                 self.s.count = count;
+                self.s.first_agent_at.get_or_insert(self.now);
                 Ok(())
             }
             AgentRestore => {
@@ -1313,28 +1325,6 @@ impl<I: IdSource> Tx<'_, I> {
                     Flag::Minimum => self.s.flags.minimum = true,
                     Flag::Yubikey => self.s.flags.yubikey = true,
                 }
-                Ok(())
-            }
-            Cutover => {
-                Self::platform(by)?;
-                guard(!self.s.flags.cutover, Refusal::WrongState)?;
-                self.s.flags.cutover = true;
-                self.effects.push(Effect::PasswordsRetired);
-                self.retire_password_sessions();
-                Ok(())
-            }
-            PasswordSignIn { session } => {
-                guard(by == Authority::Password, Refusal::WrongAuthority)?;
-                guard(self.s.password_usable(), Refusal::WrongState)?;
-                guard(!self.s.sessions.contains_key(session), Refusal::Exists)?;
-                self.s.sessions.insert(
-                    *session,
-                    Session {
-                        opener: SessionOpener::Password,
-                        last_used: self.now,
-                        open: true,
-                    },
-                );
                 Ok(())
             }
             Ban => {
@@ -1404,7 +1394,11 @@ impl<I: IdSource> Tx<'_, I> {
                     Refusal::WrongState,
                 )?;
                 guard(pending.requested_by != c, Refusal::SameFactor)?;
-                let pending = self.s.changes.get_mut(change).expect("found");
+                let pending = self
+                    .s
+                    .changes
+                    .get_mut(change)
+                    .ok_or_else(|| gone("change"))?;
                 pending.state = ChangeState::Cancelled;
                 let requester = pending.requested_by;
                 self.log(
@@ -1440,8 +1434,11 @@ impl<I: IdSource> Tx<'_, I> {
                     && self.domains_ok_after(&pending.change)
                     && !(removal && self.s.count > 5);
                 if !ok {
-                    self.s.changes.get_mut(change).expect("found").state =
-                        ChangeState::Cancelled;
+                    self.s
+                        .changes
+                        .get_mut(change)
+                        .ok_or_else(|| gone("change"))?
+                        .state = ChangeState::Cancelled;
                     self.log(
                         OperatorActionKind::ConfigChangeCancelled,
                         None,
@@ -1455,8 +1452,11 @@ impl<I: IdSource> Tx<'_, I> {
                     return Ok(());
                 }
                 let old_contact = self.s.contact.as_ref().map(|c| c.address.id);
-                self.s.changes.get_mut(change).expect("found").state =
-                    ChangeState::Effective;
+                self.s
+                    .changes
+                    .get_mut(change)
+                    .ok_or_else(|| gone("change"))?
+                    .state = ChangeState::Effective;
                 self.apply_setting(&pending.change);
                 self.log(
                     OperatorActionKind::ConfigChangeEffective,
@@ -1640,26 +1640,17 @@ impl<I: IdSource> Tx<'_, I> {
                 let m = self.s.sends.get(send).ok_or(Refusal::Unknown)?.clone();
                 guard(m.state == SendState::Scheduled, Refusal::WrongState)?;
                 guard(self.now >= m.deliver_at, Refusal::TooEarly)?;
-                let admitter_ok = match m.admitted_by {
-                    AdmittedBy::Factor(f) => self.s.effective(f),
-                    AdmittedBy::Session(s) => match self.s.sessions.get(&s) {
-                        Some(Session {
-                            opener: SessionOpener::Passkey(p),
-                            ..
-                        }) => self.s.effective(FactorId::Passkey(*p)),
-                        Some(Session {
-                            opener: SessionOpener::Password,
-                            ..
-                        }) => self.s.password_usable(),
-                        None => false,
-                    },
-                };
+                let admitter_ok =
+                    self.admitter(&m).is_some_and(|f| self.s.effective(f));
                 let ok = admitter_ok
                     && (m.reach.reach <= UNTAPPED_REACH || self.s.contact_ok())
                     && !self.s.banned();
                 if ok {
-                    self.s.sends.get_mut(send).expect("found").state =
-                        SendState::Delivered;
+                    self.s
+                        .sends
+                        .get_mut(send)
+                        .ok_or_else(|| gone("send"))?
+                        .state = SendState::Delivered;
                     self.effects.push(Effect::Deliver(*send));
                 } else {
                     self.cancel_send(*send, true, None);
@@ -1676,7 +1667,7 @@ impl<I: IdSource> Tx<'_, I> {
                         // SPEC: the cancel link is in the held notice only
                         // (D9: "a held send with reach above 5")
                         guard(
-                            m.delivery == super::tap::Delivery::Held
+                            m.delivery == Delivery::Held
                                 && m.reach.reach > UNTAPPED_REACH,
                             Refusal::VoidLink,
                         )?;
@@ -1687,14 +1678,23 @@ impl<I: IdSource> Tx<'_, I> {
                     }
                     _ => return Err(Refusal::WrongAuthority),
                 }
-                self.s.sends.get_mut(send).expect("found").state =
-                    SendState::Cancelled;
+                self.s
+                    .sends
+                    .get_mut(send)
+                    .ok_or_else(|| gone("send"))?
+                    .state = SendState::Cancelled;
                 self.log(
                     OperatorActionKind::DmCancel,
                     self.s.factor_behind(by),
                     None,
                 );
                 Ok(())
+            }
+            SendForward { send, deliver_at } => {
+                self.send_forward(*send, *deliver_at, by)
+            }
+            SendLater { send, deliver_at } => {
+                self.send_later(*send, *deliver_at, by)
             }
             Retract { send } => {
                 match by {
@@ -1723,14 +1723,11 @@ impl<I: IdSource> Tx<'_, I> {
                 Ok(())
             }
             RecoveryRequest => {
-                // SPEC: §9 "the operator's request when stranded or locked
-                // out": an operator with no factor can't authenticate, so
-                // the request reaches the model through staff
+                // SPEC: §9 "the operator's request when stranded": an operator
+                // with no factor can't authenticate, so the request reaches the
+                // model through staff
                 guard(by == Authority::Staff, Refusal::WrongAuthority)?;
-                guard(
-                    self.s.stranded() || self.s.locked_out(),
-                    Refusal::WrongState,
-                )?;
+                guard(self.s.stranded(), Refusal::WrongState)?;
                 self.open_case(CaseSubject::NoFactor);
                 Ok(())
             }
@@ -1767,9 +1764,9 @@ impl<I: IdSource> Tx<'_, I> {
                     )?;
                 }
                 if let Some(l) = losing {
-                    // RecoverySuspend: cascade with no suspender exclusion
+                    // RecoverySuspend: no suspender exclusion, no time limit
                     let deadline = self.now + suspension_deadline();
-                    let targets = self.s.cascade(*l, None);
+                    let targets = self.s.recovery_cascade(*l);
                     self.suspend_one(
                         *l,
                         SuspensionCause::Recovery { case: *case },
@@ -1787,12 +1784,15 @@ impl<I: IdSource> Tx<'_, I> {
                         );
                     }
                 }
-                self.s.cases.get_mut(case).expect("found").state =
-                    CaseState::Decided {
-                        outcome: *outcome,
-                        at: self.now,
-                        round,
-                    };
+                self.s
+                    .cases
+                    .get_mut(case)
+                    .ok_or_else(|| gone("case"))?
+                    .state = CaseState::Decided {
+                    outcome: *outcome,
+                    at: self.now,
+                    round,
+                };
                 self.notify(
                     Audience::Both,
                     NoticeSubject::RecoveryDecided(*case),
@@ -1808,8 +1808,11 @@ impl<I: IdSource> Tx<'_, I> {
                 let CaseState::Decided { round: 1, .. } = c.state else {
                     return Err(Refusal::WrongState);
                 };
-                self.s.cases.get_mut(case).expect("found").state =
-                    CaseState::Open { round: 2 };
+                self.s
+                    .cases
+                    .get_mut(case)
+                    .ok_or_else(|| gone("case"))?
+                    .state = CaseState::Open { round: 2 };
                 self.notify(
                     Audience::Both,
                     NoticeSubject::RecoveryCounterClaim(*case),
@@ -1829,13 +1832,18 @@ impl<I: IdSource> Tx<'_, I> {
                 self.s.sessions.insert(
                     *session,
                     Session {
-                        opener: SessionOpener::Passkey(*passkey),
+                        passkey: *passkey,
                         last_used: self.now,
                         open: true,
                     },
                 );
-                let first = !self.s.factors[&id].signed_in;
-                self.s.factors.get_mut(&id).expect("found").signed_in = true;
+                let factor = self
+                    .s
+                    .factors
+                    .get_mut(&id)
+                    .ok_or_else(|| gone("passkey"))?;
+                let first = !factor.signed_in;
+                factor.signed_in = true;
                 if first {
                     self.notify(
                         Audience::Both,
@@ -1851,8 +1859,11 @@ impl<I: IdSource> Tx<'_, I> {
                     Refusal::WrongAuthority,
                 )?;
                 self.session(by)?;
-                self.s.sessions.get_mut(session).expect("found").last_used =
-                    self.now;
+                self.s
+                    .sessions
+                    .get_mut(session)
+                    .ok_or_else(|| gone("session"))?
+                    .last_used = self.now;
                 Ok(())
             }
             SessionExpire { session } => {
@@ -1866,27 +1877,46 @@ impl<I: IdSource> Tx<'_, I> {
                 self.end_session(*session, true, None);
                 Ok(())
             }
-            SignOutOthers => {
+            SignOut => {
+                let me = self.session(by)?;
+                self.end_session(me, true, None);
+                Ok(())
+            }
+            SignOutOthers { session } => {
                 let me = self.session(by)?;
                 self.mode(ModeClass::TakeAway)?;
+                if let Some(named) = session {
+                    guard(*named != me, Refusal::WrongState)?;
+                    let s =
+                        self.s.sessions.get(named).ok_or(Refusal::Unknown)?;
+                    guard(s.open, Refusal::WrongState)?;
+                }
                 let others: Vec<_> = self
                     .s
                     .sessions
                     .iter()
-                    .filter(|(id, s)| s.open && **id != me)
+                    .filter(|(id, s)| {
+                        s.open
+                            && **id != me
+                            && session.is_none_or(|named| named == **id)
+                    })
                     .map(|(id, _)| *id)
                     .collect();
                 let caller = self.s.session_factor(me);
                 for other in others {
                     self.end_session(other, false, caller);
                 }
-                self.log(
-                    OperatorActionKind::SessionRevoke,
-                    self.s.session_factor(me),
-                    None,
-                );
+                self.log(OperatorActionKind::SessionRevoke, caller, None);
                 Ok(())
             }
+        }
+    }
+
+    /// The factor behind what admitted a send
+    fn admitter(&self, m: &Send) -> Option<FactorId> {
+        match m.admitted_by {
+            AdmittedBy::Factor(f) => Some(f),
+            AdmittedBy::Session(s) => self.s.session_factor(s),
         }
     }
 
@@ -2015,7 +2045,11 @@ impl<I: IdSource> Tx<'_, I> {
                 .is_none_or(|t| self.now >= *t + freeze_interval()),
             Refusal::RateLimited,
         )?;
-        self.s.freeze_links.get_mut(&link).expect("found").used = true;
+        self.s
+            .freeze_links
+            .get_mut(&link)
+            .ok_or_else(|| gone("freeze link"))?
+            .used = true;
         self.s.last_freeze.insert(address, self.now);
         let entry = self.log(OperatorActionKind::Freeze, None, Some(l.factor));
         self.s.hold = Hold::Frozen(Frozen {
@@ -2062,11 +2096,17 @@ impl<I: IdSource> Tx<'_, I> {
         };
         guard(!self.s.sends.contains_key(&send), Refusal::Exists)?;
         let window = self.s.window_messages();
+        let level = self.s.level(by);
         let plan = plan_send(&SendRequest {
             recipients,
             when,
-            level: self.s.level(by),
+            level,
             contact_ok: self.s.contact_ok(),
+            sends_now: self
+                .s
+                .factor_behind(by)
+                .is_none_or(|f| self.s.sends_now(f, self.now)),
+            new_account: self.s.new_account(self.now),
             now: self.now,
             dm_hold: self.s.settings.dm_hold,
             bulk_hold: self.s.settings.bulk_hold,
@@ -2088,6 +2128,9 @@ impl<I: IdSource> Tx<'_, I> {
                 reach: plan.reach,
                 admitted_by,
                 state: SendState::Scheduled,
+                admitted_at: self.now,
+                level,
+                announced: plan.announced(),
             },
         );
         let flag = self.s.factor_behind(by);
@@ -2109,7 +2152,7 @@ impl<I: IdSource> Tx<'_, I> {
         if plan.names_to_contact() {
             for e in self.effects.iter_mut().rev() {
                 if let Effect::Notice(n) = e
-                    && n.to == Audience::Contact
+                    && matches!(n.to, Audience::Contact | Audience::Both)
                 {
                     n.names = true;
                     break;
@@ -2117,6 +2160,120 @@ impl<I: IdSource> Tx<'_, I> {
             }
         }
         self.log(OperatorActionKind::DmSend, flag, None);
+        Ok(())
+    }
+
+    /// **SendForward**: earlier, by a YubiKey tap, which becomes what admitted it
+    fn send_forward(
+        &mut self,
+        send: OperatorActionId,
+        deliver_at: DateTime<Utc>,
+        by: Authority,
+    ) -> R {
+        let t = self.yubikey_tap(by, TapKind::MoveSend)?;
+        let m = self.s.sends.get(&send).ok_or(Refusal::Unknown)?.clone();
+        guard(m.state == SendState::Scheduled, Refusal::WrongState)?;
+        let deliver_at = deliver_at.max(self.now);
+        guard(deliver_at < m.deliver_at, Refusal::WrongState)?;
+        let window = self.s.window_without(Some(send));
+        let at_new = reach(&m.recipients, deliver_at, &window);
+        self.mode(if at_new.reach > UNTAPPED_REACH {
+            ModeClass::SendLarge
+        } else {
+            ModeClass::SendSmall
+        })?;
+        let above_5 = at_new.immediate_reach > UNTAPPED_REACH;
+        guard(
+            !above_5 || self.s.sends_now(t, self.now),
+            SendRefusal::NewKey { reach: at_new }.into(),
+        )?;
+        guard(
+            !(self.s.new_account(self.now)
+                && (above_5 || m.reach.immediate_reach > UNTAPPED_REACH)
+                && deliver_at < m.admitted_at + super::tap::long_hold()),
+            SendRefusal::NewAccount { reach: at_new }.into(),
+        )?;
+        let moved = self.s.sends.get_mut(&send).ok_or_else(|| gone("send"))?;
+        moved.deliver_at = deliver_at;
+        moved.reach = widest(m.reach, at_new);
+        moved.admitted_by = AdmittedBy::Factor(t);
+        moved.level = TapLevel::YubikeyTap;
+        moved.announced = true;
+        self.notify(Audience::Both, NoticeSubject::SendMoved(send), Some(t));
+        self.log(OperatorActionKind::DmSend, Some(t), None);
+        Ok(())
+    }
+
+    /// **SendLater**: counted again at the new time, under the rule for a new
+    /// send, with the level the send has and the hold from its admission
+    fn send_later(
+        &mut self,
+        send: OperatorActionId,
+        deliver_at: DateTime<Utc>,
+        by: Authority,
+    ) -> R {
+        let m = self.s.sends.get(&send).ok_or(Refusal::Unknown)?.clone();
+        guard(m.state == SendState::Scheduled, Refusal::WrongState)?;
+        guard(deliver_at > m.deliver_at, Refusal::WrongState)?;
+        let mover = if m.level == TapLevel::YubikeyTap {
+            Some(self.yubikey_tap(by, TapKind::MoveSend)?)
+        } else {
+            match by {
+                Authority::Session(_) | Authority::Signed(_) => {
+                    self.authority_live(by)?;
+                    self.s.factor_behind(by)
+                }
+                _ => return Err(Refusal::WrongAuthority),
+            }
+        };
+        let admitter = self.admitter(&m);
+        let window = self.s.window_without(Some(send));
+        let plan = plan_send(&SendRequest {
+            recipients: &m.recipients,
+            when: When::At(deliver_at),
+            level: m.level,
+            contact_ok: self.s.contact_ok(),
+            sends_now: admitter.is_none_or(|f| self.s.sends_now(f, self.now)),
+            new_account: self.s.new_account(self.now),
+            now: m.admitted_at,
+            dm_hold: self.s.settings.dm_hold,
+            bulk_hold: self.s.settings.bulk_hold,
+            window: &window,
+        })?;
+        // SPEC: §4.2 has no row for SendLater: it can land a send, so it takes
+        // what sending takes, not taking away's pass
+        let class = if plan.reach.reach > UNTAPPED_REACH {
+            ModeClass::SendLarge
+        } else {
+            ModeClass::SendSmall
+        };
+        self.tier_one(by, class)?;
+        self.mode(class)?;
+        let moved = self.s.sends.get_mut(&send).ok_or_else(|| gone("send"))?;
+        moved.deliver_at = deliver_at;
+        moved.delivery = Delivery::Held;
+        moved.reach = widest(m.reach, plan.reach);
+        if m.announced {
+            let flag = admitter.filter(|f| self.s.effective(*f));
+            self.effects.push(Effect::Notice(Notice {
+                to: Audience::Primary,
+                subject: NoticeSubject::SendMoved(send),
+                freeze_link: None,
+                cancel_link: Some(send),
+                names: false,
+            }));
+            self.notify(
+                Audience::Contact,
+                NoticeSubject::SendMoved(send),
+                flag,
+            );
+            if plan.reach.reach > NAMED_REACH
+                && let Some(Effect::Notice(n)) = self.effects.last_mut()
+            {
+                n.names = true;
+            }
+        }
+        self.log(OperatorActionKind::DmSend, mover, None);
         Ok(())
     }
 
@@ -2143,7 +2300,11 @@ impl<I: IdSource> Tx<'_, I> {
                 )?;
                 let reinstate = outcome == RecoveryOutcome::Reinstate;
                 for g in std::iter::once(f).chain(self.followers(f)) {
-                    let factor = self.s.factors.get_mut(&g).expect("found");
+                    let factor = self
+                        .s
+                        .factors
+                        .get_mut(&g)
+                        .ok_or_else(|| gone("factor"))?;
                     if reinstate {
                         factor.state = CredentialState::Active;
                         self.log(
@@ -2179,12 +2340,7 @@ impl<I: IdSource> Tx<'_, I> {
                 // account's recovery add waits for the unban
                 guard(!self.s.banned(), Refusal::Banned)?;
                 let id = FactorId::Passkey(passkey);
-                self.add_factor(id, FactorKind::Passkey(class), None)?;
-                if self.s.auth == AuthMode::PasswordOnly {
-                    self.s.auth = AuthMode::Passkeys;
-                    self.effects.push(Effect::PasswordRetired);
-                    self.retire_password_sessions();
-                }
+                self.add_factor(id, FactorKind::Passkey(class), None, None)?;
                 self.log(OperatorActionKind::CredentialAdd, None, Some(id));
                 self.notify(
                     Audience::Both,
@@ -2194,8 +2350,20 @@ impl<I: IdSource> Tx<'_, I> {
             }
             _ => return Err(Refusal::WrongState),
         }
-        self.s.cases.get_mut(&case).expect("found").state =
-            CaseState::Effective;
+        self.s
+            .cases
+            .get_mut(&case)
+            .ok_or_else(|| gone("case"))?
+            .state = CaseState::Effective;
         Ok(())
+    }
+}
+
+/// The wider of a send's reaches, so moving it never voids its cancel link or
+/// its contact recheck
+fn widest(a: super::tap::Reach, b: super::tap::Reach) -> super::tap::Reach {
+    super::tap::Reach {
+        reach: a.reach.max(b.reach),
+        immediate_reach: a.immediate_reach.max(b.immediate_reach),
     }
 }

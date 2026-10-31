@@ -2,6 +2,41 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.145.0
+
+Operator security's flow rework (agora `docs/design-operator-state-table.md`,
+the rulings of 2026-10-31; security plan steps 21 and 21b). Nothing here changes
+what an agent sees: the seed runner, the reactor and the prompts are untouched,
+and an agent's view of the log still omits every factor entry.
+
+- **Adds**: `PasskeyAdd` (one tap, 0x12, and the new key is active) and
+  `PasskeyAddFree` (a session alone until the account's first agent, kept as
+  `first_agent_at`) replace `PasskeyRegister`, `PasskeyApprove` and
+  `PendingExpire`. `replace_passkey` is the add and the suspension on one tap.
+  The YubiKey-tap guard on adds and `has_yk_tap` are gone.
+- **New keys (I-41)**: a factor that gives a YubiKey tap carries `sends_now_from`,
+  72 h on unless a YubiKey past its own 72 h approved it
+  (`sends_now_from_for_add`, for the server's cell). Until then it can't send now
+  above 5 agents, and counts at once for everything else.
+- **New accounts (I-43)**: `plan_send` takes `new_account`: for `NEW_ACCOUNT_DAYS`
+  a send with immediate reach above 5 is held 24 h at any level.
+- **Suspension**: `provenance_cascade` and `cascade` take the 72 h limit, checked
+  link by link; a staff suspension has none (`recovery_cascade`). A last passkey
+  can't suspend itself (I-42, `is_last_passkey`).
+- **Decision 9, as ruled 2026-10-30**: a YubiKey tap sends now at any reach,
+  `required_tap` always answers, and a held send waits 24 h above 50
+  (`required_hold`). **SendForward** and **SendLater** (tap 0x11) are new, as are
+  **SignOut** and **SignOutOthers** naming one session.
+- **Passwords**: `AuthMode`, the cutover, `FirstPasskey`, password sessions and
+  `FirstPasskeyConfirmRequest`/`Response` are gone. So are the `Pending` and
+  `Discarded` factor states.
+- **Taps**: 0x12 added and 0x05 retired: `TapKind::from_tag` still reads it, for
+  stored assertions, and `Approval` can no longer make one.
+- **Log**: `PasskeyAdd` gains an optional `key_sha256`. Stored entries read as
+  before, `CancelReason::PasswordRetired` included.
+- `tracing` is no longer optional, so `operator_security`'s defensive arms always
+  log; they no longer panic.
+
 ## 0.144.1
 
 0.144.0 as described below, which never reached crates.io: its release run

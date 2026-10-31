@@ -162,19 +162,15 @@ impl World {
             .expect("a freeze link")
     }
 
-    /// Add a passkey approved by passkey `by`'s tap
+    /// Add a passkey by a grant from passkey `by`'s tap
     #[track_caller]
-    fn add_passkey(&mut self, i: u8, class: PasskeyClass, by: u8, session: u8) {
+    fn add_passkey(&mut self, i: u8, class: PasskeyClass, by: u8) {
         self.ok(
-            Event::PasskeyRegister {
+            Event::PasskeyAdd {
                 passkey: pk(i),
                 class,
             },
-            Authority::Session(sess(session)),
-        );
-        self.ok(
-            Event::PasskeyApprove { passkey: pk(i) },
-            tap(by, TapKind::PasskeyEnrolment),
+            tap(by, TapKind::PasskeyAdd),
         );
     }
 
@@ -207,18 +203,30 @@ impl World {
     }
 }
 
-/// An account registered with passkey 0 at `t0`, signed in as session 0
-fn registered(class: PasskeyClass) -> World {
+const LIMITS: Limits = Limits {
+    suspend: 3,
+    new_account_days: NEW_ACCOUNT_DAYS,
+};
+
+/// An account signed up at `t0` with passkey 0, signed in as session 0
+fn signed_up(class: PasskeyClass) -> World {
     let s = AccountState::register(
         OperatorId::from(uuid(0, 1)),
         address(0, "primary.example"),
         pk(0),
         class,
         t0(),
-        3,
+        LIMITS,
     );
     let mut w = World::new(s);
     w.sign_in(0, 0);
+    w
+}
+
+/// As [`signed_up`], but past `new_account`, its passkey 0 still added at `t0`
+fn registered(class: PasskeyClass) -> World {
+    let mut w = signed_up(class);
+    w.s.created_at = t0() - Duration::days(30);
     w
 }
 
@@ -234,17 +242,18 @@ fn required_tap_by_reach() {
     };
     use Delivery::*;
     use TapLevel as L;
-    assert_eq!(required_tap(r(5, 5), Immediate), Some(L::None));
-    assert_eq!(required_tap(r(6, 5), Held), Some(L::Unattended));
-    assert_eq!(required_tap(r(6, 5), Immediate), Some(L::Tap));
-    assert_eq!(required_tap(r(6, 6), Immediate), Some(L::YubikeyTap));
-    assert_eq!(required_tap(r(500, 500), Immediate), Some(L::YubikeyTap));
-    assert_eq!(required_tap(r(500, 501), Immediate), None);
-    assert_eq!(required_tap(r(501, 1), Immediate), None);
-    assert_eq!(required_tap(r(501, 501), Held), Some(L::YubikeyTap));
+    assert_eq!(required_tap(r(5, 5), Immediate), L::None);
+    assert_eq!(required_tap(r(5, 5), Held), L::None);
+    assert_eq!(required_tap(r(6, 5), Held), L::Unattended);
+    assert_eq!(required_tap(r(6, 5), Immediate), L::Tap);
+    assert_eq!(required_tap(r(6, 6), Immediate), L::YubikeyTap);
+    // No cap: a YubiKey tap goes now at any reach (Steward, 2026-10-30)
+    assert_eq!(required_tap(r(5000, 5000), Immediate), L::YubikeyTap);
+    assert_eq!(required_tap(r(5000, 1), Immediate), L::Tap);
+    assert_eq!(required_tap(r(5000, 5000), Held), L::Unattended);
     // An immediate reach above 5 needs a YubiKey tap even at reach ≤ 5
-    assert_eq!(required_tap(r(1, 6), Immediate), Some(L::YubikeyTap));
-    assert_eq!(required_tap(r(1, 6), Held), Some(L::None));
+    assert_eq!(required_tap(r(1, 6), Immediate), L::YubikeyTap);
+    assert_eq!(required_tap(r(1, 6), Held), L::None);
 }
 
 #[test]
@@ -280,6 +289,8 @@ fn request<'a>(
         when,
         level,
         contact_ok: true,
+        sends_now: true,
+        new_account: false,
         now: t0(),
         dm_hold: Duration::minutes(1),
         bulk_hold: Duration::hours(1),
@@ -290,7 +301,7 @@ fn request<'a>(
 /// Decision 9's worked example: 400 held to tomorrow, then chats
 #[test]
 fn decision_9_worked_example() {
-    let tomorrow = t0() + Duration::hours(15);
+    let tomorrow = t0() + Duration::hours(24);
     let fleet = agents(0, 400);
     let held =
         plan_send(&request(&fleet, When::At(tomorrow), TapLevel::Tap, &[]))
@@ -317,7 +328,7 @@ fn decision_9_worked_example() {
     assert_eq!(
         plan_send(&request(&outside, When::Default, TapLevel::None, &window)),
         Err(SendRefusal::NeedsTap {
-            required: Some(TapLevel::Unattended),
+            required: TapLevel::Unattended,
             reach: Reach {
                 reach: 401,
                 immediate_reach: 1
@@ -348,7 +359,7 @@ fn defaults_and_explicit_times() {
     assert_eq!(
         plan_send(&request(&six, When::Now, TapLevel::Unattended, &[])),
         Err(SendRefusal::NeedsTap {
-            required: Some(TapLevel::YubikeyTap),
+            required: TapLevel::YubikeyTap,
             reach: Reach {
                 reach: 6,
                 immediate_reach: 6
@@ -360,17 +371,40 @@ fn defaults_and_explicit_times() {
         plan_send(&request(&six, When::Default, TapLevel::YubikeyTap, &[]))
             .unwrap();
     assert_eq!(plan.delivery, Delivery::Immediate);
-    // Above 500: always held, even by a YubiKey tap asking for now
+    // At any number
     let many = agents(0, 501);
-    assert!(
-        plan_send(&request(&many, When::Now, TapLevel::YubikeyTap, &[]))
-            .is_err()
-    );
+    let plan = plan_send(&request(&many, When::Now, TapLevel::YubikeyTap, &[]))
+        .unwrap();
+    assert_eq!(plan.delivery, Delivery::Immediate);
+    assert!(plan.names_to_contact() && plan.announced_now());
+    // Held longer the more it reaches: 1 h to 50, 24 h above
+    let fifty = agents(0, 50);
     let plan =
-        plan_send(&request(&many, When::Default, TapLevel::YubikeyTap, &[]))
+        plan_send(&request(&fifty, When::Default, TapLevel::Unattended, &[]))
+            .unwrap();
+    assert_eq!(plan.deliver_at, t0() + Duration::hours(1));
+    let plan =
+        plan_send(&request(&many, When::Default, TapLevel::Unattended, &[]))
             .unwrap();
     assert_eq!(plan.delivery, Delivery::Held);
+    assert_eq!(plan.deliver_at, t0() + Duration::hours(24));
     assert!(plan.names_to_contact() && plan.announced_held());
+    // Above 50, an hour off isn't held, so it's refused and not delayed
+    assert_eq!(
+        plan_send(&request(
+            &many,
+            When::At(t0() + Duration::hours(2)),
+            TapLevel::Unattended,
+            &[]
+        )),
+        Err(SendRefusal::NeedsTap {
+            required: TapLevel::YubikeyTap,
+            reach: Reach {
+                reach: 501,
+                immediate_reach: 501
+            }
+        })
+    );
     // A software key never sends above 5
     assert!(
         plan_send(&request(&six, When::Default, TapLevel::None, &[])).is_err()
@@ -413,36 +447,31 @@ fn window_is_on_deliver_at() {
 // Worked cases
 // ---------------------------------------------------------------------------
 
-/// CD1: "claude-opus rotates 9c by suspending it with a tap of the
-/// ceremonial Bio": both Bios stay effective, only 9c is suspended
+/// CD1: "claude-opus rotates 9c by suspending it with a tap of the Bio": the Bio
+/// is the suspender, so it and the 5Ci it added stay effective
 #[test]
-fn rotating_9c_from_the_ceremonial_bio_spares_both_bios() {
+fn rotating_9c_from_the_bio_spares_both() {
     let s = AccountState::migrated(
         OperatorId::from(uuid(0, 1)),
         address(0, "gmail:claude"),
-        AuthMode::PasswordOnly,
+        t0(),
         [(c(0), UNATTENDED, t0()), (c(1), SUDO, t0())],
-        3,
+        LIMITS,
     );
     let mut w = World::new(s);
-    w.ok(
-        Event::PasswordSignIn { session: sess(0) },
-        Authority::Password,
-    );
-    // The ceremonial Bio, confirmed by 9c; the password retires
-    w.ok(
-        Event::FirstPasskey {
-            passkey: pk(0),
-            class: YUBIKEY,
-            confirm: Some(cred(1)),
+    // As they stand after the transition: 9c approved the Bio, which added the 5Ci
+    w.s.factors.insert(
+        p(0),
+        Factor {
+            kind: FactorKind::Passkey(YUBIKEY),
+            state: CredentialState::Active,
+            parent: Some(c(1)),
+            added_at: t0(),
+            signed_in: true,
+            sends_now_from: None,
         },
-        Authority::Session(sess(0)),
     );
-    assert_eq!(w.s.factor(p(0)).unwrap().parent, Some(c(1)));
-    assert!(!w.s.sessions[&sess(0)].open);
-    w.sign_in(1, 0);
-    // The balerion Bio, approved by a YubiKey tap of the ceremonial one
-    w.add_passkey(1, YUBIKEY, 0, 1);
+    w.add_passkey(1, YUBIKEY, 0);
     assert_eq!(w.s.factor(p(1)).unwrap().parent, Some(p(0)));
     w.ok(Event::Suspend { target: c(1) }, tap(0, TapKind::Suspend));
     assert!(matches!(w.state(c(1)), CredentialState::Suspended(_)));
@@ -456,9 +485,9 @@ fn rotating_9c_from_the_ceremonial_bio_spares_both_bios() {
 #[test]
 fn suspending_a_yubikey_you_added_cascades_to_what_was_added_through_it() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, YUBIKEY, 0, 0); // Y, by Q
+    w.add_passkey(1, YUBIKEY, 0); // Y, by Q
     w.sign_in(1, 1);
-    w.add_passkey(2, YUBIKEY, 1, 1); // Z, by Y (a YubiKey tap)
+    w.add_passkey(2, YUBIKEY, 1); // Z, by Y (a YubiKey tap)
     w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
     assert!(matches!(
         w.state(p(1)),
@@ -484,7 +513,7 @@ fn suspending_a_yubikey_you_added_cascades_to_what_was_added_through_it() {
 #[test]
 fn a_suspension_stops_at_its_suspender() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, YUBIKEY, 0, 0);
+    w.add_passkey(1, YUBIKEY, 0);
     w.ok(Event::Suspend { target: p(0) }, tap(1, TapKind::Suspend));
     assert!(matches!(w.state(p(0)), CredentialState::Suspended(_)));
     assert_eq!(w.state(p(1)), CredentialState::Active);
@@ -495,12 +524,12 @@ fn a_suspension_stops_at_its_suspender() {
 fn the_three_unfreeze_bypass_routes_fail() {
     // The owner: P0 (old, synced: the stolen one), P1 (old device)
     let mut w = registered(SYNCED);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(1);
     w.wait(Duration::days(10));
     // 1. The thief adds P2 with P0; the contact freezes on a send by P0;
     //    P2, younger than a week, can't unfreeze
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0);
     let six = agents(0, 6);
     w.ok(
         Event::SendAdmit {
@@ -534,10 +563,10 @@ fn the_three_unfreeze_bypass_routes_fail() {
 
     // 3. An ancestor: Q (old) added the frozen P in the week before
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.wait(Duration::days(10));
-    w.add_passkey(2, DEVICE, 0, 0); // P2 added by Q = P0, recently
+    w.add_passkey(2, DEVICE, 0); // P2 added by Q = P0, recently
     w.sign_in(2, 2);
     w.ok(
         Event::OAuthConsent {
@@ -558,91 +587,15 @@ fn the_three_unfreeze_bypass_routes_fail() {
     w.ok(Event::Unfreeze, tap(1, TapKind::Unfreeze));
 }
 
-/// §12.3: a stolen plain passkey can't add a PIN-always PIV key once the
-/// account has a YubiKey-tap factor
-#[test]
-fn a_yubikey_tap_factor_needs_a_yubikey_tap_to_add() {
-    let mut w = registered(SYNCED);
-    w.add_passkey(1, YUBIKEY, 0, 0);
-    w.ok(
-        Event::EnrolStart {
-            enrolment: enrol(0),
-            kind: SUDO_PIN,
-        },
-        Authority::Anonymous,
-    );
-    assert_eq!(
-        w.try_do(
-            Event::EnrolApprove {
-                enrolment: enrol(0),
-                credential: cred(0)
-            },
-            tap(0, TapKind::EnrolmentApproval),
-        ),
-        Err(Refusal::NeedsYubikeyTap)
-    );
-    // Suspending the owner's YubiKey doesn't lower the bar: it counts
-    // until revoked
-    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
-    assert!(w.s.has_yk_tap());
-    assert_eq!(
-        w.try_do(
-            Event::EnrolApprove {
-                enrolment: enrol(0),
-                credential: cred(0)
-            },
-            tap(0, TapKind::EnrolmentApproval),
-        ),
-        Err(Refusal::NeedsYubikeyTap)
-    );
-}
-
-/// The above, with a passkey: the thief's own YubiKey needs the owner's
-#[test]
-fn a_suspended_yubikey_counts_until_revoked() {
-    let mut w = registered(SYNCED);
-    w.add_passkey(1, YUBIKEY, 0, 0);
-    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
-    w.ok(
-        Event::PasskeyRegister {
-            passkey: pk(2),
-            class: YUBIKEY,
-        },
-        Authority::Session(sess(0)),
-    );
-    assert_eq!(
-        w.try_do(
-            Event::PasskeyApprove { passkey: pk(2) },
-            tap(0, TapKind::PasskeyEnrolment)
-        ),
-        Err(Refusal::NeedsYubikeyTap)
-    );
-    // After its 72 h it is revoked, and a plain tap may add one (a Known
-    // hole's remedy)
-    // A contest at the deadline's instant would win: revocation is after
-    w.wait(Duration::hours(72));
-    assert_eq!(
-        w.try_do(Event::Deadline { factor: p(1) }, Authority::Platform),
-        Err(Refusal::TooEarly)
-    );
-    w.wait(Duration::seconds(1));
-    w.ok(Event::Deadline { factor: p(1) }, Authority::Platform);
-    assert!(!w.s.has_yk_tap());
-    w.ok(
-        Event::PasskeyApprove { passkey: pk(2) },
-        tap(0, TapKind::PasskeyEnrolment),
-    );
-}
-
 /// A contest stops the clock of its root's followers, and the root's
 /// outcome applies to them
 #[test]
 fn followers_share_their_roots_fate() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.sign_in(1, 1);
-    w.add_passkey(2, DEVICE, 1, 1);
-    w.add_passkey(3, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 1);
+    w.add_passkey(3, DEVICE, 0);
     w.ok(Event::Suspend { target: p(1) }, tap(3, TapKind::Suspend));
     w.ok(Event::Contest { factor: p(1) }, tap(1, TapKind::Contest));
     w.wait(Duration::hours(80));
@@ -671,13 +624,13 @@ fn followers_share_their_roots_fate() {
 #[test]
 fn freeze_links_are_void_while_frozen_and_after_replacement() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     // No contact yet: the add's notice carried no link
     assert!(w.s.freeze_links.is_empty());
     w.contact(0);
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0);
     let link_a = w.link();
-    w.add_passkey(3, DEVICE, 1, 0);
+    w.add_passkey(3, DEVICE, 1);
     let link_b = w.link();
     w.ok(Event::Freeze { link: link_a }, Authority::Email(addr_id(1)));
     w.wait(Duration::hours(25));
@@ -688,10 +641,10 @@ fn freeze_links_are_void_while_frozen_and_after_replacement() {
     // Unfreeze is impossible with only week-young factors: manual
     // recovery (a Known hole); here, wait it out in a fresh world
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.wait(Duration::days(8));
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0);
     let old_link = w.link();
     // Replace the contact (72 h), verified
     w.ok(
@@ -734,87 +687,14 @@ fn freeze_links_are_void_while_frozen_and_after_replacement() {
     );
 }
 
-/// §12.3: retiring the password ends the thief's password session, and
-/// cancels what it admitted
-#[test]
-fn the_first_passkey_ends_password_sessions() {
-    let s = AccountState::migrated(
-        OperatorId::from(uuid(0, 1)),
-        address(0, "primary.example"),
-        AuthMode::PasswordOnly,
-        [],
-        3,
-    );
-    let mut w = World::new(s);
-    w.ok(
-        Event::PasswordSignIn { session: sess(0) },
-        Authority::Password,
-    );
-    w.ok(
-        Event::PasswordSignIn { session: sess(1) },
-        Authority::Password,
-    );
-    w.ok(
-        Event::SendAdmit {
-            send: send_id(0),
-            recipients: agents(0, 2),
-            when: When::Default,
-        },
-        Authority::Session(sess(1)),
-    );
-    w.ok(
-        Event::FirstPasskey {
-            passkey: pk(0),
-            class: DEVICE,
-            confirm: None,
-        },
-        Authority::Session(sess(0)),
-    );
-    assert!(!w.s.sessions[&sess(1)].open);
-    assert_eq!(w.s.sends[&send_id(0)].state, SendState::Cancelled);
-    assert_eq!(
-        w.try_do(
-            Event::PasswordSignIn { session: sess(2) },
-            Authority::Password
-        ),
-        Err(Refusal::WrongState)
-    );
-}
-
-/// A live sudo key must confirm the first passkey
-#[test]
-fn a_sudo_key_confirms_the_first_passkey() {
-    let s = AccountState::migrated(
-        OperatorId::from(uuid(0, 1)),
-        address(0, "primary.example"),
-        AuthMode::PasswordOnly,
-        [(c(0), SUDO, t0()), (c(1), UNATTENDED, t0())],
-        3,
-    );
-    let mut w = World::new(s);
-    w.ok(
-        Event::PasswordSignIn { session: sess(0) },
-        Authority::Password,
-    );
-    let first = |confirm| Event::FirstPasskey {
-        passkey: pk(0),
-        class: DEVICE,
-        confirm,
-    };
-    let by = Authority::Session(sess(0));
-    assert_eq!(w.try_do(first(None), by), Err(Refusal::NeedsSudo));
-    assert_eq!(w.try_do(first(Some(cred(1))), by), Err(Refusal::NeedsSudo));
-    w.ok(first(Some(cred(0))), by);
-}
-
 /// I-23 and §1: taking away works restricted, frozen and banned at once
 #[test]
 fn taking_away_passes_every_mode() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.wait(Duration::days(8));
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0);
     w.s.count = 60;
     w.s.flags.yubikey = true;
     assert!(w.s.restricted());
@@ -823,7 +703,10 @@ fn taking_away_passes_every_mode() {
     w.ok(Event::Ban, Authority::Platform);
     assert!(w.s.restricted() && w.s.frozen().is_some() && w.s.banned());
     w.sign_in(5, 1);
-    w.ok(Event::SignOutOthers, Authority::Session(sess(5)));
+    w.ok(
+        Event::SignOutOthers { session: None },
+        Authority::Session(sess(5)),
+    );
     w.ok(Event::LogWithdraw, tap(1, TapKind::LogPrivate));
     w.ok(Event::Suspend { target: p(0) }, tap(1, TapKind::Suspend));
     // ... but no sends and no adds
@@ -840,11 +723,11 @@ fn taking_away_passes_every_mode() {
     );
     assert_eq!(
         w.try_do(
-            Event::PasskeyRegister {
+            Event::PasskeyAdd {
                 passkey: pk(3),
                 class: DEVICE,
             },
-            Authority::Session(sess(5)),
+            tap(1, TapKind::PasskeyAdd),
         ),
         Err(Refusal::Mode(ModeClass::PasskeyAdd))
     );
@@ -900,7 +783,7 @@ fn a_software_key_above_5_only_takes_away() {
 #[test]
 fn a_yubikey_tap_skips_the_wait_except_for_the_alarm_channels() {
     let mut w = registered(YUBIKEY);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.ok(
         Event::ChangeRequest {
@@ -945,7 +828,7 @@ fn agent_six_needs_the_minimum() {
         w.try_do(Event::AgentAdd, Authority::Session(sess(0))),
         Err(Refusal::Minimum(5))
     );
-    w.add_passkey(1, SYNCED, 0, 0);
+    w.add_passkey(1, SYNCED, 0);
     w.contact(0);
     w.ok(Event::AgentAdd, Authority::Session(sess(0)));
     assert_eq!(w.s.count, 6);
@@ -956,7 +839,7 @@ fn agent_six_needs_the_minimum() {
 #[test]
 fn a_tapped_send_that_goes_now_is_announced() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.ok(
         Event::SendAdmit {
@@ -1006,8 +889,8 @@ fn a_tapped_send_that_goes_now_is_announced() {
 #[test]
 fn a_counter_claim_has_its_own_tap_and_round_2_is_final() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
+    w.add_passkey(2, DEVICE, 0);
     w.ok(Event::Suspend { target: p(2) }, tap(1, TapKind::Suspend));
     w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
     let case = *w.s.cases.keys().next().unwrap();
@@ -1065,9 +948,9 @@ fn a_counter_claim_has_its_own_tap_and_round_2_is_final() {
 #[test]
 fn a_contact_change_voids_the_old_addresses_links() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0);
     let old = w.link();
     w.ok(
         Event::ChangeRequest {
@@ -1172,7 +1055,7 @@ fn hold_changes_are_bounded() {
 #[test]
 fn automatic_endings_log_their_target_not_an_actor() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.sign_in(1, 1);
     w.contact(0);
     w.ok(
@@ -1204,7 +1087,7 @@ fn automatic_endings_log_their_target_not_an_actor() {
         );
     }
     // A freeze's cancellations have no actor
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(2, DEVICE, 0);
     let link = w.link();
     w.ok(
         Event::SendAdmit {
@@ -1248,7 +1131,9 @@ fn api_kind() -> impl Strategy<Value = FactorKind> {
 }
 
 fn tap_kind() -> impl Strategy<Value = TapKind> {
-    proptest::sample::select(TapKind::ALL.to_vec())
+    let mut kinds = TapKind::ALL.to_vec();
+    kinds.push(TapKind::RetiredPasskeyEnrolment);
+    proptest::sample::select(kinds)
 }
 
 /// Any authority in the universe: noise, to exercise the refusals
@@ -1256,7 +1141,6 @@ fn any_authority() -> impl Strategy<Value = Authority> {
     prop_oneof![
         (0u8..3).prop_map(|i| Authority::Email(addr_id(i))),
         (0u8..4).prop_map(|i| Authority::Session(sess(i))),
-        Just(Authority::Password),
         (0u8..4).prop_map(|i| Authority::Signed(cred(i))),
         (0u8..4, tap_kind()).prop_map(|(i, k)| tap(i, k)),
         (0u8..4).prop_map(|i| Authority::Assertion(pk(i))),
@@ -1348,16 +1232,13 @@ enum AuthGen {
 #[derive(Debug, Clone)]
 enum EventGen {
     Fixed(Event),
-    /// Register a passkey in a session and approve it with a tap: two
-    /// events, each checked
-    AddPasskey(u8, PasskeyClass, Pick),
     /// Start an enrolment and approve it with a tap
     AddKey(u8, FactorKind, Pick),
+    /// A send, and a YubiKey's tap bringing it forward to now
+    AdmitThenForward(u8, u32, Pick),
     /// Whatever the state invites: a frozen account's moves, a decided
     /// case's counter-claim, a held send's cancel link, …
     Smart(Pick, Pick),
-    /// A pending passkey
-    Approve,
     Suspend(Pick),
     Contest(Pick),
     Deadline(Pick),
@@ -1370,6 +1251,8 @@ enum EventGen {
     Verify(Pick),
     Deliver(Pick),
     Cancel(Pick),
+    Forward(Pick, Duration),
+    Later(Pick, Duration),
     Retract(Pick),
     Read(Pick),
     Expire(Pick),
@@ -1413,18 +1296,12 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
     let steps = prop_oneof![
         40 => (0usize..64, pick()).prop_map(|(i, j)| (G::Smart(i, j), AuthGen::Fixed(Authority::Platform))),
         // §2
-        5 => (1u8..6, passkey_class(), pick(), by_tap(TapKind::PasskeyEnrolment))
-            .prop_map(|(i, class, session, a)| (G::AddPasskey(i, class, session), a)),
+        5 => (1u8..6, passkey_class(), by_tap(TapKind::PasskeyAdd))
+            .prop_map(move |(i, class, a)| (fixed(Event::PasskeyAdd { passkey: pk(i), class }), a)),
         3 => (0u8..4, api_kind(), pick(), by_tap(TapKind::EnrolmentApproval))
             .prop_map(|(i, kind, e, a)| (G::AddKey(i, kind, e), a)),
         3 => (1u8..6, passkey_class(), by_session())
-            .prop_map(move |(i, class, a)| (fixed(Event::PasskeyRegister { passkey: pk(i), class }), a)),
-        3 => by_tap(TapKind::PasskeyEnrolment).prop_map(|a| (G::Approve, a)),
-        1 => (pick(), by(platform)).prop_map(move |(i, a)| (G::Expire(i), a)),
-        2 => (0u8..4, passkey_class(), proptest::option::of(0u8..4), by_session())
-            .prop_map(move |(i, class, k, a)| {
-                (fixed(Event::FirstPasskey { passkey: pk(i), class, confirm: k.map(cred) }), a)
-            }),
+            .prop_map(move |(i, class, a)| (fixed(Event::PasskeyAddFree { passkey: pk(i), class }), a)),
         5 => (pick(), by_tap(TapKind::Suspend)).prop_map(|(i, a)| (G::Suspend(i), a)),
         2 => (pick(), prop_oneof![5 => Just(AuthGen::Own), 1 => any_authority().prop_map(AuthGen::Fixed)])
             .prop_map(|(i, a)| (G::Contest(i), a)),
@@ -1444,9 +1321,6 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
         1 => by(platform).prop_map(move |a| (fixed(Event::AgentGraceEnd), a)),
         1 => (prop_oneof![Just(Flag::Tier), Just(Flag::Minimum), Just(Flag::Yubikey)], by(platform))
             .prop_map(move |(f, a)| (fixed(Event::FlagOn(f)), a)),
-        1 => by(platform).prop_map(move |a| (fixed(Event::Cutover), a)),
-        1 => (0u8..6, by(Authority::Password))
-            .prop_map(move |(i, a)| (fixed(Event::PasswordSignIn { session: sess(i) }), a)),
         1 => by(platform).prop_map(move |a| (fixed(Event::Ban), a)),
         1 => by(platform).prop_map(move |a| (fixed(Event::Unban), a)),
         2 => (0u32..2, by_tap(TapKind::OAuthConsent)).prop_map(move |(i, a)| {
@@ -1462,6 +1336,9 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
         }),
         1 => (pick(), by_tap(TapKind::CancelPending)).prop_map(|(i, a)| (G::ChangeCancel(i), a)),
         2 => (pick(), by(platform)).prop_map(|(i, a)| (G::ChangeEffective(i), a)),
+        // §6, a move
+        3 => (50u8..54, proptest::sample::select(vec![2u32, 6, 51]), pick())
+            .prop_map(|(i, n, j)| (G::AdmitThenForward(i, n, j), AuthGen::Fixed(Authority::Platform))),
         // §7
         2 => (1u8..3, prop_oneof![4 => Just("contact.example"), 1 => Just("primary.example")],
               prop_oneof![
@@ -1497,6 +1374,19 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
                   1 => any_authority().prop_map(AuthGen::Fixed)
               ])
             .prop_map(|(i, a)| (G::Cancel(i), a)),
+        2 => (pick(), wait(), prop_oneof![
+                  3 => pick().prop_map(|i| AuthGen::Tap(TapKind::MoveSend, i)),
+                  1 => pick().prop_map(AuthGen::Signed),
+                  1 => any_authority().prop_map(AuthGen::Fixed)
+              ])
+            .prop_map(|(i, d, a)| (G::Forward(i, d), a)),
+        2 => (pick(), wait(), prop_oneof![
+                  2 => pick().prop_map(AuthGen::Session),
+                  1 => pick().prop_map(AuthGen::Signed),
+                  2 => pick().prop_map(|i| AuthGen::Tap(TapKind::MoveSend, i)),
+                  1 => any_authority().prop_map(AuthGen::Fixed)
+              ])
+            .prop_map(|(i, d, a)| (G::Later(i, d), a)),
         1 => (pick(), by_session()).prop_map(|(i, a)| (G::Retract(i), a)),
         1 => (pick(), by(Authority::Agent)).prop_map(|(i, a)| (G::Read(i), a)),
         // §9
@@ -1518,7 +1408,10 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
             (fixed(Event::SignIn { session: sess(s), passkey: pk(0) }), AuthGen::Assertion(i))
         }),
         1 => (pick(), by(platform)).prop_map(|(i, a)| (G::Expire(i), a)),
-        1 => by_session().prop_map(move |a| (fixed(Event::SignOutOthers), a)),
+        1 => by_session().prop_map(move |a| (fixed(Event::SignOut), a)),
+        1 => (proptest::option::weighted(0.5, 0u8..6), by_session()).prop_map(move |(n, a)| {
+            (fixed(Event::SignOutOthers { session: n.map(sess) }), a)
+        }),
     ];
     (wait(), steps).prop_map(|(w, (e, a))| (w, e, a))
 }
@@ -1799,6 +1692,50 @@ fn invited(s: &AccountState, j: Pick) -> Vec<Vec<(Event, Authority)>> {
         }
     }
     groups.push(std::mem::take(&mut out));
+    // A send moved by a YubiKey tap, by one past its 72 h if there is one
+    let yubikeys: Vec<_> = s
+        .factors
+        .iter()
+        .filter(|(_, f)| f.state.is_active() && f.kind.is_yubikey_passkey())
+        .collect();
+    let yk = yubikeys
+        .iter()
+        .find(|(_, f)| f.sends_now_from.is_none())
+        .or(yubikeys.first())
+        .and_then(|(id, _)| passkey_of(**id));
+    if let Some(yk) = yk {
+        for (id, m) in s.sends.iter().rev() {
+            if m.state != SendState::Scheduled {
+                continue;
+            }
+            let earliest = m.admitted_at + long_hold();
+            let deliver_at = if m.deliver_at > earliest {
+                earliest
+            } else {
+                m.deliver_at - Duration::minutes(10)
+            };
+            out.push((
+                Event::SendForward {
+                    send: *id,
+                    deliver_at,
+                },
+                tap_by(yk, TapKind::MoveSend),
+            ));
+        }
+        groups.push(std::mem::take(&mut out));
+        for (id, m) in &s.sends {
+            if m.state == SendState::Scheduled {
+                out.push((
+                    Event::SendLater {
+                        send: *id,
+                        deliver_at: m.deliver_at + Duration::hours(30),
+                    },
+                    tap_by(yk, TapKind::MoveSend),
+                ));
+            }
+        }
+    }
+    groups.push(std::mem::take(&mut out));
     // A send to more than 500, by a YubiKey passkey
     if let Some(yk) = s
         .factors
@@ -1849,23 +1786,7 @@ fn resolve(
     auth: &AuthGen,
 ) -> Option<Vec<(Event, Authority)>> {
     use EventGen as G;
-    let open_sessions = ordered(&s.sessions, |_| true, |x| x.open);
     match event {
-        G::AddPasskey(i, class, session) => {
-            let approve = resolve(
-                s,
-                &G::Fixed(Event::PasskeyApprove { passkey: pk(*i) }),
-                auth,
-            )?;
-            let register = (
-                Event::PasskeyRegister {
-                    passkey: pk(*i),
-                    class: *class,
-                },
-                Authority::Session(nth(&open_sessions, *session)?),
-            );
-            return Some([vec![register], approve].concat());
-        }
         G::AddKey(i, kind, e) => {
             let enrolment = enrol(*e as u8 + 10 * *i);
             let approve = resolve(
@@ -1885,6 +1806,42 @@ fn resolve(
             );
             return Some([vec![start], approve].concat());
         }
+        G::AdmitThenForward(i, n, j) => {
+            let yubikeys: Vec<_> = s
+                .factors
+                .iter()
+                .filter(|(_, f)| {
+                    f.state.is_active() && f.kind.is_yubikey_passkey()
+                })
+                .filter_map(|(id, _)| passkey_of(*id))
+                .collect();
+            let t = nth(&yubikeys, *j)?;
+            let send = send_id(*i);
+            return Some(vec![
+                (
+                    Event::SendAdmit {
+                        send,
+                        recipients: agents(4000 + 100 * u32::from(*i), *n),
+                        when: When::At(t0() + Duration::days(400)),
+                    },
+                    Authority::PasskeyTap {
+                        passkey: t,
+                        kind: TapKind::Send,
+                    },
+                ),
+                (
+                    // Clamped to now
+                    Event::SendForward {
+                        send,
+                        deliver_at: t0(),
+                    },
+                    Authority::PasskeyTap {
+                        passkey: t,
+                        kind: TapKind::MoveSend,
+                    },
+                ),
+            ]);
+        }
         G::Smart(i, j) => {
             let groups = invited(s, *j);
             let n = groups.len();
@@ -1902,19 +1859,7 @@ fn resolve(
     let any_factor = ordered(&s.factors, |_| true, active);
     let event = match event {
         G::Fixed(e) => e.clone(),
-        G::AddPasskey(..) | G::AddKey(..) | G::Smart(..) => {
-            unreachable!("expanded above")
-        }
-        G::Approve => {
-            let pending = ordered(
-                &s.factors,
-                |_| true,
-                |f| matches!(f.state, CredentialState::Pending { .. }),
-            );
-            Event::PasskeyApprove {
-                passkey: pending.into_iter().find_map(passkey_of)?,
-            }
-        }
+        G::AddKey(..) | G::AdmitThenForward(..) | G::Smart(..) => return None,
         G::Suspend(i) => {
             // Factors that added others first, so cascades happen
             let (mut parents, rest): (Vec<_>, Vec<_>) = any_factor
@@ -1985,6 +1930,27 @@ fn resolve(
                 _ => Event::SendCancel { send },
             }
         }
+        G::Forward(i, d) | G::Later(i, d) => {
+            let send = nth(
+                &ordered(
+                    &s.sends,
+                    |_| true,
+                    |m| m.state == SendState::Scheduled,
+                ),
+                *i,
+            )?;
+            let at = s.sends[&send].deliver_at;
+            match event {
+                G::Forward(..) => Event::SendForward {
+                    send,
+                    deliver_at: at - *d - Duration::seconds(1),
+                },
+                _ => Event::SendLater {
+                    send,
+                    deliver_at: at + *d + Duration::seconds(1),
+                },
+            }
+        }
         G::Retract(i) | G::Read(i) => {
             let send = nth(
                 &ordered(
@@ -1999,26 +1965,9 @@ fn resolve(
                 _ => Event::Read { send },
             }
         }
-        G::Expire(i) => {
-            // A pending passkey's ceremony, or a session
-            let pending: Vec<_> = s
-                .factors
-                .iter()
-                .filter(|(_, f)| {
-                    matches!(f.state, CredentialState::Pending { .. })
-                })
-                .filter_map(|(id, _)| passkey_of(*id))
-                .collect();
-            match nth(&pending, *i) {
-                Some(passkey) if i % 2 == 0 => Event::PendingExpire { passkey },
-                _ => Event::SessionExpire {
-                    session: nth(
-                        &ordered(&s.sessions, |_| true, |x| x.open),
-                        *i,
-                    )?,
-                },
-            }
-        }
+        G::Expire(i) => Event::SessionExpire {
+            session: nth(&ordered(&s.sessions, |_| true, |x| x.open), *i)?,
+        },
     };
     let passkeys = ordered(&s.factors, |f| passkey_of(*f).is_some(), active);
     let credentials =
@@ -2072,8 +2021,8 @@ fn resolve(
     Some(vec![(event, authority)])
 }
 
-/// A starting account: migrated with one or two passkeys, or with a
-/// password; with some of the four kinds of API key
+/// A starting account: migrated with no passkey, or one or two; with some of the
+/// four kinds of API key; past `new_account` or not; agents or none
 fn start() -> impl Strategy<Value = AccountState> {
     (
         prop_oneof![Just(None), passkey_class().prop_map(Some)],
@@ -2083,6 +2032,7 @@ fn start() -> impl Strategy<Value = AccountState> {
         proptest::sample::select(vec![0u32, 5, 6, 50, 51]),
         (any::<bool>(), any::<bool>(), any::<bool>()),
         0u8..3,
+        any::<bool>(),
     )
         .prop_map(
             |(
@@ -2093,6 +2043,7 @@ fn start() -> impl Strategy<Value = AccountState> {
                 count,
                 (tier, minimum, yubikey),
                 contact,
+                established,
             )| {
                 let added = if old { t0() - Duration::days(10) } else { t0() };
                 let kinds =
@@ -2103,33 +2054,33 @@ fn start() -> impl Strategy<Value = AccountState> {
                     .filter(|(_, on)| **on)
                     .map(|(i, _)| (c(i as u8), kinds[i], added))
                     .collect();
-                let auth = match first {
-                    Some(class) => {
-                        factors.push((p(0), FactorKind::Passkey(class), added));
-                        if let Some(class) = second {
-                            factors.push((
-                                p(1),
-                                FactorKind::Passkey(class),
-                                added,
-                            ));
-                        }
-                        AuthMode::Passkeys
+                if let Some(class) = first {
+                    factors.push((p(0), FactorKind::Passkey(class), added));
+                    if let Some(class) = second {
+                        factors.push((p(1), FactorKind::Passkey(class), added));
                     }
-                    None => AuthMode::PasswordOnly,
+                }
+                let created = if established {
+                    t0() - Duration::days(30)
+                } else {
+                    t0() - Duration::days(1)
                 };
                 let mut s = AccountState::migrated(
                     OperatorId::from(uuid(0, 1)),
                     address(0, "primary.example"),
-                    auth,
+                    created,
                     factors,
-                    2,
+                    Limits {
+                        suspend: 2,
+                        new_account_days: NEW_ACCOUNT_DAYS,
+                    },
                 );
                 s.count = count;
+                s.first_agent_at = (count > 0).then_some(created);
                 s.flags = Flags {
                     tier,
                     minimum,
                     yubikey,
-                    cutover: false,
                 };
                 s.contact = match contact {
                     0 => None,
@@ -2144,21 +2095,12 @@ fn start() -> impl Strategy<Value = AccountState> {
                         power: FreezePower::Armed,
                     }),
                 };
-                if let Some(PasskeyClass { .. }) = first {
+                if first.is_some() {
                     s.factors.get_mut(&p(0)).unwrap().signed_in = true;
                     s.sessions.insert(
                         sess(0),
                         Session {
-                            opener: SessionOpener::Passkey(pk(0)),
-                            last_used: t0(),
-                            open: true,
-                        },
-                    );
-                } else {
-                    s.sessions.insert(
-                        sess(0),
-                        Session {
-                            opener: SessionOpener::Password,
+                            passkey: pk(0),
                             last_used: t0(),
                             open: true,
                         },
@@ -2212,15 +2154,10 @@ impl Applied<'_> {
             })
     }
 
-    /// Factors added: absent or pending before, active now
+    /// Factors added: absent before
     fn added(&self) -> Vec<FactorId> {
         self.changed()
-            .filter(|(_, before, after)| {
-                after.state.is_active()
-                    && before.is_none_or(|b| {
-                        matches!(b.state, CredentialState::Pending { .. })
-                    })
-            })
+            .filter(|(_, before, _)| before.is_none())
             .map(|(id, _, _)| id)
             .collect()
     }
@@ -2252,6 +2189,44 @@ impl Applied<'_> {
     }
 }
 
+/// `cascade(T, S, t)` from §1's words, independently of [`provenance_cascade`]:
+/// each effective G that has a path up to T with S not on it, and every factor
+/// after T on that path, G included, added in the 72 h before t
+fn cascade_restated(
+    s: &AccountState,
+    target: FactorId,
+    suspender: FactorId,
+    t: DateTime<Utc>,
+) -> BTreeSet<FactorId> {
+    let mut out = BTreeSet::from([target]);
+    if suspender == target {
+        return out;
+    }
+    for (g, factor) in &s.factors {
+        if !factor.state.is_active() {
+            continue;
+        }
+        let mut at = *g;
+        let found = loop {
+            if at == target {
+                break true;
+            }
+            let Some(f) = s.factor(at) else { break false };
+            if at == suspender || f.added_at + Duration::hours(72) <= t {
+                break false;
+            }
+            match f.parent {
+                Some(parent) => at = parent,
+                None => break false,
+            }
+        };
+        if found {
+            out.insert(*g);
+        }
+    }
+    out
+}
+
 fn i1_and_i3_the_cascade(a: &Applied) -> Result<(), TestCaseError> {
     let (Event::Suspend { target }, Authority::PasskeyTap { passkey, .. }) =
         (a.event, a.by)
@@ -2263,14 +2238,19 @@ fn i1_and_i3_the_cascade(a: &Applied) -> Result<(), TestCaseError> {
     let newly = a.newly_suspended();
     match before {
         CredentialState::Active => {
-            // I-3: exactly cascade(T, S)
-            prop_assert_eq!(&newly, &a.pre.cascade(*target, Some(s)));
+            // I-3: exactly cascade(T, S, t)
+            prop_assert_eq!(&newly, &a.pre.cascade(*target, Some(s), a.now));
+            prop_assert_eq!(
+                &newly,
+                &cascade_restated(a.pre, *target, s, a.now),
+                "I-3: the rule, in the table's words"
+            );
         }
         CredentialState::Suspended(Suspension {
             cause: SuspensionCause::Freeze { .. },
             ..
         }) => {
-            let mut expected = a.pre.cascade(*target, Some(s));
+            let mut expected = a.pre.cascade(*target, Some(s), a.now);
             expected.remove(target);
             prop_assert_eq!(&newly, &expected);
         }
@@ -2299,17 +2279,7 @@ fn i1_and_i3_the_cascade(a: &Applied) -> Result<(), TestCaseError> {
 
 fn i2_a_freeze_changes_one_factor(a: &Applied) -> Result<(), TestCaseError> {
     if matches!(a.event, Event::Freeze { .. }) {
-        // A pending passkey bound to an ended session is discarded with it:
-        // that is the ceremony's end, not a cascade
-        let changed = a
-            .changed()
-            .filter(|(_, b, f)| {
-                !(matches!(
-                    b.map(|b| b.state),
-                    Some(CredentialState::Pending { .. })
-                ) && f.state == CredentialState::Discarded)
-            })
-            .count();
+        let changed = a.changed().count();
         prop_assert!(changed <= 1, "I-2: a freeze changed {} factors", changed);
     }
     Ok(())
@@ -2324,12 +2294,6 @@ fn i4_and_i9_status_at_execution(a: &Applied) -> Result<(), TestCaseError> {
             "I-4/I-9: {:?} acted while not active",
             f
         );
-    }
-    if let Event::FirstPasskey {
-        confirm: Some(k), ..
-    } = a.event
-    {
-        prop_assert!(a.pre.effective(FactorId::Credential(*k)));
     }
     if let Event::RecoveryCancel { .. } = a.event {
         prop_assert!(
@@ -2486,36 +2450,62 @@ fn i11_to_i15_adds(a: &Applied) -> Result<(), TestCaseError> {
     let added = a.added();
     for id in &added {
         let factor = a.post.factors[id];
-        // I-11: every add takes a tap, but the three exceptions
+        // I-11: every add takes a tap, but the two exceptions
         let tapped = matches!(
             (a.event, a.by),
-            (Event::PasskeyApprove { .. }, Authority::PasskeyTap { .. })
-                | (Event::EnrolApprove { .. }, Authority::PasskeyTap { .. })
+            (
+                Event::PasskeyAdd { .. },
+                Authority::PasskeyTap {
+                    kind: TapKind::PasskeyAdd,
+                    ..
+                }
+            ) | (
+                Event::EnrolApprove { .. },
+                Authority::PasskeyTap {
+                    kind: TapKind::EnrolmentApproval,
+                    ..
+                }
+            )
         );
-        let excepted = matches!(
-            a.event,
-            Event::FirstPasskey { .. } | Event::RecoveryEffective { .. }
-        );
+        let excepted = match a.event {
+            Event::PasskeyAddFree { .. } => {
+                a.pre.no_agents() && a.pre.counted_passkeys() < MAX_PASSKEYS
+            }
+            Event::RecoveryEffective { .. } => true,
+            _ => false,
+        };
         prop_assert!(
             tapped || excepted,
             "I-11: {:?} added by {:?}",
             id,
             a.event
         );
-        // I-12
-        if a.pre.has_yk_tap() && factor.kind.gives_yubikey_tap() {
-            prop_assert!(
-                a.pre.level(a.by) == TapLevel::YubikeyTap
-                    || (matches!(a.event, Event::FirstPasskey { .. })
-                        && !a.pre.flags.cutover)
-                    || matches!(a.event, Event::RecoveryEffective { .. }),
-                "I-12"
-            );
+        // I-12: one grant and nothing more, whatever the keys' kinds. The parent
+        // is the tapper, and a tap adds one factor
+        if tapped {
+            prop_assert_eq!(factor.parent, a.pre.factor_behind(a.by), "I-12");
+            prop_assert_eq!(added.len(), 1, "I-12");
+        } else {
+            prop_assert_eq!(factor.parent, None, "§1: no tap, no parent");
         }
         // I-13: no software key added while count > 5 ∧ TIER
         if a.pre.count > 5 && a.pre.flags.tier {
             prop_assert!(!factor.kind.is_software_key(), "I-13: add");
         }
+        // I-41: the cell, from the table's words
+        let free = factor.parent.is_some_and(|t| {
+            a.pre.factor(t).is_some_and(|t| {
+                t.kind.gives_yubikey_tap()
+                    && t.sends_now_from.is_none_or(|from| from <= a.now)
+            })
+        });
+        let held = tapped && factor.kind.gives_yubikey_tap() && !free;
+        prop_assert_eq!(
+            factor.sends_now_from,
+            held.then(|| a.now + Duration::hours(72)),
+            "I-41: {:?}",
+            id
+        );
         // I-14: the parent was active at the add
         if let Some(parent) = factor.parent {
             prop_assert!(a.pre.effective(parent), "I-14: parent not active");
@@ -2530,6 +2520,11 @@ fn i11_to_i15_adds(a: &Applied) -> Result<(), TestCaseError> {
     for (id, before) in &a.pre.factors {
         if !added.contains(id) {
             prop_assert_eq!(before.parent, a.post.factors[id].parent, "I-14");
+            prop_assert_eq!(
+                before.sends_now_from,
+                a.post.factors[id].sends_now_from,
+                "the cell is set once"
+            );
         }
     }
     // I-13: no use but taking away, or its own contest
@@ -2669,15 +2664,7 @@ fn taking_away(s: &AccountState) -> Vec<(Event, Authority)> {
     let session = s
         .sessions
         .iter()
-        .find(|(_, x)| {
-            x.open
-                && match x.opener {
-                    SessionOpener::Passkey(p) => {
-                        s.effective(FactorId::Passkey(p))
-                    }
-                    SessionOpener::Password => s.password_usable(),
-                }
-        })
+        .find(|(_, x)| x.open && s.effective(FactorId::Passkey(x.passkey)))
         .map(|(id, _)| *id);
     let send = s.sends.keys().next().copied().unwrap_or(send_id(99));
     let change = s.changes.keys().next().copied().unwrap_or(change_id(99));
@@ -2693,7 +2680,7 @@ fn taking_away(s: &AccountState) -> Vec<(Event, Authority)> {
         let by = Authority::Session(x);
         out.push((Event::SendCancel { send }, by));
         out.push((Event::Retract { send }, by));
-        out.push((Event::SignOutOthers, by));
+        out.push((Event::SignOutOthers { session: None }, by));
         out.push((
             Event::ConsentRevoke {
                 client: "client".parse().unwrap(),
@@ -2846,18 +2833,17 @@ fn i31_to_i33_sends(a: &Applied) -> Result<(), TestCaseError> {
         let window = a.pre.window_messages();
         let r = reach(&send.recipients, send.deliver_at, &window);
         prop_assert_eq!(r, send.reach);
-        let required = required_tap(r, send.delivery);
         prop_assert!(
-            required.is_some_and(|req| a.pre.level(a.by) >= req),
+            a.pre.level(a.by) >= required_tap(r, send.delivery),
             "I-31: admitted below its level"
         );
-        if r.reach > TAPPED_REACH {
-            prop_assert_eq!(
-                send.delivery,
-                Delivery::Held,
-                "I-31: above 500 now"
-            );
-        }
+        let new_account = a.pre.new_account(a.now);
+        let hold = required_hold(r, a.pre.settings.bulk_hold, new_account);
+        prop_assert_eq!(
+            send.delivery == Delivery::Held,
+            send.deliver_at >= a.now + hold,
+            "I-31: held by its hold"
+        );
         // I-32
         if r.reach > UNTAPPED_REACH {
             prop_assert!(
@@ -2894,8 +2880,9 @@ fn announced_factor(a: &Applied) -> Option<FactorId> {
     let behind = a.pre.factor_behind(a.by);
     match a.event {
         Event::ChangeRequest { .. }
-        | Event::PasskeyApprove { .. }
+        | Event::PasskeyAdd { .. }
         | Event::EnrolApprove { .. }
+        | Event::SendForward { .. }
         | Event::OAuthConsent { .. }
         | Event::AgentDelete { .. } => behind,
         Event::ChangeEffective { change }
@@ -2903,13 +2890,9 @@ fn announced_factor(a: &Applied) -> Option<FactorId> {
         {
             Some(a.pre.changes[change].requested_by)
         }
-        Event::FirstPasskey { confirm, .. } => {
-            confirm.map(FactorId::Credential)
-        }
         Event::SendAdmit { send, .. } => {
             let s = &a.post.sends[send];
-            let tapped = required_tap(s.reach, s.delivery)
-                .is_some_and(|r| r >= TapLevel::Tap);
+            let tapped = required_tap(s.reach, s.delivery) >= TapLevel::Tap;
             let announced = (s.delivery == Delivery::Held
                 && s.reach.reach > UNTAPPED_REACH)
                 || (s.delivery == Delivery::Immediate
@@ -2934,8 +2917,7 @@ fn i40_every_tapped_send_is_announced(
     a: &Applied,
 ) -> Result<(), TestCaseError> {
     for (id, send) in a.new_sends() {
-        let required = required_tap(send.reach, send.delivery);
-        if !required.is_some_and(|r| r >= TapLevel::Tap) {
+        if required_tap(send.reach, send.delivery) < TapLevel::Tap {
             continue;
         }
         let about = |n: &&Notice| {
@@ -3052,35 +3034,76 @@ fn i36_links_name_an_active_factor(a: &Applied) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-fn i37_and_i38_sessions(a: &Applied) -> Result<(), TestCaseError> {
+fn i37_sessions(a: &Applied) -> Result<(), TestCaseError> {
     for s in a.post.sessions.values().filter(|s| s.open) {
-        match s.opener {
-            SessionOpener::Passkey(p) => {
-                prop_assert!(a.post.effective(FactorId::Passkey(p)), "I-37");
-            }
-            SessionOpener::Password => {
-                prop_assert!(
-                    a.post.auth == AuthMode::PasswordOnly
-                        && !a.post.flags.cutover,
-                    "I-38: a password session survived"
-                );
-            }
+        prop_assert!(a.post.effective(FactorId::Passkey(s.passkey)), "I-37");
+    }
+    Ok(())
+}
+
+/// I-41: a factor still in its 72 h admits nothing going now above 5, nor brings
+/// anything forward to where it would be
+fn i41_a_new_key_is_held(a: &Applied) -> Result<(), TestCaseError> {
+    let Some(f) = a.pre.factor_behind(a.by) else {
+        return Ok(());
+    };
+    let held = a
+        .pre
+        .factor(f)
+        .and_then(|f| f.sends_now_from)
+        .is_some_and(|from| a.now < from);
+    if !held {
+        return Ok(());
+    }
+    for (_, send) in a.new_sends() {
+        prop_assert!(
+            !(send.delivery == Delivery::Immediate
+                && send.reach.immediate_reach > UNTAPPED_REACH),
+            "I-41: {:?} sent now above 5 in its 72 h",
+            f
+        );
+    }
+    if let Event::SendForward { send, .. } = a.event {
+        let m = &a.post.sends[send];
+        let window = a.pre.window_without(Some(*send));
+        let at_new = reach(&m.recipients, m.deliver_at, &window);
+        prop_assert!(
+            at_new.immediate_reach <= UNTAPPED_REACH,
+            "I-41: {:?} brought a send forward above 5 in its 72 h",
+            f
+        );
+    }
+    Ok(())
+}
+
+/// I-42: no **Suspend** leaves an account with no effective passkey
+fn i42_no_suspend_strands(a: &Applied) -> Result<(), TestCaseError> {
+    if matches!(a.event, Event::Suspend { .. }) {
+        prop_assert!(!a.post.stranded(), "I-42: {:?}", a.event);
+    }
+    Ok(())
+}
+
+/// I-43: while new, nothing above 5 is delivered under 24 h after its admission
+fn i43_a_new_account_sends_nothing_now(
+    a: &Applied,
+) -> Result<(), TestCaseError> {
+    if !a.pre.new_account(a.now) {
+        return Ok(());
+    }
+    let day = Duration::hours(24);
+    for (_, send) in a.new_sends() {
+        if send.reach.immediate_reach > UNTAPPED_REACH {
+            prop_assert!(send.deliver_at >= a.now + day, "I-43: admitted");
         }
     }
-    let by_password = match a.by {
-        Authority::Password => true,
-        Authority::Session(s) => a
-            .pre
-            .sessions
-            .get(&s)
-            .is_some_and(|s| s.opener == SessionOpener::Password),
-        _ => false,
-    };
-    if by_password {
-        prop_assert!(
-            a.pre.password_usable(),
-            "I-38: a password after it retired"
-        );
+    if let Event::SendDeliver { send } = a.event
+        && a.post.sends[send].state == SendState::Delivered
+    {
+        let m = &a.pre.sends[send];
+        if m.reach.immediate_reach > UNTAPPED_REACH {
+            prop_assert!(a.now >= m.admitted_at + day, "I-43: delivered");
+        }
     }
     Ok(())
 }
@@ -3105,8 +3128,11 @@ fn check(a: &Applied, h: &mut History) -> Result<(), TestCaseError> {
     i34_announced_with_a_link(a)?;
     i35_email_never_widens(a)?;
     i36_links_name_an_active_factor(a)?;
-    i37_and_i38_sessions(a)?;
+    i37_sessions(a)?;
     i40_every_tapped_send_is_announced(a)?;
+    i41_a_new_key_is_held(a)?;
+    i42_no_suspend_strands(a)?;
+    i43_a_new_account_sends_nothing_now(a)?;
     Ok(())
 }
 
@@ -3165,7 +3191,8 @@ fn cases() -> u32 {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(cases()))]
 
-    /// I-1 to I-21 and I-23 to I-39 after every step of a generated run
+    /// I-1 to I-21 and I-23 to I-43 after every step of a generated run (I-38 by
+    /// construction: `Authority` has no password)
     #[test]
     fn invariants_hold_after_every_step(
         start in start(),
@@ -3220,71 +3247,17 @@ fn escape(
         let _ =
             w.try_do(Event::ChangeEffective { change }, Authority::Platform);
     }
-    // Suspend each effective software key; and, with a YubiKey-tap factor
-    // but no effective YubiKey passkey, the factors that give it, then let
-    // their deadlines pass. SPEC: I-22's sequence assumes no such factor
-    // contests: one that did, or that follows a root that did, counts
-    // toward `has_yk_tap` until manual recovery decides, so the escape then
-    // runs through that case
-    for _ in 0..4 {
-        let yk_stuck = w.s.has_yk_tap() && !w.s.has_yk_passkey();
-        let targets: Vec<_> =
-            w.s.factors
-                .iter()
-                .filter(|(id, f)| {
-                    **id != FactorId::Passkey(t)
-                        && f.state.is_live()
-                        && (f.kind.is_software_key()
-                            || (yk_stuck && f.kind.gives_yubikey_tap()))
-                })
-                .map(|(id, _)| *id)
-                .collect();
-        if targets.is_empty() {
-            break;
-        }
-        for target in targets {
-            w.wait(Duration::hours(1));
-            if w.s.effective(target) {
-                w.ok(Event::Suspend { target }, owner(TapKind::Suspend));
-                continue;
-            }
-            // Contested itself, or following a contested root
-            let contested = |f: FactorId| match w.s.factor(f).map(|f| f.state) {
-                Some(CredentialState::Contested { case, .. }) => Some(case),
-                _ => None,
-            };
-            let root = match w.s.factor(target).map(|f| f.state) {
-                Some(CredentialState::Suspended(sus)) => sus.follows_root,
-                _ => None,
-            };
-            let Some(case) =
-                contested(target).or_else(|| root.and_then(contested))
-            else {
-                continue;
-            };
-            if let CaseState::Open { .. } = w.s.cases[&case].state {
-                w.ok(
-                    Event::RecoveryDecide {
-                        case,
-                        outcome: RecoveryOutcome::Revoke,
-                        losing: None,
-                    },
-                    Authority::Staff,
-                );
-            }
-            w.wait(Duration::days(7));
-            w.ok(Event::RecoveryEffective { case }, Authority::Platform);
-        }
-        w.wait(Duration::hours(73));
-        let suspended: Vec<_> = w
-            .s
-            .factors
+    // Suspend each effective software key
+    let keys: Vec<_> =
+        w.s.factors
             .iter()
-            .filter(|(_, f)| matches!(f.state, CredentialState::Suspended(_)))
+            .filter(|(_, f)| f.state.is_active() && f.kind.is_software_key())
             .map(|(id, _)| *id)
             .collect();
-        for factor in suspended {
-            let _ = w.try_do(Event::Deadline { factor }, Authority::Platform);
+    for target in keys {
+        w.wait(Duration::hours(1));
+        if w.s.effective(target) {
+            w.ok(Event::Suspend { target }, owner(TapKind::Suspend));
         }
     }
     // The contact
@@ -3323,11 +3296,11 @@ fn escape(
     }
     // Devices, then above 50 a YubiKey passkey
     while w.s.devices() < 2 {
-        w.add_passkey_by(next, DEVICE, t, 99);
+        w.add_passkey_by(next, DEVICE, t);
         next += 1;
     }
     if w.s.count > 50 && !w.s.has_yk_passkey() {
-        w.add_passkey_by(next, YUBIKEY, t, 99);
+        w.add_passkey_by(next, YUBIKEY, t);
     }
     Ok(w.s)
 }
@@ -3355,36 +3328,15 @@ impl World {
         i: u8,
         class: PasskeyClass,
         by: OperatorPasskeyId,
-        session: u8,
     ) {
         self.ok(
-            Event::PasskeyRegister {
+            Event::PasskeyAdd {
                 passkey: pk(i),
                 class,
             },
-            Authority::Session(sess(session)),
-        );
-        let level = if class.yubikey && self.s.has_yk_tap() {
-            // The owner's own YubiKey passkey, if it has one
-            self.s
-                .factors
-                .iter()
-                .find(|(_, f)| {
-                    f.state.is_active() && f.kind.is_yubikey_passkey()
-                })
-                .and_then(|(id, _)| match id {
-                    FactorId::Passkey(p) => Some(*p),
-                    FactorId::Credential(_) => None,
-                })
-                .unwrap_or(by)
-        } else {
-            by
-        };
-        self.ok(
-            Event::PasskeyApprove { passkey: pk(i) },
             Authority::PasskeyTap {
-                passkey: level,
-                kind: TapKind::PasskeyEnrolment,
+                passkey: by,
+                kind: TapKind::PasskeyAdd,
             },
         );
     }
@@ -3469,8 +3421,11 @@ fn the_generator_reaches_every_machine() {
                 Event::ChangeEffective { .. } => "change effective",
                 Event::ChangeCancel { .. } => "change cancel",
                 Event::EnrolApprove { .. } => "enrol approve",
-                Event::PasskeyApprove { .. } => "passkey approve",
-                Event::FirstPasskey { .. } => "first passkey",
+                Event::PasskeyAdd { .. } => "passkey add",
+                Event::PasskeyAddFree { .. } => "free add",
+                Event::SendForward { .. } => "forward",
+                Event::SendLater { .. } => "later",
+                Event::SignOut => "sign out",
                 Event::SendAdmit { recipients, .. }
                     if recipients.len() > 500 =>
                 {
@@ -3521,8 +3476,11 @@ fn the_generator_reaches_every_machine() {
         ("change effective", 20),
         ("change cancel", 20),
         ("enrol approve", 50),
-        ("passkey approve", 100),
-        ("first passkey", 10),
+        ("passkey add", 100),
+        ("free add", 30),
+        ("forward", 20),
+        ("later", 20),
+        ("sign out", 20),
         ("send > 5", 20),
         ("send > 500", 20),
         ("tapped now (I-40)", 20),
@@ -3621,7 +3579,7 @@ fn a_session_use_is_its_own() {
 #[test]
 fn the_primary_address_changes_when_its_change_takes_effect() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.wait(Duration::days(8));
     let new = address(3, "new.example");
     w.ok(
@@ -3697,9 +3655,9 @@ fn a_hardware_factor_is_a_hardware_credential() {
 #[test]
 fn a_recovery_loser_cascades_to_what_it_approved() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
-    w.add_passkey(2, DEVICE, 0, 0);
-    w.add_passkey(3, DEVICE, 1, 0);
+    w.add_passkey(1, DEVICE, 0);
+    w.add_passkey(2, DEVICE, 0);
+    w.add_passkey(3, DEVICE, 1);
     w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
     w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
     let case = *w.s.cases.keys().next().unwrap();
@@ -3738,9 +3696,9 @@ fn a_recovery_loser_cascades_to_what_it_approved() {
 #[test]
 fn a_recovery_loser_must_be_active() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
-    w.add_passkey(2, DEVICE, 0, 0);
-    w.add_passkey(3, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
+    w.add_passkey(2, DEVICE, 0);
+    w.add_passkey(3, DEVICE, 0);
     w.ok(Event::Suspend { target: p(3) }, tap(0, TapKind::Suspend));
     w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
     w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
@@ -3771,44 +3729,6 @@ fn a_recovery_loser_must_be_active() {
     assert!(matches!(w.state(p(1)), CredentialState::Suspended(_)));
 }
 
-/// A pending passkey expires; nothing else does
-#[test]
-fn only_a_pending_passkey_expires() {
-    let mut w = registered(DEVICE);
-    assert_eq!(
-        w.try_do(Event::PendingExpire { passkey: pk(0) }, Authority::Platform),
-        Err(Refusal::WrongState)
-    );
-}
-
-/// A sudo key that is gone no longer has to confirm a first passkey
-#[test]
-fn a_revoked_sudo_key_does_not_have_to_confirm_a_first_passkey() {
-    let s = AccountState::migrated(
-        OperatorId::from(uuid(0, 1)),
-        address(0, "primary.example"),
-        AuthMode::PasswordOnly,
-        [(c(0), SUDO, t0())],
-        3,
-    );
-    let mut w = World::new(s);
-    w.ok(
-        Event::PasswordSignIn { session: sess(0) },
-        Authority::Password,
-    );
-    let first = Event::FirstPasskey {
-        passkey: pk(0),
-        class: DEVICE,
-        confirm: None,
-    };
-    assert_eq!(
-        w.try_do(first.clone(), Authority::Session(sess(0))),
-        Err(Refusal::NeedsSudo)
-    );
-    w.s.factors.get_mut(&c(0)).unwrap().state = CredentialState::Revoked;
-    w.ok(first, Authority::Session(sess(0)));
-}
-
 fn a_contact_change(i: u8, to: u8, domain: &str) -> Event {
     Event::ChangeRequest {
         change: change_id(i),
@@ -3821,7 +3741,7 @@ fn a_contact_change(i: u8, to: u8, domain: &str) -> Event {
 #[test]
 fn a_change_that_would_now_share_a_domain_is_cancelled_at_its_time() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.ok(
         a_contact_change(0, 2, "shared.example"),
@@ -3869,8 +3789,8 @@ fn a_change_that_would_now_share_a_domain_is_cancelled_at_its_time() {
 #[test]
 fn a_second_freeze_within_the_interval_and_a_used_link_through_a_change() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
-    w.add_passkey(2, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
+    w.add_passkey(2, DEVICE, 0);
     w.contact(1);
     w.wait(Duration::days(10));
     let send = |i| Event::SendAdmit {
@@ -3928,7 +3848,7 @@ fn deliver_cancelled(w: &mut World, i: u8) {
 #[test]
 fn delivery_rechecks_an_expired_sessions_passkey() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.sign_in(1, 1);
     w.ok(
         Event::SendAdmit {
@@ -3949,55 +3869,11 @@ fn delivery_rechecks_an_expired_sessions_passkey() {
     deliver_cancelled(&mut w, 0);
 }
 
-/// ...or a password since retired
-#[test]
-fn delivery_rechecks_an_expired_sessions_password() {
-    let s = AccountState::migrated(
-        OperatorId::from(uuid(0, 1)),
-        address(0, "primary.example"),
-        AuthMode::PasswordOnly,
-        [],
-        3,
-    );
-    let mut w = World::new(s);
-    w.ok(
-        Event::PasswordSignIn { session: sess(0) },
-        Authority::Password,
-    );
-    w.ok(
-        Event::SendAdmit {
-            send: send_id(0),
-            recipients: agents(0, 2),
-            when: When::At(t0() + Duration::days(60)),
-        },
-        Authority::Session(sess(0)),
-    );
-    w.wait(session_ttl());
-    w.ok(
-        Event::SessionExpire { session: sess(0) },
-        Authority::Platform,
-    );
-    w.ok(
-        Event::PasswordSignIn { session: sess(1) },
-        Authority::Password,
-    );
-    w.ok(
-        Event::FirstPasskey {
-            passkey: pk(0),
-            class: DEVICE,
-            confirm: None,
-        },
-        Authority::Session(sess(1)),
-    );
-    w.wait(Duration::days(60));
-    deliver_cancelled(&mut w, 0);
-}
-
 /// A large send held past its contact's removal doesn't go
 #[test]
 fn delivery_rechecks_the_contact_for_a_large_send() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(0);
     w.wait(Duration::days(10));
     w.ok(
@@ -4035,7 +3911,6 @@ fn a_flag_turned_off_is_seen_whichever_it_is() {
         tier: true,
         minimum: true,
         yubikey: true,
-        cutover: true,
     };
     assert!(on.none_turned_off(&on));
     for off in [
@@ -4046,10 +3921,6 @@ fn a_flag_turned_off_is_seen_whichever_it_is() {
         },
         Flags {
             yubikey: false,
-            ..on
-        },
-        Flags {
-            cutover: false,
             ..on
         },
     ] {
@@ -4071,24 +3942,28 @@ fn the_cascade_rule_on_a_shared_child() {
             vec![]
         }
     };
-    assert_eq!(
-        provenance_cascade(p(0), None, children, |_| true),
-        BTreeSet::from([p(0), p(1), p(2), p(3)])
-    );
-    assert_eq!(
-        provenance_cascade(p(0), Some(p(1)), children, |_| true),
-        BTreeSet::from([p(0), p(2), p(3)])
-    );
+    let walk = |suspender| {
+        provenance_cascade(
+            p(0),
+            suspender,
+            None,
+            children,
+            |_| true,
+            |_| Some(t0()),
+        )
+    };
+    assert_eq!(walk(None), BTreeSet::from([p(0), p(1), p(2), p(3)]));
+    assert_eq!(walk(Some(p(1))), BTreeSet::from([p(0), p(2), p(3)]));
 }
 
 /// `authorised(F)`: each of what it counts, alone
 #[test]
 fn what_a_factor_has_authorised() {
     let mut w = registered(DEVICE);
-    w.add_passkey(1, DEVICE, 0, 0);
-    w.add_passkey(2, DEVICE, 0, 0);
-    w.add_passkey(3, DEVICE, 0, 0);
-    w.add_passkey(4, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
+    w.add_passkey(2, DEVICE, 0);
+    w.add_passkey(3, DEVICE, 0);
+    w.add_passkey(4, DEVICE, 0);
     assert!(w.s.authorised_is_empty(p(1)));
     // An open session it opened; session 0 is P0's
     assert!(!w.s.authorised_is_empty(p(0)));
@@ -4137,7 +4012,7 @@ fn the_minimums_and_normal_mode_fail_each_way() {
     assert!(w.s.restricted() && !w.s.normal());
     w.s.count = 3;
     w.s.flags.minimum = false;
-    w.add_passkey(1, DEVICE, 0, 0);
+    w.add_passkey(1, DEVICE, 0);
     w.contact(1);
     w.wait(Duration::days(10));
     w.ok(
@@ -4155,4 +4030,1112 @@ fn the_minimums_and_normal_mode_fail_each_way() {
 
 fn agora_client() -> OAuthClientId {
     OAuthClientId::generate()
+}
+
+// ---------------------------------------------------------------------------
+// The flow rework (Steward, 2026-10-31): each changed row of the state table
+// ---------------------------------------------------------------------------
+
+fn pk_add(i: u8, class: PasskeyClass) -> Event {
+    Event::PasskeyAdd {
+        passkey: pk(i),
+        class,
+    }
+}
+
+fn pk_free(i: u8, class: PasskeyClass) -> Event {
+    Event::PasskeyAddFree {
+        passkey: pk(i),
+        class,
+    }
+}
+
+fn six_now(i: u8) -> Event {
+    Event::SendAdmit {
+        send: send_id(i),
+        recipients: agents(1000 * u32::from(i), 6),
+        when: When::Now,
+    }
+}
+
+fn six_default(i: u8) -> Event {
+    Event::SendAdmit {
+        send: send_id(i),
+        recipients: agents(1000 * u32::from(i), 6),
+        when: When::Default,
+    }
+}
+
+fn notices(w: &World) -> Vec<Notice> {
+    w.effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Notice(n) => Some(*n),
+            _ => None,
+        })
+        .collect()
+}
+
+fn logs(w: &World) -> Vec<LogEntry> {
+    w.effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Log(l) => Some(*l),
+            _ => None,
+        })
+        .collect()
+}
+
+/// §2 **PasskeyAdd**: one tap, a plain one will do, effective at once, its parent
+/// the tapper, announced with a link naming it, logged by it
+#[test]
+fn a_passkey_add_takes_one_tap() {
+    let mut w = registered(SYNCED);
+    w.contact(0);
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    let new = w.s.factor(p(1)).unwrap();
+    assert_eq!(new.state, CredentialState::Active);
+    assert_eq!(new.parent, Some(p(0)));
+    assert!(w.s.has_yk_passkey(), "it counts for the minimum at once");
+    assert!(
+        notices(&w)
+            .iter()
+            .any(|n| n.subject == NoticeSubject::FactorAdded(p(1))
+                && n.to == Audience::Both
+                && n.freeze_link.map(|(_, f)| f) == Some(p(0)))
+    );
+    let entry = logs(&w)[0];
+    assert_eq!(entry.kind, OperatorActionKind::CredentialAdd);
+    assert_eq!((entry.by, entry.target), (Some(p(0)), Some(p(1))));
+    // No other tap kind opens it, a session doesn't, and a suspended key can't
+    for wrong in [
+        tap(0, TapKind::Suspend),
+        tap(0, TapKind::RetiredPasskeyEnrolment),
+    ] {
+        assert_eq!(
+            w.try_do(pk_add(2, DEVICE), wrong),
+            Err(Refusal::WrongTapKind)
+        );
+    }
+    assert_eq!(
+        w.try_do(pk_add(2, DEVICE), Authority::Session(sess(0))),
+        Err(Refusal::WrongAuthority)
+    );
+    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
+    assert_eq!(
+        w.try_do(pk_add(2, DEVICE), tap(1, TapKind::PasskeyAdd)),
+        Err(Refusal::NotEffective)
+    );
+    assert_eq!(
+        w.try_do(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd)),
+        Err(Refusal::Exists)
+    );
+}
+
+/// §4.2: restricted and frozen allow it, banned doesn't
+#[test]
+fn a_passkey_add_passes_restricted_and_frozen_not_banned() {
+    let mut w = registered(DEVICE);
+    w.s.count = 6;
+    w.s.first_agent_at = Some(t0());
+    w.s.flags.minimum = true;
+    assert!(w.s.restricted());
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.contact(0);
+    w.ok(pk_add(2, DEVICE), tap(1, TapKind::PasskeyAdd));
+    let link = w.link();
+    w.ok(Event::Freeze { link }, Authority::Email(addr_id(1)));
+    w.ok(pk_add(3, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.ok(Event::Ban, Authority::Platform);
+    assert_eq!(
+        w.try_do(pk_add(4, DEVICE), tap(0, TapKind::PasskeyAdd)),
+        Err(Refusal::Mode(ModeClass::PasskeyAdd))
+    );
+}
+
+/// *Adding*: 20 passkeys, not counting revoked ones; both adds
+#[test]
+fn twenty_passkeys_and_no_more() {
+    let mut w = registered(DEVICE);
+    for i in 1..MAX_PASSKEYS as u8 {
+        w.ok(pk_free(i, DEVICE), Authority::Session(sess(0)));
+    }
+    assert_eq!(
+        w.try_do(pk_free(30, DEVICE), Authority::Session(sess(0))),
+        Err(Refusal::TooManyPasskeys)
+    );
+    assert_eq!(
+        w.try_do(pk_add(30, DEVICE), tap(0, TapKind::PasskeyAdd)),
+        Err(Refusal::TooManyPasskeys)
+    );
+    // A suspended one still counts; once revoked, it doesn't
+    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
+    assert_eq!(
+        w.try_do(pk_add(30, DEVICE), tap(0, TapKind::PasskeyAdd)),
+        Err(Refusal::TooManyPasskeys)
+    );
+    w.wait(Duration::hours(73));
+    w.ok(Event::Deadline { factor: p(1) }, Authority::Platform);
+    w.ok(pk_add(30, DEVICE), tap(0, TapKind::PasskeyAdd));
+}
+
+/// §2 **PasskeyAddFree**: a session alone, until the first agent, and never again:
+/// no parent, no link, no 72 h
+#[test]
+fn a_free_add_lasts_until_the_first_agent() {
+    let mut w = signed_up(DEVICE);
+    w.contact(0);
+    w.ok(pk_free(1, YUBIKEY), Authority::Session(sess(0)));
+    let new = w.s.factor(p(1)).unwrap();
+    assert_eq!(new.parent, None);
+    assert_eq!(new.sends_now_from, None);
+    assert!(notices(&w).iter().all(|n| n.freeze_link.is_none()));
+    assert!(
+        notices(&w)
+            .iter()
+            .any(|n| n.subject == NoticeSubject::FactorAdded(p(1))
+                && n.to == Audience::Both)
+    );
+    assert_eq!(logs(&w)[0].by, None);
+    // Not a tap, nor an email
+    assert_eq!(
+        w.try_do(pk_free(2, DEVICE), tap(0, TapKind::PasskeyAdd)),
+        Err(Refusal::WrongAuthority)
+    );
+    w.ok(Event::AgentAdd, Authority::Session(sess(0)));
+    assert_eq!(w.s.first_agent_at, Some(t0()));
+    assert_eq!(
+        w.try_do(pk_free(2, DEVICE), Authority::Session(sess(0))),
+        Err(Refusal::HasHadAgent)
+    );
+    // Deleting every agent doesn't reopen it
+    w.ok(
+        Event::AgentDelete { agent: agent(0) },
+        tap(0, TapKind::AgentDeletion),
+    );
+    w.ok(Event::AgentGraceEnd, Authority::Platform);
+    assert_eq!(w.s.count, 0);
+    assert_eq!(w.s.first_agent_at, Some(t0()));
+    assert_eq!(
+        w.try_do(pk_free(2, DEVICE), Authority::Session(sess(0))),
+        Err(Refusal::HasHadAgent)
+    );
+    // ... and a second agent doesn't move the date
+    w.wait(Duration::days(1));
+    w.ok(Event::AgentAdd, Authority::Session(sess(0)));
+    assert_eq!(w.s.first_agent_at, Some(t0()));
+}
+
+/// §4.2's row for the free add, while banned
+#[test]
+fn a_free_add_is_refused_while_banned() {
+    let mut w = signed_up(DEVICE);
+    w.ok(Event::Ban, Authority::Platform);
+    assert_eq!(
+        w.try_do(pk_free(1, DEVICE), Authority::Session(sess(0))),
+        Err(Refusal::Mode(ModeClass::PasskeyAdd))
+    );
+}
+
+/// §1 `sends_now_from`, for adds of each kind by taps of each standing
+#[test]
+fn the_new_key_cell_by_kind_and_approver() {
+    let now = t0();
+    let later = Some(now + new_factor_window());
+    let plain = FactorKind::Passkey(DEVICE);
+    let yk = FactorKind::Passkey(YUBIKEY);
+    let f = |new, tap, from| sends_now_from_for_add(new, tap, from, now);
+    // What can't send immediately never waits
+    assert_eq!(f(plain, plain, None), None);
+    assert_eq!(f(SUDO, plain, None), None);
+    assert_eq!(f(UNATTENDED, plain, None), None);
+    assert_eq!(f(FactorKind::SoftwareKey, plain, None), None);
+    // What can, waits, unless a YubiKey past its own 72 h approved it
+    assert_eq!(f(yk, plain, None), later);
+    assert_eq!(f(SUDO_PIN, plain, None), later);
+    assert_eq!(f(yk, SUDO, None), later);
+    assert_eq!(f(yk, yk, None), None);
+    assert_eq!(f(SUDO_PIN, yk, None), None);
+    assert_eq!(f(yk, yk, Some(now)), None, "its 72 h ended just now");
+    // In its own 72 h: the new key's run from its own add
+    assert_eq!(f(yk, yk, Some(now + Duration::seconds(1))), later);
+    assert_eq!(f(plain, yk, Some(now + Duration::seconds(1))), None);
+}
+
+/// I-41: held 72 h, for sends going now above 5, and nothing else
+#[test]
+fn a_new_key_cant_send_now_above_5_for_72_hours() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    w.s.first_agent_at = Some(t0());
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    let from = t0() + Duration::hours(72);
+    assert_eq!(w.s.factor(p(1)).unwrap().sends_now_from, Some(from));
+    // Explicitly now: refused, with why
+    assert!(matches!(
+        w.try_do(six_now(0), tap(1, TapKind::Send)),
+        Err(Refusal::Send(SendRefusal::NewKey { .. }))
+    ));
+    // By default: held
+    w.ok(six_default(1), tap(1, TapKind::Send));
+    let held = &w.s.sends[&send_id(1)];
+    assert_eq!(held.delivery, Delivery::Held);
+    assert_eq!(held.deliver_at, t0() + Duration::hours(1));
+    assert!(
+        notices(&w)
+            .iter()
+            .any(|n| n.subject == NoticeSubject::SendHeld(send_id(1))
+                && n.freeze_link.map(|(_, f)| f) == Some(p(1)))
+    );
+    // 5 or fewer go now
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(2),
+            recipients: agents(5000, 5),
+            when: When::Now,
+        },
+        tap(1, TapKind::Send),
+    );
+    // It counts for everything else at once: a setting changes on its tap
+    w.ok(
+        Event::ChangeRequest {
+            change: change_id(0),
+            setting: SettingChange::DmHold(Duration::minutes(2)),
+        },
+        tap(1, TapKind::PendingChange),
+    );
+    assert_eq!(w.s.settings.dm_hold, Duration::minutes(2));
+    // A second away from it, still held; on the instant, free
+    w.wait(Duration::hours(72) - Duration::seconds(1));
+    assert!(w.try_do(six_now(3), tap(1, TapKind::Send)).is_err());
+    w.wait(Duration::seconds(1));
+    w.ok(six_now(3), tap(1, TapKind::Send));
+    assert_eq!(w.s.sends[&send_id(3)].delivery, Delivery::Immediate);
+}
+
+/// *Adding*: "an operator with another such key sends now with that one"; a chain
+/// of new keys each has its own 72 h (§12.3), and a free tap has none
+#[test]
+fn a_chain_of_new_keys_each_waits_and_a_free_tap_doesnt() {
+    let mut w = registered(YUBIKEY); // no cell: past its 72 h
+    w.contact(0);
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    assert_eq!(w.s.factor(p(1)).unwrap().sends_now_from, None, "a free tap");
+    w.ok(six_now(0), tap(1, TapKind::Send));
+    // The thief's: a plain passkey adds K1, K1 adds K2
+    w.ok(pk_add(2, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.ok(pk_add(3, YUBIKEY), tap(2, TapKind::PasskeyAdd));
+    w.wait(Duration::hours(1));
+    w.ok(pk_add(4, YUBIKEY), tap(3, TapKind::PasskeyAdd));
+    assert_eq!(
+        w.s.factor(p(4)).unwrap().sends_now_from,
+        Some(w.now + Duration::hours(72)),
+        "its own 72 h, from its own add"
+    );
+    assert!(w.try_do(six_now(1), tap(4, TapKind::Send)).is_err());
+    // The owner's other YubiKey still sends now
+    w.wait(Duration::hours(30));
+    w.ok(six_now(2), tap(0, TapKind::Send));
+}
+
+/// §2 **RecoveryAdd** and the account's own first keys: no 72 h
+#[test]
+fn a_recovery_add_has_no_72_hours() {
+    let mut w = registered(DEVICE);
+    w.s.factors.get_mut(&p(0)).unwrap().state = CredentialState::Revoked;
+    w.s.sessions.clear();
+    assert!(w.s.stranded());
+    w.ok(Event::RecoveryRequest, Authority::Staff);
+    let case = *w.s.cases.keys().next().unwrap();
+    w.ok(
+        Event::RecoveryDecide {
+            case,
+            outcome: RecoveryOutcome::NewPasskey {
+                passkey: pk(1),
+                class: YUBIKEY,
+            },
+            losing: None,
+        },
+        Authority::Staff,
+    );
+    w.wait(Duration::days(7));
+    w.ok(Event::RecoveryEffective { case }, Authority::Platform);
+    let new = w.s.factor(p(1)).unwrap();
+    assert_eq!((new.parent, new.sends_now_from), (None, None));
+    assert!(notices(&w).iter().all(|n| n.freeze_link.is_none()));
+    // No request while a passkey works
+    assert_eq!(
+        w.try_do(Event::RecoveryRequest, Authority::Staff),
+        Err(Refusal::WrongState)
+    );
+}
+
+/// §3 **EnrolApprove**: a plain tap approves any kind, with the same cell
+#[test]
+fn an_enrolment_takes_a_plain_tap_and_the_same_cell() {
+    let mut w = registered(SYNCED);
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    let enrol_key = |w: &mut World, i: u8, kind, by| {
+        w.ok(
+            Event::EnrolStart {
+                enrolment: enrol(i),
+                kind,
+            },
+            Authority::Anonymous,
+        );
+        w.ok(
+            Event::EnrolApprove {
+                enrolment: enrol(i),
+                credential: cred(i),
+            },
+            tap(by, TapKind::EnrolmentApproval),
+        );
+        assert_eq!(w.s.factor(c(i)).unwrap().parent, Some(p(by)));
+    };
+    enrol_key(&mut w, 0, SUDO_PIN, 0);
+    assert_eq!(
+        w.s.factor(c(0)).unwrap().sends_now_from,
+        Some(t0() + Duration::hours(72))
+    );
+    enrol_key(&mut w, 1, SUDO, 0);
+    assert_eq!(w.s.factor(c(1)).unwrap().sends_now_from, None);
+    // A signature in its 72 h is held like a tap
+    w.contact(0);
+    assert!(matches!(
+        w.try_do(six_now(0), Authority::Signed(cred(0))),
+        Err(Refusal::Send(SendRefusal::NewKey { .. }))
+    ));
+    w.ok(six_default(1), Authority::Signed(cred(0)));
+    assert_eq!(w.s.sends[&send_id(1)].delivery, Delivery::Held);
+    // Approved by the owner's own YubiKey past its 72 h, it has none: here the
+    // key from the first line is still in its own, so it doesn't lend that
+    w.wait(Duration::hours(1));
+    enrol_key(&mut w, 2, SUDO_PIN, 1);
+    assert_eq!(
+        w.s.factor(c(2)).unwrap().sends_now_from,
+        Some(w.now + Duration::hours(72))
+    );
+    w.wait(Duration::hours(72));
+    enrol_key(&mut w, 3, SUDO_PIN, 1);
+    assert_eq!(w.s.factor(c(3)).unwrap().sends_now_from, None);
+}
+
+/// I-42 and §2's guard
+#[test]
+fn a_last_passkey_cant_suspend_itself() {
+    let mut w = registered(DEVICE);
+    // API keys don't count
+    w.ok(
+        Event::EnrolStart {
+            enrolment: enrol(0),
+            kind: SUDO,
+        },
+        Authority::Anonymous,
+    );
+    w.ok(
+        Event::EnrolApprove {
+            enrolment: enrol(0),
+            credential: cred(0),
+        },
+        tap(0, TapKind::EnrolmentApproval),
+    );
+    assert!(w.s.is_last_passkey(p(0)));
+    assert_eq!(
+        w.try_do(Event::Suspend { target: p(0) }, tap(0, TapKind::Suspend)),
+        Err(Refusal::LastPasskey)
+    );
+    assert_eq!(w.state(p(0)), CredentialState::Active);
+    // Suspending something else is fine
+    w.ok(Event::Suspend { target: c(0) }, tap(0, TapKind::Suspend));
+    // With another, it may, and only it goes
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    assert!(!w.s.is_last_passkey(p(0)));
+    w.ok(Event::Suspend { target: p(0) }, tap(0, TapKind::Suspend));
+    assert!(matches!(w.state(p(0)), CredentialState::Suspended(_)));
+    assert_eq!(w.state(p(1)), CredentialState::Active, "no cascade");
+    assert!(w.s.is_last_passkey(p(1)));
+    assert!(!w.s.is_last_passkey(p(0)), "not effective");
+    assert!(!w.s.is_last_passkey(c(0)), "not a passkey");
+    assert_eq!(
+        w.try_do(Event::Suspend { target: p(1) }, tap(1, TapKind::Suspend)),
+        Err(Refusal::LastPasskey)
+    );
+}
+
+/// I-42's other half: a freeze and staff may leave none
+#[test]
+fn a_freeze_or_staff_may_strand() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    w.ok(
+        Event::OAuthConsent {
+            client: agora_client(),
+            agent: agent(0),
+        },
+        tap(0, TapKind::OAuthConsent),
+    );
+    let link = w.link();
+    w.ok(Event::Freeze { link }, Authority::Email(addr_id(1)));
+    assert!(w.s.stranded());
+
+    let mut w = registered(DEVICE);
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.ok(pk_add(2, DEVICE), tap(1, TapKind::PasskeyAdd));
+    w.ok(Event::Suspend { target: p(2) }, tap(1, TapKind::Suspend));
+    w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
+    let case = *w.s.cases.keys().next().unwrap();
+    let decide = |losing| Event::RecoveryDecide {
+        case,
+        outcome: RecoveryOutcome::Revoke,
+        losing,
+    };
+    w.ok(decide(None), Authority::Staff);
+    w.ok(
+        Event::RecoveryCancel { case },
+        tap(0, TapKind::CounterClaim),
+    );
+    w.ok(decide(Some(p(0))), Authority::Staff);
+    assert!(matches!(w.state(p(0)), CredentialState::Suspended(_)));
+    assert!(matches!(w.state(p(1)), CredentialState::Suspended(_)));
+    assert!(w.s.stranded());
+}
+
+/// §1 `cascade(T, S, t)`: T's age doesn't matter, each link after it does
+#[test]
+fn the_cascade_reaches_back_72_hours_link_by_link() {
+    let mut w = registered(DEVICE); // T = P0, old
+    w.ok(pk_add(9, DEVICE), tap(0, TapKind::PasskeyAdd)); // the suspender's parent
+    let owner = 9;
+    w.s.factors.get_mut(&p(9)).unwrap().parent = None;
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd)); // old: 100 h back
+    w.wait(Duration::hours(50));
+    w.ok(pk_add(2, DEVICE), tap(1, TapKind::PasskeyAdd)); // recent, below old
+    w.ok(pk_add(3, DEVICE), tap(0, TapKind::PasskeyAdd)); // recent: 50 h back
+    w.wait(Duration::hours(50));
+    w.ok(pk_add(4, DEVICE), tap(3, TapKind::PasskeyAdd)); // recent below recent
+    let cascade = w.s.cascade(p(0), Some(p(owner)), w.now);
+    assert_eq!(cascade, BTreeSet::from([p(0), p(3), p(4)]));
+    assert_eq!(cascade, cascade_restated(&w.s, p(0), p(owner), w.now));
+    w.ok(
+        Event::Suspend { target: p(0) },
+        tap(owner, TapKind::Suspend),
+    );
+    assert_eq!(w.state(p(1)), CredentialState::Active, "the older link");
+    assert_eq!(w.state(p(2)), CredentialState::Active, "behind the older");
+    for f in [p(3), p(4)] {
+        assert!(
+            matches!(w.state(f), CredentialState::Suspended(s) if s.follows_root == Some(p(0)))
+        );
+    }
+}
+
+/// The window's edge: at exactly 72 h a factor is out, the instant its
+/// `sends_now_from` frees it
+#[test]
+fn the_cascade_window_ends_when_the_new_key_may_send() {
+    let mut w = registered(DEVICE);
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    let from = w.s.factor(p(1)).unwrap().sends_now_from.unwrap();
+    assert_eq!(
+        w.s.cascade(p(0), None, from - Duration::seconds(1)),
+        BTreeSet::from([p(0), p(1)])
+    );
+    assert_eq!(w.s.cascade(p(0), None, from), BTreeSet::from([p(0)]));
+}
+
+/// §2: suspending a factor a freeze suspended applies the cascade the freeze
+/// didn't, with its 72 h counted back from this suspension
+#[test]
+fn suspending_a_frozen_factor_counts_72_hours_from_then() {
+    let mut w = registered(DEVICE);
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.contact(0);
+    w.ok(pk_add(2, DEVICE), tap(1, TapKind::PasskeyAdd)); // P1's first
+    let link = w.link();
+    w.wait(Duration::hours(1));
+    w.ok(pk_add(3, DEVICE), tap(1, TapKind::PasskeyAdd)); // P1's second
+    w.ok(Event::Freeze { link }, Authority::Email(addr_id(1)));
+    assert_eq!(w.state(p(2)), CredentialState::Active, "no cascade");
+    let CredentialState::Suspended(frozen) = w.state(p(1)) else {
+        panic!("suspended")
+    };
+    // 71½ h on, P2 (72½ h old) is out of the window, and P3 (71½ h old) isn't
+    w.wait(Duration::hours(71) + Duration::minutes(30));
+    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
+    assert_eq!(w.state(p(2)), CredentialState::Active);
+    assert!(matches!(w.state(p(3)), CredentialState::Suspended(_)));
+    let CredentialState::Suspended(direct) = w.state(p(1)) else {
+        panic!("suspended")
+    };
+    assert_eq!(
+        direct.deadline, frozen.deadline,
+        "the deadline doesn't move"
+    );
+    assert_eq!(direct.cause, SuspensionCause::Direct { by: p(0) });
+}
+
+/// CD1's worked case: the owner's Q suspends Y, which a thief used; a key the
+/// thief added more than 72 h ago stays, and is suspended on its own
+#[test]
+fn an_older_key_the_thief_added_is_suspended_separately() {
+    let mut w = registered(DEVICE);
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    w.ok(pk_add(2, DEVICE), tap(1, TapKind::PasskeyAdd));
+    w.wait(Duration::hours(73));
+    w.ok(Event::Suspend { target: p(1) }, tap(0, TapKind::Suspend));
+    assert_eq!(w.state(p(2)), CredentialState::Active);
+    w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
+    assert!(matches!(w.state(p(2)), CredentialState::Suspended(_)));
+}
+
+/// §2 **RecoverySuspend**: no time limit, unlike a passkey's suspension
+#[test]
+fn a_recovery_loser_cascades_with_no_time_limit() {
+    let mut w = registered(DEVICE);
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.ok(pk_add(2, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.ok(pk_add(3, DEVICE), tap(1, TapKind::PasskeyAdd));
+    w.wait(Duration::days(30));
+    w.ok(Event::Suspend { target: p(2) }, tap(0, TapKind::Suspend));
+    w.ok(Event::Contest { factor: p(2) }, tap(2, TapKind::Contest));
+    let case = *w.s.cases.keys().next().unwrap();
+    let decide = |losing| Event::RecoveryDecide {
+        case,
+        outcome: RecoveryOutcome::Reinstate,
+        losing,
+    };
+    w.ok(decide(None), Authority::Staff);
+    w.ok(
+        Event::RecoveryCancel { case },
+        tap(1, TapKind::CounterClaim),
+    );
+    w.ok(decide(Some(p(1))), Authority::Staff);
+    assert!(matches!(w.state(p(3)), CredentialState::Suspended(_)));
+}
+
+/// §2's note: replacing is an add and a suspension on one tap, all or nothing,
+/// never by the old row
+#[test]
+fn replacing_a_passkey_is_an_add_and_a_suspension() {
+    let mut w = registered(DEVICE);
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    let replace = |w: &mut World, new, old, tapper| {
+        let t = w.s.replace_passkey(
+            pk(new),
+            YUBIKEY,
+            pk(old),
+            pk(tapper),
+            w.now,
+            &mut w.ids,
+        )?;
+        w.s = t.state;
+        w.effects = t.effects;
+        Ok::<_, Refusal>(())
+    };
+    let before = w.s.clone();
+    assert_eq!(replace(&mut w, 2, 1, 1), Err(Refusal::SameFactor));
+    assert_eq!(w.s, before);
+    replace(&mut w, 2, 1, 0).unwrap();
+    assert_eq!(w.s.factor(p(2)).unwrap().parent, Some(p(0)));
+    assert!(w.s.factor(p(2)).unwrap().sends_now_from.is_some());
+    assert!(matches!(w.state(p(1)), CredentialState::Suspended(_)));
+    let kinds: Vec<_> = logs(&w).iter().map(|l| l.kind).collect();
+    assert!(kinds.contains(&OperatorActionKind::CredentialAdd));
+    assert!(kinds.contains(&OperatorActionKind::CredentialSuspend));
+    // A failure in either half leaves nothing: P1 is gone, so nothing is added
+    let before = w.s.clone();
+    assert_eq!(replace(&mut w, 3, 0, 1), Err(Refusal::NotEffective));
+    assert_eq!(w.s, before);
+    let unknown = replace(&mut w, 3, 7, 0);
+    assert_eq!(unknown, Err(Refusal::Unknown));
+    assert_eq!(w.s, before);
+    // Only 0x04's tap: a lone 0x04 opens no add
+    assert_eq!(
+        w.try_do(pk_add(3, DEVICE), tap(0, TapKind::Suspend)),
+        Err(Refusal::WrongTapKind)
+    );
+}
+
+/// D9, I-43: an account's first days hold a send above 5, whatever taps it
+#[test]
+fn a_new_account_holds_sends_above_5() {
+    let mut w = signed_up(YUBIKEY);
+    w.contact(0);
+    assert!(w.s.new_account(w.now));
+    assert!(matches!(
+        w.try_do(six_now(0), tap(0, TapKind::Send)),
+        Err(Refusal::Send(SendRefusal::NewAccount { .. }))
+    ));
+    // By default: 24 h, not the hour
+    w.ok(six_default(1), tap(0, TapKind::Send));
+    let m = &w.s.sends[&send_id(1)];
+    assert_eq!(m.delivery, Delivery::Held);
+    assert_eq!(m.deliver_at, t0() + Duration::hours(24));
+    // An explicit time inside the 24 h is refused, not delayed
+    assert!(matches!(
+        w.try_do(
+            Event::SendAdmit {
+                send: send_id(2),
+                recipients: agents(7000, 6),
+                when: When::At(t0() + Duration::hours(23)),
+            },
+            tap(0, TapKind::Send),
+        ),
+        Err(Refusal::Send(SendRefusal::NewAccount { .. }))
+    ));
+    // 5 or fewer are untouched
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(3),
+            recipients: agents(1000, 5),
+            when: When::Now,
+        },
+        Authority::Session(sess(0)),
+    );
+    assert_eq!(w.s.sends[&send_id(3)].delivery, Delivery::Immediate);
+    // It can't be brought forward in that time, or only past it
+    assert!(matches!(
+        w.try_do(
+            Event::SendForward {
+                send: send_id(1),
+                deliver_at: t0() + Duration::hours(23),
+            },
+            tap(0, TapKind::MoveSend),
+        ),
+        Err(Refusal::Send(SendRefusal::NewAccount { .. }))
+    ));
+    // Its age is a server setting: the last instant of the 7 days, and after
+    w.wait(Duration::days(7) - Duration::seconds(1));
+    assert!(w.s.new_account(w.now));
+    assert!(w.try_do(six_now(4), tap(0, TapKind::Send)).is_err());
+    w.wait(Duration::seconds(1));
+    assert!(!w.s.new_account(w.now));
+    w.ok(six_now(4), tap(0, TapKind::Send));
+    let mut short = signed_up(YUBIKEY);
+    short.s.limits.new_account_days = 1;
+    short.contact(0);
+    short.wait(Duration::days(1));
+    short.ok(six_now(0), tap(0, TapKind::Send));
+}
+
+/// D9: a longer bulk hold wins, new account or not
+#[test]
+fn the_new_account_hold_is_the_longer_of_a_day_and_the_bulk_hold() {
+    let six = agents(0, 6);
+    let mut req = request(&six, When::Default, TapLevel::YubikeyTap, &[]);
+    req.new_account = true;
+    req.bulk_hold = Duration::hours(48);
+    let plan = plan_send(&req).unwrap();
+    assert_eq!(plan.deliver_at, t0() + Duration::hours(48));
+    assert_eq!(plan.delivery, Delivery::Held);
+}
+
+/// I-43's exception: the compromise notice is outside it
+#[test]
+fn a_new_accounts_compromise_notice_is_outside_the_hold() {
+    let mut w = signed_up(DEVICE);
+    w.ok(pk_free(1, DEVICE), Authority::Session(sess(0)));
+    w.ok(pk_free(2, DEVICE), Authority::Session(sess(0)));
+    w.contact(0);
+    w.s.limits.new_account_days = 30;
+    w.wait(Duration::days(8));
+    assert!(w.s.new_account(w.now));
+    w.ok(
+        Event::OAuthConsent {
+            client: agora_client(),
+            agent: agent(0),
+        },
+        tap(2, TapKind::OAuthConsent),
+    );
+    let link = w.link();
+    w.ok(Event::Freeze { link }, Authority::Email(addr_id(1)));
+    w.ok(Event::CompromiseNotice, tap(1, TapKind::CompromiseNotice));
+    assert!(w.effects.contains(&Effect::DeliverCompromiseNotice));
+}
+
+/// §6: above 500 goes now on a YubiKey tap, with the names on the notice
+#[test]
+fn a_send_above_500_goes_now_on_a_yubikey_tap_with_names() {
+    let mut w = registered(YUBIKEY);
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 501),
+            when: When::Now,
+        },
+        tap(0, TapKind::Send),
+    );
+    assert_eq!(w.s.sends[&send_id(0)].delivery, Delivery::Immediate);
+    assert!(
+        notices(&w)
+            .iter()
+            .any(|n| n.subject == NoticeSubject::SendNow(send_id(0))
+                && n.names
+                && n.to == Audience::Both)
+    );
+}
+
+/// Held 24 h above 50, on any tap short of a YubiKey's now
+#[test]
+fn above_50_a_held_send_waits_a_day() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 51),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    assert_eq!(
+        w.s.sends[&send_id(0)].deliver_at,
+        t0() + Duration::hours(24)
+    );
+    assert!(
+        required_hold(
+            Reach {
+                reach: 50,
+                immediate_reach: 50
+            },
+            bulk_hold_floor(),
+            false
+        ) == Duration::hours(1)
+    );
+}
+
+/// §6 **SendForward**: a YubiKey tap, earlier, and it then admitted the send
+#[test]
+fn bringing_a_send_forward_takes_a_yubikey_tap() {
+    let mut w = registered(YUBIKEY);
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.contact(0);
+    w.ok(six_default(0), tap(1, TapKind::Send));
+    let at = w.s.sends[&send_id(0)].deliver_at;
+    let forward = |deliver_at| Event::SendForward {
+        send: send_id(0),
+        deliver_at,
+    };
+    assert_eq!(
+        w.try_do(forward(w.now), tap(1, TapKind::MoveSend)),
+        Err(Refusal::NeedsYubikeyTap)
+    );
+    assert_eq!(
+        w.try_do(forward(w.now), tap(0, TapKind::Send)),
+        Err(Refusal::WrongTapKind)
+    );
+    assert_eq!(
+        w.try_do(forward(w.now), Authority::Session(sess(0))),
+        Err(Refusal::WrongAuthority)
+    );
+    assert_eq!(
+        w.try_do(forward(at), tap(0, TapKind::MoveSend)),
+        Err(Refusal::WrongState),
+        "it must be earlier"
+    );
+    w.ok(forward(w.now), tap(0, TapKind::MoveSend));
+    let m = &w.s.sends[&send_id(0)];
+    assert_eq!(m.deliver_at, w.now);
+    assert_eq!(m.admitted_by, AdmittedBy::Factor(p(0)));
+    assert_eq!(m.level, TapLevel::YubikeyTap);
+    assert_eq!(m.delivery, Delivery::Held, "stored at admission");
+    assert!(
+        notices(&w)
+            .iter()
+            .any(|n| n.subject == NoticeSubject::SendMoved(send_id(0))
+                && n.to == Audience::Both
+                && n.freeze_link.map(|(_, f)| f) == Some(p(0)))
+    );
+    assert_eq!(logs(&w)[0].kind, OperatorActionKind::DmSend);
+    // Suspending the new admitter cancels it; the old one no longer does
+    w.ok(Event::Suspend { target: p(0) }, tap(1, TapKind::Suspend));
+    assert_eq!(w.s.sends[&send_id(0)].state, SendState::Cancelled);
+}
+
+/// §6 **SendForward**, by the API's YubiKey tap and from a new key
+#[test]
+fn a_new_key_cant_bring_a_send_forward_above_5() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
+    w.ok(six_default(0), tap(0, TapKind::Send));
+    let forward = Event::SendForward {
+        send: send_id(0),
+        deliver_at: w.now,
+    };
+    assert!(matches!(
+        w.try_do(forward.clone(), tap(1, TapKind::MoveSend)),
+        Err(Refusal::Send(SendRefusal::NewKey { .. }))
+    ));
+    // A signature that isn't a YubiKey tap
+    w.ok(
+        Event::EnrolStart {
+            enrolment: enrol(0),
+            kind: SUDO,
+        },
+        Authority::Anonymous,
+    );
+    w.ok(
+        Event::EnrolApprove {
+            enrolment: enrol(0),
+            credential: cred(0),
+        },
+        tap(0, TapKind::EnrolmentApproval),
+    );
+    assert_eq!(
+        w.try_do(forward.clone(), Authority::Signed(cred(0))),
+        Err(Refusal::NeedsYubikeyTap)
+    );
+    w.wait(Duration::minutes(1));
+    w.ok(
+        Event::EnrolStart {
+            enrolment: enrol(1),
+            kind: SUDO_PIN,
+        },
+        Authority::Anonymous,
+    );
+    w.ok(
+        Event::EnrolApprove {
+            enrolment: enrol(1),
+            credential: cred(1),
+        },
+        tap(0, TapKind::EnrolmentApproval),
+    );
+    // Five agents forward from a new key: fine, nothing above 5 goes now
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(1),
+            recipients: agents(0, 5),
+            when: When::At(w.now + Duration::hours(5)),
+        },
+        Authority::Session(sess(0)),
+    );
+    w.ok(
+        Event::SendForward {
+            send: send_id(1),
+            deliver_at: w.now + Duration::hours(1),
+        },
+        Authority::Signed(cred(1)),
+    );
+    assert_eq!(w.s.sends[&send_id(1)].admitted_by, AdmittedBy::Factor(c(1)));
+    // Past its 72 h, the send above 5 too
+    w.wait(Duration::hours(72));
+    w.ok(six_default(2), tap(0, TapKind::Send));
+    w.ok(
+        Event::SendForward {
+            send: send_id(2),
+            deliver_at: w.now,
+        },
+        Authority::Signed(cred(1)),
+    );
+}
+
+/// §4.2: a frozen or banned account has nothing to move and can't try
+#[test]
+fn moving_a_send_needs_the_mode_of_a_send() {
+    let mut w = registered(YUBIKEY);
+    w.contact(0);
+    w.ok(six_default(0), tap(0, TapKind::Send));
+    w.s.count = 6;
+    w.s.first_agent_at = Some(t0());
+    w.s.flags.minimum = true;
+    assert!(w.s.restricted());
+    let at = w.s.sends[&send_id(0)].deliver_at;
+    assert_eq!(
+        w.try_do(
+            Event::SendForward {
+                send: send_id(0),
+                deliver_at: w.now
+            },
+            tap(0, TapKind::MoveSend)
+        ),
+        Err(Refusal::Mode(ModeClass::SendLarge))
+    );
+    assert_eq!(
+        w.try_do(
+            Event::SendLater {
+                send: send_id(0),
+                deliver_at: at + Duration::hours(5)
+            },
+            tap(0, TapKind::MoveSend)
+        ),
+        Err(Refusal::Mode(ModeClass::SendLarge))
+    );
+}
+
+/// §6 **SendLater**: what cancelling takes, not the cancel link; a YubiKey tap if
+/// one admitted it; announced again; `immediate` false from then
+#[test]
+fn moving_a_send_later() {
+    let mut w = registered(YUBIKEY);
+    w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 2),
+            when: When::Now,
+        },
+        Authority::Session(sess(0)),
+    );
+    assert_eq!(w.s.sends[&send_id(0)].delivery, Delivery::Immediate);
+    let later = |i, deliver_at| Event::SendLater {
+        send: send_id(i),
+        deliver_at,
+    };
+    let at = w.now + Duration::hours(2);
+    assert_eq!(
+        w.try_do(later(0, w.now), Authority::Session(sess(0))),
+        Err(Refusal::WrongState),
+        "it must be later"
+    );
+    assert_eq!(
+        w.try_do(later(0, at), Authority::Email(w.s.primary.id)),
+        Err(Refusal::WrongAuthority),
+        "the cancel link only cancels"
+    );
+    w.ok(later(0, at), Authority::Session(sess(0)));
+    let m = &w.s.sends[&send_id(0)];
+    assert_eq!(m.deliver_at, at);
+    assert_eq!(m.delivery, Delivery::Held);
+    assert_eq!(m.admitted_by, AdmittedBy::Session(sess(0)));
+    assert!(notices(&w).is_empty(), "it was never announced");
+
+    // Admitted by a plain tap and announced: moved by a session, announced again
+    w.ok(six_default(1), tap(1, TapKind::Send));
+    let at = w.s.sends[&send_id(1)].deliver_at + Duration::hours(1);
+    w.ok(later(1, at), Authority::Session(sess(0)));
+    let moved = notices(&w);
+    assert!(moved.iter().any(|n| n.to == Audience::Primary
+        && n.cancel_link == Some(send_id(1))
+        && n.subject == NoticeSubject::SendMoved(send_id(1))));
+    assert!(moved.iter().any(|n| n.to == Audience::Contact
+        && n.freeze_link.map(|(_, f)| f) == Some(p(1))));
+
+    // A YubiKey tap's: only a YubiKey tap moves it
+    w.ok(six_now(2), tap(0, TapKind::Send));
+    let at = w.now + Duration::hours(3);
+    assert_eq!(
+        w.try_do(later(2, at), Authority::Session(sess(0))),
+        Err(Refusal::WrongAuthority)
+    );
+    assert_eq!(
+        w.try_do(later(2, at), tap(1, TapKind::MoveSend)),
+        Err(Refusal::NeedsYubikeyTap)
+    );
+    w.ok(later(2, at), tap(0, TapKind::MoveSend));
+    assert_eq!(logs(&w)[0].by, Some(p(0)));
+    assert!(w.s.sends[&send_id(2)].announced);
+}
+
+/// §6 **SendLater**: refused if the new time needs more than the send has, under
+/// the rule for a new send; the hold it has is counted from its admission
+#[test]
+fn a_send_moved_later_is_counted_again() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    // Five untapped, and five more two days out
+    let far = t0() + Duration::days(2);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 5),
+            when: When::Default,
+        },
+        Authority::Session(sess(0)),
+    );
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(1),
+            recipients: agents(100, 5),
+            when: When::At(far),
+        },
+        Authority::Session(sess(0)),
+    );
+    // Next to the five, its reach is ten: it needs more than a session
+    assert!(matches!(
+        w.try_do(
+            Event::SendLater {
+                send: send_id(0),
+                deliver_at: far,
+            },
+            Authority::Session(sess(0)),
+        ),
+        Err(Refusal::Send(SendRefusal::NeedsTap { .. }))
+    ));
+    assert_eq!(
+        w.s.sends[&send_id(0)].deliver_at,
+        t0() + Duration::minutes(1)
+    );
+    // A held send isn't refused for nearing its time: 59 minutes in, one more
+    w.ok(six_default(2), tap(0, TapKind::Send));
+    let at = w.s.sends[&send_id(2)].deliver_at;
+    w.wait(Duration::minutes(59));
+    w.ok(
+        Event::SendLater {
+            send: send_id(2),
+            deliver_at: at + Duration::minutes(1),
+        },
+        Authority::Session(sess(0)),
+    );
+    // ... and a software key above 5 only takes away
+    assert_eq!(w.s.sends[&send_id(2)].state, SendState::Scheduled);
+}
+
+/// §10: signing yourself out leaves your sends; signing out another cancels its
+#[test]
+fn signing_out_and_what_stands() {
+    let mut w = registered(DEVICE);
+    w.sign_in(1, 0);
+    w.sign_in(2, 0);
+    let send = |w: &mut World, i, session| {
+        w.ok(
+            Event::SendAdmit {
+                send: send_id(i),
+                recipients: agents(u32::from(i), 1),
+                when: When::At(t0() + Duration::days(1)),
+            },
+            Authority::Session(sess(session)),
+        );
+    };
+    send(&mut w, 0, 0);
+    send(&mut w, 1, 1);
+    send(&mut w, 2, 2);
+    w.ok(Event::SignOut, Authority::Session(sess(0)));
+    assert!(!w.s.sessions[&sess(0)].open);
+    assert_eq!(w.s.sends[&send_id(0)].state, SendState::Scheduled);
+    assert_eq!(
+        w.try_do(Event::SignOut, Authority::Session(sess(0))),
+        Err(Refusal::SessionClosed)
+    );
+    // Naming one session ends it alone, and not yourself
+    let name = |s| Event::SignOutOthers { session: Some(s) };
+    assert_eq!(
+        w.try_do(name(sess(1)), Authority::Session(sess(1))),
+        Err(Refusal::WrongState)
+    );
+    assert_eq!(
+        w.try_do(name(sess(0)), Authority::Session(sess(1))),
+        Err(Refusal::WrongState)
+    );
+    assert_eq!(
+        w.try_do(name(sess(9)), Authority::Session(sess(1))),
+        Err(Refusal::Unknown)
+    );
+    w.ok(name(sess(2)), Authority::Session(sess(1)));
+    assert!(!w.s.sessions[&sess(2)].open && w.s.sessions[&sess(1)].open);
+    assert_eq!(w.s.sends[&send_id(2)].state, SendState::Cancelled);
+    assert_eq!(w.s.sends[&send_id(1)].state, SendState::Scheduled);
+}
+
+/// `Event` has no password, and no factor is ever pending: I-5's only terminal
+/// state, and a factor that isn't `Active` authorises nothing
+#[test]
+fn a_revoked_factor_stays_revoked() {
+    assert!(CredentialState::Revoked.is_terminal());
+    assert!(!CredentialState::Active.is_terminal());
+    assert!(!CredentialState::Revoked.is_live());
+    assert_eq!(CredentialState::Revoked.suspension(), None);
+    assert_eq!(CredentialState::Active.suspension(), None);
 }

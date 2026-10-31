@@ -114,8 +114,8 @@ impl FactorKind {
         }
     }
 
-    /// `gives_yubikey_tap`: once an account has a live factor that does,
-    /// adding another takes a YubiKey tap (*Adding a credential*)
+    /// `gives_yubikey_tap`: it can send now to any number of agents, so a new
+    /// one waits ([`sends_now_from_for_add`](super::sends_now_from_for_add))
     pub const fn gives_yubikey_tap(&self) -> bool {
         matches!(self.tap_level(), TapLevel::YubikeyTap)
     }
@@ -135,9 +135,10 @@ impl FactorKind {
 
 /// Up to this reach, a send needs no tap and may go now
 pub const UNTAPPED_REACH: u32 = 5;
-/// Up to this reach, any tap sends, and a YubiKey tap sends now; above it,
-/// only a YubiKey tap, and the send is always held
-pub const TAPPED_REACH: u32 = 500;
+/// Up to this reach a held send waits the bulk hold; above it, [`long_hold`]
+pub const SHORT_HOLD_REACH: u32 = 50;
+/// Above this reach the contact also gets the count and the first names
+pub const NAMED_REACH: u32 = 500;
 
 /// Each side of a send's `deliver_at` that its window spans
 pub fn window_half_width() -> Duration {
@@ -149,28 +150,50 @@ pub fn bulk_hold_floor() -> Duration {
     Duration::hours(1)
 }
 
+/// The hold above [`SHORT_HOLD_REACH`], and on a new account above
+/// [`UNTAPPED_REACH`] (or the bulk hold, if longer)
+pub fn long_hold() -> Duration {
+    Duration::hours(24)
+}
+
+/// How far off a send's `deliver_at` must be for it to count as held. A new
+/// account holds a send whose immediate reach is above 5 at any reach
+pub fn required_hold(
+    reach: Reach,
+    bulk_hold: Duration,
+    new_account: bool,
+) -> Duration {
+    let long = reach.reach > SHORT_HOLD_REACH
+        || (new_account && reach.immediate_reach > UNTAPPED_REACH);
+    if long {
+        bulk_hold.max(long_hold())
+    } else {
+        bulk_hold
+    }
+}
+
 /// Whether a send goes now or is held
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
-    /// `deliver_at` sooner than now + the bulk hold
+    /// `deliver_at` sooner than now + its [`required_hold`]
     Immediate,
-    /// `deliver_at` at least now + the bulk hold
+    /// `deliver_at` at least now + its [`required_hold`]
     Held,
 }
 
 impl Delivery {
-    /// Held when `deliver_at` is at least `now` + `bulk_hold`
+    /// Held when `deliver_at` is at least `now` + `hold`
     pub fn of(
         deliver_at: DateTime<Utc>,
         now: DateTime<Utc>,
-        bulk_hold: Duration,
+        hold: Duration,
     ) -> Self {
-        // SPEC: decision 9, "held: deliver_at ≥ now + the bulk hold"; so
-        // anything sooner is a send that goes now, `dm_hold` included
-        match now.checked_add_signed(bulk_hold) {
+        // SPEC: decision 9, "held: deliver_at ≥ now + the hold"; so anything
+        // sooner is a send that goes now, `dm_hold` included
+        match now.checked_add_signed(hold) {
             Some(held) if deliver_at >= held => Self::Held,
             _ => Self::Immediate,
         }
@@ -237,34 +260,24 @@ pub fn reach(
     }
 }
 
-/// The level a send needs (decision 9), or `None` when no level may send it
-/// that way: above [`TAPPED_REACH`], or an immediate reach above it, a
-/// send must be held.
+/// The level a send needs (decision 9).
 ///
 /// - reach ≤ 5: none;
-/// - 6–500: [`TapLevel::Unattended`] held, [`TapLevel::Tap`] now;
-/// - above 500: [`TapLevel::YubikeyTap`], held only;
-/// - now, with an immediate reach of 6–500: a YubiKey tap.
-pub fn required_tap(reach: Reach, delivery: Delivery) -> Option<TapLevel> {
-    let by_reach = match (reach.reach, delivery) {
-        (0..=UNTAPPED_REACH, _) => TapLevel::None,
-        (_, Delivery::Held) if reach.reach <= TAPPED_REACH => {
-            TapLevel::Unattended
+/// - reach above 5: [`TapLevel::Unattended`] held, [`TapLevel::Tap`] now;
+/// - now, with an immediate reach above 5: a YubiKey tap, at any reach.
+///
+/// A new key and a new account can't send now above 5 at any level:
+/// [`plan_send`] takes those
+pub fn required_tap(reach: Reach, delivery: Delivery) -> TapLevel {
+    match delivery {
+        Delivery::Held if reach.reach <= UNTAPPED_REACH => TapLevel::None,
+        Delivery::Held => TapLevel::Unattended,
+        Delivery::Immediate if reach.immediate_reach > UNTAPPED_REACH => {
+            TapLevel::YubikeyTap
         }
-        (_, Delivery::Immediate) if reach.reach <= TAPPED_REACH => {
-            TapLevel::Tap
-        }
-        (_, Delivery::Held) => TapLevel::YubikeyTap,
-        (_, Delivery::Immediate) => return None,
-    };
-    let by_now = match (delivery, reach.immediate_reach) {
-        (Delivery::Held, _) | (Delivery::Immediate, 0..=UNTAPPED_REACH) => {
-            TapLevel::None
-        }
-        (Delivery::Immediate, ir) if ir <= TAPPED_REACH => TapLevel::YubikeyTap,
-        (Delivery::Immediate, _) => return None,
-    };
-    Some(by_reach.max(by_now))
+        Delivery::Immediate if reach.reach > UNTAPPED_REACH => TapLevel::Tap,
+        Delivery::Immediate => TapLevel::None,
+    }
 }
 
 /// When a send asks to be delivered
@@ -289,6 +302,10 @@ pub struct SendRequest<'a> {
     /// The account's emergency contact is verified, on another domain
     pub contact_ok: bool,
     pub now: DateTime<Utc>,
+    /// `sends_now` of the factor behind the request
+    pub sends_now: bool,
+    /// `new_account` of the operator's account
+    pub new_account: bool,
     /// The operator's default hold
     pub dm_hold: Duration,
     /// The operator's bulk hold (at least [`bulk_hold_floor`])
@@ -335,20 +352,23 @@ impl SendPlan {
 
     /// Above 500: the contact also gets the count and the first names
     pub fn names_to_contact(&self) -> bool {
-        self.reach.reach > TAPPED_REACH
+        self.reach.reach > NAMED_REACH
     }
 }
 
 /// Why decision 9 refused a send
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SendRefusal {
-    /// The request's level is below what the send needs; `required` is
-    /// `None` when no level can send it this way (it must be held)
+    /// The request's level is below what the send needs
     #[error("this send needs {required:?} (reach {reach:?})")]
-    NeedsTap {
-        required: Option<TapLevel>,
-        reach: Reach,
-    },
+    NeedsTap { required: TapLevel, reach: Reach },
+    /// A key in its first 72 h can't send now above 5 agents: it must be held,
+    /// or sent with another YubiKey
+    #[error("this key is new: this send has to be held")]
+    NewKey { reach: Reach },
+    /// A new account can't send now above 5 agents, at any level
+    #[error("new accounts can't send immediately to this many agents yet")]
+    NewAccount { reach: Reach },
     /// Reach above 5 needs a verified emergency contact on another domain
     #[error(
         "a send to more than 5 agents needs a qualifying emergency contact"
@@ -364,42 +384,49 @@ pub enum SendRefusal {
 
 /// Decision 9 for one send: where it lands, and whether `level` may make it.
 ///
-/// An explicit time the level can't send is refused with the level it
-/// needs; nothing is silently delayed
+/// An explicit time the level can't send is refused with what it needs;
+/// nothing is silently delayed
 pub fn plan_send(request: &SendRequest<'_>) -> Result<SendPlan, SendRefusal> {
     if request.recipients.is_empty() {
         return Err(SendRefusal::NoRecipients);
     }
     let now = request.now;
-    let evaluate = |deliver_at: DateTime<Utc>| {
-        let delivery = Delivery::of(deliver_at, now, request.bulk_hold);
+    let plan = |deliver_at: DateTime<Utc>| {
         let reach = reach(request.recipients, deliver_at, request.window);
-        (delivery, reach, required_tap(reach, delivery))
-    };
-    let plan = |deliver_at| {
-        let (delivery, reach, required) = evaluate(deliver_at);
-        match required {
-            Some(required) if request.level >= required => Ok(SendPlan {
-                deliver_at,
-                delivery,
-                reach,
-                required,
-            }),
-            _ => Err(SendRefusal::NeedsTap { required, reach }),
+        let hold = required_hold(reach, request.bulk_hold, request.new_account);
+        let delivery = Delivery::of(deliver_at, now, hold);
+        let required = required_tap(reach, delivery);
+        let now_above_5 = delivery == Delivery::Immediate
+            && reach.immediate_reach > UNTAPPED_REACH;
+        if now_above_5 && request.new_account {
+            return Err(SendRefusal::NewAccount { reach });
         }
+        if request.level < required {
+            return Err(SendRefusal::NeedsTap { required, reach });
+        }
+        if now_above_5 && !request.sends_now {
+            return Err(SendRefusal::NewKey { reach });
+        }
+        Ok(SendPlan {
+            deliver_at,
+            delivery,
+            reach,
+            required,
+        })
     };
     let planned = match request.when {
         When::Now => plan(now),
         When::At(at) => plan(at.max(now)),
         // SPEC: decision 9's default is "now + dm_hold when the send may go
-        // now", and the window is on deliver_at, so the "may go now" test
-        // is made at now + dm_hold and the held one at now + the bulk hold
+        // now, and otherwise now + the hold", and the window is on deliver_at,
+        // so each is tried at its own time
         When::Default => {
             let after = |hold| {
                 now.checked_add_signed(hold).ok_or(SendRefusal::OutOfRange)
             };
             plan(after(request.dm_hold)?)
                 .or_else(|_| plan(after(request.bulk_hold)?))
+                .or_else(|_| plan(after(request.bulk_hold.max(long_hold()))?))
         }
     }?;
     if planned.reach.reach > UNTAPPED_REACH && !request.contact_ok {
