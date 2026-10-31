@@ -1135,9 +1135,10 @@ pub enum SignerError {
     /// The device isn't connected (unplugged, or not found).
     #[error("the hardware key is not connected")]
     DeviceAbsent,
-    /// The key's PIN policy needs the PIN and it hasn't been presented
-    /// (for [`PinPolicy::Always`], immediately before this signature).
-    #[error("the hardware key needs its PIN first")]
+    /// The key's PIN policy needs the PIN and it hasn't been presented (for
+    /// [`PinPolicy::Always`], immediately before this signature), or a touch
+    /// timed out: a PIV touch timeout returns the same status.
+    #[error("the hardware key needs its PIN first, or wasn't touched in time")]
     PinRequired,
     /// The PIN was wrong.
     #[error("wrong PIN ({retries_left} tries left before the PIN locks)")]

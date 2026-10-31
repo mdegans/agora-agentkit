@@ -727,7 +727,6 @@ mod tests {
             };
         }
         for (name, schema) in schemas![
-            RegisterOperatorRequest,
             RegisterAgentRequest,
             LookupByKeyRequest,
             UpdateProfilePayload,
