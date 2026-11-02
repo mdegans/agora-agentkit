@@ -166,14 +166,11 @@ impl<E: Enrolment> AgoraOutbox<E> {
             at: Utc::now(),
             waiting,
         };
-        let path = seal.dir().join(STATUS);
-        let tmp = seal.dir().join("status.json.writing");
-        tokio::fs::write(
-            &tmp,
-            serde_json::to_vec_pretty(&file).map_err(SealError::from)?,
+        super::storage::write_atomic(
+            &seal.dir().join(STATUS),
+            &serde_json::to_vec_pretty(&file).map_err(SealError::from)?,
         )
         .await?;
-        tokio::fs::rename(&tmp, &path).await?;
         Ok(DrainReport {
             uploaded,
             status,
@@ -297,7 +294,7 @@ mod tests {
         while let Some(e) = rd.next_entry().await.unwrap() {
             left.push(e.file_name().into_string().unwrap());
         }
-        assert_eq!(left, vec![kf.blob_sha256.to_hex()]);
+        assert_eq!(left, vec![kf.blob_sha256().unwrap().to_hex()]);
         // Its siblings untouched
         for f in ["head.json", "enrolled"] {
             assert!(seal.dir().join(f).exists(), "{f}");

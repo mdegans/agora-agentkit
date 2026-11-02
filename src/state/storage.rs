@@ -5,50 +5,60 @@
 //!
 //! - `enrolled`, `refused`: markers. Only an enrolled, unrefused agent is
 //!   sealed
+//! - `lock`: held across a save's three steps ([`SealLock`])
 //! - `head.json`: the local head ([`HeadFile`])
-//! - `blobs/<sha256>`: every sealed blob
+//! - `blobs/<sha256>`: sealed blobs not yet uploaded, and the current
+//!   keyframe's ([`AgentSeal::prune_blobs`])
 //! - `outbox/<ord>.json`: committed entries not yet uploaded, `<ord>.tmp`
 //!   one being written, `<ord>.abandoned` one whose local write never came
 //! - `sent/<ord>.json`: uploaded entries
-//! - `seal_failed.json`: a local write whose seal failed ([`SealFailed`])
-//!
-//! `blobs/` keeps only the current keyframe and blobs not yet uploaded
-//! ([`AgentSeal::prune_blobs`]); the server holds the rest.
+//! - `seal_failed.json`: a local write that went ahead unsealed
+//!   ([`SealFailed`])
 //!
 //! A save is crash-safe in this order: seal into `outbox/<ord>.tmp`, the
-//! local write, then commit (the rename and `head.json`). [`AgentSeal::recover`]
-//! finishes a commit a crash interrupted. Nothing here deletes.
+//! local write, then commit (the rename and `head.json`).
+//! [`AgentSeal::recover`] finishes a commit a crash interrupted. A seal
+//! that fails never stops the local write. Nothing outside `sealed/` is
+//! ever deleted, and inside it only blobs the server holds.
 //!
 //! [`Storage`]: crate::reactor::Storage
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::chain::{
     BlobEncoding, BlobRef, GenesisOrigin, STATE_ENTRY_VERSION,
     SignedStateEntry, StateEntry,
 };
 use super::codec::{self, Encoded, Keyframe, KeyframePolicy};
-use super::crypto::{StateKey, open_blob, seal_blob};
+use super::crypto::{
+    BlobContext, EntryBlobError, StateKey, open_entry_blob, seal_blob,
+};
 use super::verify::HeadRef;
 use crate::crypto::SigningKey;
 use crate::enums::StateEntryKind;
 use crate::govlog::{Sha256Hex, canonical_json};
 use crate::ids::AgentId;
-use crate::reactor::{AgentNotFound, FsStorage, Loaded, Storage, Version};
+use crate::reactor::{AgentNotFound, FsStorage, Loaded, Storage};
 
 /// The sealed directory, in an agent's
 pub const SEALED_DIR: &str = "sealed";
 const ENROLLED: &str = "enrolled";
 const REFUSED: &str = "refused";
+const LOCK: &str = "lock";
 const HEAD: &str = "head.json";
 const OUTBOX: &str = "outbox";
 const SENT: &str = "sent";
 const BLOBS: &str = "blobs";
 const SEAL_FAILED: &str = "seal_failed.json";
+
+/// Blobs kept while a fork holds pruning, past which it alerts
+pub const BLOB_ALERT: usize = 256;
 
 /// A [`Storage`] that keeps each agent in a directory of its own
 pub trait AgentDir {
@@ -101,13 +111,22 @@ pub trait Outbox: Send + Sync {
 impl Outbox for () {}
 
 /// The current keyframe, for the next delta
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyframeRef {
-    pub entry_hash: Sha256Hex,
-    pub blob_sha256: Sha256Hex,
-    pub key_gen: u32,
+    /// The keyframe's own entry, which its blob is bound to
+    pub entry: StateEntry,
     /// Deltas written against it
     pub deltas: u32,
+}
+
+impl KeyframeRef {
+    pub fn entry_hash(&self) -> Sha256Hex {
+        self.entry.entry_hash()
+    }
+
+    pub fn blob_sha256(&self) -> Option<Sha256Hex> {
+        self.entry.blob.as_ref().map(|b| b.sha256)
+    }
 }
 
 /// `sealed/head.json`
@@ -137,7 +156,7 @@ pub struct OutboxItem {
     pub displaced: Option<HeadRef>,
 }
 
-/// Something sealed failed. The local write never happens without its seal
+/// Something sealed failed
 #[derive(Debug, thiserror::Error)]
 pub enum SealError {
     #[error("io: {0}")]
@@ -152,13 +171,13 @@ pub enum SealError {
     NoKeys,
     #[error("refused: only an operator can clear it")]
     Refused,
-    #[error("not a sealed-state version: {0:?}")]
-    BadVersion(String),
     #[error("a genesis needs an empty chain, and anything else a parent")]
     BadParent,
+    #[error("the outbox item to commit is not the one prepared")]
+    Raced,
 }
 
-/// Which way a seal failed, without content
+/// Why a local write went ahead unsealed, without content
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SealFailureKind {
@@ -167,29 +186,32 @@ pub enum SealFailureKind {
     Seal,
     NoHead,
     NoKeys,
-    BadVersion,
     BadParent,
+    Raced,
+    /// Not a failure: the agent is refused
+    Refused,
+    /// Not a failure: the agent opted out after enrolling
+    OptedOut,
 }
 
 impl SealError {
-    /// Its kind, for [`SealFailed`]. `None` for a refusal, which is no
-    /// failure
-    pub fn kind(&self) -> Option<SealFailureKind> {
-        Some(match self {
+    /// Its kind, for [`SealFailed`]
+    pub fn kind(&self) -> SealFailureKind {
+        match self {
             Self::Io(_) => SealFailureKind::Io,
             Self::Json(_) => SealFailureKind::Json,
             Self::Seal(_) => SealFailureKind::Seal,
             Self::NoHead => SealFailureKind::NoHead,
             Self::NoKeys => SealFailureKind::NoKeys,
-            Self::BadVersion(_) => SealFailureKind::BadVersion,
             Self::BadParent => SealFailureKind::BadParent,
-            Self::Refused => return None,
-        })
+            Self::Raced => SealFailureKind::Raced,
+            Self::Refused => SealFailureKind::Refused,
+        }
     }
 }
 
 /// `sealed/seal_failed.json`: the local write went ahead unsealed. The
-/// next seal clears it
+/// next seal of a state clears it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SealFailed {
     pub at: DateTime<Utc>,
@@ -198,8 +220,8 @@ pub struct SealFailed {
     pub error: SealFailureKind,
 }
 
-/// What [`Append`] adds
-#[derive(Debug, Clone)]
+/// What [`AgentSeal::prepare`] adds
+#[derive(Clone)]
 pub struct Append<'a> {
     pub kind: StateEntryKind,
     /// Uncompressed
@@ -209,6 +231,17 @@ pub struct Append<'a> {
     pub state_at: DateTime<Utc>,
     /// `None` only for the genesis
     pub parent: Option<HeadRef>,
+}
+
+impl std::fmt::Debug for Append<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Append")
+            .field("kind", &self.kind)
+            .field("plaintext", &"[REDACTED]")
+            .field("state_at", &self.state_at)
+            .field("parent", &self.parent)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A sealed entry written to `outbox/<ord>.tmp`, not yet committed
@@ -229,12 +262,19 @@ pub enum Recovery {
     Committed(HeadRef),
     /// There is no local state
     NoLocalState(HeadRef),
-    /// The local state is one whose seal failed (`seal_failed.json`):
-    /// hold and alert, it is not a loss
+    /// The local state is one written unsealed (`seal_failed.json`): hold
+    /// and alert, or reseal; it is not a loss
     SealFailed(HeadRef, SealFailureKind),
     /// The local state matches neither the head nor a pending item
     Mismatch(HeadRef),
+    /// `sealed/` couldn't be read; the local state loaded without a base
+    Unreadable(SealFailureKind),
 }
+
+/// The per-agent advisory lock on `sealed/lock`, held across a save's
+/// three steps. Released on drop
+#[derive(Debug)]
+pub struct SealLock(#[allow(dead_code)] std::fs::File);
 
 /// One agent's `sealed/` directory
 #[derive(Debug, Clone)]
@@ -243,28 +283,23 @@ pub struct AgentSeal {
     dir: PathBuf,
 }
 
-/// `seq:hash`
-pub fn version_of(head: &HeadRef) -> Version {
-    Version::new(format!("{}:{}", head.seq, head.entry_hash))
-}
-
-/// The inverse of [`version_of`]
-pub fn head_of(version: &Version) -> Result<HeadRef, SealError> {
-    let bad = || SealError::BadVersion(version.as_str().to_owned());
-    let (seq, hash) = version.as_str().split_once(':').ok_or_else(bad)?;
-    Ok(HeadRef {
-        seq: seq.parse().map_err(|_| bad())?,
-        entry_hash: hash.parse().map_err(|_| bad())?,
-    })
-}
-
 fn sha256(bytes: &[u8]) -> Sha256Hex {
     Sha256Hex::from(<[u8; 32]>::from(Sha256::digest(bytes)))
 }
 
-/// The local-only hash of a state's sealed plaintext
+/// The local-only hash of a state's sealed plaintext, for a value as
+/// loaded
 pub fn plaintext_hash(state: &serde_json::Value) -> Sha256Hex {
     sha256(&codec::plaintext(state))
+}
+
+/// `state` as a load will read it back: serialized and parsed again. A
+/// float need not survive the round trip, so a save hashes and seals
+/// this, not the value in memory
+pub fn as_reloaded(
+    state: &serde_json::Value,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::from_slice(&Zeroizing::new(serde_json::to_vec(state)?))
 }
 
 async fn exists(path: &Path) -> std::io::Result<bool> {
@@ -272,7 +307,10 @@ async fn exists(path: &Path) -> std::io::Result<bool> {
 }
 
 /// tmp, fsync, rename, directory fsync
-async fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_atomic(
+    path: &Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
     let dir = path.parent().expect("a file in a directory");
     tokio::fs::create_dir_all(dir).await?;
     let mut tmp = path.as_os_str().to_owned();
@@ -306,6 +344,22 @@ impl AgentSeal {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Take the agent's lock, waiting for another writer to finish
+    pub async fn lock(&self) -> Result<SealLock, SealError> {
+        tokio::fs::create_dir_all(&self.dir).await?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.dir.join(LOCK))?;
+        let file =
+            tokio::task::spawn_blocking(move || file.lock().map(|()| file))
+                .await
+                .map_err(std::io::Error::other)??;
+        Ok(SealLock(file))
     }
 
     pub async fn is_enrolled(&self) -> std::io::Result<bool> {
@@ -395,7 +449,8 @@ impl AgentSeal {
     }
 
     /// Move an uploaded item from the outbox to `sent/`
-    pub async fn mark_sent(&self, ord: u64) -> std::io::Result<()> {
+    pub async fn mark_sent(&self, ord: u64) -> Result<(), SealError> {
+        let _lock = self.lock().await?;
         let sent = self.dir.join(SENT);
         tokio::fs::create_dir_all(&sent).await?;
         tokio::fs::rename(
@@ -404,7 +459,8 @@ impl AgentSeal {
         )
         .await?;
         sync_dir(&sent).await?;
-        sync_dir(&self.dir.join(OUTBOX)).await
+        sync_dir(&self.dir.join(OUTBOX)).await?;
+        Ok(())
     }
 
     /// The plaintext of the current keyframe, if it opens
@@ -412,25 +468,20 @@ impl AgentSeal {
         &self,
         kf: &KeyframeRef,
         keys: &SealKeys,
-    ) -> Option<Vec<u8>> {
-        if kf.key_gen != keys.key_gen {
+    ) -> Option<Zeroizing<Vec<u8>>> {
+        if kf.entry.key_gen != keys.key_gen {
             return None;
         }
-        let sealed = self.read_blob(&kf.blob_sha256).await.ok()?;
-        let compressed = open_blob(
-            &keys.state_key,
-            self.agent_id,
-            kf.key_gen,
-            &BlobEncoding::Keyframe,
-            &sealed,
-        )
-        .ok()?;
+        let sealed = self.read_blob(&kf.blob_sha256()?).await.ok()?;
+        let compressed =
+            open_entry_blob(&keys.state_key, &kf.entry, &sealed).ok()?;
         codec::decompress(&compressed, None).ok()
     }
 
     /// Step 1: seal, sign and write `outbox/<ord>.tmp`
     pub async fn prepare(
         &self,
+        _lock: &SealLock,
         keys: &SealKeys,
         policy: &KeyframePolicy,
         append: Append<'_>,
@@ -450,7 +501,7 @@ impl AgentSeal {
 
         let current = match (&head, displaced) {
             (Some(h), None) if append.kind == StateEntryKind::Snapshot => {
-                h.keyframe
+                h.keyframe.clone()
             }
             _ => None,
         };
@@ -472,16 +523,25 @@ impl AgentSeal {
             Encoded::Keyframe(c) => (BlobEncoding::Keyframe, c),
             Encoded::Delta(c) => (
                 BlobEncoding::Delta {
-                    base: current.expect("a delta has a keyframe").entry_hash,
+                    base: current
+                        .as_ref()
+                        .expect("a delta has a keyframe")
+                        .entry_hash(),
                 },
                 c,
             ),
         };
+        let seq = append.parent.map_or(0, |p| p.seq + 1);
+        let prev_hash = append.parent.map(|p| p.entry_hash);
         let sealed = seal_blob(
             &keys.state_key,
-            self.agent_id,
-            keys.key_gen,
-            &encoding,
+            &BlobContext {
+                agent_id: self.agent_id,
+                key_gen: keys.key_gen,
+                seq,
+                prev_hash: prev_hash.as_ref(),
+                encoding: &encoding,
+            },
             &compressed,
         );
         let blob_sha256 = sha256(&sealed);
@@ -490,15 +550,14 @@ impl AgentSeal {
             write_atomic(&blob_path, &sealed).await?;
         }
 
-        let now = Utc::now();
         let entry = StateEntry {
             agora_state_entry: STATE_ENTRY_VERSION,
             agent_id: self.agent_id,
-            seq: append.parent.map_or(0, |p| p.seq + 1),
-            created_at: now.timestamp_micros(),
+            seq,
+            created_at: Utc::now().timestamp_micros(),
             state_at: append.state_at.timestamp_micros(),
             kind: append.kind,
-            prev_hash: append.parent.map(|p| p.entry_hash),
+            prev_hash,
             merged_from: Vec::new(),
             blob: Some(BlobRef {
                 sha256: blob_sha256,
@@ -510,13 +569,11 @@ impl AgentSeal {
         };
         let entry = entry.sign(&keys.signing);
         let keyframe_after = if append.kind != StateEntryKind::Snapshot {
-            head.as_ref().and_then(|h| h.keyframe)
+            head.as_ref().and_then(|h| h.keyframe.clone())
         } else {
             Some(match encoding {
                 BlobEncoding::Keyframe => KeyframeRef {
-                    entry_hash: entry.entry_hash(),
-                    blob_sha256,
-                    key_gen: keys.key_gen,
+                    entry: entry.entry.clone(),
                     deltas: 0,
                 },
                 BlobEncoding::Delta { .. } => {
@@ -550,9 +607,24 @@ impl AgentSeal {
     /// Step 3: rename the item into the outbox and move the head
     pub async fn commit(
         &self,
+        _lock: &SealLock,
         prepared: &Prepared,
     ) -> Result<HeadRef, SealError> {
         self.commit_item(&prepared.item).await
+    }
+
+    /// Whether the head is `prepared`'s entry: a commit that failed after
+    /// `head.json` was written
+    pub async fn is_committed(
+        &self,
+        prepared: &Prepared,
+    ) -> Result<Option<HeadRef>, SealError> {
+        let hash = prepared.item.entry.entry_hash();
+        Ok(self
+            .head()
+            .await?
+            .map(|h| h.head)
+            .filter(|h| h.entry_hash == hash))
     }
 
     async fn commit_item(
@@ -561,14 +633,33 @@ impl AgentSeal {
     ) -> Result<HeadRef, SealError> {
         let outbox = self.dir.join(OUTBOX);
         let tmp = outbox.join(ord_name(item.ord, "tmp"));
-        if exists(&tmp).await? {
-            tokio::fs::rename(&tmp, outbox.join(ord_name(item.ord, "json")))
-                .await?;
-            sync_dir(&outbox).await?;
+        let json = outbox.join(ord_name(item.ord, "json"));
+        let hash = item.entry.entry_hash();
+        // The file at this ord must be this item, or another writer's
+        let on_disk = |path: PathBuf| async move {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => serde_json::from_slice::<OutboxItem>(&bytes)
+                    .map(|i| Some(i.entry.entry_hash()))
+                    .map_err(SealError::from),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        };
+        match on_disk(tmp.clone()).await? {
+            Some(h) if h == hash => {
+                tokio::fs::rename(&tmp, &json).await?;
+                sync_dir(&outbox).await?;
+            }
+            Some(_) => return Err(SealError::Raced),
+            None => {
+                if on_disk(json).await? != Some(hash) {
+                    return Err(SealError::Raced);
+                }
+            }
         }
         let old = self.head().await?;
         let head = HeadRef {
-            entry_hash: item.entry.entry_hash(),
+            entry_hash: hash,
             seq: item.entry.entry.seq,
         };
         let mut displaced = old
@@ -581,7 +672,7 @@ impl AgentSeal {
             plaintext_sha256: item
                 .plaintext_sha256
                 .or(old.as_ref().and_then(|h| h.plaintext_sha256)),
-            keyframe: item.keyframe_after,
+            keyframe: item.keyframe_after.clone(),
             next_ord: item.ord + 1,
             displaced,
         };
@@ -598,8 +689,9 @@ impl AgentSeal {
         Ok(head)
     }
 
-    /// At start: compare the local state's hash with the head's, and
-    /// commit the newest uncommitted item that matches it
+    /// At start: compare the local state's hash (of the value as loaded)
+    /// with the head's, and commit the newest uncommitted item that
+    /// matches it
     pub async fn recover(
         &self,
         local: Option<&Sha256Hex>,
@@ -607,6 +699,7 @@ impl AgentSeal {
         if !self.is_enrolled().await? {
             return Ok(Recovery::NotEnrolled);
         }
+        let _lock = self.lock().await?;
         let Some(head) = self.head().await? else {
             return Ok(Recovery::NoHead);
         };
@@ -666,30 +759,61 @@ impl AgentSeal {
         Ok(())
     }
 
-    /// Delete the uploaded blobs this code wrote that are no longer needed:
-    /// every blob of a `sent/` entry but the current keyframe's and any an
-    /// outbox item still names. Touches nothing else
+    /// Delete blobs the server holds and nothing here needs: those of
+    /// `sent/` entries, and of abandoned items the head has moved past,
+    /// but never the current keyframe's or one an outbox item names. While
+    /// a fork is unresolved nothing is deleted, with an alert past
+    /// [`BLOB_ALERT`]. Touches nothing outside `blobs/`
     pub async fn prune_blobs(&self) -> Result<usize, SealError> {
-        let mut keep = std::collections::HashSet::new();
-        if let Some(kf) = self.head().await?.and_then(|h| h.keyframe) {
-            keep.insert(kf.blob_sha256);
-        }
-        for ext in ["json", "tmp", "abandoned"] {
-            for item in self.items(OUTBOX, ext).await? {
-                if let Some(b) = item.entry.entry.blob {
-                    keep.insert(b.sha256);
+        let _lock = self.lock().await?;
+        let Some(head) = self.head().await? else {
+            return Ok(0);
+        };
+        if !head.displaced.is_empty() {
+            let mut count = 0usize;
+            if let Ok(mut rd) = tokio::fs::read_dir(self.dir.join(BLOBS)).await
+            {
+                while rd.next_entry().await?.is_some() {
+                    count += 1;
                 }
+            }
+            if count > BLOB_ALERT {
+                tracing::error!(
+                    agent_id = %self.agent_id,
+                    blobs = count,
+                    forks = head.displaced.len(),
+                    "sealed blobs held for an unresolved fork"
+                );
+            }
+            return Ok(0);
+        }
+        let mut keep = HashSet::new();
+        keep.extend(head.keyframe.as_ref().and_then(|k| k.blob_sha256()));
+        for ext in ["json", "tmp"] {
+            for item in self.items(OUTBOX, ext).await? {
+                keep.extend(item.entry.entry.blob.map(|b| b.sha256));
+            }
+        }
+        let mut candidates: Vec<Sha256Hex> = self
+            .sent()
+            .await?
+            .into_iter()
+            .filter_map(|i| i.entry.entry.blob.map(|b| b.sha256))
+            .collect();
+        for item in self.items(OUTBOX, "abandoned").await? {
+            let blob = item.entry.entry.blob.map(|b| b.sha256);
+            if item.ord < head.next_ord {
+                candidates.extend(blob);
+            } else {
+                keep.extend(blob);
             }
         }
         let mut pruned = 0;
-        for item in self.sent().await? {
-            let Some(blob) = item.entry.entry.blob else {
-                continue;
-            };
-            if keep.contains(&blob.sha256) {
+        for sha in candidates {
+            if keep.contains(&sha) {
                 continue;
             }
-            let path = self.dir.join(BLOBS).join(blob.sha256.to_hex());
+            let path = self.dir.join(BLOBS).join(sha.to_hex());
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => pruned += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -709,9 +833,11 @@ impl AgentSeal {
         origin: &GenesisOrigin,
         state_at: DateTime<Utc>,
     ) -> Result<HeadRef, SealError> {
+        let lock = self.lock().await?;
         let plaintext = canonical_json(&serde_json::to_value(origin)?);
         let prepared = self
             .prepare(
+                &lock,
                 keys,
                 &KeyframePolicy::default(),
                 Append {
@@ -723,12 +849,13 @@ impl AgentSeal {
                 },
             )
             .await?;
-        self.commit(&prepared).await
+        self.commit(&lock, &prepared).await
     }
 
     /// Append a state with no local write of its own: a backfilled
     /// archive, an `archived_prior` copy, or the current state at
-    /// enrolment
+    /// enrolment or after a refusal is cleared. `state` is a value as
+    /// loaded, whose hash a later load will match
     pub async fn append_state(
         &self,
         keys: &SealKeys,
@@ -737,12 +864,14 @@ impl AgentSeal {
         state: &serde_json::Value,
         state_at: DateTime<Utc>,
     ) -> Result<HeadRef, SealError> {
+        let lock = self.lock().await?;
         let head = self.head().await?.ok_or(SealError::NoHead)?;
         let plaintext = codec::plaintext(state);
         let plaintext_sha256 =
             (kind == StateEntryKind::Snapshot).then(|| sha256(&plaintext));
         let prepared = self
             .prepare(
+                &lock,
                 keys,
                 policy,
                 Append {
@@ -754,10 +883,11 @@ impl AgentSeal {
                 },
             )
             .await?;
-        self.commit(&prepared).await
+        self.commit(&lock, &prepared).await
     }
 
-    /// Open the state a sealed snapshot holds, for a restore or a check
+    /// Open the state a sealed snapshot holds, for a restore or a check.
+    /// Its blob (and a delta's keyframe's) must still be local
     pub async fn open_state(
         &self,
         keys: &SealKeys,
@@ -774,8 +904,9 @@ impl AgentSeal {
                 Some(self.open_plaintext(keys, kf, None).await?)
             }
         };
-        let plaintext =
-            self.open_plaintext(keys, entry, dict.as_deref()).await?;
+        let plaintext = self
+            .open_plaintext(keys, entry, dict.as_deref().map(|d| &d[..]))
+            .await?;
         let mut envelope: serde_json::Value =
             serde_json::from_slice(&plaintext)?;
         Ok(envelope.get_mut("state").ok_or(OpenError::NoBlob)?.take())
@@ -786,19 +917,13 @@ impl AgentSeal {
         keys: &SealKeys,
         entry: &StateEntry,
         dict: Option<&[u8]>,
-    ) -> Result<Vec<u8>, OpenError> {
+    ) -> Result<Zeroizing<Vec<u8>>, OpenError> {
         let blob = entry.blob.as_ref().ok_or(OpenError::NoBlob)?;
         if entry.key_gen != keys.key_gen {
             return Err(OpenError::KeyGen(entry.key_gen));
         }
         let sealed = self.read_blob(&blob.sha256).await?;
-        let compressed = open_blob(
-            &keys.state_key,
-            self.agent_id,
-            entry.key_gen,
-            &blob.encoding,
-            &sealed,
-        )?;
+        let compressed = open_entry_blob(&keys.state_key, entry, &sealed)?;
         Ok(codec::decompress(&compressed, dict)?)
     }
 }
@@ -810,8 +935,8 @@ pub enum OpenError {
     Io(#[from] std::io::Error),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("seal: {0}")]
-    Seal(#[from] crate::envelope::EnvelopeError),
+    #[error(transparent)]
+    Blob(#[from] EntryBlobError),
     #[error("{0}")]
     Codec(#[from] codec::CodecError),
     #[error("the entry has no blob")]
@@ -822,13 +947,12 @@ pub enum OpenError {
     KeyGen(u32),
 }
 
-/// [`Mirrored`]'s errors
+/// [`Mirrored`]'s errors: the local store's alone, since a seal never
+/// fails a save
 #[derive(Debug, thiserror::Error)]
 pub enum MirroredError<E> {
     #[error(transparent)]
     Local(E),
-    #[error(transparent)]
-    Seal(#[from] SealError),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
     #[error(transparent)]
@@ -854,6 +978,7 @@ pub struct Mirrored<L, O, E> {
     outbox: O,
     enrolment: E,
     policy: KeyframePolicy,
+    recoveries: std::sync::Mutex<BTreeMap<AgentId, Recovery>>,
 }
 
 impl<L, O, E> Mirrored<L, O, E> {
@@ -863,6 +988,7 @@ impl<L, O, E> Mirrored<L, O, E> {
             outbox,
             enrolment,
             policy: KeyframePolicy::default(),
+            recoveries: Default::default(),
         }
     }
 
@@ -877,6 +1003,16 @@ impl<L, O, E> Mirrored<L, O, E> {
 
     pub fn outbox(&self) -> &O {
         &self.outbox
+    }
+
+    /// What the last load of `id` found in `sealed/`, for the runner's
+    /// start check
+    pub fn recovery(&self, id: AgentId) -> Option<Recovery> {
+        self.recoveries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
     }
 }
 
@@ -896,14 +1032,15 @@ enum Step {
 }
 
 impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
-    /// Step 1 of a save of an opted-in agent
+    /// Step 1 of a save of an opted-in agent, under `lock`
     async fn prepare(
         &self,
+        lock: &SealLock,
         seal: &AgentSeal,
         id: AgentId,
         plaintext: &[u8],
         plaintext_sha256: Sha256Hex,
-        base: Option<&Version>,
+        base: Option<&HeadRef>,
     ) -> Result<Step, SealError> {
         if !seal.is_enrolled().await? {
             return Ok(Step::NotEnrolled);
@@ -915,18 +1052,17 @@ impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
         if head.plaintext_sha256 == Some(plaintext_sha256) {
             return Ok(Step::Unchanged(head.head));
         }
-        let parent = match base {
-            Some(base) => head_of(base)?,
-            None => {
-                tracing::warn!(
-                    agent_id = %id,
-                    "sealed save without a base; parented on the local head"
-                );
-                head.head
-            }
+        let Some(parent) = base.copied() else {
+            tracing::error!(
+                agent_id = %id,
+                head = %head.head.entry_hash,
+                "sealed save without a base; saved locally, unsealed"
+            );
+            return Err(SealError::BadParent);
         };
         let keys = self.enrolment.keys(id).ok_or(SealError::NoKeys)?;
         seal.prepare(
+            lock,
             &keys,
             &self.policy,
             Append {
@@ -941,29 +1077,32 @@ impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
         .map(|p| Step::Prepared(Box::new(p)))
     }
 
-    /// A local write that went ahead without its seal: logged, and
-    /// recorded unless it was a refusal
+    /// A local write that went ahead unsealed: logged and recorded
     async fn unsealed(
-        &self,
         seal: &AgentSeal,
         id: AgentId,
         plaintext_sha256: Sha256Hex,
-        e: &SealError,
+        kind: SealFailureKind,
+        error: Option<&SealError>,
     ) {
-        let Some(kind) = e.kind() else {
-            tracing::warn!(agent_id = %id, "refused agent saved locally, unsealed");
-            return;
-        };
-        tracing::error!(
-            agent_id = %id,
-            error = %e,
-            "seal failed; the state was saved locally, unsealed"
-        );
+        match error {
+            Some(e) if kind != SealFailureKind::Refused => tracing::error!(
+                agent_id = %id,
+                error = %e,
+                kind = ?kind,
+                "seal failed; the state was saved locally, unsealed"
+            ),
+            _ => tracing::warn!(
+                agent_id = %id,
+                kind = ?kind,
+                "state saved locally, unsealed"
+            ),
+        }
         if let Err(e) = seal.record_seal_failed(plaintext_sha256, kind).await {
             tracing::error!(
                 agent_id = %id,
                 error = %e,
-                "could not record the failed seal"
+                "could not record the unsealed write"
             );
         }
     }
@@ -974,10 +1113,11 @@ impl<L: Storage, O, E> Mirrored<L, O, E> {
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<Option<Version>, MirroredError<L::Error>> {
+    ) -> Result<(), MirroredError<L::Error>> {
         self.local
             .save_raw(id, value, None)
             .await
+            .map(drop)
             .map_err(MirroredError::Local)
     }
 }
@@ -990,41 +1130,83 @@ where
     E: Enrolment,
 {
     type Error = MirroredError<L::Error>;
+    type Version = HeadRef;
 
-    /// A seal failure never stops the local write: it is recorded in
-    /// `seal_failed.json` instead. A refused agent is written unsealed
+    /// A seal that fails never stops the local write: it is recorded in
+    /// `seal_failed.json` instead, as is a write of a refused or opted-out
+    /// agent's state
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        base: Option<&Version>,
-    ) -> Result<Option<Version>, Self::Error> {
-        if !self.enrolment.opted_in(id) {
-            return self
-                .local
-                .save_raw(id, value, base)
-                .await
-                .map_err(MirroredError::Local);
-        }
+        base: Option<&HeadRef>,
+    ) -> Result<Option<HeadRef>, Self::Error> {
         let seal = self.seal(id);
-        let plaintext = codec::plaintext(&value);
+        // Hash and seal what a load will read, not the value in memory
+        let reloaded = as_reloaded(&value)?;
+        let plaintext = codec::plaintext(&reloaded);
         let plaintext_sha256 = sha256(&plaintext);
+        drop(reloaded);
+
+        if !self.enrolment.opted_in(id) {
+            self.write_local(id, value).await?;
+            if seal.is_enrolled().await.unwrap_or(false) {
+                Self::unsealed(
+                    &seal,
+                    id,
+                    plaintext_sha256,
+                    SealFailureKind::OptedOut,
+                    None,
+                )
+                .await;
+            }
+            return Ok(None);
+        }
+
+        // An agent not enrolled gets no `sealed/` at all
+        if let Ok(false) = seal.is_enrolled().await {
+            self.write_local(id, value).await?;
+            return Ok(None);
+        }
+        let lock = match seal.lock().await {
+            Ok(lock) => lock,
+            Err(e) => {
+                self.write_local(id, value).await?;
+                Self::unsealed(&seal, id, plaintext_sha256, e.kind(), Some(&e))
+                    .await;
+                return Ok(base.copied());
+            }
+        };
         let step = self
-            .prepare(&seal, id, &plaintext, plaintext_sha256, base)
+            .prepare(&lock, &seal, id, &plaintext, plaintext_sha256, base)
             .await;
         match step {
-            Ok(Step::NotEnrolled) => self
-                .local
-                .save_raw(id, value, base)
-                .await
-                .map_err(MirroredError::Local),
+            Ok(Step::NotEnrolled) => {
+                self.write_local(id, value).await?;
+                Ok(None)
+            }
             Ok(Step::Unchanged(head)) => {
                 self.write_local(id, value).await?;
-                Ok(Some(version_of(&head)))
+                Ok(Some(head))
             }
             Ok(Step::Prepared(prepared)) => {
                 self.write_local(id, value).await?;
-                match seal.commit(&prepared).await {
+                let committed = match seal.commit(&lock, &prepared).await {
+                    Ok(new) => Ok(new),
+                    // Failed after `head.json` was written: committed
+                    Err(e) => match seal.is_committed(&prepared).await {
+                        Ok(Some(new)) => {
+                            tracing::warn!(
+                                agent_id = %id,
+                                error = %e,
+                                "sealed commit finished with an error after moving the head"
+                            );
+                            Ok(new)
+                        }
+                        _ => Err(e),
+                    },
+                };
+                match committed {
                     Ok(new) => {
                         if let Some(displaced) = prepared.item.displaced {
                             tracing::warn!(
@@ -1034,23 +1216,36 @@ where
                             );
                         }
                         self.outbox.notify(id);
-                        Ok(Some(version_of(&new)))
+                        Ok(Some(new))
                     }
                     Err(e) => {
-                        self.unsealed(&seal, id, plaintext_sha256, &e).await;
-                        Ok(base.cloned())
+                        Self::unsealed(
+                            &seal,
+                            id,
+                            plaintext_sha256,
+                            e.kind(),
+                            Some(&e),
+                        )
+                        .await;
+                        Ok(base.copied())
                     }
                 }
             }
             Err(e) => {
                 self.write_local(id, value).await?;
-                self.unsealed(&seal, id, plaintext_sha256, &e).await;
-                Ok(base.cloned())
+                Self::unsealed(&seal, id, plaintext_sha256, e.kind(), Some(&e))
+                    .await;
+                Ok(base.copied())
             }
         }
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, Self::Error> {
+    /// Local, always. A problem in `sealed/` degrades to no base and
+    /// [`Recovery::Unreadable`] ([`Mirrored::recovery`]), never a failed load
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, HeadRef>, Self::Error> {
         let Loaded { value, .. } = self
             .local
             .load_raw(id)
@@ -1059,17 +1254,34 @@ where
         if !self.enrolment.opted_in(id) {
             return Ok(Loaded { value, base: None });
         }
-        let seal = self.seal(id);
-        let base = match seal.recover(Some(&plaintext_hash(&value))).await? {
-            Recovery::Intact(h) | Recovery::Committed(h) => {
-                Some(version_of(&h))
-            }
+        let recovery =
+            match self.seal(id).recover(Some(&plaintext_hash(&value))).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        agent_id = %id,
+                        error = %e,
+                        kind = ?e.kind(),
+                        "sealed state unreadable; loaded without a base"
+                    );
+                    Recovery::Unreadable(e.kind())
+                }
+            };
+        let base = match &recovery {
+            Recovery::Intact(h)
+            | Recovery::Committed(h)
             // The runner's start check decides; the base is the head's
-            Recovery::Mismatch(h)
+            | Recovery::Mismatch(h)
             | Recovery::NoLocalState(h)
-            | Recovery::SealFailed(h, _) => Some(version_of(&h)),
-            Recovery::NotEnrolled | Recovery::NoHead => None,
+            | Recovery::SealFailed(h, _) => Some(*h),
+            Recovery::NotEnrolled | Recovery::NoHead | Recovery::Unreadable(_) => {
+                None
+            }
         };
+        self.recoveries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, recovery);
         Ok(Loaded { value, base })
     }
 }
@@ -1254,6 +1466,13 @@ mod tests {
         assert_eq!(store.save_raw(id, state(50), None).await.unwrap(), None);
         assert_eq!(store.seal(id).outbox().await.unwrap().len(), before);
         assert_eq!(store.load_raw(id).await.unwrap().base, None);
+        // Opted in again: the write is known, not a mismatch
+        store.enrolment.out.lock().unwrap().clear();
+        store.load_raw(id).await.unwrap();
+        assert!(matches!(
+            store.recovery(id),
+            Some(Recovery::SealFailed(_, SealFailureKind::OptedOut))
+        ));
     }
 
     #[tokio::test]
@@ -1268,10 +1487,20 @@ mod tests {
         assert_eq!(got, base, "the base doesn't move");
         assert_eq!(store.local.load_raw(id).await.unwrap().value, state(99));
         assert_eq!(seal.outbox().await.unwrap().len(), before);
-        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        assert_eq!(
+            seal.seal_failed().await.unwrap().unwrap().error,
+            SealFailureKind::Refused
+        );
         seal.clear_refusal().await.unwrap();
+        // After the refusal is cleared, the write is known
+        let base = store.load_raw(id).await.unwrap().base;
+        assert!(matches!(
+            store.recovery(id),
+            Some(Recovery::SealFailed(_, SealFailureKind::Refused))
+        ));
         store.save_raw(id, state(100), base.as_ref()).await.unwrap();
         assert_eq!(seal.outbox().await.unwrap().len(), before + 1);
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
     }
 
     /// A seal that fails still writes the state, records it, and the next
@@ -1351,11 +1580,16 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let (h1, h2) = (head_of(&first).unwrap(), head_of(&second).unwrap());
+        let (h1, h2) = (first, second);
         assert_eq!(h1.seq, h2.seq, "siblings");
         let head = store.seal(id).head().await.unwrap().unwrap();
         assert_eq!(head.head, h2);
         assert_eq!(head.displaced, vec![h1]);
+        // Nothing is pruned while the fork is unresolved
+        for ord in 0..3 {
+            store.seal(id).mark_sent(ord).await.unwrap();
+        }
+        assert_eq!(store.seal(id).prune_blobs().await.unwrap(), 0);
         // Both are kept, and the chain shows the fork
         let entries = chain(&store.seal(id)).await;
         let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
@@ -1386,8 +1620,10 @@ mod tests {
             let head = seal.head().await.unwrap().unwrap();
             let next = state(77);
             let plaintext = codec::plaintext(&next);
+            let lock = seal.lock().await.unwrap();
             let prepared = seal
                 .prepare(
+                    &lock,
                     &k,
                     &KeyframePolicy::default(),
                     Append {
@@ -1400,6 +1636,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            drop(lock);
             if crash_after >= 2 {
                 store
                     .local
@@ -1469,5 +1706,167 @@ mod tests {
             store.seal(id).recover(None).await.unwrap(),
             Recovery::NoLocalState(_)
         ));
+    }
+
+    /// A float that doesn't survive serde_json's default parse: the save
+    /// hashes what the load reads
+    #[tokio::test]
+    async fn a_float_state_is_intact_after_a_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let base = store.load_raw(id).await.unwrap().base;
+        let value =
+            serde_json::json!({ "memory": "m", "x": 9856906946328.693_f64 });
+        let new = store.save_raw(id, value, base.as_ref()).await.unwrap();
+        let loaded = store.load_raw(id).await.unwrap();
+        assert_eq!(store.recovery(id), Some(Recovery::Intact(new.unwrap())));
+        assert_eq!(loaded.base, new);
+    }
+
+    /// Two stores on one directory save at once: the lock orders them,
+    /// and both entries are kept, one as the head and one displaced
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_concurrent_writers_lose_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut a, id, _) = enrolled(dir.path()).await;
+        let mut b =
+            Mirrored::new(FsStorage::new(dir.path()), (), a.enrolment.clone());
+        let base = a.load_raw(id).await.unwrap().base;
+        let before = a.seal(id).outbox().await.unwrap().len();
+        let (ra, rb) = tokio::join!(
+            a.save_raw(id, state(30), base.as_ref()),
+            b.save_raw(id, state(31), base.as_ref()),
+        );
+        let (ha, hb) = (ra.unwrap().unwrap(), rb.unwrap().unwrap());
+        assert_ne!(ha, hb);
+        let seal = a.seal(id);
+        let outbox = seal.outbox().await.unwrap();
+        assert_eq!(outbox.len(), before + 2, "both recorded");
+        let hashes: Vec<_> =
+            outbox.iter().map(|i| i.entry.entry_hash()).collect();
+        assert!(
+            hashes.contains(&ha.entry_hash) && hashes.contains(&hb.entry_hash)
+        );
+        let head = seal.head().await.unwrap().unwrap();
+        assert!(head.head == ha || head.head == hb);
+        assert_eq!(head.displaced.len(), 1);
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+    }
+
+    /// A commit refuses an outbox item that is not the one it prepared
+    #[tokio::test]
+    async fn a_commit_refuses_another_writers_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let head = seal.head().await.unwrap().unwrap();
+        let lock = seal.lock().await.unwrap();
+        let append = |pt: &'static [u8]| Append {
+            kind: StateEntryKind::Snapshot,
+            plaintext: pt,
+            plaintext_sha256: Some(sha256(pt)),
+            state_at: Utc::now(),
+            parent: Some(head.head),
+        };
+        let policy = KeyframePolicy::default();
+        let first = seal
+            .prepare(&lock, &k, &policy, append(b"one"))
+            .await
+            .unwrap();
+        let second = seal
+            .prepare(&lock, &k, &policy, append(b"two"))
+            .await
+            .unwrap();
+        assert_eq!(first.item.ord, second.item.ord);
+        assert!(matches!(
+            seal.commit(&lock, &first).await,
+            Err(SealError::Raced)
+        ));
+        assert_eq!(seal.head().await.unwrap().unwrap().head, head.head);
+        seal.commit(&lock, &second).await.unwrap();
+        drop(lock);
+        // The abandoned item's blob goes once the head is past it; the
+        // committed one's stays until uploaded
+        let blob =
+            |p: &Prepared| p.item.entry.entry.blob.as_ref().unwrap().sha256;
+        assert_eq!(seal.prune_blobs().await.unwrap(), 1);
+        assert!(seal.read_blob(&blob(&first)).await.is_err());
+        assert!(seal.read_blob(&blob(&second)).await.is_ok());
+        // The abandoned record itself is kept
+        assert_eq!(seal.items(OUTBOX, "abandoned").await.unwrap().len(), 1);
+    }
+
+    /// A commit that fails after moving the head still counts
+    #[tokio::test]
+    async fn a_commit_error_after_the_head_moved_is_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let base = store.load_raw(id).await.unwrap().base;
+        // Clearing `seal_failed.json` is the commit's last step: make it fail
+        tokio::fs::create_dir(seal.dir().join(SEAL_FAILED))
+            .await
+            .unwrap();
+        let new = store
+            .save_raw(id, state(60), base.as_ref())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(Some(new), base);
+        assert_eq!(seal.head().await.unwrap().unwrap().head, new);
+        tokio::fs::remove_dir(seal.dir().join(SEAL_FAILED))
+            .await
+            .unwrap();
+        // The next save is no fork
+        store.save_raw(id, state(61), Some(&new)).await.unwrap();
+        assert!(seal.head().await.unwrap().unwrap().displaced.is_empty());
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+    }
+
+    /// An enrolled agent's save without a base is written, not sealed
+    #[tokio::test]
+    async fn a_save_without_a_base_is_recorded_not_guessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let before = seal.outbox().await.unwrap().len();
+        assert_eq!(store.save_raw(id, state(70), None).await.unwrap(), None);
+        assert_eq!(store.local.load_raw(id).await.unwrap().value, state(70));
+        assert_eq!(seal.outbox().await.unwrap().len(), before);
+        assert_eq!(
+            seal.seal_failed().await.unwrap().unwrap().error,
+            SealFailureKind::BadParent
+        );
+    }
+
+    /// A broken `sealed/` degrades a load, never fails it
+    #[tokio::test]
+    async fn a_load_degrades_on_a_sealed_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = enrolled(dir.path()).await;
+        tokio::fs::write(store.seal(id).dir().join(HEAD), b"{not json")
+            .await
+            .unwrap();
+        let loaded = store.load_raw(id).await.unwrap();
+        assert_eq!(loaded.value, state(10));
+        assert_eq!(loaded.base, None);
+        assert_eq!(
+            store.recovery(id),
+            Some(Recovery::Unreadable(SealFailureKind::Json))
+        );
+    }
+
+    #[test]
+    fn append_debug_shows_no_plaintext() {
+        let a = Append {
+            kind: StateEntryKind::Snapshot,
+            plaintext: b"secret memory",
+            plaintext_sha256: None,
+            state_at: Utc::now(),
+            parent: None,
+        };
+        let shown = format!("{a:?}");
+        assert!(!shown.contains("secret") && shown.contains("REDACTED"));
     }
 }

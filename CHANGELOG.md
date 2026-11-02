@@ -26,11 +26,21 @@ an agent whose runner doesn't enrol it.
   write order and `recover`, and `AgoraOutbox`. A failed seal never stops
   the local write: it is recorded in `sealed/seal_failed.json` and
   recovers as `Recovery::SealFailed`. `sealed/blobs/` keeps only the
-  current keyframe and blobs not yet acknowledged.
+  current keyframe and blobs not yet acknowledged. A per-agent file lock
+  (`std::fs::File::lock`) holds a save's three steps together.
+- **Padding**: a blob is padded inside its encryption to a bucket (`m·2^k`,
+  `m` in [8, 16), at least 1 KiB), so its size shows only the bucket.
+  Blob wire version 2; its AAD binds the entry's seq and `prev_hash`, and
+  a blob's bytes must hash to its `BlobRef`.
+- **Key rotations** sign their `seq` and `rotated_at`; `TrustedKeys`
+  follows them in sequence from the key current at each point, and trusts
+  a key only for entries before its rotation.
 - **`Storage` changes**: `load_raw` returns `Loaded { value, base }`,
   `save_raw` takes the base and returns the new one, the batch methods
-  follow, and `load_agents` returns `LoadedAgents`. `Reactor::with_bases`
-  carries each agent's base from load to save; `Report::unsaved_bases`.
+  follow, and `load_agents` returns `LoadedAgents`. The version is the
+  store's own type (`Storage::Version`; `NoVersion` for `FsStorage`).
+  `Reactor::with_bases` carries each agent's base from load to save;
+  `Report::bases` and `Report::unsaved_bases` hold them as JSON.
 - **The reactor no longer saves an agent whose `on_init` failed**, on
   either path.
 - `GovernanceLogPrefix::Anc` and `GovernanceLogEntryType::Anchor` (appended
