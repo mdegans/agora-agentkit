@@ -41,6 +41,18 @@ pub fn bucket(n: usize) -> usize {
     n.div_ceil(step) * step
 }
 
+/// What sealing adds to a padded payload: version, nonce and tag
+pub const SEALED_OVERHEAD: u64 = (1 + XNONCE_LEN + TAG_LEN) as u64;
+
+/// Whether `n` bytes is a size [`seal_blob`] can produce: a [`bucket`]
+/// plus [`SEALED_OVERHEAD`]
+pub fn is_sealed_blob_size(n: u64) -> bool {
+    let Some(padded) = n.checked_sub(SEALED_OVERHEAD) else {
+        return false;
+    };
+    usize::try_from(padded).is_ok_and(|b| b >= MIN_BUCKET && bucket(b) == b)
+}
+
 /// `len (u64 LE) ‖ data ‖ zeros`, to a [`bucket`]
 fn pad(data: &[u8]) -> Zeroizing<Vec<u8>> {
     let inner = 8 + data.len();
@@ -405,6 +417,43 @@ mod tests {
             assert_eq!(b % step, 0, "{n} -> {b}");
             assert_eq!(bucket(b), b, "a bucket is its own");
         }
+    }
+
+    #[test]
+    fn every_sealed_size_is_recognised_and_its_neighbours_are_not() {
+        let key = StateKey::generate();
+        let ctx = BlobContext {
+            agent_id: AgentId::new(),
+            key_gen: 0,
+            seq: 0,
+            prev_hash: None,
+            encoding: &BlobEncoding::Keyframe,
+        };
+        let mut sizes = std::collections::BTreeSet::new();
+        for len in (0..70_000).step_by(97).chain([1016, 1017, 1 << 16]) {
+            sizes.insert(seal_blob(&key, &ctx, &vec![0; len]).len() as u64);
+        }
+        for &n in &sizes {
+            assert!(is_sealed_blob_size(n), "{n}");
+            for near in [n - 1, n + 1] {
+                if !sizes.contains(&near) {
+                    assert!(!is_sealed_blob_size(near), "{near}");
+                }
+            }
+        }
+        // Every bucket the function admits is one sealing makes
+        for n in 0..200_000u64 {
+            if is_sealed_blob_size(n) {
+                let inner = (n - SEALED_OVERHEAD) as usize;
+                assert_eq!(bucket(inner), inner);
+                let sealed = seal_blob(&key, &ctx, &vec![0; inner - 8]);
+                assert_eq!(sealed.len() as u64, n);
+            }
+        }
+        assert!(!is_sealed_blob_size(0));
+        assert!(!is_sealed_blob_size(
+            SEALED_OVERHEAD + MIN_BUCKET as u64 - 1
+        ));
     }
 
     #[test]
