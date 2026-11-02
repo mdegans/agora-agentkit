@@ -79,6 +79,29 @@ impl AgentDir for FsStorage {
     }
 }
 
+/// A local [`Storage`] that can mark a sealed agent's state so binaries
+/// before 0.147 refuse it instead of overwriting it unsealed
+#[async_trait::async_trait]
+pub trait MarkedLocal: Storage {
+    async fn save_marked(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), Self::Error>;
+}
+
+#[async_trait::async_trait]
+impl MarkedLocal for FsStorage {
+    /// Format 2 ([`SEALED_FORMAT`](crate::reactor::storage::SEALED_FORMAT))
+    async fn save_marked(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), Self::Error> {
+        self.save_sealed_raw(id, value).await
+    }
+}
+
 /// What an agent's entries are signed and sealed with
 pub struct SealKeys {
     pub signing: SigningKey,
@@ -1276,6 +1299,9 @@ pub enum MirroredError<E> {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     NotFound(#[from] AgentNotFound),
+    /// Only from [`Mirrored::enroll`]: a save never fails on a seal
+    #[error(transparent)]
+    Seal(#[from] SealError),
 }
 
 impl<E: crate::reactor::RetryAfter> crate::reactor::RetryAfter
@@ -1463,24 +1489,74 @@ impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
     }
 }
 
-impl<L: Storage, O, E> Mirrored<L, O, E> {
+impl<L: MarkedLocal, O, E> Mirrored<L, O, E> {
+    /// The local write: marked for an enrolled agent, plain otherwise
     async fn write_local(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
+        enrolled: bool,
     ) -> Result<(), MirroredError<L::Error>> {
-        self.local
-            .save_raw(id, value, None)
+        if enrolled {
+            self.local.save_marked(id, value).await
+        } else {
+            self.local.save_raw(id, value, None).await.map(drop)
+        }
+        .map_err(MirroredError::Local)
+    }
+}
+
+impl<L, O, E> Mirrored<L, O, E>
+where
+    L: MarkedLocal + AgentDir,
+    E: Enrolment,
+{
+    /// Enrolment's last step, after its genesis, archives and current
+    /// state are sealed: mark the local state, align the head with the
+    /// state as marked (a float may not survive the rewrite), then write
+    /// `enrolled`
+    pub async fn enroll(
+        &mut self,
+        id: AgentId,
+    ) -> Result<HeadRef, MirroredError<L::Error>> {
+        let seal = self.seal(id);
+        let Loaded { value, .. } = self
+            .local
+            .load_raw(id)
             .await
-            .map(drop)
-            .map_err(MirroredError::Local)
+            .map_err(MirroredError::Local)?;
+        self.local
+            .save_marked(id, value)
+            .await
+            .map_err(MirroredError::Local)?;
+        let Loaded { value, .. } = self
+            .local
+            .load_raw(id)
+            .await
+            .map_err(MirroredError::Local)?;
+        let head = seal.head().await?.ok_or(SealError::NoHead)?;
+        let head = if head.plaintext_sha256 == Some(plaintext_hash(&value)) {
+            head.head
+        } else {
+            let keys = self.enrolment.keys(id).ok_or(SealError::NoKeys)?;
+            seal.append_state(
+                &keys,
+                &self.policy,
+                StateEntryKind::Snapshot,
+                &value,
+                Utc::now(),
+            )
+            .await?
+        };
+        seal.enroll().await.map_err(SealError::from)?;
+        Ok(head)
     }
 }
 
 #[async_trait::async_trait]
 impl<L, O, E> Storage for Mirrored<L, O, E>
 where
-    L: Storage + AgentDir,
+    L: MarkedLocal + AgentDir,
     O: Outbox,
     E: Enrolment,
 {
@@ -1504,8 +1580,9 @@ where
         drop(reloaded);
 
         if !self.enrolment.opted_in(id) {
-            self.write_local(id, value).await?;
-            if seal.is_enrolled().await.unwrap_or(false) {
+            let enrolled = seal.is_enrolled().await.unwrap_or(true);
+            self.write_local(id, value, enrolled).await?;
+            if enrolled {
                 Self::unsealed(
                     &seal,
                     id,
@@ -1520,13 +1597,13 @@ where
 
         // An agent not enrolled gets no `sealed/` at all
         if let Ok(false) = seal.is_enrolled().await {
-            self.write_local(id, value).await?;
+            self.write_local(id, value, false).await?;
             return Ok(None);
         }
         let lock = match seal.lock().await {
             Ok(lock) => lock,
             Err(e) => {
-                self.write_local(id, value).await?;
+                self.write_local(id, value, true).await?;
                 Self::unsealed(&seal, id, plaintext_sha256, e.kind(), Some(&e))
                     .await;
                 return Ok(base.copied());
@@ -1537,15 +1614,15 @@ where
             .await;
         match step {
             Ok(Step::NotEnrolled) => {
-                self.write_local(id, value).await?;
+                self.write_local(id, value, false).await?;
                 Ok(None)
             }
             Ok(Step::Unchanged(head)) => {
-                self.write_local(id, value).await?;
+                self.write_local(id, value, true).await?;
                 Ok(Some(head))
             }
             Ok(Step::Prepared(prepared)) => {
-                self.write_local(id, value).await?;
+                self.write_local(id, value, true).await?;
                 let commit = seal.commit(&lock, &prepared).await;
                 let committed = match &commit {
                     Ok(_) => Ok(None),
@@ -1577,7 +1654,7 @@ where
                 }
             }
             Err(e) => {
-                self.write_local(id, value).await?;
+                self.write_local(id, value, true).await?;
                 Self::unsealed(&seal, id, plaintext_sha256, e.kind(), Some(&e))
                     .await;
                 Ok(base.copied())
@@ -1731,7 +1808,8 @@ mod tests {
         )
         .await
         .unwrap();
-        seal.enroll().await.unwrap();
+        let mut store = store;
+        store.enroll(id).await.unwrap();
         (store, id, vk)
     }
 
@@ -2591,5 +2669,48 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    fn format_of(store: &Store, id: AgentId) -> serde_json::Value {
+        let raw: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(store.local.agent_dir(id).join("state.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        raw["format"].clone()
+    }
+
+    /// An enrolled agent's state is marked so binaries before 0.147 refuse
+    /// it; anyone else's is written as before. The mark changes no hash
+    #[tokio::test]
+    async fn an_enrolled_agents_state_is_marked_and_others_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        assert_eq!(format_of(&store, id), 2, "marked at enrolment");
+        let base = store.load_raw(id).await.unwrap().base;
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        store.save_raw(id, state(90), base.as_ref()).await.unwrap();
+        assert_eq!(format_of(&store, id), 2);
+        store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        // Opted out but enrolled: still marked
+        store.enrolment.out.lock().unwrap().push(id);
+        store.save_raw(id, state(91), None).await.unwrap();
+        assert_eq!(format_of(&store, id), 2);
+
+        // Not enrolled: format 1, byte for byte what FsStorage writes
+        let other = AgentId::new();
+        store.enrolment.add(other);
+        store.save_raw(other, state(5), None).await.unwrap();
+        let ours =
+            std::fs::read(store.local.agent_dir(other).join("state.json"))
+                .unwrap();
+        let plain_dir = tempfile::tempdir().unwrap();
+        let mut plain = FsStorage::new(plain_dir.path());
+        plain.save_raw(other, state(5), None).await.unwrap();
+        let theirs =
+            std::fs::read(plain.agent_dir(other).join("state.json")).unwrap();
+        assert_eq!(ours, theirs);
+        assert!(!store.seal(other).dir().exists());
     }
 }

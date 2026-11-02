@@ -47,6 +47,13 @@ an agent whose runner doesn't enrol it.
   store's own type (`Storage::Version`; `NoVersion` for `FsStorage`).
   `Reactor::with_bases` carries each agent's base from load to save;
   `Report::bases` and `Report::unsaved_bases` hold them as JSON.
+- **`FsStorage` format 2**: format 1 plus `"sealed": true`, written by
+  `Mirrored` for enrolled agents only (`FsStorage::save_sealed_raw`,
+  `MarkedLocal`; `Mirrored::enroll` marks as enrolment's last step).
+  This version reads both; 0.146 and earlier refuse format 2, so a
+  rollback skips a sealed agent instead of overwriting it unsealed.
+  Everyone else's file is format 1, byte for byte as before, and the
+  sealed plaintext is always `{format: 1, state}`.
 - **The reactor no longer saves an agent whose `on_init` failed**, on
   either path.
 - `GovernanceLogPrefix::Anc` and `GovernanceLogEntryType::Anchor` (appended

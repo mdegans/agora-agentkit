@@ -24,11 +24,15 @@ pub const DEFAULT_MAX_CHAIN: u32 = 64;
 #[error("brotli: {0}")]
 pub struct CodecError(#[from] std::io::Error);
 
-/// What is sealed for a state: the canonical bytes of `FsStorage`'s
-/// envelope, `{format, state}`
+/// The `format` in a sealed plaintext: always 1, whatever `FsStorage`
+/// writes, so its sealed marker never changes a hash
+pub const PLAINTEXT_FORMAT: u64 = 1;
+
+/// What is sealed for a state: the canonical bytes of `{format: 1,
+/// state}`, the state alone in `FsStorage`'s format-1 envelope
 pub fn plaintext(state: &serde_json::Value) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(canonical_json(&serde_json::json!({
-        "format": crate::reactor::storage::FORMAT,
+        "format": PLAINTEXT_FORMAT,
         "state": state,
     })))
 }
