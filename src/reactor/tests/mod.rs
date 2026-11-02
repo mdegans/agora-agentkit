@@ -29,7 +29,7 @@ use misanthropic::response::{self, StopReason};
 use misanthropic::tool::Tool;
 use serde::Serialize;
 
-use super::backend::{Inference, Loaded, SaveError, Saved, Storage, Version};
+use super::backend::{Inference, Loaded, NoVersion, SaveError, Saved, Storage};
 use super::inference::Quirks;
 use super::{Agent, AgentNotFound, Control, Outcome, RetryAfter, State};
 use crate::ids::AgentId;
@@ -381,7 +381,7 @@ fn offered_models() -> misanthropic::model::Models {
 // ---------------------------------------------------------------------------
 
 /// A save's id and the base it was given
-type BaseSeen = (AgentId, Option<Version>);
+type BaseSeen = (AgentId, Option<u64>);
 
 #[derive(Default, Clone)]
 struct MemStore {
@@ -395,31 +395,30 @@ struct MemStore {
 #[async_trait::async_trait]
 impl Storage for MemStore {
     type Error = TestError;
+    type Version = u64;
 
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        base: Option<&Version>,
-    ) -> Result<Option<Version>, TestError> {
+        base: Option<&u64>,
+    ) -> Result<Option<u64>, TestError> {
         self.bases_seen.lock().unwrap().push((id, base.cloned()));
         self.map.lock().unwrap().insert(id, value);
         let mut versions = self.versions.lock().unwrap();
         let v = versions.entry(id).or_insert(0);
         *v += 1;
-        Ok(Some(Version::new(v.to_string())))
+        Ok(Some(*v))
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, u64>, TestError> {
         match self.map.lock().unwrap().get(&id) {
             Some(value) => Ok(Loaded {
                 value: serde_json::from_value(value.clone())?,
-                base: self
-                    .versions
-                    .lock()
-                    .unwrap()
-                    .get(&id)
-                    .map(|v| Version::new(v.to_string())),
+                base: self.versions.lock().unwrap().get(&id).copied(),
             }),
             None => Err(AgentNotFound(id).into()),
         }
@@ -438,18 +437,22 @@ struct BulkStore {
 #[async_trait::async_trait]
 impl Storage for BulkStore {
     type Error = TestError;
+    type Version = NoVersion;
 
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        _base: Option<&Version>,
-    ) -> Result<Option<Version>, TestError> {
+        _base: Option<&NoVersion>,
+    ) -> Result<Option<NoVersion>, TestError> {
         self.map.lock().unwrap().insert(id, value);
         Ok(None)
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, NoVersion>, TestError> {
         match self.map.lock().unwrap().get(&id) {
             Some(value) => Ok(Loaded {
                 value: serde_json::from_value(value.clone())?,
@@ -462,10 +465,10 @@ impl Storage for BulkStore {
     async fn save_all_raw<It>(
         &mut self,
         items: It,
-    ) -> Result<Saved, SaveError<TestError>>
+    ) -> Result<Saved<NoVersion>, SaveError<TestError, NoVersion>>
     where
         It: ExactSizeIterator<
-                Item = (AgentId, serde_json::Value, Option<Version>),
+                Item = (AgentId, serde_json::Value, Option<NoVersion>),
             > + Send,
     {
         self.bulk_calls.fetch_add(1, Ordering::SeqCst);
@@ -787,6 +790,7 @@ impl PartialStore {
 #[async_trait::async_trait]
 impl Storage for PartialStore {
     type Error = TestError;
+    type Version = NoVersion;
 
     // `fetch_update` is `try_update` from Rust 1.99, which 1.98 lacks
     #[allow(deprecated)]
@@ -794,8 +798,8 @@ impl Storage for PartialStore {
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        _base: Option<&Version>,
-    ) -> Result<Option<Version>, TestError> {
+        _base: Option<&NoVersion>,
+    ) -> Result<Option<NoVersion>, TestError> {
         if self
             .budget
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -809,7 +813,10 @@ impl Storage for PartialStore {
         Ok(None)
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, NoVersion>, TestError> {
         match self.map.lock().unwrap().get(&id) {
             Some(value) => Ok(Loaded {
                 value: serde_json::from_value(value.clone())?,

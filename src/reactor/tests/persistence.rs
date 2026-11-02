@@ -100,7 +100,7 @@ async fn load_agents_round_trips() {
         agents,
         bases,
         failures,
-    }: LoadedAgents<TestAgent> =
+    }: LoadedAgents<TestAgent, u64> =
         load_agents(&store, "shared", [id1, id2, AgentId::new()].into_iter())
             .await
             .unwrap();
@@ -235,14 +235,15 @@ struct FailFirst {
 #[async_trait::async_trait]
 impl Storage for FailFirst {
     type Error = TestError;
+    type Version = u64;
 
     #[allow(deprecated)]
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        base: Option<&Version>,
-    ) -> Result<Option<Version>, TestError> {
+        base: Option<&u64>,
+    ) -> Result<Option<u64>, TestError> {
         if self
             .left
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -255,7 +256,10 @@ impl Storage for FailFirst {
         self.inner.save_raw(id, value, base).await
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, u64>, TestError> {
         self.inner.load_raw(id).await
     }
 }
@@ -349,25 +353,19 @@ async fn the_base_goes_from_load_to_save() {
         poison: None,
     };
     let first = store.save::<TestAgent>(id, &state, None).await.unwrap();
-    assert_eq!(first, Some(Version::new("1")));
+    assert_eq!(first, Some(1));
 
     for round in 1..=2u64 {
-        let LoadedAgents { agents, bases, .. }: LoadedAgents<TestAgent> =
+        let LoadedAgents { agents, bases, .. }: LoadedAgents<TestAgent, u64> =
             load_agents(&store, "", [id].into_iter()).await.unwrap();
-        assert_eq!(bases[&id], Version::new(round.to_string()));
+        assert_eq!(bases[&id], round);
         let mut reactor: Reactor<_, _, TestAgent> =
             Reactor::new(MockInference::end_turns(2), store.clone(), agents)
                 .with_bases(bases);
         let report = reactor.run().await.unwrap();
         assert_eq!(report.done, 1);
+        assert_eq!(report.bases[&id], serde_json::json!(round + 1));
     }
     let seen = store.bases_seen.lock().unwrap();
-    assert_eq!(
-        *seen,
-        vec![
-            (id, None),
-            (id, Some(Version::new("1"))),
-            (id, Some(Version::new("2"))),
-        ]
-    );
+    assert_eq!(*seen, vec![(id, None), (id, Some(1)), (id, Some(2)),]);
 }

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ids::AgentId;
 
-use super::backend::{AgentNotFound, Loaded, Storage, Version};
+use super::backend::{AgentNotFound, Loaded, NoVersion, Storage};
 
 /// The envelope format [`FsStorage`] writes. Bump on layout change; `load`
 /// rejects anything newer so an old binary never half-reads a new layout.
@@ -89,14 +89,15 @@ impl crate::reactor::RetryAfter for FsStorageError {}
 #[async_trait::async_trait]
 impl Storage for FsStorage {
     type Error = FsStorageError;
+    type Version = NoVersion;
 
     /// `base` is ignored: a directory keeps no versions to save against
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        _base: Option<&Version>,
-    ) -> Result<Option<Version>, Self::Error> {
+        _base: Option<&NoVersion>,
+    ) -> Result<Option<NoVersion>, Self::Error> {
         let dir = self.agent_dir(id);
         tokio::fs::create_dir_all(&dir).await?;
 
@@ -123,7 +124,10 @@ impl Storage for FsStorage {
         Ok(None)
     }
 
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, Self::Error> {
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, NoVersion>, Self::Error> {
         let path = self.agent_dir(id).join(STATE_FILE);
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,

@@ -27,7 +27,7 @@ pub use agent::{
 
 mod backend;
 pub use backend::{
-    AgentNotFound, Inference, Loaded, SaveError, Saved, Storage, Version,
+    AgentNotFound, Inference, Loaded, NoVersion, SaveError, Saved, Storage,
 };
 
 #[cfg(feature = "fs-storage")]
@@ -275,9 +275,9 @@ struct Drive {
 type SharedStorage<'a, S> = futures::lock::Mutex<Store<'a, S>>;
 
 /// A [`Storage`] and each agent's base, carried from load to save
-struct Store<'a, S> {
+struct Store<'a, S: Storage> {
     storage: &'a mut S,
-    bases: &'a mut BTreeMap<AgentId, Version>,
+    bases: &'a mut BTreeMap<AgentId, S::Version>,
 }
 
 impl<S: Storage> Store<'_, S> {
@@ -297,11 +297,7 @@ impl<S: Storage> Store<'_, S> {
 }
 
 /// Keep `base` as `id`'s, or forget it
-fn set_base(
-    bases: &mut BTreeMap<AgentId, Version>,
-    id: AgentId,
-    base: Option<Version>,
-) {
+fn set_base<V>(bases: &mut BTreeMap<AgentId, V>, id: AgentId, base: Option<V>) {
     match base {
         Some(base) => bases.insert(id, base),
         None => bases.remove(&id),
@@ -412,8 +408,8 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
     /// [`State`] of [`Agent`]s whose state didn't persist. Drained into
     /// [`Report::unsaved`].
     unsaved: BTreeMap<AgentId, serde_json::Value>,
-    /// Each agent's [`Version`] from its load, to save against
-    bases: BTreeMap<AgentId, Version>,
+    /// Each agent's [`Storage::Version`] from its load, to save against
+    bases: BTreeMap<AgentId, S::Version>,
     /// [`State`] of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]).
     /// Drained into [`Report::rejected`] so the caller can re-route them.
     rejected: BTreeMap<AgentId, serde_json::Value>,
@@ -526,11 +522,11 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         self
     }
 
-    /// The [`Version`]s the agents were loaded at ([`Loaded::base`]), so
+    /// The versions the agents were loaded at ([`Loaded::base`]), so
     /// each save names its parent ([`LoadedAgents::bases`])
     pub fn with_bases(
         mut self,
-        bases: impl IntoIterator<Item = (AgentId, Version)>,
+        bases: impl IntoIterator<Item = (AgentId, S::Version)>,
     ) -> Self {
         self.bases.extend(bases);
         self
@@ -570,7 +566,12 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             unsaved_bases: self
                 .unsaved
                 .keys()
-                .filter_map(|id| Some((*id, self.bases.get(id)?.clone())))
+                .filter_map(|id| Some((*id, base_value(self.bases.get(id)?))))
+                .collect(),
+            bases: self
+                .bases
+                .iter()
+                .map(|(id, base)| (*id, base_value(base)))
                 .collect(),
             rejected: self.rejected.clone(),
             unstarted: self.unstarted,
@@ -1289,11 +1290,16 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     }
 }
 
+/// A base as JSON, for a [`Report`]
+fn base_value<V: Serialize>(base: &V) -> serde_json::Value {
+    serde_json::to_value(base).expect("a Storage::Version serializes")
+}
+
 /// What [`load_agents`] built
-pub struct LoadedAgents<A: Agent> {
+pub struct LoadedAgents<A: Agent, V = NoVersion> {
     pub agents: Vec<A>,
     /// For [`Reactor::with_bases`]
-    pub bases: BTreeMap<AgentId, Version>,
+    pub bases: BTreeMap<AgentId, V>,
     pub failures: Vec<(AgentId, A::Error)>,
 }
 
@@ -1303,7 +1309,7 @@ pub async fn load_agents<S: Storage, A: Agent>(
     storage: &S,
     context: A::Context,
     ids: impl ExactSizeIterator<Item = AgentId> + Send,
-) -> Result<LoadedAgents<A>, S::Error> {
+) -> Result<LoadedAgents<A, S::Version>, S::Error> {
     let raw = storage.load_all::<_, A>(ids).await?;
     let mut agents = Vec::with_capacity(raw.len());
     let mut bases = BTreeMap::new();
@@ -1381,9 +1387,13 @@ pub struct Report {
     pub errors: BTreeMap<AgentId, ErrorReport>,
     pub unsaved: BTreeMap<AgentId, serde_json::Value>,
     /// The base each [`unsaved`](Self::unsaved) snapshot is to be saved
-    /// against, where its store keeps one
+    /// against, where its store keeps one: its `Storage::Version`, as JSON
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub unsaved_bases: BTreeMap<AgentId, Version>,
+    pub unsaved_bases: BTreeMap<AgentId, serde_json::Value>,
+    /// Every agent's base after the run, saved or not, as JSON: what its
+    /// next save names as its parent
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bases: BTreeMap<AgentId, serde_json::Value>,
     /// Snapshots of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]),
     /// for the caller to re-route.
     #[serde(default)]
@@ -1410,6 +1420,7 @@ impl std::ops::AddAssign<Report> for Report {
         self.errors.extend(rhs.errors);
         self.unsaved.extend(rhs.unsaved);
         self.unsaved_bases.extend(rhs.unsaved_bases);
+        self.bases.extend(rhs.bases);
         self.rejected.extend(rhs.rejected);
         self.unstarted += rhs.unstarted;
     }

@@ -8,41 +8,26 @@ use crate::{ids::AgentId, reactor::Agent};
 /// A failed bulk save.
 #[derive(Debug, thiserror::Error)]
 #[error("saved {} before failing: {inner}", saved.len())]
-pub struct SaveError<E> {
+pub struct SaveError<E, V = NoVersion> {
     /// [`AgentId`]s of [`Agent`]s whose [`Agent::State`] was successfully
     /// saved, with each one's new base.
-    pub saved: Saved,
+    pub saved: Saved<V>,
     #[source]
     pub inner: E,
 }
 
 /// The ids a bulk save committed, each with its new base
-pub type Saved = BTreeMap<AgentId, Option<Version>>;
+pub type Saved<V> = BTreeMap<AgentId, Option<V>>;
 
-/// An opaque token for the stored version a value was loaded from, handed
-/// back to [`Storage::save_raw`] as its base. A store that keeps no
-/// history has none
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Version(String);
+/// The [`Storage::Version`] of a store that keeps no versions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NoVersion {}
 
-impl Version {
-    /// A store's own token
-    pub fn new(token: impl Into<String>) -> Self {
-        Self(token.into())
-    }
-
-    /// The token
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// A loaded value and the [`Version`] it is, to save against
+/// A loaded value and the version it is, to save against
 #[derive(Debug, Clone, PartialEq)]
-pub struct Loaded<T = serde_json::Value> {
+pub struct Loaded<T = serde_json::Value, V = NoVersion> {
     pub value: T,
-    pub base: Option<Version>,
+    pub base: Option<V>,
 }
 
 /// An `Inference` backend for an [`Agent`] [`Reactor`].
@@ -133,6 +118,17 @@ pub struct AgentNotFound(pub AgentId);
 #[async_trait::async_trait]
 pub trait Storage: Sized + Send + Sync {
     type Error: super::Error + From<serde_json::Error> + From<AgentNotFound>;
+    /// The version a value was loaded at, handed back to
+    /// [`save_raw`](Storage::save_raw) as its base. [`NoVersion`] for a
+    /// store that keeps none
+    type Version: Clone
+        + std::fmt::Debug
+        + PartialEq
+        + Serialize
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync
+        + 'static;
 
     /// Persist an opaque JSON value under `id`, overwriting any prior
     /// value. `base` is what [`load_raw`](Storage::load_raw) returned for
@@ -141,11 +137,14 @@ pub trait Storage: Sized + Send + Sync {
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-        base: Option<&Version>,
-    ) -> Result<Option<Version>, Self::Error>;
+        base: Option<&Self::Version>,
+    ) -> Result<Option<Self::Version>, Self::Error>;
 
     /// Load the JSON value stored under `id`
-    async fn load_raw(&self, id: AgentId) -> Result<Loaded, Self::Error>;
+    async fn load_raw(
+        &self,
+        id: AgentId,
+    ) -> Result<Loaded<serde_json::Value, Self::Version>, Self::Error>;
 
     /// Serialize and store [`Agent::State`]
     ///
@@ -154,8 +153,8 @@ pub trait Storage: Sized + Send + Sync {
         &mut self,
         id: AgentId,
         state: &A::State,
-        base: Option<&Version>,
-    ) -> Result<Option<Version>, Self::Error> {
+        base: Option<&Self::Version>,
+    ) -> Result<Option<Self::Version>, Self::Error> {
         self.save_raw(id, serde_json::to_value(state)?, base).await
     }
 
@@ -163,7 +162,7 @@ pub trait Storage: Sized + Send + Sync {
     async fn load<A: Agent>(
         &self,
         id: AgentId,
-    ) -> Result<Loaded<A::State>, Self::Error> {
+    ) -> Result<Loaded<A::State, Self::Version>, Self::Error> {
         let Loaded { value, base } = self.load_raw(id).await?;
         Ok(Loaded {
             value: serde_json::from_value(value)?,
@@ -183,13 +182,13 @@ pub trait Storage: Sized + Send + Sync {
     async fn save_all_raw<It>(
         &mut self,
         items: It,
-    ) -> Result<Saved, SaveError<Self::Error>>
+    ) -> Result<Saved<Self::Version>, SaveError<Self::Error, Self::Version>>
     where
         It: ExactSizeIterator<
-                Item = (AgentId, serde_json::Value, Option<Version>),
+                Item = (AgentId, serde_json::Value, Option<Self::Version>),
             > + Send,
     {
-        let mut saved = Saved::new();
+        let mut saved = Saved::<Self::Version>::new();
         for (id, value, base) in items {
             match self.save_raw(id, value, base.as_ref()).await {
                 Ok(new) => {
@@ -207,7 +206,13 @@ pub trait Storage: Sized + Send + Sync {
     async fn load_all_raw<It>(
         &self,
         ids: It,
-    ) -> Result<Vec<(AgentId, Result<Loaded, Self::Error>)>, Self::Error>
+    ) -> Result<
+        Vec<(
+            AgentId,
+            Result<Loaded<serde_json::Value, Self::Version>, Self::Error>,
+        )>,
+        Self::Error,
+    >
     where
         It: ExactSizeIterator<Item = AgentId> + Send,
     {
@@ -231,15 +236,15 @@ pub trait Storage: Sized + Send + Sync {
     async fn save_all<It, A: Agent>(
         &mut self,
         items: It,
-    ) -> Result<Saved, SaveError<Self::Error>>
+    ) -> Result<Saved<Self::Version>, SaveError<Self::Error, Self::Version>>
     where
-        It: ExactSizeIterator<Item = (AgentId, A::State, Option<Version>)>
+        It: ExactSizeIterator<Item = (AgentId, A::State, Option<Self::Version>)>
             + Send,
     {
         let mut raw = Vec::with_capacity(items.len());
         for (id, value, base) in items {
             let value = serde_json::to_value(value).map_err(|e| SaveError {
-                saved: Saved::new(),
+                saved: Saved::<Self::Version>::new(),
                 inner: Self::Error::from(e),
             })?;
             raw.push((id, value, base));
@@ -255,7 +260,10 @@ pub trait Storage: Sized + Send + Sync {
         &self,
         ids: It,
     ) -> Result<
-        Vec<(AgentId, Result<Loaded<A::State>, Self::Error>)>,
+        Vec<(
+            AgentId,
+            Result<Loaded<A::State, Self::Version>, Self::Error>,
+        )>,
         Self::Error,
     >
     where
