@@ -235,6 +235,19 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
+    /// `GET /api/identity/rotations`: the signer's rotations, oldest first.
+    /// Advisory: trust comes only from the runner's own records
+    pub async fn get_rotations(
+        &self,
+        auth: StateAuth<'_>,
+    ) -> Result<Vec<KeyRotation>, Error> {
+        let url = self.url("api/identity/rotations")?;
+        let resp = self
+            .send_signed(reqwest::Method::GET, url, auth, None)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     /// `POST /api/identity/rotate_key`, signed by the old key (`auth`)
     pub async fn rotate_key(
         &self,

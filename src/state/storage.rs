@@ -926,6 +926,161 @@ impl AgentSeal {
         let compressed = open_entry_blob(&keys.state_key, entry, &sealed)?;
         Ok(codec::decompress(&compressed, dict)?)
     }
+
+    /// Rebuild a lost `head.json` from the server's chain: verified under
+    /// `trusted`, the head's state opened from its blobs (`fetch`, checked
+    /// against each `BlobRef`), and its plaintext hash compared with the
+    /// local state's. Writes `head.json` and the current keyframe's blob
+    /// only if all of that passes, and never a genesis. Leaves `enrolled`
+    /// to the caller
+    pub async fn adopt_server_head<F, Fut>(
+        &self,
+        _lock: &SealLock,
+        chain: &[SignedStateEntry],
+        trusted: &super::verify::TrustedKeys,
+        keys: &SealKeys,
+        local: Option<&serde_json::Value>,
+        mut fetch: F,
+    ) -> Result<Adopted, AdoptError>
+    where
+        F: FnMut(Sha256Hex) -> Fut + Send,
+        Fut: std::future::Future<
+                Output = Result<
+                    Vec<u8>,
+                    Box<dyn std::error::Error + Send + Sync>,
+                >,
+            > + Send,
+    {
+        if self.head().await?.is_some() {
+            return Err(AdoptError::HeadExists);
+        }
+        let report = super::verify::verify_chain(self.agent_id, chain, trusted);
+        if !report.intact {
+            return Err(AdoptError::Chain(report.problems));
+        }
+        let last = chain.last().ok_or(AdoptError::Empty)?;
+        let head = HeadRef {
+            entry_hash: last.entry_hash(),
+            seq: last.entry.seq,
+        };
+        let snapshot = chain
+            .iter()
+            .rev()
+            .map(|s| &s.entry)
+            .find(|e| e.kind == StateEntryKind::Snapshot)
+            .ok_or(AdoptError::NoSnapshot)?;
+        let keyframe = match snapshot.blob.as_ref().map(|b| b.encoding) {
+            Some(BlobEncoding::Delta { base }) => chain
+                .iter()
+                .map(|s| &s.entry)
+                .find(|e| e.entry_hash() == base)
+                .ok_or(AdoptError::Chain(Vec::new()))?,
+            _ => snapshot,
+        };
+        let mut open = async |entry: &StateEntry, dict: Option<&[u8]>| {
+            if entry.key_gen != keys.key_gen {
+                return Err(AdoptError::Open(OpenError::KeyGen(entry.key_gen)));
+            }
+            let sha = entry.blob.as_ref().ok_or(OpenError::NoBlob)?.sha256;
+            let sealed = fetch(sha).await.map_err(AdoptError::Fetch)?;
+            let compressed = open_entry_blob(&keys.state_key, entry, &sealed)
+                .map_err(OpenError::from)?;
+            let plaintext = codec::decompress(&compressed, dict)
+                .map_err(OpenError::from)?;
+            Ok::<_, AdoptError>((sealed, plaintext))
+        };
+        let (kf_sealed, kf_plaintext) = open(keyframe, None).await?;
+        let plaintext = if std::ptr::eq(keyframe, snapshot) {
+            kf_plaintext
+        } else {
+            open(snapshot, Some(&kf_plaintext)).await?.1
+        };
+        let server_sha256 = sha256(&plaintext);
+        drop(plaintext);
+
+        let kf_hash = keyframe.entry_hash();
+        let deltas = chain
+            .iter()
+            .filter_map(|s| s.entry.blob.as_ref())
+            .filter(|b| b.encoding == BlobEncoding::Delta { base: kf_hash })
+            .count() as u32;
+        let mut next_ord = 0;
+        for (sub, ext) in [
+            (OUTBOX, "json"),
+            (OUTBOX, "tmp"),
+            (OUTBOX, "abandoned"),
+            (SENT, "json"),
+        ] {
+            for item in self.items(sub, ext).await? {
+                next_ord = next_ord.max(item.ord + 1);
+            }
+        }
+        let blob_path = self
+            .dir
+            .join(BLOBS)
+            .join(keyframe.blob.as_ref().expect("opened").sha256.to_hex());
+        if !exists(&blob_path).await? {
+            write_atomic(&blob_path, &kf_sealed).await?;
+        }
+        let file = HeadFile {
+            head,
+            plaintext_sha256: Some(server_sha256),
+            keyframe: Some(KeyframeRef {
+                entry: keyframe.clone(),
+                deltas,
+            }),
+            next_ord,
+            displaced: Vec::new(),
+        };
+        write_atomic(&self.dir.join(HEAD), &serde_json::to_vec_pretty(&file)?)
+            .await?;
+        Ok(match local {
+            Some(v) if plaintext_hash(v) == server_sha256 => {
+                Adopted::Intact(head)
+            }
+            _ => Adopted::Mismatch(head),
+        })
+    }
+}
+
+/// What [`AgentSeal::adopt_server_head`] found, having written `head.json`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adopted {
+    /// The local state is the server head's
+    Intact(HeadRef),
+    /// It isn't: keep the refusal; the operator decides
+    Mismatch(HeadRef),
+}
+
+/// Why a server head was not adopted; nothing was written
+#[derive(Debug, thiserror::Error)]
+pub enum AdoptError {
+    #[error("head.json exists; nothing to rebuild")]
+    HeadExists,
+    #[error("the server's chain is empty")]
+    Empty,
+    #[error("the server's chain has no snapshot")]
+    NoSnapshot,
+    #[error("the server's chain does not verify: {0:?}")]
+    Chain(Vec<super::verify::ChainProblem>),
+    #[error("fetching a blob: {0}")]
+    Fetch(Box<dyn std::error::Error + Send + Sync>),
+    #[error(transparent)]
+    Open(#[from] OpenError),
+    #[error(transparent)]
+    Seal(#[from] SealError),
+}
+
+impl From<std::io::Error> for AdoptError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Seal(e.into())
+    }
+}
+
+impl From<serde_json::Error> for AdoptError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Seal(e.into())
+    }
 }
 
 /// A sealed state that would not open
@@ -1868,5 +2023,194 @@ mod tests {
         };
         let shown = format!("{a:?}");
         assert!(!shown.contains("secret") && shown.contains("REDACTED"));
+    }
+
+    /// Every blob under `sealed/blobs`, as a server would hold them
+    async fn blobs(seal: &AgentSeal) -> HashMap<Sha256Hex, Vec<u8>> {
+        let mut out = HashMap::new();
+        let mut rd = tokio::fs::read_dir(seal.dir().join(BLOBS)).await.unwrap();
+        while let Some(e) = rd.next_entry().await.unwrap() {
+            let sha: Sha256Hex =
+                e.file_name().to_str().unwrap().parse().unwrap();
+            out.insert(sha, tokio::fs::read(e.path()).await.unwrap());
+        }
+        out
+    }
+
+    fn fetcher(
+        blobs: HashMap<Sha256Hex, Vec<u8>>,
+    ) -> impl FnMut(
+        Sha256Hex,
+    ) -> std::future::Ready<
+        Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>,
+    > + Send {
+        move |sha| {
+            std::future::ready(
+                blobs.get(&sha).cloned().ok_or_else(|| "missing".into()),
+            )
+        }
+    }
+
+    /// A store whose `sealed/` was lost, with what the server holds
+    async fn lost(
+        dir: &Path,
+    ) -> (
+        Store,
+        AgentId,
+        crate::crypto::VerifyingKey,
+        Vec<SignedStateEntry>,
+        HashMap<Sha256Hex, Vec<u8>>,
+        HeadRef,
+    ) {
+        let (mut store, id, vk) = enrolled(dir).await;
+        let mut base = store.load_raw(id).await.unwrap().base;
+        for n in 11..14 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+        }
+        let seal = store.seal(id);
+        let server = chain(&seal).await;
+        let blobs = blobs(&seal).await;
+        tokio::fs::remove_dir_all(seal.dir()).await.unwrap();
+        (store, id, vk, server, blobs, base.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_lost_head_is_rebuilt_from_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, vk, server, blobs, head) = lost(dir.path()).await;
+        let seal = store.seal(id);
+        let keys = store.enrolment.keys(id).unwrap();
+        let local = store.local.load_raw(id).await.unwrap().value;
+        let lock = seal.lock().await.unwrap();
+        let adopted = seal
+            .adopt_server_head(
+                &lock,
+                &server,
+                &TrustedKeys::new(vk),
+                &keys,
+                Some(&local),
+                fetcher(blobs),
+            )
+            .await
+            .unwrap();
+        drop(lock);
+        assert_eq!(adopted, Adopted::Intact(head));
+        assert_eq!(seal.head().await.unwrap().unwrap().head, head);
+        // Saving goes on from it, a delta against the adopted keyframe
+        seal.enroll().await.unwrap();
+        let base = store.load_raw(id).await.unwrap().base;
+        assert_eq!(store.recovery(id), Some(Recovery::Intact(head)));
+        let next = store
+            .save_raw(id, state(14), base.as_ref())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.seq, head.seq + 1);
+        let item = seal.outbox().await.unwrap().pop().unwrap();
+        assert!(matches!(
+            item.entry.entry.blob.unwrap().encoding,
+            BlobEncoding::Delta { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_adopted_head_that_isnt_the_local_state_is_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, vk, server, blobs, head) = lost(dir.path()).await;
+        let seal = store.seal(id);
+        let keys = store.enrolment.keys(id).unwrap();
+        let lock = seal.lock().await.unwrap();
+        let adopted = seal
+            .adopt_server_head(
+                &lock,
+                &server,
+                &TrustedKeys::new(vk),
+                &keys,
+                Some(&serde_json::json!({ "memory": "" })),
+                fetcher(blobs),
+            )
+            .await
+            .unwrap();
+        assert_eq!(adopted, Adopted::Mismatch(head));
+        // Twice is refused
+        assert!(matches!(
+            seal.adopt_server_head(
+                &lock,
+                &server,
+                &TrustedKeys::new(vk),
+                &keys,
+                None,
+                fetcher(HashMap::new()),
+            )
+            .await,
+            Err(AdoptError::HeadExists)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_bad_chain_or_blob_is_never_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, vk, server, blobs, _) = lost(dir.path()).await;
+        let seal = store.seal(id);
+        let keys = store.enrolment.keys(id).unwrap();
+        let lock = seal.lock().await.unwrap();
+        let local = store.local.load_raw(id).await.unwrap().value;
+
+        // Untrusted key
+        let (_, other) = generate_keypair();
+        let r = seal
+            .adopt_server_head(
+                &lock,
+                &server,
+                &TrustedKeys::new(other),
+                &keys,
+                Some(&local),
+                fetcher(blobs.clone()),
+            )
+            .await;
+        assert!(matches!(r, Err(AdoptError::Chain(_))), "{r:?}");
+        // Truncated: no genesis
+        let r = seal
+            .adopt_server_head(
+                &lock,
+                &server[1..],
+                &TrustedKeys::new(vk),
+                &keys,
+                Some(&local),
+                fetcher(blobs.clone()),
+            )
+            .await;
+        assert!(matches!(r, Err(AdoptError::Chain(_))), "{r:?}");
+        // A blob swapped for another
+        let head_blob =
+            server.last().unwrap().entry.blob.as_ref().unwrap().sha256;
+        let other_blob = server[1].entry.blob.as_ref().unwrap().sha256;
+        let mut swapped = blobs.clone();
+        swapped.insert(head_blob, blobs[&other_blob].clone());
+        let r = seal
+            .adopt_server_head(
+                &lock,
+                &server,
+                &TrustedKeys::new(vk),
+                &keys,
+                Some(&local),
+                fetcher(swapped),
+            )
+            .await;
+        assert!(matches!(r, Err(AdoptError::Open(_))), "{r:?}");
+        // A blob the server lacks
+        let r = seal
+            .adopt_server_head(
+                &lock,
+                &server,
+                &TrustedKeys::new(vk),
+                &keys,
+                Some(&local),
+                fetcher(HashMap::new()),
+            )
+            .await;
+        assert!(matches!(r, Err(AdoptError::Fetch(_))), "{r:?}");
+        // Nothing was written
+        assert_eq!(seal.head().await.unwrap(), None);
     }
 }
