@@ -332,15 +332,47 @@ fn wrap_key(
     key: &MessageKey,
     to_pub: &EncryptionPublicKey,
 ) -> Result<Vec<u8>, EnvelopeError> {
+    wrap_secret(&key.0, to_pub, WRAP_INFO, &[])
+}
+
+/// Unwrap `K` from a wrapped-key blob using one's own static secret.
+/// Works for either party's wrap (recipient inbox read, sender outbox
+/// export).
+pub fn unwrap_key(
+    wrapped: &[u8],
+    own_secret: &EncryptionSecretKey,
+) -> Result<MessageKey, EnvelopeError> {
+    unwrap_secret(wrapped, own_secret, WRAP_INFO, &[]).map(MessageKey)
+}
+
+/// The wrap of [`wrap_key`] under its own HKDF `info` and AEAD `aad`, for
+/// other 32-byte secrets (the sealed-state key). `aad` empty is the
+/// message wrap, byte for byte.
+pub(crate) fn wrap_secret(
+    secret: &[u8; 32],
+    to_pub: &EncryptionPublicKey,
+    info: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, EnvelopeError> {
     let ephemeral = EncryptionSecretKey::random_from_rng(OsRng);
     let ephemeral_pub = EncryptionPublicKey::from(&ephemeral);
-    let kek =
-        derive_kek(ephemeral.diffie_hellman(to_pub), &ephemeral_pub, to_pub)?;
+    let kek = derive_kek(
+        ephemeral.diffie_hellman(to_pub),
+        &ephemeral_pub,
+        to_pub,
+        info,
+    )?;
 
     let cipher = ChaCha20Poly1305::new(kek.as_ref().into());
     // Zero nonce: the KEK is single-use by construction (fresh ephemeral).
     let ct = cipher
-        .encrypt(&Default::default(), key.0.as_ref() as &[u8])
+        .encrypt(
+            &Default::default(),
+            Payload {
+                msg: secret.as_slice(),
+                aad,
+            },
+        )
         .expect(
             "ChaCha20-Poly1305 encryption is infallible for in-memory buffers",
         );
@@ -352,13 +384,13 @@ fn wrap_key(
     Ok(out)
 }
 
-/// Unwrap `K` from a wrapped-key blob using one's own static secret.
-/// Works for either party's wrap (recipient inbox read, sender outbox
-/// export).
-pub fn unwrap_key(
+/// The inverse of [`wrap_secret`]
+pub(crate) fn unwrap_secret(
     wrapped: &[u8],
     own_secret: &EncryptionSecretKey,
-) -> Result<MessageKey, EnvelopeError> {
+    info: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
     if wrapped.len() != WRAPPED_KEY_LEN {
         return Err(EnvelopeError::Truncated(wrapped.len()));
     }
@@ -373,23 +405,34 @@ pub fn unwrap_key(
         own_secret.diffie_hellman(&ephemeral_pub),
         &ephemeral_pub,
         &own_pub,
+        info,
     )?;
 
     let cipher = ChaCha20Poly1305::new(kek.as_ref().into());
-    let k = cipher
-        .decrypt(&Default::default(), &wrapped[1 + PUB_LEN..])
-        .map_err(|_| EnvelopeError::Decrypt)?;
+    let k = Zeroizing::new(
+        cipher
+            .decrypt(
+                &Default::default(),
+                Payload {
+                    msg: &wrapped[1 + PUB_LEN..],
+                    aad,
+                },
+            )
+            .map_err(|_| EnvelopeError::Decrypt)?,
+    );
     let mut key = Zeroizing::new([0u8; 32]);
     key.copy_from_slice(&k);
-    Ok(MessageKey(key))
+    Ok(key)
 }
 
 /// `KEK = HKDF-SHA256(salt = ephemeral_pub || recipient_pub, ikm = shared,
-/// info = "agora/wrap/v1")` — age's X25519 stanza construction.
+/// info)` — age's X25519 stanza construction. `info` is `"agora/wrap/v1"`
+/// for messages.
 fn derive_kek(
     shared: x25519_dalek::SharedSecret,
     ephemeral_pub: &EncryptionPublicKey,
     to_pub: &EncryptionPublicKey,
+    info: &[u8],
 ) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
     if !shared.was_contributory() {
         return Err(EnvelopeError::NonContributory);
@@ -399,7 +442,7 @@ fn derive_kek(
     salt[32..].copy_from_slice(to_pub.as_bytes());
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
     let mut kek = Zeroizing::new([0u8; 32]);
-    hk.expand(WRAP_INFO, kek.as_mut())
+    hk.expand(info, kek.as_mut())
         .expect("32-byte HKDF output is always valid");
     Ok(kek)
 }
@@ -767,9 +810,13 @@ mod tests {
         ]);
         let eph_pub = EncryptionPublicKey::from(&eph_secret);
 
-        let kek =
-            derive_kek(eph_secret.diffie_hellman(&own_pub), &eph_pub, &own_pub)
-                .unwrap();
+        let kek = derive_kek(
+            eph_secret.diffie_hellman(&own_pub),
+            &eph_pub,
+            &own_pub,
+            WRAP_INFO,
+        )
+        .unwrap();
         assert_eq!(
             hex::encode(kek.as_ref()),
             "6f8d2f628f8da34c43e61aa77f0c2295683ca4c604bd0fcefb854bf961099998",
