@@ -32,9 +32,15 @@ an agent whose runner doesn't enrol it.
   `m` in [8, 16), at least 1 KiB), so its size shows only the bucket.
   Blob wire version 2; its AAD binds the entry's seq and `prev_hash`, and
   a blob's bytes must hash to its `BlobRef`.
-- **Key rotations** sign their `seq` and `rotated_at`; `TrustedKeys`
+- **Key rotations** sign their `seq`, `rotated_at`, `authority` and
+  `old_key_last` (the old key's last main-line entry). `TrustedKeys`
   follows them in sequence from the key current at each point, and trusts
-  a key only for entries before its rotation.
+  a key by chain position, never by time.
+- **Recovery**: `AgentSeal::adopt_server_head` rebuilds a lost
+  `head.json` from a verified server chain, and `rebase_onto` resolves a
+  held fork for the operator, keeping the other line aside. A drain's
+  status carries what is held back (`Held`). `Client::get_rotations`
+  (advisory).
 - **`Storage` changes**: `load_raw` returns `Loaded { value, base }`,
   `save_raw` takes the base and returns the new one, the batch methods
   follow, and `load_agents` returns `LoadedAgents`. The version is the

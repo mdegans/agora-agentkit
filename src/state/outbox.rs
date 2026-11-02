@@ -7,7 +7,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::storage::{AgentSeal, Enrolment, Outbox, SealError};
+use super::storage::{AgentSeal, Enrolment, Held, Outbox, SealError};
 use super::verify::{HeadStatus, head_status};
 use crate::client::{Client, Error as ClientError, StateAuth, state_conflict};
 use crate::govlog::Sha256Hex;
@@ -22,6 +22,9 @@ pub struct DrainStatus {
     pub at: DateTime<Utc>,
     /// Items still in the outbox
     pub waiting: usize,
+    /// What `sealed/` holds back, for an alert while a fork waits
+    #[serde(default)]
+    pub held: Held,
 }
 
 /// What one [`AgoraOutbox::drain`] did
@@ -30,6 +33,7 @@ pub struct DrainReport {
     pub uploaded: usize,
     pub status: HeadStatus,
     pub waiting: usize,
+    pub held: Held,
 }
 
 /// A drain that stopped; the items stay where they are
@@ -97,6 +101,7 @@ impl<E: Enrolment> AgoraOutbox<E> {
                 uploaded: 0,
                 status: HeadStatus::Same,
                 waiting: 0,
+                held: Held::default(),
             });
         }
         let keys = self.enrolment.keys(id).ok_or(DrainError::NoKeys)?;
@@ -161,10 +166,23 @@ impl<E: Enrolment> AgoraOutbox<E> {
         status: HeadStatus,
         waiting: usize,
     ) -> Result<DrainReport, DrainError> {
+        let held = seal.held().await?;
+        if status != HeadStatus::Same {
+            tracing::error!(
+                agent_id = %seal.agent_id(),
+                status = ?status,
+                outbox_items = held.outbox_items,
+                blobs = held.blobs,
+                blob_bytes = held.blob_bytes,
+                forks = held.displaced,
+                "sealed uploads held; an operator resolves it (sealed-accept)"
+            );
+        }
         let file = DrainStatus {
             status,
             at: Utc::now(),
             waiting,
+            held,
         };
         super::storage::write_atomic(
             &seal.dir().join(STATUS),
@@ -175,6 +193,7 @@ impl<E: Enrolment> AgoraOutbox<E> {
             uploaded,
             status,
             waiting,
+            held,
         })
     }
 
@@ -348,6 +367,12 @@ mod tests {
         assert_eq!(report.uploaded, 0);
         assert_eq!(report.status, HeadStatus::Diverged);
         assert_eq!(report.waiting, 2);
+        assert_eq!(report.held.outbox_items, 2);
+        assert_eq!(report.held.blobs, 2);
+        assert!(report.held.blob_bytes >= 2 * 1024);
+        let status = outbox.status(id).await.unwrap().unwrap();
+        assert_eq!(status.status, HeadStatus::Diverged);
+        assert_eq!(status.held, report.held);
         assert_eq!(
             outbox.seal(id).outbox().await.unwrap().len(),
             2,
