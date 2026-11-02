@@ -110,6 +110,7 @@ ENTRY_TYPES = {
     "obligation",
     "data_set",
     "test",
+    "anchor",
 }
 #: The id series reserved for one entry type. Every other type shares GOV-
 #: and APP-, which the verifier does not tell apart.
@@ -120,6 +121,7 @@ RESERVED_PREFIXES = {
     "obligation": "OBL",
     "data_set": "DATA",
     "test": "TEST",
+    "anchor": "ANC",
 }
 AMENDMENT_KINDS = {
     "non_precedential",
@@ -803,7 +805,7 @@ _UUID = re.compile(
     r"|[0-9a-f]{32}",
     re.IGNORECASE,
 )
-_PREFIXES = ("GOV", "APP", "AMD", "KEY", "REC", "OBL", "DATA", "TEST")
+_PREFIXES = ("GOV", "APP", "AMD", "KEY", "REC", "OBL", "DATA", "TEST", "ANC")
 
 
 def _string(obj, name, where):

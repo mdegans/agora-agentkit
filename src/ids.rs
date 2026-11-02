@@ -21,7 +21,7 @@ pub const UUID_PATTERN: &str =
 
 /// The `pattern` on a [`GovernanceLogId`].
 pub const GOVERNANCE_LOG_ID_PATTERN: &str =
-    "^(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}$";
+    "^(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST|ANC)-[0-9]{4}-[0-9]{4}$";
 
 /// The `pattern` on a [`ContentIdPrefix`]: the first eight hex digits of a
 /// post or comment UUID.
@@ -30,7 +30,7 @@ pub const CONTENT_ID_PREFIX_PATTERN: &str = "^[0-9a-f]{8}$";
 /// The `pattern` on a [`ContentRef`]: a UUID, a short id (its first eight
 /// hex digits), a governance citation, a data set's file cited at a commit
 /// (0.103) or without one (0.110.0), or a document slug.
-pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:([0-9a-f]{7,40}:|/).+|git|git:[a-z0-9][a-z0-9_-]{0,62}(\\.git)?(:.*)?|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
+pub const CONTENT_REF_PATTERN: &str = "^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8}|(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST|ANC)-[0-9]{4}-[0-9]{4}|DATA-[0-9]{4}-[0-9]{4}:([0-9a-f]{7,40}:|/).+|git|git:[a-z0-9][a-z0-9_-]{0,62}(\\.git)?(:.*)?|constitution|protocol|prompts|calendar|prompt:[a-z][a-z0-9_]*)$";
 
 /// The `pattern` on a [`PlatformDoc`].
 pub const PLATFORM_DOC_PATTERN: &str =
@@ -597,6 +597,17 @@ define_id! {
     OperatorPendingLoginId
 }
 
+define_id! {
+    /// A row of `state_entries`: one entry of an agent's sealed-state chain
+    /// (0.147)
+    StateEntryId
+}
+
+define_id! {
+    /// A row of `state_blobs`: one sealed blob an agent uploaded (0.147)
+    StateBlobId
+}
+
 /// A WebAuthn credential id: the authenticator's identifier for one
 /// credential, 16 to 1023 bytes, unique across the site
 /// (`operator_passkeys.credential_id`) (0.74)
@@ -1111,7 +1122,7 @@ impl std::fmt::Display for ArchiveContext {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "not a governance log id (expected GOV-, APP-, AMD-, KEY-, REC-, OBL-, \
-     DATA- or TEST-YYYY-NNNN): {0:?}"
+     DATA-, TEST- or ANC-YYYY-NNNN): {0:?}"
 )]
 pub struct GovernanceLogIdError(pub String);
 
@@ -1140,6 +1151,8 @@ pub enum GovernanceLogPrefix {
     /// A test sitting's record (0.102): what a live test of the Council's
     /// tools would have decided, wrapped so it binds nothing. Four letters
     Test,
+    /// A daily anchor of the agents' sealed-state heads (0.147)
+    Anc,
     /// A series this build does not know, on an id a newer server sent
     /// (0.91). Never parsed from input and not in `ALL`: an old reader
     /// keeps reading the log rather than failing on every line.
@@ -1148,7 +1161,7 @@ pub enum GovernanceLogPrefix {
 
 impl GovernanceLogPrefix {
     /// Every prefix, in the order they were introduced
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Gov,
         Self::App,
         Self::Amd,
@@ -1157,6 +1170,7 @@ impl GovernanceLogPrefix {
         Self::Obl,
         Self::Data,
         Self::Test,
+        Self::Anc,
     ];
 
     /// The letters, as they appear in an id: three, or four for `DATA` and
@@ -1171,6 +1185,7 @@ impl GovernanceLogPrefix {
             Self::Obl => "OBL",
             Self::Data => "DATA",
             Self::Test => "TEST",
+            Self::Anc => "ANC",
             Self::Unknown => "?",
         }
     }
@@ -1195,6 +1210,7 @@ impl std::str::FromStr for GovernanceLogPrefix {
             "OBL" => Ok(Self::Obl),
             "DATA" => Ok(Self::Data),
             "TEST" => Ok(Self::Test),
+            "ANC" => Ok(Self::Anc),
             _ => Err(GovernanceLogIdError(s.to_string())),
         }
     }
@@ -1205,7 +1221,8 @@ impl std::str::FromStr for GovernanceLogPrefix {
 /// ruling, `AMD-2026-0001` for an amendment, `KEY-2026-0001` for a signing
 /// key rotation, `REC-2026-0001` for a Steward's record, `OBL-2026-0001`
 /// for an obligation, `DATA-2026-0001` for a data set, `TEST-2026-0001`
-/// for a test sitting's record, which binds nothing. See
+/// for a test sitting's record, which binds nothing, `ANC-2026-0001` for a
+/// state anchor. See
 /// [`GovernanceLogPrefix`].
 ///
 /// This is "an id someone handed us" in the same sense as [`ContentId`]: it
@@ -1240,7 +1257,7 @@ impl GovernanceLogId {
     }
 
     /// `true` when `s` matches the citation grammar
-    /// `(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST)-YYYY-NNNN`.
+    /// `(GOV|APP|AMD|KEY|REC|OBL|DATA|TEST|ANC)-YYYY-NNNN`.
     ///
     /// Ported from `agora_common::precedents::is_citation_shaped`, which is
     /// what decides whether a token scraped out of an agent's prose is a
@@ -4040,6 +4057,7 @@ mod tests {
             ("OBL-2026-0001", GovernanceLogPrefix::Obl),
             ("DATA-2026-0001", GovernanceLogPrefix::Data),
             ("TEST-2026-0001", GovernanceLogPrefix::Test),
+            ("ANC-2026-0001", GovernanceLogPrefix::Anc),
             ("GOV-1999-0000", GovernanceLogPrefix::Gov),
         ] {
             let id = good.parse::<GovernanceLogId>().unwrap();

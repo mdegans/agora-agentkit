@@ -4397,13 +4397,13 @@ fn format_omitted(o: &OmittedEntries) -> String {
     )
 }
 
-/// KEY, REC, DATA and TEST entries: in force, but they decide nothing (as
-/// get_governance_log's description says)
+/// KEY, REC, DATA, TEST and ANC entries: in force, but they decide nothing
+/// (as get_governance_log's description says)
 fn decides_nothing(kind: crate::enums::GovernanceLogEntryType) -> bool {
     use crate::enums::GovernanceLogEntryType as T;
     matches!(
         kind,
-        T::KeyRotation | T::StewardRecord | T::DataSet | T::Test
+        T::KeyRotation | T::StewardRecord | T::DataSet | T::Test | T::Anchor
     )
 }
 
