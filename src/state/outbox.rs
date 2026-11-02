@@ -149,6 +149,8 @@ impl<E: Enrolment> AgoraOutbox<E> {
             seal.mark_sent(item.ord).await?;
             uploaded += 1;
         }
+        let pruned = seal.prune_blobs().await?;
+        tracing::debug!(agent_id = %id, uploaded, pruned, "sealed outbox drained");
         self.finish(&seal, uploaded, HeadStatus::Same, 0).await
     }
 
@@ -287,6 +289,19 @@ mod tests {
         let seal = outbox.seal(id);
         assert!(seal.outbox().await.unwrap().is_empty());
         assert_eq!(seal.sent().await.unwrap().len(), 2);
+        // Only the current keyframe's blob stays; the genesis blob went
+        let kf = seal.head().await.unwrap().unwrap().keyframe.unwrap();
+        let mut left = Vec::new();
+        let mut rd =
+            tokio::fs::read_dir(seal.dir().join("blobs")).await.unwrap();
+        while let Some(e) = rd.next_entry().await.unwrap() {
+            left.push(e.file_name().into_string().unwrap());
+        }
+        assert_eq!(left, vec![kf.blob_sha256.to_hex()]);
+        // Its siblings untouched
+        for f in ["head.json", "enrolled"] {
+            assert!(seal.dir().join(f).exists(), "{f}");
+        }
         assert_eq!(
             outbox.status(id).await.unwrap().unwrap().status,
             HeadStatus::Same
@@ -341,5 +356,14 @@ mod tests {
             2,
             "nothing lost"
         );
+        // Blobs not acknowledged are all kept
+        let mut n = 0;
+        let mut rd = tokio::fs::read_dir(outbox.seal(id).dir().join("blobs"))
+            .await
+            .unwrap();
+        while rd.next_entry().await.unwrap().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 2);
     }
 }

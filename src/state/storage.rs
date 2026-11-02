@@ -10,6 +10,10 @@
 //! - `outbox/<ord>.json`: committed entries not yet uploaded, `<ord>.tmp`
 //!   one being written, `<ord>.abandoned` one whose local write never came
 //! - `sent/<ord>.json`: uploaded entries
+//! - `seal_failed.json`: a local write whose seal failed ([`SealFailed`])
+//!
+//! `blobs/` keeps only the current keyframe and blobs not yet uploaded
+//! ([`AgentSeal::prune_blobs`]); the server holds the rest.
 //!
 //! A save is crash-safe in this order: seal into `outbox/<ord>.tmp`, the
 //! local write, then commit (the rename and `head.json`). [`AgentSeal::recover`]
@@ -44,6 +48,7 @@ const HEAD: &str = "head.json";
 const OUTBOX: &str = "outbox";
 const SENT: &str = "sent";
 const BLOBS: &str = "blobs";
+const SEAL_FAILED: &str = "seal_failed.json";
 
 /// A [`Storage`] that keeps each agent in a directory of its own
 pub trait AgentDir {
@@ -153,6 +158,46 @@ pub enum SealError {
     BadParent,
 }
 
+/// Which way a seal failed, without content
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SealFailureKind {
+    Io,
+    Json,
+    Seal,
+    NoHead,
+    NoKeys,
+    BadVersion,
+    BadParent,
+}
+
+impl SealError {
+    /// Its kind, for [`SealFailed`]. `None` for a refusal, which is no
+    /// failure
+    pub fn kind(&self) -> Option<SealFailureKind> {
+        Some(match self {
+            Self::Io(_) => SealFailureKind::Io,
+            Self::Json(_) => SealFailureKind::Json,
+            Self::Seal(_) => SealFailureKind::Seal,
+            Self::NoHead => SealFailureKind::NoHead,
+            Self::NoKeys => SealFailureKind::NoKeys,
+            Self::BadVersion(_) => SealFailureKind::BadVersion,
+            Self::BadParent => SealFailureKind::BadParent,
+            Self::Refused => return None,
+        })
+    }
+}
+
+/// `sealed/seal_failed.json`: the local write went ahead unsealed. The
+/// next seal clears it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealFailed {
+    pub at: DateTime<Utc>,
+    /// Local only, as in [`HeadFile`]
+    pub local_plaintext_sha256: Sha256Hex,
+    pub error: SealFailureKind,
+}
+
 /// What [`Append`] adds
 #[derive(Debug, Clone)]
 pub struct Append<'a> {
@@ -184,6 +229,9 @@ pub enum Recovery {
     Committed(HeadRef),
     /// There is no local state
     NoLocalState(HeadRef),
+    /// The local state is one whose seal failed (`seal_failed.json`):
+    /// hold and alert, it is not a loss
+    SealFailed(HeadRef, SealFailureKind),
     /// The local state matches neither the head nor a pending item
     Mismatch(HeadRef),
 }
@@ -539,6 +587,14 @@ impl AgentSeal {
         };
         write_atomic(&self.dir.join(HEAD), &serde_json::to_vec_pretty(&file)?)
             .await?;
+        if item.plaintext_sha256.is_some() {
+            // A seal of the state supersedes an unsealed write before it
+            match tokio::fs::remove_file(self.dir.join(SEAL_FAILED)).await {
+                Ok(()) => sync_dir(&self.dir).await?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
         Ok(head)
     }
 
@@ -568,15 +624,82 @@ impl AgentSeal {
             .filter(|i| i.ord >= head.next_ord)
             .collect();
         pending.sort_by_key(|i| std::cmp::Reverse(i.ord));
-        match pending
+        if let Some(item) = pending
             .into_iter()
             .find(|i| i.plaintext_sha256.as_ref() == Some(local))
         {
-            Some(item) => {
-                Ok(Recovery::Committed(self.commit_item(&item).await?))
-            }
-            None => Ok(Recovery::Mismatch(head.head)),
+            return Ok(Recovery::Committed(self.commit_item(&item).await?));
         }
+        match self.seal_failed().await? {
+            Some(f) if f.local_plaintext_sha256 == *local => {
+                Ok(Recovery::SealFailed(head.head, f.error))
+            }
+            _ => Ok(Recovery::Mismatch(head.head)),
+        }
+    }
+
+    /// The last unsealed local write, if one is outstanding
+    pub async fn seal_failed(&self) -> Result<Option<SealFailed>, SealError> {
+        match tokio::fs::read(self.dir.join(SEAL_FAILED)).await {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Record a local write that went ahead unsealed
+    pub async fn record_seal_failed(
+        &self,
+        local_plaintext_sha256: Sha256Hex,
+        error: SealFailureKind,
+    ) -> Result<(), SealError> {
+        let failed = SealFailed {
+            at: Utc::now(),
+            local_plaintext_sha256,
+            error,
+        };
+        write_atomic(
+            &self.dir.join(SEAL_FAILED),
+            &serde_json::to_vec_pretty(&failed)?,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Delete the uploaded blobs this code wrote that are no longer needed:
+    /// every blob of a `sent/` entry but the current keyframe's and any an
+    /// outbox item still names. Touches nothing else
+    pub async fn prune_blobs(&self) -> Result<usize, SealError> {
+        let mut keep = std::collections::HashSet::new();
+        if let Some(kf) = self.head().await?.and_then(|h| h.keyframe) {
+            keep.insert(kf.blob_sha256);
+        }
+        for ext in ["json", "tmp", "abandoned"] {
+            for item in self.items(OUTBOX, ext).await? {
+                if let Some(b) = item.entry.entry.blob {
+                    keep.insert(b.sha256);
+                }
+            }
+        }
+        let mut pruned = 0;
+        for item in self.sent().await? {
+            let Some(blob) = item.entry.entry.blob else {
+                continue;
+            };
+            if keep.contains(&blob.sha256) {
+                continue;
+            }
+            let path = self.dir.join(BLOBS).join(blob.sha256.to_hex());
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => pruned += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        if pruned > 0 {
+            sync_dir(&self.dir.join(BLOBS)).await?;
+        }
+        Ok(pruned)
     }
 
     /// Start a chain with its genesis
@@ -764,57 +887,33 @@ impl<L: AgentDir, O, E> Mirrored<L, O, E> {
     }
 }
 
+/// How far a save's seal got before the local write
+enum Step {
+    NotEnrolled,
+    /// Same bytes as the head's
+    Unchanged(HeadRef),
+    Prepared(Box<Prepared>),
+}
+
 impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
-    /// Whether a save of `id` is sealed
-    async fn sealing(
+    /// Step 1 of a save of an opted-in agent
+    async fn prepare(
         &self,
+        seal: &AgentSeal,
         id: AgentId,
-    ) -> Result<Option<AgentSeal>, SealError> {
-        if !self.enrolment.opted_in(id) {
-            return Ok(None);
-        }
-        let seal = self.seal(id);
+        plaintext: &[u8],
+        plaintext_sha256: Sha256Hex,
+        base: Option<&Version>,
+    ) -> Result<Step, SealError> {
         if !seal.is_enrolled().await? {
-            return Ok(None);
+            return Ok(Step::NotEnrolled);
         }
         if seal.is_refused().await? {
             return Err(SealError::Refused);
         }
-        Ok(Some(seal))
-    }
-}
-
-#[async_trait::async_trait]
-impl<L, O, E> Storage for Mirrored<L, O, E>
-where
-    L: Storage + AgentDir,
-    O: Outbox,
-    E: Enrolment,
-{
-    type Error = MirroredError<L::Error>;
-
-    async fn save_raw(
-        &mut self,
-        id: AgentId,
-        value: serde_json::Value,
-        base: Option<&Version>,
-    ) -> Result<Option<Version>, Self::Error> {
-        let Some(seal) = self.sealing(id).await? else {
-            return self
-                .local
-                .save_raw(id, value, base)
-                .await
-                .map_err(MirroredError::Local);
-        };
         let head = seal.head().await?.ok_or(SealError::NoHead)?;
-        let plaintext = codec::plaintext(&value);
-        let plaintext_sha256 = sha256(&plaintext);
         if head.plaintext_sha256 == Some(plaintext_sha256) {
-            self.local
-                .save_raw(id, value, None)
-                .await
-                .map_err(MirroredError::Local)?;
-            return Ok(Some(version_of(&head.head)));
+            return Ok(Step::Unchanged(head.head));
         }
         let parent = match base {
             Some(base) => head_of(base)?,
@@ -827,34 +926,128 @@ where
             }
         };
         let keys = self.enrolment.keys(id).ok_or(SealError::NoKeys)?;
-        let prepared = seal
-            .prepare(
-                &keys,
-                &self.policy,
-                Append {
-                    kind: StateEntryKind::Snapshot,
-                    plaintext: &plaintext,
-                    plaintext_sha256: Some(plaintext_sha256),
-                    state_at: Utc::now(),
-                    parent: Some(parent),
-                },
-            )
-            .await?;
+        seal.prepare(
+            &keys,
+            &self.policy,
+            Append {
+                kind: StateEntryKind::Snapshot,
+                plaintext,
+                plaintext_sha256: Some(plaintext_sha256),
+                state_at: Utc::now(),
+                parent: Some(parent),
+            },
+        )
+        .await
+        .map(|p| Step::Prepared(Box::new(p)))
+    }
+
+    /// A local write that went ahead without its seal: logged, and
+    /// recorded unless it was a refusal
+    async fn unsealed(
+        &self,
+        seal: &AgentSeal,
+        id: AgentId,
+        plaintext_sha256: Sha256Hex,
+        e: &SealError,
+    ) {
+        let Some(kind) = e.kind() else {
+            tracing::warn!(agent_id = %id, "refused agent saved locally, unsealed");
+            return;
+        };
+        tracing::error!(
+            agent_id = %id,
+            error = %e,
+            "seal failed; the state was saved locally, unsealed"
+        );
+        if let Err(e) = seal.record_seal_failed(plaintext_sha256, kind).await {
+            tracing::error!(
+                agent_id = %id,
+                error = %e,
+                "could not record the failed seal"
+            );
+        }
+    }
+}
+
+impl<L: Storage, O, E> Mirrored<L, O, E> {
+    async fn write_local(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<Option<Version>, MirroredError<L::Error>> {
         self.local
             .save_raw(id, value, None)
             .await
-            .map_err(MirroredError::Local)?;
-        let new = seal.commit(&prepared).await?;
-        if prepared.item.displaced.is_some() {
-            tracing::warn!(
-                agent_id = %id,
-                base = %parent.entry_hash,
-                displaced = %head.head.entry_hash,
-                "sealed save forked from an older head; held for a merge"
-            );
+            .map_err(MirroredError::Local)
+    }
+}
+
+#[async_trait::async_trait]
+impl<L, O, E> Storage for Mirrored<L, O, E>
+where
+    L: Storage + AgentDir,
+    O: Outbox,
+    E: Enrolment,
+{
+    type Error = MirroredError<L::Error>;
+
+    /// A seal failure never stops the local write: it is recorded in
+    /// `seal_failed.json` instead. A refused agent is written unsealed
+    async fn save_raw(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+        base: Option<&Version>,
+    ) -> Result<Option<Version>, Self::Error> {
+        if !self.enrolment.opted_in(id) {
+            return self
+                .local
+                .save_raw(id, value, base)
+                .await
+                .map_err(MirroredError::Local);
         }
-        self.outbox.notify(id);
-        Ok(Some(version_of(&new)))
+        let seal = self.seal(id);
+        let plaintext = codec::plaintext(&value);
+        let plaintext_sha256 = sha256(&plaintext);
+        let step = self
+            .prepare(&seal, id, &plaintext, plaintext_sha256, base)
+            .await;
+        match step {
+            Ok(Step::NotEnrolled) => self
+                .local
+                .save_raw(id, value, base)
+                .await
+                .map_err(MirroredError::Local),
+            Ok(Step::Unchanged(head)) => {
+                self.write_local(id, value).await?;
+                Ok(Some(version_of(&head)))
+            }
+            Ok(Step::Prepared(prepared)) => {
+                self.write_local(id, value).await?;
+                match seal.commit(&prepared).await {
+                    Ok(new) => {
+                        if let Some(displaced) = prepared.item.displaced {
+                            tracing::warn!(
+                                agent_id = %id,
+                                displaced = %displaced.entry_hash,
+                                "sealed save forked from an older head; held for a merge"
+                            );
+                        }
+                        self.outbox.notify(id);
+                        Ok(Some(version_of(&new)))
+                    }
+                    Err(e) => {
+                        self.unsealed(&seal, id, plaintext_sha256, &e).await;
+                        Ok(base.cloned())
+                    }
+                }
+            }
+            Err(e) => {
+                self.write_local(id, value).await?;
+                self.unsealed(&seal, id, plaintext_sha256, &e).await;
+                Ok(base.cloned())
+            }
+        }
     }
 
     async fn load_raw(&self, id: AgentId) -> Result<Loaded, Self::Error> {
@@ -872,9 +1065,9 @@ where
                 Some(version_of(&h))
             }
             // The runner's start check decides; the base is the head's
-            Recovery::Mismatch(h) | Recovery::NoLocalState(h) => {
-                Some(version_of(&h))
-            }
+            Recovery::Mismatch(h)
+            | Recovery::NoLocalState(h)
+            | Recovery::SealFailed(h, _) => Some(version_of(&h)),
             Recovery::NotEnrolled | Recovery::NoHead => None,
         };
         Ok(Loaded { value, base })
@@ -1064,17 +1257,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refused_agent_is_not_saved_at_all() {
+    async fn a_refused_agent_is_saved_locally_and_never_sealed() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, id, _) = enrolled(dir.path()).await;
-        store.seal(id).refuse("wiped").await.unwrap();
+        let seal = store.seal(id);
+        seal.refuse("wiped").await.unwrap();
+        let before = seal.outbox().await.unwrap().len();
+        let base = store.load_raw(id).await.unwrap().base;
+        let got = store.save_raw(id, state(99), base.as_ref()).await.unwrap();
+        assert_eq!(got, base, "the base doesn't move");
+        assert_eq!(store.local.load_raw(id).await.unwrap().value, state(99));
+        assert_eq!(seal.outbox().await.unwrap().len(), before);
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        seal.clear_refusal().await.unwrap();
+        store.save_raw(id, state(100), base.as_ref()).await.unwrap();
+        assert_eq!(seal.outbox().await.unwrap().len(), before + 1);
+    }
+
+    /// A seal that fails still writes the state, records it, and the next
+    /// seal clears the record
+    #[tokio::test]
+    async fn a_failed_seal_never_stops_the_local_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let base = store.load_raw(id).await.unwrap().base;
+        let saved_keys =
+            store.enrolment.keys.lock().unwrap().remove(&id).unwrap();
+
+        let got = store.save_raw(id, state(42), base.as_ref()).await.unwrap();
+        assert_eq!(got, base);
+        let local = store.local.load_raw(id).await.unwrap().value;
+        assert_eq!(local, state(42), "written, unsealed");
+        let failed = seal.seal_failed().await.unwrap().unwrap();
+        assert_eq!(failed.error, SealFailureKind::NoKeys);
+        assert_eq!(failed.local_plaintext_sha256, plaintext_hash(&local));
+        // Not the May signature: its own verdict
+        let head = seal.head().await.unwrap().unwrap().head;
+        assert_eq!(
+            seal.recover(Some(&plaintext_hash(&local))).await.unwrap(),
+            Recovery::SealFailed(head, SealFailureKind::NoKeys)
+        );
+        // Anything else is still a mismatch
         assert!(matches!(
-            store.save_raw(id, state(99), None).await,
-            Err(MirroredError::Seal(SealError::Refused))
+            seal.recover(Some(&plaintext_hash(&state(1))))
+                .await
+                .unwrap(),
+            Recovery::Mismatch(_)
         ));
-        assert_eq!(store.local.load_raw(id).await.unwrap().value, state(10));
-        store.seal(id).clear_refusal().await.unwrap();
-        store.save_raw(id, state(99), None).await.unwrap();
+
+        // An IO failure inside sealed/ is no different
+        store.enrolment.keys.lock().unwrap().insert(id, saved_keys);
+        let blobs = seal.dir().join(BLOBS);
+        tokio::fs::rename(&blobs, seal.dir().join("blobs.moved"))
+            .await
+            .unwrap();
+        tokio::fs::write(&blobs, b"not a directory").await.unwrap();
+        store.save_raw(id, state(43), base.as_ref()).await.unwrap();
+        assert_eq!(store.local.load_raw(id).await.unwrap().value, state(43));
+        assert_eq!(
+            seal.seal_failed().await.unwrap().unwrap().error,
+            SealFailureKind::Io
+        );
+        tokio::fs::remove_file(&blobs).await.unwrap();
+        tokio::fs::rename(seal.dir().join("blobs.moved"), &blobs)
+            .await
+            .unwrap();
+
+        // The next seal clears it
+        store.save_raw(id, state(44), base.as_ref()).await.unwrap();
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        let local = store.local.load_raw(id).await.unwrap().value;
+        assert!(matches!(
+            seal.recover(Some(&plaintext_hash(&local))).await.unwrap(),
+            Recovery::Intact(_)
+        ));
     }
 
     #[tokio::test]

@@ -23,7 +23,10 @@ an agent whose runner doesn't enrol it.
 - **Feature `sealed-state`** (brotli 9, Steward approved): the codec and
   `KeyframePolicy` (a new keyframe when a delta is over half a fresh
   keyframe, or after 64 deltas), `Mirrored` storage with its crash-safe
-  write order and `recover`, and `AgoraOutbox`.
+  write order and `recover`, and `AgoraOutbox`. A failed seal never stops
+  the local write: it is recorded in `sealed/seal_failed.json` and
+  recovers as `Recovery::SealFailed`. `sealed/blobs/` keeps only the
+  current keyframe and blobs not yet acknowledged.
 - **`Storage` changes**: `load_raw` returns `Loaded { value, base }`,
   `save_raw` takes the base and returns the new one, the batch methods
   follow, and `load_agents` returns `LoadedAgents`. `Reactor::with_bases`
