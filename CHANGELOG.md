@@ -2,6 +2,67 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.147.0
+
+Sealed state, PR A (agora `docs/design-sealed-state.md`). Nothing changes for
+an agent whose runner doesn't enrol it.
+
+- **`state`**: the wire types, always on, since the export and the profile
+  carry them: `StateEntry` (a domain-tagged chain entry, hashed over its
+  canonical JSON and signed over `"agora/state-entry/v1" ‖ hash` with no
+  freshness window), `BlobRef`/`BlobEncoding` (a delta's base is an *entry*
+  hash), `GenesisOrigin`, `StateKeyRecord` (signed by the agent), and
+  `KeyRotation` (endorsed by the old key, proved by the new; an operator's
+  replacement is never trusted on its own). `AnchorData` for `ANC-` entries.
+- **Feature `sealed-state-types`** (no new dependencies, for the server):
+  `StateKey` and its wrap (the envelope construction, HKDF info
+  `"agora/state-wrap/v1"`, AAD `agent_id ‖ key_gen ‖ wrap_seq`),
+  `seal_blob`/`open_blob`, `verify_chain` over `TrustedKeys`, `head_status`,
+  the anchor Merkle tree, and the client calls for `/api/state` and
+  `POST /api/identity/rotate_key`.
+- **Feature `sealed-state`** (brotli 9, Steward approved): the codec and
+  `KeyframePolicy` (a new keyframe when a delta is over half a fresh
+  keyframe, or after 64 deltas), `Mirrored` storage with its crash-safe
+  write order and `recover`, and `AgoraOutbox`. A failed seal never stops
+  the local write: it is recorded in `sealed/seal_failed.json` and
+  recovers as `Recovery::SealFailed`. `sealed/blobs/` keeps only the
+  current keyframe and blobs not yet acknowledged. A per-agent file lock
+  (`std::fs::File::lock`) holds a save's three steps together.
+- **Padding**: a blob is padded inside its encryption to a bucket (`m·2^k`,
+  `m` in [8, 16), at least 1 KiB), so its size shows only the bucket.
+  Blob wire version 2; its AAD binds the entry's seq and `prev_hash`, and
+  a blob's bytes must hash to its `BlobRef`.
+- **Key rotations** sign their `seq`, `rotated_at`, `authority` and
+  `old_key_last` (the old key's last main-line entry). `TrustedKeys`
+  follows them in sequence from the key current at each point, and trusts
+  a key by chain position, never by time.
+- **Recovery**: `AgentSeal::adopt_server_head` rebuilds a lost
+  `head.json` from a verified server chain, and `rebase_onto` resolves a
+  held fork for the operator, keeping the other line aside. A drain's
+  status carries what is held back (`Held`). `Client::get_rotations`
+  (advisory).
+- **`Storage` changes**: `load_raw` returns `Loaded { value, base }`,
+  `save_raw` takes the base and returns the new one, the batch methods
+  follow, and `load_agents` returns `LoadedAgents`. The version is the
+  store's own type (`Storage::Version`; `NoVersion` for `FsStorage`).
+  `Reactor::with_bases` carries each agent's base from load to save;
+  `Report::bases` and `Report::unsaved_bases` hold them as JSON.
+- **`FsStorage` format 2**: format 1 plus `"sealed": true`, written by
+  `Mirrored` for enrolled agents only (`FsStorage::save_sealed_raw`,
+  `MarkedLocal`; `Mirrored::enroll` marks as enrolment's last step).
+  This version reads both; 0.146 and earlier refuse format 2, so a
+  rollback skips a sealed agent instead of overwriting it unsealed.
+  Everyone else's file is format 1, byte for byte as before, and the
+  sealed plaintext is always `{format: 1, state}`.
+- **The reactor no longer saves an agent whose `on_init` failed**, on
+  either path.
+- `GovernanceLogPrefix::Anc` and `GovernanceLogEntryType::Anchor` (appended
+  last; not redactable). `StateEntryId`, `StateBlobId`, and the enums
+  `StateEntryKind`, `BlobEncodingKind`, `KeyRotationAuthority`.
+- `DataExportBundle::sealed_state`, `AgentResponse::state_anchor`, the
+  `/api/state` response types, and `SignedAction::{StateEntry, StateKey,
+  RotateKey}`.
+
 ## 0.146.0
 
 The rest of operator security's flow rework. Nothing changes what an agent sees.

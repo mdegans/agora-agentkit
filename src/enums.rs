@@ -480,6 +480,10 @@ pub enum GovernanceLogEntryType {
     // and the inner entry's type and data). Redactable and revisable like
     // a record; never a precedent that binds. (0.102)
     Test,
+    // An `ANC-` entry: the day's Merkle root over every agent's sealed-state
+    // head. Its `data` is a `state::AnchorData`. Not redactable: a verifier
+    // reads it, and it names no one. (0.147)
+    Anchor,
     // A type this build does not know, from a newer server. Never stored
     // or sent by the server; exists so an old reader lists the entry and
     // moves on, and a verifier says it cannot check it. (0.91)
@@ -1739,6 +1743,77 @@ pub enum TrustTier {
 }
 
 // ---------------------------------------------------------------------------
+// Sealed state (0.147)
+// ---------------------------------------------------------------------------
+
+/// What a sealed-state entry records (`state_entry_kind_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "state_entry_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum StateEntryKind {
+    // The first entry; its sealed blob is a `state::GenesisOrigin`.
+    Genesis,
+    // A state as it was saved.
+    Snapshot,
+    // A copy from before a loss, returned to the agent: kept beside the
+    // line, never spliced into it.
+    ArchivedPrior,
+    // Reserved: a version deleted by the agent (history tools).
+    Deleted,
+    // Reserved: a window re-encoded after its keyframe was deleted.
+    Reencoded,
+    // Reserved: two lines joined (v1.1).
+    Merge,
+}
+
+impl StateEntryKind {
+    /// Whether v1 writes and accepts this kind
+    pub fn is_v1(self) -> bool {
+        matches!(self, Self::Genesis | Self::Snapshot | Self::ArchivedPrior)
+    }
+}
+
+/// How a sealed blob is compressed (`blob_encoding_kind_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "blob_encoding_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BlobEncodingKind {
+    // Whole, on its own.
+    Keyframe,
+    // Against a keyframe's plaintext as the dictionary.
+    Delta,
+}
+
+/// Whose word a signing-key rotation is (`key_rotation_authority_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "key_rotation_authority_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyRotationAuthority {
+    // Signed by the old key, with the new key's proof of possession.
+    AgentSigned,
+    // The operator replaced a lost key; not the old key's word.
+    Operator,
+}
+
+// ---------------------------------------------------------------------------
 // Display and FromStr impls (via serde round-trip)
 // ---------------------------------------------------------------------------
 
@@ -1801,6 +1876,9 @@ impl_display_fromstr!(RemovedBy);
 impl_display_fromstr!(RemedyOutcome);
 impl_display_fromstr!(ThreadRole);
 impl_display_fromstr!(TrustTier);
+impl_display_fromstr!(StateEntryKind);
+impl_display_fromstr!(BlobEncodingKind);
+impl_display_fromstr!(KeyRotationAuthority);
 
 // ---------------------------------------------------------------------------
 // Every variant with a Postgres label (0.73)
@@ -1851,7 +1929,7 @@ closed_variants!(ArchiveContextKind [AgendaItem, Meeting, Appeal, Flag, Intervie
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
 closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
-closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet, Test] never_written [Unknown]);
+closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet, Test, Anchor] never_written [Unknown]);
 closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn]);
 closed_variants!(Standing [InForce, NonPrecedential, Overruled, Superseded]);
 closed_variants!(KeyStatus [Active, Retired, Compromised]);
@@ -1868,6 +1946,9 @@ closed_variants!(DecisionOutcome [Approved, Rejected, Deferred, Amended]);
 closed_variants!(BatchType [Jury, Judge, Tier2, Redaction, Chambers, Precedent]);
 closed_variants!(BatchStatus [Submitted, Polling, Completed, Failed]);
 closed_variants!(OAuthScope [Read, Write]);
+closed_variants!(StateEntryKind [Genesis, Snapshot, ArchivedPrior, Deleted, Reencoded, Merge]);
+closed_variants!(BlobEncodingKind [Keyframe, Delta]);
+closed_variants!(KeyRotationAuthority [AgentSigned, Operator]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);
@@ -2191,6 +2272,12 @@ mod tests {
             GovernanceLogEntryType::DataSet
         );
         assert_eq!(GovernanceLogEntryType::Test.to_string(), "test");
+        assert_eq!(GovernanceLogEntryType::Anchor.to_string(), "anchor");
+        assert_eq!(
+            GovernanceLogEntryType::ALL.last(),
+            Some(&GovernanceLogEntryType::Anchor),
+            "appended last, as Postgres' ADD VALUE does"
+        );
         assert_eq!(
             "test".parse::<GovernanceLogEntryType>().unwrap(),
             GovernanceLogEntryType::Test

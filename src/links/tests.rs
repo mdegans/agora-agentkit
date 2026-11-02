@@ -399,7 +399,7 @@ fn the_tool_schema_has_no_ref_and_no_pattern() {
 fn gov_id() -> impl Strategy<Value = GovernanceLogId> {
     (
         prop::sample::select(vec![
-            "GOV", "APP", "AMD", "KEY", "REC", "OBL", "DATA", "TEST",
+            "GOV", "APP", "AMD", "KEY", "REC", "OBL", "DATA", "TEST", "ANC",
         ]),
         2026u32..2030,
         1u32..9999,

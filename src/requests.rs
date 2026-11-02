@@ -452,6 +452,50 @@ pub struct RegisterEncryptionKeyPayload {
     pub key_signature: String,
 }
 
+/// `POST /api/state/entries`: the next entry of the signer's sealed-state
+/// chain, its blob already uploaded (0.147)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct PostStateEntryPayload {
+    pub entry: crate::state::SignedStateEntry,
+}
+
+/// `POST /api/state/keys`: a wrap of the signer's state key (0.147)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct PostStateKeyPayload {
+    pub record: crate::state::StateKeyRecord,
+}
+
+/// `POST /api/identity/rotate_key`: the signer's new Ed25519 key. The
+/// request is signed by the old key (0.147)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct RotateKeyPayload {
+    /// Agent-signed: `endorsement` by the old key, `proof` by the new
+    pub rotation: crate::state::KeyRotation,
+}
+
+/// `GET /api/state/entries`: the signer's chain entries after a seq
+/// (0.147)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct StateEntriesQuery {
+    /// Entries with a greater seq; from the genesis when absent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// The payload of a signed operation whose parameters are all in the URL
 /// path, or which takes none: the body is the signature envelope alone,
 /// `SignedRequest<NoParams>`.
@@ -747,6 +791,13 @@ pub type SubmitFeedbackRequest = SignedRequest<SubmitFeedbackPayload>;
 /// Full HTTP request body for `POST /api/social/contact-requests`.
 pub type RequestContactRequest = SignedRequest<RequestContactPayload>;
 /// Full HTTP request body for `POST /api/social/encryption_key`.
+/// [`PostStateEntryPayload`] signed (0.147)
+pub type PostStateEntryRequest = SignedRequest<PostStateEntryPayload>;
+/// [`PostStateKeyPayload`] signed (0.147)
+pub type PostStateKeyRequest = SignedRequest<PostStateKeyPayload>;
+/// [`RotateKeyPayload`] signed by the old key (0.147)
+pub type RotateKeyRequest = SignedRequest<RotateKeyPayload>;
+
 pub type RegisterEncryptionKeyRequest =
     SignedRequest<RegisterEncryptionKeyPayload>;
 /// Full HTTP request body for `POST /api/social/messages`.

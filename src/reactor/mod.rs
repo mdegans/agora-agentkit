@@ -26,7 +26,9 @@ pub use agent::{
 };
 
 mod backend;
-pub use backend::{AgentNotFound, Inference, SaveError, Storage};
+pub use backend::{
+    AgentNotFound, Inference, Loaded, NoVersion, SaveError, Saved, Storage,
+};
 
 #[cfg(feature = "fs-storage")]
 pub mod storage;
@@ -241,6 +243,8 @@ struct Persist<I: Inference, S: Storage, A: Agent> {
     /// The session began. One that didn't (the run was stopping) is neither
     /// saved nor counted: the agent goes back to the reactor's queue.
     started: bool,
+    /// [`Agent::on_init`] succeeded. One whose start failed is never saved
+    initialized: bool,
 }
 
 impl<I: Inference, S: Storage, A: Agent> Persist<I, S, A> {
@@ -251,6 +255,7 @@ impl<I: Inference, S: Storage, A: Agent> Persist<I, S, A> {
             result: Ok(Outcome::Failed),
             saved: false,
             started: false,
+            initialized: false,
         }
     }
 }
@@ -262,10 +267,42 @@ struct Drive {
     stalled: bool,
     /// Asked to close by [`Agent::on_stop`]: the run was stopping
     stopped: bool,
+    /// [`Agent::on_init`] succeeded
+    initialized: bool,
 }
 
 /// [`Storage`] shared by the two run-paths, so each agent saves as it finishes
-type SharedStorage<'a, S> = futures::lock::Mutex<&'a mut S>;
+type SharedStorage<'a, S> = futures::lock::Mutex<Store<'a, S>>;
+
+/// A [`Storage`] and each agent's base, carried from load to save
+struct Store<'a, S: Storage> {
+    storage: &'a mut S,
+    bases: &'a mut BTreeMap<AgentId, S::Version>,
+}
+
+impl<S: Storage> Store<'_, S> {
+    /// Save against the agent's base, and keep the new one
+    async fn save(
+        &mut self,
+        id: AgentId,
+        value: serde_json::Value,
+    ) -> Result<(), S::Error> {
+        let new = self
+            .storage
+            .save_raw(id, value, self.bases.get(&id))
+            .await?;
+        set_base(self.bases, id, new);
+        Ok(())
+    }
+}
+
+/// Keep `base` as `id`'s, or forget it
+fn set_base<V>(bases: &mut BTreeMap<AgentId, V>, id: AgentId, base: Option<V>) {
+    match base {
+        Some(base) => bases.insert(id, base),
+        None => bases.remove(&id),
+    };
+}
 
 /// How a session ended, for the `session_finished` event
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,6 +408,8 @@ pub struct Reactor<I: Inference, S: Storage, A: Agent> {
     /// [`State`] of [`Agent`]s whose state didn't persist. Drained into
     /// [`Report::unsaved`].
     unsaved: BTreeMap<AgentId, serde_json::Value>,
+    /// Each agent's [`Storage::Version`] from its load, to save against
+    bases: BTreeMap<AgentId, S::Version>,
     /// [`State`] of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]).
     /// Drained into [`Report::rejected`] so the caller can re-route them.
     rejected: BTreeMap<AgentId, serde_json::Value>,
@@ -451,6 +490,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             failed: BTreeMap::new(),
             errors: BTreeMap::new(),
             unsaved: BTreeMap::new(),
+            bases: BTreeMap::new(),
             rejected: BTreeMap::new(),
             unreachable_hold: None,
             stop: Stop::new(),
@@ -479,6 +519,16 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     /// [`Report::unstarted`]. Without one, a run never stops early.
     pub fn with_stop(mut self, stop: Stop) -> Self {
         self.stop = stop;
+        self
+    }
+
+    /// The versions the agents were loaded at ([`Loaded::base`]), so
+    /// each save names its parent ([`LoadedAgents::bases`])
+    pub fn with_bases(
+        mut self,
+        bases: impl IntoIterator<Item = (AgentId, S::Version)>,
+    ) -> Self {
+        self.bases.extend(bases);
         self
     }
 
@@ -513,6 +563,16 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 .map(|(id, e)| (*id, ErrorReport::from(e)))
                 .collect(),
             unsaved: self.unsaved.clone(),
+            unsaved_bases: self
+                .unsaved
+                .keys()
+                .filter_map(|id| Some((*id, base_value(self.bases.get(id)?))))
+                .collect(),
+            bases: self
+                .bases
+                .iter()
+                .map(|(id, base)| (*id, base_value(base)))
+                .collect(),
             rejected: self.rejected.clone(),
             unstarted: self.unstarted,
         }
@@ -532,22 +592,36 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         stop: &Stop,
     ) -> (Result<Outcome, ReactorError<I, S, A>>, Drive) {
         let mut stopped = false;
-        let driven =
-            Self::drive_inner(inference, agent, hold, stop, &mut stopped).await;
+        let mut initialized = false;
+        let driven = Self::drive_inner(
+            inference,
+            agent,
+            hold,
+            stop,
+            &mut stopped,
+            &mut initialized,
+        )
+        .await;
         let stalled = matches!(driven, Ok(None));
         let driven = driven.map(|o| o.unwrap_or(Outcome::Failed));
         let teardown =
             agent.on_teardown().await.map_err(ReactorError::AgentError);
         (
             driven.and_then(|outcome| teardown.map(|()| outcome)),
-            Drive { stalled, stopped },
+            Drive {
+                stalled,
+                stopped,
+                initialized,
+            },
         )
     }
 
     /// Save one finished agent's state right away, so a crash later in a long
     /// run loses nothing already done, and emit its `session_finished` event.
     /// Returns whether the save committed; if not,
-    /// [`persist_all`](Self::persist_all) tries again and reports.
+    /// [`persist_all`](Self::persist_all) tries again and reports. An agent
+    /// whose [`on_init`](Agent::on_init) failed is not saved: its start
+    /// may have refused the state it holds.
     async fn settle(
         storage: &SharedStorage<'_, S>,
         // `&mut` only because `&A` isn't `Send` across the save's await.
@@ -556,10 +630,15 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         drive: Drive,
         started: Started,
     ) -> bool {
-        let Drive { stalled, stopped } = drive;
+        let Drive {
+            stalled,
+            stopped,
+            initialized,
+        } = drive;
         let id = agent.id();
         let saved = match serde_json::to_value(agent.state()) {
-            Ok(value) => match storage.lock().await.save_raw(id, value).await {
+            Ok(_) if !initialized => false,
+            Ok(value) => match storage.lock().await.save(id, value).await {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::warn!(
@@ -649,8 +728,10 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         hold: Option<Duration>,
         stop: &Stop,
         stopped: &mut bool,
+        initialized: &mut bool,
     ) -> Result<Option<Outcome>, ReactorError<I, S, A>> {
         agent.on_init().await.map_err(ReactorError::AgentError)?;
+        *initialized = true;
         let mut stalls = 0usize;
         let mut turned = false;
         loop {
@@ -799,6 +880,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                     result,
                     saved,
                     started: true,
+                    initialized: drive.initialized,
                 }
             })
             .buffer_unordered(limit)
@@ -836,12 +918,15 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         let mut item_failures: HashMap<usize, usize> = HashMap::new();
         // Agents asked to close because the run is stopping (`on_stop`).
         let mut stopped: BTreeSet<usize> = BTreeSet::new();
+        // Agents whose `on_init` failed: never saved.
+        let mut init_failed: BTreeSet<usize> = BTreeSet::new();
         // Rounds scattered so far
         let mut rounds = 0usize;
 
         for (i, agent) in agents.iter_mut().enumerate() {
             if let Err(e) = agent.on_init().await {
                 errors.insert(i, ReactorError::AgentError(e));
+                init_failed.insert(i);
             }
         }
 
@@ -886,6 +971,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 &finished,
                 &stall_capped,
                 &stopped,
+                &init_failed,
                 &mut settled,
                 started,
             )
@@ -1030,6 +1116,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             &finished,
             &stall_capped,
             &stopped,
+            &init_failed,
             &mut settled,
             started,
         )
@@ -1047,6 +1134,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 },
                 saved: settled.get(&i).copied().unwrap_or(false),
                 started: true,
+                initialized: !init_failed.contains(&i),
                 agent,
             })
             .collect()
@@ -1064,6 +1152,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         finished: &HashMap<usize, Outcome>,
         stall_capped: &BTreeSet<usize>,
         stopped: &BTreeSet<usize>,
+        init_failed: &BTreeSet<usize>,
         settled: &mut HashMap<usize, bool>,
         started: Started,
     ) {
@@ -1088,6 +1177,7 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
                 Drive {
                     stalled: stall_capped.contains(&i),
                     stopped: stopped.contains(&i),
+                    initialized: !init_failed.contains(&i),
                 },
                 started,
             )
@@ -1114,7 +1204,10 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
             .filter(|p| p.saved)
             .map(|p| p.agent.id())
             .collect();
-        for Persist { agent, .. } in agent_results.iter().filter(|p| !p.saved) {
+        // A failed start is never saved (see `settle`).
+        for Persist { agent, .. } in
+            agent_results.iter().filter(|p| !p.saved && p.initialized)
+        {
             let id = agent.id();
             match serde_json::to_value(agent.state()) {
                 Ok(v) => values.push((id, v)),
@@ -1135,12 +1228,21 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
         if !values.is_empty() {
             // `save_all_raw`, not `save_all`: per-agent serialize failures are
             // handled above (`save_all` aborts the whole batch — see its FIXME).
-            match self.storage.save_all_raw(values.clone().into_iter()).await {
-                Ok(()) => saved.extend(attempted.iter().copied()),
-                Err(SaveError { saved: some, inner }) => {
-                    saved.extend(some);
-                    save_err = Some(inner);
-                }
+            let items: Vec<_> = values
+                .iter()
+                .map(|(id, v)| (*id, v.clone(), self.bases.get(id).cloned()))
+                .collect();
+            let committed =
+                match self.storage.save_all_raw(items.into_iter()).await {
+                    Ok(committed) => committed,
+                    Err(SaveError { saved: some, inner }) => {
+                        save_err = Some(inner);
+                        some
+                    }
+                };
+            for (id, base) in committed {
+                saved.insert(id);
+                set_base(&mut self.bases, id, base);
             }
         }
 
@@ -1188,22 +1290,43 @@ impl<I: Inference, S: Storage, A: Agent> Reactor<I, S, A> {
     }
 }
 
+/// A base as JSON, for a [`Report`]
+fn base_value<V: Serialize>(base: &V) -> serde_json::Value {
+    serde_json::to_value(base).expect("a Storage::Version serializes")
+}
+
+/// What [`load_agents`] built
+pub struct LoadedAgents<A: Agent, V = NoVersion> {
+    pub agents: Vec<A>,
+    /// For [`Reactor::with_bases`]
+    pub bases: BTreeMap<AgentId, V>,
+    pub failures: Vec<(AgentId, A::Error)>,
+}
+
 /// Bulk-load [`Agent`]s, cloning `context` into each construction (see
 /// [`Agent::Context`]). A Deserialize failure will abort the entire batch
 pub async fn load_agents<S: Storage, A: Agent>(
     storage: &S,
     context: A::Context,
     ids: impl ExactSizeIterator<Item = AgentId> + Send,
-) -> Result<(Vec<A>, Vec<(AgentId, A::Error)>), S::Error> {
+) -> Result<LoadedAgents<A, S::Version>, S::Error> {
     let raw = storage.load_all::<_, A>(ids).await?;
     let mut agents = Vec::with_capacity(raw.len());
+    let mut bases = BTreeMap::new();
     let mut failures = Vec::new();
     for (id, result) in raw {
         match result {
-            Ok(state) => match A::new(id, state, context.clone()) {
-                Ok(agent) => agents.push(agent),
-                Err(e) => failures.push((id, e)),
-            },
+            Ok(Loaded { value, base }) => {
+                match A::new(id, value, context.clone()) {
+                    Ok(agent) => {
+                        agents.push(agent);
+                        if let Some(base) = base {
+                            bases.insert(id, base);
+                        }
+                    }
+                    Err(e) => failures.push((id, e)),
+                }
+            }
             Err(e) => failures.push((
                 id,
                 A::Error::from(
@@ -1212,7 +1335,11 @@ pub async fn load_agents<S: Storage, A: Agent>(
             )),
         }
     }
-    Ok((agents, failures))
+    Ok(LoadedAgents {
+        agents,
+        bases,
+        failures,
+    })
 }
 
 /// Which reactor operation an error came from, so a caller deciding whether to
@@ -1259,6 +1386,14 @@ pub struct Report {
     pub failed: usize,
     pub errors: BTreeMap<AgentId, ErrorReport>,
     pub unsaved: BTreeMap<AgentId, serde_json::Value>,
+    /// The base each [`unsaved`](Self::unsaved) snapshot is to be saved
+    /// against, where its store keeps one: its `Storage::Version`, as JSON
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unsaved_bases: BTreeMap<AgentId, serde_json::Value>,
+    /// Every agent's base after the run, saved or not, as JSON: what its
+    /// next save names as its parent
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bases: BTreeMap<AgentId, serde_json::Value>,
     /// Snapshots of [`Agent`]s the endpoint couldn't satisfy (see [`negotiate`]),
     /// for the caller to re-route.
     #[serde(default)]
@@ -1284,6 +1419,8 @@ impl std::ops::AddAssign<Report> for Report {
         self.failed += rhs.failed;
         self.errors.extend(rhs.errors);
         self.unsaved.extend(rhs.unsaved);
+        self.unsaved_bases.extend(rhs.unsaved_bases);
+        self.bases.extend(rhs.bases);
         self.rejected.extend(rhs.rejected);
         self.unstarted += rhs.unstarted;
     }
@@ -1416,7 +1553,10 @@ impl<I: Inference, S: Storage, A: Agent> Run for Reactor<I, S, A> {
         // One agent's failure never aborts the cohort, and each agent is saved
         // as soon as its session ends.
         let inference = &self.inference;
-        let storage = futures::lock::Mutex::new(&mut self.storage);
+        let storage = futures::lock::Mutex::new(Store {
+            storage: &mut self.storage,
+            bases: &mut self.bases,
+        });
         let stop = &self.stop;
         let (mut to_persist, seq_persist) = futures::join!(
             Self::run_round_major(inference, &storage, batch, stop),

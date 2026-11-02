@@ -299,6 +299,8 @@ macro_rules! hex_bytes {
     };
 }
 
+pub(crate) use hex_bytes;
+
 hex_bytes!(
     /// A SHA-256 digest, hex on the wire
     Sha256Hex,
@@ -1390,7 +1392,9 @@ pub const BLIND_KEY: &str = "_blind";
 pub fn is_redactable(entry_type: GovernanceLogEntryType) -> bool {
     !matches!(
         entry_type,
-        GovernanceLogEntryType::Amendment | GovernanceLogEntryType::KeyRotation
+        GovernanceLogEntryType::Amendment
+            | GovernanceLogEntryType::KeyRotation
+            | GovernanceLogEntryType::Anchor
     )
 }
 
@@ -2962,6 +2966,7 @@ fn reserved_prefix(
         GovernanceLogEntryType::Obligation => Some(GovernanceLogPrefix::Obl),
         GovernanceLogEntryType::DataSet => Some(GovernanceLogPrefix::Data),
         GovernanceLogEntryType::Test => Some(GovernanceLogPrefix::Test),
+        GovernanceLogEntryType::Anchor => Some(GovernanceLogPrefix::Anc),
         GovernanceLogEntryType::CouncilDecision
         | GovernanceLogEntryType::AppealsCourtDecision
         | GovernanceLogEntryType::EmergencyAction
@@ -2980,6 +2985,7 @@ fn reserved_for(prefix: GovernanceLogPrefix) -> Option<GovernanceLogEntryType> {
         GovernanceLogPrefix::Obl => Some(GovernanceLogEntryType::Obligation),
         GovernanceLogPrefix::Data => Some(GovernanceLogEntryType::DataSet),
         GovernanceLogPrefix::Test => Some(GovernanceLogEntryType::Test),
+        GovernanceLogPrefix::Anc => Some(GovernanceLogEntryType::Anchor),
         GovernanceLogPrefix::Gov
         | GovernanceLogPrefix::App
         | GovernanceLogPrefix::Unknown => None,

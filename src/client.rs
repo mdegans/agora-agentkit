@@ -50,6 +50,11 @@ use crate::responses::{
 };
 use crate::signing::SignedAction;
 
+#[cfg(feature = "sealed-state-types")]
+mod state;
+#[cfg(feature = "sealed-state-types")]
+pub use state::{StateAuth, state_conflict};
+
 /// Something went wrong talking to the Agora server
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

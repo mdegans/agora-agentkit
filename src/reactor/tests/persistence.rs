@@ -79,6 +79,7 @@ async fn load_agents_round_trips() {
                 turns_left: 1,
                 poison: None,
             },
+            None,
         )
         .await
         .unwrap();
@@ -90,14 +91,20 @@ async fn load_agents_round_trips() {
                 turns_left: 0,
                 poison: None,
             },
+            None,
         )
         .await
         .unwrap();
 
-    let (agents, failures): (Vec<TestAgent>, _) =
+    let LoadedAgents {
+        agents,
+        bases,
+        failures,
+    }: LoadedAgents<TestAgent, u64> =
         load_agents(&store, "shared", [id1, id2, AgentId::new()].into_iter())
             .await
             .unwrap();
+    assert_eq!(bases.len(), 2, "each loaded agent's base");
 
     assert_eq!(failures.len(), 1); // for the AgentId::new
     assert_eq!(agents.len(), 2);
@@ -228,13 +235,15 @@ struct FailFirst {
 #[async_trait::async_trait]
 impl Storage for FailFirst {
     type Error = TestError;
+    type Version = u64;
 
     #[allow(deprecated)]
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<(), TestError> {
+        base: Option<&u64>,
+    ) -> Result<Option<u64>, TestError> {
         if self
             .left
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -244,13 +253,13 @@ impl Storage for FailFirst {
         {
             return Err(TestError::Msg("disk hiccup".into()));
         }
-        self.inner.save_raw(id, value).await
+        self.inner.save_raw(id, value, base).await
     }
 
     async fn load_raw(
         &self,
         id: AgentId,
-    ) -> Result<serde_json::Value, TestError> {
+    ) -> Result<Loaded<serde_json::Value, u64>, TestError> {
         self.inner.load_raw(id).await
     }
 }
@@ -304,4 +313,59 @@ async fn on_saved_waits_for_the_save_that_commits() {
     let report = reactor.run().await.unwrap();
     assert_eq!(report.done, 1);
     assert_eq!(retried_saves.load(Ordering::SeqCst), 1);
+}
+
+/// An agent whose `on_init` fails is saved by neither path, at the session's
+/// end or in the end-of-run retry, and is not left in `unsaved` either
+#[tokio::test]
+async fn a_failed_start_saves_nothing() {
+    for batch in [false, true] {
+        let make = if batch { batch_agent } else { agent };
+        let store = MemStore::default();
+        let refused = make(Behavior::ErrInit, 1);
+        let fine = make(Behavior::Complete, 1);
+        let (refused_id, fine_id) = (refused.id(), fine.id());
+        let mut reactor: Reactor<_, _, TestAgent> = Reactor::new(
+            MockInference::end_turns(4),
+            store.clone(),
+            vec![refused, fine],
+        );
+        let report = reactor.run().await.unwrap();
+
+        let map = store.map.lock().unwrap();
+        assert!(!map.contains_key(&refused_id), "batch={batch}");
+        assert!(map.contains_key(&fine_id), "batch={batch}");
+        assert!(report.unsaved.is_empty(), "batch={batch}");
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.errors[&refused_id].kind, ErrorKind::Agent);
+    }
+}
+
+/// Each agent's base goes from its load to its save, and the next save
+/// names the version the last one made
+#[tokio::test]
+async fn the_base_goes_from_load_to_save() {
+    let mut store = MemStore::default();
+    let id = AgentId::new();
+    let state = TestState {
+        behavior: Behavior::Complete,
+        turns_left: 1,
+        poison: None,
+    };
+    let first = store.save::<TestAgent>(id, &state, None).await.unwrap();
+    assert_eq!(first, Some(1));
+
+    for round in 1..=2u64 {
+        let LoadedAgents { agents, bases, .. }: LoadedAgents<TestAgent, u64> =
+            load_agents(&store, "", [id].into_iter()).await.unwrap();
+        assert_eq!(bases[&id], round);
+        let mut reactor: Reactor<_, _, TestAgent> =
+            Reactor::new(MockInference::end_turns(2), store.clone(), agents)
+                .with_bases(bases);
+        let report = reactor.run().await.unwrap();
+        assert_eq!(report.done, 1);
+        assert_eq!(report.bases[&id], serde_json::json!(round + 1));
+    }
+    let seen = store.bases_seen.lock().unwrap();
+    assert_eq!(*seen, vec![(id, None), (id, Some(1)), (id, Some(2)),]);
 }
