@@ -15,14 +15,16 @@ use crate::enums::StateEntryKind;
 use crate::govlog::{PublicKeyHex, Sha256Hex};
 use crate::ids::AgentId;
 
-/// The signing keys a runner trusts for one agent. Only the runner's own
-/// records go in: its current key, its past keys, and rotations, which are
-/// followed only when the old key signed them
+/// The signing keys a runner trusts for one agent: its first key, and each
+/// rotation in turn that the key current at that point endorsed. A key is
+/// trusted for entries made before it was rotated away, and never after
 #[derive(Debug, Clone)]
 pub struct TrustedKeys {
-    trusted: Vec<VerifyingKey>,
-    /// Keys known but not trusted: an operator's replacement, a key the
-    /// server reports. An entry they signed is [`ChainProblem::UntrustedKey`]
+    /// In order; each key with when it was rotated away (µs)
+    epochs: Vec<(VerifyingKey, Option<i64>)>,
+    /// Keys known but not trusted: an operator's replacement, a refused
+    /// rotation's, a key the server reports. An entry they signed is
+    /// [`ChainProblem::UntrustedKey`]
     untrusted: Vec<VerifyingKey>,
     notices: Vec<KeyNotice>,
 }
@@ -33,7 +35,8 @@ pub struct TrustedKeys {
 pub enum KeyNotice {
     /// The operator replaced a key: not the old key's word
     OperatorRotation { new_key: PublicKeyHex },
-    /// A rotation that does not verify, or whose old key isn't trusted
+    /// A rotation that does not verify, is out of sequence, or was
+    /// endorsed by a key that was not current at that point
     RotationRefused {
         new_key: PublicKeyHex,
         reason: String,
@@ -43,69 +46,75 @@ pub enum KeyNotice {
 }
 
 impl TrustedKeys {
-    /// The agent's current key
-    pub fn new(current: VerifyingKey) -> Self {
+    /// The agent's first key, as the runner recorded it
+    pub fn new(first: VerifyingKey) -> Self {
         Self {
-            trusted: vec![current],
+            epochs: vec![(first, None)],
             untrusted: Vec::new(),
             notices: Vec::new(),
         }
     }
 
-    /// Past keys the runner recorded itself (`past_keys.json`)
-    pub fn with_past(
-        mut self,
-        past: impl IntoIterator<Item = VerifyingKey>,
-    ) -> Self {
-        self.trusted.extend(past);
-        self
-    }
-
-    /// Follow `rotations`: a new key is trusted when a trusted old key
-    /// endorsed it, repeatedly, so chains of rotations resolve in any order
+    /// Follow `rotations` in `seq` order. Each must be the next in
+    /// sequence, later than the last, from the key current at that point,
+    /// and endorsed by it. The first that isn't stops the walk: every
+    /// rotation after it is refused too
     pub fn with_rotations(mut self, rotations: &[KeyRotation]) -> Self {
-        let mut pending: Vec<&KeyRotation> = rotations.iter().collect();
-        loop {
-            let before = pending.len();
-            pending.retain(|r| {
-                let Ok(old) = r.old_public_key.to_verifying_key() else {
-                    return true;
-                };
-                if !self.trusted.contains(&old)
-                    || r.verify_agent_signed().is_err()
-                {
-                    return true;
-                }
-                if let Ok(new) = r.new_public_key.to_verifying_key()
-                    && !self.trusted.contains(&new)
-                {
-                    self.trusted.push(new);
-                }
-                false
-            });
-            if pending.len() == before {
-                break;
-            }
-        }
-        for r in pending {
-            let new = r.new_public_key.to_verifying_key().ok();
-            match r.verify_agent_signed() {
+        let mut sorted: Vec<&KeyRotation> = rotations.iter().collect();
+        sorted.sort_by_key(|r| r.seq);
+        let mut broken = false;
+        for r in sorted {
+            let refuse = |this: &mut Self, reason: String| {
+                this.notices.push(KeyNotice::RotationRefused {
+                    new_key: r.new_public_key,
+                    reason,
+                });
+            };
+            let next = (self.epochs.len() - 1) as u32;
+            let (current, _) = *self.epochs.last().expect("never empty");
+            let reason = match r.verify_agent_signed() {
                 Err(RotationError::OperatorAuthority) => {
                     self.notices.push(KeyNotice::OperatorRotation {
                         new_key: r.new_public_key,
-                    })
+                    });
+                    None
                 }
-                Err(e) => self.notices.push(KeyNotice::RotationRefused {
-                    new_key: r.new_public_key,
-                    reason: e.to_string(),
-                }),
-                Ok(()) => self.notices.push(KeyNotice::RotationRefused {
-                    new_key: r.new_public_key,
-                    reason: "its old key is not trusted".into(),
-                }),
+                Err(e) => Some(e.to_string()),
+                Ok(()) if broken => {
+                    Some("an earlier rotation was refused".into())
+                }
+                Ok(()) if r.seq != next => Some(format!(
+                    "rotation {} out of sequence; {next} is next",
+                    r.seq
+                )),
+                Ok(()) if r.old_public_key != PublicKeyHex::from(&current) => {
+                    Some("endorsed by a key that was not current".into())
+                }
+                Ok(())
+                    if self.epochs.len() > 1
+                        && self.epochs[self.epochs.len() - 2].1
+                            >= Some(r.rotated_at.timestamp_micros()) =>
+                {
+                    Some("earlier than the rotation before it".into())
+                }
+                Ok(()) => {
+                    match r.new_public_key.to_verifying_key() {
+                        Ok(new) => {
+                            self.epochs.last_mut().expect("never empty").1 =
+                                Some(r.rotated_at.timestamp_micros());
+                            self.epochs.push((new, None));
+                        }
+                        Err(_) => broken = true,
+                    }
+                    continue;
+                }
+            };
+            broken = true;
+            if let Some(reason) = reason {
+                refuse(&mut self, reason);
             }
-            if let Some(new) = new
-                && !self.trusted.contains(&new)
+            if let Ok(new) = r.new_public_key.to_verifying_key()
+                && !self.trusts(&new)
             {
                 self.untrusted.push(new);
             }
@@ -113,20 +122,27 @@ impl TrustedKeys {
         self
     }
 
-    /// The key the server reports: advisory, a notice if not trusted
+    /// The key the server reports: advisory, a notice if not current
     pub fn with_server_key(mut self, key: VerifyingKey) -> Self {
-        if !self.trusted.contains(&key) {
+        if key != self.current() {
             self.notices.push(KeyNotice::ServerKeyUnknown {
                 key: PublicKeyHex::from(&key),
             });
-            self.untrusted.push(key);
+            if !self.trusts(&key) {
+                self.untrusted.push(key);
+            }
         }
         self
     }
 
-    /// Whether `key` is trusted
+    /// The key at the end of the followed rotations
+    pub fn current(&self) -> VerifyingKey {
+        self.epochs.last().expect("never empty").0
+    }
+
+    /// Whether `key` is trusted for any entry
     pub fn trusts(&self, key: &VerifyingKey) -> bool {
-        self.trusted.contains(key)
+        self.epochs.iter().any(|(k, _)| k == key)
     }
 
     /// What the keys alone raised
@@ -181,6 +197,11 @@ pub enum ChainProblem {
     UntrustedKey {
         seq: u64,
     },
+    /// A key made it after it was rotated away, or after a later key
+    /// had signed
+    RetiredKey {
+        seq: u64,
+    },
     /// A kind v1 doesn't write
     UnknownKind {
         seq: u64,
@@ -228,6 +249,8 @@ pub fn verify_chain(
     let mut problems = Vec::new();
     let mut keyframes: HashSet<Sha256Hex> = HashSet::new();
     let mut prev: Option<(&StateEntry, Sha256Hex)> = None;
+    // The latest key epoch an entry was signed in: no going back
+    let mut epoch_seen = 0usize;
 
     match entries.first() {
         Some(first)
@@ -296,14 +319,23 @@ pub fn verify_chain(
             },
             None => {}
         }
-        if !trusted.trusted.iter().any(|k| signed.verify(k)) {
-            problems.push(
+        match trusted.epochs.iter().position(|(k, _)| signed.verify(k)) {
+            Some(epoch) => {
+                let until = trusted.epochs[epoch].1;
+                if until.is_some_and(|u| e.created_at >= u)
+                    || epoch < epoch_seen
+                {
+                    problems.push(ChainProblem::RetiredKey { seq });
+                }
+                epoch_seen = epoch_seen.max(epoch);
+            }
+            None => problems.push(
                 if trusted.untrusted.iter().any(|k| signed.verify(k)) {
                     ChainProblem::UntrustedKey { seq }
                 } else {
                     ChainProblem::BadSignature { seq }
                 },
-            );
+            ),
         }
         prev = Some((e, hash));
     }
@@ -572,20 +604,28 @@ mod tests {
             Some(BlobEncoding::Keyframe),
         );
         entries.push(next.sign(&new));
+        // Between entry 1 and entry 2
+        let at =
+            DateTime::from_timestamp_micros(entries[2].entry.created_at - 1)
+                .unwrap();
+        let rotation = KeyRotation::agent_signed(agent(), 0, &old, &new, at);
 
-        let rotation =
-            KeyRotation::agent_signed(agent(), &old, &new, Utc::now());
-        let trusted = TrustedKeys::new(new_vk).with_past([old_vk]);
-        assert!(verify_chain(agent(), &entries, &trusted).intact);
-
-        // Only the old key held: the rotation moves trust
         let rotated = TrustedKeys::new(old_vk)
             .with_rotations(std::slice::from_ref(&rotation));
         assert!(rotated.trusts(&new_vk));
+        assert_eq!(rotated.current(), new_vk);
         assert!(verify_chain(agent(), &entries, &rotated).intact);
 
+        // Without the rotation, the new key's entry is unverified
+        let report = verify_chain(agent(), &entries, &TrustedKeys::new(old_vk));
+        assert!(
+            report
+                .problems
+                .contains(&ChainProblem::BadSignature { seq: 2 })
+        );
+
         // An operator's replacement is a notice, and its entries untrusted
-        let mut operator = rotation;
+        let mut operator = rotation.clone();
         operator.authority = crate::enums::KeyRotationAuthority::Operator;
         operator.endorsement = None;
         let replaced = TrustedKeys::new(old_vk).with_rotations(&[operator]);
@@ -608,6 +648,81 @@ mod tests {
             advised.notices()[..],
             [KeyNotice::ServerKeyUnknown { .. }]
         ));
+    }
+
+    /// A retired key can neither rotate again nor sign after its rotation
+    #[test]
+    fn a_retired_key_is_powerless() {
+        let (old, old_vk) = generate_keypair();
+        let (new, new_vk) = generate_keypair();
+        let (attacker, attacker_vk) = generate_keypair();
+        let t0 = Utc::now();
+        let r0 = KeyRotation::agent_signed(agent(), 0, &old, &new, t0);
+        // The stolen old key endorses old -> attacker, as the next rotation
+        let bad = KeyRotation::agent_signed(
+            agent(),
+            1,
+            &old,
+            &attacker,
+            t0 + chrono::Duration::seconds(5),
+        );
+        let keys = TrustedKeys::new(old_vk).with_rotations(&[r0.clone(), bad]);
+        assert_eq!(keys.current(), new_vk);
+        assert!(!keys.trusts(&attacker_vk));
+        assert!(matches!(
+            keys.notices()[..],
+            [KeyNotice::RotationRefused { .. }]
+        ));
+        // Or as a rival rotation 0
+        let rival = KeyRotation::agent_signed(agent(), 0, &old, &attacker, t0);
+        let keys2 = TrustedKeys::new(old_vk).with_rotations(&[r0, rival]);
+        assert!(!keys2.trusts(&attacker_vk));
+
+        // An entry the old key signs after its rotation
+        let g = entry(
+            0,
+            None,
+            StateEntryKind::Genesis,
+            Some(BlobEncoding::Keyframe),
+        );
+        let mut late = g.clone();
+        late.created_at = t0.timestamp_micros() + 1;
+        let report = verify_chain(agent(), &[late.sign(&old)], &keys);
+        assert!(
+            report
+                .problems
+                .contains(&ChainProblem::RetiredKey { seq: 0 })
+        );
+        // Before it, fine
+        let mut early = g;
+        early.created_at = t0.timestamp_micros() - 1;
+        let first = early.sign(&old);
+        assert!(
+            verify_chain(agent(), std::slice::from_ref(&first), &keys).intact
+        );
+        // But not after the new key has signed
+        let mut second = entry(
+            1,
+            Some(first.entry_hash()),
+            StateEntryKind::Snapshot,
+            Some(BlobEncoding::Keyframe),
+        );
+        second.created_at = t0.timestamp_micros() - 1;
+        let second = second.sign(&new);
+        let mut third = entry(
+            2,
+            Some(second.entry_hash()),
+            StateEntryKind::Snapshot,
+            Some(BlobEncoding::Keyframe),
+        );
+        third.created_at = t0.timestamp_micros() - 1;
+        let report =
+            verify_chain(agent(), &[first, second, third.sign(&old)], &keys);
+        assert!(
+            report
+                .problems
+                .contains(&ChainProblem::RetiredKey { seq: 2 })
+        );
     }
 
     #[test]

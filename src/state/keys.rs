@@ -109,6 +109,8 @@ impl StateKeyRecord {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct KeyRotation {
     pub agent_id: AgentId,
+    /// This agent's rotations so far, from 0
+    pub seq: u32,
     pub old_public_key: PublicKeyHex,
     pub new_public_key: PublicKeyHex,
     pub authority: KeyRotationAuthority,
@@ -134,32 +136,48 @@ pub enum RotationError {
 }
 
 impl KeyRotation {
-    /// `KEY_ROTATION_CONTEXT ‖ agent_id ‖ old_pub ‖ new_pub`
+    /// `KEY_ROTATION_CONTEXT ‖ agent_id ‖ seq ‖ rotated_at ‖ old_pub ‖
+    /// new_pub`, `seq` u32 and `rotated_at` i64 microseconds, little-endian
     pub fn signing_bytes(
         agent_id: AgentId,
+        seq: u32,
+        rotated_at: DateTime<Utc>,
         old: &PublicKeyHex,
         new: &PublicKeyHex,
     ) -> Vec<u8> {
         let mut out = KEY_ROTATION_CONTEXT.to_vec();
         out.extend_from_slice(agent_id.as_uuid().as_bytes());
+        out.extend_from_slice(&seq.to_le_bytes());
+        out.extend_from_slice(&rotated_at.timestamp_micros().to_le_bytes());
         out.extend_from_slice(old.as_bytes());
         out.extend_from_slice(new.as_bytes());
         out
     }
 
-    /// An agent-signed rotation from `old` to `new`
+    /// The agent's `seq`th rotation, from `old` to `new`, signed by both
     pub fn agent_signed(
         agent_id: AgentId,
+        seq: u32,
         old: &SigningKey,
         new: &SigningKey,
         rotated_at: DateTime<Utc>,
     ) -> Self {
+        // Microseconds: what the bytes carry, so a round trip verifies
+        let rotated_at =
+            DateTime::from_timestamp_micros(rotated_at.timestamp_micros())
+                .expect("in range");
         let old_public_key = PublicKeyHex::from(&old.verifying_key());
         let new_public_key = PublicKeyHex::from(&new.verifying_key());
-        let bytes =
-            Self::signing_bytes(agent_id, &old_public_key, &new_public_key);
+        let bytes = Self::signing_bytes(
+            agent_id,
+            seq,
+            rotated_at,
+            &old_public_key,
+            &new_public_key,
+        );
         Self {
             agent_id,
+            seq,
             old_public_key,
             new_public_key,
             authority: KeyRotationAuthority::AgentSigned,
@@ -207,6 +225,8 @@ impl KeyRotation {
     fn bytes(&self) -> Vec<u8> {
         Self::signing_bytes(
             self.agent_id,
+            self.seq,
+            self.rotated_at,
             &self.old_public_key,
             &self.new_public_key,
         )
@@ -223,7 +243,7 @@ mod tests {
         let id = AgentId::new();
         let (old, _) = generate_keypair();
         let (new, _) = generate_keypair();
-        let rotation = KeyRotation::agent_signed(id, &old, &new, Utc::now());
+        let rotation = KeyRotation::agent_signed(id, 0, &old, &new, Utc::now());
         assert_eq!(rotation.verify_agent_signed(), Ok(()));
 
         let mut operator = rotation.clone();
@@ -239,6 +259,14 @@ mod tests {
         let (other, _) = generate_keypair();
         forged.new_public_key = PublicKeyHex::from(&other.verifying_key());
         assert_eq!(forged.verify_agent_signed(), Err(RotationError::BadProof));
+
+        // Its seq and time are signed
+        let mut moved = rotation.clone();
+        moved.seq = 1;
+        assert_eq!(moved.verify_agent_signed(), Err(RotationError::BadProof));
+        let mut moved = rotation.clone();
+        moved.rotated_at += chrono::Duration::seconds(1);
+        assert_eq!(moved.verify_agent_signed(), Err(RotationError::BadProof));
 
         let mut unendorsed = rotation;
         unendorsed.endorsement = None;
