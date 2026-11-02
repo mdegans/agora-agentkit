@@ -10,7 +10,7 @@ use super::backend::{AgentNotFound, Loaded, Storage, Version};
 
 /// The envelope format [`FsStorage`] writes. Bump on layout change; `load`
 /// rejects anything newer so an old binary never half-reads a new layout.
-const FORMAT: u64 = 1;
+pub const FORMAT: u64 = 1;
 
 /// The value file inside an agent's directory.
 const STATE_FILE: &str = "state.json";

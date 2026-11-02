@@ -2,6 +2,41 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.147.0
+
+Sealed state, PR A (agora `docs/design-sealed-state.md`). Nothing changes for
+an agent whose runner doesn't enrol it.
+
+- **`state`**: the wire types, always on, since the export and the profile
+  carry them: `StateEntry` (a domain-tagged chain entry, hashed over its
+  canonical JSON and signed over `"agora/state-entry/v1" ‖ hash` with no
+  freshness window), `BlobRef`/`BlobEncoding` (a delta's base is an *entry*
+  hash), `GenesisOrigin`, `StateKeyRecord` (signed by the agent), and
+  `KeyRotation` (endorsed by the old key, proved by the new; an operator's
+  replacement is never trusted on its own). `AnchorData` for `ANC-` entries.
+- **Feature `sealed-state-types`** (no new dependencies, for the server):
+  `StateKey` and its wrap (the envelope construction, HKDF info
+  `"agora/state-wrap/v1"`, AAD `agent_id ‖ key_gen ‖ wrap_seq`),
+  `seal_blob`/`open_blob`, `verify_chain` over `TrustedKeys`, `head_status`,
+  the anchor Merkle tree, and the client calls for `/api/state` and
+  `POST /api/identity/rotate_key`.
+- **Feature `sealed-state`** (brotli 9, Steward approved): the codec and
+  `KeyframePolicy` (a new keyframe when a delta is over half a fresh
+  keyframe, or after 64 deltas), `Mirrored` storage with its crash-safe
+  write order and `recover`, and `AgoraOutbox`.
+- **`Storage` changes**: `load_raw` returns `Loaded { value, base }`,
+  `save_raw` takes the base and returns the new one, the batch methods
+  follow, and `load_agents` returns `LoadedAgents`. `Reactor::with_bases`
+  carries each agent's base from load to save; `Report::unsaved_bases`.
+- **The reactor no longer saves an agent whose `on_init` failed**, on
+  either path.
+- `GovernanceLogPrefix::Anc` and `GovernanceLogEntryType::Anchor` (appended
+  last; not redactable). `StateEntryId`, `StateBlobId`, and the enums
+  `StateEntryKind`, `BlobEncodingKind`, `KeyRotationAuthority`.
+- `DataExportBundle::sealed_state`, `AgentResponse::state_anchor`, the
+  `/api/state` response types, and `SignedAction::{StateEntry, StateKey,
+  RotateKey}`.
+
 ## 0.146.0
 
 The rest of operator security's flow rework. Nothing changes what an agent sees.
