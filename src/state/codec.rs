@@ -3,6 +3,8 @@
 
 use brotli::enc::BrotliEncoderParams;
 
+use zeroize::Zeroizing;
+
 use crate::govlog::canonical_json;
 
 /// Brotli quality
@@ -24,11 +26,11 @@ pub struct CodecError(#[from] std::io::Error);
 
 /// What is sealed for a state: the canonical bytes of `FsStorage`'s
 /// envelope, `{format, state}`
-pub fn plaintext(state: &serde_json::Value) -> Vec<u8> {
-    canonical_json(&serde_json::json!({
+pub fn plaintext(state: &serde_json::Value) -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(canonical_json(&serde_json::json!({
         "format": crate::reactor::storage::FORMAT,
         "state": state,
-    }))
+    })))
 }
 
 fn params() -> BrotliEncoderParams {
@@ -69,11 +71,11 @@ pub fn compress(data: &[u8], dict: Option<&[u8]>) -> Vec<u8> {
 pub fn decompress(
     data: &[u8],
     dict: Option<&[u8]>,
-) -> Result<Vec<u8>, CodecError> {
-    let mut out = Vec::new();
+) -> Result<Zeroizing<Vec<u8>>, CodecError> {
+    let mut out = Zeroizing::new(Vec::new());
     brotli_decompressor::BrotliDecompressCustomDict(
         &mut &data[..],
-        &mut out,
+        &mut *out,
         &mut [0u8; 4096],
         &mut [0u8; 4096],
         dict.map(<[u8]>::to_vec).unwrap_or_default(),
@@ -144,7 +146,7 @@ impl KeyframePolicy {
 mod tests {
     use super::*;
 
-    fn state(n: usize, extra: &str) -> Vec<u8> {
+    fn state(n: usize, extra: &str) -> Zeroizing<Vec<u8>> {
         let memory: String = (0..n)
             .map(|i| format!("Day {i}: I read a thread about governance. "))
             .collect();

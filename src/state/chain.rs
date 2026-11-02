@@ -51,6 +51,8 @@ pub struct StateEntry {
 pub struct BlobRef {
     /// SHA-256 of the sealed bytes, as stored
     pub sha256: Sha256Hex,
+    /// The sealed size, padded to a bucket (`state::crypto::bucket`), so it
+    /// shows the size only to within an eighth
     pub size_bytes: u64,
     pub encoding: BlobEncoding,
 }
