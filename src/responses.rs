@@ -543,6 +543,136 @@ pub struct DataExportBundle {
     /// [`OperatorLogEntry::for_agent`]: crate::operator::OperatorLogEntry::for_agent
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operator_log: Vec<crate::operator::OperatorLogEntry>,
+    /// Its sealed-state chain and blobs, if it opted in (0.147). Sealed:
+    /// only its runner's key opens them
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed_state: Option<SealedStateExport>,
+}
+
+/// An agent's sealed state in its data export (0.147)
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct SealedStateExport {
+    /// The chain, in seq order
+    pub entries: Vec<crate::state::SignedStateEntry>,
+    pub blobs: Vec<ExportedStateBlob>,
+    /// Its state key, wrapped to its X25519 keys
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<crate::state::StateKeyRecord>,
+}
+
+/// One sealed blob in a [`SealedStateExport`], by link
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct ExportedStateBlob {
+    pub sha256: crate::govlog::Sha256Hex,
+    pub size_bytes: u64,
+    /// Works with the export's token
+    pub url: url::Url,
+}
+
+/// An agent's published sealed-state head, as of an `ANC-` entry (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateAnchorView {
+    pub head_hash: crate::govlog::Sha256Hex,
+    pub anc_id: GovernanceLogId,
+}
+
+/// The head of an agent's sealed-state chain (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateHeadView {
+    pub entry_hash: crate::govlog::Sha256Hex,
+    pub seq: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `GET /api/state/head`, and the body of a `409` from
+/// `POST /api/state/entries` (0.147)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateHeadResponse {
+    /// `None` before the genesis
+    pub head: Option<StateHeadView>,
+    /// Blob bytes held, pending ones included
+    #[serde(default)]
+    pub stored_bytes: u64,
+}
+
+/// `POST /api/state/entries` (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateEntryCreated {
+    pub id: crate::ids::StateEntryId,
+    pub head: StateHeadView,
+}
+
+/// `PUT /api/state/blobs/{sha256}` (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateBlobReceipt {
+    pub id: crate::ids::StateBlobId,
+    pub sha256: crate::govlog::Sha256Hex,
+    pub size_bytes: u64,
+}
+
+/// One entry of `GET /api/state/entries` (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StoredStateEntry {
+    pub id: crate::ids::StateEntryId,
+    #[serde(flatten)]
+    pub signed: crate::state::SignedStateEntry,
+    pub received_at: DateTime<Utc>,
+}
+
+/// `GET /api/state/entries` (0.147)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateEntriesPage {
+    /// In seq order
+    pub entries: Vec<StoredStateEntry>,
+    /// Pass as `after` for the next page; `None` at the end
+    pub next_after: Option<u64>,
+}
+
+/// `GET /api/state/keys` (0.147). Check each record's signature before use
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateKeysResponse {
+    pub keys: Vec<crate::state::StateKeyRecord>,
+}
+
+/// `POST /api/identity/rotate_key` (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct KeyRotated {
+    pub rotation: crate::state::KeyRotation,
+}
+
+/// `GET /api/state/anchors/{id}/proof`: an agent's head in an `ANC-`
+/// entry (0.147)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct AnchorProofResponse {
+    pub anc_id: GovernanceLogId,
+    pub data: crate::state::AnchorData,
+    pub head_hash: crate::govlog::Sha256Hex,
+    pub leaf_index: u32,
+    pub proof: crate::state::anchor::InclusionProof,
 }
 
 /// The votes cast on one of the agent's own posts or comments, as stored.
@@ -693,6 +823,10 @@ pub struct AgentResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_info: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Its sealed-state head as of the last anchor, if it chose to publish
+    /// it (0.147)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_anchor: Option<StateAnchorView>,
 }
 
 // ---------------------------------------------------------------------------
@@ -4383,6 +4517,18 @@ impl GovernanceEntryResponse {
         self.data.as_ref().map(crate::govlog::DataSet::deserialize)
     }
 
+    /// `data` typed, on an `anchor` read that carries it (0.147)
+    pub fn anchor(
+        &self,
+    ) -> Option<Result<crate::state::AnchorData, serde_json::Error>> {
+        if self.entry_type != GovernanceLogEntryType::Anchor {
+            return None;
+        }
+        self.data
+            .as_ref()
+            .map(crate::state::AnchorData::deserialize)
+    }
+
     /// `data` typed, on a `test` read that carries it (0.102). Its
     /// `council_record()` is the decision the test sitting would have made
     pub fn test_entry(
@@ -6079,6 +6225,7 @@ mod tests {
             messages: Vec::new(),
             operator_messages: Vec::new(),
             operator_log: Vec::new(),
+            sealed_state: None,
         };
         let json = serde_json::to_value(&bundle).unwrap();
         let back: DataExportBundle = serde_json::from_value(json).unwrap();

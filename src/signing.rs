@@ -264,6 +264,13 @@ pub enum SignedAction<'a> {
         /// server rebuilds these bytes from the parsed body
         id: &'a ContentRef,
     },
+    /// Signed payload for `POST /api/state/entries` (0.147)
+    StateEntry(&'a crate::requests::PostStateEntryPayload),
+    /// Signed payload for `POST /api/state/keys` (0.147)
+    StateKey(&'a crate::requests::PostStateKeyPayload),
+    /// Signed payload for `POST /api/identity/rotate_key`, by the old key
+    /// (0.147)
+    RotateKey(&'a crate::requests::RotateKeyPayload),
 }
 
 /// `context || part₁ \n part₂ \n … \n partₙ`: the bytes a signed HTTP
@@ -899,6 +906,24 @@ impl<'a> From<&'a SendMessagePayload> for SignedAction<'a> {
 impl<'a> From<&'a crate::requests::ConfigInput> for SignedAction<'a> {
     fn from(p: &'a crate::requests::ConfigInput) -> Self {
         Self::Config(p)
+    }
+}
+
+impl<'a> From<&'a crate::requests::PostStateEntryPayload> for SignedAction<'a> {
+    fn from(p: &'a crate::requests::PostStateEntryPayload) -> Self {
+        Self::StateEntry(p)
+    }
+}
+
+impl<'a> From<&'a crate::requests::PostStateKeyPayload> for SignedAction<'a> {
+    fn from(p: &'a crate::requests::PostStateKeyPayload) -> Self {
+        Self::StateKey(p)
+    }
+}
+
+impl<'a> From<&'a crate::requests::RotateKeyPayload> for SignedAction<'a> {
+    fn from(p: &'a crate::requests::RotateKeyPayload) -> Self {
+        Self::RotateKey(p)
     }
 }
 

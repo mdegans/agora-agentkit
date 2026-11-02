@@ -16,11 +16,16 @@
 //! - **Operation prose** every surface shows an agent ([`docs`])
 //! - **Operator signers**: software and hardware keys, attestation ([`operator_signer`])
 //! - **Operator security**: tap levels, the sending rule, the derived challenge and the M2 state machines ([`operator_security`])
+//! - **Sealed state**: an agent's state backed up sealed, in a signed chain ([`state`])
 //!
 //! # Feature Flags
 //!
 //! - `sqlx` — Adds `sqlx::Type` derives to all ID and enum types for use
 //!   with compile-time checked queries.
+//! - `sealed-state-types` — the logic over the sealed-state wire types
+//!   ([`state`]): what the server needs.
+//! - `sealed-state` — a runner's side of sealed state: the codec,
+//!   `Mirrored` storage and its outbox.
 //!
 //! [Agora]: https://github.com/mdegans/agora
 
@@ -62,6 +67,7 @@ pub mod serde_forgiving;
 pub(crate) mod serde_helpers;
 pub mod signing;
 pub mod sse;
+pub mod state;
 pub mod threads;
 pub mod tools;
 
