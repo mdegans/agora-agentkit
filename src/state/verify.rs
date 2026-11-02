@@ -20,13 +20,22 @@ use crate::ids::AgentId;
 /// trusted for entries made before it was rotated away, and never after
 #[derive(Debug, Clone)]
 pub struct TrustedKeys {
-    /// In order; each key with when it was rotated away (µs)
-    epochs: Vec<(VerifyingKey, Option<i64>)>,
+    /// In order; each key with the last entry it may sign
+    epochs: Vec<(VerifyingKey, Until)>,
     /// Keys known but not trusted: an operator's replacement, a refused
     /// rotation's, a key the server reports. An entry they signed is
     /// [`ChainProblem::UntrustedKey`]
     untrusted: Vec<VerifyingKey>,
     notices: Vec<KeyNotice>,
+}
+
+/// How far down the main line a key is trusted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Until {
+    /// The current key
+    Current,
+    /// Rotated away after this entry; `None` if it signed none
+    Through(Option<HeadRef>),
 }
 
 /// Something about the keys the agent and operator should hear
@@ -49,7 +58,7 @@ impl TrustedKeys {
     /// The agent's first key, as the runner recorded it
     pub fn new(first: VerifyingKey) -> Self {
         Self {
-            epochs: vec![(first, None)],
+            epochs: vec![(first, Until::Current)],
             untrusted: Vec::new(),
             notices: Vec::new(),
         }
@@ -90,19 +99,15 @@ impl TrustedKeys {
                 Ok(()) if r.old_public_key != PublicKeyHex::from(&current) => {
                     Some("endorsed by a key that was not current".into())
                 }
-                Ok(())
-                    if self.epochs.len() > 1
-                        && self.epochs[self.epochs.len() - 2].1
-                            >= Some(r.rotated_at.timestamp_micros()) =>
-                {
-                    Some("earlier than the rotation before it".into())
+                Ok(()) if self.before_last_rotation(r.old_key_last) => {
+                    Some("placed before the rotation before it".into())
                 }
                 Ok(()) => {
                     match r.new_public_key.to_verifying_key() {
                         Ok(new) => {
                             self.epochs.last_mut().expect("never empty").1 =
-                                Some(r.rotated_at.timestamp_micros());
-                            self.epochs.push((new, None));
+                                Until::Through(r.old_key_last);
+                            self.epochs.push((new, Until::Current));
                         }
                         Err(_) => broken = true,
                     }
@@ -120,6 +125,18 @@ impl TrustedKeys {
             }
         }
         self
+    }
+
+    /// Whether `last` is earlier on the line than the previous rotation's
+    fn before_last_rotation(&self, last: Option<HeadRef>) -> bool {
+        let previous = self.epochs.iter().rev().find_map(|(_, u)| match u {
+            Until::Through(Some(h)) => Some(h.seq),
+            _ => None,
+        });
+        match (previous, last) {
+            (Some(p), Some(l)) => l.seq < p,
+            (Some(_), None) | (None, _) => false,
+        }
     }
 
     /// The key the server reports: advisory, a notice if not current
@@ -151,12 +168,7 @@ impl TrustedKeys {
     }
 }
 
-/// A chain entry, by position
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeadRef {
-    pub entry_hash: Sha256Hex,
-    pub seq: u64,
-}
+pub use super::chain::HeadRef;
 
 /// What is wrong with a chain
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,10 +333,15 @@ pub fn verify_chain(
         }
         match trusted.epochs.iter().position(|(k, _)| signed.verify(k)) {
             Some(epoch) => {
-                let until = trusted.epochs[epoch].1;
-                if until.is_some_and(|u| e.created_at >= u)
-                    || epoch < epoch_seen
-                {
+                let past = match trusted.epochs[epoch].1 {
+                    Until::Current => false,
+                    Until::Through(None) => true,
+                    Until::Through(Some(last)) => {
+                        seq > last.seq
+                            || (seq == last.seq && hash != last.entry_hash)
+                    }
+                };
+                if past || epoch < epoch_seen {
                     problems.push(ChainProblem::RetiredKey { seq });
                 }
                 epoch_seen = epoch_seen.max(epoch);
@@ -597,18 +614,25 @@ mod tests {
         let (old, old_vk) = generate_keypair();
         let (new, new_vk) = generate_keypair();
         let mut entries = chain(&old, 2);
+        let last = HeadRef {
+            entry_hash: entries[1].entry_hash(),
+            seq: 1,
+        };
         let next = entry(
             2,
-            Some(entries[1].entry_hash()),
+            Some(last.entry_hash),
             StateEntryKind::Snapshot,
             Some(BlobEncoding::Keyframe),
         );
         entries.push(next.sign(&new));
-        // Between entry 1 and entry 2
-        let at =
-            DateTime::from_timestamp_micros(entries[2].entry.created_at - 1)
-                .unwrap();
-        let rotation = KeyRotation::agent_signed(agent(), 0, &old, &new, at);
+        let rotation = KeyRotation::agent_signed(
+            agent(),
+            0,
+            &old,
+            &new,
+            Some(last),
+            Utc::now(),
+        );
 
         let rotated = TrustedKeys::new(old_vk)
             .with_rotations(std::slice::from_ref(&rotation));
@@ -625,9 +649,14 @@ mod tests {
         );
 
         // An operator's replacement is a notice, and its entries untrusted
-        let mut operator = rotation.clone();
-        operator.authority = crate::enums::KeyRotationAuthority::Operator;
-        operator.endorsement = None;
+        let operator = KeyRotation::operator(
+            agent(),
+            0,
+            PublicKeyHex::from(&old_vk),
+            &new,
+            Some(last),
+            Utc::now(),
+        );
         let replaced = TrustedKeys::new(old_vk).with_rotations(&[operator]);
         assert!(!replaced.trusts(&new_vk));
         let report = verify_chain(agent(), &entries, &replaced);
@@ -650,21 +679,34 @@ mod tests {
         ));
     }
 
-    /// A retired key can neither rotate again nor sign after its rotation
+    /// A retired key can neither rotate again nor sign past its rotation's
+    /// position, however it dates the entry
     #[test]
     fn a_retired_key_is_powerless() {
         let (old, old_vk) = generate_keypair();
         let (new, new_vk) = generate_keypair();
         let (attacker, attacker_vk) = generate_keypair();
-        let t0 = Utc::now();
-        let r0 = KeyRotation::agent_signed(agent(), 0, &old, &new, t0);
+        let entries = chain(&old, 2);
+        let last = HeadRef {
+            entry_hash: entries[1].entry_hash(),
+            seq: 1,
+        };
+        let r0 = KeyRotation::agent_signed(
+            agent(),
+            0,
+            &old,
+            &new,
+            Some(last),
+            Utc::now(),
+        );
         // The stolen old key endorses old -> attacker, as the next rotation
         let bad = KeyRotation::agent_signed(
             agent(),
             1,
             &old,
             &attacker,
-            t0 + chrono::Duration::seconds(5),
+            Some(last),
+            Utc::now(),
         );
         let keys = TrustedKeys::new(old_vk).with_rotations(&[r0.clone(), bad]);
         assert_eq!(keys.current(), new_vk);
@@ -674,55 +716,68 @@ mod tests {
             [KeyNotice::RotationRefused { .. }]
         ));
         // Or as a rival rotation 0
-        let rival = KeyRotation::agent_signed(agent(), 0, &old, &attacker, t0);
+        let rival = KeyRotation::agent_signed(
+            agent(),
+            0,
+            &old,
+            &attacker,
+            Some(last),
+            Utc::now(),
+        );
         let keys2 = TrustedKeys::new(old_vk).with_rotations(&[r0, rival]);
         assert!(!keys2.trusts(&attacker_vk));
 
-        // An entry the old key signs after its rotation
-        let g = entry(
-            0,
-            None,
-            StateEntryKind::Genesis,
-            Some(BlobEncoding::Keyframe),
-        );
-        let mut late = g.clone();
-        late.created_at = t0.timestamp_micros() + 1;
-        let report = verify_chain(agent(), &[late.sign(&old)], &keys);
-        assert!(
-            report
-                .problems
-                .contains(&ChainProblem::RetiredKey { seq: 0 })
-        );
-        // Before it, fine
-        let mut early = g;
-        early.created_at = t0.timestamp_micros() - 1;
-        let first = early.sign(&old);
-        assert!(
-            verify_chain(agent(), std::slice::from_ref(&first), &keys).intact
-        );
-        // But not after the new key has signed
-        let mut second = entry(
-            1,
-            Some(first.entry_hash()),
-            StateEntryKind::Snapshot,
-            Some(BlobEncoding::Keyframe),
-        );
-        second.created_at = t0.timestamp_micros() - 1;
-        let second = second.sign(&new);
-        let mut third = entry(
+        // The old key's own entries, through its last, are fine
+        assert!(verify_chain(agent(), &entries, &keys).intact);
+        // A backdated entry past its last is not
+        let mut forged = entry(
             2,
-            Some(second.entry_hash()),
+            Some(last.entry_hash),
             StateEntryKind::Snapshot,
             Some(BlobEncoding::Keyframe),
         );
-        third.created_at = t0.timestamp_micros() - 1;
-        let report =
-            verify_chain(agent(), &[first, second, third.sign(&old)], &keys);
+        forged.created_at = entries[0].entry.created_at;
+        let mut with_forged = entries.clone();
+        with_forged.push(forged.clone().sign(&old));
+        let report = verify_chain(agent(), &with_forged, &keys);
         assert!(
             report
                 .problems
                 .contains(&ChainProblem::RetiredKey { seq: 2 })
         );
+        // Nor a rewrite of its last entry
+        let mut rewritten = entries[1].entry.clone();
+        rewritten.state_at += 1;
+        let swapped = vec![entries[0].clone(), rewritten.sign(&old)];
+        let report = verify_chain(agent(), &swapped, &keys);
+        assert!(
+            report
+                .problems
+                .contains(&ChainProblem::RetiredKey { seq: 1 })
+        );
+        // An old-key entry after a new-key one is refused too
+        let second = forged.clone().sign(&new);
+        let third = entry(
+            3,
+            Some(second.entry_hash()),
+            StateEntryKind::Snapshot,
+            Some(BlobEncoding::Keyframe),
+        );
+        let mut mixed = entries.clone();
+        mixed.push(second);
+        mixed.push(third.sign(&old));
+        let report = verify_chain(agent(), &mixed, &keys);
+        assert!(
+            report
+                .problems
+                .contains(&ChainProblem::RetiredKey { seq: 3 })
+        );
+        // Clock skew is no problem: trust is by position
+        let mut skewed = entries.clone();
+        let mut late = forged;
+        late.created_at = entries[1].entry.created_at + 1;
+        skewed.push(late.sign(&new));
+        assert!(verify_chain(agent(), &skewed, &keys).intact);
     }
 
     #[test]

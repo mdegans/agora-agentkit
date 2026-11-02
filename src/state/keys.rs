@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::Signer;
 use serde::{Deserialize, Serialize};
 
+use super::chain::HeadRef;
 use crate::crypto::{Signature, SigningKey, VerifyingKey};
 use crate::enums::KeyRotationAuthority;
 use crate::envelope::WRAPPED_KEY_LEN;
@@ -114,6 +115,9 @@ pub struct KeyRotation {
     pub old_public_key: PublicKeyHex,
     pub new_public_key: PublicKeyHex,
     pub authority: KeyRotationAuthority,
+    /// The last main-line entry the old key may sign; `None` if it signed
+    /// none. Trust is bound to this position, never to time
+    pub old_key_last: Option<HeadRef>,
     /// By the old key over [`signing_bytes`](Self::signing_bytes); `None`
     /// for an operator's replacement of a lost key
     pub endorsement: Option<SignatureHex>,
@@ -136,55 +140,93 @@ pub enum RotationError {
 }
 
 impl KeyRotation {
-    /// `KEY_ROTATION_CONTEXT ‖ agent_id ‖ seq ‖ rotated_at ‖ old_pub ‖
-    /// new_pub`, `seq` u32 and `rotated_at` i64 microseconds, little-endian
-    pub fn signing_bytes(
-        agent_id: AgentId,
-        seq: u32,
-        rotated_at: DateTime<Utc>,
-        old: &PublicKeyHex,
-        new: &PublicKeyHex,
-    ) -> Vec<u8> {
+    /// `KEY_ROTATION_CONTEXT ‖ agent_id ‖ seq ‖ rotated_at ‖ authority ‖
+    /// old_key_last ‖ old_pub ‖ new_pub`: `seq` u32, `rotated_at` i64
+    /// microseconds, both little-endian; `authority` one byte (0 agent
+    /// signed, 1 operator); `old_key_last` 0, or 1 ‖ seq u64 LE ‖ hash
+    pub fn signing_bytes(&self) -> Vec<u8> {
         let mut out = KEY_ROTATION_CONTEXT.to_vec();
-        out.extend_from_slice(agent_id.as_uuid().as_bytes());
-        out.extend_from_slice(&seq.to_le_bytes());
-        out.extend_from_slice(&rotated_at.timestamp_micros().to_le_bytes());
-        out.extend_from_slice(old.as_bytes());
-        out.extend_from_slice(new.as_bytes());
+        out.extend_from_slice(self.agent_id.as_uuid().as_bytes());
+        out.extend_from_slice(&self.seq.to_le_bytes());
+        out.extend_from_slice(
+            &self.rotated_at.timestamp_micros().to_le_bytes(),
+        );
+        out.push(match self.authority {
+            KeyRotationAuthority::AgentSigned => 0,
+            KeyRotationAuthority::Operator => 1,
+        });
+        match &self.old_key_last {
+            None => out.push(0),
+            Some(last) => {
+                out.push(1);
+                out.extend_from_slice(&last.seq.to_le_bytes());
+                out.extend_from_slice(last.entry_hash.as_bytes());
+            }
+        }
+        out.extend_from_slice(self.old_public_key.as_bytes());
+        out.extend_from_slice(self.new_public_key.as_bytes());
         out
     }
 
-    /// The agent's `seq`th rotation, from `old` to `new`, signed by both
+    /// The agent's `seq`th rotation, from `old` to `new`, after `old`
+    /// signed `old_key_last`, signed by both
     pub fn agent_signed(
         agent_id: AgentId,
         seq: u32,
         old: &SigningKey,
         new: &SigningKey,
+        old_key_last: Option<HeadRef>,
         rotated_at: DateTime<Utc>,
     ) -> Self {
         // Microseconds: what the bytes carry, so a round trip verifies
         let rotated_at =
             DateTime::from_timestamp_micros(rotated_at.timestamp_micros())
                 .expect("in range");
-        let old_public_key = PublicKeyHex::from(&old.verifying_key());
-        let new_public_key = PublicKeyHex::from(&new.verifying_key());
-        let bytes = Self::signing_bytes(
+        let mut rotation = Self {
             agent_id,
             seq,
-            rotated_at,
-            &old_public_key,
-            &new_public_key,
-        );
-        Self {
-            agent_id,
-            seq,
-            old_public_key,
-            new_public_key,
+            old_public_key: PublicKeyHex::from(&old.verifying_key()),
+            new_public_key: PublicKeyHex::from(&new.verifying_key()),
             authority: KeyRotationAuthority::AgentSigned,
-            endorsement: Some(SignatureHex::from(old.sign(&bytes).to_bytes())),
-            proof: SignatureHex::from(new.sign(&bytes).to_bytes()),
+            old_key_last,
+            endorsement: None,
+            proof: SignatureHex::from([0; 64]),
             rotated_at,
-        }
+        };
+        let bytes = rotation.signing_bytes();
+        rotation.endorsement =
+            Some(SignatureHex::from(old.sign(&bytes).to_bytes()));
+        rotation.proof = SignatureHex::from(new.sign(&bytes).to_bytes());
+        rotation
+    }
+
+    /// An operator's replacement of a lost `old` key: proved by `new`, with
+    /// no endorsement. Never trusted on its own
+    pub fn operator(
+        agent_id: AgentId,
+        seq: u32,
+        old: PublicKeyHex,
+        new: &SigningKey,
+        old_key_last: Option<HeadRef>,
+        rotated_at: DateTime<Utc>,
+    ) -> Self {
+        let rotated_at =
+            DateTime::from_timestamp_micros(rotated_at.timestamp_micros())
+                .expect("in range");
+        let mut rotation = Self {
+            agent_id,
+            seq,
+            old_public_key: old,
+            new_public_key: PublicKeyHex::from(&new.verifying_key()),
+            authority: KeyRotationAuthority::Operator,
+            old_key_last,
+            endorsement: None,
+            proof: SignatureHex::from([0; 64]),
+            rotated_at,
+        };
+        rotation.proof =
+            SignatureHex::from(new.sign(&rotation.signing_bytes()).to_bytes());
+        rotation
     }
 
     /// The proof of possession alone. What a server checks of an
@@ -223,13 +265,7 @@ impl KeyRotation {
     }
 
     fn bytes(&self) -> Vec<u8> {
-        Self::signing_bytes(
-            self.agent_id,
-            self.seq,
-            self.rotated_at,
-            &self.old_public_key,
-            &self.new_public_key,
-        )
+        self.signing_bytes()
     }
 }
 
@@ -243,12 +279,22 @@ mod tests {
         let id = AgentId::new();
         let (old, _) = generate_keypair();
         let (new, _) = generate_keypair();
-        let rotation = KeyRotation::agent_signed(id, 0, &old, &new, Utc::now());
+        let last = Some(HeadRef {
+            entry_hash: crate::govlog::Sha256Hex::from([4; 32]),
+            seq: 9,
+        });
+        let rotation =
+            KeyRotation::agent_signed(id, 0, &old, &new, last, Utc::now());
         assert_eq!(rotation.verify_agent_signed(), Ok(()));
 
-        let mut operator = rotation.clone();
-        operator.authority = KeyRotationAuthority::Operator;
-        operator.endorsement = None;
+        let operator = KeyRotation::operator(
+            id,
+            0,
+            PublicKeyHex::from(&old.verifying_key()),
+            &new,
+            last,
+            Utc::now(),
+        );
         assert_eq!(operator.verify_proof(), Ok(()));
         assert_eq!(
             operator.verify_agent_signed(),
@@ -267,6 +313,13 @@ mod tests {
         let mut moved = rotation.clone();
         moved.rotated_at += chrono::Duration::seconds(1);
         assert_eq!(moved.verify_agent_signed(), Err(RotationError::BadProof));
+        let mut moved = rotation.clone();
+        moved.old_key_last.as_mut().unwrap().seq = 10;
+        assert_eq!(moved.verify_agent_signed(), Err(RotationError::BadProof));
+        // A server can't flip it to the operator's word
+        let mut flipped = rotation.clone();
+        flipped.authority = KeyRotationAuthority::Operator;
+        assert_eq!(flipped.verify_proof(), Err(RotationError::BadProof));
 
         let mut unendorsed = rotation;
         unendorsed.endorsement = None;

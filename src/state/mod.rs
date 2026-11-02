@@ -23,7 +23,7 @@ pub mod verify;
 
 pub use anchor::AnchorData;
 pub use chain::{
-    BlobEncoding, BlobRef, GenesisClass, GenesisOrigin, IncidentCite,
+    BlobEncoding, BlobRef, GenesisClass, GenesisOrigin, HeadRef, IncidentCite,
     SignedStateEntry, StateEntry,
 };
 pub use keys::{KeyRotation, StateKeyRecord, WrappedStateKey};

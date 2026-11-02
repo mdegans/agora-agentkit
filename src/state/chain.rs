@@ -44,6 +44,15 @@ pub struct StateEntry {
     pub key_gen: u32,
 }
 
+/// A chain entry, by position
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct HeadRef {
+    pub entry_hash: Sha256Hex,
+    pub seq: u64,
+}
+
 /// A sealed blob, by the hash of its ciphertext
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
