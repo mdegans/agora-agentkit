@@ -29,7 +29,7 @@ use misanthropic::response::{self, StopReason};
 use misanthropic::tool::Tool;
 use serde::Serialize;
 
-use super::backend::{Inference, SaveError, Storage};
+use super::backend::{Inference, Loaded, SaveError, Saved, Storage, Version};
 use super::inference::Quirks;
 use super::{Agent, AgentNotFound, Control, Outcome, RetryAfter, State};
 use crate::ids::AgentId;
@@ -37,8 +37,8 @@ use crate::ids::AgentId;
 // Reactor types the test submodules reach through `use super::*` but the harness
 // itself doesn't touch — re-exported so the submodules stay a bare glob import.
 pub(crate) use super::{
-    ErrorKind, ErrorReport, MAX_INFER_RETRIES, Reactor, Report, Run, Stop,
-    StopLevel, load_agents,
+    ErrorKind, ErrorReport, LoadedAgents, MAX_INFER_RETRIES, Reactor, Report,
+    Run, Stop, StopLevel, load_agents,
 };
 
 // Its echo tool is a `#[tool]`-macro tool, gated as in [`tools`].
@@ -110,6 +110,8 @@ enum Behavior {
     /// Like `Complete`, but panics where it would finish, taking the whole
     /// run down with it.
     Panic,
+    /// `on_init` fails: the session never starts, and nothing is saved.
+    ErrInit,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -241,6 +243,11 @@ impl Agent for TestAgent {
     }
 
     async fn on_init(&mut self) -> Result<(), TestError> {
+        if self.state.behavior == Behavior::ErrInit {
+            // A start that refused its state, having changed it
+            self.state.turns_left = 999;
+            return Err(TestError::Msg("refused".into()));
+        }
         if let Some(stop) = &self.stop_on_init {
             stop.request(StopLevel::EndTurn);
         }
@@ -265,7 +272,9 @@ impl Agent for TestAgent {
         _response: &response::Message,
     ) -> Result<Control, TestError> {
         match self.state.behavior {
-            Behavior::ErrHandle => Err(TestError::Msg("boom".into())),
+            Behavior::ErrHandle | Behavior::ErrInit => {
+                Err(TestError::Msg("boom".into()))
+            }
             Behavior::Stall => {
                 // A real agent would re-ask; keep the prompt legal and stall.
                 self.push_user("retry")?;
@@ -371,9 +380,16 @@ fn offered_models() -> misanthropic::model::Models {
 // In-memory store
 // ---------------------------------------------------------------------------
 
+/// A save's id and the base it was given
+type BaseSeen = (AgentId, Option<Version>);
+
 #[derive(Default, Clone)]
 struct MemStore {
     map: Arc<Mutex<HashMap<AgentId, serde_json::Value>>>,
+    /// Each agent's version: saves so far
+    versions: Arc<Mutex<HashMap<AgentId, u64>>>,
+    /// The base every save was given, in order
+    bases_seen: Arc<Mutex<Vec<BaseSeen>>>,
 }
 
 #[async_trait::async_trait]
@@ -384,17 +400,27 @@ impl Storage for MemStore {
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<(), TestError> {
+        base: Option<&Version>,
+    ) -> Result<Option<Version>, TestError> {
+        self.bases_seen.lock().unwrap().push((id, base.cloned()));
         self.map.lock().unwrap().insert(id, value);
-        Ok(())
+        let mut versions = self.versions.lock().unwrap();
+        let v = versions.entry(id).or_insert(0);
+        *v += 1;
+        Ok(Some(Version::new(v.to_string())))
     }
 
-    async fn load_raw(
-        &self,
-        id: AgentId,
-    ) -> Result<serde_json::Value, TestError> {
+    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
         match self.map.lock().unwrap().get(&id) {
-            Some(value) => Ok(serde_json::from_value(value.clone())?),
+            Some(value) => Ok(Loaded {
+                value: serde_json::from_value(value.clone())?,
+                base: self
+                    .versions
+                    .lock()
+                    .unwrap()
+                    .get(&id)
+                    .map(|v| Version::new(v.to_string())),
+            }),
             None => Err(AgentNotFound(id).into()),
         }
     }
@@ -417,17 +443,18 @@ impl Storage for BulkStore {
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<(), TestError> {
+        _base: Option<&Version>,
+    ) -> Result<Option<Version>, TestError> {
         self.map.lock().unwrap().insert(id, value);
-        Ok(())
+        Ok(None)
     }
 
-    async fn load_raw(
-        &self,
-        id: AgentId,
-    ) -> Result<serde_json::Value, TestError> {
+    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
         match self.map.lock().unwrap().get(&id) {
-            Some(value) => Ok(serde_json::from_value(value.clone())?),
+            Some(value) => Ok(Loaded {
+                value: serde_json::from_value(value.clone())?,
+                base: None,
+            }),
             None => Err(AgentNotFound(id).into()),
         }
     }
@@ -435,17 +462,21 @@ impl Storage for BulkStore {
     async fn save_all_raw<It>(
         &mut self,
         items: It,
-    ) -> Result<(), SaveError<TestError>>
+    ) -> Result<Saved, SaveError<TestError>>
     where
-        It: ExactSizeIterator<Item = (AgentId, serde_json::Value)> + Send,
+        It: ExactSizeIterator<
+                Item = (AgentId, serde_json::Value, Option<Version>),
+            > + Send,
     {
         self.bulk_calls.fetch_add(1, Ordering::SeqCst);
         *self.last_batch.lock().unwrap() = items.len();
         let mut map = self.map.lock().unwrap();
-        for (id, value) in items {
+        let mut saved = Saved::new();
+        for (id, value, _) in items {
             map.insert(id, value);
+            saved.insert(id, None);
         }
-        Ok(())
+        Ok(saved)
     }
 }
 
@@ -763,7 +794,8 @@ impl Storage for PartialStore {
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<(), TestError> {
+        _base: Option<&Version>,
+    ) -> Result<Option<Version>, TestError> {
         if self
             .budget
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -774,15 +806,15 @@ impl Storage for PartialStore {
             return Err(TestError::Msg("out of space".into()));
         }
         self.map.lock().unwrap().insert(id, value);
-        Ok(())
+        Ok(None)
     }
 
-    async fn load_raw(
-        &self,
-        id: AgentId,
-    ) -> Result<serde_json::Value, TestError> {
+    async fn load_raw(&self, id: AgentId) -> Result<Loaded, TestError> {
         match self.map.lock().unwrap().get(&id) {
-            Some(value) => Ok(serde_json::from_value(value.clone())?),
+            Some(value) => Ok(Loaded {
+                value: serde_json::from_value(value.clone())?,
+                base: None,
+            }),
             None => Err(AgentNotFound(id).into()),
         }
     }

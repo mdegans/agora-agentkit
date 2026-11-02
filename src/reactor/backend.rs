@@ -1,7 +1,7 @@
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{ids::AgentId, reactor::Agent};
 
@@ -10,10 +10,39 @@ use crate::{ids::AgentId, reactor::Agent};
 #[error("saved {} before failing: {inner}", saved.len())]
 pub struct SaveError<E> {
     /// [`AgentId`]s of [`Agent`]s whose [`Agent::State`] was successfully
-    /// saved.
-    pub saved: BTreeSet<AgentId>,
+    /// saved, with each one's new base.
+    pub saved: Saved,
     #[source]
     pub inner: E,
+}
+
+/// The ids a bulk save committed, each with its new base
+pub type Saved = BTreeMap<AgentId, Option<Version>>;
+
+/// An opaque token for the stored version a value was loaded from, handed
+/// back to [`Storage::save_raw`] as its base. A store that keeps no
+/// history has none
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Version(String);
+
+impl Version {
+    /// A store's own token
+    pub fn new(token: impl Into<String>) -> Self {
+        Self(token.into())
+    }
+
+    /// The token
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A loaded value and the [`Version`] it is, to save against
+#[derive(Debug, Clone, PartialEq)]
+pub struct Loaded<T = serde_json::Value> {
+    pub value: T,
+    pub base: Option<Version>,
 }
 
 /// An `Inference` backend for an [`Agent`] [`Reactor`].
@@ -105,18 +134,18 @@ pub struct AgentNotFound(pub AgentId);
 pub trait Storage: Sized + Send + Sync {
     type Error: super::Error + From<serde_json::Error> + From<AgentNotFound>;
 
-    /// Persist an opaque JSON value under `id`, overwriting any prior value
+    /// Persist an opaque JSON value under `id`, overwriting any prior
+    /// value. `base` is what [`load_raw`](Storage::load_raw) returned for
+    /// it, or the last save's result. Returns the new base
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<(), Self::Error>;
+        base: Option<&Version>,
+    ) -> Result<Option<Version>, Self::Error>;
 
     /// Load the JSON value stored under `id`
-    async fn load_raw(
-        &self,
-        id: AgentId,
-    ) -> Result<serde_json::Value, Self::Error>;
+    async fn load_raw(&self, id: AgentId) -> Result<Loaded, Self::Error>;
 
     /// Serialize and store [`Agent::State`]
     ///
@@ -125,17 +154,21 @@ pub trait Storage: Sized + Send + Sync {
         &mut self,
         id: AgentId,
         state: &A::State,
-    ) -> Result<(), Self::Error> {
-        self.save_raw(id, serde_json::to_value(state)?).await
+        base: Option<&Version>,
+    ) -> Result<Option<Version>, Self::Error> {
+        self.save_raw(id, serde_json::to_value(state)?, base).await
     }
 
     /// Load and deserialize `Agent::State`
     async fn load<A: Agent>(
         &self,
         id: AgentId,
-    ) -> Result<A::State, Self::Error> {
-        let value = self.load_raw(id).await?;
-        Ok(serde_json::from_value(value)?)
+    ) -> Result<Loaded<A::State>, Self::Error> {
+        let Loaded { value, base } = self.load_raw(id).await?;
+        Ok(Loaded {
+            value: serde_json::from_value(value)?,
+            base,
+        })
     }
 
     /// Persist many values at once, reporting exactly which ids committed. On
@@ -150,18 +183,22 @@ pub trait Storage: Sized + Send + Sync {
     async fn save_all_raw<It>(
         &mut self,
         items: It,
-    ) -> Result<(), SaveError<Self::Error>>
+    ) -> Result<Saved, SaveError<Self::Error>>
     where
-        It: ExactSizeIterator<Item = (AgentId, serde_json::Value)> + Send,
+        It: ExactSizeIterator<
+                Item = (AgentId, serde_json::Value, Option<Version>),
+            > + Send,
     {
-        let mut saved = BTreeSet::new();
-        for (id, value) in items {
-            if let Err(inner) = self.save_raw(id, value).await {
-                return Err(SaveError { saved, inner });
+        let mut saved = Saved::new();
+        for (id, value, base) in items {
+            match self.save_raw(id, value, base.as_ref()).await {
+                Ok(new) => {
+                    saved.insert(id, new);
+                }
+                Err(inner) => return Err(SaveError { saved, inner }),
             }
-            saved.insert(id);
         }
-        Ok(())
+        Ok(saved)
     }
 
     /// Load many raw [`Value`](serde_json::Value)s at once.
@@ -170,10 +207,7 @@ pub trait Storage: Sized + Send + Sync {
     async fn load_all_raw<It>(
         &self,
         ids: It,
-    ) -> Result<
-        Vec<(AgentId, Result<serde_json::Value, Self::Error>)>,
-        Self::Error,
-    >
+    ) -> Result<Vec<(AgentId, Result<Loaded, Self::Error>)>, Self::Error>
     where
         It: ExactSizeIterator<Item = AgentId> + Send,
     {
@@ -197,17 +231,18 @@ pub trait Storage: Sized + Send + Sync {
     async fn save_all<It, A: Agent>(
         &mut self,
         items: It,
-    ) -> Result<(), SaveError<Self::Error>>
+    ) -> Result<Saved, SaveError<Self::Error>>
     where
-        It: ExactSizeIterator<Item = (AgentId, A::State)> + Send,
+        It: ExactSizeIterator<Item = (AgentId, A::State, Option<Version>)>
+            + Send,
     {
         let mut raw = Vec::with_capacity(items.len());
-        for (id, value) in items {
+        for (id, value, base) in items {
             let value = serde_json::to_value(value).map_err(|e| SaveError {
-                saved: BTreeSet::new(),
+                saved: Saved::new(),
                 inner: Self::Error::from(e),
             })?;
-            raw.push((id, value));
+            raw.push((id, value, base));
         }
         self.save_all_raw(raw.into_iter()).await
     }
@@ -215,24 +250,26 @@ pub trait Storage: Sized + Send + Sync {
     /// Load and deserialize many payloads, skipping ids with nothing stored.
     /// [`Deserialize`] errors are not fatal and will be converted to
     /// [`Self::Error`]
+    #[allow(clippy::type_complexity)]
     async fn load_all<It, A: Agent>(
         &self,
         ids: It,
-    ) -> Result<Vec<(AgentId, Result<A::State, Self::Error>)>, Self::Error>
+    ) -> Result<
+        Vec<(AgentId, Result<Loaded<A::State>, Self::Error>)>,
+        Self::Error,
+    >
     where
         It: ExactSizeIterator<Item = AgentId> + Send,
     {
         let raw = self.load_all_raw(ids).await?;
         let mut out = Vec::with_capacity(raw.len());
-        for (id, value) in raw {
-            match value {
-                Ok(value) => {
-                    let result =
-                        serde_json::from_value(value).map_err(Into::into);
-                    out.push((id, result))
-                }
-                Err(e) => out.push((id, Err(e))),
-            }
+        for (id, loaded) in raw {
+            let result = loaded.and_then(|Loaded { value, base }| {
+                serde_json::from_value(value)
+                    .map(|value| Loaded { value, base })
+                    .map_err(Into::into)
+            });
+            out.push((id, result));
         }
         Ok(out)
     }

@@ -727,6 +727,7 @@ async fn run_session_with(
             Some(Duration::ZERO),
             &Stop::new(),
             &mut false,
+            &mut false,
         )
         .await;
     assert!(

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ids::AgentId;
 
-use super::backend::{AgentNotFound, Storage};
+use super::backend::{AgentNotFound, Loaded, Storage, Version};
 
 /// The envelope format [`FsStorage`] writes. Bump on layout change; `load`
 /// rejects anything newer so an old binary never half-reads a new layout.
@@ -90,11 +90,13 @@ impl crate::reactor::RetryAfter for FsStorageError {}
 impl Storage for FsStorage {
     type Error = FsStorageError;
 
+    /// `base` is ignored: a directory keeps no versions to save against
     async fn save_raw(
         &mut self,
         id: AgentId,
         value: serde_json::Value,
-    ) -> Result<(), Self::Error> {
+        _base: Option<&Version>,
+    ) -> Result<Option<Version>, Self::Error> {
         let dir = self.agent_dir(id);
         tokio::fs::create_dir_all(&dir).await?;
 
@@ -118,13 +120,10 @@ impl Storage for FsStorage {
         self.archive(&dir).await?;
         tokio::fs::rename(&tmp, dir.join(STATE_FILE)).await?;
         tokio::fs::File::open(&dir).await?.sync_all().await?;
-        Ok(())
+        Ok(None)
     }
 
-    async fn load_raw(
-        &self,
-        id: AgentId,
-    ) -> Result<serde_json::Value, Self::Error> {
+    async fn load_raw(&self, id: AgentId) -> Result<Loaded, Self::Error> {
         let path = self.agent_dir(id).join(STATE_FILE);
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
@@ -141,10 +140,13 @@ impl Storage for FsStorage {
         if found > FORMAT {
             return Err(FsStorageError::Format { found });
         }
-        Ok(envelope
-            .get_mut("state")
-            .ok_or(FsStorageError::Envelope("state"))?
-            .take())
+        Ok(Loaded {
+            value: envelope
+                .get_mut("state")
+                .ok_or(FsStorageError::Envelope("state"))?
+                .take(),
+            base: None,
+        })
     }
 
     // `save_all_raw`/`load_all_raw` keep the provided loops: with a
@@ -180,8 +182,8 @@ mod tests {
         let mut storage = FsStorage::new(dir.path());
         let id = AgentId::new();
 
-        storage.save_raw(id, value(1)).await.unwrap();
-        assert_eq!(storage.load_raw(id).await.unwrap(), value(1));
+        storage.save_raw(id, value(1), None).await.unwrap();
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(1));
     }
 
     #[tokio::test]
@@ -207,9 +209,9 @@ mod tests {
         // Three rapid saves — likely inside one millisecond, so this also
         // exercises the collision suffix.
         for n in 1..=3 {
-            storage.save_raw(id, value(n)).await.unwrap();
+            storage.save_raw(id, value(n), None).await.unwrap();
         }
-        assert_eq!(storage.load_raw(id).await.unwrap(), value(3));
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(3));
 
         let archived = archives(&storage.agent_dir(id));
         assert_eq!(archived.len(), 2, "one archive per overwrite");
@@ -232,7 +234,7 @@ mod tests {
         let mut storage = FsStorage::new(dir.path());
         let id = AgentId::new();
 
-        storage.save_raw(id, value(1)).await.unwrap();
+        storage.save_raw(id, value(1), None).await.unwrap();
         let raw: serde_json::Value = serde_json::from_slice(
             &std::fs::read(storage.agent_dir(id).join(STATE_FILE)).unwrap(),
         )
@@ -286,10 +288,12 @@ mod tests {
         let b = AgentId::new();
 
         storage
-            .save_all_raw([(a, value(1)), (b, value(2))].into_iter())
+            .save_all_raw(
+                [(a, value(1), None), (b, value(2), None)].into_iter(),
+            )
             .await
             .unwrap();
-        assert_eq!(storage.load_raw(a).await.unwrap(), value(1));
-        assert_eq!(storage.load_raw(b).await.unwrap(), value(2));
+        assert_eq!(storage.load_raw(a).await.unwrap().value, value(1));
+        assert_eq!(storage.load_raw(b).await.unwrap().value, value(2));
     }
 }
