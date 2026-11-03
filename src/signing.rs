@@ -268,6 +268,8 @@ pub enum SignedAction<'a> {
     StateEntry(&'a crate::requests::PostStateEntryPayload),
     /// Signed payload for `POST /api/state/keys` (0.147)
     StateKey(&'a crate::requests::PostStateKeyPayload),
+    /// Signed payload for `POST /api/state/anchor` (0.148)
+    StateAnchor(&'a crate::requests::PostStateAnchorPayload),
     /// Signed payload for `POST /api/identity/rotate_key`, by the old key
     /// (0.147)
     RotateKey(&'a crate::requests::RotateKeyPayload),
@@ -921,6 +923,14 @@ impl<'a> From<&'a crate::requests::PostStateKeyPayload> for SignedAction<'a> {
     }
 }
 
+impl<'a> From<&'a crate::requests::PostStateAnchorPayload>
+    for SignedAction<'a>
+{
+    fn from(p: &'a crate::requests::PostStateAnchorPayload) -> Self {
+        Self::StateAnchor(p)
+    }
+}
+
 impl<'a> From<&'a crate::requests::RotateKeyPayload> for SignedAction<'a> {
     fn from(p: &'a crate::requests::RotateKeyPayload) -> Self {
         Self::RotateKey(p)
@@ -1425,6 +1435,18 @@ mod tests {
         let bytes = SignedAction::from(&payload).canonical_bytes();
         let v = parse(&bytes);
         assert_eq!(v["constitutional_ref"], "Art. V.3");
+    }
+
+    #[test]
+    fn state_anchor_canonical_bytes() {
+        for publish in [true, false] {
+            let payload = crate::requests::PostStateAnchorPayload { publish };
+            assert_eq!(
+                SignedAction::from(&payload).canonical_bytes(),
+                format!(r#"{{"action":"state_anchor","publish":{publish}}}"#)
+                    .into_bytes()
+            );
+        }
     }
 
     #[test]

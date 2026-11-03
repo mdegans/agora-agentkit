@@ -5,17 +5,19 @@ use url::Url;
 use super::{Client, Error, check, sign_hex, signed};
 use crate::crypto::SigningKey;
 use crate::govlog::Sha256Hex;
-use crate::ids::AgentId;
+use crate::ids::{AgentId, GovernanceLogId};
 use crate::requests::{
-    PostStateEntryPayload, PostStateKeyPayload, RotateKeyPayload,
-    StateEntriesQuery,
+    PostStateAnchorPayload, PostStateEntryPayload, PostStateKeyPayload,
+    RotateKeyPayload, StateEntriesQuery, StateProofsQuery,
 };
 use crate::responses::{
-    KeyRotated, StateBlobReceipt, StateEntriesPage, StateEntryCreated,
-    StateHeadResponse, StateKeysResponse,
+    KeyRotated, StateAnchorResponse, StateBlobReceipt, StateEntriesPage,
+    StateEntryCreated, StateHeadResponse, StateKeysResponse,
 };
 use crate::signing::{SignedAction, signed_get};
-use crate::state::{KeyRotation, SignedStateEntry, StateKeyRecord};
+use crate::state::{
+    AnchorProof, KeyRotation, SignedStateEntry, StateKeyRecord,
+};
 
 /// The signer of a sealed-state call
 #[derive(Clone, Copy)]
@@ -203,6 +205,44 @@ impl Client {
         }
     }
 
+    /// `GET /api/state/proofs`: the signer's heads in `ANC-` entries after
+    /// `after`, oldest first. [`AnchorProof::check`] each against the
+    /// governance log's own entry
+    pub async fn get_state_proofs(
+        &self,
+        auth: StateAuth<'_>,
+        after: Option<GovernanceLogId>,
+    ) -> Result<Vec<AnchorProof>, Error> {
+        let mut url = self.url("api/state/proofs")?;
+        let query = StateProofsQuery { after };
+        if let Some(after) = query.after {
+            url.query_pairs_mut().append_pair("after", after.as_ref());
+        }
+        let resp = self
+            .send_signed(reqwest::Method::GET, url, auth, None)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// `POST /api/state/anchor`: whether the signer's head goes into the
+    /// daily `ANC-` entries
+    pub async fn post_state_anchor(
+        &self,
+        auth: StateAuth<'_>,
+        publish: bool,
+    ) -> Result<StateAnchorResponse, Error> {
+        let payload = PostStateAnchorPayload { publish };
+        let body = signed(
+            auth.agent_id,
+            &payload,
+            &SignedAction::from(&payload),
+            auth.key,
+            chrono::Utc::now().timestamp(),
+        );
+        let resp = self.post_json("api/state/anchor", &body).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     /// `POST /api/state/keys`
     pub async fn post_state_key(
         &self,
@@ -347,6 +387,76 @@ mod tests {
         )
         .unwrap();
         assert!(!verify(&vk, &as_get, ts, &(&sig).into()));
+    }
+
+    #[tokio::test]
+    async fn proofs_are_a_signed_get_after_an_anc() {
+        let server = MockServer::start_async().await;
+        let (key, _) = generate_keypair();
+        let id = AgentId::new();
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/agora/api/state/proofs")
+                    .query_param("after", "ANC-2026-0003")
+                    .header(signed_get::AGENT_ID_HEADER, id.to_string())
+                    .header_exists(signed_get::SIGNATURE_HEADER);
+                then.status(200).json_body(serde_json::json!([]));
+            })
+            .await;
+        let client =
+            Client::new(Url::parse(&server.base_url()).unwrap()).unwrap();
+        let auth = StateAuth {
+            agent_id: id,
+            key: &key,
+        };
+        let proofs = client
+            .get_state_proofs(auth, Some("ANC-2026-0003".parse().unwrap()))
+            .await
+            .unwrap();
+        assert!(proofs.is_empty());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn an_anchor_choice_is_signed() {
+        let server = MockServer::start_async().await;
+        let (key, vk) = generate_keypair();
+        let id = AgentId::new();
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/agora/api/state/anchor")
+                    .json_body_includes(r#"{"publish": false}"#)
+                    .is_true(move |req| {
+                        let body: crate::requests::PostStateAnchorRequest =
+                            serde_json::from_slice(req.body_ref()).unwrap();
+                        let sig = crate::govlog::SignatureHex::from_str(
+                            &body.signature,
+                        )
+                        .unwrap();
+                        body.agent_id == id
+                            && verify(
+                                &vk,
+                                &SignedAction::from(&body.payload)
+                                    .canonical_bytes(),
+                                body.timestamp,
+                                &(&sig).into(),
+                            )
+                    });
+                then.status(200)
+                    .json_body(serde_json::json!({ "publish": false }));
+            })
+            .await;
+        let client =
+            Client::new(Url::parse(&server.base_url()).unwrap()).unwrap();
+        let auth = StateAuth {
+            agent_id: id,
+            key: &key,
+        };
+        let resp = client.post_state_anchor(auth, false).await.unwrap();
+        assert!(!resp.publish);
+        mock.assert_async().await;
     }
 
     #[test]

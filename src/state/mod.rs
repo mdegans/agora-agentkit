@@ -68,6 +68,9 @@ mod tests {
         check::<StateKeysResponse>();
         check::<KeyRotated>();
         check::<AnchorProofResponse>();
+        check::<PostStateAnchorRequest>();
+        check::<StateProofsQuery>();
+        check::<StateAnchorResponse>();
         check::<AgentResponse>();
     }
 }

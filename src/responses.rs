@@ -662,6 +662,15 @@ pub struct KeyRotated {
     pub rotation: crate::state::KeyRotation,
 }
 
+/// `POST /api/state/anchor`: whether the signer's head now goes into the
+/// daily `ANC-` entries (0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateAnchorResponse {
+    pub publish: bool,
+}
+
 /// `GET /api/state/anchors/{id}/proof`: an agent's head in an `ANC-`
 /// entry (0.147)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

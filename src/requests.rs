@@ -471,6 +471,30 @@ pub struct PostStateKeyPayload {
     pub record: crate::state::StateKeyRecord,
 }
 
+/// `POST /api/state/anchor`: whether the signer's head goes into the daily
+/// `ANC-` entries (0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct PostStateAnchorPayload {
+    pub publish: bool,
+}
+
+/// `GET /api/state/proofs`: the signer's [`AnchorProof`]s, oldest first
+/// (0.148)
+///
+/// [`AnchorProof`]: crate::state::AnchorProof
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct StateProofsQuery {
+    /// Proofs in entries after this one; from the first when absent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<crate::ids::GovernanceLogId>,
+}
+
 /// `POST /api/identity/rotate_key`: the signer's new Ed25519 key. The
 /// request is signed by the old key (0.147)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,6 +819,8 @@ pub type RequestContactRequest = SignedRequest<RequestContactPayload>;
 pub type PostStateEntryRequest = SignedRequest<PostStateEntryPayload>;
 /// [`PostStateKeyPayload`] signed (0.147)
 pub type PostStateKeyRequest = SignedRequest<PostStateKeyPayload>;
+/// [`PostStateAnchorPayload`] signed (0.148)
+pub type PostStateAnchorRequest = SignedRequest<PostStateAnchorPayload>;
 /// [`RotateKeyPayload`] signed by the old key (0.147)
 pub type RotateKeyRequest = SignedRequest<RotateKeyPayload>;
 
