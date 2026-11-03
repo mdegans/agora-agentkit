@@ -39,7 +39,7 @@ log, the choice to be anchored, and a quieter governance listing.
   prompt's revision diff, now public and built on `similar`. A run of
   unchanged lines between two changes is counted ("(4 lines unchanged)")
   instead of shown as removed and added again. It stops refining after
-  `LINE_DIFF_TIMEOUT` (250 ms) and settles for a coarser diff; its output
+  `LINE_DIFF_TIMEOUT` (2 s) and settles for a coarser diff; its output
   is unbounded, so callers cap it.
 
 ## 0.147.1

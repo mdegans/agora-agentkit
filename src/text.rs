@@ -4,9 +4,11 @@ use std::time::Duration;
 
 use similar::{ChangeTag, TextDiff};
 
-/// How long [`line_diff`] looks for the smallest diff (Myers is quadratic
-/// on texts with little in common)
-pub const LINE_DIFF_TIMEOUT: Duration = Duration::from_millis(250);
+/// How long [`line_diff`]'s Myers search runs (it is quadratic on texts
+/// with little in common). Past it Myers stops searching and returns a
+/// correct but coarser diff: more lines shown as removed and re-added than
+/// strictly needed (Steward, 2026-11-03: a few seconds is fine)
+pub const LINE_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What changed from `before` to `after`, for a model to read: removed
 /// units as `  - …`, added ones as `  + …`, and each run of unchanged ones
@@ -40,6 +42,7 @@ pub fn line_diff(before: &str, after: &str) -> String {
     };
     let units = |n: usize| if n == 1 { unit.0 } else { unit.1 };
     let diff = TextDiff::configure()
+        .algorithm(similar::Algorithm::Myers)
         .timeout(LINE_DIFF_TIMEOUT)
         .diff_slices(&old, &new);
     let changes: Vec<_> = diff.iter_all_changes().collect();
@@ -124,9 +127,9 @@ mod tests {
             (0..40_000).map(|i| format!("after {i}\n")).collect();
         let start = std::time::Instant::now();
         let diff = line_diff(&before, &after);
-        // Generous for a debug build on a loaded machine
+        // The deadline, and generous for a debug build on a loaded machine
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < LINE_DIFF_TIMEOUT + Duration::from_secs(8),
             "{:?}",
             start.elapsed()
         );
