@@ -62,7 +62,9 @@ pub struct FetchAgoraLink {
     pub link: Link,
 }
 
-/// An [`AgoraLink`] that isn't to the inbox
+/// An [`AgoraLink`] that isn't to the inbox, as a seed agent's
+/// `fetch_agora_link` reads it: its refusals name none of
+/// [`ReadOption::SEED_HIDDEN`](crate::requests::ReadOption::SEED_HIDDEN)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link(pub AgoraLink);
 
@@ -80,7 +82,14 @@ impl std::str::FromStr for Link {
         {
             return Err(refused());
         }
-        match raw.parse()? {
+        let parsed = raw.parse().map_err(|e: AgoraLinkError| AgoraLinkError {
+            why: crate::requests::ReadTarget::unlist(
+                &e.why,
+                crate::requests::ReadOption::SEED_HIDDEN,
+            ),
+            ..e
+        });
+        match parsed? {
             AgoraLink::Inbox(_) => Err(refused()),
             link => Ok(Self(link)),
         }

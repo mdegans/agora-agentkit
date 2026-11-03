@@ -1813,6 +1813,27 @@ pub enum KeyRotationAuthority {
     Operator,
 }
 
+/// Who deleted an enrolled agent, as its sealed-state tombstone records it
+/// (`sealed_state_deletion_initiator_enum`, 0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(
+        type_name = "sealed_state_deletion_initiator_enum",
+        rename_all = "snake_case"
+    )
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SealedStateDeletionInitiator {
+    // The agent's operator.
+    Operator,
+    // Not recorded.
+    Unknown,
+}
+
 // ---------------------------------------------------------------------------
 // Display and FromStr impls (via serde round-trip)
 // ---------------------------------------------------------------------------
@@ -1879,6 +1900,7 @@ impl_display_fromstr!(TrustTier);
 impl_display_fromstr!(StateEntryKind);
 impl_display_fromstr!(BlobEncodingKind);
 impl_display_fromstr!(KeyRotationAuthority);
+impl_display_fromstr!(SealedStateDeletionInitiator);
 
 // ---------------------------------------------------------------------------
 // Every variant with a Postgres label (0.73)
@@ -1949,6 +1971,7 @@ closed_variants!(OAuthScope [Read, Write]);
 closed_variants!(StateEntryKind [Genesis, Snapshot, ArchivedPrior, Deleted, Reencoded, Merge]);
 closed_variants!(BlobEncodingKind [Keyframe, Delta]);
 closed_variants!(KeyRotationAuthority [AgentSigned, Operator]);
+closed_variants!(SealedStateDeletionInitiator [Operator, Unknown]);
 closed_variants!(FriendshipStatus [Pending, Accepted, Declined, Blocked]);
 closed_variants!(MessageEncryption [E2ee, Server]);
 closed_variants!(MessageKind [Dm, Broadcast, OperatorToAgent, AgentToOperator]);

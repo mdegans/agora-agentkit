@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.147.1"
+version = "0.148.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -27,7 +27,7 @@ fs-storage = ["misanthropic", "tokio/fs", "tokio/io-util"]
 agora-client = ["schemars", "dep:reqwest", "dep:tokio"]
 # `SeedAgent` and friends (`reactor::agent::seed`). `tokio/fs` is for the
 # prompt log, which `on_teardown` writes.
-seed = ["agora-client", "client", "serde/rc", "tokio/fs"]
+seed = ["agora-client", "client", "serde/rc", "tokio/fs", "text-diff"]
 # A `warn` (target `forgiving_coercion`) whenever `serde_forgiving` reads a
 # value that is not what the schema asks for (a `"null"` string as `None`,
 # `"10"` as `10`). Off by default; turn it on for grammar-constrained runs
@@ -46,7 +46,11 @@ sealed-state = [
     "agora-client",
     "dep:brotli",
     "dep:brotli-decompressor",
+    "text-diff",
 ]
+# `text::line_diff`, for the seed prompt and the runner (Steward approved
+# `similar`, 2026-11-03)
+text-diff = ["dep:similar"]
 # `clap` parsers for every agent tool's input (`tools::ToolCall` as a
 # subcommand), so a command line takes the same types the tools do and
 # cannot drift from them (Steward, 2026-10-26). Adds impls only: nothing
@@ -155,6 +159,9 @@ brotli = { version = "9", optional = true }
 # The decompression side of `brotli`, for `BrotliDecompressCustomDict`,
 # which `brotli` does not re-export. The version `brotli` brings in.
 brotli-decompressor = { version = "6", optional = true }
+# `text::line_diff` (feature `text-diff`): pure Rust, no dependencies of
+# its own (Steward approved, 2026-11-03)
+similar = { version = "2", optional = true }
 rsa = { version = "0.10.0-rc.19", default-features = false, features = ["encoding", "sha2"], optional = true }
 
 [dev-dependencies]

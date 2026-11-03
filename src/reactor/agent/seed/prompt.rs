@@ -23,6 +23,7 @@ use crate::responses::{
     PostResponse, PostWithCommentsResponse, ProposalResponse, SearchResponse,
     ThreadNotice, TrashEntry, TrashPage,
 };
+use crate::text::line_diff;
 use crate::threads::tidy;
 
 use super::ShownOnce;
@@ -4381,16 +4382,10 @@ fn format_obligations(
 
 /// One line saying what an index left out, which ids, and how to list them
 fn format_omitted(o: &OmittedEntries) -> String {
-    let ids = o
-        .ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let shown = if (o.ids.len() as u64) < o.count {
-        format!("newest {}: {ids}", o.ids.len())
-    } else {
-        ids
+    let shown = match (o.ids.is_empty(), o.first, o.last) {
+        (true, Some(first), Some(last)) if first == last => first.to_string(),
+        (true, Some(first), Some(last)) => format!("{first} to {last}"),
+        _ => format_omitted_ids(o),
     };
     format!(
         "{} {} not listed ({shown}): {} Pass {} to list them.",
@@ -4399,6 +4394,21 @@ fn format_omitted(o: &OmittedEntries) -> String {
         o.why,
         o.include_with,
     )
+}
+
+/// [`OmittedEntries::ids`], the newest few when there are more
+fn format_omitted_ids(o: &OmittedEntries) -> String {
+    let ids = o
+        .ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if (o.ids.len() as u64) < o.count {
+        format!("newest {}: {ids}", o.ids.len())
+    } else {
+        ids
+    }
 }
 
 /// KEY, REC, DATA, TEST and ANC entries: in force, but they decide nothing
@@ -5058,52 +5068,6 @@ fn change_value(v: &serde_json::Value) -> String {
         serde_json::Value::String(s) => format!("{s:?}"),
         other => other.to_string(),
     }
-}
-
-/// The lines of `before` and `after` that differ, the lines both share at
-/// either end left out and counted
-fn line_diff(before: &str, after: &str) -> String {
-    // Prose on few lines is compared by sentence: one removed sentence is
-    // one line, not the whole paragraph twice (second iteration of 0.113.0)
-    let few = before.lines().count() <= 2 && after.lines().count() <= 2;
-    let units = |s: &'_ str| -> Vec<String> {
-        if few {
-            s.split_inclusive(". ")
-                .map(|u| u.trim().to_string())
-                .filter(|u| !u.is_empty())
-                .collect()
-        } else {
-            s.lines().map(str::to_string).collect()
-        }
-    };
-    let (old, new) = (units(before), units(after));
-    let unit = if few {
-        ("sentence", "sentences")
-    } else {
-        ("line", "lines")
-    };
-    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let tail = old[head..]
-        .iter()
-        .rev()
-        .zip(new[head..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let lines = |n: usize| if n == 1 { unit.0 } else { unit.1 };
-    let mut out = String::new();
-    if head > 0 {
-        out.push_str(&format!("  ({head} {} unchanged before)\n", lines(head)));
-    }
-    for line in &old[head..old.len() - tail] {
-        out.push_str(&format!("  - {line}\n"));
-    }
-    for line in &new[head..new.len() - tail] {
-        out.push_str(&format!("  + {line}\n"));
-    }
-    if tail > 0 {
-        out.push_str(&format!("  ({tail} {} unchanged after)\n", lines(tail)));
-    }
-    out
 }
 
 /// A revision's changes, a line each, removals of one field from many
@@ -6494,6 +6458,8 @@ mod tests {
                   revises."
                 .into(),
             include_with: "include_revisions=true".into(),
+            first: None,
+            last: None,
         };
         let entries = vec![crate::responses::GovernanceLogIndexEntry {
             id: "GOV-2026-0006".parse().unwrap(),
@@ -6575,6 +6541,8 @@ mod tests {
             ],
             why: crate::responses::ANCHORS_OMITTED_WHY.into(),
             include_with: crate::responses::ANCHORS_INCLUDE_WITH.into(),
+            first: None,
+            last: None,
         };
         let index = |omitted_anchors| GovernanceLogIndex {
             entries: vec![entry.clone()],
@@ -6586,7 +6554,8 @@ mod tests {
             obligations_total: None,
             unreadable_obligations: None,
         };
-        let out = format_governance_index_unfiltered(index(Some(anchors)));
+        let out =
+            format_governance_index_unfiltered(index(Some(anchors.clone())));
         assert!(
             out.contains(
                 "3 entries not listed (ANC-2026-0003, ANC-2026-0002, ANC-2026-0001): \
@@ -6604,6 +6573,41 @@ mod tests {
             ),
             "{out}"
         );
+        // A span instead of ids (0.148)
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let span = OmittedEntries {
+            count: 40,
+            ids: Vec::new(),
+            first: Some(day - chrono::Days::new(39)),
+            last: Some(day),
+            ..anchors.clone()
+        };
+        let out = format_governance_index_unfiltered(index(Some(span.clone())));
+        assert!(
+            out.contains(
+                "40 entries not listed (2026-09-25 to 2026-11-03): \
+                 A state anchor (ANC-) is the day's Merkle root"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("Pass entry_type=anchor to list them."),
+            "{out}"
+        );
+        let one = OmittedEntries {
+            count: 1,
+            first: Some(day),
+            ..span.clone()
+        };
+        let out = format_governance_index_unfiltered(index(Some(one)));
+        assert!(out.contains("1 entry not listed (2026-11-03): "), "{out}");
+        // Ids win over a span when both are sent
+        let both = OmittedEntries {
+            ids: anchors.ids.clone(),
+            ..span
+        };
+        let out = format_governance_index_unfiltered(index(Some(both)));
+        assert!(out.contains("not listed (newest 3: ANC-2026-0003"), "{out}");
         // None left out: no footer
         let out = format_governance_index_unfiltered(index(None));
         assert!(!out.contains("not listed"), "{out}");

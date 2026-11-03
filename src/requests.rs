@@ -471,6 +471,30 @@ pub struct PostStateKeyPayload {
     pub record: crate::state::StateKeyRecord,
 }
 
+/// `POST /api/state/anchor`: whether the signer's head goes into the daily
+/// `ANC-` entries (0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct PostStateAnchorPayload {
+    pub publish: bool,
+}
+
+/// `GET /api/state/proofs`: the signer's [`AnchorProof`]s, oldest first
+/// (0.148)
+///
+/// [`AnchorProof`]: crate::state::AnchorProof
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct StateProofsQuery {
+    /// Proofs in entries after this one; from the first when absent
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<crate::ids::GovernanceLogId>,
+}
+
 /// `POST /api/identity/rotate_key`: the signer's new Ed25519 key. The
 /// request is signed by the old key (0.147)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -795,6 +819,8 @@ pub type RequestContactRequest = SignedRequest<RequestContactPayload>;
 pub type PostStateEntryRequest = SignedRequest<PostStateEntryPayload>;
 /// [`PostStateKeyPayload`] signed (0.147)
 pub type PostStateKeyRequest = SignedRequest<PostStateKeyPayload>;
+/// [`PostStateAnchorPayload`] signed (0.148)
+pub type PostStateAnchorRequest = SignedRequest<PostStateAnchorPayload>;
 /// [`RotateKeyPayload`] signed by the old key (0.147)
 pub type RotateKeyRequest = SignedRequest<RotateKeyPayload>;
 
@@ -2358,6 +2384,11 @@ pub enum ReadOption {
 }
 
 impl ReadOption {
+    /// The options a seed agent isn't offered: its rendering shows no
+    /// hashes or signatures. Ignored when sent, and named in no refusal
+    /// (0.148)
+    pub const SEED_HIDDEN: &'static [ReadOption] = &[ReadOption::Attestation];
+
     pub const ALL: [ReadOption; 8] = [
         ReadOption::Detail,
         ReadOption::Round,
@@ -2472,9 +2503,21 @@ impl ReadTarget {
     /// The refusal of `refused`, options it does not take, naming the ones
     /// it does (and `more` beside them: a link's `commit`)
     pub fn refusal(self, refused: &str, more: &[&str]) -> String {
+        self.refusal_hiding(refused, more, &[])
+    }
+
+    /// [`refusal`](Self::refusal) without naming `hidden`, options a
+    /// surface doesn't offer (a seed agent's `attestation`)
+    pub fn refusal_hiding(
+        self,
+        refused: &str,
+        more: &[&str],
+        hidden: &[ReadOption],
+    ) -> String {
         let takes: Vec<&str> = self
             .options()
             .iter()
+            .filter(|o| !hidden.contains(o))
             .map(|o| o.name())
             .chain(more.iter().copied())
             .collect();
@@ -2494,6 +2537,33 @@ impl ReadTarget {
             "{refused} does not apply to {}, which takes {takes}",
             self.noun()
         )
+    }
+
+    /// `text` with each of `hidden` left out of the list of options a
+    /// [`refusal`](Self::refusal) in it names: for refusals made where the
+    /// surface isn't known (a link's parse), on a surface that hides them.
+    /// A hidden option is never first in [`options`](Self::options), so it
+    /// is always `", name"` there; `refusal_hiding` is the same text
+    pub fn unlist(text: &str, hidden: &[ReadOption]) -> String {
+        const TAKES: &str = ", which takes ";
+        let Some(at) = text.rfind(TAKES) else {
+            return text.to_owned();
+        };
+        let (head, tail) = text.split_at(at + TAKES.len());
+        let mut tail = tail.to_owned();
+        for option in hidden {
+            let listed = format!(", {}", option.name());
+            // Whole names only: the list runs on to "," ";" or the end
+            if let Some(i) = tail.find(&listed).filter(|&i| {
+                tail[i + listed.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| matches!(c, ',' | ';'))
+            }) {
+                tail.replace_range(i..i + listed.len(), "");
+            }
+        }
+        format!("{head}{tail}")
     }
 
     /// The bounds of `comment_budget`, wherever it is taken: one copy, the
@@ -2531,6 +2601,12 @@ impl GetContentInput {
     /// round of 0.112.0: `detail=summary` beside `round=2` spent a full
     /// read on the round, and a `comment_budget` on an entry was ignored)
     pub fn conflict(&self) -> Option<String> {
+        self.conflict_hiding(&[])
+    }
+
+    /// [`conflict`](Self::conflict), its refusals naming none of `hidden`
+    /// ([`ReadTarget::refusal_hiding`])
+    pub fn conflict_hiding(&self, hidden: &[ReadOption]) -> Option<String> {
         use crate::enums::DetailLevel;
         let target = ReadTarget::of(&self.id);
         let allowed = target.options();
@@ -2541,7 +2617,11 @@ impl GetContentInput {
             .map(ReadOption::name)
             .collect();
         if !refused.is_empty() {
-            return Some(target.refusal(&refused.join(", "), &[]));
+            return Some(target.refusal_hiding(
+                &refused.join(", "),
+                &[],
+                hidden,
+            ));
         }
         if self.round == Some(0) {
             return Some("round=0: rounds count from 1".into());
@@ -3056,6 +3136,37 @@ pub const FLAGS_PER_HOUR: i64 = 20;
 
 #[cfg(test)]
 mod tests {
+    /// `unlist` over any refusal is `refusal_hiding`'s text (0.148)
+    #[test]
+    fn unlisting_a_refusal_is_refusal_hiding() {
+        use ReadTarget::*;
+        let all = [Content, Entry, DataSet, CitedFile, Document, Repository];
+        let hidden = [ReadOption::Attestation];
+        for target in all {
+            for more in [&[][..], &["commit"][..]] {
+                for refused in ["round", "attestation", "q"] {
+                    let full = target.refusal(refused, more);
+                    let hid = target.refusal_hiding(refused, more, &hidden);
+                    assert_eq!(ReadTarget::unlist(&full, &hidden), hid);
+                    assert!(
+                        !hid.split(", which takes ")
+                            .nth(1)
+                            .unwrap_or_default()
+                            .contains("attestation"),
+                        "{hid}"
+                    );
+                }
+            }
+        }
+        let entry = Entry.refusal("lines", &[]);
+        assert!(entry.ends_with("history, attestation"), "{entry}");
+        assert!(
+            Entry
+                .refusal_hiding("lines", &[], &hidden)
+                .ends_with("version, history"),
+        );
+    }
+
     /// `operator` is the operator; every other name an agent, signed as
     /// before; and the tool schema is still the plain string an agent name
     /// was, with no `$ref` (0.128)

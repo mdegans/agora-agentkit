@@ -223,6 +223,10 @@ pub enum SealError {
     BadParent,
     #[error("the outbox item to commit is not the one prepared")]
     Raced,
+    /// A forked save's parent is in no record here, so its time can't be
+    /// checked
+    #[error("the parent entry is not in the head, keyframe or outbox")]
+    ParentNotFound,
 }
 
 /// Why a local write went ahead unsealed, without content
@@ -251,7 +255,9 @@ impl SealError {
             Self::Seal(_) => SealFailureKind::Seal,
             Self::NoHead => SealFailureKind::NoHead,
             Self::NoKeys => SealFailureKind::NoKeys,
-            Self::BadParent => SealFailureKind::BadParent,
+            Self::BadParent | Self::ParentNotFound => {
+                SealFailureKind::BadParent
+            }
             Self::Raced => SealFailureKind::Raced,
             Self::Refused => SealFailureKind::Refused,
         }
@@ -601,6 +607,18 @@ impl AgentSeal {
             _ => return Err(SealError::BadParent),
         };
 
+        // Never before the parent, whatever the clock did since
+        // (`time_went_back`, the rule `verify_chain` holds a child to)
+        let parent_created_at = match (&head, append.parent) {
+            (_, None) => None,
+            (Some(h), Some(p)) if h.head == p => Some(h.created_at),
+            (_, Some(p)) => Some(
+                self.created_at_of(head.as_ref(), p)
+                    .await?
+                    .ok_or(SealError::ParentNotFound)?,
+            ),
+        };
+
         let current = match (&head, displaced) {
             (Some(h), None) if append.kind == StateEntryKind::Snapshot => {
                 h.keyframe.clone()
@@ -641,16 +659,17 @@ impl AgentSeal {
             write_atomic(&blob_path, &sealed).await?;
         }
 
-        // Never before the parent, whatever the clock did since
-        let floor = match &head {
-            Some(h) if append.parent == Some(h.head) => h.created_at + 1,
-            _ => 0,
-        };
         let entry = StateEntry {
             agora_state_entry: STATE_ENTRY_VERSION,
             agent_id: self.agent_id,
             seq,
-            created_at: Utc::now().timestamp_micros().max(floor),
+            created_at: {
+                let now = Utc::now().timestamp_micros();
+                match parent_created_at {
+                    Some(p) if crate::state::chain::time_went_back(p, now) => p,
+                    _ => now,
+                }
+            },
             state_at: append.state_at.timestamp_micros(),
             kind: append.kind,
             prev_hash,
@@ -700,6 +719,37 @@ impl AgentSeal {
         }
         write_atomic(&tmp, &serde_json::to_vec_pretty(&item)?).await?;
         Ok(Prepared { item })
+    }
+
+    /// `parent`'s `created_at`, from the head, its keyframe or an item in
+    /// `outbox/` or `sent/` (set aside as displaced too)
+    async fn created_at_of(
+        &self,
+        head: Option<&HeadFile>,
+        parent: HeadRef,
+    ) -> Result<Option<i64>, SealError> {
+        if let Some(h) = head {
+            if h.head == parent {
+                return Ok(Some(h.created_at));
+            }
+            if let Some(kf) = &h.keyframe
+                && kf.entry.seq == parent.seq
+                && kf.entry.entry_hash() == parent.entry_hash
+            {
+                return Ok(Some(kf.entry.created_at));
+            }
+        }
+        for (sub, ext) in
+            [(OUTBOX, "json"), (SENT, "json"), (OUTBOX, "displaced")]
+        {
+            for item in self.items(sub, ext).await? {
+                let e = &item.entry.entry;
+                if e.seq == parent.seq && e.entry_hash() == parent.entry_hash {
+                    return Ok(Some(e.created_at));
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Step 3: rename the item into the outbox and move the head
@@ -2586,10 +2636,95 @@ mod tests {
         let base = store.load_raw(id).await.unwrap().base;
         store.save_raw(id, state(80), base.as_ref()).await.unwrap();
         let item = seal.outbox().await.unwrap().pop().unwrap();
-        assert_eq!(item.entry.entry.created_at, future + 1);
+        assert_eq!(item.entry.entry.created_at, future);
         let entries = chain(&seal).await;
         let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
         assert!(report.intact);
+    }
+
+    /// A forked save's parent, not the head, floors its time too: a clock
+    /// stepped back since the parent never makes the child older (review
+    /// of 0.148)
+    #[tokio::test]
+    async fn a_forked_child_is_never_older_than_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, vk) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        // A parent stamped an hour ahead: the clock has since stepped back
+        let mut head = seal.head().await.unwrap().unwrap();
+        let future = Utc::now().timestamp_micros() + 3_600_000_000;
+        head.created_at = future;
+        write_atomic(
+            &seal.dir().join(HEAD),
+            &serde_json::to_vec(&head).unwrap(),
+        )
+        .await
+        .unwrap();
+        let base = store.load_raw(id).await.unwrap().base;
+        let parent = store
+            .save_raw(id, state(80), base.as_ref())
+            .await
+            .unwrap()
+            .unwrap();
+        // Two loads of it; one save moves the head on, the other forks
+        let a = store.load_raw(id).await.unwrap().base;
+        let b = store.load_raw(id).await.unwrap().base;
+        store.save_raw(id, state(81), a.as_ref()).await.unwrap();
+        let forked = store
+            .save_raw(id, state(82), b.as_ref())
+            .await
+            .unwrap()
+            .unwrap();
+        let head = seal.head().await.unwrap().unwrap();
+        assert_eq!(head.head, forked);
+        assert_eq!(head.displaced.len(), 1, "a fork");
+        let item = seal.outbox().await.unwrap().pop().unwrap();
+        assert_eq!(item.entry.entry.prev_hash, Some(parent.entry_hash));
+        assert_eq!(item.entry.entry.created_at, future);
+        let entries = chain(&seal).await;
+        let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
+        assert!(
+            !report.problems.iter().any(|p| matches!(
+                p,
+                crate::state::verify::ChainProblem::TimeWentBack { .. }
+            )),
+            "{:?}",
+            report.problems
+        );
+    }
+
+    /// A parent in no record here fails the seal rather than going
+    /// unchecked
+    #[tokio::test]
+    async fn a_parent_nowhere_here_fails_the_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let plaintext = codec::plaintext(&state(90));
+        let before = seal.outbox().await.unwrap();
+        let lock = seal.lock().await.unwrap();
+        let err = seal
+            .prepare(
+                &lock,
+                &k,
+                &KeyframePolicy::default(),
+                Append {
+                    kind: StateEntryKind::Snapshot,
+                    plaintext: &plaintext,
+                    plaintext_sha256: Some(sha256(&plaintext)),
+                    state_at: Utc::now(),
+                    parent: Some(HeadRef {
+                        entry_hash: Sha256Hex::from([0x5a; 32]),
+                        seq: 0,
+                    }),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SealError::ParentNotFound), "{err}");
+        assert_eq!(err.kind(), SealFailureKind::BadParent);
+        assert_eq!(seal.outbox().await.unwrap(), before, "nothing added");
     }
 
     /// Abandoned items at one ord all stay, and a blob nothing names goes

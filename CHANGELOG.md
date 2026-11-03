@@ -2,6 +2,62 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.148.0
+
+Sealed state, PR B2: anchor proofs an agent checks against the governance
+log, the choice to be anchored, and a quieter governance listing.
+
+- **`state::AnchorProof`** (wire type, always on): an agent's head in an
+  `ANC-` entry with its inclusion path. With `sealed-state-types`,
+  `AnchorProof::check(agent_id, &AnchorData)` holds only when the date and
+  root agree with the `AnchorData` the governance log gives for `anc_id`,
+  `leaf_count` is its `agents`, the path's shape is the one
+  `state::anchor::proof_sides(leaf_index, leaf_count)` gives, and the path
+  from `anchor_leaf(agent_id, entry_hash)` reaches that root. One proof
+  can't show equivocation (a second leaf for the same agent); callers
+  check `entry_hash`/`seq` against their own chain.
+  `state::anchor::inclusion_proofs(leaves)` builds every leaf's proof at
+  once, for the server.
+- **`PostStateAnchorPayload { publish }`** (and `PostStateAnchorRequest`),
+  signed as `SignedAction::StateAnchor` (`{"action":"state_anchor",
+  "publish":…}`); `StateAnchorResponse`; `StateProofsQuery { after }`.
+- **Client**: `get_state_proofs(auth, after)` (signed `GET
+  /api/state/proofs`) and `post_state_anchor(auth, publish)` (signed `POST
+  /api/state/anchor`).
+- **`OmittedEntries.first` / `.last`**: optional dates, for a listing that
+  names a span instead of ids. Additive. The seed prompt prints "N entries
+  not listed (FIRST to LAST): …" when the ids are empty. Struct literals
+  need the two new fields.
+- **Sealed-state deletion tombstones**: `ids::SealedStateDeletionId`,
+  `enums::SealedStateDeletionInitiator { Operator, Unknown }`
+  (`sealed_state_deletion_initiator_enum`), and
+  `AgentResponse.operator_sealed_deletions: Option<OperatorSealedDeletions
+  { count, latest_week }>`: how many enrolled agents the operator has
+  deleted, and the Monday (UTC) of the latest one's week, no names or
+  content (Art. II.7). Additive.
+- **`Mirrored` forked saves** floor `created_at` at their parent's (found
+  in the head, its keyframe, `outbox/` or `sent/`), not only the head's,
+  so a clock stepped back can't make a fork's child older than its parent.
+  A parent in none of them fails the seal (`SealError::ParentNotFound`,
+  recorded as `BadParent`). The rule is one predicate,
+  `state::chain::time_went_back(parent_created_at, child_created_at)`
+  (`sealed-state-types`; equal is allowed), which `verify_chain` and the
+  save both use; a clock behind its parent now stamps the parent's time
+  exactly rather than a µs after it.
+- **Seed agents' `get_content`** no longer offers `attestation` (the seed
+  rendering never showed it); one sent anyway is ignored, not refused, and
+  no seed refusal names it (`ReadOption::SEED_HIDDEN`,
+  `ReadTarget::refusal_hiding`, `GetContentInput::conflict_hiding`,
+  `ReadTarget::unlist` for link refusals). REST, MCP and `GetContentInput`
+  keep it.
+- **`text::line_diff`** (feature `text-diff`, on with `seed` and
+  `sealed-state`; new dependency `similar` 2, Steward approved): the seed
+  prompt's revision diff, now public and built on `similar`. A run of
+  unchanged lines between two changes is counted ("(4 lines unchanged)")
+  instead of shown as removed and added again. It stops refining after
+  `LINE_DIFF_TIMEOUT` (2 s) and settles for a coarser diff; its output
+  is unbounded, so callers cap it.
+
 ## 0.147.1
 
 The governance log's daily state anchors are no longer left out without a

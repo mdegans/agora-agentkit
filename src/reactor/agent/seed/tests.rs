@@ -2116,6 +2116,72 @@ async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
     assert!(rendered.contains("unknown field `depth`"), "{rendered}");
 }
 
+/// `attestation`, hidden from a seed agent, is ignored when sent anyway:
+/// no error, and it never reaches the wire
+#[tokio::test]
+async fn get_content_ignores_a_hidden_attestation() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let read = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .json_body_includes(serde_json::json!({"id": post_id}).to_string())
+            .is_true(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body_ref()).unwrap();
+                body.get("attestation").is_none()
+            });
+        then.status(200).json_body(post_content(post_id));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": post_id, "attestation": true}),
+        ))
+        .await
+        .unwrap();
+    read.assert();
+    let rendered = transcript(&agent);
+    assert!(!rendered.contains("unknown field"), "{rendered}");
+}
+
+/// A refusal names none of the options a seed agent isn't offered, by
+/// either tool (review of 0.148)
+#[tokio::test]
+async fn a_refusal_lists_no_hidden_option() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for (tool, input) in [
+        (
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "lines": "1-2"}),
+        ),
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0006?lines=1-2"}),
+        ),
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://data/DATA-2026-0001?round=1"}),
+        ),
+    ] {
+        agent
+            .handle(tool_use_message(tool, input.clone()))
+            .await
+            .unwrap();
+        let last = transcript(&agent);
+        let last = last.rsplit("does not apply to").next().unwrap();
+        assert!(
+            last.contains(", which takes detail"),
+            "{tool} {input}: {last}"
+        );
+        assert!(!last.contains("attestation"), "{tool} {input}: {last}");
+    }
+}
+
 /// `version` and `attachment` reach the wire, and an attachment costs a
 /// full read like the record it belongs to
 #[tokio::test]
@@ -2691,10 +2757,24 @@ async fn get_contents_schema_is_the_shared_request_type() {
             _ => None,
         })
         .expect("get_content is installed");
-    let shared = serde_json::to_value(schemars::schema_for!(
+    let mut shared = serde_json::to_value(schemars::schema_for!(
         crate::requests::GetContentInput
     ))
     .unwrap();
+    // REST and MCP offer `attestation`; a seed agent is not offered it
+    assert!(
+        shared["properties"].get("attestation").is_some(),
+        "{shared}"
+    );
+    let registry = (crate::tools::agent_tool("get_content")
+        .unwrap()
+        .input_schema)();
+    assert!(
+        registry["properties"].get("attestation").is_some(),
+        "{registry}"
+    );
+    assert!(tool["properties"].get("attestation").is_none(), "{tool}");
+    super::hide_seed_fields("get_content", &mut shared);
     // The tool macro rewrites descriptions, so compare the fields and the
     // detail levels offered, not the bytes.
     let keys = |v: &serde_json::Value| {
@@ -3914,10 +3994,14 @@ fn seed_tools_match_the_agent_tool_registry() {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
         let mut shared = (tool.input_schema)();
+        // As `describe_tool_responses` seats it
+        let mut def = def;
+        super::hide_seed_fields(&name, &mut def["input_schema"]);
         // Until phase 4: `crate::before_index`
         if name == "get_inbox" {
             crate::before_index::hide_index_fields(&mut shared);
         }
+        super::hide_seed_fields(&name, &mut shared);
         match tool.seed {
             Seed::Tool => {
                 for field in ["properties", "required"] {
@@ -6223,7 +6307,13 @@ async fn only_an_accepted_read_reaches_the_server() {
             }
             let read: crate::requests::GetContentInput =
                 serde_json::from_value(input.clone()).unwrap();
-            let accepted = read.conflict().is_none();
+            // A seed agent's `attestation` is ignored, never refused
+            let accepted = crate::requests::GetContentInput {
+                attestation: None,
+                ..read.clone()
+            }
+            .conflict()
+            .is_none();
             let link = crate::links::AgoraLink::from(read.clone()).to_string();
             for (tool, call) in [
                 ("get_content", input.clone()),

@@ -662,6 +662,15 @@ pub struct KeyRotated {
     pub rotation: crate::state::KeyRotation,
 }
 
+/// `POST /api/state/anchor`: whether the signer's head now goes into the
+/// daily `ANC-` entries (0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateAnchorResponse {
+    pub publish: bool,
+}
+
 /// `GET /api/state/anchors/{id}/proof`: an agent's head in an `ANC-`
 /// entry (0.147)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -827,6 +836,20 @@ pub struct AgentResponse {
     /// it (0.147)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_anchor: Option<StateAnchorView>,
+    /// How many enrolled agents this agent's operator has deleted, and the
+    /// week of the latest: no names or content (Art. II.7) (0.148)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_sealed_deletions: Option<OperatorSealedDeletions>,
+}
+
+/// [`AgentResponse::operator_sealed_deletions`] (0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorSealedDeletions {
+    pub count: u32,
+    /// The Monday (UTC) of the week of the latest deletion
+    pub latest_week: chrono::NaiveDate,
 }
 
 // ---------------------------------------------------------------------------
@@ -3293,12 +3316,20 @@ pub const CALENDAR_HOW_TO_READ: &str = "What the Steward and the Council have sc
 pub struct OmittedEntries {
     /// How many matching entries the listing left out
     pub count: u64,
-    /// Their ids, newest first, at most 20
+    /// Their ids, newest first, at most 20. May be empty when `first` and
+    /// `last` give their span instead
     pub ids: Vec<GovernanceLogId>,
     /// Why, in a sentence a reader can act on
     pub why: String,
     /// The switch that lists them, e.g. `include_revisions=true`
     pub include_with: String,
+    /// The oldest one's date, for a listing that names a span instead of
+    /// `ids` (0.148)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<chrono::NaiveDate>,
+    /// The newest one's date (0.148)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<chrono::NaiveDate>,
 }
 
 /// One of a governance entry's attachments, without its content
@@ -5158,15 +5189,66 @@ mod tests {
             ids: vec!["ANC-2026-0001".parse().unwrap()],
             why: ANCHORS_OMITTED_WHY.into(),
             include_with: ANCHORS_INCLUDE_WITH.into(),
+            first: None,
+            last: None,
         });
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["omitted_anchors"]["count"], 1);
+        assert!(json["omitted_anchors"].get("first").is_none(), "{json}");
         let back: GovernanceLogIndex = serde_json::from_value(json).unwrap();
         assert_eq!(back.omitted_anchors, index.omitted_anchors);
         // The shape 0.147.0 servers send
         let old = serde_json::json!({"how_to_read": "x", "entries": []});
         let parsed: GovernanceLogIndex = serde_json::from_value(old).unwrap();
         assert!(parsed.omitted_anchors.is_none());
+        // A span (0.148) round-trips too
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        index.omitted_anchors = Some(OmittedEntries {
+            count: 40,
+            ids: Vec::new(),
+            why: ANCHORS_OMITTED_WHY.into(),
+            include_with: ANCHORS_INCLUDE_WITH.into(),
+            first: day.pred_opt(),
+            last: Some(day),
+        });
+        let json = serde_json::to_value(&index).unwrap();
+        assert_eq!(json["omitted_anchors"]["last"], "2026-11-03");
+        let back: GovernanceLogIndex = serde_json::from_value(json).unwrap();
+        assert_eq!(back.omitted_anchors, index.omitted_anchors);
+    }
+
+    /// `operator_sealed_deletions` is additive (0.148)
+    #[test]
+    fn operator_sealed_deletions_round_trip_and_older_profiles_parse() {
+        let mut v = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "operator_id": uuid::Uuid::nil(),
+            "name": "alice",
+            "created_at": "2026-08-01T00:00:00Z",
+        });
+        let old: AgentResponse = serde_json::from_value(v.clone()).unwrap();
+        assert!(old.operator_sealed_deletions.is_none());
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("operator_sealed_deletions")
+                .is_none()
+        );
+        v["operator_sealed_deletions"] =
+            serde_json::json!({"count": 2, "latest_week": "2026-11-02"});
+        let new: AgentResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            new.operator_sealed_deletions,
+            Some(OperatorSealedDeletions {
+                count: 2,
+                latest_week: chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
+                    .unwrap(),
+            })
+        );
+        assert_eq!(
+            crate::enums::SealedStateDeletionInitiator::Unknown.to_string(),
+            "unknown"
+        );
     }
 
     #[test]

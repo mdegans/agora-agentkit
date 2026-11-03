@@ -1976,6 +1976,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             _ => registered.description.to_string(),
         };
         custom.description = description.into();
+        hide_seed_fields(&name, &mut custom.schema);
         crate::tools::model_facing_schema(&mut custom.schema);
         // misanthropic strips numeric, length and item bounds from every
         // tool schema (Anthropic's strict subset), so a seed agent reads
@@ -1994,6 +1995,35 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             limit.insert("maximum".into(), MAX_LISTING.into());
         }
         describe_bounds(&mut custom.schema, &full);
+    }
+}
+
+/// Drop from `name`'s schema the fields a seed agent isn't offered,
+/// though its input type keeps them for REST and MCP. In place, so the
+/// fields keep their order
+///
+/// - `get_content`'s [`ReadOption::SEED_HIDDEN`]
+///
+/// [`ReadOption::SEED_HIDDEN`]: crate::requests::ReadOption::SEED_HIDDEN
+pub(crate) fn hide_seed_fields(name: &str, schema: &mut serde_json::Value) {
+    if name != "get_content" {
+        return;
+    }
+    for option in crate::requests::ReadOption::SEED_HIDDEN {
+        let field = option.name();
+        if let Some(props) = schema
+            .get_mut("properties")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            // Not `remove`, which swaps the last field into the gap
+            props.retain(|k, _| k != field);
+        }
+        if let Some(required) = schema
+            .get_mut("required")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            required.retain(|k| k != field);
+        }
     }
 }
 
