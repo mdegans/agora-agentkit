@@ -3089,6 +3089,11 @@ pub struct GovernanceLogIndex {
     /// on it. Absent when nothing was left out
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_obligations: Option<OmittedEntries>,
+    /// Daily state anchors (`ANC-`) an unfiltered index left out (0.147.1):
+    /// one a day, deciding nothing, listed with `entry_type` `anchor`.
+    /// Absent when nothing was left out
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_anchors: Option<OmittedEntries>,
     /// `view=obligations` only: the page of obligations (0.72). `entries`
     /// is then empty
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3102,6 +3107,15 @@ pub struct GovernanceLogIndex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unreadable_obligations: Option<UnreadableObligations>,
 }
+
+/// Why an unfiltered index leaves anchors out, as [`OmittedEntries::why`]
+/// (0.147.1)
+pub const ANCHORS_OMITTED_WHY: &str = "A state anchor (ANC-) is the day's Merkle root over \
+    the agents' sealed-state heads: one a day, and it decides nothing.";
+
+/// How to list the anchors an index left out, as
+/// [`OmittedEntries::include_with`] (0.147.1)
+pub const ANCHORS_INCLUDE_WITH: &str = "entry_type=anchor";
 
 /// What [`GovernanceLogIndex::how_to_read`] says for `view=obligations`
 pub const OBLIGATIONS_HOW_TO_READ: &str = "Each line is an obligation (`OBL-…`): work a \
@@ -3129,6 +3143,7 @@ impl GovernanceLogIndex {
             entries,
             omitted,
             omitted_obligations: None,
+            omitted_anchors: None,
             obligations: None,
             obligations_total: None,
             unreadable_obligations: None,
@@ -3146,6 +3161,7 @@ impl GovernanceLogIndex {
             entries: Vec::new(),
             omitted: None,
             omitted_obligations: None,
+            omitted_anchors: None,
             obligations: Some(obligations),
             obligations_total: Some(total),
             unreadable_obligations: UnreadableObligations::of(unreadable),
@@ -5129,6 +5145,29 @@ mod tests {
     }
 
     use super::*;
+
+    /// `omitted_anchors` is additive (0.147.1): it round-trips, is left out
+    /// when absent, and an index from a server without it still parses
+    #[test]
+    fn omitted_anchors_round_trips_and_older_indexes_still_parse() {
+        let mut index = GovernanceLogIndex::new(Vec::new(), None);
+        let json = serde_json::to_value(&index).unwrap();
+        assert!(json.get("omitted_anchors").is_none(), "{json}");
+        index.omitted_anchors = Some(OmittedEntries {
+            count: 1,
+            ids: vec!["ANC-2026-0001".parse().unwrap()],
+            why: ANCHORS_OMITTED_WHY.into(),
+            include_with: ANCHORS_INCLUDE_WITH.into(),
+        });
+        let json = serde_json::to_value(&index).unwrap();
+        assert_eq!(json["omitted_anchors"]["count"], 1);
+        let back: GovernanceLogIndex = serde_json::from_value(json).unwrap();
+        assert_eq!(back.omitted_anchors, index.omitted_anchors);
+        // The shape 0.147.0 servers send
+        let old = serde_json::json!({"how_to_read": "x", "entries": []});
+        let parsed: GovernanceLogIndex = serde_json::from_value(old).unwrap();
+        assert!(parsed.omitted_anchors.is_none());
+    }
 
     #[test]
     fn post_response_deserialize_with_defaults() {

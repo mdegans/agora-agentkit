@@ -2,6 +2,21 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.147.1
+
+The governance log's daily state anchors are no longer left out without a
+trace (beta round 4 of 0.147).
+
+- **`GovernanceLogIndex.omitted_anchors`**: the `ANC-` entries an unfiltered
+  index left out, as `OmittedEntries`, with `ANCHORS_OMITTED_WHY` and
+  `ANCHORS_INCLUDE_WITH` (`entry_type=anchor`). Additive: absent when
+  nothing was left out, and an index without it still parses.
+- **The seed prompt** renders it as a third "not listed" footer, beside
+  revisions and attached obligations, and its legend reads "KEY, REC, DATA,
+  TEST and ANC entries still decide nothing".
+- **`docs::GET_GOVERNANCE_LOG_DOC`** names ANC among the entries that decide
+  nothing.
+
 ## 0.147.0
 
 Sealed state, PR A (agora `docs/design-sealed-state.md`). Nothing changes for

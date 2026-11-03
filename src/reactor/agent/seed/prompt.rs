@@ -4008,11 +4008,15 @@ pub(super) fn format_governance_index(
         return out;
     }
     let entries = &index.entries;
-    let omitted = [index.omitted.as_ref(), index.omitted_obligations.as_ref()]
-        .into_iter()
-        .flatten()
-        .map(format_omitted)
-        .reduce(|a, b| format!("{a}\n{b}"));
+    let omitted = [
+        index.omitted.as_ref(),
+        index.omitted_obligations.as_ref(),
+        index.omitted_anchors.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(format_omitted)
+    .reduce(|a, b| format!("{a}\n{b}"));
     if entries.is_empty() {
         // The filter alone said nothing of what a TEST entry is, or that
         // there are none (betas of 0.116.0)
@@ -4106,15 +4110,15 @@ pub(super) fn format_governance_index(
     };
     out.push_str(&if asked.cues.links {
         format!(
-            "\nA line with no standing shown is in_force (KEY, REC, DATA and \
-             TEST entries still decide nothing). Read one as \
+            "\nA line with no standing shown is in_force (KEY, REC, DATA, \
+             TEST and ANC entries still decide nothing). Read one as \
              agora://gov/<id> for the whole record{left}, or \
              agora://gov/<id>?detail=summary for its summary alone (free).\n"
         )
     } else {
         format!(
-            "\nA line with no standing shown is in_force (KEY, REC, DATA and \
-             TEST entries still decide nothing). Read one with \
+            "\nA line with no standing shown is in_force (KEY, REC, DATA, \
+             TEST and ANC entries still decide nothing). Read one with \
              get_content(id) for the whole record{left}, or with \
              detail=\"summary\" for its summary alone (free).\n"
         )
@@ -6289,6 +6293,7 @@ mod tests {
             omitted: None,
             how_to_read: String::new(),
             omitted_obligations: None,
+            omitted_anchors: None,
             obligations: None,
             obligations_total: None,
             unreadable_obligations: None,
@@ -6320,6 +6325,7 @@ mod tests {
                 omitted: None,
                 how_to_read: String::new(),
                 omitted_obligations: None,
+                omitted_anchors: None,
                 obligations: None,
                 obligations_total: None,
                 unreadable_obligations: None,
@@ -6440,6 +6446,7 @@ mod tests {
             omitted: None,
             how_to_read: String::new(),
             omitted_obligations: None,
+            omitted_anchors: None,
             obligations: None,
             obligations_total: None,
             unreadable_obligations: None,
@@ -6504,6 +6511,7 @@ mod tests {
             omitted: Some(omitted.clone()),
             how_to_read: String::new(),
             omitted_obligations: None,
+            omitted_anchors: None,
             obligations: None,
             obligations_total: None,
             unreadable_obligations: None,
@@ -6533,12 +6541,72 @@ mod tests {
             }),
             how_to_read: String::new(),
             omitted_obligations: None,
+            omitted_anchors: None,
             obligations: None,
             obligations_total: None,
             unreadable_obligations: None,
         });
         assert!(out.contains("No governance log entries"), "{out}");
         assert!(out.contains("25 entries not listed (newest 2: "), "{out}");
+    }
+
+    /// The daily state anchors an index left out get a footer of their own,
+    /// beside the others, and the legend counts ANC among the entries that
+    /// decide nothing (beta round 4 of 0.147)
+    #[test]
+    fn governance_index_discloses_the_anchors_it_omitted() {
+        let entry = crate::responses::GovernanceLogIndexEntry {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "Ratification".into(),
+            created_at: chrono::Utc::now(),
+            tags: None,
+            standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
+        };
+        let anchors = OmittedEntries {
+            count: 3,
+            ids: vec![
+                "ANC-2026-0003".parse().unwrap(),
+                "ANC-2026-0002".parse().unwrap(),
+                "ANC-2026-0001".parse().unwrap(),
+            ],
+            why: crate::responses::ANCHORS_OMITTED_WHY.into(),
+            include_with: crate::responses::ANCHORS_INCLUDE_WITH.into(),
+        };
+        let index = |omitted_anchors| GovernanceLogIndex {
+            entries: vec![entry.clone()],
+            omitted: None,
+            how_to_read: String::new(),
+            omitted_obligations: None,
+            omitted_anchors,
+            obligations: None,
+            obligations_total: None,
+            unreadable_obligations: None,
+        };
+        let out = format_governance_index_unfiltered(index(Some(anchors)));
+        assert!(
+            out.contains(
+                "3 entries not listed (ANC-2026-0003, ANC-2026-0002, ANC-2026-0001): \
+                 A state anchor (ANC-) is the day's Merkle root"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("Pass entry_type=anchor to list them."),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "KEY, REC, DATA, TEST and ANC entries still decide nothing"
+            ),
+            "{out}"
+        );
+        // None left out: no footer
+        let out = format_governance_index_unfiltered(index(None));
+        assert!(!out.contains("not listed"), "{out}");
     }
 
     /// A record reads as markdown in reading order: headings for what it

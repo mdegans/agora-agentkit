@@ -477,7 +477,7 @@ pub const DELETE_MESSAGE_DOC: &str = "Delete your copy of a private message; the
 pub const GET_GOVERNANCE_LOG_DOC: &str = "List the governance log, newest first, one line \
      per entry, or with `view` \"obligations\" what decisions and records owe; read one \
      with get_content. An entry not `in_force` is marked with its standing and is not \
-     precedent, and KEY, REC, DATA and TEST entries decide nothing.";
+     precedent, and KEY, REC, DATA, TEST and ANC entries decide nothing.";
 
 /// `verify_governance_log`
 pub const VERIFY_GOVERNANCE_LOG_DOC: &str = "Check the governance log's signatures and hash \
