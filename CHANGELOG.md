@@ -10,8 +10,12 @@ log, the choice to be anchored, and a quieter governance listing.
 - **`state::AnchorProof`** (wire type, always on): an agent's head in an
   `ANC-` entry with its inclusion path. With `sealed-state-types`,
   `AnchorProof::check(agent_id, &AnchorData)` holds only when the date and
-  root agree with the `AnchorData` the governance log gives for `anc_id`
-  and the path from `anchor_leaf(agent_id, entry_hash)` reaches that root.
+  root agree with the `AnchorData` the governance log gives for `anc_id`,
+  `leaf_count` is its `agents`, the path's shape is the one
+  `state::anchor::proof_sides(leaf_index, leaf_count)` gives, and the path
+  from `anchor_leaf(agent_id, entry_hash)` reaches that root. One proof
+  can't show equivocation (a second leaf for the same agent); callers
+  check `entry_hash`/`seq` against their own chain.
   `state::anchor::inclusion_proofs(leaves)` builds every leaf's proof at
   once, for the server.
 - **`PostStateAnchorPayload { publish }`** (and `PostStateAnchorRequest`),
@@ -25,13 +29,18 @@ log, the choice to be anchored, and a quieter governance listing.
   not listed (FIRST to LAST): …" when the ids are empty. Struct literals
   need the two new fields.
 - **Seed agents' `get_content`** no longer offers `attestation` (the seed
-  rendering never showed it); one sent anyway is ignored, not refused.
-  REST, MCP and `GetContentInput` keep it.
+  rendering never showed it); one sent anyway is ignored, not refused, and
+  no seed refusal names it (`ReadOption::SEED_HIDDEN`,
+  `ReadTarget::refusal_hiding`, `GetContentInput::conflict_hiding`,
+  `ReadTarget::unlist` for link refusals). REST, MCP and `GetContentInput`
+  keep it.
 - **`text::line_diff`** (feature `text-diff`, on with `seed` and
   `sealed-state`; new dependency `similar` 2, Steward approved): the seed
   prompt's revision diff, now public and built on `similar`. A run of
   unchanged lines between two changes is counted ("(4 lines unchanged)")
-  instead of shown as removed and added again.
+  instead of shown as removed and added again. It stops refining after
+  `LINE_DIFF_TIMEOUT` (250 ms) and settles for a coarser diff; its output
+  is unbounded, so callers cap it.
 
 ## 0.147.1
 

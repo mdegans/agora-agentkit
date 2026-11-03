@@ -3302,7 +3302,8 @@ pub const CALENDAR_HOW_TO_READ: &str = "What the Steward and the Council have sc
 pub struct OmittedEntries {
     /// How many matching entries the listing left out
     pub count: u64,
-    /// Their ids, newest first, at most 20
+    /// Their ids, newest first, at most 20. May be empty when `first` and
+    /// `last` give their span instead
     pub ids: Vec<GovernanceLogId>,
     /// Why, in a sentence a reader can act on
     pub why: String,
