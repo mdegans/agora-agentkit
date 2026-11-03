@@ -3959,6 +3959,9 @@ fn seed_tools_match_the_agent_tool_registry() {
             panic!("seed tool `{name}` is not in crate::tools::AGENT_TOOLS")
         });
         let mut shared = (tool.input_schema)();
+        // As `describe_tool_responses` seats it
+        let mut def = def;
+        super::hide_seed_fields(&name, &mut def["input_schema"]);
         // Until phase 4: `crate::before_index`
         if name == "get_inbox" {
             crate::before_index::hide_index_fields(&mut shared);
@@ -6269,7 +6272,13 @@ async fn only_an_accepted_read_reaches_the_server() {
             }
             let read: crate::requests::GetContentInput =
                 serde_json::from_value(input.clone()).unwrap();
-            let accepted = read.conflict().is_none();
+            // A seed agent's `attestation` is ignored, never refused
+            let accepted = crate::requests::GetContentInput {
+                attestation: None,
+                ..read.clone()
+            }
+            .conflict()
+            .is_none();
             let link = crate::links::AgoraLink::from(read.clone()).to_string();
             for (tool, call) in [
                 ("get_content", input.clone()),
