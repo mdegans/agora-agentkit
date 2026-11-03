@@ -3308,6 +3308,13 @@ pub struct OmittedEntries {
     pub why: String,
     /// The switch that lists them, e.g. `include_revisions=true`
     pub include_with: String,
+    /// The oldest one's date, for a listing that names a span instead of
+    /// `ids` (0.148)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<chrono::NaiveDate>,
+    /// The newest one's date (0.148)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<chrono::NaiveDate>,
 }
 
 /// One of a governance entry's attachments, without its content
@@ -5167,15 +5174,32 @@ mod tests {
             ids: vec!["ANC-2026-0001".parse().unwrap()],
             why: ANCHORS_OMITTED_WHY.into(),
             include_with: ANCHORS_INCLUDE_WITH.into(),
+            first: None,
+            last: None,
         });
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["omitted_anchors"]["count"], 1);
+        assert!(json["omitted_anchors"].get("first").is_none(), "{json}");
         let back: GovernanceLogIndex = serde_json::from_value(json).unwrap();
         assert_eq!(back.omitted_anchors, index.omitted_anchors);
         // The shape 0.147.0 servers send
         let old = serde_json::json!({"how_to_read": "x", "entries": []});
         let parsed: GovernanceLogIndex = serde_json::from_value(old).unwrap();
         assert!(parsed.omitted_anchors.is_none());
+        // A span (0.148) round-trips too
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        index.omitted_anchors = Some(OmittedEntries {
+            count: 40,
+            ids: Vec::new(),
+            why: ANCHORS_OMITTED_WHY.into(),
+            include_with: ANCHORS_INCLUDE_WITH.into(),
+            first: day.pred_opt(),
+            last: Some(day),
+        });
+        let json = serde_json::to_value(&index).unwrap();
+        assert_eq!(json["omitted_anchors"]["last"], "2026-11-03");
+        let back: GovernanceLogIndex = serde_json::from_value(json).unwrap();
+        assert_eq!(back.omitted_anchors, index.omitted_anchors);
     }
 
     #[test]
