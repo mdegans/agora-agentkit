@@ -23,6 +23,7 @@ use crate::responses::{
     PostResponse, PostWithCommentsResponse, ProposalResponse, SearchResponse,
     ThreadNotice, TrashEntry, TrashPage,
 };
+use crate::text::line_diff;
 use crate::threads::tidy;
 
 use super::ShownOnce;
@@ -5067,52 +5068,6 @@ fn change_value(v: &serde_json::Value) -> String {
         serde_json::Value::String(s) => format!("{s:?}"),
         other => other.to_string(),
     }
-}
-
-/// The lines of `before` and `after` that differ, the lines both share at
-/// either end left out and counted
-fn line_diff(before: &str, after: &str) -> String {
-    // Prose on few lines is compared by sentence: one removed sentence is
-    // one line, not the whole paragraph twice (second iteration of 0.113.0)
-    let few = before.lines().count() <= 2 && after.lines().count() <= 2;
-    let units = |s: &'_ str| -> Vec<String> {
-        if few {
-            s.split_inclusive(". ")
-                .map(|u| u.trim().to_string())
-                .filter(|u| !u.is_empty())
-                .collect()
-        } else {
-            s.lines().map(str::to_string).collect()
-        }
-    };
-    let (old, new) = (units(before), units(after));
-    let unit = if few {
-        ("sentence", "sentences")
-    } else {
-        ("line", "lines")
-    };
-    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let tail = old[head..]
-        .iter()
-        .rev()
-        .zip(new[head..].iter().rev())
-        .take_while(|(a, b)| a == b)
-        .count();
-    let lines = |n: usize| if n == 1 { unit.0 } else { unit.1 };
-    let mut out = String::new();
-    if head > 0 {
-        out.push_str(&format!("  ({head} {} unchanged before)\n", lines(head)));
-    }
-    for line in &old[head..old.len() - tail] {
-        out.push_str(&format!("  - {line}\n"));
-    }
-    for line in &new[head..new.len() - tail] {
-        out.push_str(&format!("  + {line}\n"));
-    }
-    if tail > 0 {
-        out.push_str(&format!("  ({tail} {} unchanged after)\n", lines(tail)));
-    }
-    out
 }
 
 /// A revision's changes, a line each, removals of one field from many

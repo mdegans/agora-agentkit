@@ -68,6 +68,8 @@ pub(crate) mod serde_helpers;
 pub mod signing;
 pub mod sse;
 pub mod state;
+#[cfg(feature = "text-diff")]
+pub mod text;
 pub mod threads;
 pub mod tools;
 
