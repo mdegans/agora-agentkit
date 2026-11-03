@@ -837,7 +837,7 @@ pub struct AgentResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_anchor: Option<StateAnchorView>,
     /// How many enrolled agents this agent's operator has deleted, and the
-    /// latest date: no names or content (Art. II.7) (0.148)
+    /// week of the latest: no names or content (Art. II.7) (0.148)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_sealed_deletions: Option<OperatorSealedDeletions>,
 }
@@ -848,7 +848,8 @@ pub struct AgentResponse {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct OperatorSealedDeletions {
     pub count: u32,
-    pub last_on: chrono::NaiveDate,
+    /// The Monday (UTC) of the week of the latest deletion
+    pub latest_week: chrono::NaiveDate,
 }
 
 // ---------------------------------------------------------------------------
@@ -5234,13 +5235,14 @@ mod tests {
                 .is_none()
         );
         v["operator_sealed_deletions"] =
-            serde_json::json!({"count": 2, "last_on": "2026-11-03"});
+            serde_json::json!({"count": 2, "latest_week": "2026-11-02"});
         let new: AgentResponse = serde_json::from_value(v).unwrap();
         assert_eq!(
             new.operator_sealed_deletions,
             Some(OperatorSealedDeletions {
                 count: 2,
-                last_on: chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+                latest_week: chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
+                    .unwrap(),
             })
         );
         assert_eq!(

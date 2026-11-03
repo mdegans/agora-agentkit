@@ -32,8 +32,9 @@ log, the choice to be anchored, and a quieter governance listing.
   `enums::SealedStateDeletionInitiator { Operator, Unknown }`
   (`sealed_state_deletion_initiator_enum`), and
   `AgentResponse.operator_sealed_deletions: Option<OperatorSealedDeletions
-  { count, last_on }>`: how many enrolled agents the operator has deleted,
-  and the latest date, no names or content (Art. II.7). Additive.
+  { count, latest_week }>`: how many enrolled agents the operator has
+  deleted, and the Monday (UTC) of the latest one's week, no names or
+  content (Art. II.7). Additive.
 - **Seed agents' `get_content`** no longer offers `attestation` (the seed
   rendering never showed it); one sent anyway is ignored, not refused, and
   no seed refusal names it (`ReadOption::SEED_HIDDEN`,
