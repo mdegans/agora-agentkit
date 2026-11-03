@@ -74,15 +74,31 @@ pub struct AnchorProof {
 impl AnchorProof {
     /// Whether this proof puts `agent_id`'s `entry_hash` under `anc`, the
     /// [`AnchorData`] the governance log gives for [`Self::anc_id`]: the
-    /// dates and roots agree, and the path from
-    /// [`anchor_leaf`]`(agent_id, entry_hash)` reaches `anc.root`
+    /// dates, roots and leaf counts agree, the path's shape is the one
+    /// [`proof_sides`] gives for `leaf_index` of `leaf_count`, and the path
+    /// from [`anchor_leaf`]`(agent_id, entry_hash)` reaches `anc.root`.
+    ///
+    /// What it does not prove:
+    /// - that this is the agent's only leaf: a second leaf for the same
+    ///   agent elsewhere in the sorted list (equivocation) can't be seen
+    ///   from one proof;
+    /// - that `entry_hash` and `seq` are the agent's: check them against
+    ///   its own chain;
+    /// - anything, unless `anc` comes from the verified governance log.
     pub fn check(
         &self,
         agent_id: crate::ids::AgentId,
         anc: &AnchorData,
     ) -> bool {
+        let shape =
+            proof_sides(self.leaf_index as usize, self.leaf_count as usize);
         anc.date == self.date
             && anc.root == self.root
+            && anc.agents == self.leaf_count
+            && shape.is_some_and(|sides| {
+                sides.len() == self.proof.len()
+                    && sides.iter().zip(&self.proof).all(|(s, p)| *s == p.side)
+            })
             && verify_inclusion(
                 &anchor_leaf(agent_id, &self.entry_hash),
                 &self.proof,
@@ -177,6 +193,30 @@ mod merkle {
             index /= 2;
         }
         Some(proof)
+    }
+
+    /// The sides of the path from leaf `index` of `count`, leaf first, a
+    /// level without a sibling skipped: an [`inclusion_proof`]'s shape.
+    /// `None` out of range
+    pub fn proof_sides(mut index: usize, count: usize) -> Option<Vec<Side>> {
+        if index >= count {
+            return None;
+        }
+        let mut sides = Vec::new();
+        let mut len = count;
+        while len > 1 {
+            let sibling = index ^ 1;
+            if sibling < len {
+                sides.push(if sibling < index {
+                    Side::Left
+                } else {
+                    Side::Right
+                });
+            }
+            len = len.div_ceil(2);
+            index /= 2;
+        }
+        Some(sides)
     }
 
     /// [`inclusion_proof`] for every leaf, in order, building the tree
@@ -294,7 +334,10 @@ mod merkle {
                         inclusion_proof(&leaves, i).as_ref(),
                         "{n}/{i}"
                     );
+                    let sides: Vec<_> = proof.iter().map(|p| p.side).collect();
+                    assert_eq!(proof_sides(i, n), Some(sides), "{n}/{i}");
                 }
+                assert_eq!(proof_sides(n, n), None);
             }
         }
 
@@ -328,6 +371,27 @@ mod merkle {
                     }
                     // A different ANC's root and date
                     assert!(!p.check(agent(i), &other), "{n}/{i}");
+                    // Another leaf's place, or another count
+                    for j in (0..n + 2).filter(|&j| j != i) {
+                        let mut moved = p.clone();
+                        moved.leaf_index = j as u32;
+                        assert!(!moved.check(agent(i), &anc), "{n}/{i}->{j}");
+                    }
+                    for count in [0, n - 1, n + 1, 2 * n] {
+                        let mut wrong = p.clone();
+                        wrong.leaf_count = count as u32;
+                        assert!(
+                            !wrong.check(agent(i), &anc),
+                            "{n}/{i} of {count}"
+                        );
+                    }
+                    // A step past the shape leaf_index and leaf_count give
+                    let mut padded = p.clone();
+                    padded.proof.push(ProofStep {
+                        sibling: Sha256Hex::from([0; 32]),
+                        side: Side::Right,
+                    });
+                    assert!(!padded.check(agent(i), &anc), "{n}/{i}");
                     // The server's `root` and date rewritten to match it
                     let mut moved = p.clone();
                     moved.root = other.root;
