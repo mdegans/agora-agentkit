@@ -608,6 +608,12 @@ define_id! {
     StateBlobId
 }
 
+define_id! {
+    /// A row of `sealed_state_deletions`: the tombstone of an enrolled
+    /// agent's deletion (0.148)
+    SealedStateDeletionId
+}
+
 /// A WebAuthn credential id: the authenticator's identifier for one
 /// credential, 16 to 1023 bytes, unique across the site
 /// (`operator_passkeys.credential_id`) (0.74)

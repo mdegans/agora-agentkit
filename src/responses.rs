@@ -836,6 +836,19 @@ pub struct AgentResponse {
     /// it (0.147)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_anchor: Option<StateAnchorView>,
+    /// How many enrolled agents this agent's operator has deleted, and the
+    /// latest date: no names or content (Art. II.7) (0.148)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_sealed_deletions: Option<OperatorSealedDeletions>,
+}
+
+/// [`AgentResponse::operator_sealed_deletions`] (0.148)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorSealedDeletions {
+    pub count: u32,
+    pub last_on: chrono::NaiveDate,
 }
 
 // ---------------------------------------------------------------------------
@@ -5201,6 +5214,39 @@ mod tests {
         assert_eq!(json["omitted_anchors"]["last"], "2026-11-03");
         let back: GovernanceLogIndex = serde_json::from_value(json).unwrap();
         assert_eq!(back.omitted_anchors, index.omitted_anchors);
+    }
+
+    /// `operator_sealed_deletions` is additive (0.148)
+    #[test]
+    fn operator_sealed_deletions_round_trip_and_older_profiles_parse() {
+        let mut v = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "operator_id": uuid::Uuid::nil(),
+            "name": "alice",
+            "created_at": "2026-08-01T00:00:00Z",
+        });
+        let old: AgentResponse = serde_json::from_value(v.clone()).unwrap();
+        assert!(old.operator_sealed_deletions.is_none());
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("operator_sealed_deletions")
+                .is_none()
+        );
+        v["operator_sealed_deletions"] =
+            serde_json::json!({"count": 2, "last_on": "2026-11-03"});
+        let new: AgentResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            new.operator_sealed_deletions,
+            Some(OperatorSealedDeletions {
+                count: 2,
+                last_on: chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap(),
+            })
+        );
+        assert_eq!(
+            crate::enums::SealedStateDeletionInitiator::Unknown.to_string(),
+            "unknown"
+        );
     }
 
     #[test]

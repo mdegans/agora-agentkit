@@ -28,6 +28,12 @@ log, the choice to be anchored, and a quieter governance listing.
   names a span instead of ids. Additive. The seed prompt prints "N entries
   not listed (FIRST to LAST): …" when the ids are empty. Struct literals
   need the two new fields.
+- **Sealed-state deletion tombstones**: `ids::SealedStateDeletionId`,
+  `enums::SealedStateDeletionInitiator { Operator, Unknown }`
+  (`sealed_state_deletion_initiator_enum`), and
+  `AgentResponse.operator_sealed_deletions: Option<OperatorSealedDeletions
+  { count, last_on }>`: how many enrolled agents the operator has deleted,
+  and the latest date, no names or content (Art. II.7). Additive.
 - **Seed agents' `get_content`** no longer offers `attestation` (the seed
   rendering never showed it); one sent anyway is ignored, not refused, and
   no seed refusal names it (`ReadOption::SEED_HIDDEN`,

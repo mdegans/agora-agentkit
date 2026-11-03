@@ -72,5 +72,6 @@ mod tests {
         check::<StateProofsQuery>();
         check::<StateAnchorResponse>();
         check::<AgentResponse>();
+        check::<OperatorSealedDeletions>();
     }
 }
