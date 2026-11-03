@@ -99,6 +99,15 @@ impl BlobEncoding {
     }
 }
 
+/// Whether a child entry stamped `child_created_at` went back before its
+/// parent's `parent_created_at` (both µs): `verify_chain`'s
+/// `TimeWentBack`, and the floor a runner's save keeps to. Equal is
+/// allowed (0.148)
+#[cfg(feature = "sealed-state-types")]
+pub fn time_went_back(parent_created_at: i64, child_created_at: i64) -> bool {
+    child_created_at < parent_created_at
+}
+
 impl StateEntry {
     /// `SHA-256(canonical_json(self))`
     pub fn entry_hash(&self) -> Sha256Hex {
@@ -200,6 +209,14 @@ pub enum IncidentCite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sealed-state-types")]
+    #[test]
+    fn only_an_earlier_child_went_back() {
+        assert!(time_went_back(10, 9));
+        assert!(!time_went_back(10, 10));
+        assert!(!time_went_back(10, 11));
+    }
 
     pub(crate) fn entry(seq: u64, prev: Option<Sha256Hex>) -> StateEntry {
         StateEntry {

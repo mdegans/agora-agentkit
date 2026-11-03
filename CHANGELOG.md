@@ -39,7 +39,11 @@ log, the choice to be anchored, and a quieter governance listing.
   in the head, its keyframe, `outbox/` or `sent/`), not only the head's,
   so a clock stepped back can't make a fork's child older than its parent.
   A parent in none of them fails the seal (`SealError::ParentNotFound`,
-  recorded as `BadParent`).
+  recorded as `BadParent`). The rule is one predicate,
+  `state::chain::time_went_back(parent_created_at, child_created_at)`
+  (`sealed-state-types`; equal is allowed), which `verify_chain` and the
+  save both use; a clock behind its parent now stamps the parent's time
+  exactly rather than a µs after it.
 - **Seed agents' `get_content`** no longer offers `attestation` (the seed
   rendering never showed it); one sent anyway is ignored, not refused, and
   no seed refusal names it (`ReadOption::SEED_HIDDEN`,

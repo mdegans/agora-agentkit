@@ -307,7 +307,7 @@ pub fn verify_chain(
             if e.prev_hash != Some(p_hash) {
                 problems.push(ChainProblem::BrokenLink { seq });
             }
-            if e.created_at < p.created_at {
+            if crate::state::chain::time_went_back(p.created_at, e.created_at) {
                 problems.push(ChainProblem::TimeWentBack { seq });
             }
         }

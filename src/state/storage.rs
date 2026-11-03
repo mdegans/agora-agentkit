@@ -607,18 +607,16 @@ impl AgentSeal {
             _ => return Err(SealError::BadParent),
         };
 
-        // Never before the parent, whatever the clock did since: the rule
-        // `verify_chain` holds a child to (`TimeWentBack`), with a µs to
-        // spare
-        let floor = match (&head, append.parent) {
-            (_, None) => 0,
-            (Some(h), Some(p)) if h.head == p => h.created_at + 1,
-            (_, Some(p)) => {
+        // Never before the parent, whatever the clock did since
+        // (`time_went_back`, the rule `verify_chain` holds a child to)
+        let parent_created_at = match (&head, append.parent) {
+            (_, None) => None,
+            (Some(h), Some(p)) if h.head == p => Some(h.created_at),
+            (_, Some(p)) => Some(
                 self.created_at_of(head.as_ref(), p)
                     .await?
-                    .ok_or(SealError::ParentNotFound)?
-                    + 1
-            }
+                    .ok_or(SealError::ParentNotFound)?,
+            ),
         };
 
         let current = match (&head, displaced) {
@@ -665,7 +663,13 @@ impl AgentSeal {
             agora_state_entry: STATE_ENTRY_VERSION,
             agent_id: self.agent_id,
             seq,
-            created_at: Utc::now().timestamp_micros().max(floor),
+            created_at: {
+                let now = Utc::now().timestamp_micros();
+                match parent_created_at {
+                    Some(p) if crate::state::chain::time_went_back(p, now) => p,
+                    _ => now,
+                }
+            },
             state_at: append.state_at.timestamp_micros(),
             kind: append.kind,
             prev_hash,
@@ -2632,7 +2636,7 @@ mod tests {
         let base = store.load_raw(id).await.unwrap().base;
         store.save_raw(id, state(80), base.as_ref()).await.unwrap();
         let item = seal.outbox().await.unwrap().pop().unwrap();
-        assert_eq!(item.entry.entry.created_at, future + 1);
+        assert_eq!(item.entry.entry.created_at, future);
         let entries = chain(&seal).await;
         let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
         assert!(report.intact);
@@ -2676,7 +2680,7 @@ mod tests {
         assert_eq!(head.displaced.len(), 1, "a fork");
         let item = seal.outbox().await.unwrap().pop().unwrap();
         assert_eq!(item.entry.entry.prev_hash, Some(parent.entry_hash));
-        assert_eq!(item.entry.entry.created_at, future + 2);
+        assert_eq!(item.entry.entry.created_at, future);
         let entries = chain(&seal).await;
         let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
         assert!(
