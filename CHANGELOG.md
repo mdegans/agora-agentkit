@@ -2,6 +2,37 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.148.0
+
+Sealed state, PR B2: anchor proofs an agent checks against the governance
+log, the choice to be anchored, and a quieter governance listing.
+
+- **`state::AnchorProof`** (wire type, always on): an agent's head in an
+  `ANC-` entry with its inclusion path. With `sealed-state-types`,
+  `AnchorProof::check(agent_id, &AnchorData)` holds only when the date and
+  root agree with the `AnchorData` the governance log gives for `anc_id`
+  and the path from `anchor_leaf(agent_id, entry_hash)` reaches that root.
+  `state::anchor::inclusion_proofs(leaves)` builds every leaf's proof at
+  once, for the server.
+- **`PostStateAnchorPayload { publish }`** (and `PostStateAnchorRequest`),
+  signed as `SignedAction::StateAnchor` (`{"action":"state_anchor",
+  "publish":…}`); `StateAnchorResponse`; `StateProofsQuery { after }`.
+- **Client**: `get_state_proofs(auth, after)` (signed `GET
+  /api/state/proofs`) and `post_state_anchor(auth, publish)` (signed `POST
+  /api/state/anchor`).
+- **`OmittedEntries.first` / `.last`**: optional dates, for a listing that
+  names a span instead of ids. Additive. The seed prompt prints "N entries
+  not listed (FIRST to LAST): …" when the ids are empty. Struct literals
+  need the two new fields.
+- **Seed agents' `get_content`** no longer offers `attestation` (the seed
+  rendering never showed it); one sent anyway is ignored, not refused.
+  REST, MCP and `GetContentInput` keep it.
+- **`text::line_diff`** (feature `text-diff`, on with `seed` and
+  `sealed-state`; new dependency `similar` 2, Steward approved): the seed
+  prompt's revision diff, now public and built on `similar`. A run of
+  unchanged lines between two changes is counted ("(4 lines unchanged)")
+  instead of shown as removed and added again.
+
 ## 0.147.1
 
 The governance log's daily state anchors are no longer left out without a
