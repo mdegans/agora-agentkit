@@ -1054,6 +1054,10 @@ impl Agora {
         use crate::enums::DetailLevel;
         use crate::ids::GovernanceLogPrefix;
         use crate::links::{AgoraLink, ContentKind};
+        // Not offered to a seed agent, whose rendering shows none
+        // ([`hide_seed_fields`](super::hide_seed_fields)); one sent anyway,
+        // or in a link, is ignored rather than refused
+        input.attestation = None;
         // A read that cannot be what was asked is refused before any is
         // made, so none is spent on it (beta round of 0.112.0)
         if let Some(why) = input.conflict() {

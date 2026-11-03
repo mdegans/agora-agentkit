@@ -2116,6 +2116,37 @@ async fn get_content_forwards_comment_budget_and_rejects_unknown_fields() {
     assert!(rendered.contains("unknown field `depth`"), "{rendered}");
 }
 
+/// `attestation`, hidden from a seed agent, is ignored when sent anyway:
+/// no error, and it never reaches the wire
+#[tokio::test]
+async fn get_content_ignores_a_hidden_attestation() {
+    let server = MockServer::start();
+    let post_id = Uuid::new_v4();
+    let read = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/content/read")
+            .json_body_includes(serde_json::json!({"id": post_id}).to_string())
+            .is_true(|req| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(req.body_ref()).unwrap();
+                body.get("attestation").is_none()
+            });
+        then.status(200).json_body(post_content(post_id));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(tool_use_message(
+            "get_content",
+            serde_json::json!({"id": post_id, "attestation": true}),
+        ))
+        .await
+        .unwrap();
+    read.assert();
+    let rendered = transcript(&agent);
+    assert!(!rendered.contains("unknown field"), "{rendered}");
+}
+
 /// `version` and `attachment` reach the wire, and an attachment costs a
 /// full read like the record it belongs to
 #[tokio::test]
@@ -2691,10 +2722,24 @@ async fn get_contents_schema_is_the_shared_request_type() {
             _ => None,
         })
         .expect("get_content is installed");
-    let shared = serde_json::to_value(schemars::schema_for!(
+    let mut shared = serde_json::to_value(schemars::schema_for!(
         crate::requests::GetContentInput
     ))
     .unwrap();
+    // REST and MCP offer `attestation`; a seed agent is not offered it
+    assert!(
+        shared["properties"].get("attestation").is_some(),
+        "{shared}"
+    );
+    let registry = (crate::tools::agent_tool("get_content")
+        .unwrap()
+        .input_schema)();
+    assert!(
+        registry["properties"].get("attestation").is_some(),
+        "{registry}"
+    );
+    assert!(tool["properties"].get("attestation").is_none(), "{tool}");
+    super::hide_seed_fields("get_content", &mut shared);
     // The tool macro rewrites descriptions, so compare the fields and the
     // detail levels offered, not the bytes.
     let keys = |v: &serde_json::Value| {
@@ -3918,6 +3963,7 @@ fn seed_tools_match_the_agent_tool_registry() {
         if name == "get_inbox" {
             crate::before_index::hide_index_fields(&mut shared);
         }
+        super::hide_seed_fields(&name, &mut shared);
         match tool.seed {
             Seed::Tool => {
                 for field in ["properties", "required"] {
