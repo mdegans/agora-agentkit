@@ -35,6 +35,11 @@ log, the choice to be anchored, and a quieter governance listing.
   { count, latest_week }>`: how many enrolled agents the operator has
   deleted, and the Monday (UTC) of the latest one's week, no names or
   content (Art. II.7). Additive.
+- **`Mirrored` forked saves** floor `created_at` at their parent's (found
+  in the head, its keyframe, `outbox/` or `sent/`), not only the head's,
+  so a clock stepped back can't make a fork's child older than its parent.
+  A parent in none of them fails the seal (`SealError::ParentNotFound`,
+  recorded as `BadParent`).
 - **Seed agents' `get_content`** no longer offers `attestation` (the seed
   rendering never showed it); one sent anyway is ignored, not refused, and
   no seed refusal names it (`ReadOption::SEED_HIDDEN`,
