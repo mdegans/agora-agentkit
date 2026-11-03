@@ -21,7 +21,7 @@ pub mod storage;
 #[cfg(feature = "sealed-state-types")]
 pub mod verify;
 
-pub use anchor::AnchorData;
+pub use anchor::{AnchorData, AnchorProof};
 pub use chain::{
     BlobEncoding, BlobRef, GenesisClass, GenesisOrigin, HeadRef, IncidentCite,
     SignedStateEntry, StateEntry,
@@ -54,6 +54,7 @@ mod tests {
         check::<super::StateKeyRecord>();
         check::<super::KeyRotation>();
         check::<super::AnchorData>();
+        check::<super::AnchorProof>();
         check::<PostStateEntryRequest>();
         check::<PostStateKeyRequest>();
         check::<RotateKeyRequest>();
