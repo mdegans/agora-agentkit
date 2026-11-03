@@ -1,6 +1,12 @@
 //! Text helpers shared by the seed prompt and the runner
 
+use std::time::Duration;
+
 use similar::{ChangeTag, TextDiff};
+
+/// How long [`line_diff`] looks for the smallest diff (Myers is quadratic
+/// on texts with little in common)
+pub const LINE_DIFF_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// What changed from `before` to `after`, for a model to read: removed
 /// units as `  - …`, added ones as `  + …`, and each run of unchanged ones
@@ -8,8 +14,12 @@ use similar::{ChangeTag, TextDiff};
 ///
 /// The units are lines, or sentences when both texts are on at most two
 /// lines: one removed sentence is one unit, not the whole paragraph twice
-/// (second iteration of 0.113.0). Line ends and the units' surrounding
-/// whitespace never count as a change.
+/// (second iteration of 0.113.0). Line ends never count as a change; a
+/// sentence's surrounding whitespace doesn't either, but a line's does.
+///
+/// The diff gives up refining after [`LINE_DIFF_TIMEOUT`] and settles for a
+/// coarser one, still correct. The output is not bounded: it can be as
+/// long as both texts together, so callers cap what they show.
 pub fn line_diff(before: &str, after: &str) -> String {
     let few = before.lines().count() <= 2 && after.lines().count() <= 2;
     fn split(s: &str, few: bool) -> Vec<&str> {
@@ -29,7 +39,9 @@ pub fn line_diff(before: &str, after: &str) -> String {
         ("line", "lines")
     };
     let units = |n: usize| if n == 1 { unit.0 } else { unit.1 };
-    let diff = TextDiff::from_slices(&old, &new);
+    let diff = TextDiff::configure()
+        .timeout(LINE_DIFF_TIMEOUT)
+        .diff_slices(&old, &new);
     let changes: Vec<_> = diff.iter_all_changes().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -100,6 +112,35 @@ mod tests {
             "  (3 lines unchanged before)\n"
         );
         assert_eq!(line_diff("", ""), "");
+    }
+
+    /// Review of 0.148: 40,000 lines with nothing in common took 6.9 s
+    /// (release) without a deadline
+    #[test]
+    fn a_large_disjoint_diff_returns_quickly() {
+        let before: String =
+            (0..40_000).map(|i| format!("before {i}\n")).collect();
+        let after: String =
+            (0..40_000).map(|i| format!("after {i}\n")).collect();
+        let start = std::time::Instant::now();
+        let diff = line_diff(&before, &after);
+        // Generous for a debug build on a loaded machine
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+        assert_eq!(diff.lines().count(), 80_000);
+        assert!(diff.starts_with("  - before 0\n"));
+    }
+
+    /// A line's surrounding whitespace is part of it
+    #[test]
+    fn a_lines_whitespace_counts() {
+        assert_eq!(
+            line_diff("a\nb \nc\nd", "a\nb\nc\nd"),
+            "  (1 line unchanged before)\n  - b \n  + b\n  (2 lines unchanged after)\n"
+        );
     }
 
     #[test]
