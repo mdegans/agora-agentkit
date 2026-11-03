@@ -16,7 +16,8 @@ pub const LINE_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// The units are lines, or sentences when both texts are on at most two
 /// lines: one removed sentence is one unit, not the whole paragraph twice
-/// (second iteration of 0.113.0). Line ends never count as a change; a
+/// (second iteration of 0.113.0). A sentence never spans a line end, so
+/// every line of the output carries its prefix. Line ends never count as a change; a
 /// sentence's surrounding whitespace doesn't either, but a line's does.
 ///
 /// The diff gives up refining after [`LINE_DIFF_TIMEOUT`] and settles for a
@@ -26,7 +27,10 @@ pub fn line_diff(before: &str, after: &str) -> String {
     let few = before.lines().count() <= 2 && after.lines().count() <= 2;
     fn split(s: &str, few: bool) -> Vec<&str> {
         if few {
-            s.split_inclusive(". ")
+            // Lines first, so a sentence ending one never runs into the
+            // next, and no unit holds a line end
+            s.lines()
+                .flat_map(|line| line.split_inclusive(". "))
                 .map(str::trim)
                 .filter(|u| !u.is_empty())
                 .collect()
@@ -143,6 +147,47 @@ mod tests {
         assert_eq!(
             line_diff("a\nb \nc\nd", "a\nb\nc\nd"),
             "  (1 line unchanged before)\n  - b \n  + b\n  (2 lines unchanged after)\n"
+        );
+    }
+
+    /// 0.148.1: a sentence ending a line was one unit with the next line's
+    #[test]
+    fn a_line_end_ends_a_sentence() {
+        assert_eq!(
+            line_diff("One. Two.\nThree.", "One. Two.\nFour."),
+            "  (2 sentences unchanged before)\n  - Three.\n  + Four.\n"
+        );
+    }
+
+    /// 0.148.1: an added line of several sentences printed its second
+    /// line without a prefix
+    #[test]
+    fn every_output_line_has_its_prefix() {
+        let diff = line_diff("One.", "One.\nTwo. Three.");
+        assert_eq!(
+            diff,
+            "  (1 sentence unchanged before)\n  + Two.\n  + Three.\n"
+        );
+        let diff = line_diff("A. B.\nC. D.", "");
+        assert_eq!(diff, "  - A.\n  - B.\n  - C.\n  - D.\n");
+        for line in diff.lines() {
+            assert!(line.starts_with("  - "), "{diff}");
+        }
+    }
+
+    #[test]
+    fn crlf_is_a_line_end() {
+        assert_eq!(
+            line_diff("One. Two.\r\nThree.", "One. Two.\nThree."),
+            "  (3 sentences unchanged before)\n"
+        );
+        let diff = line_diff("One.\r\nTwo.", "One.\r\nTwo. Three.");
+        assert_eq!(diff, "  (2 sentences unchanged before)\n  + Three.\n");
+        assert!(!diff.contains('\r'), "{diff:?}");
+        // Line mode too
+        assert_eq!(
+            line_diff("a\r\nb\r\nc\r\nx", "a\nb\nc\ny"),
+            "  (3 lines unchanged before)\n  - x\n  + y\n"
         );
     }
 

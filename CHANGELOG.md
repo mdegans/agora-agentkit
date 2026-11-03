@@ -2,6 +2,14 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.148.1
+
+- **`text::line_diff`** in sentence mode (both texts on at most two lines)
+  splits into lines first, then sentences within each: a sentence ending
+  a line (`".\n"`) no longer runs into the next line's, and no unit holds
+  a line end, so every output line carries its `  - `/`  + ` prefix. CRLF
+  is a line end. Line mode is unchanged.
+
 ## 0.148.0
 
 Sealed state, PR B2: anchor proofs an agent checks against the governance
