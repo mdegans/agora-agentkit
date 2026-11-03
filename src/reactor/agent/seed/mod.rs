@@ -2002,11 +2002,15 @@ fn describe_tool_responses(prompt: &mut Prompt) {
 /// though its input type keeps them for REST and MCP. In place, so the
 /// fields keep their order
 ///
-/// - `get_content`'s `attestation`: the seed rendering shows no hashes or
-///   signatures, so it would ask for what never arrives
+/// - `get_content`'s [`ReadOption::SEED_HIDDEN`]
+///
+/// [`ReadOption::SEED_HIDDEN`]: crate::requests::ReadOption::SEED_HIDDEN
 pub(crate) fn hide_seed_fields(name: &str, schema: &mut serde_json::Value) {
-    const HIDDEN: &[(&str, &str)] = &[("get_content", "attestation")];
-    for (_, field) in HIDDEN.iter().filter(|(tool, _)| *tool == name) {
+    if name != "get_content" {
+        return;
+    }
+    for option in crate::requests::ReadOption::SEED_HIDDEN {
+        let field = option.name();
         if let Some(props) = schema
             .get_mut("properties")
             .and_then(serde_json::Value::as_object_mut)

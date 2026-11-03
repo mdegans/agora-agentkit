@@ -2147,6 +2147,41 @@ async fn get_content_ignores_a_hidden_attestation() {
     assert!(!rendered.contains("unknown field"), "{rendered}");
 }
 
+/// A refusal names none of the options a seed agent isn't offered, by
+/// either tool (review of 0.148)
+#[tokio::test]
+async fn a_refusal_lists_no_hidden_option() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for (tool, input) in [
+        (
+            "get_content",
+            serde_json::json!({"id": "GOV-2026-0006", "lines": "1-2"}),
+        ),
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://gov/GOV-2026-0006?lines=1-2"}),
+        ),
+        (
+            "fetch_agora_link",
+            serde_json::json!({"link": "agora://data/DATA-2026-0001?round=1"}),
+        ),
+    ] {
+        agent
+            .handle(tool_use_message(tool, input.clone()))
+            .await
+            .unwrap();
+        let last = transcript(&agent);
+        let last = last.rsplit("does not apply to").next().unwrap();
+        assert!(
+            last.contains(", which takes detail"),
+            "{tool} {input}: {last}"
+        );
+        assert!(!last.contains("attestation"), "{tool} {input}: {last}");
+    }
+}
+
 /// `version` and `attachment` reach the wire, and an attachment costs a
 /// full read like the record it belongs to
 #[tokio::test]
