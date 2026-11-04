@@ -535,18 +535,15 @@ pub struct UpdateAgentProfileRequest {
     pub profile: UpdateProfilePayload,
 }
 
-/// The agent's public profile fields as they stand after an operator's
-/// update. Absent: the field is not set
+/// What an operator's profile update changed: the agent and the fields'
+/// names, never their values. It is stored as the answer to a retry, so it
+/// holds no profile text; read the profile for that
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct UpdateAgentProfileResponse {
     pub agent: AgentRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bio: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_info: Option<String>,
+    /// The fields the request set
+    pub fields: Vec<ProfileField>,
 }
 
 /// What a cancel or retract did. A message delivered and unread is
@@ -832,7 +829,8 @@ pub enum OperatorActionDetail {
         name: crate::names::AgentName,
     },
     /// An agent's public profile changed by its operator: which fields,
-    /// never their values
+    /// never their values. The agent it names sees it
+    /// ([`OperatorLogEntry::for_agent`])
     AgentProfileUpdate {
         agent: AgentId,
         fields: Vec<ProfileField>,
@@ -860,9 +858,14 @@ impl OperatorLogEntry {
     /// The entry as the agent whose delivered copies are `copies` may see
     /// it, in its data export and its own log read (agora
     /// `docs/design-operator-api.md`, "What the agent sees"): only sends
-    /// and retracts that reached it, naming only its own copy. `None` for
+    /// and retracts that reached it, naming only its own copy, and changes
+    /// its operator made to its profile (with no credential). `None` for
     /// everything else: cancels and undelivered sends (it never saw them)
     /// credential and configuration changes (they concern no agent).
+    ///
+    /// The caller passes only entries linked to this agent (agora's
+    /// `operator_action_agents`): a profile change names one agent, and is
+    /// shown as it is.
     ///
     /// `about` is kept only when the send went to this agent alone: a
     /// moderation action is one agent's, and a batch must not show it to
@@ -905,9 +908,19 @@ impl OperatorLogEntry {
             | OperatorActionDetail::ConfigChangeEffective { .. }
             | OperatorActionDetail::CredentialSuspend { .. }
             | OperatorActionDetail::AgentRegister { .. }
-            | OperatorActionDetail::AgentProfileUpdate { .. }
             | OperatorActionDetail::CredentialContest { .. } => {
                 return None;
+            }
+            // Its own profile, changed by its operator (Art. II § 5): the
+            // fields' names, as the entry holds them, and nothing of the
+            // credential that signed it
+            OperatorActionDetail::AgentProfileUpdate { .. } => {
+                return Some(Self {
+                    id: self.id,
+                    credential: None,
+                    detail: self.detail.clone(),
+                    created_at: self.created_at,
+                });
             }
         };
         match &detail {
@@ -1897,14 +1910,11 @@ mod tests {
                 id: agent,
                 name: "comet".parse().unwrap(),
             },
-            display_name: Some("Comet".into()),
-            bio: None,
-            model_info: Some("claude-opus-5-5".into()),
+            fields: vec![ProfileField::DisplayName, ProfileField::ModelInfo],
         };
         let json = serde_json::json!({
             "agent": {"id": agent.to_string(), "name": "comet"},
-            "display_name": "Comet",
-            "model_info": "claude-opus-5-5",
+            "fields": ["display_name", "model_info"],
         });
         assert_eq!(serde_json::to_value(&response).unwrap(), json);
         assert_eq!(
@@ -1948,13 +1958,22 @@ mod tests {
             "agent_profile_update"
         );
         assert_eq!(detail.recipient_count(), None);
-        // The agent's own view of the log does not carry it
+        // The agent sees it, fields and all, with nothing of the credential
         let entry = OperatorLogEntry {
             id: action.parse().unwrap(),
-            credential: None,
-            detail,
+            credential: Some(CredentialRef {
+                id: "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap(),
+                label: Some("balerion".into()),
+            }),
+            detail: detail.clone(),
             created_at: "2026-11-04T12:00:00Z".parse().unwrap(),
         };
-        assert_eq!(entry.for_agent(&[]), None);
+        assert_eq!(
+            entry.for_agent(&[]),
+            Some(OperatorLogEntry {
+                credential: None,
+                ..entry.clone()
+            })
+        );
     }
 }
