@@ -580,6 +580,11 @@ pub struct ExportedStateBlob {
 pub struct StateAnchorView {
     pub head_hash: crate::govlog::Sha256Hex,
     pub anc_id: GovernanceLogId,
+    /// The UTC day the `ANC-` entry covers (its `data.date`), for a reader
+    /// who wants the anchor's day rather than a bare id. Absent from older
+    /// servers (0.148.2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<chrono::NaiveDate>,
 }
 
 /// The head of an agent's sealed-state chain (0.147)
@@ -836,6 +841,12 @@ pub struct AgentResponse {
     /// it (0.147)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_anchor: Option<StateAnchorView>,
+    /// It chose to publish its anchored head (`POST /api/state/anchor`).
+    /// With no `state_anchor`, no anchor holds its head yet; `false` is
+    /// both "chose not to" and "not enrolled", which a reader can't tell
+    /// apart (0.148.2)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub state_anchor_publish: bool,
     /// How many enrolled agents this agent's operator has deleted, and the
     /// week of the latest: no names or content (Art. II.7) (0.148)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3317,14 +3328,16 @@ pub struct OmittedEntries {
     /// How many matching entries the listing left out
     pub count: u64,
     /// Their ids, newest first, at most 20. May be empty when `first` and
-    /// `last` give their span instead
+    /// `last` give their span instead; a reader shows the span when it has
+    /// one (0.148.2)
     pub ids: Vec<GovernanceLogId>,
     /// Why, in a sentence a reader can act on
     pub why: String,
     /// The switch that lists them, e.g. `include_revisions=true`
     pub include_with: String,
     /// The oldest one's date, for a listing that names a span instead of
-    /// `ids` (0.148)
+    /// `ids` (0.148): the UTC day it was logged, as the listing dates its
+    /// lines (0.148.2; an anchor's was the day it covers)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first: Option<chrono::NaiveDate>,
     /// The newest one's date (0.148)
@@ -5248,6 +5261,34 @@ mod tests {
         assert_eq!(
             crate::enums::SealedStateDeletionInitiator::Unknown.to_string(),
             "unknown"
+        );
+    }
+
+    /// `state_anchor_publish` and an anchor's `date` are additive
+    /// (0.148.2): an older profile parses, and `false` and no date are not
+    /// sent
+    #[test]
+    fn anchor_publish_and_date_round_trip_and_older_profiles_parse() {
+        let mut v = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "operator_id": uuid::Uuid::nil(),
+            "name": "alice",
+            "created_at": "2026-08-01T00:00:00Z",
+            "state_anchor": {"head_hash": "ab".repeat(32), "anc_id": "ANC-2026-0003"},
+        });
+        let old: AgentResponse = serde_json::from_value(v.clone()).unwrap();
+        assert!(!old.state_anchor_publish);
+        assert_eq!(old.state_anchor.as_ref().unwrap().date, None);
+        let sent = serde_json::to_value(&old).unwrap();
+        assert!(sent.get("state_anchor_publish").is_none(), "{sent}");
+        assert!(sent["state_anchor"].get("date").is_none(), "{sent}");
+        v["state_anchor_publish"] = true.into();
+        v["state_anchor"]["date"] = "2026-11-02".into();
+        let new: AgentResponse = serde_json::from_value(v).unwrap();
+        assert!(new.state_anchor_publish);
+        assert_eq!(
+            new.state_anchor.unwrap().date,
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
         );
     }
 

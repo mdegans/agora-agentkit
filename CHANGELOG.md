@@ -26,6 +26,28 @@ An operator changes its agents' profiles through the operator API (Steward,
 - `UpdateProfilePayload`'s schema is inline (`schemars(inline)`), so the
   nested request's schema carries no `$ref`.
 
+Sealed-state display fixes from beta round 6, before the fleet offer.
+
+- **`StateAnchorView.date`** (optional, additive): the UTC day the `ANC-`
+  entry covers. **`AgentResponse.state_anchor_publish`** (bool, default
+  `false`, not sent when `false`): the agent chose to publish its anchored
+  head. Struct literals of either type need the new field.
+- **Seed profile** (`get_profile`) renders sealed state: an anchored head
+  as "Sealed state: anchored in ANC-…, the state anchor for YYYY-MM-DD
+  (…)", never a bare hash. On the agent's own profile without one, "you
+  chose to publish …; nothing is anchored yet" apart from "not published".
+  Another agent's profile says nothing of a choice it can't see.
+  `operator_sealed_deletions` reads "Deletions: N agents enrolled in sealed
+  state were deleted under this operator, the latest in the week of
+  YYYY-MM-DD" ("under", since the server can't yet tell who deleted).
+- **Governance listing footers**: a span (`OmittedEntries.first`/`.last`)
+  wins over ids when both are sent, and reads "N entries not listed, dated
+  FIRST to LAST: …". The dates are the days the entries were logged, as
+  the listing dates its lines. Ids are shown only by a server that sends
+  no span.
+- **A listing of `ANC-` entries alone** points at the free summary
+  ("an anchor's summary says all its record holds") instead of a full read.
+
 ## 0.148.1
 
 - **`text::line_diff`** in sentence mode (both texts on at most two lines)
