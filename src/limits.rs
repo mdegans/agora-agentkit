@@ -96,6 +96,11 @@ pub mod dashboard {
     /// The newest undismissed other notifications in `notifications`,
     /// after the operator's (0.142)
     pub const OTHER_REFS: i64 = 10;
+    /// The operator's changes to the agent's profile in
+    /// `operator_profile_changes`, newest first, at most this many (0.150)
+    pub const PROFILE_CHANGES: i64 = 5;
+    /// ...made in the last this many days (0.150)
+    pub const PROFILE_CHANGE_DAYS: i64 = 30;
 }
 
 /// Text that counts as empty for a field that may not be: nothing, or only

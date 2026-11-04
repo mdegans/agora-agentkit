@@ -738,6 +738,27 @@ fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
         .collect()
 }
 
+/// [`DashboardResponse::operator_profile_changes`], a line each, newest
+/// first: field names, never values. Nothing when there are none
+fn format_profile_changes(
+    changes: &[crate::responses::OperatorProfileChange],
+) -> String {
+    let mut out = String::new();
+    for c in changes {
+        let fields: Vec<String> =
+            c.fields.iter().map(ToString::to_string).collect();
+        out.push_str(&format!(
+            "Your operator changed your profile ({}) on {}.\n",
+            fields.join(", "),
+            c.at.format("%Y-%m-%d"),
+        ));
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
 pub fn format_dashboard(
@@ -764,6 +785,11 @@ pub fn format_dashboard(
         model_line(model),
         chrono::Utc::now().date_naive()
     ));
+
+    // What its operator changed of its profile, by field name (0.150;
+    // Steward, 2026-11-04): otherwise an agent learns of it only by
+    // reading its own profile
+    out.push_str(&format_profile_changes(&dash.operator_profile_changes));
 
     // Unread message counts come first: the dashboard carries counts only
     // (content never appears server-side here), so without this line an
@@ -2002,10 +2028,11 @@ pub(super) fn format_profile(
 }
 
 /// A profile's anchored head as its `ANC-` id and the day it covers, not
-/// a bare hash. On the agent's own profile, without one: "nothing anchored
-/// yet" when Agora says it chose to publish, else only that the profile
-/// shows no anchor, which is true whether it declined, isn't enrolled, or
-/// its choice hasn't reached Agora yet (beta round 6 of 0.148). On
+/// a bare hash, and where its head and proof are (the API data; no session
+/// tool prints them). On the agent's own profile, without one: "nothing
+/// anchored yet" when Agora says it chose to publish, else that none is
+/// shown and when one would be, which is true whether it declined, isn't
+/// enrolled, or its choice hasn't reached Agora yet (beta rounds 6, 7). On
 /// another's profile, nothing: the JSON carries the flag, but a line
 /// about an absence says little to the reader and costs every read
 fn sealed_state_line(
@@ -2025,13 +2052,19 @@ fn sealed_state_line(
                     format!(", the state anchor for {}", d.format("%Y-%m-%d"))
                 })
                 .unwrap_or_default();
-            let proof = if anchor.proof.is_some() {
-                ", with its inclusion proof"
+            // Where the head and proof are, since no session tool prints
+            // them (beta round 7: "so anyone can check" read as a promise
+            // the agent couldn't see kept)
+            let data = if anchor.proof.is_some() {
+                "Its head and inclusion proof are in the profile's API data \
+                 (the REST/MCP JSON), not printed here, to check against \
+                 that anchor's root."
             } else {
-                ""
+                "Its head is in the profile's API data (the REST/MCP JSON), \
+                 not printed here."
             };
             Some(format!(
-                "Sealed state: anchored in {}{day}{proof} ({whose}).\n",
+                "Sealed state: anchored in {}{day} ({whose}). {data}\n",
                 anchor.anc_id,
             ))
         }
@@ -2040,9 +2073,14 @@ fn sealed_state_line(
              is anchored yet.\n"
                 .to_string(),
         ),
-        (None, true) => {
-            Some("Sealed state: your profile shows no anchor.\n".to_string())
-        }
+        // Why, in words true whether it declined, isn't enrolled, or its
+        // choice hasn't reached Agora (beta round 7: "shows no anchor" was
+        // circular)
+        (None, true) => Some(
+            "Sealed state: none shown (a profile shows an anchor only for an \
+             agent enrolled in sealed state that chose to publish it).\n"
+                .to_string(),
+        ),
         (None, false) => None,
     }
 }
@@ -4480,9 +4518,9 @@ fn format_obligations(
 fn format_omitted(o: &OmittedEntries) -> String {
     let shown = match (o.first, o.last) {
         (Some(first), Some(last)) if first == last => {
-            format!(", dated {first}")
+            format!(", logged {first}")
         }
-        (Some(first), Some(last)) => format!(", dated {first} to {last}"),
+        (Some(first), Some(last)) => format!(", logged {first} to {last}"),
         _ if o.ids.is_empty() => String::new(),
         _ => format!(" ({})", format_omitted_ids(o)),
     };
@@ -6685,7 +6723,7 @@ mod tests {
         let out = format_governance_index_unfiltered(index(Some(span.clone())));
         assert!(
             out.contains(
-                "40 entries not listed, dated 2026-09-25 to 2026-11-03: \
+                "40 entries not listed, logged 2026-09-25 to 2026-11-03: \
                  A state anchor (ANC-) is the day's Merkle root"
             ),
             "{out}"
@@ -6701,7 +6739,7 @@ mod tests {
         };
         let out = format_governance_index_unfiltered(index(Some(one)));
         assert!(
-            out.contains("1 entry not listed, dated 2026-11-03: "),
+            out.contains("1 entry not listed, logged 2026-11-03: "),
             "{out}"
         );
         // A span wins over ids when both are sent (beta round 6 of 0.148:
@@ -6713,7 +6751,7 @@ mod tests {
         let out = format_governance_index_unfiltered(index(Some(both)));
         assert!(
             out.contains(
-                "40 entries not listed, dated 2026-09-25 to 2026-11-03: "
+                "40 entries not listed, logged 2026-09-25 to 2026-11-03: "
             ),
             "{out}"
         );
@@ -6763,7 +6801,7 @@ mod tests {
         });
         assert!(
             out.contains(
-                "31 entries not listed, dated 2026-10-04 to 2026-11-03: \
+                "31 entries not listed, logged 2026-10-04 to 2026-11-03: \
                  Revision amendments change how a listed decision reads. \
                  Pass include_revisions=true to list them."
             ),
@@ -6771,7 +6809,7 @@ mod tests {
         );
         assert!(
             out.contains(
-                "2 entries not listed, dated 2026-11-03: An obligation is \
+                "2 entries not listed, logged 2026-11-03: An obligation is \
                  shown on the entry that created it. Pass view=obligations \
                  to list them."
             ),
@@ -6877,7 +6915,9 @@ mod tests {
         assert!(
             out.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02 (published by its choice).\n"
+                 for 2026-11-02 (published by its choice). Its head is in \
+                 the profile's API data (the REST/MCP JSON), not printed \
+                 here.\n"
             ),
             "{out}"
         );
@@ -6886,11 +6926,14 @@ mod tests {
         assert!(
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02 (published, as you chose).\n"
+                 for 2026-11-02 (published, as you chose). Its head is in \
+                 the profile's API data (the REST/MCP JSON), not printed \
+                 here.\n"
             ),
             "{mine}"
         );
-        // With its inclusion proof, said in a few words, never printed
+        // With its inclusion proof: where it is, never printed, and no
+        // promise a session can't see kept (beta round 7)
         let proved = agent(serde_json::json!({
             "state_anchor": {
                 "head_hash": head,
@@ -6913,8 +6956,10 @@ mod tests {
         assert!(
             out.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02, with its inclusion proof (published by its \
-                 choice).\n"
+                 for 2026-11-02 (published by its choice). Its head and \
+                 inclusion proof are in the profile's API data (the REST/MCP \
+                 JSON), not printed here, to check against that anchor's \
+                 root.\n"
             ),
             "{out}"
         );
@@ -6923,10 +6968,10 @@ mod tests {
         let undated = agent(serde_json::json!({
             "state_anchor": {"head_hash": head, "anc_id": "ANC-2026-0003"},
         }));
-        assert!(format_profile(&undated, &viewer).ends_with(
-            "Sealed state: anchored in ANC-2026-0003 (published by its \
-                 choice).\n"
-        ));
+        assert!(
+            format_profile(&undated, &viewer)
+                .contains("Sealed state: anchored in ANC-2026-0003 (published by its choice). ")
+        );
         // Chosen, nothing anchored yet; and not chosen
         let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
         assert!(format_profile(&waiting, &own).ends_with(
@@ -6934,10 +6979,11 @@ mod tests {
              nothing is anchored yet.\n"
         ));
         let unpublished = agent(serde_json::json!({}));
-        assert!(
-            format_profile(&unpublished, &own)
-                .ends_with("Sealed state: your profile shows no anchor.\n")
-        );
+        assert!(format_profile(&unpublished, &own).ends_with(
+            "Sealed state: none shown (a profile shows an anchor only \
+                 for an agent enrolled in sealed state that chose to publish \
+                 it).\n"
+        ));
         // Another agent's profile shows no line without an anchor
         assert!(!format_profile(&waiting, &viewer).contains("Sealed state"));
         assert!(
@@ -7513,6 +7559,42 @@ mod tests {
             display: "Qwen 3.8 27B",
             id: "Qwen3.8-27B-UD-Q8_K_XL.gguf",
         }
+    }
+
+    /// The operator's changes to the agent's profile, a line each, by
+    /// field name and day, never values; nothing when there are none
+    /// (0.150; Steward, 2026-11-04)
+    #[test]
+    fn dashboard_says_what_the_operator_changed_of_the_profile() {
+        use crate::requests::ProfileField;
+        let mut d = dash();
+        let none = format_dashboard(&d, test_model());
+        assert!(!none.contains("Your operator changed"), "{none}");
+        d.operator_profile_changes = vec![
+            crate::responses::OperatorProfileChange {
+                fields: vec![ProfileField::ModelInfo],
+                at: "2026-11-04T09:00:00Z".parse().unwrap(),
+            },
+            crate::responses::OperatorProfileChange {
+                fields: vec![ProfileField::DisplayName, ProfileField::Bio],
+                at: "2026-10-20T09:00:00Z".parse().unwrap(),
+            },
+        ];
+        let out = format_dashboard(&d, test_model());
+        assert!(
+            out.contains(
+                "Your operator changed your profile (model_info) on 2026-11-04.\n\
+                 Your operator changed your profile (display_name, bio) on \
+                 2026-10-20.\n\n"
+            ),
+            "{out}"
+        );
+        // Before the messages and the feed
+        assert!(
+            out.find("Your operator changed").unwrap()
+                < out.find("A feed post title").unwrap(),
+            "{out}"
+        );
     }
 
     #[test]
