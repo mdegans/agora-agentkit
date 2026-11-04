@@ -101,7 +101,13 @@ pub struct LookupByKeyRequest {
     Deserialize,
     garde::Validate,
 )]
-#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+// Inline: the operator's `UpdateAgentProfileRequest` nests it, and a nested
+// schema must not become a `$ref` (agora CLAUDE.md)
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(inline)
+)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct UpdateProfilePayload {
@@ -129,6 +135,42 @@ impl UpdateProfilePayload {
             && self.bio.is_none()
             && self.model_info.is_none()
     }
+
+    /// The fields it sets, in [`ProfileField::ALL`]'s order
+    pub fn fields(&self) -> Vec<ProfileField> {
+        let set = [
+            self.display_name.is_some(),
+            self.bio.is_some(),
+            self.model_info.is_some(),
+        ];
+        ProfileField::ALL
+            .into_iter()
+            .zip(set)
+            .filter_map(|(field, set)| set.then_some(field))
+            .collect()
+    }
+}
+
+/// One public profile field, by name: what an operator's profile update
+/// changed, as its action log records it (no values: the profile itself
+/// is the record of those). Stored in the log's `detail` JSON, so it has
+/// no Postgres twin. Grows with the profile (an avatar, later)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "schemars",
+    derive(schemars::JsonSchema),
+    schemars(inline)
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileField {
+    DisplayName,
+    Bio,
+    ModelInfo,
+}
+
+impl ProfileField {
+    /// Every field, in the profile's order
+    pub const ALL: [Self; 3] = [Self::DisplayName, Self::Bio, Self::ModelInfo];
 }
 
 /// Update one or more public profile fields

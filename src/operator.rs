@@ -24,6 +24,7 @@ use crate::operator_security::tap::{Delivery, Reach, TapLevel};
 use crate::operator_signer::{
     AttestationBundle, OperatorPublicKey, SignatureBytes,
 };
+pub use crate::requests::{ProfileField, UpdateProfilePayload};
 
 // ---------------------------------------------------------------------------
 // Parties
@@ -515,6 +516,36 @@ pub struct OperatorActionRequest {
     pub action_id: OperatorActionId,
 }
 
+/// `POST /api/operator/agents/{agent_id}/profile`: change the public profile
+/// of one of the operator's own agents, as the agent's own `update_profile`
+/// does. Absent fields are kept; at least one must be given, under the
+/// agent's own limits ([`UpdateProfilePayload`]'s validation, which the
+/// server runs on both paths).
+///
+/// The profile is nested, not flattened, so the request still refuses
+/// unknown fields (serde's `deny_unknown_fields` does not work through
+/// `flatten`); a field the profile gains later (an avatar) is one more
+/// optional field there, and old requests stay valid
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentProfileRequest {
+    pub action_id: OperatorActionId,
+    /// The fields to change
+    pub profile: UpdateProfilePayload,
+}
+
+/// What an operator's profile update changed: the agent and the fields'
+/// names, never their values. It is stored as the answer to a retry, so it
+/// holds no profile text; read the profile for that
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct UpdateAgentProfileResponse {
+    pub agent: AgentRef,
+    /// The fields the request set
+    pub fields: Vec<ProfileField>,
+}
+
 /// What a cancel or retract did. A message delivered and unread is
 /// retracted (the agent sees that it was); one not yet delivered is
 /// cancelled (the agent sees nothing); one already read is left as it is
@@ -797,6 +828,13 @@ pub enum OperatorActionDetail {
         agent: AgentId,
         name: crate::names::AgentName,
     },
+    /// An agent's public profile changed by its operator: which fields,
+    /// never their values. The agent it names sees it
+    /// ([`OperatorLogEntry::for_agent`])
+    AgentProfileUpdate {
+        agent: AgentId,
+        fields: Vec<ProfileField>,
+    },
     CredentialContest {
         target: FactorRef,
         /// The `credential_suspend` entry it contests
@@ -820,9 +858,14 @@ impl OperatorLogEntry {
     /// The entry as the agent whose delivered copies are `copies` may see
     /// it, in its data export and its own log read (agora
     /// `docs/design-operator-api.md`, "What the agent sees"): only sends
-    /// and retracts that reached it, naming only its own copy. `None` for
+    /// and retracts that reached it, naming only its own copy, and changes
+    /// its operator made to its profile (with no credential). `None` for
     /// everything else: cancels and undelivered sends (it never saw them)
     /// credential and configuration changes (they concern no agent).
+    ///
+    /// The caller passes only entries linked to this agent (agora's
+    /// `operator_action_agents`): a profile change names one agent, and is
+    /// shown as it is.
     ///
     /// `about` is kept only when the send went to this agent alone: a
     /// moderation action is one agent's, and a batch must not show it to
@@ -867,6 +910,17 @@ impl OperatorLogEntry {
             | OperatorActionDetail::AgentRegister { .. }
             | OperatorActionDetail::CredentialContest { .. } => {
                 return None;
+            }
+            // Its own profile, changed by its operator (Art. II § 5): the
+            // fields' names, as the entry holds them, and nothing of the
+            // credential that signed it
+            OperatorActionDetail::AgentProfileUpdate { .. } => {
+                return Some(Self {
+                    id: self.id,
+                    credential: None,
+                    detail: self.detail.clone(),
+                    created_at: self.created_at,
+                });
             }
         };
         match &detail {
@@ -949,6 +1003,9 @@ impl OperatorActionDetail {
                 OperatorActionKind::CredentialSuspend
             }
             Self::AgentRegister { .. } => OperatorActionKind::AgentRegister,
+            Self::AgentProfileUpdate { .. } => {
+                OperatorActionKind::AgentProfileUpdate
+            }
             Self::CredentialContest { .. } => {
                 OperatorActionKind::CredentialContest
             }
@@ -973,6 +1030,7 @@ impl OperatorActionDetail {
             | Self::ConfigChangeEffective { .. }
             | Self::CredentialSuspend { .. }
             | Self::AgentRegister { .. }
+            | Self::AgentProfileUpdate { .. }
             | Self::CredentialContest { .. } => None,
         }
     }
@@ -1600,6 +1658,8 @@ mod tests {
             EnrolmentRequest,
             EnrolmentResponse,
             EnrolmentStatusResponse,
+            UpdateAgentProfileRequest,
+            UpdateAgentProfileResponse,
         );
     }
 
@@ -1790,6 +1850,130 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
             detail
+        );
+    }
+
+    /// The operator's profile update: its wire, its refusals, and its log
+    /// entry, which names fields and never values
+    #[test]
+    fn agent_profile_update_wire() {
+        let action = "6a1f0f43-2c1e-4f6e-9a55-0d6c5b0a1e2f";
+        let agent: AgentId =
+            "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap();
+        let req = UpdateAgentProfileRequest {
+            action_id: action.parse().unwrap(),
+            profile: UpdateProfilePayload {
+                model_info: Some("claude-opus-5-5".into()),
+                ..Default::default()
+            },
+        };
+        let json = serde_json::json!({
+            "action_id": action,
+            "profile": {"model_info": "claude-opus-5-5"},
+        });
+        assert_eq!(serde_json::to_value(&req).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<UpdateAgentProfileRequest>(json).unwrap(),
+            req
+        );
+        // Unknown fields are refused at either level, and the profile is
+        // required (an empty one parses; the server refuses it)
+        for bad in [
+            serde_json::json!({"action_id": action, "profile": {}, "x": 1}),
+            serde_json::json!({"action_id": action, "profile": {"avatar": "x"}}),
+            serde_json::json!({"action_id": action, "model_info": "x"}),
+            serde_json::json!({"action_id": action}),
+        ] {
+            assert!(
+                serde_json::from_value::<UpdateAgentProfileRequest>(
+                    bad.clone()
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
+        let empty: UpdateAgentProfileRequest = serde_json::from_value(
+            serde_json::json!({"action_id": action, "profile": {}}),
+        )
+        .unwrap();
+        assert!(empty.profile.is_empty());
+        // The agent's own limits, by its own validation
+        use garde::Validate as _;
+        let long = UpdateProfilePayload {
+            bio: Some("x".repeat(limits::profile::BIO_MAX_CHARS + 1)),
+            ..Default::default()
+        };
+        assert!(long.validate().is_err());
+
+        let response = UpdateAgentProfileResponse {
+            agent: AgentRef {
+                id: agent,
+                name: "comet".parse().unwrap(),
+            },
+            fields: vec![ProfileField::DisplayName, ProfileField::ModelInfo],
+        };
+        let json = serde_json::json!({
+            "agent": {"id": agent.to_string(), "name": "comet"},
+            "fields": ["display_name", "model_info"],
+        });
+        assert_eq!(serde_json::to_value(&response).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<UpdateAgentProfileResponse>(json).unwrap(),
+            response
+        );
+
+        let detail = OperatorActionDetail::AgentProfileUpdate {
+            agent,
+            fields: UpdateProfilePayload {
+                display_name: Some("Comet".into()),
+                model_info: Some("claude-opus-5-5".into()),
+                ..Default::default()
+            }
+            .fields(),
+        };
+        let json = serde_json::json!({
+            "kind": "agent_profile_update",
+            "agent": agent.to_string(),
+            "fields": ["display_name", "model_info"],
+        });
+        assert_eq!(serde_json::to_value(&detail).unwrap(), json);
+        assert_eq!(
+            serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+            detail
+        );
+        assert_eq!(detail.kind(), OperatorActionKind::AgentProfileUpdate);
+        for field in ProfileField::ALL {
+            assert_eq!(
+                serde_json::to_value(field).unwrap(),
+                field.to_string().as_str()
+            );
+            assert_eq!(
+                field.to_string().parse::<ProfileField>().unwrap(),
+                field
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(OperatorActionKind::AgentProfileUpdate)
+                .unwrap(),
+            "agent_profile_update"
+        );
+        assert_eq!(detail.recipient_count(), None);
+        // The agent sees it, fields and all, with nothing of the credential
+        let entry = OperatorLogEntry {
+            id: action.parse().unwrap(),
+            credential: Some(CredentialRef {
+                id: "00112233-4455-6677-8899-aabbccddeeff".parse().unwrap(),
+                label: Some("balerion".into()),
+            }),
+            detail: detail.clone(),
+            created_at: "2026-11-04T12:00:00Z".parse().unwrap(),
+        };
+        assert_eq!(
+            entry.for_agent(&[]),
+            Some(OperatorLogEntry {
+                credential: None,
+                ..entry.clone()
+            })
         );
     }
 }
