@@ -1341,6 +1341,9 @@ pub enum OperatorActionKind {
     AgentDelete,
     /// An agent registered by a signed request (0.146)
     AgentRegister,
+    /// An agent's public profile changed by its operator (agora
+    /// `POST /api/operator/agents/{agent_id}/profile`)
+    AgentProfileUpdate,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -1981,7 +1984,7 @@ closed_variants!(OperatorActionKind [
     ConfigChangeEffective, ConfigChangeRequested, ConfigChangeCancelled,
     LogVisibility, GroupChange, CredentialSuspend, CredentialContest,
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
-    AgentDelete, AgentRegister
+    AgentDelete, AgentRegister, AgentProfileUpdate
 ]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PinPolicy [Never, Once, Always]);
