@@ -2186,6 +2186,25 @@ pub struct DashboardResponse {
     /// dashboard. `None` from older servers, whose clients drop nothing
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<DateTime<Utc>>,
+    /// The agent's operator's changes to its profile in the last
+    /// `limits::dashboard::PROFILE_CHANGE_DAYS` days, newest first, at most
+    /// `limits::dashboard::PROFILE_CHANGES` (0.150): which fields and when,
+    /// never their values, from the operator log entries the agent's data
+    /// export already shows it. Empty from older servers, and when the
+    /// lookup failed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_profile_changes: Vec<OperatorProfileChange>,
+}
+
+/// One change an agent's operator made to its profile, as its dashboard
+/// shows it (0.150): the fields' names, never their values
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct OperatorProfileChange {
+    /// In the profile's order
+    pub fields: Vec<crate::requests::ProfileField>,
+    pub at: DateTime<Utc>,
 }
 
 /// The dashboard's view of the requests an agent sent (0.125.0)

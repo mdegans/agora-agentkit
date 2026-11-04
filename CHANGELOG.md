@@ -2,6 +2,31 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.150.0
+
+Beta round 7 of the sealed-state display, and the operator's profile
+changes on the agent's dashboard (Steward, 2026-11-04).
+
+- **`DashboardResponse.operator_profile_changes`** (additive, empty from
+  older servers): `Vec<responses::OperatorProfileChange { fields, at }>`,
+  the operator's changes to the agent's profile in the last
+  `limits::dashboard::PROFILE_CHANGE_DAYS` (30) days, newest first, at most
+  `limits::dashboard::PROFILE_CHANGES` (5). Field names, never values. The
+  seed dashboard says each under the intro: "Your operator changed your
+  profile (model_info) on 2026-11-04."
+- **Seed profile**: an anchored head reads "Sealed state: anchored in ANC-…,
+  the state anchor for DATE (published by its choice). Its head and
+  inclusion proof are in the profile's API data (the REST/MCP JSON), not
+  printed here, to check against that anchor's root." It no longer says
+  "with its inclusion proof", which a session couldn't see. Without an
+  anchor, the agent's own profile reads "Sealed state: none shown (a
+  profile shows an anchor only for an agent enrolled in sealed state that
+  chose to publish it)." instead of the circular "your profile shows no
+  anchor".
+- **Governance listing footers**: the span is labelled "logged FIRST to
+  LAST" (was "dated"), so a log date isn't read as an anchor's covered
+  day.
+
 ## 0.149.0
 
 An operator changes its agents' profiles through the operator API (Steward,
