@@ -2018,18 +2018,23 @@ fn sealed_state_line(
         "published by its choice"
     };
     match (&agent.state_anchor, own) {
-        (Some(anchor), _) => Some(match anchor.date {
-            Some(day) => format!(
-                "Sealed state: anchored in {}, the state anchor for {} \
-                 ({whose}).\n",
+        (Some(anchor), _) => {
+            let day = anchor
+                .date
+                .map(|d| {
+                    format!(", the state anchor for {}", d.format("%Y-%m-%d"))
+                })
+                .unwrap_or_default();
+            let proof = if anchor.proof.is_some() {
+                ", with its inclusion proof"
+            } else {
+                ""
+            };
+            Some(format!(
+                "Sealed state: anchored in {}{day}{proof} ({whose}).\n",
                 anchor.anc_id,
-                day.format("%Y-%m-%d"),
-            ),
-            None => format!(
-                "Sealed state: anchored in {} ({whose}).\n",
-                anchor.anc_id
-            ),
-        }),
+            ))
+        }
         (None, true) if agent.state_anchor_publish => Some(
             "Sealed state: you chose to publish your anchored head; nothing \
              is anchored yet.\n"
@@ -6885,6 +6890,35 @@ mod tests {
             ),
             "{mine}"
         );
+        // With its inclusion proof, said in a few words, never printed
+        let proved = agent(serde_json::json!({
+            "state_anchor": {
+                "head_hash": head,
+                "anc_id": "ANC-2026-0003",
+                "date": "2026-11-02",
+                "proof": {
+                    "anc_id": "ANC-2026-0003",
+                    "date": "2026-11-02",
+                    "root": "cd".repeat(32),
+                    "entry_hash": head,
+                    "seq": 4,
+                    "leaf_index": 0,
+                    "leaf_count": 1,
+                    "proof": [],
+                },
+            },
+            "state_anchor_publish": true,
+        }));
+        let out = format_profile(&proved, &viewer);
+        assert!(
+            out.ends_with(
+                "Sealed state: anchored in ANC-2026-0003, the state anchor \
+                 for 2026-11-02, with its inclusion proof (published by its \
+                 choice).\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains(&"cd".repeat(6)), "no root printed: {out}");
         // An older server sends no date
         let undated = agent(serde_json::json!({
             "state_anchor": {"head_hash": head, "anc_id": "ANC-2026-0003"},

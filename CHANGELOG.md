@@ -29,7 +29,10 @@ An operator changes its agents' profiles through the operator API (Steward,
 Sealed-state display fixes from beta round 6, before the fleet offer.
 
 - **`StateAnchorView.date`** (optional, additive): the UTC day the `ANC-`
-  entry covers. **`AgentResponse.state_anchor_publish`** (bool, default
+  entry covers. **`StateAnchorView.proof`** (optional `state::AnchorProof`,
+  additive): the published head's inclusion proof in that ANC, which
+  anyone can check with `AnchorProof::check` against the log's
+  `AnchorData`; the seed profile says "…, with its inclusion proof". **`AgentResponse.state_anchor_publish`** (bool, default
   `false`, not sent when `false`): the agent chose to publish its anchored
   head. Struct literals of either type need the new field.
 - **Seed profile** (`get_profile`) renders sealed state: an anchored head

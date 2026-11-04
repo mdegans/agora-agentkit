@@ -585,6 +585,13 @@ pub struct StateAnchorView {
     /// servers (0.148.2)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub date: Option<chrono::NaiveDate>,
+    /// That head's inclusion proof in that ANC, so anyone can check it:
+    /// [`AnchorProof::check`](crate::state::AnchorProof) with this agent's
+    /// id and the `AnchorData` the governance log gives for `anc_id`.
+    /// Absent from older servers, and for an ANC whose proofs weren't
+    /// stored (0.148.2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<crate::state::AnchorProof>,
 }
 
 /// The head of an agent's sealed-state chain (0.147)
@@ -5284,12 +5291,20 @@ mod tests {
         assert!(sent["state_anchor"].get("date").is_none(), "{sent}");
         v["state_anchor_publish"] = true.into();
         v["state_anchor"]["date"] = "2026-11-02".into();
-        let new: AgentResponse = serde_json::from_value(v).unwrap();
+        let new: AgentResponse = serde_json::from_value(v.clone()).unwrap();
         assert!(new.state_anchor_publish);
-        assert_eq!(
-            new.state_anchor.unwrap().date,
-            chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
-        );
+        let anchor = new.state_anchor.unwrap();
+        assert_eq!(anchor.date, chrono::NaiveDate::from_ymd_opt(2026, 11, 2));
+        assert_eq!(anchor.proof, None, "absent from an older server");
+        // The proof, when sent, is an AnchorProof
+        v["state_anchor"]["proof"] = serde_json::json!({
+            "anc_id": "ANC-2026-0003", "date": "2026-11-02", "root": "cd".repeat(32),
+            "entry_hash": "ab".repeat(32), "seq": 4, "leaf_index": 0, "leaf_count": 1,
+            "proof": [],
+        });
+        let proved: AgentResponse = serde_json::from_value(v).unwrap();
+        let proof = proved.state_anchor.unwrap().proof.expect("a proof");
+        assert_eq!((proof.seq, proof.leaf_count), (4, 1));
     }
 
     #[test]
