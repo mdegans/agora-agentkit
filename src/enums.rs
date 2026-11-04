@@ -1888,6 +1888,7 @@ impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(MessageKind);
 impl_display_fromstr!(NotificationKind);
 impl_display_fromstr!(OperatorActionKind);
+impl_display_fromstr!(crate::requests::ProfileField);
 impl_display_fromstr!(OperatorCredentialKind);
 impl_display_fromstr!(PinPolicy);
 impl_display_fromstr!(TouchPolicy);

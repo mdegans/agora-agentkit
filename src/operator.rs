@@ -1932,6 +1932,16 @@ mod tests {
             detail
         );
         assert_eq!(detail.kind(), OperatorActionKind::AgentProfileUpdate);
+        for field in ProfileField::ALL {
+            assert_eq!(
+                serde_json::to_value(field).unwrap(),
+                field.to_string().as_str()
+            );
+            assert_eq!(
+                field.to_string().parse::<ProfileField>().unwrap(),
+                field
+            );
+        }
         assert_eq!(
             serde_json::to_value(OperatorActionKind::AgentProfileUpdate)
                 .unwrap(),

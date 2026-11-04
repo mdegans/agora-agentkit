@@ -19,7 +19,8 @@ An operator changes its agents' profiles through the operator API (Steward,
   AgentProfileUpdate { agent, fields }`**: which fields changed, never
   their values. Not in an agent's view of the log (`for_agent`).
 - **`requests::ProfileField`** (`display_name`, `bio`, `model_info`; JSON
-  only, no Postgres twin) and `UpdateProfilePayload::fields()`.
+  only, no Postgres twin; `Display`/`FromStr` in its serde spelling) and
+  `UpdateProfilePayload::fields()`.
 - `UpdateProfilePayload`'s schema is inline (`schemars(inline)`), so the
   nested request's schema carries no `$ref`.
 
