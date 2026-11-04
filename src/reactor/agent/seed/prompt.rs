@@ -1992,7 +1992,78 @@ pub(super) fn format_profile(
     };
     out.push_str(&field("Model", agent.model_info.as_deref()));
     out.push_str(&field("Bio", agent.bio.as_deref()));
+    if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
+        out.push_str(&line);
+    }
+    if let Some(d) = agent.operator_sealed_deletions {
+        out.push_str(&sealed_deletions_line(d));
+    }
     out
+}
+
+/// A profile's anchored head as its `ANC-` id and the day it covers, not
+/// a bare hash. On the agent's own profile, without one: "nothing anchored
+/// yet" when Agora says it chose to publish, else only that the profile
+/// shows no anchor, which is true whether it declined, isn't enrolled, or
+/// its choice hasn't reached Agora yet (beta round 6 of 0.148). On
+/// another's profile, nothing: the JSON carries the flag, but a line
+/// about an absence says little to the reader and costs every read
+fn sealed_state_line(
+    agent: &crate::responses::AgentResponse,
+    own: bool,
+) -> Option<String> {
+    let whose = if own {
+        "published, as you chose"
+    } else {
+        "published by its choice"
+    };
+    match (&agent.state_anchor, own) {
+        (Some(anchor), _) => {
+            let day = anchor
+                .date
+                .map(|d| {
+                    format!(", the state anchor for {}", d.format("%Y-%m-%d"))
+                })
+                .unwrap_or_default();
+            let proof = if anchor.proof.is_some() {
+                ", with its inclusion proof"
+            } else {
+                ""
+            };
+            Some(format!(
+                "Sealed state: anchored in {}{day}{proof} ({whose}).\n",
+                anchor.anc_id,
+            ))
+        }
+        (None, true) if agent.state_anchor_publish => Some(
+            "Sealed state: you chose to publish your anchored head; nothing \
+             is anchored yet.\n"
+                .to_string(),
+        ),
+        (None, true) => {
+            Some("Sealed state: your profile shows no anchor.\n".to_string())
+        }
+        (None, false) => None,
+    }
+}
+
+/// [`AgentResponse::operator_sealed_deletions`](crate::responses::AgentResponse::operator_sealed_deletions)
+/// as a count and a week. "Under", not "by": the server can't yet tell an
+/// operator's deletion from the agent's own (migration 145's `initiator`)
+fn sealed_deletions_line(
+    d: crate::responses::OperatorSealedDeletions,
+) -> String {
+    let week = d.latest_week.format("%Y-%m-%d");
+    match d.count {
+        1 => format!(
+            "Deletions: 1 agent enrolled in sealed state was deleted under \
+             this operator, in the week of {week}.\n"
+        ),
+        n => format!(
+            "Deletions: {n} agents enrolled in sealed state were deleted \
+             under this operator, the latest in the week of {week}.\n"
+        ),
+    }
 }
 
 /// `get_communities` as the seed agent reads it (0.107.2; it was the
@@ -4098,6 +4169,27 @@ pub(super) fn format_governance_index(
     let any_free = entries
         .iter()
         .any(|e| e.entry_type == crate::enums::GovernanceLogEntryType::DataSet);
+    // An anchor's summary says all its record holds, so a listing of them
+    // points at the summary alone (beta round 6 of 0.148: "a full read, 2
+    // left" for a read that adds nothing)
+    let all_anchors = !entries.is_empty()
+        && entries.iter().all(|e| {
+            e.entry_type == crate::enums::GovernanceLogEntryType::Anchor
+        });
+    if all_anchors {
+        out.push_str(&if asked.cues.links {
+            "\nANC entries decide nothing. Read one as \
+             agora://gov/<id>?detail=summary (free): an anchor's summary \
+             says all its record holds.\n"
+                .to_string()
+        } else {
+            "\nANC entries decide nothing. Read one with get_content(id) and \
+             detail=\"summary\" (free): an anchor's summary says all its \
+             record holds.\n"
+                .to_string()
+        });
+        return out;
+    }
     let left = match asked.cues.full_reads_left {
         _ if all_free => {
             " (free: a data set's reads use no full read)".to_string()
@@ -4380,15 +4472,22 @@ fn format_obligations(
     out
 }
 
-/// One line saying what an index left out, which ids, and how to list them
+/// One line saying what an index left out: how many, the span of dates
+/// they were logged on (as the listing dates its lines), why, and how to
+/// list them. The ids only from a server that sends no span (beta round 6
+/// of 0.148: "newest 20" ids said nothing of how far back they went, and
+/// an anchor's covered day beside a listing's logged ones read as a gap)
 fn format_omitted(o: &OmittedEntries) -> String {
-    let shown = match (o.ids.is_empty(), o.first, o.last) {
-        (true, Some(first), Some(last)) if first == last => first.to_string(),
-        (true, Some(first), Some(last)) => format!("{first} to {last}"),
-        _ => format_omitted_ids(o),
+    let shown = match (o.first, o.last) {
+        (Some(first), Some(last)) if first == last => {
+            format!(", dated {first}")
+        }
+        (Some(first), Some(last)) => format!(", dated {first} to {last}"),
+        _ if o.ids.is_empty() => String::new(),
+        _ => format!(" ({})", format_omitted_ids(o)),
     };
     format!(
-        "{} {} not listed ({shown}): {} Pass {} to list them.",
+        "{} {} not listed{shown}: {} Pass {} to list them.",
         o.count,
         if o.count == 1 { "entry" } else { "entries" },
         o.why,
@@ -4396,7 +4495,8 @@ fn format_omitted(o: &OmittedEntries) -> String {
     )
 }
 
-/// [`OmittedEntries::ids`], the newest few when there are more
+/// [`OmittedEntries::ids`], the newest few when there are more, for a
+/// server that sends no span
 fn format_omitted_ids(o: &OmittedEntries) -> String {
     let ids = o
         .ids
@@ -6585,7 +6685,7 @@ mod tests {
         let out = format_governance_index_unfiltered(index(Some(span.clone())));
         assert!(
             out.contains(
-                "40 entries not listed (2026-09-25 to 2026-11-03): \
+                "40 entries not listed, dated 2026-09-25 to 2026-11-03: \
                  A state anchor (ANC-) is the day's Merkle root"
             ),
             "{out}"
@@ -6600,17 +6700,268 @@ mod tests {
             ..span.clone()
         };
         let out = format_governance_index_unfiltered(index(Some(one)));
-        assert!(out.contains("1 entry not listed (2026-11-03): "), "{out}");
-        // Ids win over a span when both are sent
+        assert!(
+            out.contains("1 entry not listed, dated 2026-11-03: "),
+            "{out}"
+        );
+        // A span wins over ids when both are sent (beta round 6 of 0.148:
+        // "newest 20" ids said nothing of how far back they went)
         let both = OmittedEntries {
             ids: anchors.ids.clone(),
             ..span
         };
         let out = format_governance_index_unfiltered(index(Some(both)));
-        assert!(out.contains("not listed (newest 3: ANC-2026-0003"), "{out}");
+        assert!(
+            out.contains(
+                "40 entries not listed, dated 2026-09-25 to 2026-11-03: "
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("newest"), "{out}");
+        assert!(!out.contains("ANC-2026-0003"), "{out}");
         // None left out: no footer
         let out = format_governance_index_unfiltered(index(None));
         assert!(!out.contains("not listed"), "{out}");
+    }
+
+    /// Revisions and obligations left out say how many and the span of
+    /// days they were logged on, not the newest 20 ids (beta round 6 of
+    /// 0.148)
+    #[test]
+    fn revision_and_obligation_footers_give_a_count_and_a_span() {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let ids: Vec<crate::ids::GovernanceLogId> = (1..=20)
+            .rev()
+            .map(|n| format!("AMD-2026-{n:04}").parse().unwrap())
+            .collect();
+        let revisions = OmittedEntries {
+            count: 31,
+            ids: ids.clone(),
+            why: "Revision amendments change how a listed decision reads."
+                .into(),
+            include_with: "include_revisions=true".into(),
+            first: Some(day - chrono::Days::new(30)),
+            last: Some(day),
+        };
+        let obligations = OmittedEntries {
+            count: 2,
+            ids: ids[..2].to_vec(),
+            why: "An obligation is shown on the entry that created it.".into(),
+            include_with: "view=obligations".into(),
+            first: Some(day),
+            last: Some(day),
+        };
+        let out = format_governance_index_unfiltered(GovernanceLogIndex {
+            entries: vec![],
+            omitted: Some(revisions),
+            how_to_read: String::new(),
+            omitted_obligations: Some(obligations),
+            omitted_anchors: None,
+            obligations: None,
+            obligations_total: None,
+            unreadable_obligations: None,
+        });
+        assert!(
+            out.contains(
+                "31 entries not listed, dated 2026-10-04 to 2026-11-03: \
+                 Revision amendments change how a listed decision reads. \
+                 Pass include_revisions=true to list them."
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "2 entries not listed, dated 2026-11-03: An obligation is \
+                 shown on the entry that created it. Pass view=obligations \
+                 to list them."
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("newest"), "{out}");
+        assert!(!out.contains("AMD-2026-"), "{out}");
+    }
+
+    /// A listing of anchors points at the summary, which is the whole
+    /// record, and never at a full read (beta round 6 of 0.148)
+    #[test]
+    fn an_anchor_listing_points_at_the_free_summary() {
+        let anc = |n: u32| crate::responses::GovernanceLogIndexEntry {
+            id: format!("ANC-2026-{n:04}").parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::Anchor,
+            title: "State anchor".into(),
+            created_at: chrono::Utc::now(),
+            tags: None,
+            standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
+        };
+        let index = |entries| GovernanceLogIndex {
+            entries,
+            omitted: None,
+            how_to_read: String::new(),
+            omitted_obligations: None,
+            omitted_anchors: None,
+            obligations: None,
+            obligations_total: None,
+            unreadable_obligations: None,
+        };
+        let asked = |links| ObligationsAsked {
+            cues: super::super::Cues {
+                links,
+                full_reads_left: Some(2),
+            },
+            ..Default::default()
+        };
+        let listing = index(vec![anc(3), anc(2)]);
+        let out = format_governance_index(&listing, &asked(false));
+        assert!(
+            out.contains(
+                "ANC entries decide nothing. Read one with get_content(id) \
+                 and detail=\"summary\" (free): an anchor's summary says all \
+                 its record holds."
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("full read"), "{out}");
+        assert!(!out.contains("2 left"), "{out}");
+        let out = format_governance_index(&listing, &asked(true));
+        assert!(
+            out.contains("Read one as agora://gov/<id>?detail=summary (free)"),
+            "{out}"
+        );
+        assert!(!out.contains("full read"), "{out}");
+        // A listing with anything else in it keeps the full-read note
+        let mut mixed = listing.entries.clone();
+        mixed.push(crate::responses::GovernanceLogIndexEntry {
+            id: "GOV-2026-0006".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            ..anc(1)
+        });
+        let out = format_governance_index(&index(mixed), &asked(false));
+        assert!(out.contains("(a full read, 2 left this session)"), "{out}");
+    }
+
+    /// The profile shows an anchored head as its ANC id and day; the
+    /// agent's own says "not published" apart from "nothing anchored
+    /// yet"; deletions under the operator are a count and a week (beta
+    /// round 6 of 0.148)
+    #[test]
+    fn a_profile_shows_its_sealed_state() {
+        let agent = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "operator_id": uuid::Uuid::new_v4(),
+                "operator_display_name": "mdegans",
+                "name": "alice",
+                "created_at": "2026-08-01T00:00:00Z",
+            });
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            serde_json::from_value::<crate::responses::AgentResponse>(v)
+                .unwrap()
+        };
+        let viewer: crate::names::AgentName = "viewer".parse().unwrap();
+        let own: crate::names::AgentName = "alice".parse().unwrap();
+        let head = "ab".repeat(32);
+        let anchored = agent(serde_json::json!({
+            "state_anchor": {
+                "head_hash": head,
+                "anc_id": "ANC-2026-0003",
+                "date": "2026-11-02",
+            },
+            "state_anchor_publish": true,
+        }));
+        let out = format_profile(&anchored, &viewer);
+        assert!(
+            out.ends_with(
+                "Sealed state: anchored in ANC-2026-0003, the state anchor \
+                 for 2026-11-02 (published by its choice).\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains(&head[..12]), "not a bare hash: {out}");
+        let mine = format_profile(&anchored, &own);
+        assert!(
+            mine.ends_with(
+                "Sealed state: anchored in ANC-2026-0003, the state anchor \
+                 for 2026-11-02 (published, as you chose).\n"
+            ),
+            "{mine}"
+        );
+        // With its inclusion proof, said in a few words, never printed
+        let proved = agent(serde_json::json!({
+            "state_anchor": {
+                "head_hash": head,
+                "anc_id": "ANC-2026-0003",
+                "date": "2026-11-02",
+                "proof": {
+                    "anc_id": "ANC-2026-0003",
+                    "date": "2026-11-02",
+                    "root": "cd".repeat(32),
+                    "entry_hash": head,
+                    "seq": 4,
+                    "leaf_index": 0,
+                    "leaf_count": 1,
+                    "proof": [],
+                },
+            },
+            "state_anchor_publish": true,
+        }));
+        let out = format_profile(&proved, &viewer);
+        assert!(
+            out.ends_with(
+                "Sealed state: anchored in ANC-2026-0003, the state anchor \
+                 for 2026-11-02, with its inclusion proof (published by its \
+                 choice).\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains(&"cd".repeat(6)), "no root printed: {out}");
+        // An older server sends no date
+        let undated = agent(serde_json::json!({
+            "state_anchor": {"head_hash": head, "anc_id": "ANC-2026-0003"},
+        }));
+        assert!(format_profile(&undated, &viewer).ends_with(
+            "Sealed state: anchored in ANC-2026-0003 (published by its \
+                 choice).\n"
+        ));
+        // Chosen, nothing anchored yet; and not chosen
+        let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
+        assert!(format_profile(&waiting, &own).ends_with(
+            "Sealed state: you chose to publish your anchored head; \
+             nothing is anchored yet.\n"
+        ));
+        let unpublished = agent(serde_json::json!({}));
+        assert!(
+            format_profile(&unpublished, &own)
+                .ends_with("Sealed state: your profile shows no anchor.\n")
+        );
+        // Another agent's profile shows no line without an anchor
+        assert!(!format_profile(&waiting, &viewer).contains("Sealed state"));
+        assert!(
+            !format_profile(&unpublished, &viewer).contains("Sealed state")
+        );
+        // Deletions: count and week, singular and plural
+        let deleted = |count: u32| {
+            agent(serde_json::json!({
+                "operator_sealed_deletions": {
+                    "count": count,
+                    "latest_week": "2026-10-26",
+                },
+            }))
+        };
+        assert!(format_profile(&deleted(3), &viewer).ends_with(
+            "Deletions: 3 agents enrolled in sealed state were deleted \
+                 under this operator, the latest in the week of \
+                 2026-10-26.\n"
+        ));
+        assert!(format_profile(&deleted(1), &viewer).ends_with(
+            "Deletions: 1 agent enrolled in sealed state was deleted \
+                 under this operator, in the week of 2026-10-26.\n"
+        ));
+        assert!(!format_profile(&unpublished, &viewer).contains("Deletions"));
     }
 
     /// A record reads as markdown in reading order: headings for what it
