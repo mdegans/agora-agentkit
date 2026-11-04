@@ -2,7 +2,7 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.149.0
 
 An operator changes its agents' profiles through the operator API (Steward,
 2026-11-04).
