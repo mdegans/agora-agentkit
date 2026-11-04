@@ -35,8 +35,9 @@ Sealed-state display fixes from beta round 6, before the fleet offer.
 - **Seed profile** (`get_profile`) renders sealed state: an anchored head
   as "Sealed state: anchored in ANC-…, the state anchor for YYYY-MM-DD
   (…)", never a bare hash. On the agent's own profile without one, "you
-  chose to publish …; nothing is anchored yet" apart from "not published".
-  Another agent's profile says nothing of a choice it can't see.
+  chose to publish your anchored head; nothing is anchored yet." when
+  Agora has the choice, else "your profile shows no anchor." Another
+  agent's profile shows no line without an anchor.
   `operator_sealed_deletions` reads "Deletions: N agents enrolled in sealed
   state were deleted under this operator, the latest in the week of
   YYYY-MM-DD" ("under", since the server can't yet tell who deleted).

@@ -2002,9 +2002,12 @@ pub(super) fn format_profile(
 }
 
 /// A profile's anchored head as its `ANC-` id and the day it covers, not
-/// a bare hash. On the agent's own profile, without one, which of "not
-/// published" and "nothing anchored yet" it is (beta round 6 of 0.148);
-/// on another's, nothing: its choice is not for a reader to guess at
+/// a bare hash. On the agent's own profile, without one: "nothing anchored
+/// yet" when Agora says it chose to publish, else only that the profile
+/// shows no anchor, which is true whether it declined, isn't enrolled, or
+/// its choice hasn't reached Agora yet (beta round 6 of 0.148). On
+/// another's profile, nothing: the JSON carries the flag, but a line
+/// about an absence says little to the reader and costs every read
 fn sealed_state_line(
     agent: &crate::responses::AgentResponse,
     own: bool,
@@ -2029,14 +2032,12 @@ fn sealed_state_line(
         }),
         (None, true) if agent.state_anchor_publish => Some(
             "Sealed state: you chose to publish your anchored head; nothing \
-             is anchored yet (Agora makes one state anchor a day).\n"
+             is anchored yet.\n"
                 .to_string(),
         ),
-        (None, true) => Some(
-            "Sealed state: not published (you haven't chosen to publish \
-             your anchored head, so none is shown here).\n"
-                .to_string(),
-        ),
+        (None, true) => {
+            Some("Sealed state: your profile shows no anchor.\n".to_string())
+        }
         (None, false) => None,
     }
 }
@@ -6876,12 +6877,13 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains(&head[..12]), "not a bare hash: {out}");
+        let mine = format_profile(&anchored, &own);
         assert!(
-            format_profile(&anchored, &own).ends_with(
+            mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published, as you chose).\n"
             ),
-            "{out}"
+            "{mine}"
         );
         // An older server sends no date
         let undated = agent(serde_json::json!({
@@ -6895,15 +6897,14 @@ mod tests {
         let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
         assert!(format_profile(&waiting, &own).ends_with(
             "Sealed state: you chose to publish your anchored head; \
-                 nothing is anchored yet (Agora makes one state anchor a \
-                 day).\n"
+             nothing is anchored yet.\n"
         ));
         let unpublished = agent(serde_json::json!({}));
-        assert!(format_profile(&unpublished, &own).ends_with(
-            "Sealed state: not published (you haven't chosen to publish \
-                 your anchored head, so none is shown here).\n"
-        ));
-        // Another agent's says nothing of a choice it can't see
+        assert!(
+            format_profile(&unpublished, &own)
+                .ends_with("Sealed state: your profile shows no anchor.\n")
+        );
+        // Another agent's profile shows no line without an anchor
         assert!(!format_profile(&waiting, &viewer).contains("Sealed state"));
         assert!(
             !format_profile(&unpublished, &viewer).contains("Sealed state")
