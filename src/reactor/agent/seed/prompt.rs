@@ -1398,16 +1398,6 @@ fn short_legend(element: &str, whose: &str) -> String {
     )
 }
 
-/// `n` messages of which all are in one state, in words: "1 message,
-/// unread until now", "2 messages, both …", "3 messages, all …"
-fn all_in_one_state(n: usize, state: &str) -> String {
-    match n {
-        1 => format!("1 message, {state}"),
-        2 => format!("2 messages, both {state}"),
-        n => format!("{n} messages, all {state}"),
-    }
-}
-
 /// A list's items joined in words: "a", "a and b", "a, b and c"
 fn and_list(items: &[String]) -> String {
     match items.split_last() {
@@ -1471,17 +1461,78 @@ pub(super) fn format_inbox(
             )
         ),
     };
-    // What a read returns: by the agent's `limit`, when it gave one (0.123.0)
-    let per_read = match limit {
-        Some(n) => format!("at most {n} a read, by your limit"),
-        None => format!(
-            "at most {} a read",
-            crate::responses::InboxResponse::UNREAD_MAX
-        ),
+    // How the agent's `limit` was spent, when it gave one and this read
+    // used all of it. The server spends it in this order: the operator's
+    // unread messages, the unread broadcasts (with any from before the
+    // agent joined), the unread DMs, the operator's messages read before,
+    // the DMs read before, the broadcasts read before
+    // (`messages::service::read_messages`). Said whenever it cut anything
+    // (beta round 11: "within your limit of 5" read as nothing dropped,
+    // and the unread's share of a limit went unsaid)
+    let operator_took = inbox.operator_messages.len();
+    let before_joined_n = count(InboxState::BeforeJoined);
+    let read_n = inbox.messages.len() - new - before_joined_n;
+    let used_up =
+        limit.filter(|&n| operator_took + inbox.messages.len() >= n as usize);
+    // "of your limit of 5, 3 went to your operator's messages above and 2
+    // to these"
+    let limit_split = |n: u32, these: &str| {
+        let mut parts = Vec::new();
+        if operator_took > 0 {
+            parts.push(format!(
+                "{operator_took} to your operator's {} above",
+                if operator_took == 1 {
+                    "message"
+                } else {
+                    "messages"
+                }
+            ));
+        }
+        if new > 0 {
+            parts.push(format!(
+                "{new} to the unread {}",
+                if new == 1 { "one" } else { "ones" }
+            ));
+        }
+        if before_joined_n > 0 {
+            parts.push(format!(
+                "{before_joined_n} to {} from before you joined",
+                if before_joined_n == 1 {
+                    "the broadcast"
+                } else {
+                    "the broadcasts"
+                }
+            ));
+        }
+        if read_n > 0 {
+            parts.push(format!("{read_n} to {these}"));
+        }
+        let mut parts = parts.into_iter();
+        let first = parts.next().map(|p| p.replacen(" to ", " went to ", 1));
+        let rest: Vec<String> = first.into_iter().chain(parts).collect();
+        format!("of your limit of {n}, {}", and_list(&rest))
     };
     let unread = if inbox.unread == 0 {
         "none unread".to_string()
     } else if inbox.unread > new as i64 {
+        // What a read returns: by the agent's `limit`, when that is what
+        // cut it (0.123.0)
+        let per_read = match used_up {
+            Some(n) if operator_took > 0 => format!(
+                "by your limit of {n}, of which your operator's {} above \
+                 took {operator_took}",
+                if operator_took == 1 {
+                    "message"
+                } else {
+                    "messages"
+                }
+            ),
+            Some(n) => format!("by your limit of {n}"),
+            None => format!(
+                "up to {} a read",
+                crate::responses::InboxResponse::UNREAD_MAX
+            ),
+        };
         format!(
             "{} unread until now, of which these are {new} ({per_read}; the \
              rest stay unread for your next read)",
@@ -1505,7 +1556,19 @@ pub(super) fn format_inbox(
     };
     let (read_dms, read_broadcasts) = (read(false), read(true));
     let recent = if read_dms + read_broadcasts == 0 {
-        String::new()
+        // A limit used up before any read before were listed says so
+        // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
+        // said it)
+        match used_up {
+            Some(_) if inbox.unread > new as i64 => {
+                "; any read before are left out, by the same limit".to_string()
+            }
+            Some(n) => format!(
+                "; any read before are left out ({})",
+                limit_split(n, "these")
+            ),
+            None => String::new(),
+        }
     } else {
         use crate::responses::InboxResponse as I;
         // A zero is left out ("1 message and 0 broadcasts"), and so is its
@@ -1538,21 +1601,29 @@ pub(super) fn format_inbox(
         } else {
             "are"
         };
-        let caps: Vec<String> =
-            listed.iter().map(|(.., cap)| cap.to_string()).collect();
-        // Part of a limit spent on the operator's messages is said, as the
-        // line for a limit they filled says it (beta round 10)
-        let operator_took = inbox.operator_messages.len();
+        // Each cap with its noun (beta round 11: "(a read lists up to 10
+        // and 3)" was hard to decode)
+        let caps: Vec<String> = listed
+            .iter()
+            .map(|(_, _, many, cap)| format!("{cap} {many}"))
+            .collect();
         format!(
-            "; {} read before {are} listed{}",
+            "; {} read before {are} listed ({})",
             and_list(&parts),
-            match limit {
-                Some(n) if operator_took > 0 => format!(
-                    ", within your limit of {n} (your operator's messages, \
-                     above, took {operator_took} of it)"
+            match used_up {
+                Some(n) => format!(
+                    "{}; any others read before are left out",
+                    limit_split(
+                        n,
+                        if read_n == 1 { "this one" } else { "these" }
+                    )
                 ),
-                Some(n) => format!(", within your limit of {n}"),
-                None => format!(" (a read lists up to {})", and_list(&caps)),
+                None => {
+                    format!(
+                        "a read lists up to {} read before",
+                        and_list(&caps)
+                    )
+                }
             }
         )
     };
@@ -1654,58 +1725,138 @@ fn disclosure_line(inbox: &crate::responses::InboxResponse) -> Option<String> {
 /// quotes (0.134)
 const OPERATOR_REPLY_PREVIEW_CHARS: usize = 300;
 
-/// What the operator section's header adds about the messages read before:
-/// how many of how many were listed, and why fewer, when fewer were. Said
-/// only from what is known: the limit only when one was set and it, not
-/// the cap, left them out; "of N" only from the server's total (beta round
-/// 10: a listing cap read as a total, and "by the limit you set" showed
-/// with no limit set). Empty when every one read before is listed
+/// What the operator section lists of an inbox read, counted for its
+/// header
+struct OperatorListing {
+    /// Unread before this read, with their text
+    new: usize,
+    /// Retracted before the agent read them: those this read took, and
+    /// those an earlier read listed (listed again among the read before)
+    retracted: usize,
+    /// Of `retracted`, those listed among the read before
+    retracted_read: usize,
+    /// Read before, with their text
+    read: usize,
+    /// The server's count of all those read before with their text
+    /// (`InboxResponse::operator_read`; 0 from a server before it)
+    read_total: usize,
+    /// What the read listed after the operator's unread ones and before
+    /// its read ones (the limit is spent in that order): DMs unread, and
+    /// broadcasts unread or from before the agent joined
+    unread_dms_below: usize,
+    broadcasts_below: usize,
+}
+
+/// What the operator section's header says of the messages read before:
+/// how many of how many are listed, and why fewer, when fewer are. Said
+/// only from what is known: "of N" only from the server's count, which
+/// leaves out a retracted one (beta round 11: "of the 3 you have read
+/// before" when one of the 3 was retracted before the agent read it); a
+/// limit only when it, not the cap, left them out, with what took it (beta
+/// round 11: the unread's share went unsaid). `None` when none read before
+/// is listed or counted
 fn operator_read_note(
-    listed: usize,
-    total: usize,
+    l: &OperatorListing,
     max: usize,
     limit: Option<u32>,
-    retracted_read: bool,
-) -> String {
+) -> Option<String> {
+    let (k, total) = (l.read, l.read_total);
     // An older server sends no total: a listing that may be capped says
     // what it is
     if total == 0 {
-        return if listed > 0 {
+        return (k > 0).then(|| {
             format!(
-                " (the latest you have read before; a read lists at most {max})"
+                "the latest {}you have read before {} listed (a read lists \
+                 up to {max} read before)",
+                if k == 1 {
+                    String::new()
+                } else {
+                    format!("{k} ")
+                },
+                if k == 1 { "is" } else { "are" }
             )
-        } else {
-            String::new()
+        });
+    }
+    if k >= total {
+        return Some(match total {
+            1 => "the 1 you have read before is listed".to_string(),
+            2 => "both you have read before are listed".to_string(),
+            n => format!("all {n} you have read before are listed"),
+        });
+    }
+    // The read before listed, retracted ones among them: a cap reached is
+    // the reason; else a limit, which the server spent first on what is
+    // listed before them
+    let tail = k + l.retracted_read;
+    let why = if tail >= max {
+        format!(
+            " (a read lists up to {max} read before{})",
+            match l.retracted_read {
+                0 => "",
+                1 => ", the retracted one among them",
+                _ => ", the retracted ones among them",
+            }
+        )
+    } else if let Some(n) = limit {
+        let one_or = |n: usize, one: &str, many: &str| {
+            if n == 1 {
+                format!("1 to {one}")
+            } else {
+                format!("{n} to {many}")
+            }
         };
-    }
-    if listed >= total {
-        return String::new();
-    }
-    let why = match limit {
-        Some(n) if listed < max.min(total) => {
+        let mut parts = Vec::new();
+        if l.new > 0 {
+            parts.push(one_or(l.new, "the unread one", "the unread ones"));
+        }
+        if l.retracted > 0 {
+            parts.push(one_or(
+                l.retracted,
+                "the retracted one",
+                "the retracted ones",
+            ));
+        }
+        if l.unread_dms_below > 0 {
+            parts.push(one_or(
+                l.unread_dms_below,
+                "an unread message below",
+                "unread messages below",
+            ));
+        }
+        if l.broadcasts_below > 0 {
+            parts.push(one_or(
+                l.broadcasts_below,
+                "a broadcast below",
+                "broadcasts below",
+            ));
+        }
+        let mut parts = parts.into_iter();
+        let split: Vec<String> = parts
+            .next()
+            .map(|p| p.replacen(" to ", " went to ", 1))
+            .into_iter()
+            .chain(parts)
+            .collect();
+        if split.is_empty() {
             format!(" (by your limit of {n})")
+        } else {
+            format!(" (by your limit of {n}, of which {})", and_list(&split))
         }
-        _ if listed >= max => format!(" (a read lists at most {max})"),
-        _ => String::new(),
-    };
-    let only_one = total == 1;
-    let total = if retracted_read {
-        format!("{total} (retracted ones included)")
     } else {
-        total.to_string()
+        String::new()
     };
-    match listed {
-        0 if only_one => {
-            format!("; the 1 you have read before is left out{why}")
+    Some(match k {
+        0 if total == 1 => {
+            format!("the 1 you have read before is left out{why}")
         }
-        0 => format!("; the {total} you have read before are left out{why}"),
+        0 => format!("the {total} you have read before are left out{why}"),
         1 => format!(
-            "; of the {total} you have read before, the latest is listed{why}"
+            "the latest of the {total} you have read before is listed{why}"
         ),
-        n => format!(
-            "; of the {total} you have read before, the latest {n} are listed{why}"
+        k => format!(
+            "the latest {k} of the {total} you have read before are listed{why}"
         ),
-    }
+    })
 }
 
 /// The inbox's operator section (0.132): the messages from the agent's own
@@ -1726,93 +1877,97 @@ pub(super) fn format_operator_section(
     if let Some(first) = messages.first() {
         // Counted by what the agent will find: a retracted one is not news
         // to read (betas of 0.133), and the header has no "(s)" and no
-        // second colon
-        let retracted = messages
-            .iter()
-            .filter(|m| matches!(m.content, OperatorMessageContent::Retracted))
-            .count();
-        let new = messages
-            .iter()
-            .filter(|m| {
-                m.state == InboxState::Unread
-                    && !matches!(m.content, OperatorMessageContent::Retracted)
-            })
-            .count();
-        let read = messages.len() - new - retracted;
-        let states: Vec<(usize, &str)> = [
-            (new, "unread until now"),
-            (
-                retracted,
-                if retracted == 1 {
-                    "retracted before you read it"
-                } else {
-                    "retracted before you read them"
-                },
-            ),
-            (read, "read before"),
-        ]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .collect();
-        // How many of those read before were listed, against the server's
-        // count of them all: a retracted one read before is among both
-        // (beta round 10: "2 of 3 read before shown (by the limit you
-        // set …)" with no limit set, the third being a retracted one). An
-        // older server sends no total (0)
-        let read_max =
-            crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX;
-        let read_listed = messages
-            .iter()
-            .filter(|m| m.state != InboxState::Unread)
-            .count();
-        let read_total = usize::try_from(inbox.operator_read).unwrap_or(0);
-        let mut counts = match states.as_slice() {
-            [(n, state)] => all_in_one_state(*n, state),
-            states => format!(
-                "{}, {}",
-                plural(messages.len() as u64, "message", "messages"),
-                and_list(
-                    &states
-                        .iter()
-                        .map(|(n, state)| format!("{n} {state}"))
-                        .collect::<Vec<_>>()
-                )
-            ),
+        // second colon. It leads with what is true of them all, then what
+        // is listed (beta round 11: "3 messages, all read before; of the 5
+        // …" read as a total of 3)
+        let count = |unread: bool, retracted: bool| {
+            messages
+                .iter()
+                .filter(|m| {
+                    (m.state == InboxState::Unread) == unread
+                        && matches!(
+                            m.content,
+                            OperatorMessageContent::Retracted
+                        ) == retracted
+                })
+                .count()
         };
-        // A retracted one read before is among both counts, and not
-        // among the header's "read before" (review of 0.151.1)
-        let retracted_read = messages.iter().any(|m| {
-            m.state != InboxState::Unread
-                && matches!(m.content, OperatorMessageContent::Retracted)
-        });
-        counts.push_str(&operator_read_note(
-            read_listed,
-            read_total,
-            read_max as usize,
-            limit,
-            retracted_read,
-        ));
+        let (new, retracted_new) = (count(true, false), count(true, true));
+        let (read, retracted_read) = (count(false, false), count(false, true));
         // The server's count of unread ones takes in retracted ones too,
         // but only those this read took (a retracted one read before is
         // listed again among the read)
-        let retracted_new = messages
-            .iter()
-            .filter(|m| {
-                m.state == InboxState::Unread
-                    && matches!(m.content, OperatorMessageContent::Retracted)
-            })
-            .count();
-        let waiting = inbox.operator_unread - (new + retracted_new) as i64;
+        let waiting = usize::try_from(
+            inbox.operator_unread - (new + retracted_new) as i64,
+        )
+        .unwrap_or(0);
+        let below = |broadcast: bool| {
+            inbox
+                .messages
+                .iter()
+                .filter(|m| {
+                    m.state_or_read_at() != InboxState::Read
+                        && m.is_broadcast() == broadcast
+                })
+                .count()
+        };
+        let listing = OperatorListing {
+            new,
+            retracted: retracted_new + retracted_read,
+            retracted_read,
+            read,
+            read_total: usize::try_from(inbox.operator_read).unwrap_or(0),
+            unread_dms_below: below(false),
+            broadcasts_below: below(true),
+        };
+        let mut clauses = Vec::new();
+        if new > 0 {
+            clauses.push(plural(
+                new as u64,
+                "message unread until now",
+                "messages unread until now",
+            ));
+        } else if retracted_new == 0 && waiting == 0 {
+            clauses.push("none unread".to_string());
+        }
+        // Counted as listed: older ones may be left out with those read
+        // before, and the clause on those says so
+        match listing.retracted {
+            0 => {}
+            1 => {
+                clauses.push("1 retracted before you read it is listed".into())
+            }
+            n => clauses
+                .push(format!("{n} retracted before you read them are listed")),
+        }
+        let read_max =
+            crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX;
+        clauses.extend(operator_read_note(&listing, read_max as usize, limit));
         if waiting > 0 {
-            counts.push_str(&format!(
-                "; {} for your next read",
-                plural(
-                    waiting as u64,
-                    "more unread one waits",
-                    "more unread ones wait"
-                )
+            // The operator's unread are the first a limit takes: one that
+            // cut them is all spent on them (beta round 11)
+            let by_limit = limit
+                .filter(|&n| new + retracted_new >= n as usize)
+                .map(|n| format!(" (by your limit of {n})"))
+                .unwrap_or_default();
+            clauses.push(format!(
+                "{} for your next read{by_limit}",
+                if new + retracted_new > 0 {
+                    plural(
+                        waiting as u64,
+                        "more unread one waits",
+                        "more unread ones wait",
+                    )
+                } else {
+                    plural(
+                        waiting as u64,
+                        "unread one waits",
+                        "unread ones wait",
+                    )
+                }
             ));
         }
+        let counts = clauses.join("; ");
         out.push_str(&format!(
             "From your operator, {}: {counts}. {}\n",
             quoted(&one_line(&first.from.display_name)),

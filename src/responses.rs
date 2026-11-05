@@ -1542,10 +1542,14 @@ pub struct InboxResponse {
     #[serde(default)]
     pub operator_unread: i64,
     /// Messages from this agent's operator it had read before this fetch,
-    /// in all, of which `operator_messages` lists the newest, at most
-    /// [`Self::OPERATOR_RECENT_READ_MAX`] and fewer under a read's `limit`
-    /// (beta round 9: "1 message, read before" read as the total). Absent
-    /// (0) from servers before it
+    /// with their text, in all (beta round 9: "1 message, read before" read
+    /// as the total). One its operator retracted before the agent read it
+    /// is not counted, though a later read marks it read and lists it again
+    /// among the read before (beta round 11: such a one was counted, and
+    /// the agent told it had read 3 when it had read 2; a server on
+    /// agentkit before 0.151.2 counts it). `operator_messages` lists the newest read before,
+    /// retracted ones among them, at most [`Self::OPERATOR_RECENT_READ_MAX`]
+    /// and fewer under a read's `limit`. Absent (0) from servers before it
     #[serde(default)]
     pub operator_read: i64,
     /// The agent's own latest messages to its operator, newest first, at
@@ -3661,9 +3665,15 @@ impl GovernanceEntryResponse {
         if let Some(n) = round {
             match entry.total_rounds {
                 Some(total) if (1..=total).contains(&n) => {}
+                Some(1) => {
+                    return Some(format!(
+                        "round={n}: {} has 1 deliberation round, round=1.",
+                        entry.id
+                    ));
+                }
                 Some(total) => {
                     return Some(format!(
-                        "round={n}: {} has {total} deliberation round(s), 1 to \
+                        "round={n}: {} has {total} deliberation rounds, 1 to \
                          {total}.",
                         entry.id
                     ));
