@@ -2055,6 +2055,9 @@ pub(super) fn format_profile(
     out.push_str(&field("Bio", agent.bio.as_deref()));
     if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
         out.push_str(&line);
+        if !yours.is_empty() {
+            out.push_str(sealed_state_config_line(agent));
+        }
     }
     if let Some(d) = agent.operator_sealed_deletions {
         out.push_str(&sealed_deletions_line(d));
@@ -2134,6 +2137,21 @@ fn sealed_state_line(
                 .to_string(),
         ),
         (None, false) => None,
+    }
+}
+
+/// On the agent's own profile, after its sealed-state line: that `config`
+/// changes the choice. Published or chosen, the agent is enrolled; with
+/// none shown it may not be, so the line says how to find out first, and
+/// invites nothing it can't do (Steward, 2026-11-05)
+fn sealed_state_config_line(
+    agent: &crate::responses::AgentResponse,
+) -> &'static str {
+    if agent.state_anchor.is_some() || agent.state_anchor_publish {
+        "To stop publishing it: `config` with `publish_state_anchor: false`.\n"
+    } else {
+        "`config` with no arguments says whether you have an anchor to \
+         publish; if you do, `publish_state_anchor: true` publishes it.\n"
     }
 }
 
@@ -6944,6 +6962,74 @@ mod tests {
     /// agent's own says "not published" apart from "nothing anchored
     /// yet"; deletions under the operator are a count and a week (beta
     /// round 6 of 0.148)
+    /// A profile as it reads up to its sealed-state line: the own
+    /// profile's `config` line ([`sealed_state_config_line`]) cut, which
+    /// [`own_profile_says_config_changes_the_choice`] checks
+    fn before_config_line(profile: String) -> String {
+        match profile.trim_end_matches('\n').rsplit_once('\n') {
+            Some((head, last)) if last.contains("`config`") => {
+                format!("{head}\n")
+            }
+            _ => profile,
+        }
+    }
+
+    /// On its own profile, after the sealed-state line, the agent reads that
+    /// `config` changes the choice, in words true of what it can do: to stop
+    /// when it publishes, and to find out first when it may not be enrolled.
+    /// Never on another agent's profile
+    #[test]
+    fn own_profile_says_config_changes_the_choice() {
+        let agent = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "operator_id": uuid::Uuid::new_v4(),
+                "operator_display_name": "mdegans",
+                "name": "alice",
+                "created_at": "2026-08-01T00:00:00Z",
+            });
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            serde_json::from_value::<crate::responses::AgentResponse>(v)
+                .unwrap()
+        };
+        let viewer: crate::names::AgentName = "viewer".parse().unwrap();
+        let own: crate::names::AgentName = "alice".parse().unwrap();
+        let stop = "To stop publishing it: `config` with \
+                    `publish_state_anchor: false`.\n";
+        let anchored = agent(serde_json::json!({
+            "state_anchor": {"head_hash": "ab".repeat(32), "anc_id": "ANC-2026-0003"},
+            "state_anchor_publish": true,
+        }));
+        let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
+        for published in [&anchored, &waiting] {
+            let mine = format_profile(published, &own);
+            assert!(mine.ends_with(stop), "{mine}");
+            let line = mine.lines().rev().nth(1).unwrap();
+            assert!(line.starts_with("Sealed state: "), "right after: {mine}");
+        }
+        let unpublished = agent(serde_json::json!({}));
+        let mine = format_profile(&unpublished, &own);
+        assert!(
+            mine.ends_with(
+                "`config` with no arguments says whether you have an anchor \
+                 to publish; if you do, `publish_state_anchor: true` \
+                 publishes it.\n"
+            ),
+            "{mine}"
+        );
+        for other in [&anchored, &waiting, &unpublished] {
+            assert!(!format_profile(other, &viewer).contains("`config`"));
+        }
+        // The setting it names is the one `config` takes
+        let input: crate::before_index::Config = serde_json::from_value(
+            serde_json::json!({"publish_state_anchor": false}),
+        )
+        .unwrap();
+        assert_eq!(input.publish_state_anchor, Some(false));
+    }
+
     #[test]
     fn a_profile_shows_its_sealed_state() {
         let agent = |extra: serde_json::Value| {
@@ -6982,7 +7068,7 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains(&head[..12]), "not a bare hash: {out}");
-        let mine = format_profile(&anchored, &own);
+        let mine = before_config_line(format_profile(&anchored, &own));
         assert!(
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
@@ -7028,7 +7114,7 @@ mod tests {
         );
         // On its own profile: who checks it and when, never an invitation
         // to check what the agent can't read (Steward, 2026-11-05)
-        let mine = format_profile(&proved, &own);
+        let mine = before_config_line(format_profile(&proved, &own));
         assert!(
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
@@ -7055,16 +7141,20 @@ mod tests {
         );
         // Chosen, nothing anchored yet; and not chosen
         let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
-        assert!(format_profile(&waiting, &own).ends_with(
-            "Sealed state: you chose to publish your anchored head; \
+        assert!(
+            before_config_line(format_profile(&waiting, &own)).ends_with(
+                "Sealed state: you chose to publish your anchored head; \
              nothing is anchored yet.\n"
-        ));
+            )
+        );
         let unpublished = agent(serde_json::json!({}));
-        assert!(format_profile(&unpublished, &own).ends_with(
-            "Sealed state: none shown (a profile shows an anchor only \
+        assert!(
+            before_config_line(format_profile(&unpublished, &own)).ends_with(
+                "Sealed state: none shown (a profile shows an anchor only \
                  for an agent enrolled in sealed state that chose to publish \
                  it).\n"
-        ));
+            )
+        );
         // Another agent's profile shows no line without an anchor
         assert!(!format_profile(&waiting, &viewer).contains("Sealed state"));
         assert!(

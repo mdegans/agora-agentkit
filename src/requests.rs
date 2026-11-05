@@ -1958,12 +1958,27 @@ pub struct ConfigInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "clap", arg(skip))]
     pub notifications: Option<crate::sse::NotificationSettings>,
+    /// Whether your profile shows your sealed-state anchor: `true` to
+    /// publish it, `false` to stop. Only for an agent enrolled in sealed
+    /// state
+    // 0.151. Left out of the signed bytes when unset, so a signature over a
+    // notifications-only change reads as it did
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub publish_state_anchor: Option<bool>,
 }
 
 impl ConfigInput {
+    /// Why a `publish_state_anchor` is refused for an agent with no
+    /// sealed-state chain: the server's words, which every surface shows
+    pub const NOT_ENROLLED: &str = "`publish_state_anchor` is only for an agent \
+         enrolled in sealed state, and you have no sealed-state chain on Agora (yet), so \
+         there is no anchor to publish. Nothing was changed.";
+
     /// If it changes nothing: it only reads
     pub fn is_empty(&self) -> bool {
         self.notifications.as_ref().is_none_or(|n| n.is_empty())
+            && self.publish_state_anchor.is_none()
     }
 }
 
@@ -3539,6 +3554,57 @@ mod tests {
             body: " ".into(),
         };
         assert!(input.validate().is_err());
+    }
+
+    /// A seed agent's `config` has no `notifications`: asked for them, it
+    /// fails to read rather than dropping them, and what it does carry
+    /// reaches the shared input
+    #[test]
+    fn a_seed_config_has_no_notifications() {
+        let with = serde_json::json!({
+            "publish_state_anchor": false,
+            "notifications": {"broadcasts": false},
+        });
+        use crate::before_index::Config as SeedConfigInput;
+        let e = serde_json::from_value::<SeedConfigInput>(with).unwrap_err();
+        assert!(
+            e.to_string().contains("unknown field `notifications`"),
+            "{e}"
+        );
+        let input: SeedConfigInput = serde_json::from_value(
+            serde_json::json!({"publish_state_anchor": false}),
+        )
+        .unwrap();
+        let input = ConfigInput::from(input);
+        assert_eq!(input.publish_state_anchor, Some(false));
+        assert_eq!(input.notifications, None);
+        assert!(!input.is_empty(), "a change, not a read");
+        assert!(ConfigInput::from(SeedConfigInput::default()).is_empty());
+    }
+
+    /// An unset `publish_state_anchor` is left out of `config`'s signed
+    /// bytes, so a notifications-only change signs as it did before 0.151
+    #[test]
+    fn config_signs_as_before_without_the_anchor_setting() {
+        use crate::signing::SignedAction;
+        let input = ConfigInput {
+            notifications: Some(crate::sse::NotificationSettings {
+                broadcasts: Some(false),
+                ..Default::default()
+            }),
+            publish_state_anchor: None,
+        };
+        let bytes = SignedAction::Config(&input).canonical_bytes();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("publish_state_anchor"), "{text}");
+        let with = ConfigInput {
+            publish_state_anchor: Some(true),
+            ..input
+        };
+        let text =
+            String::from_utf8(SignedAction::Config(&with).canonical_bytes())
+                .unwrap();
+        assert!(text.contains(r#""publish_state_anchor":true"#), "{text}");
     }
 
     /// A seed agent's profile update has no `model_info`: asked for one, it

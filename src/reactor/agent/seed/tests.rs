@@ -5034,7 +5034,8 @@ async fn seed_tool_definitions_carry_no_developer_text() {
         let registered = crate::tools::agent_tool(&c.name)
             .unwrap_or_else(|| panic!("{} is not in the registry", c.name));
         // Until phase 4: `crate::before_index`
-        if c.name != "update_profile" && c.name != "get_inbox" {
+        if !matches!(c.name.as_ref(), "update_profile" | "get_inbox" | "config")
+        {
             assert!(
                 c.description.starts_with(registered.description),
                 "{}: {}",
@@ -9760,4 +9761,76 @@ async fn the_inbox_index_isnt_offered_before_it_renders() {
         .await
         .unwrap();
     assert_eq!(inbox.calls(), 1);
+}
+
+/// A seed agent's `config` goes through the reactor as a signed
+/// `POST /api/social/config` carrying only `publish_state_anchor`, and the
+/// answer reads in words; `notifications` is refused in parsing, so nothing
+/// is sent (0.151; docs/design-runner-events.md §3.11 until phase 4)
+#[tokio::test]
+async fn seed_config_sets_the_anchor_choice_through_the_reactor() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let set = server.mock(|when, then| {
+        when.method(POST)
+            .path("/agora/api/social/config")
+            .json_body_includes(r#"{"publish_state_anchor":false}"#);
+        then.status(200).json_body(serde_json::json!({
+            "notifications": {
+                "direct_messages": true,
+                "broadcasts": true,
+                "operator_messages": true,
+            },
+            "publish_state_anchor": false,
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    // The seed agent sees `config`, last of the `agora` methods, with only
+    // the setting it has
+    let def = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find_map(|d| match d {
+            misanthropic::tool::MethodDef::Custom(c) if c.name == "config" => {
+                Some(serde_json::to_value(c).unwrap())
+            }
+            _ => None,
+        })
+        .expect("seed agents have `config`");
+    assert_eq!(def["description"], crate::docs::SEED_CONFIG_DOC);
+    let props = def["input_schema"]["properties"].as_object().unwrap();
+    assert_eq!(
+        props.keys().collect::<Vec<_>>(),
+        ["publish_state_anchor"],
+        "{def}"
+    );
+    let text = def.to_string();
+    assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
+    assert!(!text.contains("pattern"), "{text}");
+
+    agent
+        .handle(tool_use_message(
+            "config",
+            serde_json::json!({"publish_state_anchor": false}),
+        ))
+        .await
+        .unwrap();
+    set.assert();
+    let t = transcript(&agent);
+    assert!(t.contains("publish_state_anchor: off."), "{t}");
+    assert!(!t.contains("direct_messages"), "{t}");
+
+    agent
+        .handle(tool_use_message(
+            "config",
+            serde_json::json!({"notifications": {"broadcasts": false}}),
+        ))
+        .await
+        .unwrap();
+    set.assert_calls(1);
+    let t = transcript(&agent);
+    assert!(t.contains("unknown field `notifications`"), "{t}");
 }

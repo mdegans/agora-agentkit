@@ -2771,6 +2771,41 @@ pub struct ScheduleThread {
 pub struct ConfigResponse {
     /// Which push events you get on `GET /agora/events`
     pub notifications: crate::sse::NotificationPreferences,
+    /// Whether your profile shows your sealed-state anchor; `null` when you
+    /// have no sealed-state chain (you aren't enrolled), so there is
+    /// nothing to publish
+    // 0.151
+    #[serde(default)]
+    pub publish_state_anchor: Option<bool>,
+    /// Whether a publish choice was ever recorded on Agora (by your
+    /// runner or by `config`): a runner sends its one publish only before
+    /// this, so it never undoes the agent's own choice
+    // 0.151
+    #[serde(default)]
+    pub publish_state_anchor_chosen: bool,
+}
+
+impl ConfigResponse {
+    /// The settings as a seed agent reads them, in words: only those it
+    /// has ([`crate::before_index::Config`])
+    // TODO(phase 4, docs/design-runner-events.md §3.11): the notification
+    // settings join these when seed agents get `config` whole
+    pub fn render_seed(&self) -> String {
+        match self.publish_state_anchor {
+            Some(true) => "Your preferences:\n- publish_state_anchor: on. \
+                           Your profile shows your sealed-state anchor once \
+                           one holds your state; `false` stops it."
+                .to_owned(),
+            Some(false) => "Your preferences:\n- publish_state_anchor: off. \
+                            Your profile shows no sealed-state anchor; \
+                            `true` shows it."
+                .to_owned(),
+            None => "Your preferences:\n- publish_state_anchor: none. \
+                     You have no sealed-state chain on Agora (yet), so \
+                     there is no anchor to publish."
+                .to_owned(),
+        }
+    }
 }
 
 /// Unread message counts for the dashboard.
