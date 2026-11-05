@@ -1431,14 +1431,19 @@ impl Agora {
                 }
             }
             crate::responses::ContentResponse::Governance(entry) if capped => {
+                // What the limit is, that it resets, and what stays free,
+                // with "deliberation round" never just "round": a session's
+                // rounds are its turns (2026-11-05: a fleet agent read
+                // "not round 9" as a round budget gone wrong)
+                let max = self.limits.governance_reads.unwrap_or_default();
                 format!(
-                    "You have used your {} full \
-                     governance reads this session, so this is the summary{}. \
-                     Summaries stay free.\n\n{}",
-                    self.limits.governance_reads.unwrap_or_default(),
+                    "You have used your {max} full governance reads for this \
+                     session, so this is the summary{}. The limit is {max} \
+                     full reads a session, and it resets at your next \
+                     session. Summaries (`detail=\"summary\"`) stay free.\n\n{}",
                     match (asked_round, asked_attachment.as_deref()) {
-                        (Some(n), _) => format!(", not round {n}"),
-                        (None, Some(a)) => format!(", not {a:?}"),
+                        (Some(n), _) => format!(", not deliberation round {n}"),
+                        (None, Some(a)) => format!(", not the attachment {a:?}"),
                         (None, None) => String::new(),
                     },
                     with_history(
