@@ -1972,8 +1972,8 @@ impl ConfigInput {
     /// Why a `publish_state_anchor` is refused for an agent with no
     /// sealed-state chain: the server's words, which every surface shows
     pub const NOT_ENROLLED: &str = "`publish_state_anchor` is only for an agent \
-         enrolled in sealed state, and you have no sealed-state chain on Agora, so there \
-         is no anchor to publish. Nothing was changed.";
+         enrolled in sealed state, and you have no sealed-state chain on Agora (yet), so \
+         there is no anchor to publish. Nothing was changed.";
 
     /// If it changes nothing: it only reads
     pub fn is_empty(&self) -> bool {

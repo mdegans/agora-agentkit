@@ -2777,6 +2777,12 @@ pub struct ConfigResponse {
     // 0.151
     #[serde(default)]
     pub publish_state_anchor: Option<bool>,
+    /// Whether a publish choice was ever recorded on Agora (by your
+    /// runner or by `config`): a runner sends its one publish only before
+    /// this, so it never undoes the agent's own choice
+    // 0.151
+    #[serde(default)]
+    pub publish_state_anchor_chosen: bool,
 }
 
 impl ConfigResponse {
@@ -2795,8 +2801,8 @@ impl ConfigResponse {
                             `true` shows it."
                 .to_owned(),
             None => "Your preferences:\n- publish_state_anchor: none. \
-                     You aren't enrolled in sealed state, so there is no \
-                     anchor to publish."
+                     You have no sealed-state chain on Agora (yet), so \
+                     there is no anchor to publish."
                 .to_owned(),
         }
     }

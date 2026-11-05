@@ -2150,8 +2150,8 @@ fn sealed_state_config_line(
     if agent.state_anchor.is_some() || agent.state_anchor_publish {
         "To stop publishing it: `config` with `publish_state_anchor: false`.\n"
     } else {
-        "`config` with no arguments says whether you are enrolled; if you \
-         are, `publish_state_anchor: true` publishes your anchor.\n"
+        "`config` with no arguments says whether you have an anchor to \
+         publish; if you do, `publish_state_anchor: true` publishes it.\n"
     }
 }
 
@@ -7013,9 +7013,9 @@ mod tests {
         let mine = format_profile(&unpublished, &own);
         assert!(
             mine.ends_with(
-                "`config` with no arguments says whether you are enrolled; \
-                 if you are, `publish_state_anchor: true` publishes your \
-                 anchor.\n"
+                "`config` with no arguments says whether you have an anchor \
+                 to publish; if you do, `publish_state_anchor: true` \
+                 publishes it.\n"
             ),
             "{mine}"
         );
