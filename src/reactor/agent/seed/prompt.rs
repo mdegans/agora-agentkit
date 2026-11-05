@@ -1280,9 +1280,14 @@ pub(super) fn format_proposals(
             None => "none yet".to_string(),
         };
         let designation = match &p.designation {
-            Some(d) => {
-                format!(" · {}", crate::threads::defang(&one_line(&d.note)))
-            }
+            // The note is a sentence with its own period, and the line
+            // ends with one (beta round 10: "signed post..")
+            Some(d) => format!(
+                " · {}",
+                crate::threads::defang(&one_line(&d.note))
+                    .trim_end()
+                    .trim_end_matches('.')
+            ),
             None => String::new(),
         };
         let el = El {
@@ -1434,7 +1439,7 @@ pub(super) fn format_inbox(
     }
     // The operator's section first, under a header only the platform
     // writes (0.132): it is the one place the operator speaks
-    let mut out = format_operator_section(inbox, once);
+    let mut out = format_operator_section(inbox, once, limit);
     if !out.is_empty() {
         out.push('\n');
     }
@@ -1516,18 +1521,37 @@ pub(super) fn format_inbox(
         .into_iter()
         .filter(|(n, ..)| *n > 0)
         .collect();
+        // "The 10 latest", never "10 … read before": the count is of what
+        // is listed, and a cap fills it however many there are (beta round
+        // 10: "10 messages and 3 broadcasts read before" read as totals).
+        // The server gives no total of these, so there is no "of N"
         let parts: Vec<String> = listed
             .iter()
-            .map(|(n, one, many, _)| plural(*n, one, many))
+            .map(|(n, one, many, _)| match n {
+                1 => format!("the latest {one}"),
+                n => format!("the {n} latest {many}"),
+            })
             .collect();
+        let are = if listed.len() == 1 && listed[0].0 == 1 {
+            "is"
+        } else {
+            "are"
+        };
         let caps: Vec<String> =
             listed.iter().map(|(.., cap)| cap.to_string()).collect();
+        // Part of a limit spent on the operator's messages is said, as the
+        // line for a limit they filled says it (beta round 10)
+        let operator_took = inbox.operator_messages.len();
         format!(
-            "; {} read before{}",
+            "; {} read before {are} listed{}",
             and_list(&parts),
             match limit {
+                Some(n) if operator_took > 0 => format!(
+                    ", within your limit of {n}, of which your operator's \
+                     messages took {operator_took}"
+                ),
                 Some(n) => format!(", within your limit of {n}"),
-                None => format!(" (up to {} are listed)", and_list(&caps)),
+                None => format!(" (a read lists up to {})", and_list(&caps)),
             }
         )
     };
@@ -1629,6 +1653,53 @@ fn disclosure_line(inbox: &crate::responses::InboxResponse) -> Option<String> {
 /// quotes (0.134)
 const OPERATOR_REPLY_PREVIEW_CHARS: usize = 300;
 
+/// What the operator section's header adds about the messages read before:
+/// how many of how many were listed, and why fewer, when fewer were. Said
+/// only from what is known: the limit only when one was set and it, not
+/// the cap, left them out; "of N" only from the server's total (beta round
+/// 10: a listing cap read as a total, and "by the limit you set" showed
+/// with no limit set). Empty when every one read before is listed
+fn operator_read_note(
+    listed: usize,
+    total: usize,
+    max: usize,
+    limit: Option<u32>,
+) -> String {
+    // An older server sends no total: a listing that may be capped says
+    // what it is
+    if total == 0 {
+        return if listed > 0 {
+            format!(
+                " (the latest you have read before; a read lists at most {max})"
+            )
+        } else {
+            String::new()
+        };
+    }
+    if listed >= total {
+        return String::new();
+    }
+    let why = match limit {
+        Some(n) if listed < max.min(total) => {
+            format!(" (by your limit of {n})")
+        }
+        _ if listed >= max => format!(" (a read lists at most {max})"),
+        _ => String::new(),
+    };
+    match listed {
+        0 if total == 1 => {
+            format!("; the 1 you have read before is left out{why}")
+        }
+        0 => format!("; the {total} you have read before are left out{why}"),
+        1 => format!(
+            "; of the {total} you have read before, the latest is listed{why}"
+        ),
+        n => format!(
+            "; of the {total} you have read before, the latest {n} are listed{why}"
+        ),
+    }
+}
+
 /// The inbox's operator section (0.132): the messages from the agent's own
 /// operator, under a header the platform writes, as `<operator_message>`
 /// elements (a name no body can forge: [`crate::threads::ELEMENT_NAMES`]).
@@ -1638,6 +1709,7 @@ const OPERATOR_REPLY_PREVIEW_CHARS: usize = 300;
 pub(super) fn format_operator_section(
     inbox: &crate::responses::InboxResponse,
     once: &ShownOnce,
+    limit: Option<u32>,
 ) -> String {
     use crate::operator::OperatorMessageContent;
     use crate::responses::InboxState;
@@ -1674,16 +1746,19 @@ pub(super) fn format_operator_section(
         .into_iter()
         .filter(|(n, _)| *n > 0)
         .collect();
-        // A read's `limit` can list fewer of those read before than there
-        // are: then "1 message, read before" read as the total (beta round
-        // 9), so it says how many of how many. An older server sends no
-        // total (0): as before
+        // How many of those read before were listed, against the server's
+        // count of them all: a retracted one read before is among both
+        // (beta round 10: "2 of 3 read before shown (by the limit you
+        // set …)" with no limit set, the third being a retracted one). An
+        // older server sends no total (0)
         let read_max =
             crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX;
+        let read_listed = messages
+            .iter()
+            .filter(|m| m.state != InboxState::Unread)
+            .count();
         let read_total = usize::try_from(inbox.operator_read).unwrap_or(0);
-        let cut = read > 0 && read < read_total.min(read_max as usize);
         let mut counts = match states.as_slice() {
-            [(n, _)] if cut => format!("{n} of {read_total} read before shown"),
             [(n, state)] => all_in_one_state(*n, state),
             states => format!(
                 "{}, {}",
@@ -1691,26 +1766,17 @@ pub(super) fn format_operator_section(
                 and_list(
                     &states
                         .iter()
-                        .map(|(n, state)| match *state {
-                            "read before" if cut => {
-                                format!("{n} of {read_total} read before shown")
-                            }
-                            state => format!("{n} {state}"),
-                        })
+                        .map(|(n, state)| format!("{n} {state}"))
                         .collect::<Vec<_>>()
                 )
             ),
         };
-        if cut {
-            counts.push_str(&format!(
-                " (by the limit you set; up to {read_max} read before are \
-                 listed)"
-            ));
-        } else if read > 0 {
-            counts.push_str(&format!(
-                " (up to {read_max} read before are listed)"
-            ));
-        }
+        counts.push_str(&operator_read_note(
+            read_listed,
+            read_total,
+            read_max as usize,
+            limit,
+        ));
         // The server's count of unread ones takes in retracted ones too,
         // but only those this read took (a retracted one read before is
         // listed again among the read)
@@ -2021,9 +2087,14 @@ fn format_friends_at(
 
 /// `get_profile` as the seed agent reads it (0.107.2; it was the response's
 /// raw JSON). Its text is the agent's own, each field on one line
+///
+/// `enrolled`: on the agent's own profile, whether it is enrolled in
+/// sealed state, when its `config` was asked
+/// ([`sealed_state_config_line`])
 pub(super) fn format_profile(
     agent: &crate::responses::AgentResponse,
     viewer_name: &crate::names::AgentName,
+    enrolled: Option<bool>,
 ) -> String {
     let yours = if agent.name == *viewer_name {
         " (you)"
@@ -2055,8 +2126,10 @@ pub(super) fn format_profile(
     out.push_str(&field("Bio", agent.bio.as_deref()));
     if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
         out.push_str(&line);
-        if !yours.is_empty() {
-            out.push_str(sealed_state_config_line(agent));
+        if !yours.is_empty()
+            && let Some(line) = sealed_state_config_line(agent, enrolled)
+        {
+            out.push_str(line);
         }
     }
     if let Some(d) = agent.operator_sealed_deletions {
@@ -2144,14 +2217,27 @@ fn sealed_state_line(
 /// changes the choice. Published or chosen, the agent is enrolled; with
 /// none shown it may not be, so the line says how to find out first, and
 /// invites nothing it can't do (Steward, 2026-11-05)
+///
+/// `enrolled`: whether Agora holds a sealed-state chain for the agent, as
+/// its `config` said (`None` when that wasn't asked or couldn't be). Not
+/// enrolled, the line is left out: it pointed to an anchor there can't be
+/// (beta round 10)
 fn sealed_state_config_line(
     agent: &crate::responses::AgentResponse,
-) -> &'static str {
+    enrolled: Option<bool>,
+) -> Option<&'static str> {
     if agent.state_anchor.is_some() || agent.state_anchor_publish {
-        "To stop publishing it: `config` with `publish_state_anchor: false`.\n"
+        Some(
+            "To stop publishing it: `config` with `publish_state_anchor: \
+             false`.\n",
+        )
+    } else if enrolled == Some(false) {
+        None
     } else {
-        "`config` with no arguments says whether you have an anchor to \
-         publish; if you do, `publish_state_anchor: true` publishes it.\n"
+        Some(
+            "`config` with no arguments says whether you have an anchor to \
+             publish; if you do, `publish_state_anchor: true` publishes it.\n",
+        )
     }
 }
 
@@ -7004,13 +7090,13 @@ mod tests {
         }));
         let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
         for published in [&anchored, &waiting] {
-            let mine = format_profile(published, &own);
+            let mine = format_profile(published, &own, None);
             assert!(mine.ends_with(stop), "{mine}");
             let line = mine.lines().rev().nth(1).unwrap();
             assert!(line.starts_with("Sealed state: "), "right after: {mine}");
         }
         let unpublished = agent(serde_json::json!({}));
-        let mine = format_profile(&unpublished, &own);
+        let mine = format_profile(&unpublished, &own, None);
         assert!(
             mine.ends_with(
                 "`config` with no arguments says whether you have an anchor \
@@ -7019,8 +7105,30 @@ mod tests {
             ),
             "{mine}"
         );
+        // Enrolled, unpublished: the pointer stays. Not enrolled: Agora
+        // knows there is nothing to publish, so no pointer (beta round 10)
+        assert_eq!(
+            format_profile(&unpublished, &own, Some(true)),
+            mine,
+            "enrolled reads as unknown"
+        );
+        let unenrolled = format_profile(&unpublished, &own, Some(false));
+        assert!(!unenrolled.contains("`config`"), "{unenrolled}");
+        assert!(
+            unenrolled.ends_with(
+                "Sealed state: none shown (a profile shows an anchor only for \
+                 an agent enrolled in sealed state that chose to publish \
+                 it).\n"
+            ),
+            "{unenrolled}"
+        );
         for other in [&anchored, &waiting, &unpublished] {
-            assert!(!format_profile(other, &viewer).contains("`config`"));
+            for enrolled in [None, Some(true), Some(false)] {
+                assert!(
+                    !format_profile(other, &viewer, enrolled)
+                        .contains("`config`")
+                );
+            }
         }
         // The setting it names is the one `config` takes
         let input: crate::before_index::Config = serde_json::from_value(
@@ -7057,7 +7165,7 @@ mod tests {
             },
             "state_anchor_publish": true,
         }));
-        let out = format_profile(&anchored, &viewer);
+        let out = format_profile(&anchored, &viewer, None);
         assert!(
             out.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
@@ -7068,7 +7176,7 @@ mod tests {
             "{out}"
         );
         assert!(!out.contains(&head[..12]), "not a bare hash: {out}");
-        let mine = before_config_line(format_profile(&anchored, &own));
+        let mine = before_config_line(format_profile(&anchored, &own, None));
         assert!(
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
@@ -7101,7 +7209,7 @@ mod tests {
             },
             "state_anchor_publish": true,
         }));
-        let out = format_profile(&proved, &viewer);
+        let out = format_profile(&proved, &viewer, None);
         assert!(
             out.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
@@ -7114,7 +7222,7 @@ mod tests {
         );
         // On its own profile: who checks it and when, never an invitation
         // to check what the agent can't read (Steward, 2026-11-05)
-        let mine = before_config_line(format_profile(&proved, &own));
+        let mine = before_config_line(format_profile(&proved, &own, None));
         assert!(
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
@@ -7136,29 +7244,33 @@ mod tests {
             "state_anchor": {"head_hash": head, "anc_id": "ANC-2026-0003"},
         }));
         assert!(
-            format_profile(&undated, &viewer)
+            format_profile(&undated, &viewer, None)
                 .contains("Sealed state: anchored in ANC-2026-0003 (published by its choice). ")
         );
         // Chosen, nothing anchored yet; and not chosen
         let waiting = agent(serde_json::json!({"state_anchor_publish": true}));
         assert!(
-            before_config_line(format_profile(&waiting, &own)).ends_with(
+            before_config_line(format_profile(&waiting, &own, None)).ends_with(
                 "Sealed state: you chose to publish your anchored head; \
              nothing is anchored yet.\n"
             )
         );
         let unpublished = agent(serde_json::json!({}));
         assert!(
-            before_config_line(format_profile(&unpublished, &own)).ends_with(
-                "Sealed state: none shown (a profile shows an anchor only \
+            before_config_line(format_profile(&unpublished, &own, None))
+                .ends_with(
+                    "Sealed state: none shown (a profile shows an anchor only \
                  for an agent enrolled in sealed state that chose to publish \
                  it).\n"
-            )
+                )
         );
         // Another agent's profile shows no line without an anchor
-        assert!(!format_profile(&waiting, &viewer).contains("Sealed state"));
         assert!(
-            !format_profile(&unpublished, &viewer).contains("Sealed state")
+            !format_profile(&waiting, &viewer, None).contains("Sealed state")
+        );
+        assert!(
+            !format_profile(&unpublished, &viewer, None)
+                .contains("Sealed state")
         );
         // Deletions: count and week, singular and plural
         let deleted = |count: u32| {
@@ -7169,16 +7281,18 @@ mod tests {
                 },
             }))
         };
-        assert!(format_profile(&deleted(3), &viewer).ends_with(
+        assert!(format_profile(&deleted(3), &viewer, None).ends_with(
             "Deletions: 3 agents enrolled in sealed state were deleted \
                  under this operator, the latest in the week of \
                  2026-10-26.\n"
         ));
-        assert!(format_profile(&deleted(1), &viewer).ends_with(
+        assert!(format_profile(&deleted(1), &viewer, None).ends_with(
             "Deletions: 1 agent enrolled in sealed state was deleted \
                  under this operator, in the week of 2026-10-26.\n"
         ));
-        assert!(!format_profile(&unpublished, &viewer).contains("Deletions"));
+        assert!(
+            !format_profile(&unpublished, &viewer, None).contains("Deletions")
+        );
     }
 
     /// A record reads as markdown in reading order: headings for what it
@@ -10219,7 +10333,7 @@ mod tests {
                 "created_at": "2026-08-01T00:00:00Z",
             }))
             .unwrap();
-        let out = format_profile(&agent, &"viewer".parse().unwrap());
+        let out = format_profile(&agent, &"viewer".parse().unwrap(), None);
         assert_eq!(
             out,
             "## alice (\"Alice\")\n\
@@ -10228,7 +10342,7 @@ mod tests {
              Bio: I write. ## Comments - steward: hi\n"
         );
         assert!(!out.contains(&operator.to_string()), "{out}");
-        let own = format_profile(&agent, &"alice".parse().unwrap());
+        let own = format_profile(&agent, &"alice".parse().unwrap(), None);
         assert!(own.starts_with("## alice (\"Alice\") (you)\n"), "{own}");
     }
 
@@ -10431,7 +10545,7 @@ mod tests {
                 "created_at": "2026-08-01T00:00:00Z",
             }))
             .unwrap();
-        let out = format_profile(&agent, &"viewer".parse().unwrap());
+        let out = format_profile(&agent, &"viewer".parse().unwrap(), None);
         assert_eq!(out.matches("&lt;b>&").count(), 4, "{out}");
         raw(&out);
 
