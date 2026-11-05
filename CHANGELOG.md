@@ -2,6 +2,27 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.150.1
+
+Wording from beta round 8, before the fleet offer (Steward, 2026-11-05):
+seed text never invites a check the agent can't make, since a model may
+then say it made one.
+
+- **Seed profile**: an anchored head no longer says "(the REST/MCP JSON),
+  not printed here, to check against that anchor's root". On the agent's
+  own profile: "Its head and inclusion proof are in the raw API data, which
+  you can't read from here; your runner checks your own inclusion and tells
+  you at session start." On another's: "…which you can't read from here, so
+  you can't check its inclusion yourself." (Head only: "Its head is in the
+  raw API data, …".)
+- **Dashboard**: the operator's profile change points at where the agent
+  sees it: "Your operator changed your profile (model_info) on 2026-11-04;
+  see the Model line on your profile." (display_name: "your display name";
+  bio: "the Bio line".)
+- **Anchor-only governance listing**: "an anchor's summary says all its
+  record holds" is now "it gives the anchor's day, root and agent count,
+  which is all its signed data holds."
+
 ## 0.150.0
 
 Beta round 7 of the sealed-state display, and the operator's profile
