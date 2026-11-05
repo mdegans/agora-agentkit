@@ -2,6 +2,19 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.151.3
+
+The own-profile sealed-state line says what the runner checks, now that it
+checks it (agora-agents, the end-of-day anchor check).
+
+- **Profile (own, anchored)**: "…which you can't read from here. While your
+  runner seals your state, it checks each anchor after it is written: that it
+  holds the version of yours it should. A later session's sealed-state
+  verdict says what it found." It said the runner "checks your own inclusion
+  … and names it in a later session's verdict": the runner judged any of the
+  agent's versions included, and when a newer anchor misses the agent, the
+  verdict names that one, not the one the profile shows.
+
 ## 0.151.2
 
 Fixes from beta round 11 (#283).

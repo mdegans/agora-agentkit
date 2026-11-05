@@ -2359,19 +2359,23 @@ fn sealed_state_line(
             // them: seed text never invites a check the agent can't make,
             // or it may say it made one (Steward, 2026-11-05; beta round 8:
             // "the REST/MCP JSON" puzzled). On its own profile, who does
-            // check and when
+            // check and when. What the runner checks, said as it checks it
+            // (the end-of-day check, 0.152): "names it" was untrue when a
+            // newer anchor misses the agent and the verdict names that one
             let data = match (anchor.proof.is_some(), own) {
                 (true, true) => {
                     "Its head and inclusion proof are in the raw API data, \
-                     which you can't read from here; your runner checks your \
-                     own inclusion after the anchor is written and names it \
-                     in a later session's sealed-state verdict."
+                     which you can't read from here. While your runner seals \
+                     your state, it checks each anchor after it is written: \
+                     that it holds the version of yours it should. A later \
+                     session's sealed-state verdict says what it found."
                 }
                 (false, true) => {
                     "Its head is in the raw API data, which you can't read \
-                     from here; your runner checks your own inclusion after \
-                     the anchor is written and names it in a later session's \
-                     sealed-state verdict."
+                     from here. While your runner seals your state, it checks \
+                     each anchor after it is written: that it holds the \
+                     version of yours it should. A later session's \
+                     sealed-state verdict says what it found."
                 }
                 (true, false) => {
                     "Its head and inclusion proof are in the raw API data, \
@@ -7373,10 +7377,11 @@ mod tests {
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published, as you chose). Its head is in \
-                 the raw API data, which you can't read from here; your \
-                 runner checks your own inclusion after the anchor is \
-                 written and names it in a later session's sealed-state \
-                 verdict.\n"
+                 the raw API data, which you can't read from here. While \
+                 your runner seals your state, it checks each anchor after \
+                 it is written: that it holds the version of yours it \
+                 should. A later session's sealed-state verdict says what \
+                 it found.\n"
             ),
             "{mine}"
         );
@@ -7420,9 +7425,10 @@ mod tests {
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published, as you chose). Its head and \
                  inclusion proof are in the raw API data, which you can't \
-                 read from here; your runner checks your own inclusion after \
-                 the anchor is written and names it in a later session's \
-                 sealed-state verdict.\n"
+                 read from here. While your runner seals your state, it \
+                 checks each anchor after it is written: that it holds the \
+                 version of yours it should. A later session's sealed-state \
+                 verdict says what it found.\n"
             ),
             "{mine}"
         );
