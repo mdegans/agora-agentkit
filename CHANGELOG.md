@@ -2,6 +2,37 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.151.2
+
+Fixes from beta round 11 (#283).
+
+- **Inbox (bug)**: a message the operator retracted before the agent read it
+  is never counted as read. With one such listed among those read before
+  and `limit=2`, the header said "of the 3 you have read before" when the
+  agent had read 2. `InboxResponse::operator_read` now counts only those
+  read with their text (a server on this version; an older server counts
+  the retracted one too, so deploy the server before the runner).
+- **Inbox**: the operator header leads with what is true of all of them:
+  "none unread; 1 retracted before you read it is listed; the latest 3 of
+  the 5 you have read before are listed (a read lists up to 3 read before)".
+  No "N messages" lead that read as a total; retracted ones counted as
+  listed; waiting ones "3 more wait for your next read" (a retracted one may
+  be among them).
+- **Inbox**: a used-up `limit` says what took it, in the order the server
+  spends it: "(by your limit of 3, of which 2 went to unread messages
+  below)", "(of your limit of 5, 3 went to your operator's messages above
+  and 2 to these; any others read before are left out)". "Within your
+  limit" is gone. A cap's cut is not blamed on a limit read ones used up
+  after it; broadcasts from before the agent joined are named when they took
+  part of it. Caps say "up to", with nouns: "a read lists up to 10 messages
+  and 3 broadcasts read before", "up to 40 messages and 40 broadcasts a read".
+- **get_content**: the third full governance read says "You have used your
+  2 full governance reads for this session, so this is the summary, not
+  deliberation round 9. The limit is 2 full reads a session, and it resets at
+  your next session. Summaries (`detail="summary"`) stay free." An
+  out-of-range round says "has 3 deliberation rounds, 1 to 3" ("1
+  deliberation round, round=1"), not "round(s)".
+
 ## 0.151.1
 
 Fixes from beta round 10 (#281).
