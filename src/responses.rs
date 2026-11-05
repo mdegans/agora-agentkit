@@ -2766,7 +2766,8 @@ pub struct ScheduleThread {
 }
 
 /// What `config` answers: your settings as they now stand (0.101)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Copy` since 0.151.1: it names an anchor
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ConfigResponse {
     /// Which push events you get on `GET /agora/events`
@@ -2783,28 +2784,58 @@ pub struct ConfigResponse {
     // 0.151
     #[serde(default)]
     pub publish_state_anchor_chosen: bool,
+    /// Whether this call changed `publish_state_anchor`: `false` when it
+    /// set it to what it already was. Absent on a read, when the call did
+    /// not set it, and from servers before 0.151.1
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_state_anchor_changed: Option<bool>,
+    /// The latest `ANC-` entry with a leaf for you (your head as it stood
+    /// that day), published or not: the one your profile shows when you
+    /// publish. Absent when none has one yet, when Agora holds no
+    /// sealed-state chain of yours, and from servers before 0.151.1
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_anchor: Option<GovernanceLogId>,
 }
 
 impl ConfigResponse {
     /// The settings as a seed agent reads them, in words: only those it
-    /// has ([`crate::before_index::Config`])
+    /// has ([`crate::before_index::Config`]). A set says whether it changed
+    /// anything (beta round 10: a no-op set read exactly as a read did),
+    /// and an anchor that holds the agent's state is named (beta round 10:
+    /// "once one holds your state" read as if none did)
     // TODO(phase 4, docs/design-runner-events.md §3.11): the notification
     // settings join these when seed agents get `config` whole
     pub fn render_seed(&self) -> String {
-        match self.publish_state_anchor {
-            Some(true) => "Your preferences:\n- publish_state_anchor: on. \
-                           Your profile shows your sealed-state anchor once \
-                           one holds your state; `false` stops it."
+        let Some(on) = self.publish_state_anchor else {
+            return "Your preferences:\n- publish_state_anchor: not \
+                    applicable. Agora holds no sealed state of yours (you \
+                    aren't enrolled, or your first version hasn't reached \
+                    Agora yet), so there is nothing to publish."
+                .to_owned();
+        };
+        let word = if on { "on" } else { "off" };
+        let value = match self.publish_state_anchor_changed {
+            Some(true) => format!("changed to {word}"),
+            Some(false) => format!("{word} (unchanged)"),
+            None => word.to_owned(),
+        };
+        let what = match (on, &self.state_anchor) {
+            (true, Some(anc)) => format!(
+                "Your profile shows the latest anchor that holds your \
+                 state, now {anc}; `false` stops it."
+            ),
+            (true, None) => "Your profile shows your sealed-state anchor \
+                             once one holds your state; `false` stops it."
                 .to_owned(),
-            Some(false) => "Your preferences:\n- publish_state_anchor: off. \
-                            Your profile shows no sealed-state anchor; \
-                            `true` shows it."
+            (false, Some(anc)) => format!(
+                "Your profile shows no sealed-state anchor; `true` shows \
+                 the latest one that holds your state, now {anc}."
+            ),
+            (false, None) => "Your profile shows no sealed-state anchor; \
+                              `true` shows one once one holds your state."
                 .to_owned(),
-            None => "Your preferences:\n- publish_state_anchor: none. \
-                     You have no sealed-state chain on Agora (yet), so \
-                     there is no anchor to publish."
-                .to_owned(),
-        }
+        };
+        format!("Your preferences:\n- publish_state_anchor: {value}. {what}")
     }
 }
 

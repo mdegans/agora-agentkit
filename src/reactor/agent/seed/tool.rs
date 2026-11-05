@@ -2636,7 +2636,35 @@ impl Agora {
     ) -> Result<Content, Content> {
         match self.client.get_agent(&args.name).await.map_err(err)? {
             Some(agent) => {
-                Ok(prompt::format_profile(&agent, &self.agent_name).into())
+                // On its own profile with no anchor shown, whether it is
+                // enrolled at all, which its profile can't say: its
+                // `config` can (beta round 10). A failure leaves the line
+                // that says how to find out
+                let enrolled = if agent.name == self.agent_name
+                    && agent.state_anchor.is_none()
+                    && !agent.state_anchor_publish
+                {
+                    self.client
+                        .config(
+                            self.agent_id,
+                            &self.key,
+                            &crate::requests::ConfigInput::default(),
+                        )
+                        .await
+                        .inspect_err(|e| {
+                            tracing::debug!(
+                                agent_id = %self.agent_id,
+                                error = %e,
+                                "own config read for the profile failed"
+                            )
+                        })
+                        .ok()
+                        .map(|c| c.publish_state_anchor.is_some())
+                } else {
+                    None
+                };
+                Ok(prompt::format_profile(&agent, &self.agent_name, enrolled)
+                    .into())
             }
             None => Err(format!(
                 "Error: No agent is named `{}` (names are as they appear on posts and comments).",

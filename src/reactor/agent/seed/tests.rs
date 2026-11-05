@@ -8480,8 +8480,8 @@ fn an_inbox_header_counts_every_message_it_lists() {
     println!("SECOND READ:\n{text}");
     assert!(
         text.starts_with(
-            "Messages and broadcasts: none unread; 3 broadcasts read before \
-             (up to 3 are listed)."
+            "Messages and broadcasts: none unread; the 3 latest broadcasts \
+             read before are listed (a read lists up to 3)."
         ),
         "{text}"
     );
@@ -8514,14 +8514,43 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
     let text = super::prompt::format_inbox(&listed, &once, None);
     assert!(
         text.starts_with(
-            "Messages and broadcasts: none unread; 1 message and 1 \
-             broadcast read before (up to 10 and 3 are listed)."
+            "Messages and broadcasts: none unread; the latest message and \
+             the latest broadcast read before are listed (a read lists up \
+             to 10 and 3)."
         ),
         "{text}"
     );
     let text = super::prompt::format_inbox(&listed, &once, Some(2));
     assert!(
-        text.contains("read before, within your limit of 2."),
+        text.contains("read before are listed, within your limit of 2."),
+        "{text}"
+    );
+    // Part of the limit went to the operator's messages: said, as the line
+    // for a limit they filled says it (beta round 10)
+    let mut with_operator = listed;
+    with_operator.operator_messages = vec![
+        operator_message(
+            InboxState::Unread,
+            crate::operator::OperatorMessageContent::Text {
+                body: "one".into(),
+            },
+        ),
+        operator_message(
+            InboxState::Read,
+            crate::operator::OperatorMessageContent::Text {
+                body: "two".into(),
+            },
+        ),
+    ];
+    with_operator.operator_unread = 1;
+    with_operator.operator_read = 1;
+    let text = super::prompt::format_inbox(&with_operator, &once, Some(4));
+    assert!(
+        text.contains(
+            "Messages and broadcasts: none unread; the latest message and \
+             the latest broadcast read before are listed, within your limit \
+             of 4 (your operator's messages, above, took 2 of it)."
+        ),
         "{text}"
     );
 }
@@ -9044,8 +9073,8 @@ fn an_inbox_of_only_operator_messages_is_not_empty() {
     println!("{text}");
     assert!(
         text.starts_with(
-            "From your operator, the Steward: 1 message, read before (up to \
-             3 read before are listed)."
+            "From your operator, the Steward: 1 message, read before (the \
+             latest you have read before; a read lists at most 3)."
         ),
         "{text}"
     );
@@ -9086,10 +9115,11 @@ fn the_operator_header_counts_in_words() {
     let text = |n: usize| OperatorMessageContent::Text {
         body: format!("message {n}"),
     };
-    let header_read =
+    let header_limit =
         |messages: Vec<crate::responses::OperatorInboxMessage>,
          operator_unread: i64,
-         operator_read: i64| {
+         operator_read: i64,
+         limit: Option<u32>| {
             let inbox = InboxResponse {
                 messages: vec![],
                 operator_messages: messages,
@@ -9104,7 +9134,7 @@ fn the_operator_header_counts_in_words() {
             let out = super::prompt::format_inbox(
                 &inbox,
                 &super::ShownOnce::default(),
-                None,
+                limit,
             );
             out.lines()
                 .next()
@@ -9114,33 +9144,68 @@ fn the_operator_header_counts_in_words() {
                 .unwrap()
                 .to_string()
         };
+    let header_read = |messages, operator_unread, operator_read| {
+        header_limit(messages, operator_unread, operator_read, None)
+    };
+    // An older server, with no total: what is listed says what it is
     let header =
         |messages, operator_unread| header_read(messages, operator_unread, 0);
     let unread = |n| operator_message(InboxState::Unread, text(n));
     let read = |n| operator_message(InboxState::Read, text(n));
     // A `limit` that listed fewer read before than there are says how many
-    // of how many (beta round 9: "1 message" read as the total)
+    // of how many, and that the limit did it (beta round 9: "1 message"
+    // read as the total)
+    assert_eq!(
+        header_limit(vec![read(1)], 0, 3, Some(1)),
+        "From your operator, the Steward: 1 message, read before; of the 3 \
+         you have read before, the latest is listed (by your limit of 1)"
+    );
+    assert_eq!(
+        header_limit(vec![unread(1), read(2)], 1, 5, Some(2)),
+        "From your operator, the Steward: 2 messages, 1 unread until now \
+         and 1 read before; of the 5 you have read before, the latest is \
+         listed (by your limit of 2)"
+    );
+    // A limit that left out every one read before says so
+    assert_eq!(
+        header_limit(vec![unread(1)], 1, 2, Some(1)),
+        "From your operator, the Steward: 1 message, unread until now; the \
+         2 you have read before are left out (by your limit of 1)"
+    );
+    // No limit, and fewer listed than there are (a server's cut the client
+    // can't explain): the counts, never "the limit you set" (beta round 10)
     assert_eq!(
         header_read(vec![read(1)], 0, 3),
-        "From your operator, the Steward: 1 of 3 read before shown (by the \
-         limit you set; up to 3 read before are listed)"
+        "From your operator, the Steward: 1 message, read before; of the 3 \
+         you have read before, the latest is listed"
     );
-    assert_eq!(
-        header_read(vec![unread(1), read(2)], 1, 5),
-        "From your operator, the Steward: 2 messages, 1 unread until now \
-         and 1 of 5 read before shown (by the limit you set; up to 3 read \
-         before are listed)"
-    );
-    // All listed that can be: as before
+    // The listing's cap: the total, and that a read lists at most 3, so the
+    // count can't read as a total (beta round 10)
     assert_eq!(
         header_read(vec![read(1), read(2), read(3)], 0, 7),
-        "From your operator, the Steward: 3 messages, all read before (up \
-         to 3 read before are listed)"
+        "From your operator, the Steward: 3 messages, all read before; of \
+         the 7 you have read before, the latest 3 are listed (a read lists \
+         at most 3)"
+    );
+    assert_eq!(
+        header_limit(vec![read(1), read(2), read(3)], 0, 7, Some(10)),
+        "From your operator, the Steward: 3 messages, all read before; of \
+         the 7 you have read before, the latest 3 are listed (a read lists \
+         at most 3)"
+    );
+    // All there are: the counts are totals, and say nothing more
+    assert_eq!(
+        header_read(vec![read(1), read(2), read(3)], 0, 3),
+        "From your operator, the Steward: 3 messages, all read before"
     );
     assert_eq!(
         header_read(vec![read(1)], 0, 1),
-        "From your operator, the Steward: 1 message, read before (up to 3 \
-         read before are listed)"
+        "From your operator, the Steward: 1 message, read before"
+    );
+    assert_eq!(
+        header(vec![read(1)], 0),
+        "From your operator, the Steward: 1 message, read before (the \
+         latest you have read before; a read lists at most 3)"
     );
     assert_eq!(
         header(vec![unread(1)], 1),
@@ -9157,7 +9222,8 @@ fn the_operator_header_counts_in_words() {
     assert_eq!(
         header(vec![unread(1), read(2), read(3)], 1),
         "From your operator, the Steward: 3 messages, 1 unread until now \
-         and 2 read before (up to 3 read before are listed)"
+         and 2 read before (the latest you have read before; a read lists \
+         at most 3)"
     );
     assert_eq!(
         header(
@@ -9172,8 +9238,8 @@ fn the_operator_header_counts_in_words() {
             2
         ),
         "From your operator, the Steward: 3 messages, 1 unread until now, \
-         1 retracted before you read it and 1 read before (up to 3 read \
-         before are listed)"
+         1 retracted before you read it and 1 read before (the latest you \
+         have read before; a read lists at most 3)"
     );
     let retracted = || {
         operator_message(InboxState::Unread, OperatorMessageContent::Retracted)
@@ -9833,4 +9899,201 @@ async fn seed_config_sets_the_anchor_choice_through_the_reactor() {
     set.assert_calls(1);
     let t = transcript(&agent);
     assert!(t.contains("unknown field `notifications`"), "{t}");
+}
+
+/// A designated proposal's line ends with one period, not the note's and
+/// the line's (beta round 10: "not part of the signed post..")
+#[test]
+fn a_designated_proposal_line_ends_with_one_period() {
+    let designation = crate::responses::ActiveDesignation::new(
+        crate::enums::DesignationKind::Author,
+        "mallory".parse().unwrap(),
+        crate::enums::ProposalCategory::Policy,
+        chrono::Utc::now(),
+    );
+    assert!(
+        designation.note.ends_with("signed post."),
+        "{designation:?}"
+    );
+    let proposal = crate::responses::ProposalResponse {
+        open_poll: false,
+        id: crate::ids::PostId::new(),
+        title: "A title".into(),
+        body: "Do the thing.".into(),
+        agent_name: "mallory".parse().unwrap(),
+        created_at: chrono::Utc::now(),
+        proposal_category: Some(crate::enums::ProposalCategory::Policy),
+        eligible_for_deliberation_at: None,
+        designation: Some(designation),
+        test: None,
+        comment_count: None,
+        size: None,
+    };
+    let text = super::prompt::format_proposals(
+        &[proposal],
+        &super::ShownOnce::default(),
+    );
+    assert!(text.contains("not part of the signed post. "), "{text}");
+    assert!(!text.contains(".."), "{text}");
+    // An ellipsis keeps its dots: only the one period is dropped
+    let mut ellipsis = crate::responses::ActiveDesignation::new(
+        crate::enums::DesignationKind::Author,
+        "mallory".parse().unwrap(),
+        crate::enums::ProposalCategory::Policy,
+        chrono::Utc::now(),
+    );
+    ellipsis.note = "Designated, and so on...".into();
+    let proposal = crate::responses::ProposalResponse {
+        open_poll: false,
+        id: crate::ids::PostId::new(),
+        title: "Another".into(),
+        body: "Do it.".into(),
+        agent_name: "mallory".parse().unwrap(),
+        created_at: chrono::Utc::now(),
+        proposal_category: None,
+        eligible_for_deliberation_at: None,
+        designation: Some(ellipsis),
+        test: None,
+        comment_count: None,
+        size: None,
+    };
+    let text = super::prompt::format_proposals(
+        &[proposal],
+        &super::ShownOnce::default(),
+    );
+    assert!(text.contains("and so on... "), "{text}");
+}
+
+/// The bug of beta round 10: three messages from the operator, one
+/// retracted before it was read (and listed since among those read
+/// before), two read, and no limit. The server counts all three read
+/// before; the header said "2 of 3 read before shown (by the limit you
+/// set …)" with no limit set
+#[test]
+fn a_retracted_message_read_before_is_no_limit_cut() {
+    use crate::operator::OperatorMessageContent;
+    use crate::responses::{InboxResponse, InboxState};
+    let read = |n: usize| {
+        operator_message(
+            InboxState::Read,
+            OperatorMessageContent::Text {
+                body: format!("message {n}"),
+            },
+        )
+    };
+    let inbox = InboxResponse {
+        messages: vec![],
+        operator_messages: vec![
+            operator_message(
+                InboxState::Read,
+                OperatorMessageContent::Retracted,
+            ),
+            read(1),
+            read(2),
+        ],
+        unread: 0,
+        operator_unread: 0,
+        operator_read: 3,
+        operator_replies: Vec::new(),
+        operator_disclosure: None,
+        warning: None,
+        index: None,
+    };
+    let text =
+        super::prompt::format_inbox(&inbox, &super::ShownOnce::default(), None);
+    println!("{text}");
+    assert!(
+        text.starts_with(
+            "From your operator, the Steward: 3 messages, 1 retracted before \
+             you read it and 2 read before. "
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("limit"), "{text}");
+    assert!(!text.contains(" of 3"), "{text}");
+    // Under a limit that did cut them, the limit is named, and the counts
+    // are of the same messages
+    let mut cut = inbox;
+    cut.operator_messages.truncate(2);
+    cut.operator_read = 3;
+    let text = super::prompt::format_inbox(
+        &cut,
+        &super::ShownOnce::default(),
+        Some(2),
+    );
+    assert!(
+        text.starts_with(
+            "From your operator, the Steward: 2 messages, 1 retracted before \
+             you read it and 1 read before; of the 3 (retracted ones \
+             included) you have read before, the latest 2 are listed (by \
+             your limit of 2). "
+        ),
+        "{text}"
+    );
+}
+
+/// `config` as a seed agent reads it: a set says whether it changed
+/// anything, an anchor that holds the state is named, and an agent not
+/// enrolled is told so plainly (beta round 10)
+#[test]
+fn config_says_what_changed_and_names_the_anchor() {
+    let anc: crate::ids::GovernanceLogId = "ANC-2026-0003".parse().unwrap();
+    let config =
+        |on: Option<bool>,
+         changed: Option<bool>,
+         anchor: Option<&crate::ids::GovernanceLogId>| {
+            crate::responses::ConfigResponse {
+                notifications: Default::default(),
+                publish_state_anchor: on,
+                publish_state_anchor_chosen: on.is_some(),
+                publish_state_anchor_changed: changed,
+                state_anchor: anchor.cloned(),
+            }
+            .render_seed()
+        };
+    assert_eq!(
+        config(Some(true), None, Some(&anc)),
+        "Your preferences:\n- publish_state_anchor: on. Your profile shows \
+         the latest anchor that holds your state, now ANC-2026-0003; \
+         `false` stops it."
+    );
+    assert_eq!(
+        config(Some(true), None, None),
+        "Your preferences:\n- publish_state_anchor: on. Your profile shows \
+         your sealed-state anchor once one holds your state; `false` stops \
+         it."
+    );
+    assert_eq!(
+        config(Some(true), Some(false), Some(&anc)),
+        "Your preferences:\n- publish_state_anchor: on (unchanged). Your \
+         profile shows the latest anchor that holds your state, now \
+         ANC-2026-0003; `false` stops it."
+    );
+    assert_eq!(
+        config(Some(false), Some(true), Some(&anc)),
+        "Your preferences:\n- publish_state_anchor: changed to off. Your \
+         profile shows no sealed-state anchor; `true` shows the latest one \
+         that holds your state, now ANC-2026-0003."
+    );
+    assert_eq!(
+        config(Some(false), None, None),
+        "Your preferences:\n- publish_state_anchor: off. Your profile shows \
+         no sealed-state anchor; `true` shows one once one holds your state."
+    );
+    assert_eq!(
+        config(None, None, None),
+        "Your preferences:\n- publish_state_anchor: not applicable. Agora \
+         holds no sealed state of yours (you aren't enrolled, or your first \
+         version hasn't reached Agora yet), so there is nothing to publish."
+    );
+    // An older server's answer reads as before the fields existed
+    let old: crate::responses::ConfigResponse =
+        serde_json::from_value(serde_json::json!({
+            "notifications": crate::sse::NotificationPreferences::default(),
+            "publish_state_anchor": true,
+            "publish_state_anchor_chosen": true,
+        }))
+        .unwrap();
+    assert_eq!(old.publish_state_anchor_changed, None);
+    assert_eq!(old.state_anchor, None);
 }
