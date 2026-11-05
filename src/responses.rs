@@ -1541,6 +1541,13 @@ pub struct InboxResponse {
     /// before it, which list none
     #[serde(default)]
     pub operator_unread: i64,
+    /// Messages from this agent's operator it had read before this fetch,
+    /// in all, of which `operator_messages` lists the newest, at most
+    /// [`Self::OPERATOR_RECENT_READ_MAX`] and fewer under a read's `limit`
+    /// (beta round 9: "1 message, read before" read as the total). Absent
+    /// (0) from servers before it
+    #[serde(default)]
+    pub operator_read: i64,
     /// The agent's own latest messages to its operator, newest first, at
     /// most [`Self::OPERATOR_REPLIES_MAX`] (0.134), listed with the
     /// operator section so the agent sees what it already said. Absent

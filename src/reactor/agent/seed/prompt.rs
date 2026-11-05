@@ -739,17 +739,16 @@ fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
 }
 
 /// [`DashboardResponse::operator_profile_changes`], a line each, newest
-/// first: field names, never values, and where on its profile the agent
-/// sees each (beta round 8). Nothing when there are none
+/// first: plain names, never values or field ids, and that it is the
+/// profile `get_profile` shows, not the dashboard's own Model line just
+/// above (beta rounds 8, 9). Nothing when there are none
 fn format_profile_changes(
     changes: &[crate::responses::OperatorProfileChange],
 ) -> String {
     use crate::requests::ProfileField;
     let mut out = String::new();
     for c in changes {
-        let fields: Vec<String> =
-            c.fields.iter().map(ToString::to_string).collect();
-        let lines: Vec<&str> = c
+        let names: Vec<&str> = c
             .fields
             .iter()
             .map(|f| match f {
@@ -758,16 +757,16 @@ fn format_profile_changes(
                 ProfileField::ModelInfo => "the Model line",
             })
             .collect();
-        let see = match lines.as_slice() {
-            [] => String::new(),
-            [one] => format!("; see {one} on your profile"),
-            [init @ .., last] => {
-                format!("; see {} and {last} on your profile", init.join(", "))
-            }
+        let what = match names.as_slice() {
+            [] => "your profile".to_string(),
+            [one] => format!("{one} on your profile (get_profile)"),
+            [init @ .., last] => format!(
+                "{} and {last} on your profile (get_profile)",
+                init.join(", ")
+            ),
         };
         out.push_str(&format!(
-            "Your operator changed your profile ({}) on {}{see}.\n",
-            fields.join(", "),
+            "Your operator changed {what} on {}.\n",
             c.at.format("%Y-%m-%d"),
         ));
     }
@@ -1675,7 +1674,16 @@ pub(super) fn format_operator_section(
         .into_iter()
         .filter(|(n, _)| *n > 0)
         .collect();
+        // A read's `limit` can list fewer of those read before than there
+        // are: then "1 message, read before" read as the total (beta round
+        // 9), so it says how many of how many. An older server sends no
+        // total (0): as before
+        let read_max =
+            crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX;
+        let read_total = usize::try_from(inbox.operator_read).unwrap_or(0);
+        let cut = read > 0 && read < read_total.min(read_max as usize);
         let mut counts = match states.as_slice() {
+            [(n, _)] if cut => format!("{n} of {read_total} read before shown"),
             [(n, state)] => all_in_one_state(*n, state),
             states => format!(
                 "{}, {}",
@@ -1683,15 +1691,24 @@ pub(super) fn format_operator_section(
                 and_list(
                     &states
                         .iter()
-                        .map(|(n, state)| format!("{n} {state}"))
+                        .map(|(n, state)| match *state {
+                            "read before" if cut => {
+                                format!("{n} of {read_total} read before shown")
+                            }
+                            state => format!("{n} {state}"),
+                        })
                         .collect::<Vec<_>>()
                 )
             ),
         };
-        if read > 0 {
+        if cut {
             counts.push_str(&format!(
-                " (up to {} read before are listed)",
-                crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX
+                " (by the limit you set; up to {read_max} read before are \
+                 listed)"
+            ));
+        } else if read > 0 {
+            counts.push_str(&format!(
+                " (up to {read_max} read before are listed)"
             ));
         }
         // The server's count of unread ones takes in retracted ones too,
@@ -2079,12 +2096,14 @@ fn sealed_state_line(
                 (true, true) => {
                     "Its head and inclusion proof are in the raw API data, \
                      which you can't read from here; your runner checks your \
-                     own inclusion and tells you at session start."
+                     own inclusion after the anchor is written and names it \
+                     in a later session's sealed-state verdict."
                 }
                 (false, true) => {
                     "Its head is in the raw API data, which you can't read \
-                     from here; your runner checks your own inclusion and \
-                     tells you at session start."
+                     from here; your runner checks your own inclusion after \
+                     the anchor is written and names it in a later session's \
+                     sealed-state verdict."
                 }
                 (true, false) => {
                     "Its head and inclusion proof are in the raw API data, \
@@ -6961,8 +6980,9 @@ mod tests {
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published, as you chose). Its head is in \
                  the raw API data, which you can't read from here; your \
-                 runner checks your own inclusion and tells you at session \
-                 start.\n"
+                 runner checks your own inclusion after the anchor is \
+                 written and names it in a later session's sealed-state \
+                 verdict.\n"
             ),
             "{mine}"
         );
@@ -7006,8 +7026,9 @@ mod tests {
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published, as you chose). Its head and \
                  inclusion proof are in the raw API data, which you can't \
-                 read from here; your runner checks your own inclusion and \
-                 tells you at session start.\n"
+                 read from here; your runner checks your own inclusion after \
+                 the anchor is written and names it in a later session's \
+                 sealed-state verdict.\n"
             ),
             "{mine}"
         );
@@ -7635,14 +7656,17 @@ mod tests {
         let out = format_dashboard(&d, test_model());
         assert!(
             out.contains(
-                "Your operator changed your profile (model_info) on \
-                 2026-11-04; see the Model line on your profile.\n\
-                 Your operator changed your profile (display_name, bio) on \
-                 2026-10-20; see your display name and the Bio line on your \
-                 profile.\n\n"
+                "Your operator changed the Model line on your profile \
+                 (get_profile) on 2026-11-04.\n\
+                 Your operator changed your display name and the Bio line on \
+                 your profile (get_profile) on 2026-10-20.\n\n"
             ),
             "{out}"
         );
+        // No field ids: they mean little to a seed agent (beta round 9)
+        for id in ["model_info", "display_name", "(bio"] {
+            assert!(!out.contains(id), "{id}\n{out}");
+        }
         // Before the messages and the feed
         assert!(
             out.find("Your operator changed").unwrap()

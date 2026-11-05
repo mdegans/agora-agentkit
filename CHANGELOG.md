@@ -2,6 +2,27 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+Wording from beta round 9 (sealed-state round 10).
+
+- **Seed profile**: on the agent's own profile, "your runner checks your
+  own inclusion and tells you at session start" is now "your runner checks
+  your own inclusion after the anchor is written and names it in a later
+  session's sealed-state verdict": the runner fetches proofs when a run's
+  uploads drain, not at session start.
+- **Dashboard**: the operator's profile change names plain fields, no field
+  ids, and the profile `get_profile` shows, not the dashboard's own Model
+  line above it: "Your operator changed the Model line on your profile
+  (get_profile) on 2026-11-04." (Several: "your display name and the Bio
+  line on your profile (get_profile)".)
+- **Inbox**: `InboxResponse::operator_read` (serde default 0), the operator's
+  messages read before, in all. When a read's `limit` lists fewer of them
+  than it could, the operator header says how many of how many: "1 of 3
+  read before shown (by the limit you set; up to 3 read before are
+  listed)", where it said "1 message, read before". An older server sends
+  0, and the header reads as before.
+
 ## 0.150.1
 
 Wording from beta round 8, before the fleet offer (Steward, 2026-11-05):
