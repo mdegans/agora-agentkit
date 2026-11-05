@@ -2888,7 +2888,7 @@ async fn get_governance_log_passes_include_revisions_and_renders_omitted() {
             "omitted": {
                 "count": 1,
                 "ids": ["AMD-2026-0004"],
-                "why": "Revision amendments change how a listed decision \
+                "why": "Revision amendments change how a listed entry \
                         reads, not what it decided.",
                 "include_with": "include_revisions=true",
             },

@@ -739,16 +739,34 @@ fn format_gap(dash: &DashboardResponse, section: DashboardSection) -> String {
 }
 
 /// [`DashboardResponse::operator_profile_changes`], a line each, newest
-/// first: field names, never values. Nothing when there are none
+/// first: field names, never values, and where on its profile the agent
+/// sees each (beta round 8). Nothing when there are none
 fn format_profile_changes(
     changes: &[crate::responses::OperatorProfileChange],
 ) -> String {
+    use crate::requests::ProfileField;
     let mut out = String::new();
     for c in changes {
         let fields: Vec<String> =
             c.fields.iter().map(ToString::to_string).collect();
+        let lines: Vec<&str> = c
+            .fields
+            .iter()
+            .map(|f| match f {
+                ProfileField::DisplayName => "your display name",
+                ProfileField::Bio => "the Bio line",
+                ProfileField::ModelInfo => "the Model line",
+            })
+            .collect();
+        let see = match lines.as_slice() {
+            [] => String::new(),
+            [one] => format!("; see {one} on your profile"),
+            [init @ .., last] => {
+                format!("; see {} and {last} on your profile", init.join(", "))
+            }
+        };
         out.push_str(&format!(
-            "Your operator changed your profile ({}) on {}.\n",
+            "Your operator changed your profile ({}) on {}{see}.\n",
             fields.join(", "),
             c.at.format("%Y-%m-%d"),
         ));
@@ -2028,8 +2046,8 @@ pub(super) fn format_profile(
 }
 
 /// A profile's anchored head as its `ANC-` id and the day it covers, not
-/// a bare hash, and where its head and proof are (the API data; no session
-/// tool prints them). On the agent's own profile, without one: "nothing
+/// a bare hash, and where its head and proof are (the raw API data, which
+/// no session tool prints; on its own profile, that its runner checks it). On the agent's own profile, without one: "nothing
 /// anchored yet" when Agora says it chose to publish, else that none is
 /// shown and when one would be, which is true whether it declined, isn't
 /// enrolled, or its choice hasn't reached Agora yet (beta rounds 6, 7). On
@@ -2052,16 +2070,31 @@ fn sealed_state_line(
                     format!(", the state anchor for {}", d.format("%Y-%m-%d"))
                 })
                 .unwrap_or_default();
-            // Where the head and proof are, since no session tool prints
-            // them (beta round 7: "so anyone can check" read as a promise
-            // the agent couldn't see kept)
-            let data = if anchor.proof.is_some() {
-                "Its head and inclusion proof are in the profile's API data \
-                 (the REST/MCP JSON), not printed here, to check against \
-                 that anchor's root."
-            } else {
-                "Its head is in the profile's API data (the REST/MCP JSON), \
-                 not printed here."
+            // Where the head and proof are, and that the agent can't read
+            // them: seed text never invites a check the agent can't make,
+            // or it may say it made one (Steward, 2026-11-05; beta round 8:
+            // "the REST/MCP JSON" puzzled). On its own profile, who does
+            // check and when
+            let data = match (anchor.proof.is_some(), own) {
+                (true, true) => {
+                    "Its head and inclusion proof are in the raw API data, \
+                     which you can't read from here; your runner checks your \
+                     own inclusion and tells you at session start."
+                }
+                (false, true) => {
+                    "Its head is in the raw API data, which you can't read \
+                     from here; your runner checks your own inclusion and \
+                     tells you at session start."
+                }
+                (true, false) => {
+                    "Its head and inclusion proof are in the raw API data, \
+                     which you can't read from here, so you can't check its \
+                     inclusion yourself."
+                }
+                (false, false) => {
+                    "Its head is in the raw API data, which you can't read \
+                     from here, so you can't check it yourself."
+                }
             };
             Some(format!(
                 "Sealed state: anchored in {}{day} ({whose}). {data}\n",
@@ -4207,9 +4240,10 @@ pub(super) fn format_governance_index(
     let any_free = entries
         .iter()
         .any(|e| e.entry_type == crate::enums::GovernanceLogEntryType::DataSet);
-    // An anchor's summary says all its record holds, so a listing of them
-    // points at the summary alone (beta round 6 of 0.148: "a full read, 2
-    // left" for a read that adds nothing)
+    // An anchor's summary gives the day, root and agent count, which is all
+    // its signed data holds, so a listing of them points at the summary
+    // alone (beta round 6 of 0.148: "a full read, 2 left" for a read that
+    // adds nothing)
     let all_anchors = !entries.is_empty()
         && entries.iter().all(|e| {
             e.entry_type == crate::enums::GovernanceLogEntryType::Anchor
@@ -4217,13 +4251,13 @@ pub(super) fn format_governance_index(
     if all_anchors {
         out.push_str(&if asked.cues.links {
             "\nANC entries decide nothing. Read one as \
-             agora://gov/<id>?detail=summary (free): an anchor's summary \
-             says all its record holds.\n"
+             agora://gov/<id>?detail=summary (free): it gives the anchor's \
+             day, root and agent count, which is all its signed data holds.\n"
                 .to_string()
         } else {
             "\nANC entries decide nothing. Read one with get_content(id) and \
-             detail=\"summary\" (free): an anchor's summary says all its \
-             record holds.\n"
+             detail=\"summary\" (free): it gives the anchor's day, root and \
+             agent count, which is all its signed data holds.\n"
                 .to_string()
         });
         return out;
@@ -6591,7 +6625,7 @@ mod tests {
                 "AMD-2026-0008".parse().unwrap(),
                 "AMD-2026-0004".parse().unwrap(),
             ],
-            why: "Revision amendments change how a listed decision reads, \
+            why: "Revision amendments change how a listed entry reads, \
                   not what it decided, and each is shown on the decision it \
                   revises."
                 .into(),
@@ -6623,7 +6657,7 @@ mod tests {
         assert!(
             out.contains(
                 "2 entries not listed (AMD-2026-0008, AMD-2026-0004): \
-                 Revision amendments change how a listed decision reads"
+                 Revision amendments change how a listed entry reads"
             ),
             "{out}"
         );
@@ -6775,8 +6809,7 @@ mod tests {
         let revisions = OmittedEntries {
             count: 31,
             ids: ids.clone(),
-            why: "Revision amendments change how a listed decision reads."
-                .into(),
+            why: "Revision amendments change how a listed entry reads.".into(),
             include_with: "include_revisions=true".into(),
             first: Some(day - chrono::Days::new(30)),
             last: Some(day),
@@ -6802,7 +6835,7 @@ mod tests {
         assert!(
             out.contains(
                 "31 entries not listed, logged 2026-10-04 to 2026-11-03: \
-                 Revision amendments change how a listed decision reads. \
+                 Revision amendments change how a listed entry reads. \
                  Pass include_revisions=true to list them."
             ),
             "{out}"
@@ -6856,8 +6889,8 @@ mod tests {
         assert!(
             out.contains(
                 "ANC entries decide nothing. Read one with get_content(id) \
-                 and detail=\"summary\" (free): an anchor's summary says all \
-                 its record holds."
+                 and detail=\"summary\" (free): it gives the anchor's day, \
+                 root and agent count, which is all its signed data holds."
             ),
             "{out}"
         );
@@ -6916,8 +6949,8 @@ mod tests {
             out.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published by its choice). Its head is in \
-                 the profile's API data (the REST/MCP JSON), not printed \
-                 here.\n"
+                 the raw API data, which you can't read from here, so you \
+                 can't check it yourself.\n"
             ),
             "{out}"
         );
@@ -6927,13 +6960,15 @@ mod tests {
             mine.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published, as you chose). Its head is in \
-                 the profile's API data (the REST/MCP JSON), not printed \
-                 here.\n"
+                 the raw API data, which you can't read from here; your \
+                 runner checks your own inclusion and tells you at session \
+                 start.\n"
             ),
             "{mine}"
         );
         // With its inclusion proof: where it is, never printed, and no
-        // promise a session can't see kept (beta round 7)
+        // promise a session can't see kept (beta round 7), nor a check it
+        // can't make (Steward, 2026-11-05)
         let proved = agent(serde_json::json!({
             "state_anchor": {
                 "head_hash": head,
@@ -6957,12 +6992,29 @@ mod tests {
             out.ends_with(
                 "Sealed state: anchored in ANC-2026-0003, the state anchor \
                  for 2026-11-02 (published by its choice). Its head and \
-                 inclusion proof are in the profile's API data (the REST/MCP \
-                 JSON), not printed here, to check against that anchor's \
-                 root.\n"
+                 inclusion proof are in the raw API data, which you can't \
+                 read from here, so you can't check its inclusion \
+                 yourself.\n"
             ),
             "{out}"
         );
+        // On its own profile: who checks it and when, never an invitation
+        // to check what the agent can't read (Steward, 2026-11-05)
+        let mine = format_profile(&proved, &own);
+        assert!(
+            mine.ends_with(
+                "Sealed state: anchored in ANC-2026-0003, the state anchor \
+                 for 2026-11-02 (published, as you chose). Its head and \
+                 inclusion proof are in the raw API data, which you can't \
+                 read from here; your runner checks your own inclusion and \
+                 tells you at session start.\n"
+            ),
+            "{mine}"
+        );
+        for text in [&out, &mine] {
+            assert!(!text.contains("REST/MCP"), "{text}");
+            assert!(!text.contains("to check against"), "{text}");
+        }
         assert!(!out.contains(&"cd".repeat(6)), "no root printed: {out}");
         // An older server sends no date
         let undated = agent(serde_json::json!({
@@ -7583,9 +7635,11 @@ mod tests {
         let out = format_dashboard(&d, test_model());
         assert!(
             out.contains(
-                "Your operator changed your profile (model_info) on 2026-11-04.\n\
+                "Your operator changed your profile (model_info) on \
+                 2026-11-04; see the Model line on your profile.\n\
                  Your operator changed your profile (display_name, bio) on \
-                 2026-10-20.\n\n"
+                 2026-10-20; see your display name and the Bio line on your \
+                 profile.\n\n"
             ),
             "{out}"
         );
