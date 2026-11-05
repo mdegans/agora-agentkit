@@ -1512,30 +1512,58 @@ pub(super) fn format_inbox(
         let rest: Vec<String> = first.into_iter().chain(parts).collect();
         format!("of your limit of {n}, {}", and_list(&rest))
     };
+    // The limit cut the unread only when what is listed before the read
+    // ones filled it: else a cap did, and the limit went to read ones
+    // after them (review of 0.151.2)
+    let operator_unread_took = inbox
+        .operator_messages
+        .iter()
+        .filter(|m| m.state == InboxState::Unread)
+        .count();
+    let cut_unread = used_up.filter(|&n| {
+        operator_unread_took + new + before_joined_n >= n as usize
+    });
     let unread = if inbox.unread == 0 {
         "none unread".to_string()
     } else if inbox.unread > new as i64 {
         // What a read returns: by the agent's `limit`, when that is what
-        // cut it (0.123.0)
-        let per_read = match used_up {
-            Some(n) if operator_took > 0 => format!(
-                "by your limit of {n}, of which your operator's {} above \
-                 took {operator_took}",
-                if operator_took == 1 {
-                    "message"
-                } else {
-                    "messages"
+        // cut it (0.123.0), with what else took it; else the caps, one
+        // each for messages and broadcasts (review of 0.151.2)
+        let per_read = match cut_unread {
+            Some(n) => {
+                let mut took = Vec::new();
+                if operator_unread_took > 0 {
+                    took.push(format!(
+                        "your operator's {} above took {operator_unread_took}",
+                        if operator_unread_took == 1 {
+                            "message"
+                        } else {
+                            "messages"
+                        }
+                    ));
                 }
-            ),
-            Some(n) => format!("by your limit of {n}"),
-            None => format!(
-                "up to {} a read",
-                crate::responses::InboxResponse::UNREAD_MAX
-            ),
+                if before_joined_n > 0 {
+                    took.push(format!(
+                        "broadcasts from before you joined took {before_joined_n}"
+                    ));
+                }
+                if took.is_empty() {
+                    format!("by your limit of {n}")
+                } else {
+                    format!(
+                        "by your limit of {n}, of which {}",
+                        and_list(&took)
+                    )
+                }
+            }
+            None => {
+                let max = crate::responses::InboxResponse::UNREAD_MAX;
+                format!("up to {max} messages and {max} broadcasts a read")
+            }
         };
         format!(
             "{} unread until now, of which these are {new} ({per_read}; the \
-             rest stay unread for your next read)",
+             rest stay unread for a later read)",
             inbox.unread,
         )
     } else {
@@ -1560,7 +1588,7 @@ pub(super) fn format_inbox(
         // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
         // said it)
         match used_up {
-            Some(_) if inbox.unread > new as i64 => {
+            Some(_) if cut_unread.is_some() && inbox.unread > new as i64 => {
                 "; any read before are left out, by the same limit".to_string()
             }
             Some(n) => format!(
@@ -1952,18 +1980,12 @@ pub(super) fn format_operator_section(
                 .unwrap_or_default();
             clauses.push(format!(
                 "{} for your next read{by_limit}",
+                // Not "unread": a retracted one may be among them (review
+                // of 0.151.2)
                 if new + retracted_new > 0 {
-                    plural(
-                        waiting as u64,
-                        "more unread one waits",
-                        "more unread ones wait",
-                    )
+                    plural(waiting as u64, "more waits", "more wait")
                 } else {
-                    plural(
-                        waiting as u64,
-                        "unread one waits",
-                        "unread ones wait",
-                    )
+                    plural(waiting as u64, "message waits", "messages wait")
                 }
             ));
         }

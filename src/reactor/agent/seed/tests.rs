@@ -8602,7 +8602,7 @@ fn a_second_inbox_read_keeps_its_header() {
     assert!(
         text.starts_with(
             "Messages and broadcasts: 45 unread until now, of which these \
-             are 1 (up to 40 a read;"
+             are 1 (up to 40 messages and 40 broadcasts a read;"
         ),
         "{text}"
     );
@@ -8611,7 +8611,7 @@ fn a_second_inbox_read_keeps_its_header() {
     assert!(
         text.starts_with(
             "Messages and broadcasts: 45 unread until now, of which these \
-             are 1 (by your limit of 1; the rest stay unread for your next \
+             are 1 (by your limit of 1; the rest stay unread for a later \
              read); any read before are left out, by the same limit."
         ),
         "{text}"
@@ -9302,16 +9302,13 @@ fn the_operator_header_counts_in_words() {
     // More unread than a read returned, and by whose cut
     assert_eq!(
         header(vec![unread(1)], 4),
-        steward(
-            "1 message unread until now; 3 more unread ones wait for your \
-             next read"
-        )
+        steward("1 message unread until now; 3 more wait for your next read")
     );
     assert_eq!(
         header_limit(vec![retracted()], 3, 0, Some(1)),
         steward(
-            "1 retracted before you read it is listed; 2 more unread ones \
-             wait for your next read (by your limit of 1)"
+            "1 retracted before you read it is listed; 2 more wait for your \
+             next read (by your limit of 1)"
         )
     );
     for messages in [vec![unread(1)], vec![unread(1), read(2)]] {
@@ -10273,10 +10270,58 @@ fn a_used_up_limit_says_how_it_was_split() {
                 .to_string(),
             "Messages and broadcasts: 5 unread until now, of which these are 1 \
              (by your limit of 2, of which your operator's message above took \
-             1; the rest stay unread for your next read); any read before are \
+             1; the rest stay unread for a later read); any read before are \
              left out, by the same limit"
                 .to_string(),
         ]
+    );
+    // A cap that cut the unread is not blamed on a limit the read ones
+    // used up after it, and the cap is per kind (review of 0.151.2)
+    let capped = InboxResponse {
+        messages: vec![dm(S::Unread), dm(S::Read)],
+        operator_messages: vec![read()],
+        unread: 45,
+        operator_unread: 0,
+        operator_read: 1,
+        operator_replies: Vec::new(),
+        operator_disclosure: None,
+        warning: None,
+        index: None,
+    };
+    let h = headers(&capped, Some(3));
+    assert!(
+        h[1].starts_with(
+            "Messages and broadcasts: 45 unread until now, of which these are \
+             1 (up to 40 messages and 40 broadcasts a read; the rest stay \
+             unread for a later read); the latest message read before is \
+             listed (of your limit of 3, 1 went to your operator's message \
+             above, 1 to the unread one and 1 to this one;"
+        ),
+        "{h:?}"
+    );
+    // Broadcasts from before the agent joined took part of the limit:
+    // said
+    let mut joined = dm(S::BeforeJoined);
+    joined.recipient_id = None;
+    let early = InboxResponse {
+        messages: vec![joined.clone(), joined],
+        operator_messages: vec![],
+        unread: 3,
+        operator_unread: 0,
+        operator_read: 0,
+        operator_replies: Vec::new(),
+        operator_disclosure: None,
+        warning: None,
+        index: None,
+    };
+    assert!(
+        headers(&early, Some(2))[0].starts_with(
+            "Messages and broadcasts: 3 unread until now, of which these are 0 \
+             (by your limit of 2, of which broadcasts from before you joined \
+             took 2; the rest stay unread for a later read)"
+        ),
+        "{:?}",
+        headers(&early, Some(2))
     );
 }
 
