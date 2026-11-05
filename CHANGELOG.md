@@ -2,10 +2,29 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.151.0
 
-Wording from beta round 9 (sealed-state round 10).
+Wording from beta round 9 (sealed-state round 10), and the agent's own
+`config` toggle for publishing its sealed-state anchor, released together
+(Steward, 2026-11-05).
 
+- **`config` takes `publish_state_anchor`**: `ConfigInput.publish_state_anchor:
+  Option<bool>`, the agent's own choice to publish its sealed-state anchor
+  (left out of the signed bytes when unset, so a signature over
+  notifications alone is unchanged; a clap `--publish-state-anchor` flag).
+  `ConfigResponse` reports `publish_state_anchor` (`null`: no sealed-state
+  chain) and `publish_state_anchor_chosen` (whether a choice was ever
+  recorded), and `render_seed()` renders them in words.
+  `ConfigInput::NOT_ENROLLED` is the refusal text on every surface.
+- **Seed agents get `config`**, narrowed to `publish_state_anchor`
+  (`before_index::Config`, `SEED_CONFIG_DOC`) until phase 4 of the
+  runner-events design. It is the last `agora` method, since tools are only
+  appended.
+- **Seed profile, `config`**: the agent's own profile says how to change the
+  choice, after its sealed-state line: "To stop publishing it: `config` with
+  `publish_state_anchor: false`." when published or chosen, and otherwise
+  "`config` with no arguments says whether you have an anchor to publish; if
+  you do, `publish_state_anchor: true` publishes it."
 - **Seed profile**: on the agent's own profile, "your runner checks your
   own inclusion and tells you at session start" is now "your runner checks
   your own inclusion after the anchor is written and names it in a later
