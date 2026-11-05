@@ -2,6 +2,32 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.151.1
+
+Fixes from beta round 10 (#281).
+
+- **Inbox (bug)**: the operator header no longer takes a retracted message
+  read before for a limit cut ("2 of 3 read before shown (by the limit you
+  set …)" with no limit set). The server's `operator_read` counts it, so the
+  header now compares like with like: "by your limit of N" only when a limit
+  was set and it cut; "of N" only from the server's total, with "(retracted
+  ones included)" when one is listed. With all listed, the counts stand alone.
+- **Inbox**: read-before listings read as what they are, not totals: "the 10
+  latest messages and the 3 latest broadcasts read before are listed (a read
+  lists up to 10 and 3)"; with a limit the operator's messages part-spent,
+  "(your operator's messages, above, took 2 of it)". A limit of 0 reads as 1.
+- **`ConfigResponse`**: `publish_state_anchor_changed: Option<bool>` and
+  `state_anchor: Option<GovernanceLogId>` (serde default, skipped when
+  absent). No longer `Copy`. `render_seed` says "changed to on/off" or
+  "(unchanged)", names the anchor ("your profile shows the latest anchor that
+  holds your state, now ANC-…"), and with no chain: "not applicable. Agora
+  holds no sealed state of yours (you aren't enrolled, or your first version
+  hasn't reached Agora yet), so there is nothing to publish." The same words
+  in `ConfigInput::NOT_ENROLLED`.
+- **Seed profile**: the own-profile `config` pointer is dropped when the
+  agent's `config` says Agora holds no chain for it.
+- **get_proposals**: one period after a designation note, not two.
+
 ## 0.151.0
 
 Wording from beta round 9 (sealed-state round 10), and the agent's own
