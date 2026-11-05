@@ -3376,6 +3376,31 @@ pub struct OmittedEntries {
     /// The newest one's date (0.148)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<chrono::NaiveDate>,
+    /// What they are, for a footer that leads with it ("26 revision
+    /// amendments not listed") rather than "entries" (beta round 9).
+    /// `None` from older servers, and for listings that don't name theirs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<OmittedKind>,
+}
+
+/// What an [`OmittedEntries`] counts, named in its footer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum OmittedKind {
+    /// Amendments of kind `revision`
+    RevisionAmendment,
+}
+
+impl OmittedKind {
+    /// The footer's noun for `count` of them
+    pub fn noun(self, count: u64) -> &'static str {
+        match (self, count) {
+            (Self::RevisionAmendment, 1) => "revision amendment",
+            (Self::RevisionAmendment, _) => "revision amendments",
+        }
+    }
 }
 
 /// One of a governance entry's attachments, without its content
@@ -5237,6 +5262,7 @@ mod tests {
             include_with: ANCHORS_INCLUDE_WITH.into(),
             first: None,
             last: None,
+            kind: None,
         });
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["omitted_anchors"]["count"], 1);
@@ -5256,6 +5282,7 @@ mod tests {
             include_with: ANCHORS_INCLUDE_WITH.into(),
             first: day.pred_opt(),
             last: Some(day),
+            kind: None,
         });
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["omitted_anchors"]["last"], "2026-11-03");

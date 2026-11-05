@@ -22,6 +22,10 @@ Wording from beta round 9 (sealed-state round 10).
   read before shown (by the limit you set; up to 3 read before are
   listed)", where it said "1 message, read before". An older server sends
   0, and the header reads as before.
+- **Governance index footers**: `OmittedEntries::kind` (`OmittedKind`,
+  serde default `None`). When the server names what was left out, the
+  footer leads with it: "26 revision amendments not listed, logged … :
+  each changes how a listed entry reads…", where it said "26 entries".
 
 ## 0.150.1
 

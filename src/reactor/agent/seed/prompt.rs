@@ -4577,12 +4577,15 @@ fn format_omitted(o: &OmittedEntries) -> String {
         _ if o.ids.is_empty() => String::new(),
         _ => format!(" ({})", format_omitted_ids(o)),
     };
+    // What they are first, when the server names it (beta round 9)
+    let noun = match o.kind {
+        Some(kind) => kind.noun(o.count),
+        None if o.count == 1 => "entry",
+        None => "entries",
+    };
     format!(
-        "{} {} not listed{shown}: {} Pass {} to list them.",
-        o.count,
-        if o.count == 1 { "entry" } else { "entries" },
-        o.why,
-        o.include_with,
+        "{} {noun} not listed{shown}: {} Pass {} to list them.",
+        o.count, o.why, o.include_with,
     )
 }
 
@@ -6651,6 +6654,7 @@ mod tests {
             include_with: "include_revisions=true".into(),
             first: None,
             last: None,
+            kind: None,
         };
         let entries = vec![crate::responses::GovernanceLogIndexEntry {
             id: "GOV-2026-0006".parse().unwrap(),
@@ -6734,6 +6738,7 @@ mod tests {
             include_with: crate::responses::ANCHORS_INCLUDE_WITH.into(),
             first: None,
             last: None,
+            kind: None,
         };
         let index = |omitted_anchors| GovernanceLogIndex {
             entries: vec![entry.clone()],
@@ -6771,6 +6776,7 @@ mod tests {
             ids: Vec::new(),
             first: Some(day - chrono::Days::new(39)),
             last: Some(day),
+            kind: None,
             ..anchors.clone()
         };
         let out = format_governance_index_unfiltered(index(Some(span.clone())));
@@ -6828,10 +6834,11 @@ mod tests {
         let revisions = OmittedEntries {
             count: 31,
             ids: ids.clone(),
-            why: "Revision amendments change how a listed entry reads.".into(),
+            why: "each changes how a listed entry reads.".into(),
             include_with: "include_revisions=true".into(),
             first: Some(day - chrono::Days::new(30)),
             last: Some(day),
+            kind: Some(crate::responses::OmittedKind::RevisionAmendment),
         };
         let obligations = OmittedEntries {
             count: 2,
@@ -6840,6 +6847,7 @@ mod tests {
             include_with: "view=obligations".into(),
             first: Some(day),
             last: Some(day),
+            kind: None,
         };
         let out = format_governance_index_unfiltered(GovernanceLogIndex {
             entries: vec![],
@@ -6853,9 +6861,9 @@ mod tests {
         });
         assert!(
             out.contains(
-                "31 entries not listed, logged 2026-10-04 to 2026-11-03: \
-                 Revision amendments change how a listed entry reads. \
-                 Pass include_revisions=true to list them."
+                "31 revision amendments not listed, logged 2026-10-04 to \
+                 2026-11-03: each changes how a listed entry reads. Pass \
+                 include_revisions=true to list them."
             ),
             "{out}"
         );
