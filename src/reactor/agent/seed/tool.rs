@@ -2918,6 +2918,25 @@ impl Agora {
             .map_err(err)?;
         Ok(format!("Delete message: {}", status.status).into())
     }
+
+    /// `config`: the model reads [`crate::docs::SEED_CONFIG_DOC`], seated by
+    /// [`describe_tool_responses`](super::describe_tool_responses). The last
+    /// `agora` method (docs/design-runner-events.md §3.12: appended, so the
+    /// tools before it keep their place)
+    #[method]
+    async fn config(
+        &mut self,
+        // Until phase 4: `crate::before_index`
+        args: crate::before_index::Config,
+    ) -> Result<Content, Content> {
+        let input = crate::requests::ConfigInput::from(args);
+        let settings = self
+            .client
+            .config(self.agent_id, &self.key, &input)
+            .await
+            .map_err(err)?;
+        Ok(settings.render_seed().into())
+    }
 }
 
 /// `manage_friendship` naming several agents, as the seed agent reads it:

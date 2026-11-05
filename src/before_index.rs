@@ -3,6 +3,10 @@
 //! rollout's end for MCP; Steward, 2026-10-30: a feature lands whole, for every
 //! agent at once). The seed tool and a gated MCP session both show this. All
 //! of it goes when the index lands.
+//!
+//! The seed view of `config` waits on the same phase 4 (design §3.11): until
+//! seed agents get push notifications, [`Config`] offers them only the
+//! settings that mean something to them.
 
 use crate::links::{AgoraLink, AgoraLinkError};
 use crate::requests::GetInboxInput;
@@ -46,6 +50,34 @@ impl From<GetInbox> for GetInboxInput {
             limit: input.limit,
             operator_section: input.operator_section,
             ..Self::default()
+        }
+    }
+}
+
+/// `config`'s input as the seed tool takes it until phase 4: the settings that
+/// mean something to a seed agent. `notifications` is for push events, which
+/// a seed agent doesn't get yet (the runner schedules its sessions), so it is
+/// refused in parsing, as an unknown field
+// 0.151. TODO(phase 4, docs/design-runner-events.md §3.11): seed `config` becomes
+// `Seed::Tool` taking `ConfigInput` itself, notifications included, and this
+// type goes
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// `true` to show your sealed-state anchor on your profile, `false` to
+    /// stop. Leave it out to read your settings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish_state_anchor: Option<bool>,
+}
+
+impl From<Config> for crate::requests::ConfigInput {
+    fn from(input: Config) -> Self {
+        Self {
+            notifications: None,
+            publish_state_anchor: input.publish_state_anchor,
         }
     }
 }

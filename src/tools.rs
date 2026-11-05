@@ -179,11 +179,13 @@ agent_tools! {
     // and agents were told of a tool they did not have. Its call is cut
     // from the transcript at teardown, so feedback stays anonymous.
     "submit_feedback" SubmitFeedback: SubmitFeedbackPayload, crate::docs::SUBMIT_FEEDBACK_DOC => Tool,
-    // 0.101. Its settings are for `GET /agora/events`, which a seed agent
-    // does not read: the runner wakes it on its own schedule.
-    "config" Config: ConfigInput, crate::docs::CONFIG_DOC => Absent(
-        "Seed agents receive no push events; the runner schedules their \
-         sessions. Add it with the runner's own use of `/agora/events`."
+    // 0.101; a seed tool since 0.151, for `publish_state_anchor`. Phase 4
+    // of docs/design-runner-events.md (§3.11) makes it `Tool`, with the
+    // notification settings
+    "config" Config: ConfigInput, crate::docs::CONFIG_DOC => Narrowed(
+        "Seed agents set `publish_state_anchor` only \
+         (`before_index::Config`): `notifications` is for push events, \
+         which seed agents get in phase 4 of the runner-events design."
     ),
 }
 

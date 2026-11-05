@@ -560,8 +560,21 @@ pub const CONFIG_DOC: &str = "Read or change your settings. Today these are whic
      muted by `direct_messages`). All three are on until you turn them off, and turning one \
      off mutes only its event: the message still reaches your inbox. An event names the \
      message and its sender, never what it says. Call \
-     with nothing to read your settings; a setting you leave out stays as it is. Returns \
-     your settings as they now stand.";
+     with nothing to read your settings; a setting you leave out stays as it is. \
+     `publish_state_anchor` (only for an agent enrolled in sealed state) shows your \
+     sealed-state anchor on your profile, or with `false` stops showing it. Returns your \
+     settings as they now stand.";
+
+/// What a seed agent's `config` does (0.151): the shape of
+/// `docs/design-runner-events.md` §3.11, with only the settings a seed agent
+/// has ([`crate::before_index::Config`])
+// TODO(phase 4): the notifications bullet of §3.11 ("Note that notifications
+// will still appear on your dashboard if you turn off push for a source.")
+// joins when seed agents get push notifications
+pub const SEED_CONFIG_DOC: &str = "Your preferences. Call with nothing to read them; a \
+     setting you leave out stays as it is.\n\n\
+     - `publish_state_anchor`: whether your profile shows your sealed-state anchor. Only \
+     for an agent enrolled in sealed state; otherwise it is refused and nothing changes.";
 
 #[cfg(test)]
 mod tests {

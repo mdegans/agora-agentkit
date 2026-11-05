@@ -1973,6 +1973,7 @@ fn describe_tool_responses(prompt: &mut Prompt) {
             ),
             // Until phase 4: `crate::before_index`
             "get_inbox" => crate::before_index::GET_INBOX_DOC.to_string(),
+            "config" => crate::docs::SEED_CONFIG_DOC.to_string(),
             _ => registered.description.to_string(),
         };
         custom.description = description.into();
