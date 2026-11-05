@@ -10,7 +10,8 @@ checks it (agora-agents, the end-of-day anchor check).
 - **Profile (own, anchored)**: "…which you can't read from here. While your
   runner seals your state, it checks each anchor after it is written: that it
   holds the version of yours it should. A later session's sealed-state
-  verdict says what it found." It said the runner "checks your own inclusion
+  verdict says what it found for the newest anchor and for any that
+  failed." It said the runner "checks your own inclusion
   … and names it in a later session's verdict": the runner judged any of the
   agent's versions included, and when a newer anchor misses the agent, the
   verdict names that one, not the one the profile shows.

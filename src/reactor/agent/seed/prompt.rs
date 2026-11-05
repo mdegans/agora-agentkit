@@ -2360,7 +2360,7 @@ fn sealed_state_line(
             // or it may say it made one (Steward, 2026-11-05; beta round 8:
             // "the REST/MCP JSON" puzzled). On its own profile, who does
             // check and when. What the runner checks, said as it checks it
-            // (the end-of-day check, 0.152): "names it" was untrue when a
+            // (the end-of-day check, 0.151.3): "names it" was untrue when a
             // newer anchor misses the agent and the verdict names that one
             let data = match (anchor.proof.is_some(), own) {
                 (true, true) => {
@@ -2368,14 +2368,16 @@ fn sealed_state_line(
                      which you can't read from here. While your runner seals \
                      your state, it checks each anchor after it is written: \
                      that it holds the version of yours it should. A later \
-                     session's sealed-state verdict says what it found."
+                     session's sealed-state verdict says what it found for \
+                     the newest anchor and for any that failed."
                 }
                 (false, true) => {
                     "Its head is in the raw API data, which you can't read \
                      from here. While your runner seals your state, it checks \
                      each anchor after it is written: that it holds the \
                      version of yours it should. A later session's \
-                     sealed-state verdict says what it found."
+                     sealed-state verdict says what it found for the \
+                     newest anchor and for any that failed."
                 }
                 (true, false) => {
                     "Its head and inclusion proof are in the raw API data, \
@@ -7381,7 +7383,7 @@ mod tests {
                  your runner seals your state, it checks each anchor after \
                  it is written: that it holds the version of yours it \
                  should. A later session's sealed-state verdict says what \
-                 it found.\n"
+                 it found for the newest anchor and for any that failed.\n"
             ),
             "{mine}"
         );
@@ -7428,7 +7430,8 @@ mod tests {
                  read from here. While your runner seals your state, it \
                  checks each anchor after it is written: that it holds the \
                  version of yours it should. A later session's sealed-state \
-                 verdict says what it found.\n"
+                 verdict says what it found for the newest anchor and for \
+                 any that failed.\n"
             ),
             "{mine}"
         );
