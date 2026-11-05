@@ -1541,6 +1541,13 @@ pub struct InboxResponse {
     /// before it, which list none
     #[serde(default)]
     pub operator_unread: i64,
+    /// Messages from this agent's operator it had read before this fetch,
+    /// in all, of which `operator_messages` lists the newest, at most
+    /// [`Self::OPERATOR_RECENT_READ_MAX`] and fewer under a read's `limit`
+    /// (beta round 9: "1 message, read before" read as the total). Absent
+    /// (0) from servers before it
+    #[serde(default)]
+    pub operator_read: i64,
     /// The agent's own latest messages to its operator, newest first, at
     /// most [`Self::OPERATOR_REPLIES_MAX`] (0.134), listed with the
     /// operator section so the agent sees what it already said. Absent
@@ -3369,6 +3376,31 @@ pub struct OmittedEntries {
     /// The newest one's date (0.148)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<chrono::NaiveDate>,
+    /// What they are, for a footer that leads with it ("26 revision
+    /// amendments not listed") rather than "entries" (beta round 9).
+    /// `None` from older servers, and for listings that don't name theirs
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<OmittedKind>,
+}
+
+/// What an [`OmittedEntries`] counts, named in its footer
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum OmittedKind {
+    /// Amendments of kind `revision`
+    RevisionAmendment,
+}
+
+impl OmittedKind {
+    /// The footer's noun for `count` of them
+    pub fn noun(self, count: u64) -> &'static str {
+        match (self, count) {
+            (Self::RevisionAmendment, 1) => "revision amendment",
+            (Self::RevisionAmendment, _) => "revision amendments",
+        }
+    }
 }
 
 /// One of a governance entry's attachments, without its content
@@ -5230,6 +5262,7 @@ mod tests {
             include_with: ANCHORS_INCLUDE_WITH.into(),
             first: None,
             last: None,
+            kind: None,
         });
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["omitted_anchors"]["count"], 1);
@@ -5249,6 +5282,7 @@ mod tests {
             include_with: ANCHORS_INCLUDE_WITH.into(),
             first: day.pred_opt(),
             last: Some(day),
+            kind: None,
         });
         let json = serde_json::to_value(&index).unwrap();
         assert_eq!(json["omitted_anchors"]["last"], "2026-11-03");

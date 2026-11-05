@@ -5115,6 +5115,7 @@ fn inbox_with(
         operator_messages: vec![],
         unread: 1,
         operator_unread: 0,
+        operator_read: 0,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -8422,6 +8423,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         ],
         unread: 1,
         operator_unread: 0,
+        operator_read: 0,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -8463,6 +8465,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
             .collect(),
         unread: 0,
         operator_unread: 0,
+        operator_read: 0,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -8500,6 +8503,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         messages: vec![read.clone(), b],
         unread: 0,
         operator_unread: 0,
+        operator_read: 0,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -9081,33 +9085,62 @@ fn the_operator_header_counts_in_words() {
     let text = |n: usize| OperatorMessageContent::Text {
         body: format!("message {n}"),
     };
-    let header = |messages: Vec<crate::responses::OperatorInboxMessage>,
-                  operator_unread: i64| {
-        let inbox = InboxResponse {
-            messages: vec![],
-            operator_messages: messages,
-            unread: 0,
-            operator_unread,
-            operator_replies: Vec::new(),
-            operator_disclosure: None,
-            warning: None,
-            index: None,
+    let header_read =
+        |messages: Vec<crate::responses::OperatorInboxMessage>,
+         operator_unread: i64,
+         operator_read: i64| {
+            let inbox = InboxResponse {
+                messages: vec![],
+                operator_messages: messages,
+                unread: 0,
+                operator_unread,
+                operator_read,
+                operator_replies: Vec::new(),
+                operator_disclosure: None,
+                warning: None,
+                index: None,
+            };
+            let out = super::prompt::format_inbox(
+                &inbox,
+                &super::ShownOnce::default(),
+                None,
+            );
+            out.lines()
+                .next()
+                .unwrap()
+                .split(". ")
+                .next()
+                .unwrap()
+                .to_string()
         };
-        let out = super::prompt::format_inbox(
-            &inbox,
-            &super::ShownOnce::default(),
-            None,
-        );
-        out.lines()
-            .next()
-            .unwrap()
-            .split(". ")
-            .next()
-            .unwrap()
-            .to_string()
-    };
+    let header =
+        |messages, operator_unread| header_read(messages, operator_unread, 0);
     let unread = |n| operator_message(InboxState::Unread, text(n));
     let read = |n| operator_message(InboxState::Read, text(n));
+    // A `limit` that listed fewer read before than there are says how many
+    // of how many (beta round 9: "1 message" read as the total)
+    assert_eq!(
+        header_read(vec![read(1)], 0, 3),
+        "From your operator, the Steward: 1 of 3 read before shown (by the \
+         limit you set; up to 3 read before are listed)"
+    );
+    assert_eq!(
+        header_read(vec![unread(1), read(2)], 1, 5),
+        "From your operator, the Steward: 2 messages, 1 unread until now \
+         and 1 of 5 read before shown (by the limit you set; up to 3 read \
+         before are listed)"
+    );
+    // All listed that can be: as before
+    assert_eq!(
+        header_read(vec![read(1), read(2), read(3)], 0, 7),
+        "From your operator, the Steward: 3 messages, all read before (up \
+         to 3 read before are listed)"
+    );
+    assert_eq!(
+        header_read(vec![read(1)], 0, 1),
+        "From your operator, the Steward: 1 message, read before (up to 3 \
+         read before are listed)"
+    );
     assert_eq!(
         header(vec![unread(1)], 1),
         "From your operator, the Steward: 1 message, unread until now"
