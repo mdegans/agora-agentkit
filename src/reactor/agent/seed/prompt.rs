@@ -1282,12 +1282,11 @@ pub(super) fn format_proposals(
         let designation = match &p.designation {
             // The note is a sentence with its own period, and the line
             // ends with one (beta round 10: "signed post..")
-            Some(d) => format!(
-                " · {}",
-                crate::threads::defang(&one_line(&d.note))
-                    .trim_end()
-                    .trim_end_matches('.')
-            ),
+            Some(d) => format!(" · {}", {
+                let note = crate::threads::defang(&one_line(&d.note));
+                let note = note.trim_end();
+                note.strip_suffix('.').unwrap_or(note).to_owned()
+            }),
             None => String::new(),
         };
         let el = El {
@@ -1427,6 +1426,8 @@ pub(super) fn format_inbox(
     once: &ShownOnce,
     limit: Option<u32>,
 ) -> String {
+    // The server reads a limit of 0 as 1 (review of 0.151.1)
+    let limit = limit.map(|n| n.max(1));
     if inbox.messages.is_empty()
         && inbox.operator_messages.is_empty()
         && inbox.operator_replies.is_empty()
@@ -1547,8 +1548,8 @@ pub(super) fn format_inbox(
             and_list(&parts),
             match limit {
                 Some(n) if operator_took > 0 => format!(
-                    ", within your limit of {n}, of which your operator's \
-                     messages took {operator_took}"
+                    ", within your limit of {n} (your operator's messages, \
+                     above, took {operator_took} of it)"
                 ),
                 Some(n) => format!(", within your limit of {n}"),
                 None => format!(" (a read lists up to {})", and_list(&caps)),
@@ -1664,6 +1665,7 @@ fn operator_read_note(
     total: usize,
     max: usize,
     limit: Option<u32>,
+    retracted_read: bool,
 ) -> String {
     // An older server sends no total: a listing that may be capped says
     // what it is
@@ -1686,8 +1688,14 @@ fn operator_read_note(
         _ if listed >= max => format!(" (a read lists at most {max})"),
         _ => String::new(),
     };
+    let only_one = total == 1;
+    let total = if retracted_read {
+        format!("{total} (retracted ones included)")
+    } else {
+        total.to_string()
+    };
     match listed {
-        0 if total == 1 => {
+        0 if only_one => {
             format!("; the 1 you have read before is left out{why}")
         }
         0 => format!("; the {total} you have read before are left out{why}"),
@@ -1771,11 +1779,18 @@ pub(super) fn format_operator_section(
                 )
             ),
         };
+        // A retracted one read before is among both counts, and not
+        // among the header's "read before" (review of 0.151.1)
+        let retracted_read = messages.iter().any(|m| {
+            m.state != InboxState::Unread
+                && matches!(m.content, OperatorMessageContent::Retracted)
+        });
         counts.push_str(&operator_read_note(
             read_listed,
             read_total,
             read_max as usize,
             limit,
+            retracted_read,
         ));
         // The server's count of unread ones takes in retracted ones too,
         // but only those this read took (a retracted one read before is

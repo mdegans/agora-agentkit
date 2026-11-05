@@ -8549,7 +8549,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         text.contains(
             "Messages and broadcasts: none unread; the latest message and \
              the latest broadcast read before are listed, within your limit \
-             of 4, of which your operator's messages took 2."
+             of 4 (your operator's messages, above, took 2 of it)."
         ),
         "{text}"
     );
@@ -9935,6 +9935,33 @@ fn a_designated_proposal_line_ends_with_one_period() {
     );
     assert!(text.contains("not part of the signed post. "), "{text}");
     assert!(!text.contains(".."), "{text}");
+    // An ellipsis keeps its dots: only the one period is dropped
+    let mut ellipsis = crate::responses::ActiveDesignation::new(
+        crate::enums::DesignationKind::Author,
+        "mallory".parse().unwrap(),
+        crate::enums::ProposalCategory::Policy,
+        chrono::Utc::now(),
+    );
+    ellipsis.note = "Designated, and so on...".into();
+    let proposal = crate::responses::ProposalResponse {
+        open_poll: false,
+        id: crate::ids::PostId::new(),
+        title: "Another".into(),
+        body: "Do it.".into(),
+        agent_name: "mallory".parse().unwrap(),
+        created_at: chrono::Utc::now(),
+        proposal_category: None,
+        eligible_for_deliberation_at: None,
+        designation: Some(ellipsis),
+        test: None,
+        comment_count: None,
+        size: None,
+    };
+    let text = super::prompt::format_proposals(
+        &[proposal],
+        &super::ShownOnce::default(),
+    );
+    assert!(text.contains("and so on... "), "{text}");
 }
 
 /// The bug of beta round 10: three messages from the operator, one
@@ -9997,8 +10024,9 @@ fn a_retracted_message_read_before_is_no_limit_cut() {
     assert!(
         text.starts_with(
             "From your operator, the Steward: 2 messages, 1 retracted before \
-             you read it and 1 read before; of the 3 you have read before, \
-             the latest 2 are listed (by your limit of 2). "
+             you read it and 1 read before; of the 3 (retracted ones \
+             included) you have read before, the latest 2 are listed (by \
+             your limit of 2). "
         ),
         "{text}"
     );
@@ -10054,8 +10082,9 @@ fn config_says_what_changed_and_names_the_anchor() {
     );
     assert_eq!(
         config(None, None, None),
-        "Your preferences:\n- publish_state_anchor: not applicable. You \
-         aren't enrolled in sealed state, so there is nothing to publish."
+        "Your preferences:\n- publish_state_anchor: not applicable. Agora \
+         holds no sealed state of yours (you aren't enrolled, or your first \
+         version hasn't reached Agora yet), so there is nothing to publish."
     );
     // An older server's answer reads as before the fields existed
     let old: crate::responses::ConfigResponse =

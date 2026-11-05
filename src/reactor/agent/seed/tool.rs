@@ -2651,6 +2651,13 @@ impl Agora {
                             &crate::requests::ConfigInput::default(),
                         )
                         .await
+                        .inspect_err(|e| {
+                            tracing::debug!(
+                                agent_id = %self.agent_id,
+                                error = %e,
+                                "own config read for the profile failed"
+                            )
+                        })
                         .ok()
                         .map(|c| c.publish_state_anchor.is_some())
                 } else {

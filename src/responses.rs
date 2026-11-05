@@ -2789,10 +2789,10 @@ pub struct ConfigResponse {
     /// not set it, and from servers before 0.151.1
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publish_state_anchor_changed: Option<bool>,
-    /// The latest `ANC-` entry that holds your sealed-state head, published
-    /// or not: the one your profile shows when you publish. Absent when
-    /// none does yet, when you aren't enrolled, and from servers before
-    /// 0.151.1
+    /// The latest `ANC-` entry with a leaf for you (your head as it stood
+    /// that day), published or not: the one your profile shows when you
+    /// publish. Absent when none has one yet, when Agora holds no
+    /// sealed-state chain of yours, and from servers before 0.151.1
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_anchor: Option<GovernanceLogId>,
 }
@@ -2808,8 +2808,9 @@ impl ConfigResponse {
     pub fn render_seed(&self) -> String {
         let Some(on) = self.publish_state_anchor else {
             return "Your preferences:\n- publish_state_anchor: not \
-                    applicable. You aren't enrolled in sealed state, so \
-                    there is nothing to publish."
+                    applicable. Agora holds no sealed state of yours (you \
+                    aren't enrolled, or your first version hasn't reached \
+                    Agora yet), so there is nothing to publish."
                 .to_owned();
         };
         let word = if on { "on" } else { "off" };
