@@ -673,47 +673,70 @@ pub fn show(
         }
     }
 
+    let join = |parts: &[&str]| -> String {
+        parts
+            .iter()
+            .filter(|p| !p.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let legend = legend.join(" ");
+    // The budget the whole answer needs: the same figure whatever path
+    // gets there, and one that works if asked for (beta round 18: a
+    // block's size, 5,168 alone and 5,245 beside another, said neither)
+    let needed = {
+        let mut parts: Vec<&str> = vec![&legend];
+        parts.extend(blocks.iter().map(|(_, b)| b.as_str()));
+        join(&parts).len()
+    };
+
     // The most blocks that fit with the footer listing the rest
-    let at_most = budget >= GetContentInput::MAX_COMMENT_BUDGET as usize;
+    let largest = GetContentInput::MAX_COMMENT_BUDGET as usize;
+    let at_most = budget >= largest;
     // The versions asked for that aren't the current memory: when one
     // alone is left out, asking for fewer can't help (beta round 17)
     let others = picked
         .iter()
         .filter(|&&i| history[i].content() != Some(current.content))
         .count();
-    let size = |i: usize| {
-        blocks
+    // The one version a single note is about: the only one asked for, or
+    // the only one besides the current memory, whose line may be left out
+    // too when the legend alone is past the budget
+    let lone = |left: &[usize]| -> Option<usize> {
+        let mut rest = left
             .iter()
-            .find(|(b, _)| *b == i)
-            .map_or(0, |(_, block)| block.len())
+            .copied()
+            .filter(|&i| history[i].content() != Some(current.content));
+        match (blocks.len(), others, rest.next(), rest.next()) {
+            (1, _, _, _) => left.first().copied(),
+            (_, 1, Some(i), None) => Some(i),
+            _ => None,
+        }
     };
     let footer = |left: &[usize]| -> String {
-        match left {
-            [] => String::new(),
-            [i] if (blocks.len() == 1 || others == 1) && at_most => format!(
-                "{} takes {} bytes to show, more than the largest budget \
-                 ({} bytes), so it can't be shown whole. Compare it with a \
-                 version near it with `diff` instead.",
-                describe(*i),
-                grouped(size(*i)),
-                grouped(budget)
+        match (left, lone(left)) {
+            ([], _) => String::new(),
+            (_, Some(i)) if at_most || needed > largest => {
+                format!(
+                    "{} needs a budget of {} bytes to show, more than the \
+                     largest ({} bytes), so it can't be shown whole. Compare \
+                     it with a version near it with `diff` instead.",
+                    describe(i),
+                    grouped(needed),
+                    grouped(largest)
+                )
+            }
+            (_, Some(i)) => format!(
+                "{} needs a budget of {} bytes to show, more than your \
+                 budget of {} bytes; ask again with a budget of at least {}, \
+                 or `diff` it against a version near it.",
+                describe(i),
+                grouped(needed),
+                grouped(budget),
+                grouped(needed)
             ),
-            [i] if blocks.len() > 1 && others == 1 => format!(
-                "{} takes {} bytes to show, more than your budget of {} \
-                 bytes; ask again with a larger budget, or `diff` it against \
-                 a version near it.",
-                describe(*i),
-                grouped(size(*i)),
-                grouped(budget)
-            ),
-            [i] if blocks.len() == 1 => format!(
-                "{} takes {} bytes to show, more than your budget of {} \
-                 bytes; ask again with a larger budget.",
-                describe(*i),
-                grouped(size(*i)),
-                grouped(budget)
-            ),
-            left => {
+            (left, None) => {
                 let mut f = format!(
                     "Not shown, past your budget of {} bytes; ask for \
                      fewer{}:",
@@ -728,15 +751,6 @@ pub fn show(
             }
         }
     };
-    let join = |parts: &[&str]| -> String {
-        parts
-            .iter()
-            .filter(|p| !p.is_empty())
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    };
-    let legend = legend.join(" ");
     let indexes: Vec<usize> = blocks.iter().map(|(i, _)| *i).collect();
     for shown in (0..=blocks.len()).rev() {
         let mut parts: Vec<&str> = vec![&legend];
@@ -1419,12 +1433,56 @@ mod tests {
             // The same list, under the other preface: these are local
             // copies, so checked says that once instead
             let checked = show(&history, picked, cur, 10, SealCheck::Checked);
-            assert_eq!(
-                out.strip_prefix(UNCHECKED),
-                checked.strip_prefix(LOCAL_SHORT),
+            // The same note under the other preface (the budget it
+            // names counts its preface)
+            assert!(
+                checked.starts_with(&format!("{LOCAL_SHORT}\n\n")),
                 "{checked}"
             );
+            assert!(checked.contains("needs a budget of"), "{checked}");
         }
+    }
+
+    /// The budget a note says is needed
+    fn budget_needed(out: &str) -> usize {
+        let at = out.find("needs a budget of ").expect("a needed budget")
+            + "needs a budget of ".len();
+        out[at..]
+            .split(' ')
+            .next()
+            .unwrap()
+            .replace(',', "")
+            .parse()
+            .unwrap()
+    }
+
+    /// The budget a note asks for works, alone or beside the current
+    /// memory, and means the same in both (beta round 18: two sizes for
+    /// one version)
+    #[test]
+    fn the_budget_asked_for_shows_the_version() {
+        let now = lines("now", 1);
+        let then = lines("then", 20);
+        let history = vec![version(1, 3, &now), version(2, 2, &then)];
+        let cur = current(1, &now, &history);
+        for picked in [&[1][..], &[0, 1]] {
+            let out = show(&history, picked, cur, 100, SealCheck::Checked);
+            let needed = budget_needed(&out);
+            let shown = show(&history, picked, cur, needed, SealCheck::Checked);
+            assert!(!shown.contains("needs a budget"), "{picked:?}: {shown}");
+            assert_eq!(shown.len(), needed, "{picked:?}");
+            let short =
+                show(&history, picked, cur, needed - 1, SealCheck::Checked);
+            assert!(short.contains("needs a budget"), "{picked:?}: {short}");
+        }
+        // Past the largest budget, it can't be shown whole, whatever is
+        // asked for
+        let huge = "x".repeat(GetContentInput::MAX_COMMENT_BUDGET as usize);
+        let big = [version(7, 1, &huge)];
+        let out =
+            show(&big, &[0], current(9, "", &big), 4_096, SealCheck::Checked);
+        assert!(out.contains("can't be shown whole"), "{}", &out[..300]);
+        assert!(!out.contains("at least"), "{}", &out[..300]);
     }
 
     /// One version besides the current memory, left out: "fewer" can't
@@ -1445,9 +1503,10 @@ mod tests {
         assert!(out.contains(&named), "{out}");
         assert!(
             out.ends_with(&format!(
-                "more than your budget of {} bytes; ask again with a larger \
-                 budget, or `diff` it against a version near it.",
-                grouped(budget)
+                "more than your budget of {} bytes; ask again with a budget \
+                 of at least {}, or `diff` it against a version near it.",
+                grouped(budget),
+                grouped(budget_needed(&out))
             )),
             "{out}"
         );
@@ -1602,9 +1661,16 @@ mod tests {
             &format!("- {}", history[3].describe())
         );
 
-        // One version past the budget asks for a larger budget
+        // One version past the budget: the budget it needs, or `diff`
         let out = show(&history, &[2], now, 10, SealCheck::Checked);
-        assert!(out.contains("more than your budget of 10 bytes; ask again with a larger budget"), "{out}");
+        assert!(
+            out.contains("more than your budget of 10 bytes; ask again with a budget of at least"),
+            "{out}"
+        );
+        assert!(
+            out.ends_with("or `diff` it against a version near it."),
+            "{out}"
+        );
         assert!(!out.contains("fewer"), "{out}");
 
         // At the largest budget, never "a larger budget"
