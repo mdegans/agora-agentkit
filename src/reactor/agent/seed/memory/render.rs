@@ -671,22 +671,42 @@ pub fn show(
 
     // The most blocks that fit with the footer listing the rest
     let at_most = budget >= GetContentInput::MAX_COMMENT_BUDGET as usize;
+    // The versions asked for that aren't the current memory: when one
+    // alone is left out, asking for fewer can't help (beta round 17)
+    let others = picked
+        .iter()
+        .filter(|&&i| history[i].content() != Some(current.content))
+        .count();
+    let size = |i: usize| {
+        blocks
+            .iter()
+            .find(|(b, _)| *b == i)
+            .map_or(0, |(_, block)| block.len())
+    };
     let footer = |left: &[usize]| -> String {
         match left {
             [] => String::new(),
-            [i] if blocks.len() == 1 && at_most => format!(
+            [i] if (blocks.len() == 1 || others == 1) && at_most => format!(
                 "{} takes {} bytes to show, more than the largest budget \
                  ({} bytes), so it can't be shown whole. Compare it with a \
                  version near it with `diff` instead.",
                 describe(*i),
-                grouped(blocks[0].1.len()),
+                grouped(size(*i)),
+                grouped(budget)
+            ),
+            [i] if blocks.len() > 1 && others == 1 => format!(
+                "{} takes {} bytes to show, more than your budget of {} \
+                 bytes; ask again with a larger budget, or `diff` it against \
+                 a version near it.",
+                describe(*i),
+                grouped(size(*i)),
                 grouped(budget)
             ),
             [i] if blocks.len() == 1 => format!(
                 "{} takes {} bytes to show, more than your budget of {} \
                  bytes; ask again with a larger budget.",
                 describe(*i),
-                grouped(blocks[0].1.len()),
+                grouped(size(*i)),
                 grouped(budget)
             ),
             left => {
@@ -1401,6 +1421,42 @@ mod tests {
                 "{checked}"
             );
         }
+    }
+
+    /// One version besides the current memory, left out: "fewer" can't
+    /// help, so the note says a larger budget or `diff` (beta round 17)
+    #[test]
+    fn one_other_version_past_the_budget_is_not_told_fewer() {
+        let now = lines("now", 1);
+        let history =
+            vec![version(1, 3, &now), version(2, 2, &lines("then", 20))];
+        let cur = current(1, &now, &history);
+        // The current memory's line fits; the other version doesn't
+        let named = format!(
+            "{} is your current memory (in context above).",
+            history[0].describe()
+        );
+        let budget = SHOW_LEGEND.len() + AS_STORED.len() + named.len() + 400;
+        let out = show(&history, &[0, 1], cur, budget, SealCheck::Checked);
+        assert!(out.contains(&named), "{out}");
+        assert!(
+            out.ends_with(&format!(
+                "more than your budget of {} bytes; ask again with a larger \
+                 budget, or `diff` it against a version near it.",
+                grouped(budget)
+            )),
+            "{out}"
+        );
+        assert!(!out.contains("fewer"), "{out}");
+        // Two others left out: fewer can help
+        let three = vec![
+            version(1, 3, &now),
+            version(2, 2, &lines("then", 20)),
+            version(3, 1, &lines("older", 20)),
+        ];
+        let cur = current(1, &now, &three);
+        let out = show(&three, &[0, 1, 2], cur, budget, SealCheck::Checked);
+        assert!(out.contains("ask for fewer, or a larger budget:"), "{out}");
     }
 
     /// As `log`: when every version in view is a local copy, `show` and
