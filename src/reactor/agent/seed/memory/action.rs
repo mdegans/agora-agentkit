@@ -110,16 +110,24 @@ impl MemoryInput {
             tracing::info!(
                 target: "forgiving_coercion",
                 coercion = "memory_bare_request",
-                action = %action,
+                action = %super::id::echo(&action.to_string()),
                 "memory tool call without `request`, read as its request"
             );
             return serde_json::from_value(input).map_err(|e| {
-                fail(format!("The request could not be read: {e}."))
+                fail(format!(
+                    "The request could not be read: {}.",
+                    super::id::echo(&e.to_string())
+                ))
             });
         }
         serde_json::from_value::<Self>(input)
             .map(|i| i.request)
-            .map_err(|e| fail(format!("The call could not be read: {e}.")))
+            .map_err(|e| {
+                fail(format!(
+                    "The call could not be read: {}.",
+                    super::id::echo(&e.to_string())
+                ))
+            })
     }
 }
 
@@ -394,6 +402,20 @@ mod tests {
         ] {
             let err = MemoryInput::parse(bad.clone()).unwrap_err().to_string();
             assert!(err.ends_with(CALL_SHAPE), "{bad}: {err}");
+        }
+    }
+
+    /// An error echoes a bounded part of a huge input
+    #[test]
+    fn errors_echo_little() {
+        let huge = "x".repeat(100_000);
+        for input in [
+            json!({"request": {"action": huge}}),
+            json!({"request": {"action": "show", "id": huge}}),
+            json!({"action": "diff", "a": huge}),
+        ] {
+            let err = MemoryInput::parse(input).unwrap_err().to_string();
+            assert!(err.len() < 1_000, "{}", err.len());
         }
     }
 

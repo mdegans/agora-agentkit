@@ -141,7 +141,7 @@ impl FromStr for MemoryId {
         let bytes = hex::decode(&r.hex)
             .ok()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
-            .ok_or_else(|| HistoryRefError(s.to_string()))?;
+            .ok_or_else(|| HistoryRefError(echo(s)))?;
         Ok(Self(bytes))
     }
 }
@@ -192,6 +192,18 @@ pub struct HistoryRef {
     memory: bool,
 }
 
+/// The most characters of an agent's input an error or log line echoes
+pub const ECHO_CHARS: usize = 80;
+
+/// `s` as an error or log line echoes it: at most [`ECHO_CHARS`]
+/// characters, then `…`
+pub fn echo(s: &str) -> String {
+    match s.char_indices().nth(ECHO_CHARS) {
+        Some((at, _)) => format!("{}…", &s[..at]),
+        None => s.to_string(),
+    }
+}
+
 /// Not a memory id or a head
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -212,6 +224,16 @@ impl HistoryRef {
         self.memory
     }
 
+    /// As an agent is shown it: a memory id at most as long as it is
+    /// shown (`mem-` and ten hex digits), however many digits it holds
+    pub fn shown(&self) -> String {
+        if self.memory && self.hex.len() > MEMORY_ID_SHOWN {
+            format!("{MEMORY_ID_PREFIX}{}", &self.hex[..MEMORY_ID_SHOWN])
+        } else {
+            self.to_string()
+        }
+    }
+
     /// Whether `id` starts with it
     pub fn matches_memory(&self, id: &MemoryId) -> bool {
         id.to_hex().starts_with(&self.hex)
@@ -227,7 +249,7 @@ impl FromStr for HistoryRef {
     type Err = HistoryRefError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let err = || HistoryRefError(s.to_string());
+        let err = || HistoryRefError(echo(s));
         let lower = s.trim().to_ascii_lowercase();
         let (hex, memory) = match lower.strip_prefix(MEMORY_ID_PREFIX) {
             Some(rest) => (rest.to_string(), true),
@@ -359,8 +381,9 @@ impl Resolution {
             return None;
         };
         Some(format!(
-            "\"{r}\" matches no memory id, but it is the start of head {}, \
+            "\"{}\" matches no memory id, but it is the start of head {}, \
              so that version is shown.",
+            r.shown(),
             short_head(head)
         ))
     }
@@ -374,7 +397,8 @@ impl Resolution {
         let list: Vec<String> =
             candidates.iter().map(|c| format!("- {c}")).collect();
         Some(format!(
-            "\"{r}\" could mean any of these; give more digits:\n{}",
+            "\"{}\" could mean any of these; give more digits:\n{}",
+            r.shown(),
             list.join("\n")
         ))
     }
@@ -567,6 +591,32 @@ mod tests {
             serde_json::from_value::<HistoryRef>(serde_json::json!("abc"))
                 .is_err()
         );
+    }
+
+    /// An error echoes at most 80 characters of what it was given, and a
+    /// ref from a whole id is shown short
+    #[test]
+    fn echoes_are_bounded_and_ids_short() {
+        let huge = "z".repeat(100_000);
+        let err = huge.parse::<HistoryRef>().unwrap_err().to_string();
+        assert!(err.len() < 400, "{}", err.len());
+        assert!(err.contains(&format!("{}…", "z".repeat(ECHO_CHARS))));
+        assert!(huge.parse::<MemoryId>().unwrap_err().to_string().len() < 400);
+        assert_eq!(echo("short"), "short");
+        assert_eq!(echo(&"é".repeat(81)), format!("{}…", "é".repeat(80)));
+
+        let id = MemoryId::from([0xab; 32]);
+        let r = HistoryRef::from(&id);
+        assert_eq!(r.shown(), id.to_string());
+        let short: HistoryRef = "mem-ababab".parse().unwrap();
+        assert_eq!(short.shown(), short.to_string());
+        let res = Resolution::Ambiguous(vec![
+            Candidate::Memory(id),
+            Candidate::Memory(MemoryId::from([0xac; 32])),
+        ]);
+        let text = res.ambiguity(&r).unwrap();
+        assert!(text.starts_with(&format!("\"{id}\" could mean")), "{text}");
+        assert!(!text.contains(&id.to_hex()), "{text}");
     }
 
     #[test]
