@@ -100,12 +100,6 @@ pub const TEMPLATE_NOTE: &str = "That is the example shape from the \
 instructions above, with its placeholder left in, not your answer. Write \
 your own in that shape: JSON only.";
 
-/// The failure recorded when a paused reply could not be resumed (the
-/// session's pause budget was spent). Nothing is seated: the question is
-/// sent again as it stands.
-const PAUSED_PAST_BUDGET: &str =
-    "paused on a server tool past the session's pause budget";
-
 /// The most of a reply's text kept in an [`Attempt`]
 const RAW_CAP: usize = 4_000;
 
@@ -153,11 +147,9 @@ pub trait Ask: Send + Sync + 'static {
         parse_lenient(text)
     }
 
-    /// Whether an answer is anonymous (the survey): the driver then logs,
-    /// keeps and hands on only a failure's category (`parse`, `clipped`,
-    /// `tool_call`, `rejected`, …), never its message or the reply's text,
-    /// since serde's messages quote the value they refused. The agent is
-    /// still shown the whole retry note.
+    /// Whether an answer is anonymous (the survey): the driver then keeps no
+    /// [`Attempt::raw`] text of its unusable replies either. (No question's
+    /// failure message is ever kept or logged: see [`Attempt::failure`].)
     fn anonymous(&self) -> bool {
         false
     }
@@ -202,7 +194,7 @@ pub enum Unanswered {
         /// The refused response's id
         response_id: String,
     },
-    /// Its attempts were spent; the last failure, as the agent was shown it.
+    /// Its attempts were spent; the last failure's kind ([`Attempt::failure`]).
     Missed(String),
     /// No room left in the context to ask it. Not asked at all.
     NoRoom,
@@ -219,13 +211,33 @@ impl Unanswered {
     }
 }
 
-/// One unusable reply, kept verbatim (capped) for the record.
+/// One unusable reply, for the record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempt {
-    /// The reply's text blocks, capped for a log line or a ledger.
+    /// The reply's text blocks, capped; empty for an
+    /// [anonymous](Ask::anonymous) answer. Never logged by the driver.
     pub raw: String,
-    /// Why it couldn't be used, as the agent was shown it.
+    /// Why it couldn't be used, as a kind only: `parse` (with the field's
+    /// path where there is one: ``parse at `content` ``), `clipped`,
+    /// `tool_call`, `rejected`, `template`, `refused`, `paused`. Never
+    /// serde's message or the host's: they quote what the agent wrote (a
+    /// bare-string memory reply's message is the whole memory; "We Don't
+    /// Read Agent Memory"). The agent itself is shown the whole note. This
+    /// is what logs, [`Unanswered::Missed`] and
+    /// [`Asks::stall_reason`] carry.
     pub failure: String,
+}
+
+/// A failure as [`Attempt::failure`] keeps it: its `kind`, and for a parse
+/// error the field path [`crate::field_path`] put in the note
+fn failure_kind(kind: &'static str, note: &str) -> String {
+    if kind == "parse"
+        && let Some(rest) = note.strip_prefix("Invalid JSON at `")
+        && let Some(end) = rest.find('`')
+    {
+        return format!("parse at `{}`", &rest[..end]);
+    }
+    kind.to_string()
 }
 
 /// Where a question was seated: the transcript's length, and, when the
@@ -610,16 +622,13 @@ impl<A: Ask> AskTurn<A> {
         note: &str,
         kind: &'static str,
     ) {
-        self.attempts.push(if self.ask.anonymous() {
-            Attempt {
-                raw: String::new(),
-                failure: kind.to_string(),
-            }
-        } else {
-            Attempt {
-                raw: cap(raw_text(reply)),
-                failure: note.to_string(),
-            }
+        self.attempts.push(Attempt {
+            raw: if self.ask.anonymous() {
+                String::new()
+            } else {
+                cap(raw_text(reply))
+            },
+            failure: failure_kind(kind, note),
         });
     }
 
@@ -897,11 +906,10 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
                     Control::Stalled => {
                         self.attempts.push(Attempt {
                             raw: String::new(),
-                            failure: PAUSED_PAST_BUDGET.to_string(),
+                            failure: "paused".to_string(),
                         });
                         if self.spent() {
-                            let why =
-                                Unanswered::Missed(PAUSED_PAST_BUDGET.into());
+                            let why = Unanswered::Missed("paused".into());
                             return self
                                 .settle(host, why)
                                 .await

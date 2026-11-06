@@ -74,6 +74,11 @@ pub struct CommentWrite {
 pub struct SessionEnded {
     pub at: DateTime<Utc>,
     pub failure: SessionFailure,
+    /// Whether the operator was told: the runner sets it from whether its
+    /// alert mail went out. `false` when absent (a line written before the
+    /// field)
+    #[serde(default)]
+    pub told: bool,
 }
 
 /// One write a session made.
@@ -509,6 +514,7 @@ mod tests {
                 model: "claude-test".into(),
                 response_id: "msg_1".into(),
             },
+            told: true,
         };
         journal.append(&ended.clone().into()).await.unwrap();
         let read = journal.read().await.unwrap();
@@ -536,6 +542,7 @@ mod tests {
             serde_json::to_value(JournalLine::from(SessionEnded {
                 at: at(5),
                 failure,
+                told: false,
             }))
             .unwrap()
         };
@@ -545,7 +552,8 @@ mod tests {
             }),
             serde_json::json!({
                 "line": "ended", "at": "2026-10-13T11:05:00Z",
-                "failure": {"kind": "stalled", "during": "memory"}
+                "failure": {"kind": "stalled", "during": "memory"},
+                "told": false
             })
         );
         assert_eq!(
@@ -588,5 +596,23 @@ mod tests {
         assert!(read.sessions.iter().all(|s| s.ended.is_none()));
         assert_eq!(read.interrupted().count(), 1);
         assert_eq!(read.writes(), 1);
+
+        // An `ended` line from before `told` (b539aa9) reads it as false
+        let ended = concat!(
+            r#"{"line":"session","started_at":"2026-10-13T11:32:00Z","model":"claude-test"}"#,
+            "\n",
+            r#"{"line":"ended","at":"2026-10-13T11:40:00Z","failure":{"kind":"stalled","during":"memory"}}"#,
+            "\n",
+        );
+        let read = Journal::parse(ended.as_bytes());
+        assert!(read.skipped.is_empty());
+        let ended = read.sessions[0].ended.as_ref().unwrap();
+        assert!(!ended.told);
+        assert_eq!(
+            ended.failure,
+            SessionFailure::Stalled {
+                during: "memory".into()
+            }
+        );
     }
 }

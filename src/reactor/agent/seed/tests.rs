@@ -169,12 +169,15 @@ fn transcript(agent: &SeedAgent) -> String {
 
 /// Seat the "session started" user turn `on_init` would have (the tests
 /// below skip perception's network round-trips where they can).
+/// What `on_init` leaves, without the network: a user turn, and the
+/// session begun
 fn seat_start(agent: &mut SeedAgent) {
     agent
         .state
         .prompt
         .push_message((Role::User, "start"))
         .unwrap();
+    agent.begun = true;
 }
 
 const FULL_CONSTITUTION: &str = "Preamble Article I Article II Article III \
@@ -3895,7 +3898,7 @@ async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
     let reason = reflecting.stall_reason().unwrap();
     assert!(
         reason.starts_with(
-            "the memory question failed 3 times in a row; last: Invalid JSON"
+            "the memory question failed 3 times in a row; last: parse"
         ),
         "{reason}"
     );
@@ -3931,7 +3934,7 @@ async fn a_spent_soul_rewrite_is_missed_and_the_session_completes() {
     assert!(matches!(
         agent.unanswered_asks(),
         [("soul", crate::reactor::ask::Unanswered::Missed(why))]
-            if why.starts_with("Invalid JSON")
+            if why == "parse"
     ));
 }
 
@@ -11847,4 +11850,94 @@ async fn an_unexplained_end_is_an_error_and_a_complete_one_is_none() {
     assert!(agent.state.completed);
     agent.on_teardown().await.unwrap();
     assert_eq!(agent.failure(), None);
+}
+
+/// A session whose `on_init` failed (here: no server at all, as when the
+/// endpoint is down or the constitution gate trips fleet-wide) never began,
+/// and reports no failure: there is nothing to tell the agent
+#[tokio::test]
+async fn a_session_that_never_began_has_no_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    assert!(agent.on_init().await.is_err());
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), None);
+}
+
+/// A wrapper's own question pauses on a web search while this agent is
+/// held: resumed under the session's budget, never refused, and past the
+/// budget the partial is dropped and the turn stalls, with the phase
+/// untouched
+#[tokio::test]
+async fn a_wrappers_question_pause_resumes_while_held() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(agent.phase, Phase::Held);
+    // The wrapper's question
+    seat_user(&mut agent.state.prompt, "A question from the wrapper.").unwrap();
+    let before = agent.prompt().messages.len();
+    for i in 1..=MAX_PAUSES {
+        let control = agent.resume_question_pause(paused_message()).unwrap();
+        assert_eq!(control, Control::Continue, "pause {i}");
+    }
+    assert_eq!(agent.prompt().messages.len(), before + MAX_PAUSES);
+    let control = agent.resume_question_pause(paused_message()).unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(
+        agent.prompt().messages.len(),
+        before,
+        "the partial is dropped"
+    );
+    assert_eq!(agent.phase, Phase::Held, "the phase is untouched");
+}
+
+/// Past the budget during a wrapper's question while still acting (a
+/// trial review), the memory rewrite is not begun under it
+#[tokio::test]
+async fn a_wrappers_question_pause_past_the_budget_never_begins_memory() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for _ in 0..MAX_PAUSES {
+        agent.resume_question_pause(paused_message()).unwrap();
+    }
+    let control = agent.resume_question_pause(paused_message()).unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert!(matches!(agent.phase, Phase::Acting { .. }));
+    assert!(!transcript(&agent).contains("update your `## Your Memory`"));
+}
+
+/// We don't read agent memory: a memory rewrite sent as a bare string
+/// fails with serde quoting the whole of it, and none of that reaches the
+/// stall reason or the record; the agent still sees the whole note
+#[tokio::test]
+async fn a_failed_memory_rewrite_keeps_no_words() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message(
+            r#""My private plans for tomorrow.""#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    let reason = agent.stall_reason().unwrap();
+    assert!(reason.ends_with("last: parse"), "{reason}");
+    assert!(!reason.contains("private plans"));
+    let last =
+        serde_json::to_string(agent.prompt().messages.last().unwrap()).unwrap();
+    assert!(last.contains("Invalid JSON"), "the agent sees it: {last}");
 }

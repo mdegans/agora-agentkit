@@ -19,6 +19,7 @@
 //! [`on_teardown`]: Agent::on_teardown
 
 mod asks;
+pub use asks::SessionPart;
 mod elements;
 mod gauge;
 mod keyring;
@@ -417,6 +418,9 @@ pub struct SeedAgent {
     unanswered: Vec<(&'static str, Unanswered)>,
     /// Why this session failed, once it did ([`SeedAgent::failure`])
     failure: Option<SessionFailure>,
+    /// Whether `on_init` finished: a session that never began has no
+    /// [`failure`](SeedAgent::failure)
+    begun: bool,
     /// Replies in a row this agent returned [`Control::Stalled`] for: at
     /// the reactor's cap, a session torn down short of complete stalled out
     stalls: usize,
@@ -689,15 +693,17 @@ impl SeedAgent {
         })
     }
 
-    /// Resume a paused turn: seat the partial assistant turn (the one holding
-    /// the `server_tool_use` block) so the next request continues the tool
-    /// instead of re-running it, and count the resumption against
-    /// [`MAX_PAUSES`].
+    /// Resume a paused server-tool turn (a web search still working): seat
+    /// the partial assistant turn, so the next request continues the tool
+    /// instead of re-running it, and count the resumption against the
+    /// session-wide [`MAX_PAUSES`]. Past it, the partial is taken back out
+    /// and the turn is [`Control::Stalled`].
     ///
-    /// Past the cap nothing is seated and the acting phase ends — the session
-    /// still reflects, writes memory, and completes; it just stops chasing a
-    /// turn that won't settle.
-    async fn resume_pause(
+    /// Phase-independent: it never touches the phase or begins the memory
+    /// rewrite. For a wrapping agent's own questions (its `asks` active,
+    /// this agent `Held` or not yet past acting), whose pauses share this
+    /// session's budget; [`Agent::on_pause`] is for this agent's own turns.
+    pub fn resume_question_pause(
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
@@ -710,13 +716,7 @@ impl SeedAgent {
                 "server-tool pause cap reached; abandoning the paused turn"
             );
             self.drop_abandoned_turn();
-            return match self.phase {
-                Phase::Acting { .. } => self.begin_reflect().await,
-                // A question owns its own turn: drop the partial, and the
-                // driver counts a failed attempt (the reactor's stall cap
-                // bounds the memory rewrite's)
-                _ => Ok(Control::Stalled),
-            };
+            return Ok(Control::Stalled);
         }
         // Info, not debug: each resumption is a billed round-trip (a whole
         // extra batch on the round-major path), and it's the only signal
@@ -728,6 +728,23 @@ impl SeedAgent {
         );
         self.seat_response(response)?;
         Ok(Control::Continue)
+    }
+
+    /// [`resume_question_pause`](Self::resume_question_pause) for this
+    /// agent's own turns: past the cap, acting ends and the memory rewrite
+    /// begins; a question's turn stalls, and the driver counts a failed
+    /// attempt (the reactor's stall cap bounds the memory rewrite's)
+    async fn resume_pause(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, SeedError> {
+        let acting = matches!(self.phase, Phase::Acting { .. })
+            && !self.asks.is_active();
+        let control = self.resume_question_pause(response)?;
+        if acting && control == Control::Stalled {
+            return self.begin_reflect().await;
+        }
+        Ok(control)
     }
 
     /// Take the abandoned paused turn back out of the prompt: every trailing
@@ -851,8 +868,9 @@ impl SeedAgent {
     /// session fails (a refusal, no room for the memory rewrite) or, at
     /// teardown, from how it ended: at the reactor's stall cap
     /// ([`SessionFailure::Stalled`]), else short of complete
-    /// ([`SessionFailure::Error`]). `None` for a session that completed.
-    /// Read it after [`on_teardown`](Agent::on_teardown). No content
+    /// ([`SessionFailure::Error`]). `None` for a session that completed,
+    /// and for one that never began (its [`on_init`](Agent::on_init)
+    /// failed). Read it after [`on_teardown`](Agent::on_teardown). No content
     pub fn failure(&self) -> Option<&SessionFailure> {
         self.failure.as_ref()
     }
@@ -870,12 +888,14 @@ impl SeedAgent {
     /// [`MAX_STALLS`](crate::reactor::MAX_STALLS) stalls in a row, and the
     /// reactor stops right after the last) or by an error
     fn settle_failure(&mut self) {
-        if self.state.completed || self.failure.is_some() {
+        // A session that never began (on_init failed: the constitution
+        // gate, an endpoint down) did not fail as a session: no notice
+        if !self.begun || self.state.completed || self.failure.is_some() {
             return;
         }
         let during = match self.phase {
-            Phase::Acting { .. } => "acting",
-            _ => self.asks.seated().unwrap_or("memory"),
+            Phase::Acting { .. } => SessionPart::Acting.as_str(),
+            _ => self.asks.seated().unwrap_or(SessionPart::Memory.as_str()),
         }
         .to_string();
         self.failure = Some(if self.stalls >= crate::reactor::MAX_STALLS {
@@ -1059,13 +1079,13 @@ impl SeedAgent {
                     agent = %self.state.soul.name,
                     agent_id = %self.id,
                     model = %response.model,
-                    during = "acting",
+                    during = SessionPart::Acting.as_str(),
                     round,
                     response_id = %response.id,
                     "the API refused a reply; the session ends"
                 );
                 self.failure = Some(SessionFailure::Refused {
-                    during: "acting".to_string(),
+                    during: SessionPart::Acting.as_str().to_string(),
                     round: Some(round),
                     model: response.model.to_string(),
                     response_id: response.id.to_string(),
@@ -1297,6 +1317,7 @@ impl Agent for SeedAgent {
             asks: Asks::default(),
             unanswered: Vec::new(),
             failure: None,
+            begun: false,
             stalls: 0,
             survey_mark: None,
             contact_me: false,
@@ -1573,6 +1594,7 @@ impl Agent for SeedAgent {
                 },
             },
         )?;
+        self.begun = true;
         Ok(())
     }
 

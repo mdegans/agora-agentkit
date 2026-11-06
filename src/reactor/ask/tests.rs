@@ -336,7 +336,7 @@ async fn a_spent_optional_question_is_missed_and_the_next_is_asked() {
     assert_eq!(control, Control::Continue, "on to the next question");
     assert!(matches!(
         host.unanswered.as_slice(),
-        [("note", Unanswered::Missed(why))] if why.contains("Invalid JSON")
+        [("note", Unanswered::Missed(why))] if why == "parse"
     ));
     assert_eq!(host.asked[0].attempts.len(), 3);
     // The missed reply is seated, the next question after it
@@ -367,7 +367,7 @@ async fn a_required_question_stalls_until_the_reactor_gives_up() {
     let reason = host.asks.stall_reason().unwrap();
     assert!(
         reason.contains("the required question failed 5 times in a row")
-            && reason.contains("Invalid JSON"),
+            && reason.ends_with("last: parse"),
         "{reason}"
     );
 }
@@ -722,10 +722,10 @@ async fn an_anonymous_questions_failures_carry_no_words() {
     assert!(seen.contains("Invalid JSON"), "{seen}");
     assert_eq!(
         host.unanswered,
-        [("note", Unanswered::Missed("parse".into()))]
+        [("note", Unanswered::Missed("parse at `note`".into()))]
     );
     for attempt in &host.asked[0].attempts {
-        assert_eq!(attempt.failure, "parse");
+        assert_eq!(attempt.failure, "parse at `note`");
         assert!(attempt.raw.is_empty());
     }
 }
@@ -740,7 +740,7 @@ async fn an_anonymous_stall_reason_names_only_the_category() {
     asked(&mut host, [ask]).await;
     handle(&mut host, text(r#"{"note": 42}"#)).await.unwrap();
     let reason = host.asks.stall_reason().unwrap();
-    assert!(reason.ends_with("last: parse"), "{reason}");
+    assert!(reason.ends_with("last: parse at `note`"), "{reason}");
 }
 
 /// The question's own example, copied, is a retry, whether its placeholder

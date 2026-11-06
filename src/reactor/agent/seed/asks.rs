@@ -24,6 +24,59 @@ use crate::reactor::ask::{
 use crate::reactor::{Control, Outcome, SessionFailure};
 use crate::requests::SubmitFeedbackPayload;
 
+/// The parts of a seed session, by name: acting, then the closing
+/// questions. One set, for [`Ask::name`](crate::reactor::ask::Ask::name),
+/// the `during` of a [`SessionFailure`] and [`SeedAgent::unanswered_asks`],
+/// so a runner matches on these rather than on strings
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionPart {
+    /// The tool rounds
+    Acting,
+    /// The memory rewrite (required)
+    Memory,
+    /// A deep soul mutation
+    Soul,
+    /// An evolution-log entry
+    Evolution,
+    /// The anonymous survey
+    Survey,
+}
+
+impl SessionPart {
+    /// Every part, in session order
+    pub const ALL: [Self; 5] = [
+        Self::Acting,
+        Self::Memory,
+        Self::Soul,
+        Self::Evolution,
+        Self::Survey,
+    ];
+
+    /// The name logs, `during` and [`Ask::name`] use
+    ///
+    /// [`Ask::name`]: crate::reactor::ask::Ask::name
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Acting => "acting",
+            Self::Memory => "memory",
+            Self::Soul => "soul",
+            Self::Evolution => "evolution",
+            Self::Survey => "survey",
+        }
+    }
+
+    /// The part named `name`, if it is one
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|part| part.as_str() == name)
+    }
+}
+
+impl std::fmt::Display for SessionPart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Log the fields a last attempt had clipped to fit
 fn log_clipped(agent: &str, ask: &'static str, fields: &[String]) {
     if !fields.is_empty() {
@@ -48,7 +101,7 @@ impl Ask for MemoryAsk {
     type Answer = Memory;
 
     fn name(&self) -> &'static str {
-        "memory"
+        SessionPart::Memory.as_str()
     }
 
     fn question(&self) -> Content {
@@ -87,7 +140,7 @@ impl Ask for SoulAsk {
     type Answer = Soul;
 
     fn name(&self) -> &'static str {
-        "soul"
+        SessionPart::Soul.as_str()
     }
 
     fn question(&self) -> Content {
@@ -134,7 +187,7 @@ impl Ask for EvolutionAsk {
     type Answer = Option<EvolutionRequest>;
 
     fn name(&self) -> &'static str {
-        "evolution"
+        SessionPart::Evolution.as_str()
     }
 
     fn question(&self) -> Content {
@@ -190,7 +243,7 @@ impl Ask for SurveyAsk {
     type Answer = Option<Feedback>;
 
     fn name(&self) -> &'static str {
-        "survey"
+        SessionPart::Survey.as_str()
     }
 
     fn question(&self) -> Content {
@@ -269,7 +322,7 @@ impl SeedAgent {
                     response_id: response_id.clone(),
                 });
             }
-            Unanswered::NoRoom if ask == "memory" => {
+            Unanswered::NoRoom if ask == SessionPart::Memory.as_str() => {
                 self.failure = Some(SessionFailure::NoRoom {
                     during: ask.to_string(),
                 });
@@ -503,6 +556,26 @@ mod tests {
             max_tokens: 4096,
             agent: "ada".into(),
         }
+    }
+
+    #[test]
+    fn session_parts_round_trip_by_name() {
+        for part in SessionPart::ALL {
+            assert_eq!(SessionPart::from_name(part.as_str()), Some(part));
+        }
+        assert_eq!(SessionPart::from_name("mutate"), None);
+        let soul = SoulAsk {
+            question: String::new(),
+            max_tokens: 1,
+            agent: String::new(),
+        };
+        let names = [
+            MemoryAsk { max_tokens: 1 }.name(),
+            soul.name(),
+            evolution().name(),
+            survey().name(),
+        ];
+        assert_eq!(names, ["memory", "soul", "evolution", "survey"]);
     }
 
     #[test]

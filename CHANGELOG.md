@@ -41,19 +41,27 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   response_id }`, `Stalled { during }`, `NoRoom { during }`, `Error`;
   categories only) and `SeedAgent::failure()`, set where a session fails
   and, at teardown, from how it ended: the reactor's stall cap (the agent
-  counts its stalls in a row) or else an error. `record_failure` lets a
-  wrapper record its own first.
-- **Journal**: a new `ended` line, `SessionEnded { at, failure }`, read onto
+  counts its stalls in a row) or else an error. A session that never began
+  (its `on_init` failed) has none. `record_failure` lets a wrapper record
+  its own first. `SessionPart` names the parts (`acting`, `memory`, `soul`,
+  `evolution`, `survey`) for `during` and `Ask::name`.
+- **A wrapper's pauses**: `SeedAgent::resume_question_pause` resumes a
+  paused turn under the session's pause budget, phase-independent (never
+  refused while held, never beginning the memory rewrite past the budget).
+- **Journal**: a new `ended` line, `SessionEnded { at, failure, told }`
+  (`told`: whether the operator's alert went out; `false` when absent), read onto
   `JournalSession::ended`, which a failed session's runner appends. A
   journal from before has none and reads as before (golden test); a reader
   from before skips the line. `Journal::interrupted` now also yields a
   session that ended as failed with no writes. When journals are created
   and removed is unchanged.
-- **Anonymous answers** (`Ask::anonymous`, the survey): serde's error
-  messages quote the value they refused, so for these the driver logs,
-  keeps and hands on only a failure's category (`parse`, `clipped`,
-  `tool_call`, `rejected`, `template`, …), in `Missed` too; the agent still
-  sees the whole retry note. The survey's redaction mark is set when it is
+- **No failure's words are kept** ("We Don't Read Agent Memory"): serde's
+  messages quote what they refused (a bare-string memory reply's, the whole
+  memory), so for every question the driver logs, keeps and hands on only a
+  failure's kind (`parse`, with the field path where there is one,
+  `clipped`, `tool_call`, `rejected`, `template`, `refused`, `paused`), in
+  `Missed` and `stall_reason` too; the agent still sees the whole retry
+  note. `Ask::anonymous` (the survey) keeps no raw reply text either. The survey's redaction mark is set when it is
   seated (`Answer::seated`), and on every unanswered path, so a session
   that errs with the survey open is redacted too.
 - **The question's own example is no answer**: an answer holding one of
