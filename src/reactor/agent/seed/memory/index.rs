@@ -62,6 +62,8 @@ pub enum IndexError {
     Mismatch,
     #[error("the index names a line it does not hold")]
     LineOutOfRange,
+    #[error("a memory's save times are out of order")]
+    Unsorted,
 }
 
 /// One distinct line that matched, across the versions that hold it
@@ -207,6 +209,14 @@ impl SearchIndex {
         }) {
             return Err(IndexError::LineOutOfRange);
         }
+        if file
+            .index
+            .versions
+            .iter()
+            .any(|v| v.at.windows(2).any(|w| w[0] >= w[1]))
+        {
+            return Err(IndexError::Unsorted);
+        }
         Ok(file.index)
     }
 
@@ -259,8 +269,9 @@ impl SearchIndex {
             }
         }
         let mut groups: Vec<(u32, Seen)> = found.into_iter().collect();
+        // Newest first; a version's lines top-down
         groups.sort_by_key(|(line, (first, last, _))| {
-            std::cmp::Reverse((*last, *first, *line))
+            (std::cmp::Reverse(*last), std::cmp::Reverse(*first), *line)
         });
         result.more = groups.len().saturating_sub(MAX_GROUPS);
         result.hits = groups
@@ -575,6 +586,26 @@ mod tests {
         assert!(matches!(
             SearchIndex::from_bytes(b"{"),
             Err(IndexError::Json(_))
+        ));
+    }
+
+    /// One version's lines list top-down
+    #[test]
+    fn a_versions_lines_list_top_down() {
+        let mut ix = SearchIndex::new();
+        ix.add(id(1), at(1), "note b\nnote a\nnote c\n");
+        let lines: Vec<String> =
+            ix.search("note").hits.into_iter().map(|h| h.line).collect();
+        assert_eq!(lines, ["note b", "note a", "note c"]);
+    }
+
+    #[test]
+    fn unsorted_save_times_are_refused() {
+        let mut ix = index();
+        ix.versions[0].at.push(at(1));
+        assert!(matches!(
+            SearchIndex::from_bytes(&ix.to_bytes()),
+            Err(IndexError::Unsorted)
         ));
     }
 
