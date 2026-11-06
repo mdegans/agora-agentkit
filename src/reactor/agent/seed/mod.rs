@@ -473,8 +473,9 @@ pub struct SeedAgent {
     /// Acting turns in a row whose every call was refused for its input
     /// before anything was read ([`MAX_FREE_REFUSED_TURNS`])
     refused_streak: usize,
-    /// The id of the memory this session starts with, from the runner's
-    /// key ([`SeedAgent::set_memory_id_key`])
+    /// The runner's key for memory ids ([`SeedAgent::set_memory_id_key`])
+    memory_id_key: Option<MemoryIdKey>,
+    /// The id of the memory the intro rendered, computed at `on_init`
     memory_id: Option<MemoryId>,
 }
 
@@ -1355,16 +1356,19 @@ impl SeedAgent {
         self.contact_request
     }
 
-    /// Name the memory this session starts with by its [`MemoryId`] under
+    /// Name the memory in this session's intro by its [`MemoryId`] under
     /// `key`, so its heading shows it. Call before the session's
-    /// [`on_init`](Agent::on_init)
+    /// [`on_init`](Agent::on_init), which computes the id from the memory
+    /// it renders, so a change to the memory in between is never stale
     pub fn set_memory_id_key(&mut self, key: &MemoryIdKey) {
-        self.memory_id =
-            Some(MemoryId::of(key, self.id, &self.state.memory.content));
+        self.memory_id_key = Some(MemoryIdKey::from_bytes(
+            zeroize::Zeroizing::new(*key.expose()),
+        ));
     }
 
-    /// The id of the memory this session started with: the memory in the
-    /// agent's context, which the `memory` tool is anchored on
+    /// The id of the memory the intro rendered: the memory in the agent's
+    /// context, which the `memory` tool is anchored on. `None` before
+    /// [`on_init`](Agent::on_init), or without a key
     pub fn memory_id(&self) -> Option<MemoryId> {
         self.memory_id
     }
@@ -1502,6 +1506,7 @@ impl Agent for SeedAgent {
             phase_failures: 0,
             phase_budget: 0,
             last_failure: None,
+            memory_id_key: None,
             memory_id: None,
         })
     }
@@ -1729,6 +1734,12 @@ impl Agent for SeedAgent {
 
         let soul_markdown = self.state.soul.markdown();
         let memory = self.state.memory.render_for_prompt();
+        // From the memory rendered here, whatever happened to it since the
+        // key was set
+        self.memory_id = self
+            .memory_id_key
+            .as_ref()
+            .map(|key| MemoryId::of(key, self.id, &self.state.memory.content));
         // Read the installed tool set *before* taking the prompt — the take
         // leaves a `Prompt::default()` behind, tools and all.
         let web_tools = self.has_web_tools();

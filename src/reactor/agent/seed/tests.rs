@@ -303,9 +303,13 @@ async fn the_memory_id_key_names_the_memory_in_its_heading() {
     assert_eq!(agent.memory_id(), None);
     let key = MemoryIdKey::generate();
     agent.set_memory_id_key(&key);
-    let id = MemoryId::of(&key, agent.id, &agent.state.memory.content);
-    assert_eq!(agent.memory_id(), Some(id));
+    // Computed at init, from the memory rendered: a change after the key
+    // is set (a restore, say) is not left with a stale id
+    assert_eq!(agent.memory_id(), None);
+    agent.state.memory.content = "Restored memory.".into();
+    let id = MemoryId::of(&key, agent.id, "Restored memory.");
     agent.on_init().await.unwrap();
+    assert_eq!(agent.memory_id(), Some(id));
     let intro = transcript(&agent);
     assert!(intro.contains(&format!("## Your Memory ({id})")), "{intro}");
 
