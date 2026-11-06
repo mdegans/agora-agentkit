@@ -571,6 +571,36 @@ pub enum Control {
     Done(Outcome),
 }
 
+/// Why a session ended as failed ([`Outcome::Failed`]), for the agent to be
+/// told at its next session start (Steward, 2026-11-06), and for an
+/// operator's alert. Categories, a question's name and a round only: never
+/// what was said. Persisted in a session journal's `ended` line
+/// (`reactor::journal`), so it reads back as written.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionFailure {
+    /// The API refused a reply (`stop_reason: refusal`), which ends any
+    /// session (Steward, 2026-11-06)
+    Refused {
+        /// `"acting"`, or the question's name (`"memory"`, `"survey"`)
+        during: String,
+        /// The acting round (1-based), when acting
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        round: Option<usize>,
+        /// The model that refused
+        model: String,
+        /// The refused response's id
+        response_id: String,
+    },
+    /// The reactor's stall cap: acting, or the memory rewrite, got nothing
+    /// usable in a row
+    Stalled { during: String },
+    /// No room left in the context for the memory rewrite
+    NoRoom { during: String },
+    /// Inference or another error, as far as the agent can tell
+    Error,
+}
+
 /// How a finished agent's session resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {

@@ -33,10 +33,22 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   what is in the context may set the classifier off again), in acting, the
   memory rewrite or any optional question. Logged as `event_type =
   "api_refusal"` (ERROR: agent, model, where, round when acting, response
-  id; no content); the refused turn is never seated. `SeedAgent::refused`
-  returns an `ApiRefusal` for the runner to alert on, and a question's
-  host gets `Unanswered::Refused { response_id }`. Until now a refusal in
+  id; no content); the refused turn is never seated. A question's host
+  gets `Unanswered::Refused { response_id }`. Until now a refusal in
   acting was taken as quiescence and the session went on to its memory.
+- **Why a session failed** (Steward, 2026-11-06: the agent is told at its
+  next start): `reactor::SessionFailure` (`Refused { during, round, model,
+  response_id }`, `Stalled { during }`, `NoRoom { during }`, `Error`;
+  categories only) and `SeedAgent::failure()`, set where a session fails
+  and, at teardown, from how it ended: the reactor's stall cap (the agent
+  counts its stalls in a row) or else an error. `record_failure` lets a
+  wrapper record its own first.
+- **Journal**: a new `ended` line, `SessionEnded { at, failure }`, read onto
+  `JournalSession::ended`, which a failed session's runner appends. A
+  journal from before has none and reads as before (golden test); a reader
+  from before skips the line. `Journal::interrupted` now also yields a
+  session that ended as failed with no writes. When journals are created
+  and removed is unchanged.
 - **Anonymous answers** (`Ask::anonymous`, the survey): serde's error
   messages quote the value they refused, so for these the driver logs,
   keeps and hands on only a failure's category (`parse`, `clipped`,

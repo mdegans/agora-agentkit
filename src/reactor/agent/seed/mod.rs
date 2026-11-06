@@ -83,8 +83,8 @@ use crate::govlog::Sha256Hex;
 use crate::ids::{AgentId, ContactRequestId, FeedbackId, PostId};
 use crate::reactor::ask::{self, Asks, Mark, Unanswered};
 use crate::reactor::{
-    Agent, Control, Epilogue, Outcome, RetryAfter, State, default_handle,
-    inference::Quirks, seat_unused_reply, seat_user,
+    Agent, Control, Epilogue, Outcome, RetryAfter, SessionFailure, State,
+    default_handle, inference::Quirks, seat_unused_reply, seat_user,
 };
 use crate::requests::RequestContactPayload;
 use tool::MAX_LISTING;
@@ -415,8 +415,11 @@ pub struct SeedAgent {
     asks: Asks<SeedAgent>,
     /// Closing questions that ended without an answer this session
     unanswered: Vec<(&'static str, Unanswered)>,
-    /// The API refusal that ended this session, if one did
-    refused: Option<ApiRefusal>,
+    /// Why this session failed, once it did ([`SeedAgent::failure`])
+    failure: Option<SessionFailure>,
+    /// Replies in a row this agent returned [`Control::Stalled`] for: at
+    /// the reactor's cap, a session torn down short of complete stalled out
+    stalls: usize,
     /// Where the survey begins, for redaction at teardown
     survey_mark: Option<Mark>,
     /// The agent answered the survey asking to be contacted: keep it
@@ -440,21 +443,6 @@ pub struct SeedAgent {
     memory_id_key: Option<MemoryIdKey>,
     /// The id of the memory the intro rendered, computed at `on_init`
     memory_id: Option<MemoryId>,
-}
-
-/// An API refusal that ended a session (Steward, 2026-11-06: any refusal
-/// fails the session). Where it happened and what refused it; never what
-/// was said
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApiRefusal {
-    /// `"acting"`, or the question's name (`"memory"`, `"survey"`)
-    pub during: String,
-    /// The acting round (1-based), when acting
-    pub round: Option<usize>,
-    /// The model that refused
-    pub model: String,
-    /// The refused response's id
-    pub response_id: String,
 }
 
 /// Turns in a row whose every call was refused for its input, before
@@ -858,10 +846,43 @@ impl SeedAgent {
         &self.unanswered
     }
 
-    /// The API refusal (`stop_reason: refusal`) that ended this session as
-    /// failed, if one did, for the runner to alert on. No content
-    pub fn refused(&self) -> Option<&ApiRefusal> {
-        self.refused.as_ref()
+    /// Why this session failed, if it did: for the runner's notice to the
+    /// agent at its next session start, and its alerts. Set where the
+    /// session fails (a refusal, no room for the memory rewrite) or, at
+    /// teardown, from how it ended: at the reactor's stall cap
+    /// ([`SessionFailure::Stalled`]), else short of complete
+    /// ([`SessionFailure::Error`]). `None` for a session that completed.
+    /// Read it after [`on_teardown`](Agent::on_teardown). No content
+    pub fn failure(&self) -> Option<&SessionFailure> {
+        self.failure.as_ref()
+    }
+
+    /// Record why the session failed, when a wrapping agent knows better
+    /// (its own question was refused): kept unless one is already recorded.
+    /// Call before [`on_teardown`](Agent::on_teardown), which otherwise
+    /// takes a session short of complete for an error
+    pub fn record_failure(&mut self, failure: SessionFailure) {
+        self.failure.get_or_insert(failure);
+    }
+
+    /// At teardown, a session not complete and not yet explained failed by
+    /// the reactor's stall cap (the agent returned
+    /// [`MAX_STALLS`](crate::reactor::MAX_STALLS) stalls in a row, and the
+    /// reactor stops right after the last) or by an error
+    fn settle_failure(&mut self) {
+        if self.state.completed || self.failure.is_some() {
+            return;
+        }
+        let during = match self.phase {
+            Phase::Acting { .. } => "acting",
+            _ => self.asks.seated().unwrap_or("memory"),
+        }
+        .to_string();
+        self.failure = Some(if self.stalls >= crate::reactor::MAX_STALLS {
+            SessionFailure::Stalled { during }
+        } else {
+            SessionFailure::Error
+        });
     }
 
     /// Dump the finished session transcript to the prompt log, if one is
@@ -1008,6 +1029,185 @@ impl SeedAgent {
     }
 }
 
+impl SeedAgent {
+    /// One reply, routed by phase: `Acting` runs the default tool loop
+    /// under the round budget; a seated question's reply goes to the
+    /// [`ask`] driver. [`Agent::handle`] counts the stalls around it
+    async fn handle_turn(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, SeedError> {
+        self.shown_once.next_turn();
+        self.context.record(&response.usage);
+        if self.asks.is_active() {
+            return ask::handle(self, response).await;
+        }
+        match self.phase {
+            // Any refusal ends the session as failed (Steward, 2026-11-06):
+            // whatever is in the context may set the classifier off again.
+            // The refused turn is not seated; nothing follows it
+            Phase::Acting { rounds_left }
+                if matches!(
+                    response.stop_reason,
+                    Some(StopReason::Refusal)
+                ) =>
+            {
+                let round =
+                    self.ctx.config.max_rounds.saturating_sub(rounds_left) + 1;
+                tracing::error!(
+                    event_type = "api_refusal",
+                    agent = %self.state.soul.name,
+                    agent_id = %self.id,
+                    model = %response.model,
+                    during = "acting",
+                    round,
+                    response_id = %response.id,
+                    "the API refused a reply; the session ends"
+                );
+                self.failure = Some(SessionFailure::Refused {
+                    during: "acting".to_string(),
+                    round: Some(round),
+                    model: response.model.to_string(),
+                    response_id: response.id.to_string(),
+                });
+                Ok(Control::Done(Outcome::Failed))
+            }
+            Phase::Acting { rounds_left } => {
+                let clipped =
+                    matches!(response.stop_reason, Some(StopReason::MaxTokens));
+                let tool_round = !clipped
+                    && response
+                        .inner
+                        .content
+                        .iter()
+                        .any(|block| block.tool_use().is_some());
+                // A clipped turn continues acting too, so it needs the
+                // same room as a round.
+                if (tool_round || clipped)
+                    && self.context.room() < MIN_ROUND_ROOM
+                {
+                    // Out of context before out of rounds: close now,
+                    // while reflect still fits, rather than run a round
+                    // whose next request the endpoint would refuse and
+                    // lose the memory rewrite with it. Seated like the
+                    // round cap below, for the same cache reason.
+                    tracing::info!(
+                        event_type = "context_quiesce",
+                        agent = %self.state.soul.name,
+                        held = self.context.get(),
+                        window = self.context.window(),
+                        reserve = self.context.reserve(),
+                        rounds_left,
+                        "context nearly full; acting ends early"
+                    );
+                    seat_unused_reply(
+                        &mut self.state.prompt,
+                        &response,
+                        &not_run_context(self.context.room()),
+                    )
+                    .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    return self.begin_reflect().await;
+                }
+                if tool_round {
+                    if rounds_left == 0 {
+                        // Budget spent. The turn is seated and each call
+                        // answered "not run" rather than the turn being
+                        // dropped: dropping it put the reflect instruction
+                        // *inside* the previous tool-result message, which
+                        // grows a message the cache already holds and costs
+                        // the whole tail on prefix caches anchored at
+                        // message ends (blallama hybrid models: windmill,
+                        // 31.2k, 2026-10-02). Seated, the previous prompt and
+                        // this turn stay a prefix, and the instruction
+                        // starts in a fresh user message.
+                        self.seat_unrun_calls(response)?;
+                        return self.begin_reflect().await;
+                    }
+                    // A server tool (web search, web fetch) reads and bills
+                    // whatever happens to the client calls beside it
+                    let server_tool = response.inner.content.iter().any(|b| {
+                        matches!(
+                            b,
+                            misanthropic::prompt::message::Block::ServerToolUse {
+                                ..
+                            }
+                        )
+                    });
+                    let mut left = rounds_left - 1;
+                    self.phase = Phase::Acting { rounds_left: left };
+                    let mut control = default_handle(self, response).await?;
+                    // A turn whose every call was refused for its input is
+                    // free, up to MAX_FREE_REFUSED_TURNS in a row: the round
+                    // is given back, and it is not a stall
+                    let mut refused_note = None;
+                    // Only while still acting: a turn that ended acting (the
+                    // pause cap's reflect) is not given back
+                    let acting = matches!(self.phase, Phase::Acting { .. });
+                    if acting
+                        && !server_tool
+                        && every_call_refused(&self.state.prompt)
+                    {
+                        self.refused_streak += 1;
+                        if self.refused_streak <= MAX_FREE_REFUSED_TURNS {
+                            left = rounds_left;
+                            self.phase = Phase::Acting { rounds_left: left };
+                            if control == Control::Stalled {
+                                control = Control::Continue;
+                            }
+                            refused_note = Some(REFUSED_TURN_FREE.to_string());
+                        } else {
+                            refused_note = Some(refused_turn_counted());
+                        }
+                    } else {
+                        self.refused_streak = 0;
+                        let (all, refused) = refusals(&self.state.prompt);
+                        // A server tool's turn counts whatever its own
+                        // calls were (review of round 15)
+                        if acting
+                            && refused > 0
+                            && (refused < all || server_tool)
+                        {
+                            refused_note =
+                                Some(refused_in_a_counted_turn(refused));
+                        }
+                    }
+                    // Said with the round's results, so the agent knows
+                    // before it plans the next one (bridge test agents,
+                    // 2026-10-13: round 10 of 10 gave no sign it was the
+                    // last, and an 11th call was refused unannounced)
+                    // A round whose every call failed (Stalled) still
+                    // spent a round. Only ever onto the results' user
+                    // turn: a paused server-tool turn is resumed, not
+                    // answered.
+                    let results_seated =
+                        self.state.prompt.messages.last().is_some_and(|m| {
+                            m.role == misanthropic::prompt::message::Role::User
+                        });
+                    let notice = match (refused_note, rounds_notice(left)) {
+                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                        (a, b) => a.or(b.map(str::to_string)),
+                    };
+                    if let (
+                        Control::Continue | Control::Stalled,
+                        Some(notice),
+                        true,
+                    ) = (&control, notice, results_seated)
+                    {
+                        seat_user(&mut self.state.prompt, notice)
+                            .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    }
+                    return Ok(control);
+                }
+                default_handle(self, response).await
+            }
+            Phase::Asking | Phase::Held => Err(SeedError::Prompt(format!(
+                "a response in the {:?} phase with no question seated",
+                self.phase
+            ))),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl Agent for SeedAgent {
     type State = SeedState;
@@ -1096,7 +1296,8 @@ impl Agent for SeedAgent {
             communities: Vec::new(),
             asks: Asks::default(),
             unanswered: Vec::new(),
-            refused: None,
+            failure: None,
+            stalls: 0,
             survey_mark: None,
             contact_me: false,
             contact_feedback: None,
@@ -1381,175 +1582,13 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
-        // One response, one turn: what a turn showed is in its context
-        self.shown_once.next_turn();
-        self.context.record(&response.usage);
-        if self.asks.is_active() {
-            return ask::handle(self, response).await;
+        let control = self.handle_turn(response).await;
+        match &control {
+            Ok(Control::Stalled) => self.stalls += 1,
+            Ok(_) => self.stalls = 0,
+            Err(_) => {}
         }
-        match self.phase {
-            // Any refusal ends the session as failed (Steward, 2026-11-06):
-            // whatever is in the context may set the classifier off again.
-            // The refused turn is not seated; nothing follows it
-            Phase::Acting { rounds_left }
-                if matches!(
-                    response.stop_reason,
-                    Some(StopReason::Refusal)
-                ) =>
-            {
-                let round =
-                    self.ctx.config.max_rounds.saturating_sub(rounds_left) + 1;
-                tracing::error!(
-                    event_type = "api_refusal",
-                    agent = %self.state.soul.name,
-                    agent_id = %self.id,
-                    model = %response.model,
-                    during = "acting",
-                    round,
-                    response_id = %response.id,
-                    "the API refused a reply; the session ends"
-                );
-                self.refused = Some(ApiRefusal {
-                    during: "acting".to_string(),
-                    round: Some(round),
-                    model: response.model.to_string(),
-                    response_id: response.id.to_string(),
-                });
-                Ok(Control::Done(Outcome::Failed))
-            }
-            Phase::Acting { rounds_left } => {
-                let clipped =
-                    matches!(response.stop_reason, Some(StopReason::MaxTokens));
-                let tool_round = !clipped
-                    && response
-                        .inner
-                        .content
-                        .iter()
-                        .any(|block| block.tool_use().is_some());
-                // A clipped turn continues acting too, so it needs the
-                // same room as a round.
-                if (tool_round || clipped)
-                    && self.context.room() < MIN_ROUND_ROOM
-                {
-                    // Out of context before out of rounds: close now,
-                    // while reflect still fits, rather than run a round
-                    // whose next request the endpoint would refuse and
-                    // lose the memory rewrite with it. Seated like the
-                    // round cap below, for the same cache reason.
-                    tracing::info!(
-                        event_type = "context_quiesce",
-                        agent = %self.state.soul.name,
-                        held = self.context.get(),
-                        window = self.context.window(),
-                        reserve = self.context.reserve(),
-                        rounds_left,
-                        "context nearly full; acting ends early"
-                    );
-                    seat_unused_reply(
-                        &mut self.state.prompt,
-                        &response,
-                        &not_run_context(self.context.room()),
-                    )
-                    .map_err(|e| SeedError::Prompt(e.to_string()))?;
-                    return self.begin_reflect().await;
-                }
-                if tool_round {
-                    if rounds_left == 0 {
-                        // Budget spent. The turn is seated and each call
-                        // answered "not run" rather than the turn being
-                        // dropped: dropping it put the reflect instruction
-                        // *inside* the previous tool-result message, which
-                        // grows a message the cache already holds and costs
-                        // the whole tail on prefix caches anchored at
-                        // message ends (blallama hybrid models: windmill,
-                        // 31.2k, 2026-10-02). Seated, the previous prompt and
-                        // this turn stay a prefix, and the instruction
-                        // starts in a fresh user message.
-                        self.seat_unrun_calls(response)?;
-                        return self.begin_reflect().await;
-                    }
-                    // A server tool (web search, web fetch) reads and bills
-                    // whatever happens to the client calls beside it
-                    let server_tool = response.inner.content.iter().any(|b| {
-                        matches!(
-                            b,
-                            misanthropic::prompt::message::Block::ServerToolUse {
-                                ..
-                            }
-                        )
-                    });
-                    let mut left = rounds_left - 1;
-                    self.phase = Phase::Acting { rounds_left: left };
-                    let mut control = default_handle(self, response).await?;
-                    // A turn whose every call was refused for its input is
-                    // free, up to MAX_FREE_REFUSED_TURNS in a row: the round
-                    // is given back, and it is not a stall
-                    let mut refused_note = None;
-                    // Only while still acting: a turn that ended acting (the
-                    // pause cap's reflect) is not given back
-                    let acting = matches!(self.phase, Phase::Acting { .. });
-                    if acting
-                        && !server_tool
-                        && every_call_refused(&self.state.prompt)
-                    {
-                        self.refused_streak += 1;
-                        if self.refused_streak <= MAX_FREE_REFUSED_TURNS {
-                            left = rounds_left;
-                            self.phase = Phase::Acting { rounds_left: left };
-                            if control == Control::Stalled {
-                                control = Control::Continue;
-                            }
-                            refused_note = Some(REFUSED_TURN_FREE.to_string());
-                        } else {
-                            refused_note = Some(refused_turn_counted());
-                        }
-                    } else {
-                        self.refused_streak = 0;
-                        let (all, refused) = refusals(&self.state.prompt);
-                        // A server tool's turn counts whatever its own
-                        // calls were (review of round 15)
-                        if acting
-                            && refused > 0
-                            && (refused < all || server_tool)
-                        {
-                            refused_note =
-                                Some(refused_in_a_counted_turn(refused));
-                        }
-                    }
-                    // Said with the round's results, so the agent knows
-                    // before it plans the next one (bridge test agents,
-                    // 2026-10-13: round 10 of 10 gave no sign it was the
-                    // last, and an 11th call was refused unannounced)
-                    // A round whose every call failed (Stalled) still
-                    // spent a round. Only ever onto the results' user
-                    // turn: a paused server-tool turn is resumed, not
-                    // answered.
-                    let results_seated =
-                        self.state.prompt.messages.last().is_some_and(|m| {
-                            m.role == misanthropic::prompt::message::Role::User
-                        });
-                    let notice = match (refused_note, rounds_notice(left)) {
-                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
-                        (a, b) => a.or(b.map(str::to_string)),
-                    };
-                    if let (
-                        Control::Continue | Control::Stalled,
-                        Some(notice),
-                        true,
-                    ) = (&control, notice, results_seated)
-                    {
-                        seat_user(&mut self.state.prompt, notice)
-                            .map_err(|e| SeedError::Prompt(e.to_string()))?;
-                    }
-                    return Ok(control);
-                }
-                default_handle(self, response).await
-            }
-            Phase::Asking | Phase::Held => Err(SeedError::Prompt(format!(
-                "a response in the {:?} phase with no question seated",
-                self.phase
-            ))),
-        }
+        control
     }
 
     /// The model stopped calling tools: acting is over, reflect begins.
@@ -1597,6 +1636,9 @@ impl Agent for SeedAgent {
     /// including one whose state fails to persist, which is exactly when
     /// having the transcript on disk matters most.
     async fn on_teardown(&mut self) -> Result<(), SeedError> {
+        // First: why the session failed, if it did, before anything else
+        // here can err
+        self.settle_failure();
         // Before the state is saved (the reactor settles after teardown)
         {
             let mut ledger = self.state.ledger.write().expect("ledger lock");

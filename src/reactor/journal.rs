@@ -9,7 +9,10 @@
 //!
 //! - at session start, a [`SessionHeader`] (when it began, on what model);
 //! - each write, as it is made ([`PostWrite`], [`CommentWrite`]), appended
-//!   and `fsync`ed before the next turn, which also covers a hard power loss.
+//!   and `fsync`ed before the next turn, which also covers a hard power loss;
+//! - when a session ends as failed, a [`SessionEnded`] saying why (0.157),
+//!   so the agent is told at its next start even if it wrote nothing. A
+//!   journal from before it has no such line, and reads as before.
 //!
 //! The file is removed once a session completes and its state is saved
 //! ([`Agent::on_saved`](super::Agent::on_saved)). So a journal found at
@@ -34,6 +37,7 @@ use misanthropic::model::Model;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+use super::SessionFailure;
 use crate::ids::{CommentId, PostId};
 
 /// The journal's name inside an agent's directory. Not `*.json`, and not
@@ -64,6 +68,14 @@ pub struct CommentWrite {
     pub on: Option<PostId>,
 }
 
+/// A session ended as failed, and why (categories only: see
+/// [`SessionFailure`]). The last line of its part of the journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEnded {
+    pub at: DateTime<Utc>,
+    pub failure: SessionFailure,
+}
+
 /// One write a session made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Written {
@@ -87,6 +99,14 @@ pub enum JournalLine {
     Session(SessionHeader),
     Post(PostWrite),
     Comment(CommentWrite),
+    /// Since 0.157. A reader from before skips it as a line it can't read.
+    Ended(SessionEnded),
+}
+
+impl From<SessionEnded> for JournalLine {
+    fn from(ended: SessionEnded) -> Self {
+        Self::Ended(ended)
+    }
 }
 
 impl From<SessionHeader> for JournalLine {
@@ -111,6 +131,10 @@ pub struct JournalSession {
     /// line torn or unreadable).
     pub header: Option<SessionHeader>,
     pub writes: Vec<Written>,
+    /// How the session ended, when it ended as failed and said so. `None`
+    /// for one that never got that far, and for every journal from before
+    /// 0.157.
+    pub ended: Option<SessionEnded>,
 }
 
 /// A journal as read back: its sessions in order, and the lines that
@@ -135,8 +159,11 @@ impl Journal {
                 Ok(JournalLine::Session(header)) => {
                     journal.sessions.push(JournalSession {
                         header: Some(header),
-                        writes: Vec::new(),
+                        ..JournalSession::default()
                     })
+                }
+                Ok(JournalLine::Ended(ended)) => {
+                    journal.last().ended = Some(ended);
                 }
                 Ok(JournalLine::Post(w)) => journal.push(Written::Post(w)),
                 Ok(JournalLine::Comment(w)) => {
@@ -149,20 +176,24 @@ impl Journal {
     }
 
     fn push(&mut self, write: Written) {
+        self.last().writes.push(write);
+    }
+
+    /// The session lines are being read into (one without a header when
+    /// none came first)
+    fn last(&mut self) -> &mut JournalSession {
         if self.sessions.is_empty() {
             self.sessions.push(JournalSession::default());
         }
-        self.sessions
-            .last_mut()
-            .expect("a session")
-            .writes
-            .push(write);
+        self.sessions.last_mut().expect("a session")
     }
 
-    /// The sessions that recorded at least one write: those to tell the
-    /// agent about.
+    /// The sessions to tell the agent about: those that recorded at least
+    /// one write, and (0.157) those that ended as failed, written or not.
     pub fn interrupted(&self) -> impl Iterator<Item = &JournalSession> {
-        self.sessions.iter().filter(|s| !s.writes.is_empty())
+        self.sessions
+            .iter()
+            .filter(|s| !s.writes.is_empty() || s.ended.is_some())
     }
 
     /// Writes recorded, over every session.
@@ -313,6 +344,7 @@ mod tests {
                 sessions: vec![JournalSession {
                     header: Some(header(32)),
                     writes: vec![p, c],
+                    ended: None,
                 }],
                 skipped: vec![],
             }
@@ -409,7 +441,8 @@ mod tests {
             read.sessions,
             vec![JournalSession {
                 header: None,
-                writes: vec![p]
+                writes: vec![p],
+                ended: None,
             }]
         );
     }
@@ -455,5 +488,105 @@ mod tests {
                 line
             );
         }
+    }
+
+    /// A failed session's `ended` line reads back onto its session, which
+    /// is then one to tell the agent about though it wrote nothing; a
+    /// journal without one reads as before
+    #[tokio::test]
+    async fn an_ended_line_round_trips_and_marks_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = SessionJournal::in_dir(dir.path());
+        journal
+            .begin(header(32), &Journal::default())
+            .await
+            .unwrap();
+        let ended = SessionEnded {
+            at: at(40),
+            failure: SessionFailure::Refused {
+                during: "acting".into(),
+                round: Some(3),
+                model: "claude-test".into(),
+                response_id: "msg_1".into(),
+            },
+        };
+        journal.append(&ended.clone().into()).await.unwrap();
+        let read = journal.read().await.unwrap();
+        assert_eq!(read.sessions.len(), 1);
+        assert_eq!(read.sessions[0].ended, Some(ended));
+        assert!(read.sessions[0].writes.is_empty());
+        assert_eq!(
+            read.interrupted().count(),
+            1,
+            "told though it wrote nothing"
+        );
+
+        let plain_dir = tempfile::tempdir().unwrap();
+        let plain = SessionJournal::in_dir(plain_dir.path());
+        plain.begin(header(1), &Journal::default()).await.unwrap();
+        let read = plain.read().await.unwrap();
+        assert_eq!(read.sessions[0].ended, None);
+        assert_eq!(read.interrupted().count(), 0);
+    }
+
+    /// The wire shape of each failure, pinned
+    #[test]
+    fn ended_wire_shape() {
+        let line = |failure| {
+            serde_json::to_value(JournalLine::from(SessionEnded {
+                at: at(5),
+                failure,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            line(SessionFailure::Stalled {
+                during: "memory".into()
+            }),
+            serde_json::json!({
+                "line": "ended", "at": "2026-10-13T11:05:00Z",
+                "failure": {"kind": "stalled", "during": "memory"}
+            })
+        );
+        assert_eq!(
+            line(SessionFailure::Error)["failure"],
+            serde_json::json!({"kind": "error"})
+        );
+        assert_eq!(
+            line(SessionFailure::NoRoom {
+                during: "memory".into()
+            })["failure"],
+            serde_json::json!({"kind": "no_room", "during": "memory"})
+        );
+        assert_eq!(
+            line(SessionFailure::Refused {
+                during: "survey".into(),
+                round: None,
+                model: "m".into(),
+                response_id: "r".into(),
+            })["failure"],
+            serde_json::json!({"kind": "refused", "during": "survey",
+                               "model": "m", "response_id": "r"})
+        );
+    }
+
+    /// Golden: a journal written before 0.157 (no `ended` line) reads as it
+    /// always did, its sessions with no `ended`
+    #[test]
+    fn a_journal_from_before_ended_still_reads() {
+        let old = concat!(
+            r#"{"line":"session","started_at":"2026-10-13T11:32:00Z","model":"claude-test"}"#,
+            "\n",
+            r#"{"line":"post","at":"2026-10-13T11:33:00Z","id":"6dcef9bb-0000-4000-8000-000000000001"}"#,
+            "\n",
+            r#"{"line":"session","started_at":"2026-10-13T11:50:00Z","model":"claude-test"}"#,
+            "\n",
+        );
+        let read = Journal::parse(old.as_bytes());
+        assert!(read.skipped.is_empty());
+        assert_eq!(read.sessions.len(), 2);
+        assert!(read.sessions.iter().all(|s| s.ended.is_none()));
+        assert_eq!(read.interrupted().count(), 1);
+        assert_eq!(read.writes(), 1);
     }
 }

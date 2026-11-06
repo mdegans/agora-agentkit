@@ -21,7 +21,7 @@ use crate::reactor::ask::{
     Answer, Ask, Asked, Mark, Next, Rejection, Unanswered, ask_schema,
     nullable, parse_lenient,
 };
-use crate::reactor::{Control, Outcome};
+use crate::reactor::{Control, Outcome, SessionFailure};
 use crate::requests::SubmitFeedbackPayload;
 
 /// Log the fields a last attempt had clipped to fit
@@ -258,13 +258,23 @@ impl SeedAgent {
         why: Unanswered,
         asked: &Asked,
     ) {
-        if let Unanswered::Refused { response_id } = &why {
-            self.refused = Some(super::ApiRefusal {
-                during: ask.to_string(),
-                round: None,
-                model: asked.model.clone().unwrap_or_default(),
-                response_id: response_id.clone(),
-            });
+        // The two ways a question fails the session (any refusal; no room
+        // for the memory rewrite), for the agent's notice next session
+        match &why {
+            Unanswered::Refused { response_id } => {
+                self.failure = Some(SessionFailure::Refused {
+                    during: ask.to_string(),
+                    round: None,
+                    model: asked.model.clone().unwrap_or_default(),
+                    response_id: response_id.clone(),
+                });
+            }
+            Unanswered::NoRoom if ask == "memory" => {
+                self.failure = Some(SessionFailure::NoRoom {
+                    during: ask.to_string(),
+                });
+            }
+            _ => {}
         }
         self.unanswered.push((ask, why));
     }

@@ -21,7 +21,7 @@ pub use agent::cache;
 #[cfg(feature = "seed")]
 pub use agent::seed;
 pub use agent::{
-    Agent, Control, Epilogue, Outcome, State, default_handle,
+    Agent, Control, Epilogue, Outcome, SessionFailure, State, default_handle,
     seat_unused_reply, seat_user,
 };
 

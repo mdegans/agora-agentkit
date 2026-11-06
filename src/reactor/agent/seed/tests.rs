@@ -4036,12 +4036,15 @@ async fn a_refusal_anywhere_ends_the_session_failed() {
     seat_start(&mut agent);
     let control = agent.handle(refusal_message()).await.unwrap();
     assert_eq!(control, Control::Done(Outcome::Failed));
-    let refused = agent.refused().unwrap();
     assert_eq!(
-        (refused.during.as_str(), refused.round),
-        ("acting", Some(1))
+        agent.failure(),
+        Some(&SessionFailure::Refused {
+            during: "acting".into(),
+            round: Some(1),
+            model: "claude-haiku-4-5".into(),
+            response_id: "msg_refused".into(),
+        })
     );
-    assert_eq!(refused.response_id, "msg_refused");
     assert!(!transcript(&agent).contains("REFUSED WORDS"));
     assert!(!agent.state.completed);
     assert_eq!(events.count(), 1);
@@ -4055,7 +4058,10 @@ async fn a_refusal_anywhere_ends_the_session_failed() {
         .unwrap();
     let control = agent.handle(refusal_message()).await.unwrap();
     assert_eq!(control, Control::Done(Outcome::Failed));
-    assert_eq!(agent.refused().unwrap().during, "memory");
+    assert!(matches!(
+        agent.failure(),
+        Some(SessionFailure::Refused { during, round: None, .. }) if during == "memory"
+    ));
     assert!(!transcript(&agent).contains("REFUSED WORDS"));
     assert_eq!(events.count(), 2);
 
@@ -4069,7 +4075,10 @@ async fn a_refusal_anywhere_ends_the_session_failed() {
     let control = agent.handle(refusal_message()).await.unwrap();
     assert_eq!(control, Control::Done(Outcome::Failed));
     assert!(!agent.state.completed, "a refused session is not complete");
-    assert_eq!(agent.refused().unwrap().during, "survey");
+    assert!(matches!(
+        agent.failure(),
+        Some(SessionFailure::Refused { during, .. }) if during == "survey"
+    ));
     assert!(matches!(
         agent.unanswered_asks(),
         [("survey", crate::reactor::ask::Unanswered::Refused { .. })]
@@ -11738,4 +11747,104 @@ async fn a_reply_while_held_is_an_error() {
     assert!(agent.on_truncate(&clipped).await.is_err());
     assert!(agent.handle(clipped).await.is_err());
     assert!(agent.on_pause(paused_message()).await.is_err());
+}
+
+/// A session that stalls out on the memory rewrite says so at teardown
+#[tokio::test]
+async fn a_stalled_out_memory_rewrite_is_the_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    for _ in 0..crate::reactor::MAX_STALLS {
+        agent
+            .handle(text_message("not json", StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    // The reactor stops at its cap and tears down
+    agent.on_teardown().await.unwrap();
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::Stalled {
+            during: "memory".into()
+        })
+    );
+}
+
+/// Acting that stalls out (no successful tool call in a row) says so too
+#[tokio::test]
+async fn a_stalled_out_acting_phase_is_the_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for _ in 0..crate::reactor::MAX_STALLS {
+        let control = agent
+            .handle(text_message("an over-long ramb", StopReason::MaxTokens))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    agent.on_teardown().await.unwrap();
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::Stalled {
+            during: "acting".into()
+        })
+    );
+}
+
+/// No room for the memory rewrite is its own failure
+#[tokio::test]
+async fn no_room_for_the_memory_rewrite_is_the_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let control = agent
+        .handle(text_with_usage("nothing to do", 125_500))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    agent.on_teardown().await.unwrap();
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::NoRoom {
+            during: "memory".into()
+        })
+    );
+}
+
+/// A session torn down short of complete for any other reason (an
+/// inference error, here after one stall, so short of the cap) is an
+/// error; a complete one has no failure
+#[tokio::test]
+async fn an_unexplained_end_is_an_error_and_a_complete_one_is_none() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message("not json", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), Some(&SessionFailure::Error));
+
+    let mut agent = self::agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert!(agent.state.completed);
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), None);
 }
