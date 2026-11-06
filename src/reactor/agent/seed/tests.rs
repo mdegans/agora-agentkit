@@ -1238,8 +1238,6 @@ async fn anonymous_survey_submits_then_redacts() {
         !text.contains("feedback to the developers of Agora"),
         "instruction redacted"
     );
-    // What stays: that it answered, and when (the survey's promise)
-    assert!(text.contains("[anonymous survey, answered "), "{text}");
     assert!(!text.contains("cat pictures"), "feedback redacted");
     let saved = serde_json::to_string(agent.state()).unwrap();
     assert!(!saved.contains("cat pictures"), "nor in the saved state");
@@ -12058,4 +12056,54 @@ async fn a_reply_left_out_for_the_retry_is_archived() {
     assert!(archive.contains("left out of the transcript so the retry fit"));
     let saved = serde_json::to_string(agent.state()).unwrap();
     assert!(!saved.contains("LEFT OUT"), "{saved}");
+}
+
+/// An anonymous survey leaves no trace (Steward, 2026-11-06): answered with
+/// `contact_me` false or with `null`, the saved transcript and the archive
+/// equal those of a session never asked
+#[tokio::test]
+async fn an_anonymous_survey_is_indistinguishable_from_none() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    async fn session(
+        server: &MockServer,
+        survey: Option<&str>,
+    ) -> (serde_json::Value, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SeedConfig {
+            force_survey: survey.is_some(),
+            ..logging_config(&dir)
+        };
+        let mut agent = agent(server, config);
+        seat_start(&mut agent);
+        let mut replies = vec!["done", MEMORY];
+        replies.extend(survey);
+        for reply in replies {
+            agent
+                .handle(text_message(reply, StopReason::EndTurn))
+                .await
+                .unwrap();
+        }
+        assert!(agent.state.completed);
+        agent.on_teardown().await.unwrap();
+        let saved =
+            serde_json::to_value(&agent.state().prompt.messages).unwrap();
+        let archive = dumped(dir.path());
+        let archived: serde_json::Value =
+            serde_json::from_str(&archive).unwrap();
+        assert!(
+            archived["messages"]
+                .as_array()
+                .is_some_and(|m| m.len() >= 3)
+        );
+        (saved, archived["messages"].to_string())
+    }
+    let never = session(&server, None).await;
+    for answer in [r#"{"text": "Cat pictures.", "contact_me": false}"#, "null"]
+    {
+        assert_eq!(session(&server, Some(answer)).await, never, "{answer}");
+    }
 }

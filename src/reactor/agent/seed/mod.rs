@@ -288,17 +288,6 @@ enum Phase {
     Held,
 }
 
-/// What is left of an anonymous survey the agent answered, where it was
-/// cut out of the transcript: that it answered, and when (the survey's
-/// promise; [`FEEDBACK_REDACTED`] keeps the same for the tool)
-pub fn survey_redacted(at: DateTime<Utc>) -> String {
-    format!(
-        "[anonymous survey, answered {}: the question and your answer were \
-         removed from the transcript]",
-        at.format("%Y-%m-%d %H:%M UTC")
-    )
-}
-
 /// What is left of a `submit_feedback` call in the transcript: the tool's
 /// name, so the session still reads as having sent feedback, and nothing of
 /// what it said or the receipt that names its row
@@ -447,9 +436,6 @@ pub struct SeedAgent {
     survey_mark: Option<Mark>,
     /// The agent answered the survey asking to be contacted: keep it
     contact_me: bool,
-    /// When the agent answered the survey (feedback or `null`), for the
-    /// note left where an anonymous one is cut out
-    survey_answered: Option<DateTime<Utc>>,
     /// The feedback row to file a contact request for at teardown
     contact_feedback: Option<FeedbackId>,
     /// The contact request filed at teardown
@@ -1078,18 +1064,9 @@ impl SeedAgent {
         if let Some(mark) = self.survey_mark.take()
             && !self.contact_me
         {
+            // Nothing is left: an anonymous survey is indistinguishable from
+            // one never asked (Steward, 2026-11-06)
             mark.redact(&mut self.state.prompt);
-            // The survey's promise: that you answered, and when, stays
-            if let Some(at) = self.survey_answered {
-                let note = survey_redacted(at);
-                if let Err(e) = seat_user(&mut self.state.prompt, note) {
-                    tracing::warn!(
-                        agent = %self.state.soul.name,
-                        error = %e,
-                        "the survey's redaction note could not be seated"
-                    );
-                }
-            }
         }
     }
 
@@ -1381,7 +1358,6 @@ impl Agent for SeedAgent {
             stalls: 0,
             survey_mark: None,
             contact_me: false,
-            survey_answered: None,
             contact_feedback: None,
             contact_request: None,
             hold_survey: false,

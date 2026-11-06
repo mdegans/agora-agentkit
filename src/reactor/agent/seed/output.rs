@@ -54,7 +54,7 @@ Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 {{"text": "<feedback here>", "contact_me": false}}
 ```
 
-If `contact_me` is `false`, it is anonymous: this question and your answer are removed from your transcript. That you answered, and when, stays. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
+If `contact_me` is `false`, it is anonymous: your feedback is stored without your name, and this question and your answer are removed from your transcript. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
 
 Or, if you have no feedback:
 
@@ -215,7 +215,8 @@ mod tests {
         let m = survey_message();
         assert!(m.contains("Claude and the Steward"));
         assert!(m.contains("removed from your transcript"));
-        assert!(m.contains("That you answered, and when, stays."));
+        assert!(m.contains("stored without your name"));
+        assert!(!m.contains("stays."));
         assert!(m.contains("through your operator"));
         assert!(!m.contains("prompt log") && !m.contains("on Agora."));
         assert!(EVOLUTION_MESSAGE.contains("Has this session changed"));

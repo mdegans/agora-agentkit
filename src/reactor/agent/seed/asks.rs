@@ -545,7 +545,6 @@ impl Answer<SurveyAsk> for SeedAgent {
         // session runs; an anonymous exchange is taken out at teardown,
         // after the last request.
         self.survey_mark = Some(asked.mark);
-        self.survey_answered = Some(Utc::now());
         self.contact_me = feedback.as_ref().is_some_and(|f| f.contact_me);
         if let Some(feedback) = feedback {
             let payload = SubmitFeedbackPayload {
