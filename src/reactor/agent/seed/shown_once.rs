@@ -435,7 +435,7 @@ impl ShownOnce {
     ) -> String {
         let mut read = Self::read_of(&entry.id);
         if let Some(n) = entry.round {
-            read.push_str(&format!(" round {n}"));
+            read.push_str(&format!(" deliberation round {n}"));
         } else if let Some(a) = &entry.attachment {
             read.push_str(&format!(" {a:?}"));
         }

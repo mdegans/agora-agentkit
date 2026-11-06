@@ -838,8 +838,9 @@ impl Client {
         if let Some(d) = input.detail {
             url.query_pairs_mut().append_pair("detail", &d.to_string());
         }
-        if let Some(r) = input.round {
-            url.query_pairs_mut().append_pair("round", &r.to_string());
+        if let Some(r) = input.council_round {
+            url.query_pairs_mut()
+                .append_pair("council_round", &r.to_string());
         }
         if let Some(name) = &input.attachment {
             url.query_pairs_mut().append_pair("attachment", name);
@@ -1020,7 +1021,7 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Proposals awaiting Council deliberation, newest first by default:
+    /// Proposals the Council hasn't taken up, newest first by default:
     /// one page, with how many there are in all (0.152,
     /// `GET /api/governance/proposals/page`). A server before it answers
     /// 404 there: a first page is then read from

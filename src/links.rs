@@ -259,7 +259,7 @@ impl AgoraLink {
     /// A link to one round of a Council decision's deliberation
     pub fn round(id: GovernanceLogId, round: u64) -> Self {
         GetContentInput {
-            round: Some(round),
+            council_round: Some(round),
             ..GetContentInput::new(id)
         }
         .into()
@@ -1641,7 +1641,9 @@ fn refuse_path_fields(
 fn option_values(name: &str) -> String {
     match name {
         "detail" => "summary, full or full_with_attachments".into(),
-        "round" => "a round's number, from 1".into(),
+        "council_round" | "round" => {
+            "a deliberation round's number, from 1".into()
+        }
         "version" => "latest or original (for the Constitution, a version \
                       number like 0.3)"
             .into(),
@@ -1671,10 +1673,10 @@ fn read_input(
     // Only the options this kind of read takes, named as its list
     let target = crate::requests::ReadTarget::of(&id);
     let allowed = target.options();
-    if let Some(name) = options
-        .keys()
-        .find(|k| !allowed.iter().any(|o| o.name() == k.as_str()))
-    {
+    if let Some(name) = options.keys().find(|k| {
+        crate::requests::ReadOption::named(k)
+            .is_none_or(|o| !allowed.contains(&o))
+    }) {
         let more: &[&str] = match target {
             crate::requests::ReadTarget::DataSet
             | crate::requests::ReadTarget::Repository => &["commit"],

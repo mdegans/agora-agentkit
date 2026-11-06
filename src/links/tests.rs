@@ -62,13 +62,24 @@ fn the_steward_examples_parse_and_print_back() {
         "agora://feed?limit=10&sort=diverse",
         "agora://search?q=voting+rules",
         "agora://search?q=voting&mode=semantic",
-        "agora://gov/GOV-2026-0016?round=2",
+        "agora://gov/GOV-2026-0016?council_round=2",
         "agora://gov/GOV-2026-0016?detail=summary",
         "agora://gov/GOV-2026-0016?version=original",
         "agora://post/7ad26ccd?comment_budget=8192",
     ] {
         assert_eq!(link(s).to_string(), s, "{s}");
     }
+}
+
+/// `round`, renamed `council_round` (beta round 13: a fleet agent read
+/// "round" as its session rounds), is still read, and printed as the new
+/// name
+#[test]
+fn the_old_round_option_is_read_and_printed_new() {
+    assert_eq!(
+        link("agora://gov/GOV-2026-0016?round=2").to_string(),
+        "agora://gov/GOV-2026-0016?council_round=2"
+    );
 }
 
 #[test]
@@ -111,7 +122,7 @@ fn links_are_the_inputs_their_tools_take() {
     );
     let r = read("agora://gov/GOV-2026-0016?detail=summary&round=3");
     assert_eq!(r.detail, Some(DetailLevel::Summary));
-    assert_eq!(r.round, Some(3));
+    assert_eq!(r.council_round, Some(3));
 }
 
 #[test]
@@ -491,7 +502,7 @@ fn any_link() -> impl Strategy<Value = AgoraLink> {
             });
             AgoraLink::from(GetContentInput {
                 detail,
-                round,
+                council_round: round,
                 attachment,
                 ..GetContentInput::new(id)
             })
@@ -1014,7 +1025,7 @@ fn page_urls_of_this_site_read_as_their_links() {
 fn reads_that_cannot_be_what_was_asked_are_refused() {
     for (s, why) in [
         (
-            "agora://gov/GOV-2026-0016?detail=summary&round=2",
+            "agora://gov/GOV-2026-0016?detail=summary&council_round=2",
             "detail=summary reads the summary alone",
         ),
         (
@@ -1024,11 +1035,11 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         (
             "agora://gov/GOV-2026-0016?lines=1-5",
             "lines does not apply to a governance entry, which takes detail, \
-             round, attachment, version",
+             council_round, attachment, version",
         ),
         (
-            "agora://gov/DATA-2026-0001?round=1",
-            "round does not apply to a data set,",
+            "agora://gov/DATA-2026-0001?council_round=1",
+            "council_round does not apply to a data set,",
         ),
         (
             "agora://prompts?detail=summary",
@@ -1039,12 +1050,12 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
             "out of its bounds here, 4096 to 262144",
         ),
         (
-            "agora://gov/DATA-2026-0001/a.md?round=2",
-            "round does not apply to a data set",
+            "agora://gov/DATA-2026-0001/a.md?council_round=2",
+            "council_round does not apply to a data set",
         ),
         (
-            "agora://post/7ad26ccd?round=2",
-            "round does not apply to a post or comment, which takes detail, \
+            "agora://post/7ad26ccd?council_round=2",
+            "council_round does not apply to a post or comment, which takes detail, \
              comment_budget",
         ),
         (
@@ -1071,7 +1082,7 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         );
     }
     for s in [
-        "agora://gov/GOV-2026-0016?round=2",
+        "agora://gov/GOV-2026-0016?council_round=2",
         "agora://gov/GOV-2026-0016/clerk-reads",
         "agora://gov/GOV-2026-0016?detail=summary",
         "agora://gov/DATA-2026-0001/a.md?lines=1-5",
@@ -1109,7 +1120,7 @@ fn every_kind_takes_exactly_its_options() {
             let mut read = GetContentInput::new(id.clone());
             match option {
                 ReadOption::Detail => read.detail = Some(DetailLevel::Full),
-                ReadOption::Round => read.round = Some(1),
+                ReadOption::Round => read.council_round = Some(1),
                 ReadOption::Attachment => read.attachment = Some("a.md".into()),
                 ReadOption::Version => {
                     read.version = Some(crate::enums::RecordVersion::Original)
@@ -1158,14 +1169,14 @@ fn every_kind_takes_exactly_its_options() {
 }
 
 /// An empty value in a link is refused with what it may be, never read as
-/// absent (beta round of 0.112.0: `?round=` read every round)
+/// absent (beta round of 0.112.0: `?council_round=` read every round)
 #[test]
 fn an_empty_option_is_refused() {
     let site = Url::parse("https://subliminal.technology").unwrap();
     for (s, why) in [
         (
-            "agora://gov/GOV-2026-0016?round=",
-            "round= is empty: give it a round's number",
+            "agora://gov/GOV-2026-0016?council_round=",
+            "council_round= is empty: give it a deliberation round's number",
         ),
         (
             "agora://gov/GOV-2026-0016?detail=",
@@ -1207,12 +1218,12 @@ fn a_read_link_names_its_kinds_options() {
         (
             "agora://gov/GOV-2026-0016?bogus=1",
             "bogus does not apply to a governance entry, which takes detail, \
-             round, attachment, version, history, attestation",
+             council_round, attachment, version, history, attestation",
         ),
         (
             "agora://gov/GOV-2026-0016?comment_budget=8192",
             "comment_budget does not apply to a governance entry, which \
-             takes detail, round, attachment, version, history, attestation",
+             takes detail, council_round, attachment, version, history, attestation",
         ),
         (
             "agora://gov/DATA-2026-0001?bogus=1",
@@ -1220,8 +1231,8 @@ fn a_read_link_names_its_kinds_options() {
              history, attestation, commit",
         ),
         (
-            "agora://post/7ad26ccd?round=1",
-            "round does not apply to a post or comment, which takes detail, \
+            "agora://post/7ad26ccd?council_round=1",
+            "council_round does not apply to a post or comment, which takes detail, \
              comment_budget",
         ),
         (
@@ -1245,7 +1256,7 @@ fn exactly_one_read(read: &GetContentInput) -> Result<(), String> {
     use crate::requests::ReadTarget as T;
     let allowed: &[&str] = match T::of(&read.id) {
         T::Content => &["detail", "comment_budget"],
-        T::Entry => &["detail", "round", "attachment", "version"],
+        T::Entry => &["detail", "council_round", "attachment", "version"],
         T::DataSet => {
             &["detail", "attachment", "version", "comment_budget", "lines"]
         }
@@ -1266,7 +1277,7 @@ fn exactly_one_read(read: &GetContentInput) -> Result<(), String> {
         return Err(format!("comment_budget={b}"));
     }
     if T::of(&read.id) == T::Entry {
-        let parts = usize::from(read.round.is_some())
+        let parts = usize::from(read.council_round.is_some())
             + usize::from(read.attachment.is_some());
         if parts > 1 {
             return Err("round and attachment".into());
@@ -1292,7 +1303,7 @@ proptest! {
         options in prop::collection::vec(
             (
                 prop::sample::select(vec![
-                    "detail", "round", "attachment", "version",
+                    "detail", "council_round", "attachment", "version",
                     "comment_budget", "lines", "commit", "bogus",
                 ]),
                 prop::sample::select(vec![
@@ -1340,9 +1351,9 @@ fn a_slash_with_no_attachment_is_refused() {
     assert!(e.contains("names no attachment"), "{e}");
     let e = refused("agora://gov/GOV-2026-0016?attachment=");
     assert!(e.contains("agora://gov/<id>/<attachment>"), "{e}");
-    let e = refused("agora://gov/GOV-2026-0016?round=1&attachment=x");
+    let e = refused("agora://gov/GOV-2026-0016?council_round=1&attachment=x");
     assert!(e.contains("an attachment is named in the path"), "{e}");
-    let both = link("agora://gov/GOV-2026-0016/clerk-reads?round=1");
+    let both = link("agora://gov/GOV-2026-0016/clerk-reads?council_round=1");
     assert!(
         both.as_read()
             .unwrap()
@@ -1467,7 +1478,7 @@ fn content_takes_any_id_get_content_takes_as_one_segment() {
     assert_eq!(c.path.as_str(), "votes/index.md");
     // A read's options still apply
     assert_eq!(
-        link("agora://content/GOV-2026-0006?round=2"),
+        link("agora://content/GOV-2026-0006?council_round=2"),
         AgoraLink::round("GOV-2026-0006".parse().unwrap(), 2)
     );
     // A document takes its canonical link's options

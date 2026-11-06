@@ -1037,8 +1037,9 @@ pub enum GovernanceLogView {
     value(rename_all = "snake_case")
 )]
 pub enum ObligationSort {
-    /// Earliest due first, so lapsed and overdue items lead; ties to the
-    /// older, undated last, oldest first. The default
+    /// Open and lapsed first, then discharged and withdrawn, each earliest
+    /// due first (so lapsed and overdue items lead), ties to the older,
+    /// undated last, oldest first. The default
     #[default]
     Due,
     /// Oldest first

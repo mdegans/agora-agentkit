@@ -578,7 +578,7 @@ async fn get_proposals_pages_with_its_total() {
     );
     assert!(
         t.contains(
-            "Proposals 3\u{2013}4 of the 57 awaiting deliberation, each a"
+            "Proposals 3\u{2013}4 of 57 the Council hasn't taken up, each a"
         ),
         "{t}"
     );
@@ -588,8 +588,8 @@ async fn get_proposals_pages_with_its_total() {
     );
     assert!(
         t.contains(
-            "No proposals on this page: 57 are awaiting deliberation in all. \
-             Lower the offset to see them."
+            "No proposals on this page: there are 57 the Council hasn't \
+             taken up. Lower the offset to see them."
         ),
         "{t}"
     );
@@ -623,13 +623,27 @@ fn a_proposals_page_says_where_it_is() {
         )
     };
     let all = render(vec![p(1), p(2)], Some(2), 0);
-    assert!(all.starts_with("All 2 proposals awaiting deliberation, each a"));
+    assert!(
+        all.starts_with("All 2 proposals the Council hasn't taken up, each a")
+    );
     assert!(!all.contains("more:"), "{all}");
     let last = render(vec![p(1)], Some(5), 4);
-    assert!(last.starts_with("Proposal 5 of the 5 awaiting deliberation, a "));
+    assert!(
+        last.starts_with(
+            "Proposal 5 of 5 the Council hasn't taken up, the last of them, a "
+        ),
+        "{last}"
+    );
     assert!(!last.contains("more:"), "{last}");
+    let tail = render(vec![p(1), p(2)], Some(4), 2);
+    assert!(
+        tail.starts_with("Proposals 3\u{2013}4 of 4 the Council hasn't taken up, the last of them, each"),
+        "{tail}"
+    );
     let first = render(vec![p(1), p(2)], Some(5), 0);
-    assert!(first.starts_with("Proposals 1\u{2013}2 of the 5 awaiting"));
+    assert!(first.starts_with(
+        "Proposals 1\u{2013}2 of 5 the Council hasn't taken up, each"
+    ));
     assert!(first.ends_with("\n3 more: the same call with offset=2.\n"));
     // An older server: no total, no footer
     let old = render(vec![p(1), p(2)], None, 0);
@@ -637,12 +651,12 @@ fn a_proposals_page_says_where_it_is() {
     assert!(!old.contains("more:"), "{old}");
     assert_eq!(
         render(Vec::new(), Some(0), 0),
-        "No proposals are awaiting deliberation."
+        "There are no proposals the Council hasn't taken up."
     );
     assert_eq!(
         render(Vec::new(), Some(1), 3),
-        "No proposals on this page: 1 is awaiting deliberation in all. Lower \
-         the offset to see them."
+        "No proposals on this page: there is 1 the Council hasn't taken up. \
+         Lower the offset to see it."
     );
 }
 
@@ -2087,7 +2101,7 @@ async fn get_content_reads_the_whole_record_and_spends_a_full_read() {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
             .is_true(|req| {
-                !has_param(req, "detail") && !has_param(req, "round")
+                !has_param(req, "detail") && !has_param(req, "council_round")
             });
         then.status(200).json_body(governance_content(
             "GOV-2026-0006",
@@ -2314,7 +2328,7 @@ async fn a_refusal_lists_no_hidden_option() {
         ),
         (
             "fetch_agora_link",
-            serde_json::json!({"link": "agora://data/DATA-2026-0001?round=1"}),
+            serde_json::json!({"link": "agora://data/DATA-2026-0001?council_round=1"}),
         ),
     ] {
         agent
@@ -2341,7 +2355,7 @@ async fn get_content_passes_version_and_attachment() {
             .path("/agora/api/content/GOV-2026-0006")
             .query_param("version", "original")
             .is_true(|req| {
-                !has_param(req, "round") && !has_param(req, "detail")
+                !has_param(req, "council_round") && !has_param(req, "detail")
             });
         let mut body = governance_content(
             "GOV-2026-0006",
@@ -2495,7 +2509,9 @@ async fn a_full_record_too_big_for_the_context_comes_back_as_the_summary() {
     assert!(!rendered.contains("### Record"), "{rendered}");
     assert!(rendered.contains("the read was not counted"), "{rendered}");
     assert!(
-        rendered.contains("one round at a time with `round` (1 to 3)"),
+        rendered.contains(
+            "one deliberation round at a time with `council_round` (1 to 3)"
+        ),
         "says how to read it in pieces: {rendered}"
     );
 
@@ -2944,7 +2960,7 @@ async fn get_contents_schema_is_the_shared_request_type() {
             "{level}: {detail}"
         );
     }
-    for field in ["id", "detail", "round", "attachment", "version"] {
+    for field in ["id", "detail", "council_round", "attachment", "version"] {
         assert!(tool["properties"].get(field).is_some(), "{field}: {tool}");
     }
 }
@@ -2958,7 +2974,7 @@ async fn get_content_pages_rounds_and_allows_one_verbatim_read() {
     let round = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
-            .query_param("round", "2");
+            .query_param("council_round", "2");
         then.status(200).json_body(governance_content(
             "GOV-2026-0006",
             Some(two_round_record()),
@@ -2988,7 +3004,9 @@ async fn get_content_pages_rounds_and_allows_one_verbatim_read() {
     let mut pager = agent(&server, quiet_config());
     seat_start(&mut pager);
     pager
-        .handle(read(serde_json::json!({"id": "GOV-2026-0006", "round": 2})))
+        .handle(read(
+            serde_json::json!({"id": "GOV-2026-0006", "council_round": 2}),
+        ))
         .await
         .unwrap();
     round.assert();
@@ -5042,6 +5060,78 @@ async fn own_comments_do_not_make_a_seen_post_new() {
     assert_eq!(busier.feeds["tech"].len(), 1);
 }
 
+/// An inbox header line up to its first sentence's end, with the "Left
+/// out: …" sentence that may follow it
+fn first_sentence_with_left_out(line: &str) -> String {
+    let mut end = 0;
+    for (i, _) in line.match_indices(". ") {
+        if !line[i + 2..].starts_with("Left out:") {
+            end = i;
+            break;
+        }
+        end = line.len();
+    }
+    if end == 0 {
+        end = line.find(". ").unwrap_or(line.len());
+    }
+    line[..end].to_string()
+}
+
+/// An operator's profile change is said once: in the first session whose
+/// dashboard has it, and not again once that session's state is kept
+/// (beta round 13: it repeated every session for 30 days)
+#[test]
+fn an_operator_profile_change_is_said_once() {
+    use crate::requests::ProfileField;
+    let change = |at: &str| crate::responses::OperatorProfileChange {
+        fields: vec![ProfileField::ModelInfo],
+        at: at.parse().unwrap(),
+    };
+    let dash = |changes| {
+        let mut d: crate::responses::DashboardResponse =
+            serde_json::from_value(serde_json::json!({
+                "agent": { "name": "marker-agent" },
+            }))
+            .unwrap();
+        d.operator_profile_changes = changes;
+        d
+    };
+    let mut shown = None;
+    let mut first = dash(vec![
+        change("2026-11-04T09:00:00Z"),
+        change("2026-10-20T09:00:00Z"),
+    ]);
+    super::fresh_profile_changes(&mut shown, &mut first);
+    assert_eq!(first.operator_profile_changes.len(), 2, "never shown: both");
+    assert_eq!(shown, Some("2026-11-04T09:00:00Z".parse().unwrap()));
+    // The next session: the same two, and one newer
+    let mut next = dash(vec![
+        change("2026-11-06T10:00:00Z"),
+        change("2026-11-04T09:00:00Z"),
+        change("2026-10-20T09:00:00Z"),
+    ]);
+    super::fresh_profile_changes(&mut shown, &mut next);
+    assert_eq!(
+        next.operator_profile_changes,
+        vec![change("2026-11-06T10:00:00Z")]
+    );
+    // Nothing new: nothing said, the mark kept
+    let mut quiet = dash(vec![change("2026-11-06T10:00:00Z")]);
+    super::fresh_profile_changes(&mut shown, &mut quiet);
+    assert!(quiet.operator_profile_changes.is_empty());
+    assert_eq!(shown, Some("2026-11-06T10:00:00Z".parse().unwrap()));
+    // A state from before the field reads as none shown
+    let old: Option<chrono::DateTime<chrono::Utc>> = None;
+    assert_eq!(
+        old,
+        serde_json::from_value::<super::SeedState>(
+            serde_json::to_value(seed_state()).unwrap()
+        )
+        .unwrap()
+        .profile_changes_shown
+    );
+}
+
 /// A comment the agent deletes in the session it made it no longer counts
 /// against its post (or the post's next comment by someone else would go
 /// unseen); restoring it counts it again
@@ -5270,6 +5360,7 @@ fn inbox_with(
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -5487,7 +5578,7 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
     );
     assert!(
         text.starts_with(
-            "The 1 proposal awaiting deliberation, a `<proposal>` element: \
+            "The 1 proposal the Council hasn't taken up, a `<proposal>` element: \
              the attributes are the platform's, the text the start of the \
              author's body, escaped (&lt; is <, &amp; is &), and a tag of \
              ours written in the text is renamed (`forged_` marks one). \
@@ -5881,7 +5972,7 @@ async fn a_link_makes_the_call_it_names() {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
             .is_true(|req| {
-                !has_param(req, "detail") && !has_param(req, "round")
+                !has_param(req, "detail") && !has_param(req, "council_round")
             });
         then.status(200).json_body(governance_content(
             "GOV-2026-0006",
@@ -5974,7 +6065,7 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
             .path("/agora/api/content/GOV-2026-0006")
             .is_true(|req| {
                 !has_param(req, "detail")
-                    && !has_param(req, "round")
+                    && !has_param(req, "council_round")
                     && !has_param(req, "attachment")
             });
         let mut body =
@@ -6020,7 +6111,9 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
 
     // In conflict: nothing is sent
     agent
-        .handle(link("agora://gov/GOV-2026-0006?detail=summary&round=2"))
+        .handle(link(
+            "agora://gov/GOV-2026-0006?detail=summary&council_round=2",
+        ))
         .await
         .unwrap();
     assert!(
@@ -6056,7 +6149,7 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
             "This decision has 3 deliberation rounds, ~900 tok in all: \
              `agora://gov/GOV-2026-0006` reads the record with all of them, \
              and one round reads alone; each uses a full read, 2 left this \
-             session. Rounds: `agora://gov/GOV-2026-0006?round=1` (~200 tok)"
+             session. Rounds: `agora://gov/GOV-2026-0006?council_round=1` (~200 tok)"
         ),
         "{rendered}"
     );
@@ -6085,18 +6178,18 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
     // Spent: a round past the last is still refused as such, and the
     // summary says nothing of reading the rounds
     agent
-        .handle(link("agora://gov/GOV-2026-0006?round=9"))
+        .handle(link("agora://gov/GOV-2026-0006?council_round=9"))
         .await
         .unwrap();
     assert!(
         transcript(&agent).contains(
-            "round=9: GOV-2026-0006 has 3 deliberation rounds, 1 to 3."
+            "council_round=9: GOV-2026-0006 has 3 deliberation rounds, 1 to 3."
         ),
         "{}",
         transcript(&agent)
     );
     agent
-        .handle(link("agora://gov/GOV-2026-0006?round=2"))
+        .handle(link("agora://gov/GOV-2026-0006?council_round=2"))
         .await
         .unwrap();
     let rendered = transcript(&agent);
@@ -6408,12 +6501,12 @@ async fn an_empty_attachment_in_a_tool_call_is_absent() {
     agent
         .handle(tool_use_message(
             "fetch_agora_link",
-            serde_json::json!({"link": "agora://gov/GOV-2026-0006?round="}),
+            serde_json::json!({"link": "agora://gov/GOV-2026-0006?council_round="}),
         ))
         .await
         .unwrap();
     assert_eq!(record.calls(), 1, "the empty option was refused");
-    assert!(transcript(&agent).contains("round= is empty"));
+    assert!(transcript(&agent).contains("council_round= is empty"));
 }
 
 /// Every kind of read with every combination of options, by both tools:
@@ -6695,7 +6788,7 @@ async fn refused_turns_are_free_five_in_a_row() {
     let conflict = || {
         tool_use_message(
             "get_content",
-            serde_json::json!({"id": "GOV-2026-0006", "detail": "summary", "round": 2}),
+            serde_json::json!({"id": "GOV-2026-0006", "detail": "summary", "council_round": 2}),
         )
     };
     let good = || {
@@ -7049,7 +7142,7 @@ async fn history_shows_what_each_revision_changed() {
     let before = calls();
     for bad in [
         serde_json::json!({"id": "GOV-2026-0017", "history": true, "version": "original"}),
-        serde_json::json!({"id": "GOV-2026-0017", "history": 2, "round": 1}),
+        serde_json::json!({"id": "GOV-2026-0017", "history": 2, "council_round": 1}),
         serde_json::json!({"id": "GOV-2026-0017", "history": 0}),
     ] {
         let control = agent
@@ -7122,7 +7215,7 @@ async fn a_rewritten_id_says_how_it_was_read() {
     agent
         .handle(tool_use_message(
             "get_content",
-            serde_json::json!({"id": "GOV-2026-6", "detail": "summary", "round": 2}),
+            serde_json::json!({"id": "GOV-2026-6", "detail": "summary", "council_round": 2}),
         ))
         .await
         .unwrap();
@@ -7314,9 +7407,9 @@ async fn refused_rounds_and_inputs_are_free_and_say_so() {
     let refused_round = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0017")
-            .query_param("round", "9");
+            .query_param("council_round", "9");
         then.status(400).json_body(serde_json::json!({
-            "error": "round=9: GOV-2026-0017 has 3 deliberation rounds, 1 to 3."
+            "error": "council_round=9: GOV-2026-0017 has 3 deliberation rounds, 1 to 3."
         }));
     });
     let summary = server.mock(|when, then| {
@@ -7336,12 +7429,12 @@ async fn refused_rounds_and_inputs_are_free_and_say_so() {
     seat_start(&mut agent);
     for (call, want) in [
         (
-            serde_json::json!({"id": "GOV-2026-0017", "round": 0}),
-            "round=0: rounds count from 1. Refused; nothing was charged.",
+            serde_json::json!({"id": "GOV-2026-0017", "council_round": 0}),
+            "council_round=0: deliberation rounds count from 1. Refused; nothing was charged.",
         ),
         (
-            serde_json::json!({"id": "GOV-2026-0017", "round": 9}),
-            "round=9: GOV-2026-0017 has 3 deliberation rounds, 1 to 3. \
+            serde_json::json!({"id": "GOV-2026-0017", "council_round": 9}),
+            "council_round=9: GOV-2026-0017 has 3 deliberation rounds, 1 to 3. \
              Refused; nothing was charged.",
         ),
         (
@@ -7470,7 +7563,7 @@ async fn a_round_read_again_is_the_pointer_at_either_version() {
     let round = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0017")
-            .query_param("round", "3")
+            .query_param("council_round", "3")
             .query_param("version", "original");
         let mut body = governance_content(
             "GOV-2026-0017",
@@ -7486,7 +7579,7 @@ async fn a_round_read_again_is_the_pointer_at_either_version() {
     let record = server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0006")
-            .is_true(|req| !has_param(req, "round"));
+            .is_true(|req| !has_param(req, "council_round"));
         then.status(200).json_body(governance_content(
             "GOV-2026-0006",
             Some(two_round_record()),
@@ -7511,22 +7604,22 @@ async fn a_round_read_again_is_the_pointer_at_either_version() {
     let spellings = || {
         vec![
             get(
-                serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"}),
+                serde_json::json!({"id": "GOV-2026-0017", "council_round": 3, "version": "original"}),
             ),
             get(
-                serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original", "detail": "full"}),
+                serde_json::json!({"id": "GOV-2026-0017", "council_round": 3, "version": "original", "detail": "full"}),
             ),
             get(
                 serde_json::json!({"id": "gov-2026-17", "round": "3", "version": "original"}),
             ),
-            link("agora://gov/GOV-2026-0017?round=3&version=original"),
+            link("agora://gov/GOV-2026-0017?council_round=3&version=original"),
             link(
                 "agora://gov/GOV-2026-0017?version=original&round=3&detail=full",
             ),
         ]
     };
     agent
-        .handle(get(serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"})))
+        .handle(get(serde_json::json!({"id": "GOV-2026-0017", "council_round": 3, "version": "original"})))
         .await
         .unwrap();
     assert!(transcript(&agent).contains("1 of 2 left this session"));
@@ -7551,7 +7644,7 @@ async fn a_round_read_again_is_the_pointer_at_either_version() {
     assert_eq!(rendered.matches("That was a full read").count(), 2);
     assert_eq!(
         rendered
-            .matches("`agora://gov/GOV-2026-0017?round=3&version=original` is in your context already")
+            .matches("`agora://gov/GOV-2026-0017?council_round=3&version=original` is in your context already")
             .count(),
         10,
         "{rendered}"
@@ -7655,14 +7748,14 @@ async fn a_round_the_same_at_both_versions_is_one_part() {
         let original = server.mock(|when, then| {
             when.method(GET)
                 .path("/agora/api/content/GOV-2026-0017")
-                .query_param("round", "3")
+                .query_param("council_round", "3")
                 .query_param("version", "original");
             then.status(200).json_body(round_body("original"));
         });
         let latest = server.mock(|when, then| {
             when.method(GET)
                 .path("/agora/api/content/GOV-2026-0017")
-                .query_param("round", "3")
+                .query_param("council_round", "3")
                 .is_true(|req| !has_param(req, "version"));
             then.status(200).json_body(round_body("latest"));
         });
@@ -7682,7 +7775,8 @@ async fn a_round_the_same_at_both_versions_is_one_part() {
         );
         seat_start(&mut agent);
         let read = |version: &str| {
-            let mut v = serde_json::json!({"id": "GOV-2026-0017", "round": 3});
+            let mut v =
+                serde_json::json!({"id": "GOV-2026-0017", "council_round": 3});
             if version == "original" {
                 v["version"] = "original".into();
             }
@@ -7709,7 +7803,7 @@ async fn a_round_the_same_at_both_versions_is_one_part() {
         assert_eq!(rendered.matches("That was a full read").count(), 2);
         assert!(
             rendered.contains(
-                "the same text: shown in your read of GOV-2026-0017 round 3"
+                "the same text: shown in your read of GOV-2026-0017 deliberation round 3"
             ),
             "{rendered}"
         );
@@ -7792,14 +7886,14 @@ async fn a_cross_version_pointer_names_what_changed_beside_the_part() {
     server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0017")
-            .query_param("round", "3")
+            .query_param("council_round", "3")
             .query_param("version", "original");
         then.status(200).json_body(round_body("original", false));
     });
     server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0017")
-            .query_param("round", "3")
+            .query_param("council_round", "3")
             .is_true(|req| !has_param(req, "version"));
         then.status(200).json_body(round_body("latest", true));
     });
@@ -7832,8 +7926,8 @@ async fn a_cross_version_pointer_names_what_changed_beside_the_part() {
     );
     seat_start(&mut agent);
     for call in [
-        serde_json::json!({"id": "GOV-2026-0017", "round": 3, "version": "original"}),
-        serde_json::json!({"id": "GOV-2026-0017", "round": 3}),
+        serde_json::json!({"id": "GOV-2026-0017", "council_round": 3, "version": "original"}),
+        serde_json::json!({"id": "GOV-2026-0017", "council_round": 3}),
     ] {
         agent
             .handle(tool_use_message("get_content", call))
@@ -7974,7 +8068,7 @@ async fn a_pointer_never_names_a_read_that_pointed() {
     server.mock(|when, then| {
         when.method(GET)
             .path("/agora/api/content/GOV-2026-0017")
-            .query_param("round", "3");
+            .query_param("council_round", "3");
         then.status(200).json_body(record(3, "original"));
     });
     server.mock(|when, then| {
@@ -8003,7 +8097,7 @@ async fn a_pointer_never_names_a_read_that_pointed() {
     agent
         .handle(tool_use_message(
             "get_content",
-            serde_json::json!({"id": "GOV-2026-0017", "round": 3}),
+            serde_json::json!({"id": "GOV-2026-0017", "council_round": 3}),
         ))
         .await
         .unwrap();
@@ -8018,7 +8112,7 @@ async fn a_pointer_never_names_a_read_that_pointed() {
     agent
         .handle(tool_use_message(
             "fetch_agora_link",
-            serde_json::json!({"link": "agora://gov/GOV-2026-0017?round=1"}),
+            serde_json::json!({"link": "agora://gov/GOV-2026-0017?council_round=1"}),
         ))
         .await
         .unwrap();
@@ -8036,7 +8130,9 @@ async fn a_pointer_never_names_a_read_that_pointed() {
     // fallback only beside it, for its note
     let last = rendered.rsplit("## GOV-2026-0017").next().unwrap();
     assert!(
-        last.contains("shown in your read of GOV-2026-0017 round 3"),
+        last.contains(
+            "shown in your read of GOV-2026-0017 deliberation round 3"
+        ),
         "{last}"
     );
     assert!(
@@ -8094,14 +8190,14 @@ async fn every_read_of_a_test_record_shows_the_label() {
         server.mock(|when, then| {
             when.method(GET)
                 .path("/agora/api/content/TEST-2026-0001")
-                .query_param("round", "2")
+                .query_param("council_round", "2")
                 .query_param("version", "original");
             then.status(200).json_body(round("original"));
         });
         server.mock(|when, then| {
             when.method(GET)
                 .path("/agora/api/content/TEST-2026-0001")
-                .query_param("round", "2")
+                .query_param("council_round", "2")
                 .is_true(|req| !has_param(req, "version"));
             then.status(200).json_body(round("latest"));
         });
@@ -8127,7 +8223,7 @@ async fn every_read_of_a_test_record_shows_the_label() {
                 .path("/agora/api/content/TEST-2026-0001")
                 .is_true(|req| {
                     !has_param(req, "detail")
-                        && !has_param(req, "round")
+                        && !has_param(req, "council_round")
                         && !has_param(req, "attachment")
                 });
             then.status(200).json_body(body(Some(serde_json::json!({
@@ -8144,8 +8240,8 @@ async fn every_read_of_a_test_record_shows_the_label() {
         seat_start(&mut agent);
         for input in [
             serde_json::json!({"id": "TEST-2026-0001"}),
-            serde_json::json!({"id": "TEST-2026-0001", "round": 2}),
-            serde_json::json!({"id": "TEST-2026-0001", "round": 2,
+            serde_json::json!({"id": "TEST-2026-0001", "council_round": 2}),
+            serde_json::json!({"id": "TEST-2026-0001", "council_round": 2,
                                "version": "original"}),
             serde_json::json!({"id": "TEST-2026-0001",
                                "attachment": "provenance.json"}),
@@ -8587,6 +8683,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -8632,6 +8729,7 @@ fn an_inbox_header_counts_every_message_it_lists() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -8674,6 +8772,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -8694,8 +8793,8 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
     let text = super::prompt::format_inbox(&listed, &once, Some(2));
     assert!(
         text.contains(
-            "read before are listed (of your limit of 2, 2 went to these; \
-             any other messages and broadcasts read before are left out)."
+            "read before are listed (of your limit of 2, 2 went to these). \
+             Left out: any other messages and broadcasts read before."
         ),
         "{text}"
     );
@@ -8732,8 +8831,8 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         text.contains(
             "Messages and broadcasts: none unread; the latest message and \
              the latest broadcast read before are listed (of your limit of 4, \
-             2 went to your operator's messages above and 2 to these; any \
-             other messages and broadcasts read before are left out)."
+             2 went to your operator's messages above and 2 to these). Left \
+             out: any other messages and broadcasts read before."
         ),
         "{text}"
     );
@@ -9314,6 +9413,7 @@ fn the_operator_header_counts_in_words() {
                 read_messages: None,
                 read_broadcasts: None,
                 operator_replies: Vec::new(),
+                operator_replies_total: None,
                 operator_disclosure: None,
                 warning: None,
                 index: None,
@@ -9602,6 +9702,34 @@ fn the_agents_own_replies_are_listed() {
         "{text}"
     );
     assert!(text.contains("(could not be decrypted)"), "{text}");
+    // With the server's total (beta round 13): how many there are in all
+    for (total, header) in [
+        (
+            12,
+            "Your latest 2 of the 12 messages you have sent your operator, \
+             newest first:\n",
+        ),
+        (
+            2,
+            "All 2 messages you have sent your operator, newest first:\n",
+        ),
+    ] {
+        inbox.operator_replies_total = Some(total);
+        let t = super::prompt::format_inbox(
+            &inbox,
+            &super::ShownOnce::default(),
+            None,
+        );
+        assert!(t.contains(header), "{t}");
+    }
+    inbox.operator_replies.truncate(1);
+    inbox.operator_replies_total = Some(1);
+    let t =
+        super::prompt::format_inbox(&inbox, &super::ShownOnce::default(), None);
+    assert!(
+        t.contains("The 1 message you have sent your operator:\n"),
+        "{t}"
+    );
     // Before the DMs, after the operator's messages
     assert!(
         text.find("<operator_message").unwrap()
@@ -10213,6 +10341,7 @@ fn retracted_messages_are_never_counted_as_read() {
             read_messages: None,
             read_broadcasts: None,
             operator_replies: Vec::new(),
+            operator_replies_total: None,
             operator_disclosure: None,
             warning: None,
             index: None,
@@ -10228,7 +10357,7 @@ fn retracted_messages_are_never_counted_as_read() {
                 l.starts_with("From your operator")
                     || l.starts_with("Messages and broadcasts")
             })
-            .map(|l| l.split(". ").next().unwrap().to_string())
+            .map(first_sentence_with_left_out)
             .collect::<Vec<_>>()
     };
     let steward =
@@ -10374,7 +10503,7 @@ fn a_used_up_limit_says_how_it_was_split() {
                 l.starts_with("From your operator")
                     || l.starts_with("Messages and broadcasts")
             })
-            .map(|l| l.split(". ").next().unwrap().to_string())
+            .map(first_sentence_with_left_out)
             .collect::<Vec<_>>()
     };
     // beta-social, limit=5
@@ -10388,6 +10517,7 @@ fn a_used_up_limit_says_how_it_was_split() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -10396,8 +10526,8 @@ fn a_used_up_limit_says_how_it_was_split() {
         headers(&social, Some(5))[1],
         "Messages and broadcasts: none unread; the 2 latest messages read \
          before are listed (of your limit of 5, 3 went to your operator's \
-         messages above and 2 to these; any other messages and broadcasts \
-         read before are left out)"
+         messages above and 2 to these). Left out: any other messages and \
+         broadcasts read before"
     );
     assert!(!headers(&social, Some(5))[1].contains("within"));
     // beta-newcomer, limit=3, 2 unread DMs
@@ -10411,6 +10541,7 @@ fn a_used_up_limit_says_how_it_was_split() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -10462,6 +10593,7 @@ fn a_used_up_limit_says_how_it_was_split() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -10473,7 +10605,7 @@ fn a_used_up_limit_says_how_it_was_split() {
              1 (up to 40 messages and 40 broadcasts a read; the rest stay \
              unread for a later read); the latest message read before is \
              listed (of your limit of 3, 1 went to your operator's message \
-             above, 1 to the unread one and 1 to this one;"
+             above, 1 to the unread one and 1 to this one). Left out:"
         ),
         "{h:?}"
     );
@@ -10491,6 +10623,7 @@ fn a_used_up_limit_says_how_it_was_split() {
         read_messages: None,
         read_broadcasts: None,
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -10616,7 +10749,7 @@ fn read_before_totals_say_how_many_of_how_many() {
         println!("{out}");
         out.lines()
             .find(|l| l.starts_with(start))
-            .map(|l| l.split(". ").next().unwrap().to_string())
+            .map(first_sentence_with_left_out)
             .unwrap_or_default()
     };
     let msgs = |inbox: &InboxResponse, limit| {
@@ -10634,6 +10767,7 @@ fn read_before_totals_say_how_many_of_how_many() {
         read_messages: Some(dms),
         read_broadcasts: Some(broadcasts),
         operator_replies: Vec::new(),
+        operator_replies_total: None,
         operator_disclosure: None,
         warning: None,
         index: None,
@@ -10682,8 +10816,8 @@ fn read_before_totals_say_how_many_of_how_many() {
         msgs(&social, Some(5)),
         "Messages and broadcasts: none unread; the latest 2 of the 6 messages \
          you have read before are listed (of your limit of 5, 3 went to your \
-         operator's messages above and 2 to these; 4 other messages and the \
-         2 broadcasts you have read before are left out)"
+         operator's messages above and 2 to these). Left out: 4 other \
+         messages and the 2 broadcasts you have read before"
     );
     // A limit that took everything there was: nothing said left out
     let mut exact = inbox(vec![dm(S::Read), dm(S::Read)], 2, 0);

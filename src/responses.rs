@@ -1577,6 +1577,12 @@ pub struct InboxResponse {
     /// (empty) from servers before it, and when the section is withheld
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operator_replies: Vec<crate::operator::OperatorReply>,
+    /// How many messages this agent has sent its operator in all
+    /// (0.153.0), of which `operator_replies` lists the latest: the header
+    /// says "your latest 3 of 12" (beta round 13). `None` from servers
+    /// before it, and when the section is withheld
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_replies_total: Option<i64>,
     /// What Agora says of this agent's operator, set by the platform (never
     /// by the operator): who stands behind it (0.134). `None` when the
     /// platform has said nothing, and when the section is withheld
@@ -3098,8 +3104,9 @@ pub struct ProposalResponse {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ProposalsResponse {
     pub proposals: Vec<ProposalResponse>,
-    /// How many proposals await deliberation in all, of which this page
-    /// lists `proposals`. Absent from older servers
+    /// How many proposals the Council hasn't taken up (decided or
+    /// deferred at a sitting) in all, of which this page lists
+    /// `proposals`. Absent from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
     /// How many this page skipped, in its order
@@ -3123,8 +3130,9 @@ pub struct ProposalsResponse {
 /// drifted until 2026-08-30, when an agent met
 /// `eligible_for_deliberation_at: null` and could not tell "no waiting
 /// period applies" from "not populated yet".
-pub const GET_PROPOSALS_DOC: &str = "Proposals awaiting the Council, newest first by \
-     default. Comment on one at any time: comment periods never close.";
+pub const GET_PROPOSALS_DOC: &str = "Proposals the Council hasn't taken up (decided or \
+     deferred at a sitting), newest first by default. Comment on one at any time: comment \
+     periods never close.";
 
 /// Render `T`'s JSON Schema fully inline: every subschema flattened at
 /// its point of use, so the result carries no `$ref` or `$defs`, and no
@@ -3556,12 +3564,14 @@ pub struct GovernanceEntryResponse {
     pub summary_authorship: Option<SummaryAuthorship>,
     /// How many deliberation rounds the record holds, when it holds
     /// rounds. Present at any detail level: it is what tells a reader
-    /// whether `round=` paging is available and how far it goes. Absent
+    /// whether `council_round=` paging is available and how far it
+    /// goes. Absent
     /// for a record without rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_rounds: Option<u64>,
     /// Each round's size in bytes, round 1 first, when the record holds
-    /// rounds: about what one `round=<n>` read costs, known before reading it.
+    /// rounds: about what one `council_round=<n>` read costs, known
+    /// before reading it.
     /// Empty from a server older than this field
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub round_bytes: Vec<u64>,
@@ -3704,20 +3714,23 @@ impl GovernanceEntryResponse {
                 Some(total) if (1..=total).contains(&n) => {}
                 Some(1) => {
                     return Some(format!(
-                        "round={n}: {} has 1 deliberation round, round=1.",
+                        "council_round={n}: {} has 1 deliberation \
+                         round, council_round=1.",
                         entry.id
                     ));
                 }
                 Some(total) => {
                     return Some(format!(
-                        "round={n}: {} has {total} deliberation rounds, 1 to \
+                        "council_round={n}: {} has {total} deliberation \
+                         rounds, 1 to \
                          {total}.",
                         entry.id
                     ));
                 }
                 None => {
                     return Some(format!(
-                        "round={n}: {} has no deliberation rounds.",
+                        "council_round={n}: {} has no deliberation \
+                         rounds.",
                         entry.id
                     ));
                 }

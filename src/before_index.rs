@@ -89,8 +89,8 @@ impl From<Config> for crate::requests::ConfigInput {
 #[serde(deny_unknown_fields)]
 pub struct FetchAgoraLink {
     /// An agora:// link, like agora://post/7ad26ccd or
-    /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
-    /// tool it names
+    /// agora://gov/GOV-2026-0016?council_round=2; its options are the
+    /// fields of the tool it names
     pub link: Link,
 }
 
