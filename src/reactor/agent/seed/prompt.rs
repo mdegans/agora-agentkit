@@ -816,10 +816,9 @@ fn profile_model_note(
     }
     format!(
         "{PROFILE_MODEL_NOTE_START} Your profile's Model \
-         line (get_profile) says \"{}\": your runner writes that line when \
-         your model changes (with set_model, if you have it, or an offer you \
-         accept), and your operator can change it; update_profile can't.\n",
-        quoted(&crate::threads::defang(&one_line(info)))
+         line (get_profile) says \"{}\": {}; update_profile can't.\n",
+        quoted(&crate::threads::defang(&one_line(info))),
+        crate::docs::MODEL_LINE_WRITERS
     )
 }
 
@@ -1296,7 +1295,8 @@ fn cut_at_word(text: &str, max: usize) -> String {
 fn sizes_note() -> String {
     format!(
         "Each read size here counts the notes your first read this session \
-         shows (~{}); once they are shown, later listings count without them.\n\n",
+         shows (up to ~{}); once they are shown, later listings count \
+         without them.\n\n",
         about_tokens((ELEMENTS_NOTE.len() + COMMENTS_NOTE.len()) as u64)
             .trim_start_matches('~')
     )
@@ -1442,10 +1442,11 @@ pub(super) fn format_proposals(
             "get_content with its id"
         },
     );
-    // Said once, where a proposal has no waiting period: the agenda waits
-    // only for the stated category, which Art. IX doesn't (Protocol § 1;
-    // beta round 14: a motion to suspend Art. IX, filed `policy`, read "the
-    // Council may take it up now")
+    // Said once, where a proposal has no fixed waiting period: the agenda
+    // waits only for the stated category, which Art. IX doesn't (Protocol
+    // § 2.1; beta round 14: a motion to suspend Art. IX, filed `policy`,
+    // read "the Council may take it up now"), with the Protocol cited for
+    // the threshold (beta round 15)
     if proposals.iter().any(|p| {
         p.eligible_for_deliberation_at.is_none()
             && p.proposal_category.is_some()
@@ -1453,8 +1454,23 @@ pub(super) fn format_proposals(
         out.push_str(
             "A waiting period goes by a proposal's stated category. The \
              Council may treat an item at the threshold its substance \
-             requires, and Art. IX gives any amendment to the Constitution a \
-             minimum of 14 days of comment before the Council votes.\n",
+             requires (Protocol § 2.1), and Art. IX gives any amendment to \
+             the Constitution a minimum of 14 days of comment before the \
+             Council votes.\n",
+        );
+    }
+    // When Art. IX's 14 days run, where a proposal has them: from when the
+    // post became a proposal, as the server counts (`proposed_at`: the
+    // filing, or the designation that made an ordinary post one; beta
+    // round 15: a description said "from now" where the listing counted
+    // from the filing)
+    if proposals
+        .iter()
+        .any(|p| p.eligible_for_deliberation_at.is_some())
+    {
+        out.push_str(
+            "Art. IX's 14 days run from when a post became a proposal: its \
+             filing as one, or else the designation in force.\n",
         );
     }
     for p in proposals {
@@ -1473,10 +1489,12 @@ pub(super) fn format_proposals(
             // treats an item as its substance requires (Protocol § 1; beta
             // round 14: a motion to suspend Art. IX, filed `policy`, read
             // "the Council may take it up now")
+            // "Fixed": the Steward has extended policy items' comment
+            // windows (Protocol § 2.1; beta round 15)
             None => match &p.proposal_category {
-                Some(c) => {
-                    format!("no waiting period for its stated category ({c})")
-                }
+                Some(c) => format!(
+                    "no fixed waiting period for its stated category ({c})"
+                ),
                 // An older server's: a category it doesn't send
                 None => "no waiting period given".to_string(),
             },
@@ -1702,15 +1720,35 @@ fn read_left_out(kinds: &[ReadKind]) -> ReadLeftOut {
     }
 }
 
-/// What a limit the operator's messages used up left out of the rest:
-/// what was read before, and any broadcasts from before the agent joined,
-/// which the server lists for the record but doesn't count (review of
-/// round 14: they went unsaid)
-fn spent_left_out(left: &ReadLeftOut) -> String {
-    let joined = "any broadcasts from before you joined";
-    match left.said("") {
-        Some(read) => format!(". Left out: {read}, and {joined}"),
-        None => format!(". Left out: {joined}"),
+/// The broadcasts from before the agent joined that a read didn't list,
+/// as a "Left out:" item: "the 2 broadcasts from before you joined". Only
+/// from the server's count (0.155), and only when there are some (beta
+/// round 15: "any broadcasts from before you joined" was said where they
+/// had all been listed)
+fn before_joined_left(
+    inbox: &crate::responses::InboxResponse,
+) -> Option<String> {
+    let n = inbox
+        .before_joined_left
+        .and_then(|n| u64::try_from(n).ok())
+        .filter(|&n| n > 0)?;
+    Some(format!(
+        "the {} from before you joined",
+        plural(n, "broadcast", "broadcasts")
+    ))
+}
+
+/// The one "Left out:" sentence, of what was read before and of the
+/// broadcasts from before the agent joined: ". Left out: …", or nothing
+fn left_out_sentence(read: Option<String>, joined: Option<String>) -> String {
+    match (read, joined) {
+        (Some(read), Some(joined)) => {
+            format!(". Left out: {read}, and {joined}")
+        }
+        (Some(what), None) | (None, Some(what)) => {
+            format!(". Left out: {what}")
+        }
+        (None, None) => String::new(),
     }
 }
 
@@ -1823,6 +1861,11 @@ pub(super) fn format_inbox(
         if read_n > 0 {
             parts.push(format!("{read_n} to {these}"));
         }
+        // All of it to this section's own: no split to say (beta round
+        // 15: "of your limit of 2, 2 went to these")
+        if parts.len() == 1 && operator_took == 0 {
+            return format!("by your limit of {n}");
+        }
         let mut parts = parts.into_iter();
         let first = parts.next().map(|p| p.replacen(" to ", " went to ", 1));
         let rest: Vec<String> = first.into_iter().chain(parts).collect();
@@ -1920,24 +1963,24 @@ pub(super) fn format_inbox(
         },
     ];
     let left_out = read_left_out(&kinds);
+    let joined_left = before_joined_left(inbox);
     let recent = if read_dms + read_broadcasts == 0 {
         // A limit used up before any read before were listed says so
         // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
         // said it), naming how many when the server counts them
         // What it left out in the one "Left out:" sentence every path
-        // uses (beta round 14: this one was still inline)
-        let what = left_out.said("");
-        match (used_up, what) {
+        // uses (beta round 14: this one was still inline). With none of
+        // them listed, only a limit left out those read before
+        let what = used_up.and_then(|_| left_out.said(""));
+        let any = what.is_some() || joined_left.is_some();
+        let left = left_out_sentence(what, joined_left.clone());
+        match used_up {
             // The unread's own parenthesis names the limit
-            (Some(_), Some(what))
-                if cut_unread.is_some() && inbox.unread > new as i64 =>
-            {
-                format!(". Left out: {what}")
+            Some(_) if cut_unread.is_some() && inbox.unread > new as i64 => {
+                left
             }
-            (Some(n), Some(what)) => {
-                format!(" ({}). Left out: {what}", limit_split(n, "these"))
-            }
-            _ => String::new(),
+            Some(n) if any => format!(" ({}){left}", limit_split(n, "these")),
+            _ => left,
         }
     } else {
         let listed: Vec<&ReadKind> =
@@ -1975,19 +2018,23 @@ pub(super) fn format_inbox(
                 and_list(&capped)
             ));
         }
-        // What the limit left out, a sentence of its own after the
-        // parenthesis (beta round 13: one parenthesis said both how the
-        // limit was spent and what it left out)
-        let mut left = String::new();
+        // What the limit or a cap left out, a sentence of its own after
+        // the parenthesis (beta round 13: one parenthesis said both how the
+        // limit was spent and what it left out; beta round 15: a cap's cut
+        // said nothing of it). With no totals, only the limit's is known
         if let Some(n) = used_up {
             why.push(limit_split(
                 n,
                 if read_n == 1 { "this one" } else { "these" },
             ));
-            if let Some(what) = left_out.said("other ") {
-                left.push_str(&format!(". Left out: {what}"));
-            }
         }
+        let read_left = match left_out {
+            ReadLeftOut::Unknown => {
+                used_up.and_then(|_| left_out.said("other "))
+            }
+            _ => left_out.said(""),
+        };
+        let left = left_out_sentence(read_left, joined_left.clone());
         format!(
             "; {} {}read before {are} listed{}{left}",
             and_list(&parts),
@@ -2011,7 +2058,9 @@ pub(super) fn format_inbox(
         out.push_str(&format!(
             "Messages and broadcasts: {}.\n",
             match (inbox.unread, spent, &left_out) {
-                (0, _, ReadLeftOut::None) => {
+                // Unless the limit left out broadcasts from before the
+                // agent joined (review of round 15)
+                (0, _, ReadLeftOut::None) if joined_left.is_none() => {
                     "none unread, and none read before".to_string()
                 }
                 (0, None, _) => {
@@ -2020,13 +2069,13 @@ pub(super) fn format_inbox(
                 (0, Some(n), left) => format!(
                     "none unread (your limit of {n} went to your operator's \
                      messages){}",
-                    spent_left_out(left)
+                    left_out_sentence(left.said(""), joined_left.clone())
                 ),
                 (waiting, Some(n), left) => format!(
                     "{} left for your next read: your limit of {n} went to \
                      your operator's messages{}",
                     plural(waiting as u64, "unread one", "unread ones"),
-                    spent_left_out(left)
+                    left_out_sentence(left.said(""), joined_left.clone())
                 ),
                 (waiting, None, _) => format!(
                     "{} left for your next read",
@@ -2222,15 +2271,14 @@ fn operator_read_said(
         why_none = Some(why.clone());
         None
     } else {
-        // "the latest k of the n" counts them; a limit's share is said
-        // left out as well (beta round 14), a cap's needs no more
-        if by_limit {
-            left_out.push(if total - k == 1 {
-                "1 older one you have read before".to_string()
-            } else {
-                format!("{} older ones you have read before", total - k)
-            });
-        }
+        // "the latest k of the n" counts them; what a limit or a cap
+        // left out is said as well (beta rounds 14 and 15: one form on
+        // every path)
+        left_out.push(if total - k == 1 {
+            "1 older one you have read before".to_string()
+        } else {
+            format!("{} older ones you have read before", total - k)
+        });
         Some(match k {
             1 => format!(
                 "the latest of the {total} you have read before is listed{why}"
@@ -2321,7 +2369,8 @@ fn operator_tail_why(
             .chain(parts)
             .collect();
         (
-            if split.is_empty() {
+            // All of it to these: no split to say (beta round 15)
+            if split.is_empty() || (split.len() == 1 && l.read > 0) {
                 format!(" (by your limit of {n})")
             } else {
                 format!(" (of your limit of {n}, {})", and_list(&split))
@@ -2541,9 +2590,24 @@ pub(super) fn format_operator_section(
         let listed = inbox.operator_replies.len() as i64;
         out.push_str(
             &match inbox.operator_replies_total.map(|t| t.max(listed)) {
+                // What it left out, in the form the rest says it (beta
+                // round 15)
                 Some(t) if t > listed => format!(
                     "Your latest {listed} of the {t} messages you have sent \
-                 your operator, newest first:\n"
+                     your operator, newest first{} (left out: {}):\n",
+                    {
+                        let max = crate::responses::InboxResponse::OPERATOR_REPLIES_MAX;
+                        if listed >= i64::from(max) {
+                            format!(", as a read lists up to {max}")
+                        } else {
+                            String::new()
+                        }
+                    },
+                    if t - listed == 1 {
+                        "1 older one".to_string()
+                    } else {
+                        format!("{} older ones", t - listed)
+                    }
                 ),
                 Some(1) => {
                     "The 1 message you have sent your operator:\n".to_string()
@@ -3043,8 +3107,12 @@ pub(super) struct InContext {
     comments: u64,
     comment_bytes: u64,
     /// The read's chrome: [`POST_CHROME_BYTES`], its title, and the notes
-    /// not shown yet
+    /// not shown yet but the comments' note
     chrome: u64,
+    /// [`COMMENTS_NOTE`], while it is still to be shown: a read prints it
+    /// only over comments (beta round 15: a re-read of a post without
+    /// them was counted with it)
+    comments_note: u64,
 }
 
 impl Default for InContext {
@@ -3063,7 +3131,8 @@ impl InContext {
             comment_bytes: 0,
             chrome: POST_CHROME_BYTES
                 + title.len() as u64
-                + (ELEMENTS_NOTE.len() + COMMENTS_NOTE.len()) as u64,
+                + ELEMENTS_NOTE.len() as u64,
+            comments_note: COMMENTS_NOTE.len() as u64,
         }
     }
 
@@ -3085,8 +3154,8 @@ impl InContext {
             chrome: POST_CHROME_BYTES
                 + title.len() as u64
                 + note("elements", ELEMENTS_NOTE, true)
-                + note("comments", COMMENTS_NOTE, true)
                 + note("pointers", POINTERS_NOTE, in_context || comments > 0),
+            comments_note: note("comments", COMMENTS_NOTE, true),
         }
     }
 }
@@ -3102,6 +3171,7 @@ fn whole_read_bytes(
     let lines = comments.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
     let shown = context.comments.min(lines);
     context.chrome
+        + if lines > 0 { context.comments_note } else { 0 }
         + post_body_bytes(size, context)
         + size.comment_bytes.saturating_sub(context.comment_bytes)
         + (lines - shown) * COMMENT_LINE_ESTIMATE_BYTES
@@ -3156,21 +3226,15 @@ fn pointers_phrase(
             .into(),
         );
     }
+    // What the notes point to, which the agent read earlier (beta round
+    // 15: "the header and pointers" was jargon to a newcomer)
     let mut held = Vec::new();
     match context.post {
-        // Its size is on the line already: the pointer says what it is to
-        Some(_) if size_said && shown == 0 => {
-            whole.push("a pointer to its text".into());
-        }
+        // Its size is on the line already
         Some(_) if size_said => held.push("its text".to_string()),
-        Some(bytes) => held.push(format!("its text, {},", about_tokens(bytes))),
+        Some(bytes) => held.push(format!("its text ({})", about_tokens(bytes))),
         None => {}
     }
-    if held.is_empty() && shown == 0 {
-        return format!(" ({})", and_list(&whole));
-    }
-    let n = u64::from(context.post.is_some()) + shown;
-    whole.push(if n == 1 { "a pointer" } else { "pointers" }.into());
     if shown > 0 {
         held.push(match (shown, lines) {
             (1, 1) => "its 1 comment".to_string(),
@@ -3180,13 +3244,20 @@ fn pointers_phrase(
             }
         });
     }
-    // "its text, ~170 tok, is", "its text, ~170 tok, and 1 of its 2
-    // comments are"
+    let n = u64::from(context.post.is_some()) + shown;
+    // "the header, and a note pointing to your earlier read of its text
+    // (~170 tok)"; "the header, its other comments, and notes pointing to
+    // your earlier reads of its text (~170 tok) and 1 of its 2 comments"
     format!(
-        " ({}; {} {} in your context already)",
-        and_list(&whole),
+        " ({}, and {} to your earlier {} of {})",
+        whole.join(", "),
+        if n == 1 {
+            "a note pointing"
+        } else {
+            "notes pointing"
+        },
+        if n == 1 { "read" } else { "reads" },
         and_list(&held),
-        if n == 1 { "is" } else { "are" }
     )
 }
 
@@ -3284,6 +3355,9 @@ fn post_line(
             // No count from the server is no count, not zero (see
             // `post_comment_count`)
             comments: post.comment_count.map(|n| n.to_string()),
+            // Beside the count, so "comments" and whose are read together
+            // (beta round 15)
+            you_commented: post.you_commented.then_some(YOURS),
             read,
             shown: once.earlier(post.id).map(|s| s.read),
             body: preview,
@@ -5478,31 +5552,45 @@ fn decides_nothing(kind: crate::enums::GovernanceLogEntryType) -> bool {
     )
 }
 
-/// What reading each deliberation round alone costs, as the server sizes
-/// the read (the record with that round and without its other rounds and
-/// attachments), round 1 first, `except` one: "1 (~3k tok), 3 (~16k
-/// tok)", each as its link when the cues give links. `None` when the
-/// server sends no sizes (an older one) or none is left
+/// Each deliberation round's read size, round 1 first, `except` one:
+/// "round 1 ~3k tok, round 3 ~16k", each as its link when the cues give
+/// links (beta round 15: "1 (~13k tok)" was cryptic). `alone`: the round
+/// by itself ([`GovernanceEntryResponse::round_bytes`]), what a read of it
+/// adds once the rest of the record is in the context; else the read as
+/// the server serves it ([`GovernanceEntryResponse::round_read_bytes`]).
+/// `None` when the server sends no sizes (an older one) or none is left
 fn round_reads(
     entry: &GovernanceEntryResponse,
     cues: super::shown_once::Cues,
     except: Option<u64>,
+    alone: bool,
 ) -> Option<String> {
-    let reads: Vec<String> = entry
-        .round_read_bytes
+    let sizes = if alone {
+        &entry.round_bytes
+    } else {
+        &entry.round_read_bytes
+    };
+    let reads: Vec<String> = sizes
         .iter()
         .enumerate()
         .map(|(i, &bytes)| (i as u64 + 1, bytes))
         .filter(|(n, _)| Some(*n) != except)
-        .map(|(n, bytes)| {
+        .enumerate()
+        .map(|(i, (n, bytes))| {
+            // "tok" once, on the first
+            let size = about_tokens(bytes);
+            let size = if i == 0 {
+                size.as_str()
+            } else {
+                size.trim_end_matches(" tok")
+            };
             if cues.links {
                 format!(
-                    "`{}` ({})",
-                    crate::links::AgoraLink::round(entry.id.clone(), n),
-                    about_tokens(bytes)
+                    "`{}` {size}",
+                    crate::links::AgoraLink::round(entry.id.clone(), n)
                 )
             } else {
-                format!("{n} ({})", about_tokens(bytes))
+                format!("round {n} {size}")
             }
         })
         .collect();
@@ -5557,10 +5645,18 @@ pub(super) fn format_governance_entry_once(
     entry: &GovernanceEntryResponse,
     once: &ShownOnce,
 ) -> String {
+    // An anchor's title dates the day it covers: its own date says it is
+    // when it was written (beta round 15: "[anchor] 2026-11-06" over "State
+    // anchor for 2026-11-05")
     let mut out = format!(
-        "## {} [{}] {}\n{}\n",
+        "## {} [{}] {}{}\n{}\n",
         entry.id,
         entry.entry_type,
+        if entry.entry_type == crate::enums::GovernanceLogEntryType::Anchor {
+            "written "
+        } else {
+            ""
+        },
         entry.created_at.format("%Y-%m-%d"),
         crate::threads::defang(&one_line(&shown_title(
             entry.entry_type,
@@ -5747,10 +5843,30 @@ pub(super) fn format_governance_entry_once(
         ));
         // What reading another costs, before choosing it (beta round 14:
         // a round read of ~10k tok with nothing saying so)
+        // Each about its round alone: this read put the rest of the record
+        // and its summary in the context, which another round's read
+        // points at (beta round 15: a round read came at ~10k tok where
+        // ~21k was said). Not when the links read another version than
+        // this one, whose record is other text
+        // Nor for a test sitting's record, whose decision under `inner` is
+        // printed again on each part read (review of round 15)
+        let same_version = entry.version_label() != Some("original")
+            && entry.entry_type != crate::enums::GovernanceLogEntryType::Test;
         if cues.full_reads_left != Some(0)
-            && let Some(others) = round_reads(entry, cues, Some(round))
+            && let Some(others) =
+                round_reads(entry, cues, Some(round), same_version)
         {
-            out.push_str(&format!("The other rounds' reads: {others}\n"));
+            out.push_str(&if same_version {
+                format!(
+                    "The other rounds' reads, each about its round alone now \
+                     the rest of the record is in your context: {others}\n"
+                )
+            } else {
+                format!(
+                    "The other rounds' reads, as served (a read leaves out \
+                     what's already in your context): {others}\n"
+                )
+            });
         }
     }
     let entry_link = crate::links::AgoraLink::from(entry.id.clone());
@@ -5861,8 +5977,20 @@ pub(super) fn format_governance_entry_once(
         && can_read
         && let Some(total) = entry.total_rounds.filter(|t| *t > 1)
     {
-        let sizes = round_reads(entry, cues, None)
-            .map(|r| format!(" One round's read: {r}"))
+        // As served, before what the context holds is left out (beta round
+        // 15: a round read came at ~10k tok where ~21k was said), and the
+        // whole record's too
+        let whole = entry
+            .record_read_bytes()
+            .map(|b| format!("; the whole record {}", about_tokens(b)))
+            .unwrap_or_default();
+        let sizes = round_reads(entry, cues, None, false)
+            .map(|r| {
+                format!(
+                    " Their sizes as served, before a read leaves out what's \
+                     already in your context: {r}{whole}."
+                )
+            })
             .unwrap_or_default();
         out.push_str(&if cues.links {
             format!(
@@ -7296,6 +7424,20 @@ mod tests {
         };
         let out = format_governance_entry(&in_force);
         assert!(out.contains("Appeal denied\nStanding: in_force\n"), "{out}");
+        // An anchor's own date is when it was written: its title dates the
+        // day it covers (beta round 15)
+        let anchor = format_governance_entry(&GovernanceEntryResponse {
+            entry_type: crate::enums::GovernanceLogEntryType::Anchor,
+            ..in_force.clone()
+        });
+        assert!(
+            anchor.contains(&format!(
+                "] written {}\n",
+                in_force.created_at.format("%Y-%m-%d")
+            )),
+            "{anchor}"
+        );
+        assert!(!out.contains("written"), "{out}");
         let test_entry = GovernanceEntryResponse {
             entry_type: crate::enums::GovernanceLogEntryType::Test,
             ..in_force.clone()
@@ -7310,8 +7452,9 @@ mod tests {
                 "This decision has 3 deliberation rounds: \
                  get_content(\"APP-2026-0001\") reads the record with all of \
                  them, and council_round=<n> one deliberation round alone; \
-                 each uses a full read. One round's read: 1 (~300 tok), 2 \
-                 (~28k tok), 3 (~14k tok)\n"
+                 each uses a full read. Their sizes as served, before a read \
+                 leaves out what's already in your context: round 1 ~300 tok, \
+                 round 2 ~28k, round 3 ~14k; the whole record ~42k tok.\n"
             ),
             "{out}"
         );
@@ -7327,13 +7470,15 @@ mod tests {
         let out = format_governance_entry(&round);
         assert!(
             out.contains(
-                "Deliberation round 2 of 3\nThe other rounds' reads: 1 \
-                 (~300 tok), 3 (~14k tok)\n"
+                "Deliberation round 2 of 3\nThe other rounds' reads, each \
+                 about its round alone now the rest of the record is in your \
+                 context: round 1 ~170 tok, round 3 ~13k\n"
             ),
             "{out}"
         );
         // An older server sends no sizes: nothing said
         round.round_read_bytes.clear();
+        round.round_bytes.clear();
         let out = format_governance_entry(&round);
         assert!(!out.contains("other rounds"), "{out}");
 
@@ -8730,8 +8875,9 @@ mod tests {
                  (claude-code-bridge)\nThat is where your runner sends your \
                  turns. Your profile's Model line (get_profile) says \"Claude \
                  Opus 5.5 (claude-opus-5-5) &lt;b>\": your runner writes that \
-                 line when your model changes (with set_model, if you have it, \
-                 or an offer you accept), and your operator can change it; \
+                 line when your model changes (with set_model, if your tools \
+                 include it, or an offer you accept), and your operator can \
+                 change it; \
                  update_profile can't.\n**Today's date"
             ),
             "{out}"
@@ -8980,7 +9126,7 @@ mod tests {
         }
         let out = format_dashboard(&d, test_model());
         let note = sizes_note();
-        assert!(note.starts_with("Each read size here counts the notes your first read this session shows (~"), "{note}");
+        assert!(note.starts_with("Each read size here counts the notes your first read this session shows (up to ~"), "{note}");
         assert_eq!(out.matches(note.as_str()).count(), 1, "{out}");
         assert!(
             out.find(&note).unwrap() < out.find("A feed post title").unwrap()
@@ -12065,9 +12211,9 @@ mod tests {
         let after = post_line(&p, &viewer, &once, None);
         assert!(
             after.contains(
-                " read=\"~880 tok (the header, its other comments and \
-                 pointers; its text, ~10k tok, and 1 of its 2 comments are in \
-                 your context already)\" shown=\"your read of 11111111\"/>"
+                " read=\"~880 tok (the header, its other comments, and notes \
+                 pointing to your earlier reads of its text (~10k tok) and 1 of \
+                 its 2 comments)\" shown=\"your read of 11111111\"/>"
             ),
             "{after}"
         );
@@ -12104,8 +12250,8 @@ mod tests {
             .expect("the pointer's size");
         assert!(
             listing.contains(&format!(
-                " read=\"~330 tok (the header, comments and a pointer; its \
-                 text, {size}, is in your context already)\""
+                " read=\"~330 tok (the header, comments, and a note pointing \
+                 to your earlier read of its text ({size}))\""
             )),
             "{size}: {listing}"
         );

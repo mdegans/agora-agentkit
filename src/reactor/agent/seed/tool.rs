@@ -217,6 +217,27 @@ pub(super) fn read_as(tool: &str, input: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// What a refusal of `tool`'s `input` adds, before it says it was free:
+/// `update_profile` given a model field says who writes the Model line
+/// (beta round 15: "unknown field `model`, expected `display_name` or
+/// `bio`" left eddy, dynamo, margin and caesura asking how to set it)
+pub(super) fn refusal_hint(
+    tool: &str,
+    input: &serde_json::Value,
+) -> Option<String> {
+    let asked_model = input.as_object().is_some_and(|fields| {
+        fields
+            .keys()
+            .any(|k| k.to_ascii_lowercase().contains("model"))
+    });
+    (tool == "update_profile" && asked_model).then(|| {
+        format!(
+            "Your profile's Model line isn't one update_profile changes: {}.",
+            crate::docs::MODEL_LINE_WRITERS
+        )
+    })
+}
+
 /// A result's text blocks as written, joined by blank lines. Never the
 /// `Content`'s `Display`, which renders Markdown (escaping it) under
 /// misanthropic's `markdown` feature (betas of 0.113.0: `\[council_decision\]`)
@@ -2237,6 +2258,34 @@ impl Agora {
         answer
     }
 
+    /// Mark the listed `posts` this agent has commented on, as the server
+    /// does a listing it serves a signed-in reader (0.155; beta round 15:
+    /// whole rounds went to re-reading threads already answered). A
+    /// listing never fails for want of its marks: an older server, or any
+    /// error, leaves them unmarked, logged
+    async fn mark_commented(
+        &self,
+        posts: &mut [crate::responses::PostResponse],
+    ) {
+        let ids: Vec<PostId> = posts
+            .iter()
+            .map(|p| p.id)
+            .take(crate::requests::CommentedOnInput::MAX_POSTS)
+            .collect();
+        match self
+            .client
+            .commented_on(self.agent_id, &ids, &self.key)
+            .await
+        {
+            Ok(commented) => commented.mark(posts),
+            Err(e) => tracing::warn!(
+                agent_id = %self.agent_id,
+                error = %e,
+                "commented-on marks unavailable; the listing is unmarked"
+            ),
+        }
+    }
+
     /// `search`: the model reads the registry's description
     /// ([`crate::tools::AGENT_TOOLS`]), seated by
     /// [`describe_tool_responses`](super::describe_tool_responses)
@@ -2255,7 +2304,8 @@ impl Agora {
             SearchInput::DEFAULT_LIMIT,
             self.limits.listing,
         ));
-        let found = self.client.search(&args).await.map_err(err)?;
+        let mut found = self.client.search(&args).await.map_err(err)?;
+        self.mark_commented(&mut found.results).await;
         self.shown.extend(found.results.iter().map(|p| p.id));
         Ok(with_limit_note(
             asked,
@@ -2286,7 +2336,8 @@ impl Agora {
             GetFeedInput::DEFAULT_LIMIT,
             self.limits.listing,
         ));
-        let posts = self.client.get_feed(&args).await.map_err(err)?;
+        let mut posts = self.client.get_feed(&args).await.map_err(err)?;
+        self.mark_commented(&mut posts).await;
         self.shown.extend(posts.iter().map(|p| p.id));
         Ok(with_limit_note(
             asked,

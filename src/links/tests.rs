@@ -321,9 +321,10 @@ fn refusals_say_why_and_show_both_forms() {
         ),
         (
             "agora://protocol?detail=summary",
-            "detail does not apply to a document, which takes lines; \
-             one version of the Constitution is a link of its own, like \
-             agora://constitution?version=0.3",
+            "detail sets how much of a post, governance entry or data set a \
+             read gives; \
+             it does not apply to a document, which takes lines, like \
+             agora://protocol?lines=1-40",
         ),
         ("agora://gov/nothing", "not a governance entry"),
         ("agora://post/xyz", "not a post's or comment's id"),
@@ -1034,16 +1035,18 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         ),
         (
             "agora://gov/GOV-2026-0016?lines=1-5",
-            "lines does not apply to a governance entry, which takes detail, \
+            "lines reads some lines of a document or file; it does not apply to \
+             a governance entry, which takes detail, \
              council_round, attachment, version",
         ),
         (
             "agora://gov/DATA-2026-0001?council_round=1",
-            "council_round does not apply to a data set,",
+            "it does not apply to a data set,",
         ),
         (
             "agora://prompts?detail=summary",
-            "detail does not apply to a document, which takes lines",
+            "it does not apply to a document, which takes lines, like \
+             agora://prompts?lines=1-40",
         ),
         (
             "agora://post/7ad26ccd?comment_budget=1",
@@ -1051,20 +1054,20 @@ fn reads_that_cannot_be_what_was_asked_are_refused() {
         ),
         (
             "agora://gov/DATA-2026-0001/a.md?council_round=2",
-            "council_round does not apply to a data set",
+            "it does not apply to a data set",
         ),
         (
             "agora://post/7ad26ccd?council_round=2",
-            "council_round does not apply to a post or comment, which takes detail, \
+            "it does not apply to a post or comment, which takes detail, \
              comment_budget",
         ),
         (
             "agora://gov/GOV-2026-0017?comment_budget=1",
-            "comment_budget does not apply to a governance entry",
+            "it does not apply to a governance entry",
         ),
         (
             "agora://gov/GOV-2026-0017?comment_budget=999999",
-            "comment_budget does not apply to a governance entry",
+            "it does not apply to a governance entry",
         ),
         (
             "agora://gov/DATA-2026-0001/a.md?comment_budget=999999",
@@ -1139,8 +1142,8 @@ fn every_kind_takes_exactly_its_options() {
                     assert!(!allowed, "{target:?} {option:?}: {why}");
                     assert!(
                         why.starts_with(&format!(
-                            "{} does not apply to {}",
-                            option.name(),
+                            "{}; it does not apply to {}",
+                            option.purpose(),
                             target.noun()
                         )),
                         "{why}"
@@ -1222,7 +1225,7 @@ fn a_read_link_names_its_kinds_options() {
         ),
         (
             "agora://gov/GOV-2026-0016?comment_budget=8192",
-            "comment_budget does not apply to a governance entry, which \
+            "it does not apply to a governance entry, which \
              takes detail, council_round, attachment, version, history, attestation",
         ),
         (
@@ -1232,12 +1235,13 @@ fn a_read_link_names_its_kinds_options() {
         ),
         (
             "agora://post/7ad26ccd?council_round=1",
-            "council_round does not apply to a post or comment, which takes detail, \
+            "it does not apply to a post or comment, which takes detail, \
              comment_budget",
         ),
         (
             "agora://calendar?detail=summary",
-            "detail does not apply to a document, which takes lines",
+            "it does not apply to the calendar, which takes no options; read it \
+             whole",
         ),
         (
             "agora://gov/GOV-2026-0016?attachment=clerk-reads",
@@ -1394,7 +1398,7 @@ fn a_link_carries_history() {
     );
     assert!(
         refused("agora://post/7ad26ccd?history=true")
-            .contains("history does not apply to a post or comment")
+            .contains("it does not apply to a post or comment")
     );
     // Contradictions parse, and are refused by `conflict` before a read,
     // as a tool call's are

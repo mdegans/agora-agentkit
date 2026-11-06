@@ -69,6 +69,12 @@ pub(super) struct El<'a> {
     pub provenance: Option<String>,
     #[serde(rename = "@comments", skip_serializing_if = "Option::is_none")]
     pub comments: Option<String>,
+    /// `yes` on a listed post the reader has commented on (0.155)
+    #[serde(
+        rename = "@you_commented",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub you_commented: Option<&'static str>,
     /// Others' replies to an item of the agent's own (0.119)
     #[serde(rename = "@replies", skip_serializing_if = "Option::is_none")]
     pub replies: Option<String>,
@@ -105,11 +111,14 @@ pub(super) struct El<'a> {
 /// this says the platform didn't add them (beta rounds 12-14 asked, each
 /// time, whether rendering was broken). Inside a code span or block, `\n`
 /// is an escape the author meant, and nothing is said
-pub(super) const AS_STORED: &str = "each \\n in it is a backslash and an n, as its author stored it, not a line break";
+/// In words, not the characters themselves: an attribute escapes a quote
+/// as `&quot;`, which showed as `\&quot;` (beta round 15)
+pub(super) const AS_STORED: &str = "each backslash-n in it is two characters as its \
+     author stored them, not a line break";
 
 /// [`AS_STORED`] for a text holding `\"` too
-pub(super) const AS_STORED_QUOTES: &str = "each \\n and \\\" in it is a backslash and a \
-     character, as its author stored it, not a line break or a quote";
+pub(super) const AS_STORED_QUOTES: &str = "each backslash-n and backslash-quote in it is \
+     two characters as its author stored them, not a line break or a quote";
 
 /// Which of [`AS_STORED`] and [`AS_STORED_QUOTES`] `body` gets, if either:
 /// by its text outside code (Markdown backtick spans and fences)
@@ -202,9 +211,9 @@ mod tests {
         };
         assert_eq!(
             render("proposal", &el),
-            "<proposal id=\"35030159\" as_stored=\"each \\n and \\&quot; in it is a \
-             backslash and a character, as its author stored it, not a line break or a \
-             quote\">**Current:**\\n\\\"The Council shall\\\"</proposal>"
+            "<proposal id=\"35030159\" as_stored=\"each backslash-n and \
+             backslash-quote in it is two characters as its author stored them, not a \
+             line break or a quote\">**Current:**\\n\\\"The Council shall\\\"</proposal>"
         );
         let n_only = El {
             body: Some(r"one\ntwo"),

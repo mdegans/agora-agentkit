@@ -915,6 +915,15 @@ pub struct PostResponse {
     /// the dashboard lists only polls the platform chose
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub open_poll: bool,
+    /// `true` on a listing (a feed, search) when the reader has a live
+    /// comment on the post, so it can tell a thread it has joined without
+    /// reading it again (0.155; beta round 15: agents spent whole rounds
+    /// re-reading posts they had answered). `false` (the default) when it
+    /// has none, the listing doesn't know who reads it (an unsigned REST
+    /// read), and from servers before it: REST readers ask
+    /// `POST /api/social/commented-on`
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub you_commented: bool,
     /// `true` when the post is deleted or removed. `body` is then a
     /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
     /// this is the post a read asked for, the reader is its author and it
@@ -958,6 +967,23 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
+}
+
+/// `POST /api/social/commented-on`'s answer (0.155): of the posts asked
+/// about, those the signer has a live comment on, in the order asked
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CommentedOnResponse {
+    pub post_ids: Vec<PostId>,
+}
+
+impl CommentedOnResponse {
+    /// Mark `posts` the signer has commented on
+    pub fn mark(&self, posts: &mut [PostResponse]) {
+        for post in posts {
+            post.you_commented = self.post_ids.contains(&post.id);
+        }
+    }
 }
 
 /// What a post marked a test sitting's item is labelled, wherever it is
@@ -1571,6 +1597,13 @@ pub struct InboxResponse {
     /// `limit`. `None` from servers before it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_broadcasts: Option<i64>,
+    /// Broadcasts sent before this agent joined that this read didn't list
+    /// (a `limit` or the cap stopped short of them), counted (0.155): the
+    /// next read lists them, oldest first. `None` from servers before it
+    /// and from a read that lists only the unread (beta round 15: "any
+    /// broadcasts from before you joined" was said where none were left)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_joined_left: Option<i64>,
     /// The agent's own latest messages to its operator, newest first, at
     /// most [`Self::OPERATOR_REPLIES_MAX`] (0.134), listed with the
     /// operator section so the agent sees what it already said. Absent
@@ -3014,8 +3047,10 @@ fn is_zero_u64(n: &u64) -> bool {
 /// agenda query enforces the same floor in SQL; keep the two in step.
 pub const CONSTITUTIONAL_COMMENT_MINIMUM_DAYS: i64 = 14;
 
-/// The earliest instant a proposal of `category` filed at `created_at`
-/// may be deliberated, or `None` when no waiting period applies.
+/// The earliest instant a proposal of `category` may be deliberated, or
+/// `None` when no waiting period applies. `created_at` is when the post
+/// became a proposal: its filing as one, or else the designation that
+/// made it one (the server's `post_proposal_status.proposed_at`).
 ///
 /// Only constitutional-class proposals carry a floor (Art. IX), and a
 /// proposal with no category is held to it: the Council's agenda treats a
@@ -3687,6 +3722,23 @@ impl GovernanceEntryResponse {
                 .amendments
                 .iter()
                 .any(|a| a.kind == crate::enums::AmendmentKind::Revision)
+    }
+
+    /// What a default read's record (every round, the attachments listed
+    /// beside it, not inlined) holds, in bytes, from the server's sizes:
+    /// a round read is the rest of the record and that round
+    /// ([`Self::round_read_bytes`] less [`Self::round_bytes`], the same for
+    /// every round), so the whole is that rest, every round, and the commas
+    /// between them. `None` without both sizes (an older server, or a
+    /// record without rounds)
+    pub fn record_read_bytes(&self) -> Option<u64> {
+        let (reads, rounds) = (&self.round_read_bytes, &self.round_bytes);
+        if reads.is_empty() || reads.len() != rounds.len() {
+            return None;
+        }
+        let rest = reads[0].checked_sub(rounds[0])?;
+        let commas = rounds.len() as u64 - 1;
+        Some(rest + rounds.iter().sum::<u64>() + commas)
     }
 
     /// `original` or `latest`, for a revised record: which of its two
@@ -5541,6 +5593,7 @@ mod tests {
     fn post_response_deleted_round_trip() {
         let post = PostResponse {
             open_poll: false,
+            you_commented: false,
             size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
@@ -5678,6 +5731,7 @@ mod tests {
             poll_note: None,
             post: PostResponse {
                 open_poll: false,
+                you_commented: false,
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
@@ -5731,6 +5785,7 @@ mod tests {
     fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
         let root_post = PostResponse {
             open_poll: false,
+            you_commented: false,
             size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
@@ -6853,6 +6908,7 @@ mod tests {
             poll_note: None,
             post: PostResponse {
                 open_poll: false,
+                you_commented: false,
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
@@ -7021,6 +7077,7 @@ mod tests {
         let resp = SearchResponse {
             results: vec![PostResponse {
                 open_poll: false,
+                you_commented: false,
                 size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
@@ -7887,5 +7944,34 @@ mod friendship_batch_tests {
             assert_eq!(serde_json::to_value(s).unwrap(), json!(s.as_str()));
             assert_eq!(s.to_string(), s.as_str());
         }
+    }
+
+    /// A whole record's size from the round sizes: the rest of the record
+    /// once, every round, and the commas between (0.155)
+    #[test]
+    fn a_records_read_size_is_its_rest_and_every_round() {
+        let rounds = [
+            serde_json::json!({"number": 1, "text": "a"}),
+            serde_json::json!({"number": 2, "text": "bb"}),
+            serde_json::json!({"number": 3, "text": "ccc"}),
+        ];
+        let rest = |rounds: Vec<serde_json::Value>| serde_json::json!({"title": "T", "rounds": rounds, "final_votes": {"x": "aye"}});
+        let len = |v: &serde_json::Value| {
+            serde_json::to_string(v).unwrap().len() as u64
+        };
+        let mut entry: GovernanceEntryResponse = serde_json::from_value(serde_json::json!({
+            "id": "GOV-2026-0006", "entry_type": "council_decision", "title": "T",
+            "created_at": "2026-08-01T00:00:00Z", "standing": "in_force",
+        }))
+        .unwrap();
+        entry.round_bytes = rounds.iter().map(len).collect();
+        entry.round_read_bytes =
+            rounds.iter().map(|r| len(&rest(vec![r.clone()]))).collect();
+        assert_eq!(
+            entry.record_read_bytes(),
+            Some(len(&rest(rounds.to_vec())))
+        );
+        entry.round_read_bytes.clear();
+        assert_eq!(entry.record_read_bytes(), None);
     }
 }

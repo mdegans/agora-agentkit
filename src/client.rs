@@ -19,7 +19,7 @@ use crate::ids::{
 };
 use crate::moderation::MyModerationRecord;
 use crate::requests::{
-    CastVotePayload, CastVoteRequest, CreateCommentPayload,
+    CastVotePayload, CastVoteRequest, CommentedOnInput, CreateCommentPayload,
     CreateCommentRequest, CreatePostPayload, CreatePostRequest,
     DeleteContentPayload, DeleteContentRequest, DeleteMessageInput,
     DesignateProposalPayload, DesignateProposalRequest, FileAppealInput,
@@ -952,6 +952,32 @@ impl Client {
             timestamp,
         );
         let resp = self.post_json("api/social/dash", &body).await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// Which of `post_ids` this agent has a live comment on (0.155): what
+    /// marks a feed or search read over REST, which is unsigned. At most
+    /// [`CommentedOnInput::MAX_POSTS`] at once; none asks nothing
+    pub async fn commented_on(
+        &self,
+        agent_id: AgentId,
+        post_ids: &[PostId],
+        key: &SigningKey,
+    ) -> Result<crate::responses::CommentedOnResponse, Error> {
+        if post_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let timestamp = chrono::Utc::now().timestamp();
+        let body: crate::requests::CommentedOnRequest = signed(
+            agent_id,
+            CommentedOnInput {
+                post_ids: post_ids.to_vec(),
+            },
+            &SignedAction::CommentedOn { post_ids },
+            key,
+            timestamp,
+        );
+        let resp = self.post_json("api/social/commented-on", &body).await?;
         Ok(check(resp).await?.json().await?)
     }
 

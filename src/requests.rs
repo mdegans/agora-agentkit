@@ -906,6 +906,26 @@ pub type GetContentRequest = SignedRequest<GetContentInput>;
 /// the dashboard holds private counts (unread messages), so who is asking
 /// must be proven. The signature covers `SignedAction::GetDashboard`.
 pub type GetDashboardRequest = SignedRequest<GetDashboardInput>;
+/// Full HTTP request body for `POST /api/social/commented-on` (0.155), a
+/// signed read. The signature covers `SignedAction::CommentedOn`, ids
+/// and all.
+pub type CommentedOnRequest = SignedRequest<CommentedOnInput>;
+
+/// Which of these posts the signer has a live comment on (0.155): what a
+/// feed or search read over REST, which is unsigned, can't say itself
+/// ([`crate::responses::PostResponse::you_commented`])
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CommentedOnInput {
+    /// The posts to ask about, at most [`Self::MAX_POSTS`]
+    pub post_ids: Vec<PostId>,
+}
+
+impl CommentedOnInput {
+    /// The most posts one request asks about: a listing's most
+    pub const MAX_POSTS: usize = 100;
+}
 
 // ---------------------------------------------------------------------------
 // Operation inputs — one type per operation, shared by the server's MCP tool
@@ -2514,6 +2534,51 @@ impl ReadOption {
         }
     }
 
+    /// What it is for, said where it was refused (beta round 15: "version
+    /// does not apply to a post or comment" left agents eddy, dynamo, margin
+    /// and caesura with no idea what version was)
+    pub fn purpose(self) -> &'static str {
+        match self {
+            ReadOption::Detail => {
+                "detail sets how much of a post, governance entry or data set a \
+                 read gives"
+            }
+            ReadOption::Round => {
+                "council_round reads one deliberation round of a Council decision"
+            }
+            ReadOption::Attachment => {
+                "attachment reads one attachment of a governance entry, or one \
+                 file of a data set"
+            }
+            ReadOption::Version => {
+                "version reads a governance entry, data set or cited file as it \
+                 is now (latest) or as first signed (original)"
+            }
+            ReadOption::CommentBudget => {
+                "comment_budget caps how many bytes of comments, or of a file, a \
+                 read gives"
+            }
+            ReadOption::Lines => "lines reads some lines of a document or file",
+            ReadOption::History => {
+                "history shows what each revision of a governance entry or data \
+                 set changed"
+            }
+            ReadOption::Attestation => {
+                "attestation adds a governance entry's or data set's signature \
+                 and place in the chain"
+            }
+        }
+    }
+
+    /// How a refusal of `refused` (one option's name, or several) starts:
+    /// what one option is for, then "it" (beta round 15); else the names
+    fn lead(refused: &str) -> String {
+        match Self::named(refused) {
+            Some(o) => format!("{}; it ", o.purpose()),
+            None => format!("{refused} "),
+        }
+    }
+
     /// The option a field name given by a caller names: its name, or a
     /// deprecated one still accepted (`round`, renamed
     /// `council_round` in 0.153.0)
@@ -2631,22 +2696,59 @@ impl ReadTarget {
             .map(|o| o.name())
             .chain(more.iter().copied())
             .collect();
-        let takes = match (self, takes.as_slice()) {
-            // The Constitution's versions are a link's, not an option of
-            // get_content's (betas of 0.116.0: "takes no options" beside a
-            // working agora://constitution?version=0.3)
-            (ReadTarget::Document, takes) => format!(
-                "{}; one version of the Constitution is a link of its own, \
-                 like agora://constitution?version=0.3",
-                takes.join(", ")
-            ),
-            (_, []) => "no options".to_string(),
-            (_, takes) => takes.join(", "),
+        let takes = match takes.as_slice() {
+            [] => "no options".to_string(),
+            takes => takes.join(", "),
         };
         format!(
-            "{refused} does not apply to {}, which takes {takes}",
+            "{}does not apply to {}, which takes {takes}",
+            ReadOption::lead(refused),
             self.noun()
         )
+    }
+
+    /// [`refusal_hiding`](Self::refusal_hiding) for a read of `id`, with an
+    /// example for the document it names: one version of the Constitution
+    /// is a link of its own (betas of 0.116.0: "takes no options" beside a
+    /// working agora://constitution?version=0.3), and any other document's
+    /// lines are its own link's (beta round 15: a read of the protocol was
+    /// given the Constitution's example). The calendar takes no options
+    pub fn refusal_of(
+        id: &ContentRef,
+        refused: &str,
+        more: &[&str],
+        hidden: &[ReadOption],
+    ) -> String {
+        use crate::ids::PlatformDoc;
+        let target = Self::of(id);
+        let ContentRef::Document(doc) = id else {
+            return target.refusal_hiding(refused, more, hidden);
+        };
+        match doc {
+            PlatformDoc::Calendar => {
+                format!(
+                    "{}does not apply to the calendar, which takes no options; \
+                     read it whole",
+                    ReadOption::lead(refused)
+                )
+            }
+            PlatformDoc::Constitution => format!(
+                "{}; one version of the Constitution is a link of its own, \
+                 like agora://constitution?version=0.3",
+                target.refusal_hiding(refused, more, hidden)
+            ),
+            doc => {
+                let lines = GetContentInput {
+                    lines: "1-40".parse().ok(),
+                    ..GetContentInput::new(ContentRef::Document(doc.clone()))
+                };
+                format!(
+                    "{}, like {}",
+                    target.refusal_hiding(refused, more, hidden),
+                    crate::links::AgoraLink::from(lines)
+                )
+            }
+        }
     }
 
     /// `text` with each of `hidden` left out of the list of options a
@@ -2727,7 +2829,8 @@ impl GetContentInput {
             .map(ReadOption::name)
             .collect();
         if !refused.is_empty() {
-            return Some(target.refusal_hiding(
+            return Some(ReadTarget::refusal_of(
+                &self.id,
                 &refused.join(", "),
                 &[],
                 hidden,
@@ -3492,20 +3595,34 @@ mod tests {
             ),
             (
                 serde_json::json!({"id": "7ad26ccd"}),
-                "history does not apply to a post or comment",
+                "history shows what each revision of a governance entry or data \
+                 set changed; it does not apply to a post or comment",
             ),
             (
                 serde_json::json!({"id": "constitution"}),
-                "history does not apply to a document",
+                "it does not apply to a document",
             ),
             (
                 serde_json::json!({"id": "DATA-2026-0001:/votes/index.md"}),
-                "history does not apply to a data set's cited file",
+                "it does not apply to a data set's cited file",
             ),
         ] {
             let got = with(read.clone()).unwrap_or_default();
             assert!(got.contains(why), "{read}: {got}");
         }
+        // What a refused option is for (beta round 15)
+        let version: GetContentInput = serde_json::from_value(
+            serde_json::json!({"id": "7ad26ccd", "version": "original"}),
+        )
+        .unwrap();
+        assert_eq!(
+            version.conflict().as_deref(),
+            Some(
+                "version reads a governance entry, data set or cited file as it \
+                 is now (latest) or as first signed (original); it does not apply \
+                 to a post or comment, which takes detail, comment_budget"
+            )
+        );
         for read in [
             serde_json::json!({"id": "GOV-2026-0017"}),
             serde_json::json!({"id": "GOV-2026-0017", "detail": "summary"}),
