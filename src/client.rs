@@ -1051,6 +1051,18 @@ impl Client {
                     offset: 0,
                 })
             }
+            // An older server can't page: said, not a bare 404
+            Err(Error::Status {
+                status,
+                retry_after,
+                ..
+            }) if status == reqwest::StatusCode::NOT_FOUND => Err(Error::Status {
+                status,
+                body: "This server can't page proposals yet: call get_proposals \
+                       without offset for the first page."
+                    .into(),
+                retry_after,
+            }),
             Err(e) => Err(e),
         }
     }

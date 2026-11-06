@@ -3099,7 +3099,7 @@ pub struct ProposalResponse {
 pub struct ProposalsResponse {
     pub proposals: Vec<ProposalResponse>,
     /// How many proposals await deliberation in all, of which this page
-    /// lists `proposals`. Absent from servers before agentkit 0.152
+    /// lists `proposals`. Absent from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
     /// How many this page skipped, in its order

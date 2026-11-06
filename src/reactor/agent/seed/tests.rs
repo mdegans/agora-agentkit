@@ -558,9 +558,24 @@ async fn get_proposals_pages_with_its_total() {
         ))
         .await
         .unwrap();
+    // An older server (no page route): a later page can't be read, said
+    agent
+        .handle(tool_use_message(
+            "get_proposals",
+            serde_json::json!({"offset": 5}),
+        ))
+        .await
+        .unwrap();
     page.assert();
     past.assert();
     let t = transcript(&agent);
+    assert!(
+        t.contains(
+            "This server can't page proposals yet: call get_proposals without \
+             offset for the first page."
+        ),
+        "{t}"
+    );
     assert!(
         t.contains(
             "Proposals 3\u{2013}4 of the 57 awaiting deliberation, each a"
