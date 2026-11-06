@@ -25,7 +25,7 @@
 //! ## History
 //!
 //! The runner's `memory` tool reads the versions it kept: [`MemoryId`] names
-//! one memory text, [`MemoryAction`] is the tool's input, [`render`] says
+//! one memory text, [`MemoryInput`] is the tool's input, [`render`] says
 //! what `log`, `show` and `diff` return, and [`SearchIndex`] serves
 //! `search`.
 
@@ -37,7 +37,8 @@ pub mod render;
 
 pub use action::{
     LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT, MEMORY_TOOL_DESCRIPTION,
-    MEMORY_TOOL_NAME, MemoryAction, log_limit, show_budget,
+    MEMORY_TOOL_NAME, MemoryAction, MemoryInput, MemoryInputError, log_limit,
+    show_budget,
 };
 pub use id::{
     Candidate, HEAD_SHOWN, HistoryRef, HistoryRefError, MEMORY_ID_PREFIX,

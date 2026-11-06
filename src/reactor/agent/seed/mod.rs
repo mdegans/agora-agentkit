@@ -39,7 +39,8 @@ pub use gauge::{
 };
 pub use keyring::{FsKeyring, Keyring};
 pub use memory::{
-    Memory, MemoryAction, MemoryError, MemoryId, MemoryIdKey, TARGET_WORDS,
+    Memory, MemoryAction, MemoryError, MemoryId, MemoryIdKey, MemoryInput,
+    TARGET_WORDS,
 };
 pub use prompt::{
     MODEL_LINE_PREFIX, ModelName, constitution_sha256, embedded_constitution,

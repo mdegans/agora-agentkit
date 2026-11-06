@@ -1,5 +1,6 @@
-//! The runner's `memory` tool: its input, [`MemoryAction`], and its
-//! definition. The runner implements the tool; this is what a model reads.
+//! The runner's `memory` tool: its input, [`MemoryInput`] (one
+//! [`MemoryAction`]), and its definition. The runner implements the tool;
+//! this is what a model reads.
 
 use misanthropic::tool::{CustomMethodDef, MethodDef};
 use schemars::JsonSchema;
@@ -33,9 +34,80 @@ pub const MEMORY_TOOL_DESCRIPTION: &str = "Read your memory's history: \
      version you ask for is shown as what changed from it to the next newer \
      one (`+` lines were added in the newer). `diff` compares two versions, \
      or one with your current memory. `search` finds the lines in any \
-     version that contain your words.";
+     version that contain your words.\n\n\
+     Call it with one request, as in {\"request\": {\"action\": \"show\", \
+     \"id\": \"mem-3f9a1c07be\"}}. Each result counts toward your context \
+     like any other read: one that would not fit is left out, and you are \
+     told its size.";
 
-/// The `memory` tool's input: one action
+/// The `memory` tool's input: one request. An object at the root, since
+/// Anthropic refuses a tool whose input schema is a bare union
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+pub struct MemoryInput {
+    /// What to do: `log`, `show`, `diff` or `search`, in `action`, with
+    /// that action's fields beside it
+    pub request: MemoryAction,
+}
+
+/// A `memory` call that could not be read, in words that say what the
+/// tool takes
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct MemoryInputError(String);
+
+/// What every [`MemoryInputError`] ends with: the call's shape
+const CALL_SHAPE: &str = "Call it with one request, as in {\"request\": \
+     {\"action\": \"log\"}} or {\"request\": {\"action\": \"show\", \"id\": \
+     \"mem-3f9a1c07be\"}}; the actions are log, show, diff and search.";
+
+impl MemoryInput {
+    /// The tool's input schema, as a model reads it: an object whose
+    /// `request` is the actions' `anyOf`, with no `oneOf`, `$ref` or `$defs`
+    pub fn schema() -> serde_json::Value {
+        crate::tools::tool_input_schema::<Self>()
+    }
+
+    /// The tool's one definition. Not `strict`
+    pub fn definition() -> MethodDef {
+        let mut def =
+            CustomMethodDef::simple(MEMORY_TOOL_NAME, MEMORY_TOOL_DESCRIPTION);
+        def.schema = Self::schema();
+        MethodDef::Custom(def)
+    }
+
+    /// Read a call's input. A bare request (`{"action": …}`, no
+    /// `request`) is read as one. A call shaped like Anthropic's memory
+    /// tool (`command`, `path`) is told this tool is not that one
+    pub fn parse(
+        input: serde_json::Value,
+    ) -> Result<MemoryAction, MemoryInputError> {
+        let fail =
+            |what: String| MemoryInputError(format!("{what} {CALL_SHAPE}"));
+        let map = input.as_object();
+        if map.is_some_and(|m| {
+            !m.contains_key("request")
+                && (m.contains_key("command") || m.contains_key("path"))
+        }) {
+            return Err(fail(
+                "This memory tool reads your own memory's history; it has \
+                 no files, paths or `command`."
+                    .into(),
+            ));
+        }
+        if map.is_some_and(|m| m.contains_key("action")) {
+            return serde_json::from_value(input).map_err(|e| {
+                fail(format!("The request could not be read: {e}."))
+            });
+        }
+        serde_json::from_value::<Self>(input)
+            .map(|i| i.request)
+            .map_err(|e| fail(format!("The call could not be read: {e}.")))
+    }
+}
+
+/// One request to the `memory` tool, by its `action`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case")]
 #[schemars(inline)]
@@ -112,22 +184,6 @@ pub enum MemoryAction {
     },
 }
 
-impl MemoryAction {
-    /// The tool's input schema, as a model reads it: inline, with `anyOf`
-    /// for the actions and no `oneOf`, `$ref` or `$defs`
-    pub fn schema() -> serde_json::Value {
-        crate::tools::tool_input_schema::<Self>()
-    }
-
-    /// The tool's one definition. Not `strict`
-    pub fn definition() -> MethodDef {
-        let mut def =
-            CustomMethodDef::simple(MEMORY_TOOL_NAME, MEMORY_TOOL_DESCRIPTION);
-        def.schema = Self::schema();
-        MethodDef::Custom(def)
-    }
-}
-
 /// `log`'s `limit`, defaulted and clamped to `1..=`[`LOG_MAX_LIMIT`]
 pub fn log_limit(limit: Option<u32>) -> usize {
     limit.unwrap_or(LOG_DEFAULT_LIMIT).clamp(1, LOG_MAX_LIMIT) as usize
@@ -151,7 +207,7 @@ mod tests {
 
     #[test]
     fn the_schema_has_no_one_of_ref_or_defs() {
-        let schema = MemoryAction::schema();
+        let schema = MemoryInput::schema();
         let text = schema.to_string();
         for banned in ["oneOf", "$ref", "$defs", "definitions", "pattern"] {
             assert!(
@@ -159,7 +215,16 @@ mod tests {
                 "{banned}: {text}"
             );
         }
-        let actions = schema["anyOf"].as_array().expect("anyOf");
+        // Anthropic refuses a bare union at the root
+        assert_eq!(schema["type"], "object");
+        for union in ["anyOf", "oneOf", "allOf"] {
+            assert!(schema.get(union).is_none(), "{union}: {schema}");
+        }
+        assert_eq!(schema["required"], json!(["request"]));
+        assert_eq!(schema["additionalProperties"], false);
+        let actions = schema["properties"]["request"]["anyOf"]
+            .as_array()
+            .expect("anyOf");
         let names: Vec<&str> = actions
             .iter()
             .map(|a| {
@@ -187,7 +252,7 @@ mod tests {
 
     #[test]
     fn the_definition_is_not_strict() {
-        let MethodDef::Custom(def) = MemoryAction::definition() else {
+        let MethodDef::Custom(def) = MemoryInput::definition() else {
             panic!("custom");
         };
         assert_eq!(def.name, MEMORY_TOOL_NAME);
@@ -202,6 +267,8 @@ mod tests {
             "writing an id into your memory",
             "Old ids keep working",
             "like `git log -p`: newest first, anchored on the memory in your context",
+            "{\"request\": {\"action\": \"show\"",
+            "counts toward your context",
         ] {
             assert!(MEMORY_TOOL_DESCRIPTION.contains(must), "{must}");
         }
@@ -278,6 +345,37 @@ mod tests {
         );
     }
 
+    /// The nested call, a bare request, and Anthropic's memory tool's shape
+    #[test]
+    fn calls_parse_or_say_what_the_tool_takes() {
+        let log = MemoryAction::Log {
+            before: None,
+            limit: None,
+        };
+        assert_eq!(
+            MemoryInput::parse(json!({"request": {"action": "log"}})).unwrap(),
+            log
+        );
+        assert_eq!(MemoryInput::parse(json!({"action": "log"})).unwrap(), log);
+        for shaped in [
+            json!({"command": "view", "path": "/memories"}),
+            json!({"command": "create", "path": "/memories/a.md", "file_text": "x"}),
+        ] {
+            let err = MemoryInput::parse(shaped).unwrap_err().to_string();
+            assert!(err.contains("no files, paths or `command`"), "{err}");
+            assert!(err.ends_with(CALL_SHAPE), "{err}");
+        }
+        for bad in [
+            json!({"request": {"action": "rm"}}),
+            json!({"action": "show"}),
+            json!({"request": {"action": "log"}, "extra": 1}),
+            json!("log"),
+        ] {
+            let err = MemoryInput::parse(bad.clone()).unwrap_err().to_string();
+            assert!(err.ends_with(CALL_SHAPE), "{bad}: {err}");
+        }
+    }
+
     #[test]
     fn limits_and_budgets_clamp() {
         assert_eq!(log_limit(None), 20);
@@ -291,7 +389,7 @@ mod tests {
     /// The numbers the field docs state are the constants'
     #[test]
     fn the_docs_state_the_constants() {
-        let text = MemoryAction::schema().to_string();
+        let text = MemoryInput::schema().to_string();
         let n = |n: u32| match n {
             0..1000 => n.to_string(),
             n if n < 1_000_000 => format!("{},{:03}", n / 1000, n % 1000),
