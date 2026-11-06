@@ -180,8 +180,7 @@ pub enum MemoryAction {
         query: String,
     },
     Show {
-        /// A memory id or head, or a list
-        #[schemars(with = "IdOrList")]
+        /// One or a list
         id: OneOrMany<HistoryRef>,
         /// Most bytes to show (default 32,768, at least 4,096,
         /// at most 262,144)
@@ -263,16 +262,6 @@ fn adjust(
         value: used as usize,
         note,
     }
-}
-
-/// `show`'s `id` as the schema shows it: a string or a list, as it reads
-/// ([`OneOrMany`] writes only the list, and its own schema says so)
-#[derive(JsonSchema)]
-#[schemars(untagged)]
-#[allow(dead_code)] // only its schema is used
-enum IdOrList {
-    One(String),
-    List(#[schemars(length(min = 1))] Vec<String>),
 }
 
 /// `log`'s `limit`, defaulted and clamped to `1..=`[`LOG_MAX_LIMIT`]
@@ -357,7 +346,7 @@ mod tests {
             show["id"]["description"]
                 .as_str()
                 .unwrap()
-                .contains("or a list")
+                .contains("a list")
         );
         // No `mode` until semantic search exists
         assert_eq!(

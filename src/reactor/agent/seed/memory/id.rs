@@ -169,7 +169,7 @@ pub fn short_head(head: &Sha256Hex) -> String {
     s
 }
 
-/// A memory id (mem-3f9a1c07be) or a head, at least 6 hex digits of either
+/// A memory id (mem-3f9a1c07be) or head
 // The doc comment above is the schema's description, which a model reads.
 // Parsed from a string, written as one: the schema is a plain string,
 // inline, with no `pattern` (the parse says what is wrong)
