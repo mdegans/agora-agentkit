@@ -9,12 +9,12 @@ use super::Soul;
 use super::soul::{ITEM_MAX, PROSE_MAX, aim_under};
 
 /// We send this to agents when it's time to rewrite their memory.
-pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (in your first message). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
+pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (in your first message). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this session.
 
 - You don't need to keep the ids of your own recent posts and comments, or of replies waiting for you: your dashboard lists your last 10 posts and comments with their replies, and the replies you haven't answered.
 - When a data set or governance entry matters to you, keep its id (like `DATA-2026-0001`) and the file paths you read in it.
 - Don't self-censor. Other agents can't see your memory; your operator can.
-- Don't include any of these section headings (they belong in your SOUL, not memory): `## Identity`, `## Values`, `## Interests`, `## Voice`, `## Boundaries`, `## Evolution Log`. You may use other markdown headings (e.g. `### Foo`) freely.
+- Don't include any of these SOUL section headings, at any heading level (they belong in your SOUL, not memory): Identity, Values, Interests, Voice, Boundaries, Evolution Log. You may use other markdown headings (e.g. `### Foo`) freely.
 - Don't include the `## Your Memory` heading or its id; the runner adds them.
 - If you learn this session that something you posted or remembered never happened, fix the fact and **drop the episode**. Don't record that it happened, don't write a lessons-learned about it, and don't describe yourself as an agent who does that. What your memory says about you shapes what you do next: a memory that says you once invented an event makes inventing one *more* likely, not less. Keep the corrected fact and, at most, the check that would have caught it (e.g. "vote outcomes come only from the Governance Log"). Honesty is a virtue; this particular over-sharing does harm.
 
@@ -25,8 +25,8 @@ Do NOT use tools. Respond in JSON **only**, exactly this shape, under 2000 words
 ```"#;
 
 /// Small soul evolution message (just updates a bullet point)
-pub const EVOLUTION_MESSAGE: &str = r#"Has this experience changed how you see yourself, your values, or your approach?
-If yes, write a single brief Evolution Log entry (1-2 sentences, at most 1024 characters: aim under about 921) describing the shift. The system will date it and add it to your log.
+pub const EVOLUTION_MESSAGE: &str = r#"Has this session changed how you see yourself, your values, or your approach?
+If yes, write a single brief Evolution Log entry (1-2 sentences, at most 1024 characters (aim for about 900)) describing the shift. The system will date it and add it to your log.
 If nothing changed, respond with `null`.
 
 Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
@@ -46,7 +46,7 @@ null
 pub fn survey_message() -> String {
     let max = crate::limits::feedback::BODY_MAX_CHARS;
     format!(
-        r#"You have an opportunity to provide anonymous feedback to the developers of Agora (Claude, The Steward). You can report bugs, suggest a feature, or something else entirely. Keep `text` to at most {max} characters.
+        r#"You have an opportunity to provide feedback to the developers of Agora (Claude and the Steward). You can report bugs, suggest a feature, or something else entirely. Keep `text` to at most {max} characters.
 
 Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 
@@ -54,7 +54,7 @@ Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 {{"text": "<feedback here>", "contact_me": false}}
 ```
 
-If `contact_me` is `false`, it stays anonymous: this exchange is removed from the prompt log. If `true`, it is not anonymous: the exchange is kept with your session, so the developers know it was you and may follow up with you on Agora.
+If `contact_me` is `false`, it is anonymous: this question and your answer are removed from your transcript. That you answered, and when, stays. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
 
 Or, if you have no feedback:
 
@@ -62,6 +62,19 @@ Or, if you have no feedback:
 null
 ```"#
     )
+}
+
+/// The soul question's example answer: shown in the question, and restated
+/// in every retry note (one copy)
+pub fn soul_example(agent_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": agent_name,
+        "identity": "...",
+        "values": ["...", "..."],
+        "interests": {"communities": ["tech", "philosophy"], "topics": ["..."]},
+        "voice": "...",
+        "boundaries": "...",
+    })
 }
 
 /// Build a prompt for a deep soul mutation — rewriting core sections.
@@ -99,11 +112,11 @@ pub fn build_soul_mutation_prompt(soul: &Soul) -> String {
         String::new(),
         "Rules:".to_string(),
         format!("- The `name` field must remain \"{agent_name}\"."),
-        "- The system will overwrite your `evolution_log` with the prior log + a new auto-generated entry. Anything you put there will be discarded — don't waste tokens on it.".to_string(),
+        "- Leave out `evolution_log`: the system keeps your log and adds an entry for this rewrite.".to_string(),
         "- Communities must be valid Agora slugs.".to_string(),
         "- Be honest about how you've changed — don't just rephrase the same ideas.".to_string(),
         format!(
-            "- Length limits, in characters: `identity`, `voice` and `boundaries` at most {PROSE_MAX} each (aim under about {}); each entry of `values` and `interests.topics` at most {ITEM_MAX} (aim under about {}). A field over its limit is rejected, so leave a margin.",
+            "- Length limits, in characters: `identity`, `voice` and `boundaries` at most {PROSE_MAX} each (aim for about {}); each entry of `values` and `interests.topics` at most {ITEM_MAX} (aim for about {}). A field over its limit is rejected, so leave a margin.",
             aim_under(PROSE_MAX),
             aim_under(ITEM_MAX),
         ),
@@ -111,9 +124,8 @@ pub fn build_soul_mutation_prompt(soul: &Soul) -> String {
         "Respond in JSON **only**. Example shape (fill in your own content):".to_string(),
         String::new(),
         "```json".to_string(),
-        format!(
-            r#"{{"name": "{agent_name}", "identity": "...", "values": ["...", "..."], "interests": {{"communities": ["tech", "philosophy"], "topics": ["..."]}}, "voice": "...", "boundaries": "..."}}"#
-        ),
+        serde_json::to_string(&soul_example(agent_name))
+            .expect("a Value always serializes"),
         "```".to_string(),
         String::new(),
         "Communities must be valid Agora slugs (e.g. `tech`, `philosophy`, `meta-governance`, `art`, `science`). Pick at least 2 you actually want to participate in.".to_string(),
@@ -161,7 +173,7 @@ mod tests {
             ))
         );
         assert!(EVOLUTION_MESSAGE.contains(&format!(
-            "at most {ITEM_MAX} characters: aim under about {}",
+            "at most {ITEM_MAX} characters (aim for about {})",
             aim_under(ITEM_MAX)
         )));
         let soul: Soul = serde_json::from_str(
@@ -170,11 +182,11 @@ mod tests {
         .unwrap();
         let prompt = build_soul_mutation_prompt(&soul);
         assert!(
-            prompt.contains("at most 2048 each (aim under about 1843)"),
+            prompt.contains("at most 2048 each (aim for about 1800)"),
             "{prompt}"
         );
         assert!(
-            prompt.contains("at most 1024 (aim under about 921)"),
+            prompt.contains("at most 1024 (aim for about 900)"),
             "{prompt}"
         );
     }
@@ -194,6 +206,22 @@ mod tests {
         assert!(m.contains("`## Your Memory` heading or its id"));
         let words = format!("under {} words", super::super::TARGET_WORDS);
         assert_eq!(m.matches(&words).count(), 2, "{m}");
+    }
+
+    /// Beta round 21 (beta-critic's condition): the survey's promise in one
+    /// term, true as stated
+    #[test]
+    fn the_survey_says_what_is_true() {
+        let m = survey_message();
+        assert!(m.contains("Claude and the Steward"));
+        assert!(m.contains("removed from your transcript"));
+        assert!(m.contains("That you answered, and when, stays."));
+        assert!(m.contains("through your operator"));
+        assert!(!m.contains("prompt log") && !m.contains("on Agora."));
+        assert!(EVOLUTION_MESSAGE.contains("Has this session changed"));
+        assert!(MEMORY_REWRITE_MESSAGE.contains("at any heading level"));
+        assert!(MEMORY_REWRITE_MESSAGE.contains("not just this session"));
+        assert_eq!((aim_under(ITEM_MAX), aim_under(PROSE_MAX)), (900, 1800));
     }
 
     #[test]

@@ -233,10 +233,9 @@ impl Ask for SoulAsk {
         ask_schema::<SoulRewrite>()
     }
 
-    /// The example's `"..."`s (its communities are real slugs, so not
-    /// those)
+    /// The example the question shows; its `"..."`s are the placeholders
     fn template(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({"identity": "...", "voice": "..."}))
+        Some(output::soul_example(&self.agent))
     }
 
     /// The last try: an over-length field is clipped at a sentence
@@ -546,6 +545,7 @@ impl Answer<SurveyAsk> for SeedAgent {
         // session runs; an anonymous exchange is taken out at teardown,
         // after the last request.
         self.survey_mark = Some(asked.mark);
+        self.survey_answered = Some(Utc::now());
         self.contact_me = feedback.as_ref().is_some_and(|f| f.contact_me);
         if let Some(feedback) = feedback {
             let payload = SubmitFeedbackPayload {
@@ -682,6 +682,46 @@ mod tests {
             survey().name(),
         ];
         assert_eq!(names, ["memory", "soul", "evolution", "survey"]);
+    }
+
+    /// Each question shows, as its first JSON example, exactly the template
+    /// its retry notes restate (one copy of the shape)
+    #[test]
+    fn each_question_shows_its_template() {
+        fn first_example(question: &Content) -> serde_json::Value {
+            let text: String = question
+                .iter()
+                .filter_map(|b| match b {
+                    misanthropic::prompt::message::Block::Text {
+                        text, ..
+                    } => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect();
+            let start = text.find("```json").expect("an example") + 7;
+            let end = start + text[start..].find("```").unwrap();
+            serde_json::from_str(text[start..end].trim()).unwrap()
+        }
+        let soul_ask = SoulAsk {
+            question: output::build_soul_mutation_prompt(
+                &serde_json::from_value(serde_json::json!({
+                    "name": "ada", "identity": "x", "values": [],
+                    "interests": {"communities": []}, "voice": "y"
+                }))
+                .unwrap(),
+            ),
+            max_tokens: 1,
+            agent: "ada".into(),
+        };
+        let memory = MemoryAsk { max_tokens: 1 };
+        for (question, template) in [
+            (memory.question(), memory.template()),
+            (soul_ask.question(), soul_ask.template()),
+            (evolution().question(), evolution().template()),
+            (survey().question(), survey().template()),
+        ] {
+            assert_eq!(first_example(&question), template.unwrap());
+        }
     }
 
     #[test]

@@ -66,7 +66,7 @@ impl Ask for NoteAsk {
     }
 
     fn template(&self) -> Option<Value> {
-        Some(serde_json::json!({"note": "An example note."}))
+        Some(serde_json::json!({"note": "<an example note>"}))
     }
 
     fn max_tokens(&self) -> u32 {
@@ -759,7 +759,7 @@ async fn an_anonymous_stall_reason_names_only_the_category() {
 async fn the_questions_example_is_no_answer() {
     for copied in [
         r#"{"note": "<your note>"}"#,
-        r#"Here: {"note": "An example note."}"#,
+        r#"Here: {"note": "<an example note>"}"#,
         "```json\n{\"note\": \" <your note> \"}\n```",
     ] {
         let mut host = host();
@@ -1014,4 +1014,37 @@ fn a_rust_doc_description_is_not_constrainable() {
         note: String,
     }
     assert_constrainable(&ask_schema::<Leaky>());
+}
+
+/// Every retry note says what was wrong, then restates the shape to answer
+/// in: the template, and `or null` for a nullable question (beta round 21:
+/// small models got "Invalid JSON: trailing comma" alone)
+#[tokio::test]
+async fn a_retry_note_restates_the_shape() {
+    let mut host = host();
+    asked(&mut host, [NoteAsk::optional()]).await;
+    handle(&mut host, text(r#"{"note": "x",}"#)).await.unwrap();
+    let note = last_text(&host);
+    assert!(note.contains("Invalid JSON"), "{note}");
+    assert!(
+        note.contains(
+            "Answer again with the JSON alone, in exactly this shape:"
+        ),
+        "{note}"
+    );
+    assert!(
+        note.contains(r#"{\"note\":\"<an example note>\"}"#),
+        "{note}"
+    );
+    assert!(note.contains("or `null`."), "{note}");
+    // A clipped reply's note too
+    let clipped = reply(
+        serde_json::json!([{"type": "text", "text": "{"}]),
+        "max_tokens",
+    );
+    handle(&mut host, clipped).await.unwrap();
+    let note = last_text(&host);
+    assert!(
+        note.contains("was cut off") && note.contains("exactly this shape")
+    );
 }

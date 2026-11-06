@@ -53,10 +53,11 @@ pub const PROSE_MAX: usize = 2048;
 pub const ITEM_MAX: usize = 1024;
 
 /// The length the prompts ask for under a limit of `max`: about 90% of it,
-/// so a near miss still fits. Models overshoot a stated limit by a few
-/// percent (tango-aether, 2026-10-01: 1058, 1042, 1087 against 1024).
+/// so a near miss still fits, as a round figure (beta round 21: "aim under
+/// about 921" read as oddly exact). Models overshoot a stated limit by a
+/// few percent (tango-aether, 2026-10-01: 1058, 1042, 1087 against 1024).
 pub const fn aim_under(max: usize) -> usize {
-    max * 9 / 10
+    max * 9 / 10 / 100 * 100
 }
 
 /// Required-section names recognized in legacy SOUL.md files.

@@ -159,10 +159,11 @@ pub trait Ask: Send + Sync + 'static {
         false
     }
 
-    /// The JSON example the question shows, if any. An answer holding one
-    /// of its string values verbatim is that example copied, and a retry
-    /// ([`template_note`]); so is one holding a `<…>` placeholder taken
-    /// from the question's text, whatever this returns.
+    /// The JSON example the question shows, if any: restated in every
+    /// retry note, as the shape to answer in. An answer holding one of its
+    /// placeholders (`<…>`, `...`) verbatim is that example copied, and a
+    /// retry ([`template_note`]); so is one holding a `<…>` placeholder
+    /// taken from the question's text, whatever this returns.
     fn template(&self) -> Option<serde_json::Value> {
         None
     }
@@ -673,11 +674,37 @@ impl<A: Ask> AskTurn<A> {
                 out.extend(angle_placeholders(text));
             }
         }
+        // Only the template's placeholders (`<…>`, `...`): its real values
+        // (a community slug in the soul's example) are fair answers
         if let Some(template) = self.ask.template() {
-            string_leaves(&template, &mut out);
+            let mut leaves = Vec::new();
+            string_leaves(&template, &mut leaves);
+            out.extend(leaves.into_iter().filter(|s| is_placeholder(s)));
         }
         out.retain(|p| !p.trim().is_empty());
         out
+    }
+
+    /// The note seated before a retry: what was wrong, then the shape to
+    /// answer in, restated (small models need it repeated; beta round 21:
+    /// "Invalid JSON: trailing comma" alone). One copy, for every question
+    fn retry_note(&self, what: &str) -> String {
+        let nullable = self.ask.schema()["anyOf"]
+            .as_array()
+            .is_some_and(|any| any.iter().any(|s| s["type"] == "null"));
+        match self.ask.template() {
+            Some(template) => format!(
+                "{what}\n\nAnswer again with the JSON alone, in exactly this \
+                 shape:\n\n```json\n{}\n```{}",
+                serde_json::to_string(&template)
+                    .expect("a Value always serializes"),
+                if nullable { "\n\nor `null`." } else { "" }
+            ),
+            None => format!(
+                "{what}\n\nAnswer again with the JSON alone, in exactly the \
+                 shape the instructions above show."
+            ),
+        }
     }
 
     /// Log `why`, then hand it to the host
@@ -856,7 +883,7 @@ impl<A: Ask> AskTurn<A> {
                 .map(Taken::Done);
         }
         let (_, prompt) = host.parts();
-        seat_user(prompt, note.to_string()).map_err(error)?;
+        seat_user(prompt, self.retry_note(note)).map_err(error)?;
         let control = self.retry_control();
         Ok(Taken::Again(self, control))
     }
@@ -1119,6 +1146,12 @@ fn angle_placeholders(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Whether `s` is an example's placeholder: `<…>`, or `...`
+fn is_placeholder(s: &str) -> bool {
+    let s = s.trim();
+    matches!(s, "..." | "…") || (s.starts_with('<') && s.ends_with('>'))
 }
 
 /// Every string in `value`, at any depth

@@ -118,6 +118,19 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   memory is in the first message, that other agents can't see it but the
   operator can, that the runner adds the `## Your Memory` heading and its
   id, and gives the word limit beside the shape.
+- **Beta round 21**: every retry note says what was wrong, then "Answer
+  again with the JSON alone, in exactly this shape:" and the question's
+  template (`or null` where null answers), one copy in the driver. The
+  soul question's example is `soul_example`, shown and restated; a
+  template's placeholders (`<…>`, `...`), not its real values, mark a
+  copied example. The survey speaks of "your transcript" only, says "That
+  you answered, and when, stays." (now true: a dated note is left where an
+  answered anonymous survey is cut out, `survey_redacted`), follow-up is
+  "through your operator", and the developers are "Claude and the
+  Steward". `aim_under` gives a round figure (900, 1800), stated "aim for
+  about"; the evolution question asks about "this session"; the memory
+  question bans the SOUL section names at any heading level (stated; the
+  memory check is unchanged) and says "not just this session".
 - **Logs**: the closing-phase events name the question (`ask = "memory"`)
   where they named the phase (`phase = Reflect`).
 

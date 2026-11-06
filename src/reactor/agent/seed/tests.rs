@@ -1215,7 +1215,7 @@ async fn anonymous_survey_submits_then_redacts() {
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(transcript(&agent).contains("anonymous feedback"));
+    assert!(transcript(&agent).contains("feedback to the developers of Agora"));
 
     let control = agent
         .handle(text_message(
@@ -1234,7 +1234,12 @@ async fn anonymous_survey_submits_then_redacts() {
     // survey prompt.
     agent.on_teardown().await.unwrap();
     let text = transcript(&agent);
-    assert!(!text.contains("anonymous feedback"), "instruction redacted");
+    assert!(
+        !text.contains("feedback to the developers of Agora"),
+        "instruction redacted"
+    );
+    // What stays: that it answered, and when (the survey's promise)
+    assert!(text.contains("[anonymous survey, answered "), "{text}");
     assert!(!text.contains("cat pictures"), "feedback redacted");
     let saved = serde_json::to_string(agent.state()).unwrap();
     assert!(!saved.contains("cat pictures"), "nor in the saved state");
@@ -1622,7 +1627,7 @@ async fn anonymous_survey_never_reaches_the_prompt_log() {
         "anonymous feedback must never land on disk"
     );
     assert!(
-        !dumped.contains("anonymous feedback"),
+        !dumped.contains("feedback to the developers of Agora"),
         "the survey question must never land on disk"
     );
 }
@@ -1818,7 +1823,7 @@ async fn anonymous_feedback_files_no_contact_request() {
     let dumped = dumped(dir.path());
     assert!(!dumped.is_empty());
     assert!(!dumped.contains("cat pictures"));
-    assert!(!dumped.contains("anonymous feedback"));
+    assert!(!dumped.contains("feedback to the developers of Agora"));
 }
 
 /// A server that predates the feedback id answers `{"status": "received"}`:
@@ -4087,7 +4092,9 @@ async fn a_refusal_anywhere_ends_the_session_failed() {
     ));
     assert_eq!(events.count(), 3);
     agent.on_teardown().await.unwrap();
-    assert!(!transcript(&agent).contains("anonymous feedback"));
+    assert!(
+        !transcript(&agent).contains("feedback to the developers of Agora")
+    );
     assert!(!transcript(&agent).contains("REFUSED WORDS"));
 }
 
@@ -4310,7 +4317,7 @@ async fn a_whole_session_only_appends_and_the_anonymous_survey_is_gone() {
     // The survey was the last request: its question is in it
     let last =
         serde_json::to_string(&requests.last().unwrap().messages).unwrap();
-    assert!(last.contains("anonymous feedback"));
+    assert!(last.contains("feedback to the developers of Agora"));
 
     agent.on_teardown().await.unwrap();
     let dumped = dumped(dir.path());
@@ -4322,7 +4329,7 @@ async fn a_whole_session_only_appends_and_the_anonymous_survey_is_gone() {
             "survey answer in the {what}"
         );
         assert!(
-            !text.contains("anonymous feedback"),
+            !text.contains("feedback to the developers of Agora"),
             "survey question in the {what}"
         );
     }
@@ -4417,7 +4424,7 @@ async fn a_held_survey_comes_after_the_wrappers_question() {
     let last =
         serde_json::to_string(&requests.last().unwrap().messages).unwrap();
     assert!(last.contains("A question from the wrapper."));
-    assert!(last.contains("anonymous feedback"));
+    assert!(last.contains("feedback to the developers of Agora"));
 
     agent.on_teardown().await.unwrap();
     let text = transcript(&agent);
@@ -4425,7 +4432,7 @@ async fn a_held_survey_comes_after_the_wrappers_question() {
         text.contains("An answer."),
         "the wrapper's exchange is kept"
     );
-    assert!(!text.contains("anonymous feedback"));
+    assert!(!text.contains("feedback to the developers of Agora"));
     assert!(!dumped(dir.path()).contains("cat pictures"));
 }
 
@@ -4486,7 +4493,7 @@ async fn a_survey_that_never_parsed_is_redacted_too() {
     agent.on_teardown().await.unwrap();
     let dumped = dumped(dir.path());
     assert!(dumped.contains("I posted about compilers"), "{dumped}");
-    assert!(!dumped.contains("anonymous feedback"));
+    assert!(!dumped.contains("feedback to the developers of Agora"));
     assert!(!dumped.contains("Cat pictures"));
 }
 
@@ -11628,7 +11635,7 @@ async fn a_session_that_errs_with_the_survey_open_is_redacted() {
     agent.on_teardown().await.unwrap();
     let saved = serde_json::to_string(agent.state()).unwrap();
     assert!(!saved.contains("my secret feedback"), "{saved}");
-    assert!(!saved.contains("anonymous feedback"));
+    assert!(!saved.contains("feedback to the developers of Agora"));
     assert!(!dumped(dir.path()).contains("my secret feedback"));
     assert!(
         saved.contains("mmmmmmmmmmmmmmmmmmmmmmmmmmm"),
