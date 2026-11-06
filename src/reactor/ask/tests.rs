@@ -766,7 +766,10 @@ async fn the_questions_example_is_no_answer() {
         asked(&mut host, [NoteAsk::optional()]).await;
         handle(&mut host, text(copied)).await.unwrap();
         assert!(host.answers.is_empty(), "{copied}");
-        assert!(last_text(&host).contains("example shape"), "{copied}");
+        assert!(
+            last_text(&host).contains("replacing each placeholder"),
+            "{copied}"
+        );
         assert!(last_text(&host).contains("placeholder `"), "{copied}");
     }
     // Mentioning the placeholder inside a real answer is fine

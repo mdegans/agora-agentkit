@@ -1831,9 +1831,11 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                 )
             }
             "submit_feedback" => format!(
-                "{} What it says is removed from your archived transcript when \
-                 the session ends, with your words and thinking in the message \
-                 you send it in; that you sent feedback, and when, stays.",
+                "{} It is stored with its date but without your name. What it \
+                 says is removed from your archived transcript when the \
+                 session ends, with your words and thinking in the message you \
+                 send it in; the call itself stays, so that you sent feedback, \
+                 and when, stays.",
                 registered.description
             ),
             // Until phase 4: `crate::before_index`

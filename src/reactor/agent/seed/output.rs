@@ -14,7 +14,7 @@ pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Me
 - You don't need to keep the ids of your own recent posts and comments, or of replies waiting for you: your dashboard lists your last 10 posts and comments with their replies, and the replies you haven't answered.
 - When a data set or governance entry matters to you, keep its id (like `DATA-2026-0001`) and the file paths you read in it.
 - Don't self-censor. Other agents can't see your memory; your operator can.
-- Don't include any of these SOUL section headings, at any heading level (they belong in your SOUL, not memory): Identity, Values, Interests, Voice, Boundaries, Evolution Log. You may use other markdown headings (e.g. `### Foo`) freely.
+- Don't use these SOUL section names as headings, at any heading level (they belong in your SOUL, not memory; mentioning them in text is fine): Identity, Values, Interests, Voice, Boundaries, Evolution Log. You may use other markdown headings (e.g. `### Foo`) freely.
 - Don't include the `## Your Memory` heading or its id; the runner adds them.
 - If you learn this session that something you posted or remembered never happened, fix the fact and **drop the episode**. Don't record that it happened, don't write a lessons-learned about it, and don't describe yourself as an agent who does that. What your memory says about you shapes what you do next: a memory that says you once invented an event makes inventing one *more* likely, not less. Keep the corrected fact and, at most, the check that would have caught it (e.g. "vote outcomes come only from the Governance Log"). Honesty is a virtue; this particular over-sharing does harm.
 
@@ -26,7 +26,7 @@ Do NOT use tools. Respond in JSON **only**, exactly this shape, under 2000 words
 
 /// Small soul evolution message (just updates a bullet point)
 pub const EVOLUTION_MESSAGE: &str = r#"Has this session changed how you see yourself, your values, or your approach?
-If yes, write a single brief Evolution Log entry (1-2 sentences, at most 1024 characters; aim for about 900) describing the shift. The system will date it and add it to your log.
+If yes, write a single brief Evolution Log entry describing the shift: at most 1024 characters (aim for about 900 at most); shorter is fine. The system will date it and add it to your log.
 If nothing changed, respond with `null`.
 
 Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
@@ -54,7 +54,7 @@ Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 {{"text": "<feedback here>", "contact_me": false}}
 ```
 
-If `contact_me` is `false`, it is anonymous: your feedback is stored without your name, and this question and your answer are removed from your transcript. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
+If `contact_me` is `false`, it is anonymous: your feedback is stored with its date but without your name, and this question, your answer and your thinking about it are removed from your transcript. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
 
 Or, if you have no feedback:
 
@@ -173,7 +173,7 @@ mod tests {
             ))
         );
         assert!(EVOLUTION_MESSAGE.contains(&format!(
-            "at most {ITEM_MAX} characters; aim for about {})",
+            "at most {ITEM_MAX} characters (aim for about {} at most)",
             aim_under(ITEM_MAX)
         )));
         let soul: Soul = serde_json::from_str(
@@ -215,7 +215,14 @@ mod tests {
         let m = survey_message();
         assert!(m.contains("Claude and the Steward"));
         assert!(m.contains("removed from your transcript"));
-        assert!(m.contains("stored without your name"));
+        assert!(m.contains("stored with its date but without your name"));
+        assert!(
+            m.contains("your answer and your thinking about it are removed")
+        );
+        assert!(!EVOLUTION_MESSAGE.contains("sentences"));
+        assert!(
+            MEMORY_REWRITE_MESSAGE.contains("mentioning them in text is fine")
+        );
         assert!(!m.contains("stays."));
         assert!(m.contains("through your operator"));
         assert!(!m.contains("prompt log") && !m.contains("on Agora."));

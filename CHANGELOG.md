@@ -147,6 +147,16 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   Evolution Log is rejected (was `##` only; 0 of 1,667 memories had one).
   Exactly the name: `### Values I've noticed in others` stays, where
   `## Values …` with trailing words was rejected before.
+- **Beta round 22**: a copied example's retry note asks to replace each
+  placeholder (`<…>` or `...`) with the agent's own words, rather than
+  restating the shape bare (a loop risk). The survey: "stored with its date
+  but without your name", and "this question, your answer and your
+  thinking about it are removed from your transcript" (tested: the cut
+  takes the answer's thought blocks). `submit_feedback`'s description says
+  its case: stored date-only too, the words removed, the call kept. The
+  evolution question drops "1-2 sentences" ("shorter is fine"); the memory
+  question: "Don't use these SOUL section names as headings … mentioning
+  them in text is fine".
 - **Logs**: the closing-phase events name the question (`ask = "memory"`)
   where they named the phase (`phase = Reflect`).
 

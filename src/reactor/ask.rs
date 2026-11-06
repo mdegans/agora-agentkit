@@ -99,8 +99,7 @@ only, per the instructions above.";
 pub fn template_note(placeholder: &str) -> String {
     format!(
         "Your answer has the example's placeholder `{}` in it, as the \
-         instructions above showed it: that is the example shape, not your \
-         answer. Write your own in that shape: JSON only.",
+         instructions above showed it: that is the example, not your answer.",
         placeholder.trim()
     )
 }
@@ -688,14 +687,22 @@ impl<A: Ask> AskTurn<A> {
     /// The note seated before a retry: what was wrong, then the shape to
     /// answer in, restated (small models need it repeated; beta round 21:
     /// "Invalid JSON: trailing comma" alone). One copy, for every question
-    fn retry_note(&self, what: &str) -> String {
+    fn retry_note(&self, what: &str, kind: &str) -> String {
         let nullable = self.ask.schema()["anyOf"]
             .as_array()
             .is_some_and(|any| any.iter().any(|s| s["type"] == "null"));
         match self.ask.template() {
             Some(template) => format!(
                 "{what}\n\nAnswer again with the JSON alone, in exactly this \
-                 shape:\n\n```json\n{}\n```{}",
+                 shape{}:\n\n```json\n{}\n```{}",
+                // A copied example: restating it alone would invite the
+                // same copy (beta round 22)
+                if kind == "template" {
+                    ", replacing each placeholder (`<…>` or `...`) with your \
+                     own words"
+                } else {
+                    ""
+                },
                 serde_json::to_string(&template)
                     .expect("a Value always serializes"),
                 if nullable { "\n\nor `null`." } else { "" }
@@ -883,7 +890,7 @@ impl<A: Ask> AskTurn<A> {
                 .map(Taken::Done);
         }
         let (_, prompt) = host.parts();
-        seat_user(prompt, self.retry_note(note)).map_err(error)?;
+        seat_user(prompt, self.retry_note(note, kind)).map_err(error)?;
         let control = self.retry_control();
         Ok(Taken::Again(self, control))
     }

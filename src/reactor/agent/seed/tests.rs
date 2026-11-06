@@ -11668,7 +11668,9 @@ async fn the_questions_own_example_is_retried() {
         .unwrap();
     assert_eq!(control, Control::Stalled);
     assert_eq!(agent.state.memory.content, before);
-    assert!(transcript(&agent).contains("example shape"));
+    assert!(transcript(&agent).contains(
+        "replacing each placeholder (`<…>` or `...`) with your own words"
+    ));
 
     let config = SeedConfig {
         evolution_chance: 100,
@@ -12192,4 +12194,45 @@ async fn a_left_out_feedback_call_is_redacted_in_the_archive() {
     assert!(archive.contains("left out of the transcript"), "{archive}");
     assert!(!archive.contains("SECRET GRIPES"), "{archive}");
     assert!(archive.contains(FEEDBACK_REDACTED));
+}
+
+/// The survey's promise: the question, the answer and the thinking about
+/// it are removed from the transcript (the redaction cuts from where the
+/// question began, so the answer's thought blocks go with it)
+#[tokio::test]
+async fn an_anonymous_surveys_thinking_is_removed_too() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let answer: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "PRIVATE MUSING about the survey",
+             "signature": "sig"},
+            {"type": "text", "text": "{\"text\": \"Fine.\", \"contact_me\": false}"},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    let control = agent.handle(answer).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(
+        serde_json::to_string(agent.prompt())
+            .unwrap()
+            .contains("PRIVATE MUSING")
+    );
+    agent.on_teardown().await.unwrap();
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("PRIVATE MUSING"), "{saved}");
 }
