@@ -99,6 +99,8 @@ struct Host {
     done: bool,
     /// What `asks.is_active()` said inside each `on_pause`
     active_in_pause: Vec<bool>,
+    /// `answer` errs (not the agent's doing)
+    fail_answer: bool,
 }
 
 #[async_trait::async_trait]
@@ -128,6 +130,7 @@ impl Agent for Host {
             max_pauses: 5,
             done: false,
             active_in_pause: Vec::new(),
+            fail_answer: false,
         })
     }
 
@@ -216,6 +219,9 @@ impl Answer<NoteAsk> for Host {
         answer: Option<Note>,
         asked: &Asked,
     ) -> Result<Next, Rejection<HostError>> {
+        if self.fail_answer {
+            return Err(Rejection::Error(error("the host failed")));
+        }
         if self.reject > 0 {
             self.reject -= 1;
             return Err(Rejection::Retry("Rejected: try again.".into()));
@@ -880,4 +886,16 @@ async fn a_question_is_active_while_its_reply_is_taken() {
     handle(&mut host, text("null")).await.unwrap();
     assert!(!host.asks.is_active(), "done");
     assert_eq!(host.asks.seated(), None);
+}
+
+/// A take that errs leaves no question active: a later reply errs too,
+/// rather than finding no head
+#[tokio::test]
+async fn an_error_while_taking_leaves_nothing_active() {
+    let mut host = host();
+    host.fail_answer = true;
+    asked(&mut host, [NoteAsk::optional()]).await;
+    assert!(handle(&mut host, text("null")).await.is_err());
+    assert!(!host.asks.is_active());
+    assert!(handle(&mut host, text("null")).await.is_err(), "no panic");
 }

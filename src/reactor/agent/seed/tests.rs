@@ -11864,6 +11864,18 @@ async fn a_session_that_never_began_has_no_failure() {
     assert_eq!(agent.failure(), None);
 }
 
+/// A wrapper whose own setup fails after this agent's succeeded unmarks the
+/// session: no failure to report
+#[tokio::test]
+async fn a_wrapper_can_unmark_a_session_begun() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent.set_begun(false);
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), None);
+}
+
 /// A wrapper's own question pauses on a web search while this agent is
 /// held: resumed under the session's budget, never refused, and past the
 /// budget the partial is dropped and the turn stalls, with the phase

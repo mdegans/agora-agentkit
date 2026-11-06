@@ -42,7 +42,8 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   categories only) and `SeedAgent::failure()`, set where a session fails
   and, at teardown, from how it ended: the reactor's stall cap (the agent
   counts its stalls in a row) or else an error. A session that never began
-  (its `on_init` failed) has none. `record_failure` lets a wrapper record
+  (its `on_init` failed) has none; `set_begun(false)` lets a wrapper whose
+  own setup failed after it say so. `record_failure` lets a wrapper record
   its own first. `SessionPart` names the parts (`acting`, `memory`, `soul`,
   `evolution`, `survey`) for `during` and `Ask::name`.
 - **A wrapper's pauses**: `SeedAgent::resume_question_pause` resumes a
@@ -51,8 +52,10 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
 - **Chained pauses**: `reactor::seat_assistant`, the one place an
   assistant turn is seated after a pause (the default `on_pause` and
   `default_handle`, `seat_unused_reply`, the seed agent's resumptions):
-  merged into a partial turn a second assistant turn may not follow. Past
-  the budget the merged partial is dropped whole.
+  merged into a paused partial (an assistant turn with no client tool call,
+  which a second may not follow); any other turn-order error, an
+  unanswered tool call included, still errs. Past the budget the merged
+  partial is dropped whole.
 - **`Asks::is_active`** holds from a question's seating until it is done,
   its reply's taking included (a host's `on_pause` called from the driver
   sees it).

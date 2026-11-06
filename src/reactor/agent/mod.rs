@@ -113,16 +113,22 @@ pub fn seat_assistant(
     turn: impl Into<misanthropic::prompt::Message>,
 ) -> Result<(), TurnOrderError> {
     let turn: misanthropic::prompt::Message = turn.into();
-    match prompt.messages.last() {
-        Some(last)
-            if last.role == Role::Assistant
-                && last.may_precede(&turn).is_err() =>
-        {
-            prompt.seat(turn, &mut None)?;
-        }
-        _ => {
-            prompt.push_message(turn)?;
-        }
+    // Only the paused-partial case merges: an assistant turn after one
+    // with no client tool call in it. Anything else (a tool call left
+    // unanswered, say) is a real bug, and errs as `push_message` says
+    let paused_partial = prompt.messages.last().is_some_and(|last| {
+        last.role == Role::Assistant
+            && turn.role == Role::Assistant
+            && !last.content.iter().any(|b| b.tool_use().is_some())
+            && matches!(
+                last.may_precede(&turn),
+                Err(TurnOrderError::BadTransition { .. })
+            )
+    });
+    if paused_partial {
+        prompt.seat(turn, &mut None)?;
+    } else {
+        prompt.push_message(turn)?;
     }
     Ok(())
 }
@@ -742,6 +748,34 @@ mod tests {
             ],
             "{tail}"
         );
+    }
+
+    /// `seat_assistant` merges only a paused partial: after an assistant
+    /// turn holding a client tool call nobody answered, a second assistant
+    /// turn still errs, as it always did
+    #[test]
+    fn seat_assistant_merges_only_a_paused_partial() {
+        let mut prompt = Prompt::default();
+        prompt.push_message((Role::User, "act")).unwrap();
+        seat_assistant(&mut prompt, (Role::Assistant, "Let me")).unwrap();
+        seat_assistant(&mut prompt, (Role::Assistant, " look.")).unwrap();
+        assert_eq!(prompt.messages.len(), 2, "merged");
+
+        let mut prompt = Prompt::default();
+        prompt.push_message((Role::User, "act")).unwrap();
+        let call: misanthropic::prompt::Message =
+            serde_json::from_value(serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1",
+                             "name": "agora", "input": {}}]
+            }))
+            .unwrap();
+        prompt.push_message(call).unwrap();
+        assert!(
+            seat_assistant(&mut prompt, (Role::Assistant, "more")).is_err(),
+            "an unanswered tool_use is a bug, not a pause"
+        );
+        assert_eq!(prompt.messages.len(), 2);
     }
 
     /// An unclipped thinking-only reply keeps its thought, closed by the

@@ -873,6 +873,15 @@ impl SeedAgent {
         self.failure.as_ref()
     }
 
+    /// Whether the session counts as begun, so a failure is reported
+    /// ([`failure`](Self::failure)). This agent's own
+    /// [`on_init`](Agent::on_init) sets it when it succeeds; a wrapping
+    /// agent whose own setup then fails sets it back to `false`, so the
+    /// session counts as begun only once both have succeeded
+    pub fn set_begun(&mut self, begun: bool) {
+        self.begun = begun;
+    }
+
     /// Record why the session failed, when a wrapping agent knows better
     /// (its own question was refused): kept unless one is already recorded.
     /// Call before [`on_teardown`](Agent::on_teardown), which otherwise

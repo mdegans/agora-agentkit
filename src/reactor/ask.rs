@@ -522,7 +522,16 @@ pub async fn handle<H: AskHost>(
     // Still active while its reply is taken
     let turn = asks.queue.pop_front().expect("active implies a head");
     let last = reply.clone();
-    match turn.take(host, reply).await? {
+    let taken = match turn.take(host, reply).await {
+        Ok(taken) => taken,
+        Err(e) => {
+            // The question is gone with the error: nothing is active, so a
+            // later reply errs rather than finding no head
+            host.asks().active = None;
+            return Err(e);
+        }
+    };
+    match taken {
         Taken::Again(turn, control) => {
             host.asks().queue.push_front(turn);
             Ok(control)
