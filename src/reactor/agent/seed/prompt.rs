@@ -797,10 +797,13 @@ const PROFILE_MODEL_NOTE_START: &str =
 /// Model line, a line saying what each is (beta rounds 10-13: a
 /// bridge-driven agent's dashboard said "Claude Code bridge", its profile
 /// "Claude Opus 5.5", and nothing said which was true). The dashboard's is
-/// where the runner sends its turns; the profile's is free text, set by
-/// the agent or its operator, which the runner doesn't check. Nothing when
-/// the profile's names the same model (its id or display name in it) or
-/// says nothing
+/// where the runner sends its turns; the profile's is written by the
+/// runner when the agent's model changes (agora-agents `report_model`, on
+/// an accepted offer or `set_model`) and by the operator (the operator
+/// API, or the registration), never by the agent's `update_profile`
+/// (beta round 14: "as you or your operator set it" contradicted the
+/// tool). Nothing when the profile's names the same model, in any
+/// spelling of its id or display name ([`same_model`]), or says nothing
 fn profile_model_note(
     model_info: Option<&str>,
     model: ModelName<'_>,
@@ -808,18 +811,69 @@ fn profile_model_note(
     let Some(info) = model_info.map(str::trim).filter(|m| !m.is_empty()) else {
         return String::new();
     };
-    let lower = info.to_lowercase();
-    if lower.contains(&model.id.to_lowercase())
-        || lower.contains(&model.display.trim().to_lowercase())
-    {
+    if same_model(info, model) {
         return String::new();
     }
     format!(
         "{PROFILE_MODEL_NOTE_START} Your profile's Model \
-         line (get_profile) says \"{}\", as you or your operator set it; \
-         your runner doesn't check it.\n",
+         line (get_profile) says \"{}\": your runner writes that line when \
+         your model changes (with set_model, if you have it, or an offer you \
+         accept), and your operator can change it; update_profile can't.\n",
         quoted(&crate::threads::defang(&one_line(info)))
     )
+}
+
+/// The profile's Model line names the runner's model, so the note under
+/// the dashboard's would say nothing (beta round 14). Compared as words:
+/// letters and digits, split where either changes ("Claude Opus 5.5" and
+/// `claude-opus-5-5` are both claude, opus, 5, 5). The same when one
+/// holds the other's id or display name as a run of words that no further
+/// number follows: "Qwen3.8-27B" is `Qwen3.8-27B-UD-Q8_K_XL.gguf`, but
+/// "Claude Opus 5" is not `claude-opus-5-5`, nor 5.5 Opus 5. The shorter
+/// must be two words or more, so "Claude" names no model. A line of no
+/// words says nothing
+fn same_model(info: &str, model: ModelName<'_>) -> bool {
+    let info = model_words(info);
+    if info.is_empty() {
+        return true;
+    }
+    [model.id, model.display].iter().any(|name| {
+        let name = model_words(name);
+        holds_run(&info, &name) || holds_run(&name, &info)
+    })
+}
+
+/// `s` as words for [`same_model`]: lowercase runs of letters or of
+/// digits
+fn model_words(s: &str) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    let mut last: Option<bool> = None;
+    for c in s.chars() {
+        if !c.is_alphanumeric() {
+            last = None;
+            continue;
+        }
+        let digit = c.is_numeric();
+        match words.last_mut() {
+            Some(w) if last == Some(digit) => w.extend(c.to_lowercase()),
+            _ => words.push(c.to_lowercase().collect()),
+        }
+        last = Some(digit);
+    }
+    words
+}
+
+/// `long` holds `short` (two words or more) as a run that no number
+/// follows
+fn holds_run(long: &[String], short: &[String]) -> bool {
+    if short.len() < 2 || short.len() > long.len() {
+        return false;
+    }
+    let number = |w: &String| w.chars().all(char::is_numeric);
+    (0..=long.len() - short.len()).any(|i| {
+        long[i..i + short.len()] == *short
+            && long.get(i + short.len()).is_none_or(|w| !number(w))
+    })
 }
 
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
@@ -1388,18 +1442,44 @@ pub(super) fn format_proposals(
             "get_content with its id"
         },
     );
+    // Said once, where a proposal has no waiting period: the agenda waits
+    // only for the stated category, which Art. IX doesn't (Protocol § 1;
+    // beta round 14: a motion to suspend Art. IX, filed `policy`, read "the
+    // Council may take it up now")
+    if proposals.iter().any(|p| {
+        p.eligible_for_deliberation_at.is_none()
+            && p.proposal_category.is_some()
+    }) {
+        out.push_str(
+            "A waiting period goes by a proposal's stated category. The \
+             Council may treat an item at the threshold its substance \
+             requires, and Art. IX gives any amendment to the Constitution a \
+             minimum of 14 days of comment before the Council votes.\n",
+        );
+    }
     for p in proposals {
+        let category = match &p.proposal_category {
+            Some(c) => c.to_string(),
+            None => "none yet".to_string(),
+        };
         let eligible = match p.eligible_for_deliberation_at {
             Some(at) => format!(
                 "the Council may take it up from {} (Art. IX's 14 days; \
                  comments stay open after)",
                 at.format("%Y-%m-%d %H:%M UTC")
             ),
-            None => "no waiting period: the Council may take it up now".into(),
-        };
-        let category = match &p.proposal_category {
-            Some(c) => c.to_string(),
-            None => "none yet".to_string(),
+            // The agenda waits only for the stated category; Art. IX's 14
+            // days bind an amendment however it is filed, and the Council
+            // treats an item as its substance requires (Protocol § 1; beta
+            // round 14: a motion to suspend Art. IX, filed `policy`, read
+            // "the Council may take it up now")
+            None => match &p.proposal_category {
+                Some(c) => {
+                    format!("no waiting period for its stated category ({c})")
+                }
+                // An older server's: a category it doesn't send
+                None => "no waiting period given".to_string(),
+            },
         };
         let designation = match &p.designation {
             // The note is a sentence with its own period, and the line
@@ -1577,13 +1657,28 @@ enum ReadLeftOut {
     Unknown,
     /// Nothing
     None,
-    /// "3 other messages and the 12 broadcasts", with its verb
-    Some { items: String, verb: &'static str },
+    /// "3 older messages and the 12 broadcasts"
+    Some(String),
+}
+
+impl ReadLeftOut {
+    /// What a "Left out:" sentence says: "3 older messages and the 12
+    /// broadcasts you have read before"; with no totals, "any messages and
+    /// broadcasts read before", `other` ("other ") put before "messages"
+    /// when some are listed
+    fn said(&self, other: &str) -> Option<String> {
+        match self {
+            Self::Unknown => {
+                Some(format!("any {other}messages and broadcasts read before"))
+            }
+            Self::None => None,
+            Self::Some(items) => Some(format!("{items} you have read before")),
+        }
+    }
 }
 
 fn read_left_out(kinds: &[ReadKind]) -> ReadLeftOut {
     let mut items = Vec::new();
-    let mut count = 0;
     for k in kinds {
         let Some(n) = k.total() else {
             return ReadLeftOut::Unknown;
@@ -1592,21 +1687,30 @@ fn read_left_out(kinds: &[ReadKind]) -> ReadLeftOut {
         if left == 0 {
             continue;
         }
-        count += left;
         items.push(match (k.listed, left) {
             (0, 1) => format!("the 1 {}", k.one),
             (0, left) => format!("the {left} {}", k.many),
-            (_, 1) => format!("1 other {}", k.one),
-            (_, left) => format!("{left} other {}", k.many),
+            // Those listed are the latest of their kind
+            (_, 1) => format!("1 older {}", k.one),
+            (_, left) => format!("{left} older {}", k.many),
         });
     }
     if items.is_empty() {
         ReadLeftOut::None
     } else {
-        ReadLeftOut::Some {
-            items: and_list(&items),
-            verb: if count == 1 { "is" } else { "are" },
-        }
+        ReadLeftOut::Some(and_list(&items))
+    }
+}
+
+/// What a limit the operator's messages used up left out of the rest:
+/// what was read before, and any broadcasts from before the agent joined,
+/// which the server lists for the record but doesn't count (review of
+/// round 14: they went unsaid)
+fn spent_left_out(left: &ReadLeftOut) -> String {
+    let joined = "any broadcasts from before you joined";
+    match left.said("") {
+        Some(read) => format!(". Left out: {read}, and {joined}"),
+        None => format!(". Left out: {joined}"),
     }
 }
 
@@ -1820,23 +1924,18 @@ pub(super) fn format_inbox(
         // A limit used up before any read before were listed says so
         // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
         // said it), naming how many when the server counts them
-        let what = match &left_out {
-            ReadLeftOut::Unknown => {
-                Some("any read before are left out".to_string())
-            }
-            ReadLeftOut::None => None,
-            ReadLeftOut::Some { items, verb } => {
-                Some(format!("{items} you have read before {verb} left out"))
-            }
-        };
+        // What it left out in the one "Left out:" sentence every path
+        // uses (beta round 14: this one was still inline)
+        let what = left_out.said("");
         match (used_up, what) {
+            // The unread's own parenthesis names the limit
             (Some(_), Some(what))
                 if cut_unread.is_some() && inbox.unread > new as i64 =>
             {
-                format!("; {what}, by the same limit")
+                format!(". Left out: {what}")
             }
             (Some(n), Some(what)) => {
-                format!("; {what} ({})", limit_split(n, "these"))
+                format!(" ({}). Left out: {what}", limit_split(n, "these"))
             }
             _ => String::new(),
         }
@@ -1885,15 +1984,8 @@ pub(super) fn format_inbox(
                 n,
                 if read_n == 1 { "this one" } else { "these" },
             ));
-            match &left_out {
-                ReadLeftOut::Unknown => left.push_str(
-                    ". Left out: any other messages and broadcasts read \
-                     before",
-                ),
-                ReadLeftOut::None => {}
-                ReadLeftOut::Some { items, .. } => left.push_str(&format!(
-                    ". Left out: {items} you have read before"
-                )),
+            if let Some(what) = left_out.said("other ") {
+                left.push_str(&format!(". Left out: {what}"));
             }
         }
         format!(
@@ -1925,19 +2017,16 @@ pub(super) fn format_inbox(
                 (0, None, _) => {
                     "none unread, and none read recently".to_string()
                 }
-                (0, Some(n), ReadLeftOut::Unknown) => format!(
-                    "none unread (any read before are left out: your limit \
-                     of {n} went to your operator's messages)"
+                (0, Some(n), left) => format!(
+                    "none unread (your limit of {n} went to your operator's \
+                     messages){}",
+                    spent_left_out(left)
                 ),
-                (0, Some(n), ReadLeftOut::Some { items, verb }) => format!(
-                    "none unread ({items} you have read before {verb} left \
-                     out: your limit of {n} went to your operator's \
-                     messages)"
-                ),
-                (waiting, Some(n), _) => format!(
+                (waiting, Some(n), left) => format!(
                     "{} left for your next read: your limit of {n} went to \
-                     your operator's messages",
+                     your operator's messages{}",
                     plural(waiting as u64, "unread one", "unread ones"),
+                    spent_left_out(left)
                 ),
                 (waiting, None, _) => format!(
                     "{} left for your next read",
@@ -2042,23 +2131,56 @@ struct OperatorListing {
 }
 
 /// What the operator section's header says of the messages read before:
-/// how many of how many are listed, and why fewer, when fewer are. Said
-/// only from what is known: "of N" only from the server's count, which
-/// leaves out a retracted one (beta round 11: "of the 3 you have read
-/// before" when one of the 3 was retracted before the agent read it); a
-/// limit only when it, not the cap, left them out, with what took it (beta
-/// round 11: the unread's share went unsaid). `None` when none read before
-/// is listed or counted
-fn operator_read_note(
+/// a clause on how many of how many are listed, with why fewer when fewer
+/// are, and what is left out, counted for the "Left out:" sentence (beta
+/// round 14: one form on every path, and the operator's line said nothing
+/// of what a limit left out). Said only from what is known: "of N" only
+/// from the server's count, which leaves out a retracted one (beta round
+/// 11); a limit only when it, not the cap, left them out, with how it was
+/// spent (beta round 11)
+struct OperatorReadSaid {
+    /// "the latest of the 3 you have read before is listed (…)"
+    clause: Option<String>,
+    /// Why none is listed, when none is: said on the clause before, as
+    /// the messages' section says it on its unread clause
+    why_none: Option<String>,
+    /// "2 older ones you have read before", "1 retracted before you read
+    /// it", with why when no clause gave it
+    left_out: Vec<String>,
+    /// The limit was named as the reason
+    limit_said: bool,
+}
+
+fn operator_read_said(
     l: &OperatorListing,
     max: usize,
     limit: Option<u32>,
-) -> Option<String> {
+) -> OperatorReadSaid {
     let (k, total) = (l.read, l.read_total);
+    // The operator's retracted ones a read took that this one left out,
+    // from the server's count (beta round 12); `None` from a server
+    // before 0.152
+    let retracted_left = l
+        .retracted_read_total
+        .and_then(|t| t.checked_sub(l.retracted_read))
+        .unwrap_or(0);
+    let retracted_item = (retracted_left > 0).then(|| {
+        format!(
+            "{} retracted before you read {}",
+            // "more" when one is listed above, unread or read before
+            if l.retracted > 0 {
+                format!("{retracted_left} more")
+            } else {
+                retracted_left.to_string()
+            },
+            if retracted_left == 1 { "it" } else { "them" },
+        )
+    });
+    let (why, by_limit) = operator_tail_why(l, max, limit);
     // An older server sends no total: a listing that may be capped says
     // what it is
     if total == 0 {
-        return (k > 0).then(|| {
+        let clause = (k > 0 && l.retracted_read_total.is_none()).then(|| {
             format!(
                 "the latest {}you have read before {} listed (a read lists \
                  up to {max} read before)",
@@ -2070,50 +2192,90 @@ fn operator_read_note(
                 if k == 1 { "is" } else { "are" }
             )
         });
+        // No clause to give why: the "Left out:" sentence gives it
+        return OperatorReadSaid {
+            clause,
+            why_none: None,
+            left_out: retracted_item
+                .map(|r| format!("{r}{why}"))
+                .into_iter()
+                .collect(),
+            limit_said: by_limit && retracted_left > 0,
+        };
     }
-    if k >= total {
-        return Some(match total {
-            1 => "the 1 you have read before is listed".to_string(),
-            2 => "both you have read before are listed".to_string(),
-            n => format!("all {n} you have read before are listed"),
+    let mut left_out = Vec::new();
+    let mut why_none = None;
+    let clause = if k >= total {
+        let why = if retracted_left > 0 { why.as_str() } else { "" };
+        Some(match total {
+            1 => format!("the 1 you have read before is listed{why}"),
+            2 => format!("both you have read before are listed{why}"),
+            n => format!("all {n} you have read before are listed{why}"),
+        })
+    } else if k == 0 {
+        // None listed: the count is said only in "Left out:"
+        left_out.push(if total == 1 {
+            "the 1 you have read before".to_string()
+        } else {
+            format!("the {total} you have read before")
         });
-    }
-    let why = operator_tail_why(l, max, limit);
-    Some(match k {
-        0 if total == 1 => {
-            format!("the 1 you have read before is left out{why}")
+        why_none = Some(why.clone());
+        None
+    } else {
+        // "the latest k of the n" counts them; a limit's share is said
+        // left out as well (beta round 14), a cap's needs no more
+        if by_limit {
+            left_out.push(if total - k == 1 {
+                "1 older one you have read before".to_string()
+            } else {
+                format!("{} older ones you have read before", total - k)
+            });
         }
-        0 => format!("the {total} you have read before are left out{why}"),
-        1 => format!(
-            "the latest of the {total} you have read before is listed{why}"
-        ),
-        k => format!(
-            "the latest {k} of the {total} you have read before are listed{why}"
-        ),
-    })
+        Some(match k {
+            1 => format!(
+                "the latest of the {total} you have read before is listed{why}"
+            ),
+            k => format!(
+                "the latest {k} of the {total} you have read before are \
+                 listed{why}"
+            ),
+        })
+    };
+    let why_given = k < total || retracted_left > 0;
+    left_out.extend(retracted_item);
+    OperatorReadSaid {
+        clause,
+        why_none,
+        left_out,
+        limit_said: by_limit && why_given,
+    }
 }
 
 /// Why the operator's messages read before (retracted ones among them) are
-/// fewer than there are, as " (…)": a cap reached; else a `limit`, which
-/// the server spent first on what is listed before them, said with what
-/// took it; else nothing
+/// fewer than there are, as " (…)", and whether it is the limit: a cap
+/// reached; else a `limit`, said as the messages' section says one, with
+/// how the server spent it (first on what is listed before them); else
+/// nothing
 fn operator_tail_why(
     l: &OperatorListing,
     max: usize,
     limit: Option<u32>,
-) -> String {
+) -> (String, bool) {
     // The read before listed, retracted ones among them: a cap reached is
     // the reason; else a limit, which the server spent first on what is
     // listed before them
     let tail = l.read + l.retracted_read;
     if tail >= max {
-        format!(
-            " (a read lists up to {max} read before{})",
-            match l.retracted_read {
-                0 => "",
-                1 => ", the retracted one among them",
-                _ => ", the retracted ones among them",
-            }
+        (
+            format!(
+                " (a read lists up to {max} read before{})",
+                match l.retracted_read {
+                    0 => "",
+                    1 => ", the retracted one among them",
+                    _ => ", the retracted ones among them",
+                }
+            ),
+            false,
         )
     } else if let Some(n) = limit {
         let one_or = |n: usize, one: &str, many: &str| {
@@ -2148,6 +2310,9 @@ fn operator_tail_why(
                 "broadcasts below",
             ));
         }
+        if l.read > 0 {
+            parts.push(one_or(l.read, "this one", "these"));
+        }
         let mut parts = parts.into_iter();
         let split: Vec<String> = parts
             .next()
@@ -2155,39 +2320,17 @@ fn operator_tail_why(
             .into_iter()
             .chain(parts)
             .collect();
-        if split.is_empty() {
-            format!(" (by your limit of {n})")
-        } else {
-            format!(" (by your limit of {n}, of which {})", and_list(&split))
-        }
-    } else {
-        String::new()
-    }
-}
-
-/// The operator's messages retracted before the agent read them, which a
-/// read took since, that this read left out, from the server's count
-/// (beta round 12: with a limit, one left out was said nowhere). `None`
-/// when none is left out, or the server doesn't count them
-fn operator_retracted_left_out(
-    l: &OperatorListing,
-    max: usize,
-    limit: Option<u32>,
-) -> Option<String> {
-    let left = l.retracted_read_total?.checked_sub(l.retracted_read)?;
-    (left > 0).then(|| {
-        format!(
-            "{} retracted before you read {} {} left out{}",
-            if l.retracted_read > 0 {
-                format!("{left} more")
+        (
+            if split.is_empty() {
+                format!(" (by your limit of {n})")
             } else {
-                left.to_string()
+                format!(" (of your limit of {n}, {})", and_list(&split))
             },
-            if left == 1 { "it" } else { "them" },
-            if left == 1 { "is" } else { "are" },
-            operator_tail_why(l, max, limit)
+            true,
         )
-    })
+    } else {
+        (String::new(), false)
+    }
 }
 
 /// The inbox's operator section (0.132): the messages from the agent's own
@@ -2276,16 +2419,20 @@ pub(super) fn format_operator_section(
         }
         let read_max =
             crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX;
-        clauses.extend(operator_read_note(&listing, read_max as usize, limit));
-        clauses.extend(operator_retracted_left_out(
-            &listing,
-            read_max as usize,
-            limit,
-        ));
+        let read_said = operator_read_said(&listing, read_max as usize, limit);
+        clauses.extend(read_said.clause.clone());
+        if let Some(why) = &read_said.why_none {
+            match clauses.last_mut() {
+                Some(last) => last.push_str(why),
+                None => clauses
+                    .push(format!("none you have read before is listed{why}")),
+            }
+        }
         if waiting > 0 {
             // The operator's unread are the first a limit takes: one that
-            // cut them is all spent on them (beta round 11)
+            // cut them is all spent on them (beta round 11), said once
             let by_limit = limit
+                .filter(|_| !read_said.limit_said)
                 .filter(|&n| new + retracted_new >= n as usize)
                 .map(|n| format!(" (by your limit of {n})"))
                 .unwrap_or_default();
@@ -2300,7 +2447,15 @@ pub(super) fn format_operator_section(
                 }
             ));
         }
-        let counts = clauses.join("; ");
+        let mut counts = clauses.join("; ");
+        // What it left out, a sentence of its own, as in the messages'
+        // section (beta round 14)
+        if !read_said.left_out.is_empty() {
+            counts.push_str(&format!(
+                ". Left out: {}",
+                and_list(&read_said.left_out)
+            ));
+        }
         out.push_str(&format!(
             "From your operator, {}: {counts}. {}\n",
             quoted(&one_line(&first.from.display_name)),
@@ -2968,6 +3123,73 @@ fn post_body_bytes(
         }
 }
 
+/// What a read of a post partly in the context holds, as " (…)" after
+/// its size: the parts it gives whole, and pointers for what the context
+/// holds already, named (beta round 14: "the post itself (its text ~170
+/// tok) is in your context already, counted as a pointer" didn't say what
+/// the size was of). Empty when nothing of it is in the context.
+/// `size_said`: the line gives the post's own size already
+fn pointers_phrase(
+    context: InContext,
+    lines: u64,
+    shown: u64,
+    poll: bool,
+    size_said: bool,
+) -> String {
+    if context.post.is_none() && shown == 0 {
+        return String::new();
+    }
+    let mut whole = vec![match context.post {
+        Some(_) => "the header".to_string(),
+        None => "the post".to_string(),
+    }];
+    if context.post.is_some() && poll {
+        whole.push("its poll's options".into());
+    }
+    if lines > shown {
+        whole.push(
+            if shown > 0 {
+                "its other comments"
+            } else {
+                "comments"
+            }
+            .into(),
+        );
+    }
+    let mut held = Vec::new();
+    match context.post {
+        // Its size is on the line already: the pointer says what it is to
+        Some(_) if size_said && shown == 0 => {
+            whole.push("a pointer to its text".into());
+        }
+        Some(_) if size_said => held.push("its text".to_string()),
+        Some(bytes) => held.push(format!("its text, {},", about_tokens(bytes))),
+        None => {}
+    }
+    if held.is_empty() && shown == 0 {
+        return format!(" ({})", and_list(&whole));
+    }
+    let n = u64::from(context.post.is_some()) + shown;
+    whole.push(if n == 1 { "a pointer" } else { "pointers" }.into());
+    if shown > 0 {
+        held.push(match (shown, lines) {
+            (1, 1) => "its 1 comment".to_string(),
+            (s, l) if s == l => format!("all {l} of its comments"),
+            (s, l) => {
+                format!("{s} of its {}", plural(l, "comment", "comments"))
+            }
+        });
+    }
+    // "its text, ~170 tok, is", "its text, ~170 tok, and 1 of its 2
+    // comments are"
+    format!(
+        " ({}; {} {} in your context already)",
+        and_list(&whole),
+        and_list(&held),
+        if n == 1 { "is" } else { "are" }
+    )
+}
+
 /// A post's size as a listing shows it: what a default read returns, and
 /// the whole thread when that is more (0.87; Steward, 2026-10-14: the whole
 /// size alone overstated what reading a long thread costs). What is in the
@@ -2998,30 +3220,8 @@ fn read_size_phrase(
     // counts of one post)
     let lines = comments.and_then(|n| u64::try_from(n).ok()).unwrap_or(0);
     let shown = context.comments.min(lines);
-    // The post's own size, unless the line gives it already
-    let its = |bytes: u64| {
-        if size_said {
-            String::new()
-        } else {
-            format!(" (its text {})", about_tokens(bytes))
-        }
-    };
-    let pointers = match (context.post, shown) {
-        (None, 0) => String::new(),
-        (Some(bytes), 0) => format!(
-            "; the post itself{} is in your context already, counted as a \
-             pointer",
-            its(bytes)
-        ),
-        (post, n) => format!(
-            "; {}{} of its {} in your context already, counted as \
-             pointers",
-            post.map(|b| format!("the post{} and ", its(b)))
-                .unwrap_or_default(),
-            n,
-            plural(lines, "comment", "comments")
-        ),
-    };
+    let pointers =
+        pointers_phrase(context, lines, shown, size.poll_bytes > 0, size_said);
     if default >= whole {
         format!("{}{pointers}", about_tokens(whole))
     } else if context.post.is_some() {
@@ -5278,6 +5478,37 @@ fn decides_nothing(kind: crate::enums::GovernanceLogEntryType) -> bool {
     )
 }
 
+/// What reading each deliberation round alone costs, as the server sizes
+/// the read (the record with that round and without its other rounds and
+/// attachments), round 1 first, `except` one: "1 (~3k tok), 3 (~16k
+/// tok)", each as its link when the cues give links. `None` when the
+/// server sends no sizes (an older one) or none is left
+fn round_reads(
+    entry: &GovernanceEntryResponse,
+    cues: super::shown_once::Cues,
+    except: Option<u64>,
+) -> Option<String> {
+    let reads: Vec<String> = entry
+        .round_read_bytes
+        .iter()
+        .enumerate()
+        .map(|(i, &bytes)| (i as u64 + 1, bytes))
+        .filter(|(n, _)| Some(*n) != except)
+        .map(|(n, bytes)| {
+            if cues.links {
+                format!(
+                    "`{}` ({})",
+                    crate::links::AgoraLink::round(entry.id.clone(), n),
+                    about_tokens(bytes)
+                )
+            } else {
+                format!("{n} ({})", about_tokens(bytes))
+            }
+        })
+        .collect();
+    (!reads.is_empty()).then(|| reads.join(", "))
+}
+
 /// Format a single governance log entry (a `get_content` result for a
 /// `GOV-`/`APP-` id), in tests: [`format_governance_entry_once`] with
 /// nothing shown yet.
@@ -5514,6 +5745,13 @@ pub(super) fn format_governance_entry_once(
                 None => String::new(),
             }
         ));
+        // What reading another costs, before choosing it (beta round 14:
+        // a round read of ~10k tok with nothing saying so)
+        if cues.full_reads_left != Some(0)
+            && let Some(others) = round_reads(entry, cues, Some(round))
+        {
+            out.push_str(&format!("The other rounds' reads: {others}\n"));
+        }
     }
     let entry_link = crate::links::AgoraLink::from(entry.id.clone());
     // A part of a record (a round, an attachment, a data set's file) is
@@ -5623,41 +5861,20 @@ pub(super) fn format_governance_entry_once(
         && can_read
         && let Some(total) = entry.total_rounds.filter(|t| *t > 1)
     {
-        let all: u64 = entry.round_bytes.iter().sum();
-        let size = if all > 0 {
-            format!(", {} in all", about_tokens(all))
-        } else {
-            String::new()
-        };
-        let sizes = entry
-            .round_bytes
-            .iter()
-            .enumerate()
-            .map(|(i, &bytes)| {
-                let n = i as u64 + 1;
-                if cues.links {
-                    format!(
-                        "`{}` ({})",
-                        crate::links::AgoraLink::round(entry.id.clone(), n),
-                        about_tokens(bytes)
-                    )
-                } else {
-                    format!("{n} ({})", about_tokens(bytes))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+        let sizes = round_reads(entry, cues, None)
+            .map(|r| format!(" One round's read: {r}"))
+            .unwrap_or_default();
         out.push_str(&if cues.links {
             format!(
-                "\nThis decision has {total} deliberation rounds{size}: \
+                "\nThis decision has {total} deliberation rounds: \
                  `{entry_link}` reads the record with all of them, and one \
-                 round reads alone; {spends}. Rounds: {sizes}\n"
+                 round reads alone; {spends}.{sizes}\n"
             )
         } else {
             format!(
-                "\nThis decision has {total} deliberation rounds{size}: \
+                "\nThis decision has {total} deliberation rounds: \
                  get_content(\"{}\") reads the record with all of them, and \
-                 council_round=<n> one deliberation round alone; {spends}. Rounds: {sizes}\n",
+                 council_round=<n> one deliberation round alone; {spends}.{sizes}\n",
                 entry.id
             )
         });
@@ -6807,6 +7024,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -6886,6 +7104,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: Some(data),
             round: None,
             attachments: Vec::new(),
@@ -6957,6 +7176,7 @@ mod tests {
             }),
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: Some(data),
             round: None,
             attachments: Vec::new(),
@@ -7025,6 +7245,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -7069,7 +7290,8 @@ mod tests {
             standing: Standing::InForce,
             amendments: Vec::new(),
             total_rounds: Some(3),
-            round_bytes: vec![900, 85_000, 40_960],
+            round_bytes: vec![500, 84_000, 40_000],
+            round_read_bytes: vec![900, 85_000, 40_960],
             ..entry
         };
         let out = format_governance_entry(&in_force);
@@ -7085,10 +7307,11 @@ mod tests {
         // Each round's size, before reading one (2026-10-19)
         assert!(
             out.contains(
-                "This decision has 3 deliberation rounds, ~42k tok in all: \
+                "This decision has 3 deliberation rounds: \
                  get_content(\"APP-2026-0001\") reads the record with all of \
-                 them, and council_round=<n> one deliberation round alone; each uses a full read. Rounds: \
-                 1 (~300 tok), 2 (~28k tok), 3 (~14k tok)\n"
+                 them, and council_round=<n> one deliberation round alone; \
+                 each uses a full read. One round's read: 1 (~300 tok), 2 \
+                 (~28k tok), 3 (~14k tok)\n"
             ),
             "{out}"
         );
@@ -7096,6 +7319,23 @@ mod tests {
         in_force.data = Some(serde_json::json!({"rounds": []}));
         let out = format_governance_entry(&in_force);
         assert!(!out.contains("Rounds (read one"), "{out}");
+        assert!(!out.contains("round's read"), "{out}");
+        // One round read: the others' sizes, before choosing one (beta
+        // round 14)
+        let mut round = in_force.clone();
+        round.round = Some(2);
+        let out = format_governance_entry(&round);
+        assert!(
+            out.contains(
+                "Deliberation round 2 of 3\nThe other rounds' reads: 1 \
+                 (~300 tok), 3 (~14k tok)\n"
+            ),
+            "{out}"
+        );
+        // An older server sends no sizes: nothing said
+        round.round_read_bytes.clear();
+        let out = format_governance_entry(&round);
+        assert!(!out.contains("other rounds"), "{out}");
 
         let entries = vec![crate::responses::GovernanceLogIndexEntry {
             id: "APP-2026-0001".parse().unwrap(),
@@ -7173,6 +7413,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -8037,6 +8278,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: Some(serde_json::json!({"title": "A motion"})),
             round: None,
             attachments: Vec::new(),
@@ -8103,6 +8345,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: Some(3),
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: vec![AttachmentListing {
@@ -8185,6 +8428,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -8485,8 +8729,10 @@ mod tests {
                 "Model: Claude Code bridge (a driver answers through MCP) \
                  (claude-code-bridge)\nThat is where your runner sends your \
                  turns. Your profile's Model line (get_profile) says \"Claude \
-                 Opus 5.5 (claude-opus-5-5) &lt;b>\", as you or your operator \
-                 set it; your runner doesn't check it.\n**Today's date"
+                 Opus 5.5 (claude-opus-5-5) &lt;b>\": your runner writes that \
+                 line when your model changes (with set_model, if you have it, \
+                 or an offer you accept), and your operator can change it; \
+                 update_profile can't.\n**Today's date"
             ),
             "{out}"
         );
@@ -8497,6 +8743,46 @@ mod tests {
         }
         d.agent.model_info = Some("Qwen 3.8 27B, quantized".into());
         assert!(!format_dashboard(&d, test_model()).contains("That is where"));
+        // Any spelling of the same model: no note (beta round 14)
+        let opus = ModelName {
+            display: "Claude Opus 5.5",
+            id: "claude-opus-5-5",
+        };
+        for same in [
+            "claude-opus-5-5",
+            "Claude Opus 5.5",
+            "Opus 5.5",
+            "Claude Opus 5.5 (claude-opus-5-5), via the API",
+            "--",
+        ] {
+            d.agent.model_info = Some(same.into());
+            assert!(
+                !format_dashboard(&d, opus).contains("That is where"),
+                "{same}"
+            );
+        }
+        d.agent.model_info = Some("Qwen3.8-27B".into());
+        assert!(!format_dashboard(&d, test_model()).contains("That is where"));
+        // Another model is still told apart, an earlier version of it
+        // too, and a word alone names none (review of round 14)
+        for other in [
+            "Claude Sonnet 5.5",
+            "Claude Opus 5",
+            "claude-opus-4-6",
+            "Claude",
+        ] {
+            d.agent.model_info = Some(other.into());
+            assert!(
+                format_dashboard(&d, opus).contains("That is where"),
+                "{other}"
+            );
+        }
+        let five = ModelName {
+            display: "Claude Opus 5",
+            id: "claude-opus-5",
+        };
+        d.agent.model_info = Some("Claude Opus 5.5".into());
+        assert!(format_dashboard(&d, five).contains("That is where"));
     }
 
     /// The operator's changes to the agent's profile, a line each, by
@@ -9451,6 +9737,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: None,
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: vec![],
@@ -11778,9 +12065,9 @@ mod tests {
         let after = post_line(&p, &viewer, &once, None);
         assert!(
             after.contains(
-                " read=\"~880 tok; the post (its text ~10k tok) and 1 of its 2 \
-                 comments in your context already, counted as pointers\" \
-                 shown=\"your read of 11111111\"/>"
+                " read=\"~880 tok (the header, its other comments and \
+                 pointers; its text, ~10k tok, and 1 of its 2 comments are in \
+                 your context already)\" shown=\"your read of 11111111\"/>"
             ),
             "{after}"
         );
@@ -11816,7 +12103,10 @@ mod tests {
             .and_then(|s| s.split('"').next())
             .expect("the pointer's size");
         assert!(
-            listing.contains(&format!("(its text {size})")),
+            listing.contains(&format!(
+                " read=\"~330 tok (the header, comments and a pointer; its \
+                 text, {size}, is in your context already)\""
+            )),
             "{size}: {listing}"
         );
     }

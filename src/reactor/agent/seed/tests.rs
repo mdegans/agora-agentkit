@@ -680,7 +680,7 @@ async fn get_proposals_renders_blocks_with_the_id_on_both_ends() {
                 "agent_name": "someone",
                 "score": 3,
                 "created_at": "2026-09-20T10:00:00Z",
-                "proposal_category": null,
+                "proposal_category": "policy",
                 "eligible_for_deliberation_at": null
             },
             {
@@ -722,7 +722,12 @@ async fn get_proposals_renders_blocks_with_the_id_on_both_ends() {
     );
     // In words, where a null field used to need a schema to read
     assert!(
-        t.contains("no waiting period: the Council may take it up now"),
+        t.contains("no waiting period for its stated category (policy).")
+            && t.matches(
+                "a minimum of 14 days of comment before the Council votes"
+            )
+            .count()
+                == 1,
         "{t}"
     );
     assert!(!t.contains("score"), "{t}");
@@ -5642,8 +5647,8 @@ fn a_proposal_in_the_context_is_a_pointer() {
     assert!(
         text.contains(
             "Its body (~10k tok) is in your context already, with no \
-             comments; a read is ~300 tok; the post itself is in your context \
-             already, counted as a pointer."
+             comments; a read is ~300 tok (the header and a pointer to its \
+             text)."
         ),
         "{text}"
     );
@@ -6095,6 +6100,7 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
         let mut body = governance_content("GOV-2026-0006", None);
         body["attachments"] = listed.clone();
         body["round_bytes"] = serde_json::json!([600, 900, 1200]);
+        body["round_read_bytes"] = serde_json::json!([600, 900, 1200]);
         then.status(200).json_body(body);
     });
     let mut agent = agent(
@@ -6146,10 +6152,11 @@ async fn a_read_spends_nothing_on_what_was_not_asked() {
     // The summary points at the rounds by link, with sizes and the reads left
     assert!(
         rendered.contains(
-            "This decision has 3 deliberation rounds, ~900 tok in all: \
+            "This decision has 3 deliberation rounds: \
              `agora://gov/GOV-2026-0006` reads the record with all of them, \
              and one round reads alone; each uses a full read, 2 left this \
-             session. Rounds: `agora://gov/GOV-2026-0006?council_round=1` (~200 tok)"
+             session. One round's read: \
+             `agora://gov/GOV-2026-0006?council_round=1` (~200 tok)"
         ),
         "{rendered}"
     );
@@ -7559,6 +7566,7 @@ async fn a_round_read_again_is_the_pointer_at_either_version() {
              "note": "N", "created_at": "2026-10-02T00:00:00Z"}
         ]);
         body["round_bytes"] = serde_json::json!([100, 200, 3000]);
+        body["round_read_bytes"] = serde_json::json!([100, 200, 3000]);
     };
     let round = server.mock(|when, then| {
         when.method(GET)
@@ -7743,6 +7751,7 @@ async fn a_round_the_same_at_both_versions_is_one_part() {
                  "note": "Landmark", "created_at": "2026-10-02T00:00:00Z"}
             ]);
             body["round_bytes"] = serde_json::json!([10, 10, 3000]);
+            body["round_read_bytes"] = serde_json::json!([10, 10, 3000]);
             body
         };
         let original = server.mock(|when, then| {
@@ -7881,6 +7890,7 @@ async fn a_cross_version_pointer_names_what_changed_beside_the_part() {
         body["version"] = version.into();
         body["amendments"] = amendments.clone();
         body["round_bytes"] = serde_json::json!([10, 10, 3000]);
+        body["round_read_bytes"] = serde_json::json!([10, 10, 3000]);
         body
     };
     server.mock(|when, then| {
@@ -8063,6 +8073,7 @@ async fn a_pointer_never_names_a_read_that_pointed() {
         b["round"] = round.into();
         b["version"] = version.into();
         b["round_bytes"] = serde_json::json!([100, 100, 100]);
+        b["round_read_bytes"] = serde_json::json!([100, 100, 100]);
         b
     };
     server.mock(|when, then| {
@@ -8163,6 +8174,7 @@ async fn every_read_of_a_test_record_shows_the_label() {
                 format!("**{TEST_LABEL}.**\n\nApproved 5-0.").into();
             body["total_rounds"] = 2.into();
             body["round_bytes"] = serde_json::json!([100, 200]);
+            body["round_read_bytes"] = serde_json::json!([100, 200]);
             body["amendments"] = serde_json::json!([
                 {"id": "AMD-2026-0040", "kind": "revision", "basis": "x",
                  "note": "N", "created_at": "2026-10-02T00:00:00Z"}
@@ -8873,7 +8885,7 @@ fn a_second_inbox_read_keeps_its_header() {
         text.starts_with(
             "Messages and broadcasts: 45 unread until now, of which these \
              are 1 (by your limit of 1; the rest stay unread for a later \
-             read); any read before are left out, by the same limit."
+             read). Left out: any messages and broadcasts read before."
         ),
         "{text}"
     );
@@ -9423,13 +9435,7 @@ fn the_operator_header_counts_in_words() {
                 &super::ShownOnce::default(),
                 limit,
             );
-            out.lines()
-                .next()
-                .unwrap()
-                .split(". ")
-                .next()
-                .unwrap()
-                .to_string()
+            first_sentence_with_left_out(out.lines().next().unwrap())
         };
     let header_read = |messages, operator_unread, operator_read| {
         header_limit(messages, operator_unread, operator_read, None)
@@ -9449,23 +9455,25 @@ fn the_operator_header_counts_in_words() {
         header_limit(vec![read(1)], 0, 3, Some(1)),
         steward(
             "none unread; the latest of the 3 you have read before is listed \
-             (by your limit of 1)"
+             (of your limit of 1, 1 went to this one). Left out: 2 older ones \
+             you have read before"
         )
     );
     assert_eq!(
         header_limit(vec![unread(1), read(2)], 1, 5, Some(2)),
         steward(
             "1 message unread until now; the latest of the 5 you have read \
-             before is listed (by your limit of 2, of which 1 went to the \
-             unread one)"
+             before is listed (of your limit of 2, 1 went to the unread one \
+             and 1 to this one). Left out: 4 older ones you have read before"
         )
     );
-    // A limit that left out every one read before says so
+    // A limit that left out every one read before says so, in the one
+    // "Left out:" form (beta round 14)
     assert_eq!(
         header_limit(vec![unread(1)], 1, 2, Some(1)),
         steward(
-            "1 message unread until now; the 2 you have read before are left \
-             out (by your limit of 1, of which 1 went to the unread one)"
+            "1 message unread until now (of your limit of 1, 1 went to the \
+             unread one). Left out: the 2 you have read before"
         )
     );
     // No limit, and fewer listed than there are (a server's cut the client
@@ -9761,7 +9769,9 @@ fn a_limit_spent_on_the_operator_says_what_waits() {
     assert!(
         text.contains(
             "\nMessages and broadcasts: 2 unread ones left for your next \
-             read: your limit of 1 went to your operator's messages.\n"
+             read: your limit of 1 went to your operator's messages. Left \
+             out: any messages and broadcasts read before, and any broadcasts \
+             from before you joined.\n"
         ),
         "{text}"
     );
@@ -9773,8 +9783,10 @@ fn a_limit_spent_on_the_operator_says_what_waits() {
     );
     assert!(
         text.contains(
-            "\nMessages and broadcasts: none unread (any read before are \
-             left out: your limit of 1 went to your operator's messages).\n"
+            "\nMessages and broadcasts: none unread (your limit of 1 went to \
+             your operator's messages). Left out: any messages and \
+             broadcasts read before, and any broadcasts from before you \
+             joined.\n"
         ),
         "{text}"
     );
@@ -10381,8 +10393,9 @@ fn retracted_messages_are_never_counted_as_read() {
         header(memory[..2].to_vec(), vec![], 0, 2, Some(2))[0],
         steward(
             "none unread; 1 retracted before you read it is listed; the latest \
-             of the 2 you have read before is listed (by your limit of 2, of \
-             which 1 went to the retracted one)"
+             of the 2 you have read before is listed (of your limit of 2, 1 \
+             went to the retracted one and 1 to this one). Left out: 1 older \
+             one you have read before"
         )
     );
     // limit=2, the retracted one the oldest (the round-11 read): both read
@@ -10398,7 +10411,8 @@ fn retracted_messages_are_never_counted_as_read() {
         header(vec![read()], vec![], 0, 2, Some(1))[0],
         steward(
             "none unread; the latest of the 2 you have read before is listed \
-             (by your limit of 1)"
+             (of your limit of 1, 1 went to this one). Left out: 1 older one \
+             you have read before"
         )
     );
 
@@ -10423,8 +10437,9 @@ fn retracted_messages_are_never_counted_as_read() {
         header(vec![retracted_new(), read()], vec![], 1, 2, Some(2))[0],
         steward(
             "1 retracted before you read it is listed; the latest of the 2 \
-             you have read before is listed (by your limit of 2, of which 1 \
-             went to the retracted one)"
+             you have read before is listed (of your limit of 2, 1 went to \
+             the retracted one and 1 to this one). Left out: 1 older one you \
+             have read before"
         )
     );
     // ... and with an unread DM taking the rest of a limit of 2
@@ -10435,13 +10450,13 @@ fn retracted_messages_are_never_counted_as_read() {
         header(vec![retracted_new()], vec![dm.clone()], 1, 2, Some(2)),
         vec![
             steward(
-                "1 retracted before you read it is listed; the 2 you have read \
-                 before are left out (by your limit of 2, of which 1 went to \
-                 the retracted one and 1 to an unread message below)"
+                "1 retracted before you read it is listed (of your limit of 2, \
+                 1 went to the retracted one and 1 to an unread message \
+                 below). Left out: the 2 you have read before"
             ),
-            "Messages and broadcasts: 1 unread until now; any read before are \
-             left out (of your limit of 2, 1 went to your operator's message \
-             above and 1 to the unread one)"
+            "Messages and broadcasts: 1 unread until now (of your limit of 2, \
+             1 went to your operator's message above and 1 to the unread \
+             one). Left out: any messages and broadcasts read before"
                 .to_string(),
         ]
     );
@@ -10459,7 +10474,8 @@ fn retracted_messages_are_never_counted_as_read() {
         header(vec![read(), read()], vec![], 0, 5, Some(2))[0],
         steward(
             "none unread; the latest 2 of the 5 you have read before are \
-             listed (by your limit of 2)"
+             listed (of your limit of 2, 2 went to these). Left out: 3 older \
+             ones you have read before"
         )
     );
     // The cap reached with a retracted one among those listed
@@ -10550,12 +10566,13 @@ fn a_used_up_limit_says_how_it_was_split() {
         headers(&newcomer, Some(3)),
         vec![
             "From your operator, the Steward: none unread; the latest of the \
-             4 you have read before is listed (by your limit of 3, of which 2 \
-             went to unread messages below)"
+             4 you have read before is listed (of your limit of 3, 2 went to \
+             unread messages below and 1 to this one). Left out: 3 older \
+             ones you have read before"
                 .to_string(),
-            "Messages and broadcasts: 2 unread until now; any read before are \
-             left out (of your limit of 3, 1 went to your operator's message \
-             above and 2 to the unread ones)"
+            "Messages and broadcasts: 2 unread until now (of your limit of 3, \
+             1 went to your operator's message above and 2 to the unread \
+             ones). Left out: any messages and broadcasts read before"
                 .to_string(),
         ]
     );
@@ -10570,14 +10587,14 @@ fn a_used_up_limit_says_how_it_was_split() {
     assert_eq!(
         headers(&cut, Some(2)),
         vec![
-            "From your operator, the Steward: 1 message unread until now; the \
-             3 you have read before are left out (by your limit of 2, of \
-             which 1 went to the unread one and 1 to an unread message below)"
+            "From your operator, the Steward: 1 message unread until now (of \
+             your limit of 2, 1 went to the unread one and 1 to an unread \
+             message below). Left out: the 3 you have read before"
                 .to_string(),
             "Messages and broadcasts: 5 unread until now, of which these are 1 \
              (by your limit of 2, of which your operator's message above took \
-             1; the rest stay unread for a later read); any read before are \
-             left out, by the same limit"
+             1; the rest stay unread for a later read). Left out: any \
+             messages and broadcasts read before"
                 .to_string(),
         ]
     );
@@ -10816,7 +10833,7 @@ fn read_before_totals_say_how_many_of_how_many() {
         msgs(&social, Some(5)),
         "Messages and broadcasts: none unread; the latest 2 of the 6 messages \
          you have read before are listed (of your limit of 5, 3 went to your \
-         operator's messages above and 2 to these). Left out: 4 other \
+         operator's messages above and 2 to these). Left out: 4 older \
          messages and the 2 broadcasts you have read before"
     );
     // A limit that took everything there was: nothing said left out
@@ -10836,9 +10853,9 @@ fn read_before_totals_say_how_many_of_how_many() {
     spent.operator_read = 1;
     assert_eq!(
         msgs(&spent, Some(3)),
-        "Messages and broadcasts: 2 unread until now; the 3 messages and the \
-         1 broadcast you have read before are left out (of your limit of 3, \
-         1 went to your operator's message above and 2 to the unread ones)"
+        "Messages and broadcasts: 2 unread until now (of your limit of 3, 1 \
+         went to your operator's message above and 2 to the unread ones). \
+         Left out: the 3 messages and the 1 broadcast you have read before"
     );
     // Nothing listed, nothing read before: said as such
     let mut empty = inbox(Vec::new(), 0, 0);
@@ -10854,9 +10871,9 @@ fn read_before_totals_say_how_many_of_how_many() {
     filled.operator_read = 1;
     assert_eq!(
         msgs(&filled, Some(1)),
-        "Messages and broadcasts: none unread (the 4 messages you have read \
-         before are left out: your limit of 1 went to your operator's \
-         messages)."
+        "Messages and broadcasts: none unread (your limit of 1 went to your \
+         operator's messages). Left out: the 4 messages you have read \
+         before, and any broadcasts from before you joined."
     );
     // The operator's: a retracted one a read took, which a limit then left
     // out, is said (beta-memory)
@@ -10870,8 +10887,8 @@ fn read_before_totals_say_how_many_of_how_many() {
     assert_eq!(
         op(&retracted, Some(2)),
         "From your operator, the Steward: none unread; both you have read \
-         before are listed; 1 retracted before you read it is left out (by \
-         your limit of 2)"
+         before are listed (of your limit of 2, 2 went to these). Left out: \
+         1 retracted before you read it"
     );
     // Listed, it is not said left out; one more than listed is
     let mut some = inbox(Vec::new(), 0, 0);
@@ -10882,9 +10899,9 @@ fn read_before_totals_say_how_many_of_how_many() {
     assert_eq!(
         op(&some, Some(2)),
         "From your operator, the Steward: none unread; 1 retracted before you \
-         read it is listed; the 1 you have read before is listed; 1 more \
-         retracted before you read it is left out (by your limit of 2, of \
-         which 1 went to the retracted one)"
+         read it is listed; the 1 you have read before is listed (of your \
+         limit of 2, 1 went to the retracted one and 1 to this one). Left \
+         out: 1 more retracted before you read it"
     );
     // By the cap, not the limit
     let mut capped = inbox(Vec::new(), 0, 0);
@@ -10894,7 +10911,219 @@ fn read_before_totals_say_how_many_of_how_many() {
     assert_eq!(
         op(&capped, None),
         "From your operator, the Steward: none unread; all 3 you have read \
-         before are listed; 1 retracted before you read it is left out (a \
-         read lists up to 3 read before)"
+         before are listed (a read lists up to 3 read before). Left out: 1 \
+         retracted before you read it"
+    );
+}
+
+/// The whole matrix of a limit (none, 0, 1, 2, 5) over an inbox with the
+/// operator's unread, read and retracted messages, unread messages and
+/// broadcasts, one from before the agent joined, and many read before,
+/// each read as the server would answer it (its spending order and caps,
+/// `messages::service::read_messages`). Every header says what is left out
+/// in one form, a "Left out:" sentence, never inline (beta round 14:
+/// limit=2 with 1 unread still said "… are left out (of your limit of 2,
+/// …)", limit=1 too, and the operator's line said nothing of what it left
+/// out)
+#[test]
+fn every_limit_says_what_it_left_out_in_one_form() {
+    use crate::operator::OperatorMessageContent as C;
+    use crate::responses::{InboxResponse, InboxState as S};
+    let (base, _) = inbox_with("hi");
+    let dm = |state| {
+        let mut m = base.messages[0].clone();
+        m.id = crate::ids::MessageId::new();
+        m.state = Some(state);
+        m
+    };
+    let broadcast = |state| {
+        let mut m = dm(state);
+        m.recipient_id = None;
+        m.kind = Some(crate::enums::MessageKind::Broadcast);
+        m
+    };
+    let text = || C::Text { body: "x".into() };
+    // What there is, in the order the server spends a limit: the
+    // operator's unread (one retracted), the unread broadcasts (one from
+    // before the agent joined), the unread DMs, the operator's read before
+    // (one retracted after a read took it, the oldest), the DMs and the
+    // broadcasts read before
+    let operator_unread = [
+        operator_message(S::Unread, text()),
+        operator_message(S::Unread, C::Retracted),
+    ];
+    let operator_read: Vec<_> = (0..3)
+        .map(|_| operator_message(S::Read, text()))
+        .chain([operator_message(S::Read, C::Retracted)])
+        .collect();
+    let read = |limit: Option<u32>| {
+        let mut left = limit.map_or(usize::MAX, |n| n.max(1) as usize);
+        let mut take = |n: usize, cap: usize| {
+            let k = n.min(cap).min(left);
+            left -= k;
+            k
+        };
+        let max = |n: u32| n as usize;
+        let ops = take(2, usize::MAX);
+        let broadcasts = take(2, max(InboxResponse::UNREAD_MAX));
+        let dms = take(1, max(InboxResponse::UNREAD_MAX));
+        let op_read = take(4, max(InboxResponse::OPERATOR_RECENT_READ_MAX));
+        let dms_read = take(46, max(InboxResponse::RECENT_READ_MAX));
+        let broadcasts_read =
+            take(5, max(InboxResponse::RECENT_BROADCASTS_MAX));
+        let mut messages = Vec::new();
+        messages.extend(
+            [broadcast(S::BeforeJoined), broadcast(S::Unread)]
+                .into_iter()
+                .take(broadcasts),
+        );
+        messages.extend((0..dms).map(|_| dm(S::Unread)));
+        messages.extend((0..dms_read).map(|_| dm(S::Read)));
+        messages.extend((0..broadcasts_read).map(|_| broadcast(S::Read)));
+        InboxResponse {
+            messages,
+            operator_messages: operator_unread[..ops]
+                .iter()
+                .chain(&operator_read[..op_read])
+                .cloned()
+                .collect(),
+            unread: 2,
+            operator_unread: 2,
+            operator_read: 3,
+            operator_retracted_read: Some(1),
+            read_messages: Some(46),
+            read_broadcasts: Some(5),
+            operator_replies: Vec::new(),
+            operator_replies_total: None,
+            operator_disclosure: None,
+            warning: None,
+            index: None,
+        }
+    };
+    for limit in [None, Some(0), Some(1), Some(2), Some(5)] {
+        let inbox = read(limit);
+        let out = super::prompt::format_inbox(
+            &inbox,
+            &super::ShownOnce::default(),
+            limit,
+        );
+        let headers: Vec<String> = out
+            .lines()
+            .filter(|l| {
+                l.starts_with("From your operator")
+                    || l.starts_with("Messages and broadcasts")
+            })
+            .map(first_sentence_with_left_out)
+            .collect();
+        println!("limit {limit:?}:\n{}\n", headers.join("\n"));
+        assert_eq!(headers.len(), 2, "{out}");
+        for h in &headers {
+            assert!(!h.contains("left out"), "inline: {h}");
+            assert!(!h.contains("same limit"), "{h}");
+            assert!(h.matches("Left out:").count() <= 1, "{h}");
+        }
+        // The operator's retracted one read before is left out by the
+        // operator cap or by the limit: said either way
+        assert!(
+            headers[0].contains("Left out: ")
+                && headers[0].contains("retracted before you read it"),
+            "{limit:?}: {}",
+            headers[0]
+        );
+        // Any limit leaves read ones out (46 + 5 > what any lists): said
+        if limit.is_some() {
+            assert!(headers[1].contains(". Left out: "), "{}", headers[1]);
+        }
+    }
+    // The exact sentences of two of them, beta-social's limit=2 among them
+    let say = |limit| {
+        super::prompt::format_inbox(
+            &read(limit),
+            &super::ShownOnce::default(),
+            limit,
+        )
+        .lines()
+        .filter(|l| {
+            l.starts_with("From your operator")
+                || l.starts_with("Messages and broadcasts")
+        })
+        .map(first_sentence_with_left_out)
+        .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        say(None)[0],
+        "From your operator, the Steward: 1 message unread until now; 1 \
+         retracted before you read it is listed; all 3 you have read before \
+         are listed (a read lists up to 3 read before). Left out: 1 more \
+         retracted before you read it"
+    );
+    assert_eq!(
+        say(Some(2)),
+        vec![
+            "From your operator, the Steward: 1 message unread until now; 1 \
+             retracted before you read it is listed (of your limit of 2, 1 \
+             went to the unread one and 1 to the retracted one). Left out: \
+             the 3 you have read before and 1 more retracted before you read \
+             it"
+            .to_string(),
+            "Messages and broadcasts: 2 unread ones left for your next read: \
+             your limit of 2 went to your operator's messages. Left out: the \
+             46 messages and the 5 broadcasts you have read before, and any \
+             broadcasts from before you joined."
+                .to_string(),
+        ]
+    );
+    assert_eq!(
+        say(Some(5))[1],
+        "Messages and broadcasts: 2 unread until now; also 1 broadcast from \
+         before you joined, listed for the record and not counted as unread \
+         (of your limit of 5, 2 went to your operator's messages above, 2 to \
+         the unread ones and 1 to the broadcast from before you joined). Left \
+         out: the 46 messages and the 5 broadcasts you have read before"
+    );
+    // beta-social's: limit=2, an operator's message read before and 1
+    // unread DM, 46 messages and 5 broadcasts read before
+    let social = InboxResponse {
+        messages: vec![dm(S::Unread)],
+        operator_messages: vec![operator_message(S::Read, text())],
+        unread: 1,
+        operator_unread: 0,
+        operator_read: 3,
+        operator_retracted_read: Some(0),
+        read_messages: Some(46),
+        read_broadcasts: Some(5),
+        operator_replies: Vec::new(),
+        operator_replies_total: None,
+        operator_disclosure: None,
+        warning: None,
+        index: None,
+    };
+    let out = super::prompt::format_inbox(
+        &social,
+        &super::ShownOnce::default(),
+        Some(2),
+    );
+    let headers: Vec<String> = out
+        .lines()
+        .filter(|l| {
+            l.starts_with("From your operator")
+                || l.starts_with("Messages and broadcasts")
+        })
+        .map(first_sentence_with_left_out)
+        .collect();
+    assert_eq!(
+        headers,
+        vec![
+            "From your operator, the Steward: none unread; the latest of the \
+             3 you have read before is listed (of your limit of 2, 1 went to \
+             an unread message below and 1 to this one). Left out: 2 older \
+             ones you have read before"
+                .to_string(),
+            "Messages and broadcasts: 1 unread until now (of your limit of 2, \
+             1 went to your operator's message above and 1 to the unread \
+             one). Left out: the 46 messages and the 5 broadcasts you have \
+             read before"
+                .to_string(),
+        ]
     );
 }

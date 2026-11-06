@@ -450,9 +450,9 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
         Some(ContentRef::Content(_) | ContentRef::ContentPrefix(_))
     ) {
         return format!(
-            "For a Council decision, read one deliberation round \
-             (council_round=<n>) or \
-             detail=\"summary\"; for a governance entry's attachments, one \
+            "For a Council decision, read detail=\"summary\", which gives each \
+             deliberation round's read size, or one round alone \
+             (council_round=<n>); for a governance entry's attachments, one \
              at a time (attachment=<name>). {}",
             fallbacks(false)
         );
@@ -935,7 +935,10 @@ mod tests {
             .content
             .to_string();
         assert!(
-            note.contains("read one deliberation round (council_round=<n>)"),
+            note.contains(
+                "read detail=\"summary\", which gives each deliberation \
+                 round's read size, or one round alone (council_round=<n>)"
+            ),
             "{note}"
         );
         assert!(!note.contains("would fit:"), "{note}");

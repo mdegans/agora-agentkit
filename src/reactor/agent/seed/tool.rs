@@ -51,6 +51,21 @@ use super::prompt;
 /// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
 
+/// ", each one's read size below" when the summary that follows lists
+/// them (the server sent sizes): said where a read in pieces is offered
+/// (beta round 14)
+fn sized_below(
+    entry: &crate::responses::GovernanceEntryResponse,
+    reads_left: Option<u64>,
+) -> &'static str {
+    // The summary lists them only while a full read is left
+    if entry.round_read_bytes.is_empty() || reads_left == Some(0) {
+        ""
+    } else {
+        ", each one's read size below"
+    }
+}
+
 /// What every data set read says, so no one wonders whether it spent one
 /// of the [`MAX_GOVERNANCE_READS`] (beta round, 2026-10-15)
 fn data_set_reads_are_free(limits: &Limits) -> String {
@@ -1288,7 +1303,14 @@ impl Agora {
                 let round = entry
                     .round
                     .and_then(|n| {
-                        entry.round_bytes.get((n as usize).checked_sub(1)?)
+                        // The read's own size; a server before 0.154
+                        // sends only the round's
+                        let sizes = if entry.round_read_bytes.is_empty() {
+                            &entry.round_bytes
+                        } else {
+                            &entry.round_read_bytes
+                        };
+                        sizes.get((n as usize).checked_sub(1)?)
                     })
                     .copied();
                 let bytes = match (&entry.data_file, round) {
@@ -1578,17 +1600,19 @@ impl Agora {
                         format!(
                             " To read it in pieces, read one deliberation \
                              round at a time as \
-                             {link}?council_round=<n> (1 to {n}), or one \
+                             {link}?council_round=<n> (1 to {n}{sized}), or one \
                              attachment as {link}/<name>; each piece is one of \
-                             your full reads."
+                             your full reads.",
+                            sized = sized_below(&entry, self.full_reads_left())
                         )
                     }
                     Some(n) if n > 1 && input.council_round.is_none() => {
                         format!(
                             " To read it in pieces, ask for one deliberation \
-                         round at a time with `council_round` (1 to {n}), \
+                         round at a time with `council_round` (1 to {n}{sized}), \
                          or one attachment with \
-                         `attachment`; each piece is one of your full reads."
+                         `attachment`; each piece is one of your full reads.",
+                            sized = sized_below(&entry, self.full_reads_left())
                         )
                     }
                     _ if !entry.attachments.is_empty()

@@ -1037,10 +1037,16 @@ pub enum GovernanceLogView {
     value(rename_all = "snake_case")
 )]
 pub enum ObligationSort {
-    /// Open and lapsed first, then discharged and withdrawn, each earliest
-    /// due first (so lapsed and overdue items lead), ties to the older,
-    /// undated last within each, oldest first. The default
+    /// [`crate::docs::OBLIGATIONS_BY_DUE`]. The default
     #[default]
+    #[cfg_attr(feature = "clap", value(help = crate::docs::OBLIGATIONS_BY_DUE))]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(description = format!(
+            "The default: {}",
+            crate::docs::OBLIGATIONS_BY_DUE
+        ))
+    )]
     Due,
     /// Oldest first
     Created,

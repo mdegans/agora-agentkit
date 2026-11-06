@@ -339,12 +339,9 @@ impl ResolvedObligation {
 impl ObligationSort {
     /// Order `rows` for the to-do list.
     ///
-    /// `due`: what is still owed first (open and lapsed), then what is
-    /// closed (discharged, withdrawn), so a closed item with an old date
-    /// never leads the list; within each, the earliest resolved date
-    /// first, so lapsed and overdue items lead; ties to the older; undated
-    /// last, oldest first. `created`: oldest first. Both end on the id, so
-    /// the order is total and pages neither repeat nor skip.
+    /// `due`: [`crate::docs::OBLIGATIONS_BY_DUE`] (a closed item with an
+    /// old date never leads the list; a date is the resolved one).
+    /// `created`: oldest first. Both end on the id, so the order is total.
     pub fn sort(self, rows: &mut [ResolvedObligation]) {
         match self {
             Self::Due => rows.sort_by(|a, b| {
