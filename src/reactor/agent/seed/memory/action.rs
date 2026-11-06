@@ -113,22 +113,44 @@ impl MemoryInput {
                 action = %super::id::echo(&action.to_string()),
                 "memory tool call without `request`, read as its request"
             );
-            return serde_json::from_value(input).map_err(|e| {
-                fail(format!(
-                    "The request could not be read: {}.",
-                    super::id::echo(&e.to_string())
-                ))
+            return read::<MemoryAction>(&input).map_err(|e| {
+                fail(format!("The request could not be read: {e}."))
             });
         }
-        serde_json::from_value::<Self>(input)
+        read::<Self>(&input)
             .map(|i| i.request)
-            .map_err(|e| {
-                fail(format!(
-                    "The call could not be read: {}.",
-                    super::id::echo(&e.to_string())
-                ))
-            })
+            .map_err(|e| fail(format!("The call could not be read: {e}.")))
     }
+}
+
+/// Read `input` as a `T`, or say why: an error echoes the agent's input
+/// only as [`echo`](super::id::echo) cuts it, and keeps all of its own
+/// words. The error is serde's for a copy of `input` with every string and
+/// key cut; that copy fails the same way, since a cut string ends in `…`
+fn read<T: serde::de::DeserializeOwned>(
+    input: &serde_json::Value,
+) -> Result<T, String> {
+    use serde_json::Value;
+    fn shortened(v: &Value) -> Value {
+        match v {
+            Value::String(s) => Value::String(super::id::echo(s)),
+            Value::Array(items) => {
+                Value::Array(items.iter().map(shortened).collect())
+            }
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (super::id::echo(k), shortened(v)))
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    T::deserialize(input).map_err(|e| {
+        T::deserialize(&shortened(input))
+            .err()
+            .unwrap_or(e)
+            .to_string()
+    })
 }
 
 /// One request to the `memory` tool, by its `action`
@@ -403,6 +425,38 @@ mod tests {
             let err = MemoryInput::parse(bad.clone()).unwrap_err().to_string();
             assert!(err.ends_with(CALL_SHAPE), "{bad}: {err}");
         }
+    }
+
+    /// An error cuts the agent's input, never its own guidance (beta
+    /// round 16: "give a memory id (mem- and hex dig…")
+    #[test]
+    fn errors_cut_the_input_not_the_guidance() {
+        let huge = "x".repeat(100_000);
+        let err = MemoryInput::parse(
+            json!({"request": {"action": "show", "id": huge}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(
+                "is not a memory id or a head: give a memory id (mem- and \
+                 hex digits, as in your Memory heading) or a head, at least \
+                 6 hex digits of either"
+            ),
+            "{err}"
+        );
+        assert!(err.ends_with(CALL_SHAPE), "{err}");
+        let err = MemoryInput::parse(json!({"request": {"action": huge}}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected one of"), "{err}");
+        let err = MemoryInput::parse(
+            json!({"request": {"action": "log", (huge.clone()): 1}}),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected `before` or `limit`"), "{err}");
+        assert!(err.len() < 1_000, "{}", err.len());
     }
 
     /// An error echoes a bounded part of a huge input
