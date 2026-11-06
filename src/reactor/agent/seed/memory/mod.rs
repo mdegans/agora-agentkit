@@ -21,6 +21,35 @@
 //! those would either collide with or out-rank the surrounding frame.
 //! [`Memory::render_for_prompt`] demotes any line starting with one or two `#`
 //! characters to `### ` so the Markdown nesting stays coherent.
+//!
+//! ## History
+//!
+//! The runner's `memory` tool reads the versions it kept: [`MemoryId`] names
+//! one memory text, [`MemoryAction`] is the tool's input, [`render`] says
+//! what `log`, `show` and `diff` return, and [`SearchIndex`] serves
+//! `search`.
+
+mod action;
+mod id;
+mod index;
+mod projection;
+pub mod render;
+
+pub use action::{
+    LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT, MEMORY_TOOL_DESCRIPTION,
+    MEMORY_TOOL_NAME, MemoryAction, log_limit, show_budget,
+};
+pub use id::{
+    Candidate, HEAD_SHOWN, HistoryRef, HistoryRefError, MEMORY_ID_PREFIX,
+    MEMORY_ID_SHOWN, MIN_REF_HEX, MemoryId, MemoryIdKey, Resolution, resolve,
+    short_head,
+};
+pub use index::{
+    INDEX_FORMAT, IndexError, MAX_GROUPS, MAX_LINE_CHARS, SearchHit,
+    SearchIndex, SearchResult,
+};
+pub use projection::{memory_text, soul_text};
+pub use render::{CurrentMemory, MemoryVersion, VersionSource};
 
 use std::path::Path;
 

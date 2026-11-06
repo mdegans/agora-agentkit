@@ -293,6 +293,27 @@ async fn on_init_seats_system_intro_and_flat_tools() {
     assert_eq!(ledger.titles_seen.len(), 1);
 }
 
+/// The runner's key names the memory in its heading, and the gauge it
+/// charges the `memory` tool against is the session's
+#[tokio::test]
+async fn the_memory_id_key_names_the_memory_in_its_heading() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let mut agent = agent(&server, quiet_config());
+    assert_eq!(agent.memory_id(), None);
+    let key = MemoryIdKey::generate();
+    agent.set_memory_id_key(&key);
+    let id = MemoryId::of(&key, agent.id, &agent.state.memory.content);
+    assert_eq!(agent.memory_id(), Some(id));
+    agent.on_init().await.unwrap();
+    let intro = transcript(&agent);
+    assert!(intro.contains(&format!("## Your Memory ({id})")), "{intro}");
+
+    let held = agent.context_gauge().get();
+    agent.context_gauge().add(10);
+    assert_eq!(agent.context.get(), held + 10);
+}
+
 /// The get_proposals wire description is single-sourced: operation prose
 /// from `GET_PROPOSALS_DOC` plus the response schema rendered from
 /// `ProposalResponse`'s doc comments — the only channel response-field
