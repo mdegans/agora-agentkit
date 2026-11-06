@@ -86,17 +86,33 @@ impl MemoryInput {
         let fail =
             |what: String| MemoryInputError(format!("{what} {CALL_SHAPE}"));
         let map = input.as_object();
-        if map.is_some_and(|m| {
-            !m.contains_key("request")
-                && (m.contains_key("command") || m.contains_key("path"))
-        }) {
+        // Anthropic's memory tool's shape, at the root or in `request`
+        let file_shaped = |v: Option<&serde_json::Value>| {
+            v.and_then(serde_json::Value::as_object).is_some_and(|m| {
+                !m.contains_key("action")
+                    && (m.contains_key("command") || m.contains_key("path"))
+            })
+        };
+        if file_shaped(Some(&input))
+            || file_shaped(map.and_then(|m| m.get("request")))
+        {
             return Err(fail(
                 "This memory tool reads your own memory's history; it has \
                  no files, paths or `command`."
                     .into(),
             ));
         }
-        if map.is_some_and(|m| m.contains_key("action")) {
+        if let Some(action) = map
+            .filter(|m| !m.contains_key("request"))
+            .and_then(|m| m.get("action"))
+        {
+            // Counted, to see how often a model drops the wrapper
+            tracing::info!(
+                target: "forgiving_coercion",
+                coercion = "memory_bare_request",
+                action = %action,
+                "memory tool call without `request`, read as its request"
+            );
             return serde_json::from_value(input).map_err(|e| {
                 fail(format!("The request could not be read: {e}."))
             });
@@ -109,7 +125,7 @@ impl MemoryInput {
 
 /// One request to the `memory` tool, by its `action`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 #[schemars(inline)]
 pub enum MemoryAction {
     /// List your memory's versions, newest first: date, memory id, head,
@@ -359,6 +375,7 @@ mod tests {
         assert_eq!(MemoryInput::parse(json!({"action": "log"})).unwrap(), log);
         for shaped in [
             json!({"command": "view", "path": "/memories"}),
+            json!({"request": {"command": "view", "path": "/memories"}}),
             json!({"command": "create", "path": "/memories/a.md", "file_text": "x"}),
         ] {
             let err = MemoryInput::parse(shaped).unwrap_err().to_string();
@@ -369,6 +386,10 @@ mod tests {
             json!({"request": {"action": "rm"}}),
             json!({"action": "show"}),
             json!({"request": {"action": "log"}, "extra": 1}),
+            // A misspelled field is refused, not dropped
+            json!({"request": {"action": "log", "befor": "mem-abcdef"}}),
+            json!({"action": "log", "befor": "mem-abcdef"}),
+            json!({"request": {"action": "show", "id": "mem-abcdef", "budgt": 4096}}),
             json!("log"),
         ] {
             let err = MemoryInput::parse(bad.clone()).unwrap_err().to_string();
