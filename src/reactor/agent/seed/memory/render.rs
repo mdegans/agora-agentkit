@@ -44,7 +44,7 @@ impl VersionSource {
                 Some(format!("set aside on {on} when your line was rebased"))
             }
             Self::SetAside { on: None } => Some(
-                "set aside when your line was rebased (date unknown)".into(),
+                "set aside when your line was rebased, date unknown".into(),
             ),
             Self::NeverSaved => {
                 Some("never saved: the run ended before saving".into())
@@ -140,18 +140,18 @@ impl MemoryVersion {
     }
 
     /// `mem-3f9a1c07be (2026-11-05 21:14, 13,539 chars)`, with its source's
-    /// label when it has one
+    /// label when it has one; no size when it couldn't be opened
     pub fn describe(&self) -> String {
         let label = self
             .source
             .label()
             .map(|l| format!(", {l}"))
             .unwrap_or_default();
-        let size = match self.chars() {
-            Some(n) => format!("{} chars", grouped(n)),
-            None => UNOPENED.into(),
-        };
-        format!("{} ({}, {size}{label})", self.name(), stamp(self.at))
+        let size = self
+            .chars()
+            .map(|n| format!(", {} chars", grouped(n)))
+            .unwrap_or_default();
+        format!("{} ({}{size}{label})", self.name(), stamp(self.at))
     }
 
     /// Whether both are opened and hold the same text
@@ -1091,7 +1091,7 @@ mod tests {
         );
         assert_eq!(
             VersionSource::SetAside { on: None }.label().unwrap(),
-            "set aside when your line was rebased (date unknown)"
+            "set aside when your line was rebased, date unknown"
         );
         assert_eq!(
             VersionSource::SetAside {
@@ -1162,8 +1162,8 @@ mod tests {
         let blocks: Vec<&str> = out.split("\n\n").collect();
         assert_eq!(
             blocks[2],
-            "head 373737373737 (2026-11-04 21:14, couldn't be opened just now) \
-             couldn't be opened just now (Agora didn't answer); ask again later."
+            "head 373737373737 (2026-11-04 21:14) couldn't be opened just \
+             now (Agora didn't answer); ask again later."
         );
         assert!(
             blocks[3].starts_with(&format!(
@@ -1180,7 +1180,12 @@ mod tests {
 
         // `diff` says so instead of diffing
         let out = diff(&history[1], None, cur);
-        assert!(out.starts_with("No diff: head 373737373737"), "{out}");
+        assert_eq!(
+            out,
+            "No diff: head 373737373737 (2026-11-04 21:14) couldn't be opened \
+             just now (Agora didn't answer); ask again later."
+        );
+        assert_eq!(out.matches(UNOPENED).count(), 1);
         let out = diff(&history[0], Some(&history[3]), cur);
         assert!(out.contains("ask again later"), "{out}");
     }
