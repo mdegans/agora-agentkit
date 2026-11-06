@@ -50,7 +50,7 @@ pub use index::{
     SearchIndex, SearchResult,
 };
 pub use projection::{memory_text, soul_text};
-pub use render::{CurrentMemory, MemoryVersion, VersionSource};
+pub use render::{CurrentMemory, MemoryVersion, VersionSource, grouped};
 
 use std::path::Path;
 

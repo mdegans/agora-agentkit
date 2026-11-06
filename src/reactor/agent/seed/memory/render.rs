@@ -8,6 +8,7 @@ use super::id::{
 };
 use crate::govlog::Sha256Hex;
 use crate::ids::GovernanceLogId;
+use crate::requests::GetContentInput;
 use crate::text::{change_counts, diff_units, line_diff};
 
 /// Where a version of an agent's memory was found
@@ -132,7 +133,7 @@ fn stamp(at: DateTime<Utc>) -> String {
 }
 
 /// `13,539`
-pub(crate) fn grouped(n: usize) -> String {
+pub fn grouped(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -418,9 +419,18 @@ pub fn show(
     }
 
     // The most blocks that fit with the footer listing the rest
+    let at_most = budget >= GetContentInput::MAX_COMMENT_BUDGET as usize;
     let footer = |left: &[usize]| -> String {
         match left {
             [] => String::new(),
+            [i] if blocks.len() == 1 && at_most => format!(
+                "{} takes {} bytes to show, more than the largest budget \
+                 ({} bytes), so it can't be shown whole. Compare it with a \
+                 version near it with `diff` instead.",
+                history[*i].describe(),
+                grouped(blocks[0].1.len()),
+                grouped(budget)
+            ),
             [i] if blocks.len() == 1 => format!(
                 "{} takes {} bytes to show, more than your budget of {} \
                  bytes; ask again with a larger budget.",
@@ -431,8 +441,9 @@ pub fn show(
             left => {
                 let mut f = format!(
                     "Not shown, past your budget of {} bytes; ask for \
-                     fewer, or a larger budget:",
-                    grouped(budget)
+                     fewer{}:",
+                    grouped(budget),
+                    if at_most { "" } else { ", or a larger budget" }
                 );
                 for i in left {
                     f.push_str("\n- ");
@@ -824,6 +835,22 @@ mod tests {
         let out = show(&history, &[2], now, 10);
         assert!(out.contains("more than your budget of 10 bytes; ask again with a larger budget"), "{out}");
         assert!(!out.contains("fewer"), "{out}");
+
+        // At the largest budget, never "a larger budget"
+        let huge: String =
+            "x".repeat(GetContentInput::MAX_COMMENT_BUDGET as usize + 1);
+        let big = [version(7, 1, &huge), version(8, 1, &huge)];
+        let max = GetContentInput::MAX_COMMENT_BUDGET as usize;
+        let out = show(&big, &[0], current(9, "", &big), max);
+        assert!(out.contains("can't be shown whole"), "{}", &out[..200]);
+        assert!(!out.contains("larger budget"));
+        let out = show(&big, &[0, 1], current(9, "", &big), max);
+        assert!(
+            out.contains("ask for fewer:"),
+            "{}",
+            &out[..200.min(out.len())]
+        );
+        assert!(!out.contains("larger budget"));
     }
 
     #[test]
