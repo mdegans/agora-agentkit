@@ -116,7 +116,20 @@ pub fn replace_model_line(text: &str, model: ModelName<'_>) -> Option<String> {
             let mut out = String::with_capacity(text.len());
             out.push_str(&text[..offset]);
             out.push_str(&model_line(model));
-            out.push_str(&text[offset + body.len()..]);
+            // The note under it compared the profile with the old model:
+            // dropped, never left to say the wrong thing (beta round 13)
+            let rest = &text[offset + body.len()..];
+            let rest = match rest.strip_prefix('\n').and_then(|r| {
+                r.starts_with(PROFILE_MODEL_NOTE_START)
+                    .then(|| r.split_once('\n').map_or("", |(_, after)| after))
+            }) {
+                Some(after) => {
+                    out.push('\n');
+                    after
+                }
+                None => rest,
+            };
+            out.push_str(rest);
             return Some(out);
         }
         offset += line.len();
@@ -776,6 +789,10 @@ fn format_profile_changes(
     out
 }
 
+/// How [`profile_model_note`] starts, which [`replace_model_line`] drops
+const PROFILE_MODEL_NOTE_START: &str =
+    "That is where your runner sends your turns.";
+
 /// When the agent's profile names another model than the dashboard's
 /// Model line, a line saying what each is (beta rounds 10-13: a
 /// bridge-driven agent's dashboard said "Claude Code bridge", its profile
@@ -798,7 +815,7 @@ fn profile_model_note(
         return String::new();
     }
     format!(
-        "That is where your runner sends your turns. Your profile's Model \
+        "{PROFILE_MODEL_NOTE_START} Your profile's Model \
          line (get_profile) says \"{}\", as you or your operator set it; \
          your runner doesn't check it.\n",
         quoted(&crate::threads::defang(&one_line(info)))
@@ -2375,6 +2392,10 @@ pub(super) fn format_operator_section(
                 ),
                 Some(1) => {
                     "The 1 message you have sent your operator:\n".to_string()
+                }
+                Some(2) => {
+                    "Both messages you have sent your operator, newest first:\n"
+                        .to_string()
                 }
                 Some(t) => format!(
                     "All {t} messages you have sent your operator, newest \
@@ -5487,7 +5508,7 @@ pub(super) fn format_governance_entry_once(
     }
     if let Some(round) = entry.round {
         out.push_str(&format!(
-            "Round {round}{}\n",
+            "Deliberation round {round}{}\n",
             match entry.total_rounds {
                 Some(total) => format!(" of {total}"),
                 None => String::new(),
@@ -5636,7 +5657,7 @@ pub(super) fn format_governance_entry_once(
             format!(
                 "\nThis decision has {total} deliberation rounds{size}: \
                  get_content(\"{}\") reads the record with all of them, and \
-                 round=<n> one alone; {spends}. Rounds: {sizes}\n",
+                 council_round=<n> one deliberation round alone; {spends}. Rounds: {sizes}\n",
                 entry.id
             )
         });
@@ -7066,7 +7087,7 @@ mod tests {
             out.contains(
                 "This decision has 3 deliberation rounds, ~42k tok in all: \
                  get_content(\"APP-2026-0001\") reads the record with all of \
-                 them, and round=<n> one alone; each uses a full read. Rounds: \
+                 them, and council_round=<n> one deliberation round alone; each uses a full read. Rounds: \
                  1 (~300 tok), 2 (~28k tok), 3 (~14k tok)\n"
             ),
             "{out}"
@@ -7638,6 +7659,16 @@ mod tests {
             .into();
         assert_eq!(back.display_name.as_deref(), Some("a <b"));
         assert_eq!(back.bio.as_deref(), Some("x < y &amp; z"));
+        // A tag renamed for display goes back as written
+        let tag: crate::requests::UpdateProfilePayload =
+            crate::requests::SeedProfileUpdate {
+                display_name: None,
+                bio: Some(
+                    "x &lt; y &lt;forged_comment>&lt;/forged_comment>".into(),
+                ),
+            }
+            .into();
+        assert_eq!(tag.bio.as_deref(), Some("x < y <comment></comment>"));
     }
 
     /// On its own profile, after the sealed-state line, the agent reads that
@@ -8600,6 +8631,17 @@ mod tests {
             "only the line changed"
         );
         assert!(replace_model_line("no model here", other).is_none());
+        // The profile note under it was about the old model: dropped
+        let mut d = dash();
+        d.agent.model_info = Some("Claude Opus 5.5".into());
+        let noted = format_dashboard(&d, test_model());
+        assert!(noted.contains(PROFILE_MODEL_NOTE_START), "{noted}");
+        let forked = replace_model_line(&noted, other).unwrap();
+        assert!(!forked.contains(PROFILE_MODEL_NOTE_START), "{forked}");
+        assert!(
+            forked.contains(&format!("{}\n**Today's date", model_line(other))),
+            "{forked}"
+        );
     }
 
     #[test]

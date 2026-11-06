@@ -9711,7 +9711,7 @@ fn the_agents_own_replies_are_listed() {
         ),
         (
             2,
-            "All 2 messages you have sent your operator, newest first:\n",
+            "Both messages you have sent your operator, newest first:\n",
         ),
     ] {
         inbox.operator_replies_total = Some(total);

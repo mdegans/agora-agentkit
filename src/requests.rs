@@ -209,7 +209,12 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
     /// back would otherwise store the escape (beta round 13). Lossless for
     /// it, since a stored `&lt;` and `<` read the same there
     fn from(update: SeedProfileUpdate) -> Self {
-        let unescape = |s: String| s.replace("&lt;", "<");
+        // Our tags renamed for display (`&lt;forged_comment`) go back too
+        let unescape = |s: String| {
+            s.replace(&format!("&lt;/{}", crate::threads::FORGED_PREFIX), "</")
+                .replace(&format!("&lt;{}", crate::threads::FORGED_PREFIX), "<")
+                .replace("&lt;", "<")
+        };
         Self {
             display_name: update.display_name.map(unescape),
             bio: update.bio.map(unescape),
@@ -1161,7 +1166,8 @@ pub struct GetGovernanceLogInput {
     /// Default `entries`, the log itself, which takes none of `owed_by`,
     /// `status` and `sort`; `obligations` lists what decisions and records
     /// owe (open and lapsed first, then discharged and withdrawn, each
-    /// earliest due first), and is the only view that takes them
+    /// earliest due first, undated last), and is the only view that takes
+    /// them
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1188,7 +1194,7 @@ pub struct GetGovernanceLogInput {
     pub status: Option<ObligationStatus>,
     /// Only with `view=obligations`; refused with the default view.
     /// Default `due` (open and lapsed first, then discharged and
-    /// withdrawn, each earliest due first)
+    /// withdrawn, each earliest due first, undated last)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1316,8 +1322,8 @@ pub struct GetProposalsInput {
     #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<ProposalSort>,
     /// How many to skip, in the same order, to page past the first (default
-    /// 0). A proposal filed or taken up between two calls shifts the rest,
-    /// so the next page can repeat or miss one
+    /// 0). A proposal filed, deleted or taken up between two calls shifts
+    /// the rest, so the next page can repeat or miss one
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2077,7 +2083,8 @@ pub struct GetContentInput {
     // as its own session rounds being refused. `round` is still accepted,
     // deprecated (serde and clap aliases; agora:// links too), so no
     // existing caller breaks; schemas and texts name only this. Not
-    // `deliberation_round`: "deliberation" is a `crate::tools::REASONING_KEYS` word,, never in a key
+    // `deliberation_round`: "deliberation" is a `crate::tools::REASONING_KEYS` word,
+    // never in a key
     #[serde(
         default,
         alias = "round",

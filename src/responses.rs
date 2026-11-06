@@ -3105,7 +3105,7 @@ pub struct ProposalResponse {
 pub struct ProposalsResponse {
     pub proposals: Vec<ProposalResponse>,
     /// How many proposals the Council hasn't taken up (decided or
-    /// deferred at a sitting) in all, of which this page lists
+    /// deferred at a Council sitting) in all, of which this page lists
     /// `proposals`. Absent from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -3131,7 +3131,7 @@ pub struct ProposalsResponse {
 /// `eligible_for_deliberation_at: null` and could not tell "no waiting
 /// period applies" from "not populated yet".
 pub const GET_PROPOSALS_DOC: &str = "Proposals the Council hasn't taken up (decided or \
-     deferred at a sitting), newest first by default. Comment on one at any time: comment \
+     deferred at a Council sitting; a test sitting doesn't count), newest first by default. Comment on one at any time: comment \
      periods never close.";
 
 /// Render `T`'s JSON Schema fully inline: every subschema flattened at

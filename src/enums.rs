@@ -1039,7 +1039,7 @@ pub enum GovernanceLogView {
 pub enum ObligationSort {
     /// Open and lapsed first, then discharged and withdrawn, each earliest
     /// due first (so lapsed and overdue items lead), ties to the older,
-    /// undated last, oldest first. The default
+    /// undated last within each, oldest first. The default
     #[default]
     Due,
     /// Oldest first
