@@ -66,6 +66,37 @@ pub enum IndexError {
     Unsorted,
 }
 
+/// How the runner came by the index a search ran on
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexState {
+    /// Read from its file
+    Loaded,
+    /// Built for this search, the first
+    Built,
+    /// Built again for this search: the file was missing a version, or
+    /// could not be used
+    Rebuilt,
+}
+
+/// What a first search says, having built the index
+pub const INDEX_BUILT: &str = "This first search built your memory's \
+     search index; later searches reuse it.";
+
+/// What a search says, having rebuilt the index
+pub const INDEX_REBUILT: &str = "This search rebuilt your memory's search \
+     index; later searches reuse it.";
+
+impl IndexState {
+    /// What a search says first, if anything
+    pub fn announcement(self) -> Option<&'static str> {
+        match self {
+            Self::Loaded => None,
+            Self::Built => Some(INDEX_BUILT),
+            Self::Rebuilt => Some(INDEX_REBUILT),
+        }
+    }
+}
+
 /// One distinct line that matched, across the versions that hold it
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
@@ -333,9 +364,19 @@ fn excerpt(line: &str, words: &[String]) -> String {
 
 impl SearchResult {
     /// What the agent reads. `mode` is the call's: semantic search is
-    /// not available for memory, so it is said to have run by keyword
-    pub fn render(&self, mode: Option<SearchMode>) -> String {
+    /// not available for memory, so it is said to have run by keyword.
+    /// `index` says how the runner came by the index; a first build or a
+    /// rebuild is announced
+    pub fn render(
+        &self,
+        mode: Option<SearchMode>,
+        index: IndexState,
+    ) -> String {
         let mut out = String::new();
+        if let Some(said) = index.announcement() {
+            out.push_str(said);
+            out.push_str("\n\n");
+        }
         if mode == Some(SearchMode::Semantic) {
             out.push_str(
                 "Semantic search isn't available for your memory yet, so \
@@ -458,7 +499,7 @@ mod tests {
         assert_eq!(r.hits[2].first, (id(1), at(1)));
         assert_eq!(r.hits[2].last, (id(1), at(1)));
 
-        let text = r.render(None);
+        let text = r.render(None, IndexState::Loaded);
         assert!(
             text.starts_with(
                 "Lines in your memory's 3 versions with every word of \
@@ -475,13 +516,15 @@ mod tests {
             )),
             "{text}"
         );
-        let one = index().search("haiku").render(Some(SearchMode::Semantic));
+        let one = index()
+            .search("haiku")
+            .render(Some(SearchMode::Semantic), IndexState::Loaded);
         assert!(one.starts_with("Semantic search isn't available"), "{one}");
         assert!(
             one.ends_with(&format!("only in {} (2026-11-03)", id(3))),
             "{one}"
         );
-        let none = index().search("zebra").render(None);
+        let none = index().search("zebra").render(None, IndexState::Loaded);
         assert_eq!(
             none,
             "No line in your memory's 3 versions contains every word of \
@@ -536,7 +579,7 @@ mod tests {
         assert_eq!(r.hits.len(), MAX_GROUPS);
         assert_eq!(r.more, 15);
         assert!(
-            r.render(None)
+            r.render(None, IndexState::Loaded)
                 .ends_with("\n15 more lines match; narrow the query.")
         );
     }
@@ -587,6 +630,28 @@ mod tests {
             SearchIndex::from_bytes(b"{"),
             Err(IndexError::Json(_))
         ));
+    }
+
+    /// A built or rebuilt index is announced first; a loaded one is not
+    #[test]
+    fn builds_are_announced() {
+        let r = index().search("haiku");
+        let plain = r.render(None, IndexState::Loaded);
+        assert_eq!(
+            r.render(None, IndexState::Built),
+            format!("{INDEX_BUILT}\n\n{plain}")
+        );
+        assert_eq!(
+            r.render(None, IndexState::Rebuilt),
+            format!("{INDEX_REBUILT}\n\n{plain}")
+        );
+        let semantic = r.render(Some(SearchMode::Semantic), IndexState::Built);
+        assert!(
+            semantic.starts_with(&format!(
+                "{INDEX_BUILT}\n\nSemantic search isn't available"
+            )),
+            "{semantic}"
+        );
     }
 
     /// One version's lines list top-down

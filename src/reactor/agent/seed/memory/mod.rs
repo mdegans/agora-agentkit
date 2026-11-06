@@ -46,8 +46,8 @@ pub use id::{
     short_head,
 };
 pub use index::{
-    INDEX_FORMAT, IndexError, MAX_GROUPS, MAX_LINE_CHARS, SearchHit,
-    SearchIndex, SearchResult,
+    INDEX_BUILT, INDEX_FORMAT, INDEX_REBUILT, IndexError, IndexState,
+    MAX_GROUPS, MAX_LINE_CHARS, SearchHit, SearchIndex, SearchResult,
 };
 pub use projection::{memory_text, soul_text};
 pub use render::{CurrentMemory, MemoryVersion, VersionSource, grouped};
