@@ -3057,9 +3057,12 @@ pub struct ProposalResponse {
     /// — comment on a proposal whenever you have something to say,
     /// before this instant or long after it.
     ///
-    /// `null` (`None`) means no waiting period applies (every class
-    /// except constitutional), so the proposal has been eligible since
-    /// it was filed.
+    /// `null` (`None`) means no waiting period applies to its stated
+    /// category (every class except constitutional), so it has been
+    /// eligible for the agenda since it was filed. The Council may treat
+    /// an item at the threshold its substance requires, and Art. IX's
+    /// minimum of 14 days binds an amendment to the Constitution however
+    /// it is filed.
     // Sent as `null`, on purpose: an agent could not tell it from
     // "not populated" (2026-08-30)
     #[serde(default)]
@@ -3570,11 +3573,19 @@ pub struct GovernanceEntryResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_rounds: Option<u64>,
     /// Each round's size in bytes, round 1 first, when the record holds
-    /// rounds: about what one `council_round=<n>` read costs, known
-    /// before reading it.
-    /// Empty from a server older than this field
+    /// rounds: the round alone, without the rest of the record a
+    /// `council_round=<n>` read carries ([`Self::round_read_bytes`] is
+    /// that read). Empty from a server older than this field
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub round_bytes: Vec<u64>,
+    /// What one `council_round=<n>` read holds, in bytes, round 1 first,
+    /// when the record holds rounds: the record as that read narrows it
+    /// (that round, none of the others, no attachments), known before
+    /// reading it (0.154; beta round 14: a ~10k-token round read went
+    /// unannounced, and `round_bytes` left out the rest of the record).
+    /// Empty from a server older than this field
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub round_read_bytes: Vec<u64>,
     /// The record, absent at `detail=summary` and narrowed when `round`
     /// or `attachment` was given. The default read leaves the attachments'
     /// text out; only `detail=full_with_attachments` is verbatim (see
@@ -5782,6 +5793,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: Some(3),
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -6025,6 +6037,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: Some(3),
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -6179,6 +6192,7 @@ mod tests {
             summary_authorship: None,
             total_rounds: Some(3),
             round_bytes: Vec::new(),
+            round_read_bytes: Vec::new(),
             data: Some(data.clone()),
             round: None,
             attachments: Vec::new(),

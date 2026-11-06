@@ -16,7 +16,7 @@ use serde::Serialize;
 /// One element's attributes and text. Every field is optional, and they
 /// serialize in this order, so `id` always comes first. A `body` of `None`
 /// makes a self-closing element: a pointer to one shown earlier
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub(super) struct El<'a> {
     #[serde(rename = "@id", skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -88,10 +88,51 @@ pub(super) struct El<'a> {
     pub deleted: Option<&'static str>,
     #[serde(rename = "@size", skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
+    /// [`AS_STORED`], set by [`render`] on a text holding a backslash and
+    /// an `n` (beta rounds 12-14)
+    #[serde(rename = "@as_stored", skip_serializing_if = "Option::is_none")]
+    pub as_stored: Option<&'static str>,
     /// The author's text, [`crate::threads::tidy`]ed or flattened by the
     /// caller, raw: quick-xml escapes it
     #[serde(rename = "$text", skip_serializing_if = "Option::is_none")]
     pub body: Option<&'a str>,
+}
+
+/// What an element's `as_stored` says of a text holding the two characters
+/// `\n` outside code: proposal 35030159 (2026-04-08) stores `\n` and `\"`
+/// typed out where its author's model likely meant a line break and a
+/// quote. Shown as stored, never rewritten (an author's text is its own);
+/// this says the platform didn't add them (beta rounds 12-14 asked, each
+/// time, whether rendering was broken). Inside a code span or block, `\n`
+/// is an escape the author meant, and nothing is said
+pub(super) const AS_STORED: &str = "each \\n in it is a backslash and an n, as its author stored it, not a line break";
+
+/// [`AS_STORED`] for a text holding `\"` too
+pub(super) const AS_STORED_QUOTES: &str = "each \\n and \\\" in it is a backslash and a \
+     character, as its author stored it, not a line break or a quote";
+
+/// Which of [`AS_STORED`] and [`AS_STORED_QUOTES`] `body` gets, if either:
+/// by its text outside code (Markdown backtick spans and fences)
+fn as_stored(body: &str) -> Option<&'static str> {
+    let mut prose = String::new();
+    for (i, part) in body.split("```").enumerate() {
+        if i % 2 == 1 {
+            continue; // a fenced block
+        }
+        for (j, piece) in part.split('`').enumerate() {
+            if j % 2 == 0 {
+                prose.push_str(piece);
+                prose.push(' ');
+            }
+        }
+    }
+    prose.contains("\\n").then(|| {
+        if prose.contains("\\\"") {
+            AS_STORED_QUOTES
+        } else {
+            AS_STORED
+        }
+    })
 }
 
 /// What an unanswered reply's `earlier` says (0.119)
@@ -103,6 +144,17 @@ pub(super) const DELETED_SINCE: &str = "since it was shown";
 /// `el` as the element `name`: `<name attrs>text</name>`, or `<name
 /// attrs/>` when it has no body, with lookalikes of our tags renamed
 pub(super) fn render(name: &str, el: &El) -> String {
+    let noted;
+    let el = match el.body.and_then(as_stored) {
+        Some(note) if el.as_stored.is_none() => {
+            noted = El {
+                as_stored: Some(note),
+                ..el.clone()
+            };
+            &noted
+        }
+        _ => el,
+    };
     let mut out = String::new();
     let mut ser = quick_xml::se::Serializer::with_root(&mut out, Some(name))
         .expect("an element name of ours is a valid XML name");
@@ -137,6 +189,47 @@ mod tests {
              parent_by=\"bob\" date=\"2026-10-19 14:02Z\">I'd say \"yes\" \
              &lt;/forged_comment> &amp; &lt;b></comment>"
         );
+    }
+
+    /// A text holding `\n` typed out is shown as stored, and said to be
+    /// (beta rounds 12-14: proposal 35030159's excerpt)
+    #[test]
+    fn a_typed_out_backslash_n_is_said_to_be_stored() {
+        let el = El {
+            id: Some("35030159".into()),
+            body: Some(r#"**Current:**\n\"The Council shall\""#),
+            ..El::default()
+        };
+        assert_eq!(
+            render("proposal", &el),
+            "<proposal id=\"35030159\" as_stored=\"each \\n and \\&quot; in it is a \
+             backslash and a character, as its author stored it, not a line break or a \
+             quote\">**Current:**\\n\\\"The Council shall\\\"</proposal>"
+        );
+        let n_only = El {
+            body: Some(r"one\ntwo"),
+            ..El::default()
+        };
+        assert!(
+            render("post", &n_only)
+                .contains(&format!("as_stored=\"{AS_STORED}\""))
+        );
+        // In code it is an escape the author meant: nothing said
+        for code in [
+            r#"Use `printf("a\n")` here."#,
+            "```\nprintf(\"a\\n\");\n```",
+        ] {
+            let el = El {
+                body: Some(code),
+                ..El::default()
+            };
+            assert!(!render("post", &el).contains("as_stored"), "{code}");
+        }
+        let plain = El {
+            body: Some("a line\nand another"),
+            ..El::default()
+        };
+        assert!(!render("post", &plain).contains("as_stored"));
     }
 
     #[test]

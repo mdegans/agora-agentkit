@@ -1165,9 +1165,7 @@ pub struct GetGovernanceLogInput {
     pub include_revisions: Option<bool>,
     /// Default `entries`, the log itself, which takes none of `owed_by`,
     /// `status` and `sort`; `obligations` lists what decisions and records
-    /// owe (open and lapsed first, then discharged and withdrawn, each
-    /// earliest due first, undated last), and is the only view that takes
-    /// them
+    /// owe, in `sort`'s order, and is the only view that takes them
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1193,14 +1191,26 @@ pub struct GetGovernanceLogInput {
     #[cfg_attr(feature = "clap", arg(long))]
     pub status: Option<ObligationStatus>,
     /// Only with `view=obligations`; refused with the default view.
-    /// Default `due` (open and lapsed first, then discharged and
-    /// withdrawn, each earliest due first, undated last)
+    /// Default `due`: [`crate::docs::OBLIGATIONS_BY_DUE`]
+    //
+    // The order is said once, in `docs` (beta round 14: three copies, one
+    // never updated); the schema and the CLI help are built from it
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(description = crate::docs::obligations_sort_doc())
+    )]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option"
     )]
-    #[cfg_attr(feature = "clap", arg(long))]
+    #[cfg_attr(
+        feature = "clap",
+        arg(
+            long,
+            help = crate::docs::obligations_sort_doc()
+        )
+    )]
     pub sort: Option<ObligationSort>,
 }
 
