@@ -18,6 +18,10 @@ pub const INDEX_FORMAT: u32 = 1;
 /// The most line groups a search shows
 pub const MAX_GROUPS: usize = 30;
 
+/// The line groups a search shows when no `limit` is given: about 30
+/// multi-line groups of a common word ran to ~5k tokens (beta round 18)
+pub const DEFAULT_GROUPS: usize = 10;
+
 /// The most characters of a line a search shows
 pub const MAX_LINE_CHARS: usize = 300;
 
@@ -117,9 +121,9 @@ pub struct SearchHit {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub query: String,
-    /// At most [`MAX_GROUPS`]
+    /// At most the search's limit
     pub hits: Vec<SearchHit>,
-    /// Matching lines past [`MAX_GROUPS`]
+    /// Matching lines past the limit
     pub more: usize,
     /// Versions searched
     pub versions: usize,
@@ -287,10 +291,12 @@ impl SearchIndex {
         Ok(file.index)
     }
 
-    /// The lines holding every word of `query` as a word (not inside a
-    /// longer one), in any case, grouped by line: newest first, at most
-    /// [`MAX_GROUPS`]
-    pub fn search(&self, query: &str) -> SearchResult {
+    /// The lines holding every word of `query` at a word's start (`sit`
+    /// finds "sitting", not "visit"), in any case, grouped by line: newest
+    /// first, at most `limit` (see [`search_limit`])
+    ///
+    /// [`search_limit`]: super::search_limit
+    pub fn search(&self, query: &str, limit: usize) -> SearchResult {
         let words: Vec<String> =
             query.split_whitespace().map(str::to_lowercase).collect();
         let mut result = SearchResult {
@@ -307,7 +313,7 @@ impl SearchIndex {
             .iter()
             .map(|l| {
                 let l = l.to_lowercase();
-                words.iter().all(|w| contains_word(&l, w))
+                words.iter().all(|w| starts_word(&l, w))
             })
             .collect();
         // Per matched line: oldest version, newest version, count
@@ -340,10 +346,10 @@ impl SearchIndex {
         groups.sort_by_key(|(line, (first, last, _))| {
             (std::cmp::Reverse(*last), std::cmp::Reverse(*first), *line)
         });
-        result.more = groups.len().saturating_sub(MAX_GROUPS);
+        result.more = groups.len().saturating_sub(limit);
         result.hits = groups
             .into_iter()
-            .take(MAX_GROUPS)
+            .take(limit)
             .map(|(line, ((fa, fid), (la, lid), count))| SearchHit {
                 line: self.lines[line as usize].clone(),
                 first: (fid, fa),
@@ -355,16 +361,13 @@ impl SearchIndex {
     }
 }
 
-/// Whether `word` is in `text` as a word: not run into letters or digits
-/// on a side where it begins or ends with one. Both lowercase
-fn contains_word(text: &str, word: &str) -> bool {
+/// Whether `word` starts a word in `text`: not run into a letter or
+/// digit before it, when it begins with one. Both lowercase
+fn starts_word(text: &str, word: &str) -> bool {
     let alnum = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
-    let (head, tail) = (word.chars().next(), word.chars().next_back());
-    text.match_indices(word).any(|(at, _)| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + word.len()..].chars().next();
-        !(alnum(head) && alnum(before)) && !(alnum(tail) && alnum(after))
-    })
+    let head = word.chars().next();
+    text.match_indices(word)
+        .any(|(at, _)| !(alnum(head) && alnum(text[..at].chars().next_back())))
 }
 
 /// `line`, cut to [`MAX_LINE_CHARS`] around the first of `words` in it
@@ -447,11 +450,10 @@ impl SearchResult {
             ));
         }
         if self.more > 0 {
-            out.push_str(&format!(
-                "\n{} more line{} match; narrow the query.",
-                self.more,
-                if self.more == 1 { "" } else { "s" }
-            ));
+            out.push_str(&match self.more {
+                1 => "\n1 more line matches; narrow the query.".to_string(),
+                n => format!("\n{n} more lines match; narrow the query."),
+            });
         }
         out
     }
@@ -502,7 +504,7 @@ mod tests {
 
     #[test]
     fn search_groups_by_line_newest_first() {
-        let r = index().search("anchor ANC-5");
+        let r = index().search("anchor ANC-5", MAX_GROUPS);
         assert_eq!(r.versions, 3);
         assert_eq!(r.more, 0);
         assert_eq!(
@@ -514,7 +516,7 @@ mod tests {
                 count: 2,
             }]
         );
-        let r = index().search("anchor");
+        let r = index().search("anchor", MAX_GROUPS);
         // Lines differing only in case are distinct lines
         assert_eq!(r.hits.len(), 3);
         assert_eq!(r.hits[0].line, "The anchor is ANC-5.");
@@ -540,33 +542,37 @@ mod tests {
             )),
             "{text}"
         );
-        let one = index().search("haiku").render(IndexState::Loaded);
+        let one = index()
+            .search("haiku", MAX_GROUPS)
+            .render(IndexState::Loaded);
         assert!(
             one.ends_with(&format!("only in {} (2026-11-03)", id(3))),
             "{one}"
         );
-        let none = index().search("zebra").render(IndexState::Loaded);
+        let none = index()
+            .search("zebra", MAX_GROUPS)
+            .render(IndexState::Loaded);
         assert_eq!(
             none,
             "No line in your memory's 3 versions contains every word of \
              \"zebra\"."
         );
-        assert!(index().search("  ").hits.is_empty());
+        assert!(index().search("  ", MAX_GROUPS).hits.is_empty());
     }
 
-    /// Words, not substrings: `anc` is not in "anchor"
+    /// At a word's start: `anch` finds "anchor", `chor` doesn't (beta
+    /// round 18: "sitting" found "sittings", which is wanted)
     #[test]
-    fn words_match_whole() {
-        assert!(index().search("anch").hits.is_empty());
-        // Only the line with `ANC-5`, none of the three with "anchor"
-        let anc = index().search("anc");
-        assert_eq!(anc.hits.len(), 1);
-        assert_eq!(anc.hits[0].line, "The anchor is ANC-5.");
-        assert_eq!(index().search("anc-5.").hits.len(), 1);
-        assert!(contains_word("a #tag here", "#tag"));
-        assert!(contains_word("x-ray", "x"));
-        assert!(!contains_word("tags", "tag"));
-        assert!(contains_word("ünïcode word", "word"));
+    fn words_match_at_their_start() {
+        assert_eq!(index().search("anch", MAX_GROUPS).hits.len(), 3);
+        assert!(index().search("chor", MAX_GROUPS).hits.is_empty());
+        assert_eq!(index().search("anc-5.", MAX_GROUPS).hits.len(), 1);
+        assert!(starts_word("a #tag here", "#tag"));
+        assert!(starts_word("x-ray", "x"));
+        assert!(starts_word("tags", "tag"));
+        assert!(starts_word("sittings", "sitting"));
+        assert!(!starts_word("visit", "sit"));
+        assert!(starts_word("ünïcode word", "wor"));
     }
 
     /// A memory seen again (A, B, A) counts again, and the dates are its
@@ -578,7 +584,7 @@ mod tests {
         ix.add(id(2), at(3), "other\n");
         ix.add(id(1), at(1), "kept line\n");
         assert_eq!((ix.len(), ix.memories()), (3, 2));
-        let r = ix.search("kept");
+        let r = ix.search("kept", MAX_GROUPS);
         assert_eq!(r.versions, 3);
         assert_eq!(
             r.hits,
@@ -596,12 +602,20 @@ mod tests {
         let mut ix = SearchIndex::new();
         let content: String = (0..45).map(|i| format!("note {i}\n")).collect();
         ix.add(id(1), at(1), &content);
-        let r = ix.search("note");
+        let r = ix.search("note", MAX_GROUPS);
         assert_eq!(r.hits.len(), MAX_GROUPS);
         assert_eq!(r.more, 15);
         assert!(
             r.render(IndexState::Loaded)
                 .ends_with("\n15 more lines match; narrow the query.")
+        );
+        // The default shows 10; one more is "matches"
+        assert_eq!(ix.search("note", DEFAULT_GROUPS).hits.len(), 10);
+        let one = ix.search("note", 44);
+        assert_eq!(one.more, 1);
+        assert!(
+            one.render(IndexState::Loaded)
+                .ends_with("\n1 more line matches; narrow the query."),
         );
     }
 
@@ -665,7 +679,7 @@ mod tests {
                 "{said}"
             );
         }
-        let r = index().search("haiku");
+        let r = index().search("haiku", MAX_GROUPS);
         let plain = r.render(IndexState::Loaded);
         assert_eq!(
             r.render(IndexState::Built),
@@ -681,7 +695,7 @@ mod tests {
     #[test]
     fn debug_shows_no_lines() {
         let ix = index();
-        let r = ix.search("haiku");
+        let r = ix.search("haiku", MAX_GROUPS);
         let text = format!("{ix:?} {r:?} {:?}", r.hits);
         for secret in ["Haiku", "haiku", "anchor", "ANC-5"] {
             assert!(!text.contains(secret), "{secret}: {text}");
@@ -694,8 +708,12 @@ mod tests {
     fn a_versions_lines_list_top_down() {
         let mut ix = SearchIndex::new();
         ix.add(id(1), at(1), "note b\nnote a\nnote c\n");
-        let lines: Vec<String> =
-            ix.search("note").hits.into_iter().map(|h| h.line).collect();
+        let lines: Vec<String> = ix
+            .search("note", MAX_GROUPS)
+            .hits
+            .into_iter()
+            .map(|h| h.line)
+            .collect();
         assert_eq!(lines, ["note b", "note a", "note c"]);
     }
 

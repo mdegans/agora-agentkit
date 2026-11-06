@@ -38,7 +38,7 @@ pub mod render;
 pub use action::{
     Adjusted, EMPTY_QUERY, LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT,
     MEMORY_TOOL_DESCRIPTION, MEMORY_TOOL_NAME, MemoryAction, MemoryInput,
-    MemoryInputError, log_limit, show_budget,
+    MemoryInputError, log_limit, search_limit, show_budget,
 };
 pub use id::{
     Candidate, ECHO_CHARS, HEAD_SHOWN, HistoryRef, HistoryRefError,
@@ -46,8 +46,9 @@ pub use id::{
     Resolution, echo, resolve, short_head,
 };
 pub use index::{
-    INDEX_BUILT, INDEX_FORMAT, INDEX_REBUILT, IndexError, IndexState,
-    MAX_GROUPS, MAX_LINE_CHARS, SearchHit, SearchIndex, SearchResult,
+    DEFAULT_GROUPS, INDEX_BUILT, INDEX_FORMAT, INDEX_REBUILT, IndexError,
+    IndexState, MAX_GROUPS, MAX_LINE_CHARS, SearchHit, SearchIndex,
+    SearchResult,
 };
 pub use projection::{memory_text, soul_text};
 pub use render::{

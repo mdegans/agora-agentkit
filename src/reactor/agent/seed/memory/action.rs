@@ -22,22 +22,21 @@ pub const LOG_MAX_LIMIT: u32 = 50;
 /// The tool's description: the same bytes for every agent
 pub const MEMORY_TOOL_DESCRIPTION: &str = "Your memory's past versions, \
      kept by your runner, which your operator runs: Agora's servers can't \
-     read them, and your operator can. Call it with one request, as in \
+     read them, and your operator can. Call it as \
      {\"request\": {\"action\": \"show\", \"id\": \"mem-3f9a1c07be\"}}.\n\n\
-     - `search`: what did I write about X? The lines in any version with \
-     every word of `query`, in any case.\n\
+     - `search`: what did I write about X? Lines in any version with \
+     every word of `query`, or words starting with it, in any case.\n\
      - `show`: one `id` shows that version whole. Several are like `git log \
      -p`: newest first, anchored on the memory in your context, each older \
-     one as what changed from it to the next newer one (`+` lines are in \
-     the newer).\n\
-     - `log`: your versions, newest first, with their ids.\n\
+     one as what changed from it to the next newer one.\n\
+     - `log`: your versions, newest first.\n\
      - `diff`: what changed from `a` to `b`, or to your current memory.\n\n\
      An id is a memory id (mem-…, as in your Memory heading) or, if your \
      state is sealed, a head: 6 hex digits of it or more. An id is worked \
      out after you rewrite your memory, so the current id can't appear \
      inside the text it names; writing an id into your memory changes the \
      next version's id. Old ids keep working. Each result counts toward \
-     your context like any other read.";
+     your context.";
 
 /// The `memory` tool's input: one request. An object at the root, since
 /// Anthropic refuses a tool whose input schema is a bare union
@@ -45,7 +44,8 @@ pub const MEMORY_TOOL_DESCRIPTION: &str = "Your memory's past versions, \
 #[serde(deny_unknown_fields)]
 #[schemars(inline)]
 pub struct MemoryInput {
-    /// One action and its fields
+    /// One action
+    // Without a doc here, the schema takes `MemoryAction`'s, a longer one
     pub request: MemoryAction,
 }
 
@@ -178,6 +178,14 @@ pub enum MemoryAction {
     Search {
         /// Words to find
         query: String,
+        /// Lines to list: 10 if left out, at most 30
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+        )]
+        #[schemars(with = "Option<u32>", range(min = 1, max = 30))]
+        limit: Option<u32>,
     },
     Show {
         /// One or a list
@@ -199,7 +207,7 @@ pub enum MemoryAction {
         budget: Option<u32>,
     },
     Log {
-        /// Start below this memory id or head
+        /// Start below this id
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -218,7 +226,7 @@ pub enum MemoryAction {
     Diff {
         /// A memory id or head
         a: HistoryRef,
-        /// A memory id or head; left out, your current memory
+        /// Left out: your current memory
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -270,6 +278,19 @@ pub fn log_limit(limit: Option<u32>) -> Adjusted {
         limit,
         LOG_DEFAULT_LIMIT,
         (1, LOG_MAX_LIMIT),
+        |n| format!("Limit raised to {n}."),
+        |n| format!("Limit lowered to {n}."),
+    )
+}
+
+/// `search`'s `limit`, line groups shown, defaulted to
+/// [`DEFAULT_GROUPS`](super::DEFAULT_GROUPS) and clamped to
+/// `1..=`[`MAX_GROUPS`](super::MAX_GROUPS)
+pub fn search_limit(limit: Option<u32>) -> Adjusted {
+    adjust(
+        limit,
+        super::DEFAULT_GROUPS as u32,
+        (1, super::MAX_GROUPS as u32),
         |n| format!("Limit raised to {n}."),
         |n| format!("Limit lowered to {n}."),
     )
@@ -355,7 +376,7 @@ mod tests {
                 .unwrap()
                 .keys()
                 .collect::<Vec<_>>(),
-            ["action", "query"]
+            ["action", "limit", "query"]
         );
     }
 
@@ -444,6 +465,7 @@ mod tests {
                 json!({"action": "search", "query": "anchor"}),
                 MemoryAction::Search {
                     query: "anchor".into(),
+                    limit: None,
                 },
             ),
         ];
@@ -580,6 +602,20 @@ mod tests {
                 Some("Budget lowered to the maximum of 262,144 bytes.")
             )
         );
+    }
+
+    #[test]
+    fn search_limits_clamp_and_say_so() {
+        let a = |value, note: Option<&str>| Adjusted {
+            value,
+            note: note.map(Into::into),
+        };
+        assert_eq!(search_limit(None), a(10, None));
+        assert_eq!(search_limit(Some(30)), a(30, None));
+        assert_eq!(search_limit(Some(0)), a(1, Some("Limit raised to 1.")));
+        assert_eq!(search_limit(Some(99)), a(30, Some("Limit lowered to 30.")));
+        assert_eq!(super::super::MAX_GROUPS, 30, "the field doc says 30");
+        assert_eq!(super::super::DEFAULT_GROUPS, 10, "the field doc says 10");
     }
 
     #[test]
