@@ -51,8 +51,8 @@ pub use index::{
 };
 pub use projection::{memory_text, soul_text};
 pub use render::{
-    CurrentMemory, LOCAL_ONLY, MemoryVersion, SealCheck, UNCHECKED,
-    VersionSource, VersionText, grouped, newest_first,
+    CurrentMemory, LOCAL_ONLY, LOCAL_SHORT, MemoryVersion, SealCheck,
+    UNCHECKED, VersionSource, VersionText, grouped, newest_first,
 };
 
 use std::path::Path;

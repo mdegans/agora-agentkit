@@ -268,6 +268,10 @@ impl<'a> CurrentMemory<'a> {
 pub const LOCAL_ONLY: &str = "These are your runner's local copies. They \
      aren't sealed, so they have no heads.";
 
+/// What `show` and `diff` say once when every version in view is a local
+/// copy: [`LOCAL_ONLY`]'s short form, as `log` says the whole of it
+pub const LOCAL_SHORT: &str = "Your runner's local copies, not sealed.";
+
 /// What `log` and `show` say first when the sealed history couldn't be
 /// checked ([`SealCheck::Unchecked`])
 pub const UNCHECKED: &str = "Your sealed history couldn't be checked just \
@@ -570,7 +574,7 @@ fn anchored(
 /// is shorter. A version that couldn't be opened says so, and the diffs
 /// pass over it. Past `budget`, the rest are listed by id and size, never
 /// cut. When every version asked for is a local copy, that is said once
-/// ([`LOCAL_ONLY`]) rather than on each, as `log` does.
+/// ([`LOCAL_SHORT`]) rather than on each, as `log` does.
 pub fn show(
     history: &[MemoryVersion],
     picked: &[usize],
@@ -599,7 +603,7 @@ pub fn show(
     let describe = |i: usize| history[i].describe_as(hide);
     let preface: &[&str] = match (seal, all_local) {
         (SealCheck::Unchecked, _) => &[UNCHECKED],
-        (SealCheck::Checked, true) => &[LOCAL_ONLY],
+        (SealCheck::Checked, true) => &[LOCAL_SHORT],
         (SealCheck::Checked, false) => &[],
     };
     // Joined with spaces: the opening paragraph
@@ -766,7 +770,7 @@ pub fn diff(
         .chain(b)
         .all(|v| v.source == VersionSource::LocalCopy);
     let said = |text: String| match all_local {
-        true => format!("{LOCAL_ONLY}\n\n{text}"),
+        true => format!("{LOCAL_SHORT}\n\n{text}"),
         false => text,
     };
     for v in std::iter::once(a).chain(b) {
@@ -1417,7 +1421,7 @@ mod tests {
             let checked = show(&history, picked, cur, 10, SealCheck::Checked);
             assert_eq!(
                 out.strip_prefix(UNCHECKED),
-                checked.strip_prefix(LOCAL_ONLY),
+                checked.strip_prefix(LOCAL_SHORT),
                 "{checked}"
             );
         }
@@ -1470,16 +1474,18 @@ mod tests {
             local(3, 1, &lines("older", 3)),
         ];
         let cur = current(1, history[0].content().unwrap(), &history);
+        // The short form: "no heads" is noise on every call
+        assert!(!LOCAL_SHORT.contains("heads"));
         for picked in [&[1][..], &[1, 2], &[0, 1, 2]] {
             let out = show(&history, picked, cur, 32_768, SealCheck::Checked);
             assert!(!out.contains(label), "{out}");
-            assert!(out.starts_with(&format!("{LOCAL_ONLY} ")), "{out}");
-            assert_eq!(out.matches(LOCAL_ONLY).count(), 1, "{out}");
+            assert!(out.starts_with(&format!("{LOCAL_SHORT} ")), "{out}");
+            assert_eq!(out.matches(LOCAL_SHORT).count(), 1, "{out}");
         }
         // Past the budget, the list too
         let out = show(&history, &[1, 2], cur, 10, SealCheck::Checked);
         assert!(
-            out.starts_with(&format!("{LOCAL_ONLY}\n\nNot shown")),
+            out.starts_with(&format!("{LOCAL_SHORT}\n\nNot shown")),
             "{out}"
         );
         assert!(!out.contains(label), "{out}");
@@ -1488,7 +1494,7 @@ mod tests {
             diff(&history[1], None, cur),
             diff(&history[1], Some(&history[1]), cur),
         ] {
-            assert!(out.starts_with(&format!("{LOCAL_ONLY}\n\n")), "{out}");
+            assert!(out.starts_with(&format!("{LOCAL_SHORT}\n\n")), "{out}");
             assert!(!out.contains(label), "{out}");
         }
 
@@ -1496,9 +1502,9 @@ mod tests {
         let mixed = vec![version(1, 3, &lines("now", 1)), history[1].clone()];
         let cur = current(1, mixed[0].content().unwrap(), &mixed);
         let out = show(&mixed, &[0, 1], cur, 32_768, SealCheck::Checked);
-        assert!(out.contains(label) && !out.contains(LOCAL_ONLY), "{out}");
+        assert!(out.contains(label) && !out.contains(LOCAL_SHORT), "{out}");
         let out = diff(&mixed[1], Some(&mixed[0]), cur);
-        assert!(out.contains(label) && !out.contains(LOCAL_ONLY), "{out}");
+        assert!(out.contains(label) && !out.contains(LOCAL_SHORT), "{out}");
     }
 
     /// 20 of 60 lines changed, the changed ones long: past half the
