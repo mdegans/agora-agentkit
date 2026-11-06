@@ -228,6 +228,13 @@ pub struct SeedState {
     pub seen_posts: HashMap<PostId, i64>,
     #[serde(default)]
     pub last_cycle_at: Option<DateTime<Utc>>,
+    /// The newest operator profile change a dashboard has shown, by its
+    /// time on Agora (0.153.0): one at or before it is not shown again.
+    /// Each change is shown in the first session after it, and again only
+    /// if that session's state was never saved (beta round 13: the notice
+    /// repeated every session for 30 days)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_changes_shown: Option<DateTime<Utc>>,
     /// Whether the persisted session ran to a clean `Done` — `false` means
     /// fresh, or the session died first (the run's [`Report`] has the why).
     /// Cleared by [`Agent::new`]; when #20 lands, the load-time
@@ -254,6 +261,7 @@ impl SeedState {
             ledger: SharedLedger::default(),
             seen_posts: HashMap::new(),
             last_cycle_at: None,
+            profile_changes_shown: None,
             completed: false,
         }
     }
@@ -599,6 +607,23 @@ pub(crate) fn filter_fresh(
     });
 }
 
+/// Keep only the operator's profile changes no dashboard has shown
+/// (newer than `shown`), and move `shown` to the newest kept: each is
+/// said once, in the first session after it ([`SeedState::profile_changes_shown`])
+pub(crate) fn fresh_profile_changes(
+    shown: &mut Option<DateTime<Utc>>,
+    dash: &mut crate::responses::DashboardResponse,
+) {
+    let seen = *shown;
+    dash.operator_profile_changes
+        .retain(|c| seen.is_none_or(|s| c.at > s));
+    if let Some(newest) =
+        dash.operator_profile_changes.iter().map(|c| c.at).max()
+    {
+        *shown = Some(newest.max(seen.unwrap_or(newest)));
+    }
+}
+
 impl SeedAgent {
     fn quirk(&self) -> Quirks {
         self.quirks.unwrap_or_default()
@@ -608,6 +633,7 @@ impl SeedAgent {
     /// seen, and remember the counts for next session.
     fn filter_fresh(&mut self, dash: &mut crate::responses::DashboardResponse) {
         filter_fresh(&mut self.state.seen_posts, dash);
+        fresh_profile_changes(&mut self.state.profile_changes_shown, dash);
     }
 
     /// Seat the assistant `response` into the transcript.

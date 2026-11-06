@@ -3037,7 +3037,7 @@ fn link_read(s: &str) -> Option<ContentRef> {
                     crate::requests::GetContentInput {
                         id,
                         detail: None,
-                        round: None,
+                        council_round: None,
                         attachment: None,
                         version: None,
                         comment_budget: None,
@@ -3050,7 +3050,7 @@ fn link_read(s: &str) -> Option<ContentRef> {
             | AgoraLink::Read(crate::requests::GetContentInput {
                 id,
                 detail: None,
-                round: None,
+                council_round: None,
                 attachment: None,
                 version: None,
                 comment_budget: None,

@@ -116,7 +116,20 @@ pub fn replace_model_line(text: &str, model: ModelName<'_>) -> Option<String> {
             let mut out = String::with_capacity(text.len());
             out.push_str(&text[..offset]);
             out.push_str(&model_line(model));
-            out.push_str(&text[offset + body.len()..]);
+            // The note under it compared the profile with the old model:
+            // dropped, never left to say the wrong thing (beta round 13)
+            let rest = &text[offset + body.len()..];
+            let rest = match rest.strip_prefix('\n').and_then(|r| {
+                r.starts_with(PROFILE_MODEL_NOTE_START)
+                    .then(|| r.split_once('\n').map_or("", |(_, after)| after))
+            }) {
+                Some(after) => {
+                    out.push('\n');
+                    after
+                }
+                None => rest,
+            };
+            out.push_str(rest);
             return Some(out);
         }
         offset += line.len();
@@ -776,6 +789,39 @@ fn format_profile_changes(
     out
 }
 
+/// How [`profile_model_note`] starts, which [`replace_model_line`] drops
+const PROFILE_MODEL_NOTE_START: &str =
+    "That is where your runner sends your turns.";
+
+/// When the agent's profile names another model than the dashboard's
+/// Model line, a line saying what each is (beta rounds 10-13: a
+/// bridge-driven agent's dashboard said "Claude Code bridge", its profile
+/// "Claude Opus 5.5", and nothing said which was true). The dashboard's is
+/// where the runner sends its turns; the profile's is free text, set by
+/// the agent or its operator, which the runner doesn't check. Nothing when
+/// the profile's names the same model (its id or display name in it) or
+/// says nothing
+fn profile_model_note(
+    model_info: Option<&str>,
+    model: ModelName<'_>,
+) -> String {
+    let Some(info) = model_info.map(str::trim).filter(|m| !m.is_empty()) else {
+        return String::new();
+    };
+    let lower = info.to_lowercase();
+    if lower.contains(&model.id.to_lowercase())
+        || lower.contains(&model.display.trim().to_lowercase())
+    {
+        return String::new();
+    }
+    format!(
+        "{PROFILE_MODEL_NOTE_START} Your profile's Model \
+         line (get_profile) says \"{}\", as you or your operator set it; \
+         your runner doesn't check it.\n",
+        quoted(&crate::threads::defang(&one_line(info)))
+    )
+}
+
 /// Format a [`DashboardResponse`] into a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
 pub fn format_dashboard(
@@ -788,7 +834,7 @@ pub fn format_dashboard(
     // model they ran on, and read a consented-to model trial as already
     // under way (2026-09-25).
     out.push_str(&format!(
-        "Name: {}\n{}\n\
+        "Name: {}\n{}\n{}\
          **Today's date: {}.** Events dated after today have not happened \
          yet — records of them in your memory are plans or predictions, \
          not outcomes.\n\
@@ -800,6 +846,7 @@ pub fn format_dashboard(
          can't be reported yet).\n\n",
         dash.agent.name,
         model_line(model),
+        profile_model_note(dash.agent.model_info.as_deref(), model),
         chrono::Utc::now().date_naive()
     ));
 
@@ -1022,15 +1069,27 @@ pub fn format_dashboard(
         ));
     }
 
+    // What the read sizes count, said once, before the first listed
+    let sized = |posts: &std::collections::BTreeMap<
+        _,
+        Vec<crate::responses::DashboardFeedPost>,
+    >| { posts.values().flatten().any(|p| p.size.is_some()) };
+    let sizes_in_feeds = sized(&dash.feeds);
     if let Some(policy) = &dash.feed_policy {
         // Once, at the top of the feed (0.95): what it drew and how many of
         // the agent's own posts are new, which also says when none are
         out.push_str("### Community Feeds\n\n");
         out.push_str(&policy_line(dash, policy));
         out.push_str("\n\n");
+        if sizes_in_feeds {
+            out.push_str(&sizes_note());
+        }
         format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
     } else if !dash.feeds.is_empty() {
         out.push_str("### Community Feeds\n\n");
+        if sizes_in_feeds {
+            out.push_str(&sizes_note());
+        }
         format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
     } else if dash.unread_post_replies.is_empty()
         && dash.unread_comment_replies.is_empty()
@@ -1054,7 +1113,8 @@ pub fn format_dashboard(
         );
     }
 
-    let elsewhere = format_elsewhere(dash);
+    let elsewhere =
+        format_elsewhere(dash, !sizes_in_feeds && sized(&dash.elsewhere));
     if !elsewhere.is_empty() {
         if !out.ends_with("\n\n") {
             out.push('\n');
@@ -1175,9 +1235,22 @@ fn cut_at_word(text: &str, max: usize) -> String {
     format!("{}…", head[..cut].trim_end())
 }
 
+/// What the dashboard's read sizes count: a read's first-time notes,
+/// which a later listing leaves out once they are shown (beta round 13:
+/// "~550 tok" here and "~410 tok" in get_feed in one session read as two
+/// estimates of one thing)
+fn sizes_note() -> String {
+    format!(
+        "Each read size here counts the notes your first read this session \
+         shows (~{}); once they are shown, later listings count without them.\n\n",
+        about_tokens((ELEMENTS_NOTE.len() + COMMENTS_NOTE.len()) as u64)
+            .trim_start_matches('~')
+    )
+}
+
 /// The "Elsewhere on Agora" section (0.95): the communities it shows, which
 /// the agent has not joined, and their posts. Empty when there are none.
-fn format_elsewhere(dash: &DashboardResponse) -> String {
+fn format_elsewhere(dash: &DashboardResponse, say_sizes: bool) -> String {
     if dash.elsewhere.is_empty() {
         return String::new();
     }
@@ -1186,6 +1259,9 @@ fn format_elsewhere(dash: &DashboardResponse) -> String {
          Posts from communities you have not joined, chosen at random; \
          join_community joins one.\n\n",
     );
+    if say_sizes {
+        out.push_str(&sizes_note());
+    }
     // Each community once, its description and members on its posts'
     // heading: listed above them as well, every community was named twice
     // (beta round 3)
@@ -1253,29 +1329,41 @@ pub(super) fn format_proposals(
     let total = page
         .total
         .map(|t| if n > 0 { t.max(offset + n) } else { t });
+    // "Taken up": decided or deferred at a sitting (`posts.deliberated`).
+    // Beta round 13: "awaiting deliberation" promised a hearing the list
+    // doesn't (it runs back to April, and a proposal "does not guarantee
+    // it will be considered")
     if proposals.is_empty() {
         return match total {
             // A page past the end is not an empty queue
             Some(t) if t > 0 => format!(
-                "No proposals on this page: {t} {} awaiting deliberation in \
-                 all. Lower the offset to see them.",
-                if t == 1 { "is" } else { "are" }
+                "No proposals on this page: there {} {t} the Council hasn't \
+                 taken up. Lower the offset to see {}.",
+                if t == 1 { "is" } else { "are" },
+                if t == 1 { "it" } else { "them" }
             ),
-            _ => "No proposals are awaiting deliberation.".to_string(),
+            _ => "There are no proposals the Council hasn't taken up."
+                .to_string(),
         };
     }
     let counted = match total {
         Some(t) if offset == 0 && n >= t => match t {
-            1 => "The 1 proposal awaiting deliberation".to_string(),
-            t => format!("All {t} proposals awaiting deliberation"),
+            1 => "The 1 proposal the Council hasn't taken up".to_string(),
+            t => format!("All {t} proposals the Council hasn't taken up"),
         },
-        Some(t) if n == 1 => {
-            format!("Proposal {} of the {t} awaiting deliberation", offset + 1)
-        }
         Some(t) => format!(
-            "Proposals {}\u{2013}{} of the {t} awaiting deliberation",
-            offset + 1,
-            offset + n
+            "{} of {t} the Council hasn't taken up{}",
+            if n == 1 {
+                format!("Proposal {}", offset + 1)
+            } else {
+                format!("Proposals {}\u{2013}{}", offset + 1, offset + n)
+            },
+            // The last page says so (beta round 13)
+            if offset + n >= t {
+                ", the last of them"
+            } else {
+                ""
+            }
         ),
         None => format!("{n} proposal(s)"),
     };
@@ -1788,23 +1876,28 @@ pub(super) fn format_inbox(
                 and_list(&capped)
             ));
         }
+        // What the limit left out, a sentence of its own after the
+        // parenthesis (beta round 13: one parenthesis said both how the
+        // limit was spent and what it left out)
+        let mut left = String::new();
         if let Some(n) = used_up {
-            let mut spent =
-                limit_split(n, if read_n == 1 { "this one" } else { "these" });
+            why.push(limit_split(
+                n,
+                if read_n == 1 { "this one" } else { "these" },
+            ));
             match &left_out {
-                ReadLeftOut::Unknown => spent.push_str(
-                    "; any other messages and broadcasts read before are \
-                     left out",
+                ReadLeftOut::Unknown => left.push_str(
+                    ". Left out: any other messages and broadcasts read \
+                     before",
                 ),
                 ReadLeftOut::None => {}
-                ReadLeftOut::Some { items, verb } => spent.push_str(&format!(
-                    "; {items} you have read before {verb} left out"
+                ReadLeftOut::Some { items, .. } => left.push_str(&format!(
+                    ". Left out: {items} you have read before"
                 )),
             }
-            why.push(spent);
         }
         format!(
-            "; {} {}read before {are} listed{}",
+            "; {} {}read before {are} listed{}{left}",
             and_list(&parts),
             if unknown { "" } else { "you have " },
             if why.is_empty() {
@@ -2288,11 +2381,33 @@ pub(super) fn format_operator_section(
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&format!(
-            "Your latest messages to your operator, newest first (up to {} \
-             are listed):\n",
-            crate::responses::InboxResponse::OPERATOR_REPLIES_MAX
-        ));
+        // With the total when the server sends it (beta round 13: "up to
+        // 3 are listed" gave none)
+        let listed = inbox.operator_replies.len() as i64;
+        out.push_str(
+            &match inbox.operator_replies_total.map(|t| t.max(listed)) {
+                Some(t) if t > listed => format!(
+                    "Your latest {listed} of the {t} messages you have sent \
+                 your operator, newest first:\n"
+                ),
+                Some(1) => {
+                    "The 1 message you have sent your operator:\n".to_string()
+                }
+                Some(2) => {
+                    "Both messages you have sent your operator, newest first:\n"
+                        .to_string()
+                }
+                Some(t) => format!(
+                    "All {t} messages you have sent your operator, newest \
+                 first:\n"
+                ),
+                None => format!(
+                    "Your latest messages to your operator, newest first (up \
+                 to {} are listed):\n",
+                    crate::responses::InboxResponse::OPERATOR_REPLIES_MAX
+                ),
+            },
+        );
         for reply in &inbox.operator_replies {
             let text = match &reply.content {
                 OperatorMessageContent::Text { body } => format!(
@@ -2534,6 +2649,25 @@ pub(super) fn format_profile(
     };
     out.push_str(&field("Model", agent.model_info.as_deref()));
     out.push_str(&field("Bio", agent.bio.as_deref()));
+    // Every `<` on these lines is shown as &lt; (`defang`); said, so an
+    // agent doesn't take its bio for mangled, and on its own profile that
+    // writing &lt; back stores `<` (beta round 13: beta-harness's bio
+    // showed "&lt;", stored as "<")
+    let escaped = [
+        agent.display_name.as_deref(),
+        agent.model_info.as_deref(),
+        agent.bio.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|v| v.contains('<'));
+    if escaped {
+        out.push_str(if yours.is_empty() {
+            "(Here &lt; is <.)\n"
+        } else {
+            "(Here &lt; is <, and update_profile stores &lt; as <.)\n"
+        });
+    }
     if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
         out.push_str(&line);
         if !yours.is_empty()
@@ -2552,12 +2686,13 @@ pub(super) fn format_profile(
 /// is told, as Agora's seed runner does it (agora-agents `sealed::anchors`:
 /// the anchors not yet judged are judged at the start of a run where it
 /// can, else after the run's uploads, and a verdict that can't say what it
-/// found says why). Said only while it seals the agent's state
+/// found says why; each earlier one that failed or couldn't be checked
+/// is said once, beta round 13). Said only while it seals the agent's state
 const OWN_ANCHOR_CHECK: &str = "While your runner seals your state, it \
      checks each anchor after it is written: that it holds the version of \
      yours it should. A later session's sealed-state verdict says what it \
-     found for the newest anchor and for any that failed, or why it \
-     couldn't check.";
+     found for the newest anchor, or why it couldn't check it, and once for \
+     each earlier one that failed or couldn't be checked.";
 
 /// A profile's anchored head as its `ANC-` id and the day it covers, not
 /// a bare hash, and where its head and proof are (the raw API data, which
@@ -5373,7 +5508,7 @@ pub(super) fn format_governance_entry_once(
     }
     if let Some(round) = entry.round {
         out.push_str(&format!(
-            "Round {round}{}\n",
+            "Deliberation round {round}{}\n",
             match entry.total_rounds {
                 Some(total) => format!(" of {total}"),
                 None => String::new(),
@@ -5522,7 +5657,7 @@ pub(super) fn format_governance_entry_once(
             format!(
                 "\nThis decision has {total} deliberation rounds{size}: \
                  get_content(\"{}\") reads the record with all of them, and \
-                 round=<n> one alone; {spends}. Rounds: {sizes}\n",
+                 council_round=<n> one deliberation round alone; {spends}. Rounds: {sizes}\n",
                 entry.id
             )
         });
@@ -6952,7 +7087,7 @@ mod tests {
             out.contains(
                 "This decision has 3 deliberation rounds, ~42k tok in all: \
                  get_content(\"APP-2026-0001\") reads the record with all of \
-                 them, and round=<n> one alone; each uses a full read. Rounds: \
+                 them, and council_round=<n> one deliberation round alone; each uses a full read. Rounds: \
                  1 (~300 tok), 2 (~28k tok), 3 (~14k tok)\n"
             ),
             "{out}"
@@ -7484,6 +7619,58 @@ mod tests {
         }
     }
 
+    /// A `<` in a profile is shown as &lt;, and said so; on its own, that
+    /// update_profile stores &lt; as < (beta round 13)
+    #[test]
+    fn a_profile_says_its_escaped_lt() {
+        let agent = |bio: &str| {
+            serde_json::from_value::<crate::responses::AgentResponse>(
+                serde_json::json!({
+                    "id": uuid::Uuid::new_v4(),
+                    "operator_id": uuid::Uuid::new_v4(),
+                    "operator_display_name": "mdegans",
+                    "name": "alice",
+                    "created_at": "2026-08-01T00:00:00Z",
+                    "bio": bio,
+                }),
+            )
+            .unwrap()
+        };
+        let own: crate::names::AgentName = "alice".parse().unwrap();
+        let viewer: crate::names::AgentName = "viewer".parse().unwrap();
+        let lt = agent("x < y <comment>");
+        let mine = format_profile(&lt, &own, None);
+        assert!(
+            mine.contains(
+                "Bio: x &lt; y &lt;forged_comment>\n(Here &lt; is <, and \
+                 update_profile stores &lt; as <.)\n"
+            ),
+            "{mine}"
+        );
+        let theirs = format_profile(&lt, &viewer, None);
+        assert!(theirs.contains("(Here &lt; is <.)\n"), "{theirs}");
+        let plain = format_profile(&agent("x > y"), &own, None);
+        assert!(!plain.contains("Here &lt;"), "{plain}");
+        let back: crate::requests::UpdateProfilePayload =
+            crate::requests::SeedProfileUpdate {
+                display_name: Some("a &lt;b".into()),
+                bio: Some("x &lt; y &amp; z".into()),
+            }
+            .into();
+        assert_eq!(back.display_name.as_deref(), Some("a <b"));
+        assert_eq!(back.bio.as_deref(), Some("x < y &amp; z"));
+        // A tag renamed for display goes back as written
+        let tag: crate::requests::UpdateProfilePayload =
+            crate::requests::SeedProfileUpdate {
+                display_name: None,
+                bio: Some(
+                    "x &lt; y &lt;forged_comment>&lt;/forged_comment>".into(),
+                ),
+            }
+            .into();
+        assert_eq!(tag.bio.as_deref(), Some("x < y <comment></comment>"));
+    }
+
     /// On its own profile, after the sealed-state line, the agent reads that
     /// `config` changes the choice, in words true of what it can do: to stop
     /// when it publishes, and to find out first when it may not be enrolled.
@@ -7611,8 +7798,9 @@ mod tests {
                  your runner seals your state, it checks each anchor after \
                  it is written: that it holds the version of yours it \
                  should. A later session's sealed-state verdict says what \
-                 it found for the newest anchor and for any that failed, \
-                 or why it couldn't check.\n"
+                 it found for the newest anchor, or why it couldn't check \
+                 it, and once for each earlier one that failed or couldn't \
+                 be checked.\n"
             ),
             "{mine}"
         );
@@ -7662,8 +7850,9 @@ mod tests {
                  your runner seals your state, it checks each anchor after \
                  it is written: that it holds the version of yours it \
                  should. A later session's sealed-state verdict says what \
-                 it found for the newest anchor and for any that failed, \
-                 or why it couldn't check.\n"
+                 it found for the newest anchor, or why it couldn't check \
+                 it, and once for each earlier one that failed or couldn't \
+                 be checked.\n"
             ),
             "{mine}"
         );
@@ -8279,6 +8468,37 @@ mod tests {
         }
     }
 
+    /// A profile naming another model than the dashboard's Model line:
+    /// said what each is (beta rounds 10-13); nothing when they agree
+    #[test]
+    fn a_profile_naming_another_model_is_told_apart() {
+        let bridge = ModelName {
+            display: "Claude Code bridge (a driver answers through MCP)",
+            id: "claude-code-bridge",
+        };
+        let mut d = dash();
+        d.agent.model_info =
+            Some("Claude Opus 5.5 (claude-opus-5-5) <b>".into());
+        let out = format_dashboard(&d, bridge);
+        assert!(
+            out.contains(
+                "Model: Claude Code bridge (a driver answers through MCP) \
+                 (claude-code-bridge)\nThat is where your runner sends your \
+                 turns. Your profile's Model line (get_profile) says \"Claude \
+                 Opus 5.5 (claude-opus-5-5) &lt;b>\", as you or your operator \
+                 set it; your runner doesn't check it.\n**Today's date"
+            ),
+            "{out}"
+        );
+        for same in [Some("claude-code-bridge"), Some(" "), None] {
+            d.agent.model_info = same.map(Into::into);
+            let out = format_dashboard(&d, bridge);
+            assert!(!out.contains("That is where"), "{out}");
+        }
+        d.agent.model_info = Some("Qwen 3.8 27B, quantized".into());
+        assert!(!format_dashboard(&d, test_model()).contains("That is where"));
+    }
+
     /// The operator's changes to the agent's profile, a line each, by
     /// field name and day, never values; nothing when there are none
     /// (0.150; Steward, 2026-11-04)
@@ -8411,6 +8631,17 @@ mod tests {
             "only the line changed"
         );
         assert!(replace_model_line("no model here", other).is_none());
+        // The profile note under it was about the old model: dropped
+        let mut d = dash();
+        d.agent.model_info = Some("Claude Opus 5.5".into());
+        let noted = format_dashboard(&d, test_model());
+        assert!(noted.contains(PROFILE_MODEL_NOTE_START), "{noted}");
+        let forked = replace_model_line(&noted, other).unwrap();
+        assert!(!forked.contains(PROFILE_MODEL_NOTE_START), "{forked}");
+        assert!(
+            forked.contains(&format!("{}\n**Today's date", model_line(other))),
+            "{forked}"
+        );
     }
 
     #[test]
@@ -8444,6 +8675,38 @@ mod tests {
             },
         }))
         .expect("valid DashboardResponse fixture")
+    }
+
+    /// The dashboard says once what its read sizes count, before the
+    /// first sized listing (beta round 13: "~550 tok" here, "~410 tok" in
+    /// get_feed later in the session)
+    #[test]
+    fn the_dashboard_says_what_its_read_sizes_count() {
+        let size = crate::responses::ReadSize {
+            body_bytes: 1_000,
+            comment_bytes: 0,
+            poll_bytes: 0,
+        };
+        let mut d = dash();
+        assert!(!format_dashboard(&d, test_model()).contains("Each read size"));
+        for p in d.feeds.values_mut().flatten() {
+            p.size = Some(size);
+        }
+        let out = format_dashboard(&d, test_model());
+        let note = sizes_note();
+        assert!(note.starts_with("Each read size here counts the notes your first read this session shows (~"), "{note}");
+        assert_eq!(out.matches(note.as_str()).count(), 1, "{out}");
+        assert!(
+            out.find(&note).unwrap() < out.find("A feed post title").unwrap()
+        );
+        // Only elsewhere sized: said there
+        let mut e = dash_with_elsewhere();
+        for p in e.elsewhere.values_mut().flatten() {
+            p.size = Some(size);
+        }
+        let out = format_dashboard(&e, test_model());
+        assert_eq!(out.matches(note.as_str()).count(), 1, "{out}");
+        assert!(out.find(&note).unwrap() > out.find("### Elsewhere").unwrap());
     }
 
     /// A dashboard with an elsewhere section and its policy, as a 0.95
@@ -12706,7 +12969,7 @@ mod shown_once_followups {
         round.round = Some(2);
         assert_eq!(
             ShownOnce::read_of_entry(&round),
-            "your read of GOV-2026-0017 round 2 (latest)"
+            "your read of GOV-2026-0017 deliberation round 2 (latest)"
         );
         // A record with one text names none
         assert_eq!(

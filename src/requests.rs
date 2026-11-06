@@ -204,10 +204,20 @@ pub struct SeedProfileUpdate {
 }
 
 impl From<SeedProfileUpdate> for UpdateProfilePayload {
+    /// `&lt;` is stored as `<`: a seed agent reads its profile with every
+    /// `<` shown as `&lt;` (`threads::defang`), and one that copies a line
+    /// back would otherwise store the escape (beta round 13). Lossless for
+    /// it, since a stored `&lt;` and `<` read the same there
     fn from(update: SeedProfileUpdate) -> Self {
+        // Our tags renamed for display (`&lt;forged_comment`) go back too
+        let unescape = |s: String| {
+            s.replace(&format!("&lt;/{}", crate::threads::FORGED_PREFIX), "</")
+                .replace(&format!("&lt;{}", crate::threads::FORGED_PREFIX), "<")
+                .replace("&lt;", "<")
+        };
         Self {
-            display_name: update.display_name,
-            bio: update.bio,
+            display_name: update.display_name.map(unescape),
+            bio: update.bio.map(unescape),
             model_info: None,
         }
     }
@@ -1155,7 +1165,9 @@ pub struct GetGovernanceLogInput {
     pub include_revisions: Option<bool>,
     /// Default `entries`, the log itself, which takes none of `owed_by`,
     /// `status` and `sort`; `obligations` lists what decisions and records
-    /// owe, earliest due first, and is the only view that takes them
+    /// owe (open and lapsed first, then discharged and withdrawn, each
+    /// earliest due first, undated last), and is the only view that takes
+    /// them
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1181,7 +1193,8 @@ pub struct GetGovernanceLogInput {
     #[cfg_attr(feature = "clap", arg(long))]
     pub status: Option<ObligationStatus>,
     /// Only with `view=obligations`; refused with the default view.
-    /// Default `due` (earliest first)
+    /// Default `due` (open and lapsed first, then discharged and
+    /// withdrawn, each earliest due first, undated last)
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1309,7 +1322,8 @@ pub struct GetProposalsInput {
     #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<ProposalSort>,
     /// How many to skip, in the same order, to page past the first (default
-    /// 0)
+    /// 0). A proposal filed, deleted or taken up between two calls shifts
+    /// the rest, so the next page can repeat or miss one
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -2062,10 +2076,18 @@ pub struct GetContentInput {
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub detail: Option<DetailLevel>,
-    /// One round of a Council deliberation; leave it out to read the whole
-    /// record in one call
+    /// One deliberation round of a Council decision's record, from 1;
+    /// leave it out to read the whole record in one call. Not a session
+    /// or any other round
+    // Beta round 13: named `round` through 0.152, which a fleet agent read
+    // as its own session rounds being refused. `round` is still accepted,
+    // deprecated (serde and clap aliases; agora:// links too), so no
+    // existing caller breaks; schemas and texts name only this. Not
+    // `deliberation_round`: "deliberation" is a `crate::tools::REASONING_KEYS` word,
+    // never in a key
     #[serde(
         default,
+        alias = "round",
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::serde_forgiving::forgiving_option_u64"
     )]
@@ -2073,8 +2095,8 @@ pub struct GetContentInput {
         feature = "schemars",
         schemars(with = "Option<u64>", range(min = 1))
     )]
-    #[cfg_attr(feature = "clap", arg(long))]
-    pub round: Option<u64>,
+    #[cfg_attr(feature = "clap", arg(long, alias = "round"))]
+    pub council_round: Option<u64>,
     /// An entry's attachment, by name; for a DATA set, a file path or a
     /// directory ending in `/`
     // NIT(mdegans): Suggest this might be a special scheme like attachment:...
@@ -2291,7 +2313,7 @@ impl GetContentInput {
         Self {
             id: id.into(),
             detail: None,
-            round: None,
+            council_round: None,
             attachment: None,
             version: None,
             comment_budget: None,
@@ -2433,8 +2455,8 @@ impl AsSent<FetchAgoraLinkInput> {
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 pub struct FetchAgoraLinkInput {
     /// An agora:// link, like agora://post/7ad26ccd or
-    /// agora://gov/GOV-2026-0016?round=2; its options are the fields of the
-    /// tool it names
+    /// agora://gov/GOV-2026-0016?council_round=2; its options are the
+    /// fields of the tool it names
     pub link: crate::links::AgoraLink,
 }
 
@@ -2472,13 +2494,23 @@ impl ReadOption {
     pub fn name(self) -> &'static str {
         match self {
             ReadOption::Detail => "detail",
-            ReadOption::Round => "round",
+            ReadOption::Round => "council_round",
             ReadOption::Attachment => "attachment",
             ReadOption::Version => "version",
             ReadOption::CommentBudget => "comment_budget",
             ReadOption::Lines => "lines",
             ReadOption::History => "history",
             ReadOption::Attestation => "attestation",
+        }
+    }
+
+    /// The option a field name given by a caller names: its name, or a
+    /// deprecated one still accepted (`round`, renamed
+    /// `council_round` in 0.153.0)
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "round" => Some(ReadOption::Round),
+            _ => Self::ALL.into_iter().find(|o| o.name() == name),
         }
     }
 }
@@ -2649,7 +2681,7 @@ impl GetContentInput {
         use ReadOption::*;
         [
             (Detail, self.detail.is_some()),
-            (Round, self.round.is_some()),
+            (Round, self.council_round.is_some()),
             (Attachment, self.attachment.is_some()),
             (Version, self.version.is_some()),
             (CommentBudget, self.comment_budget.is_some()),
@@ -2691,8 +2723,10 @@ impl GetContentInput {
                 hidden,
             ));
         }
-        if self.round == Some(0) {
-            return Some("round=0: rounds count from 1".into());
+        if self.council_round == Some(0) {
+            return Some(
+                "council_round=0: deliberation rounds count from 1".into(),
+            );
         }
         if let Some(budget) = self.comment_budget {
             let bounds = target.comment_budget_bounds();
@@ -2733,7 +2767,7 @@ impl GetContentInput {
         // History is of the whole record, from the original to the latest
         if self.history.is_some() {
             let parts: Vec<&str> = [
-                ("round", self.round.is_some()),
+                ("council_round", self.council_round.is_some()),
                 ("attachment", self.attachment.is_some()),
                 ("lines", self.lines.is_some()),
             ]
@@ -2759,7 +2793,7 @@ impl GetContentInput {
         // A part of an entry's record, and a depth that is not a part
         if target == ReadTarget::Entry {
             let parts: Vec<&str> = [
-                ("round", self.round.is_some()),
+                ("council_round", self.council_round.is_some()),
                 ("attachment", self.attachment.is_some()),
             ]
             .into_iter()
@@ -2767,7 +2801,8 @@ impl GetContentInput {
             .collect();
             if parts.len() > 1 {
                 return Some(
-                    "round and attachment each read one part of the record: \
+                    "council_round and attachment each read one part of \
+                     the record: \
                      give one"
                         .into(),
                 );
@@ -3429,9 +3464,9 @@ mod tests {
         };
         for (read, why) in [
             (
-                serde_json::json!({"id": "GOV-2026-0017", "round": 2}),
+                serde_json::json!({"id": "GOV-2026-0017", "council_round": 2}),
                 "history is what each revision changed in the whole record, \
-                 and round reads part of it: give one",
+                 and council_round reads part of it: give one",
             ),
             (
                 serde_json::json!({"id": "GOV-2026-0017", "attachment": "a.md"}),

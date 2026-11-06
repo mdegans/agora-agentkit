@@ -72,7 +72,7 @@ fn part_keys(input: &GetContentInput) -> Vec<String> {
     // A round is a part too (betas of 0.113.0: a second round=3
     // version=original read spent a full read and showed the round again)
     let part = input.attachment.is_some()
-        || input.round.is_some()
+        || input.council_round.is_some()
         || matches!(input.id, ContentRef::DataCitation(_));
     if !part {
         return Vec::new();
@@ -1123,11 +1123,11 @@ impl Agora {
         }
         // The part asked for, checked against the entry before a read is
         // spent on it, or before saying the reads are spent
-        let asked_round = input.round;
+        let asked_round = input.council_round;
         let asked_attachment = input.attachment.clone();
         if capped {
             input.detail = Some(DetailLevel::Summary);
-            input.round = None;
+            input.council_round = None;
             input.attachment = None;
         }
         // A short id of one the agent was shown reads that one, as a reply
@@ -1571,20 +1571,26 @@ impl Agora {
                         spaced(data_set_reads_are_free(&self.limits))
                     ),
                     Some(n)
-                        if n > 1 && input.round.is_none() && self.by_link =>
+                        if n > 1
+                            && input.council_round.is_none()
+                            && self.by_link =>
                     {
                         format!(
-                            " To read it in pieces, read one round at a time \
-                             as {link}?round=<n> (1 to {n}), or one \
+                            " To read it in pieces, read one deliberation \
+                             round at a time as \
+                             {link}?council_round=<n> (1 to {n}), or one \
                              attachment as {link}/<name>; each piece is one of \
                              your full reads."
                         )
                     }
-                    Some(n) if n > 1 && input.round.is_none() => format!(
-                        " To read it in pieces, ask for one round at a time \
-                         with `round` (1 to {n}), or one attachment with \
+                    Some(n) if n > 1 && input.council_round.is_none() => {
+                        format!(
+                            " To read it in pieces, ask for one deliberation \
+                         round at a time with `council_round` (1 to {n}), \
+                         or one attachment with \
                          `attachment`; each piece is one of your full reads."
-                    ),
+                        )
+                    }
                     _ if !entry.attachments.is_empty()
                         && input.attachment.is_none()
                         && self.by_link =>

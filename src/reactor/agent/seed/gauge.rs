@@ -392,7 +392,8 @@ impl Requested {
 
 /// What a refused read by link is told about the options [`instead`] names
 const LINK_OPTIONS: &str = "With fetch_agora_link these are options in the \
-     link (…?detail=summary, …?comment_budget=<bytes>, …?round=<n>), and an \
+     link (…?detail=summary, …?comment_budget=<bytes>, \
+     …?council_round=<n>), and an \
      attachment is the last part of its path.";
 
 /// What a refused `get_content` should try instead, as one sentence or
@@ -449,7 +450,8 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
         Some(ContentRef::Content(_) | ContentRef::ContentPrefix(_))
     ) {
         return format!(
-            "For a Council decision, read one round (round=<n>) or \
+            "For a Council decision, read one deliberation round \
+             (council_round=<n>) or \
              detail=\"summary\"; for a governance entry's attachments, one \
              at a time (attachment=<name>). {}",
             fallbacks(false)
@@ -932,7 +934,10 @@ mod tests {
             .await
             .content
             .to_string();
-        assert!(note.contains("read one round (round=<n>)"), "{note}");
+        assert!(
+            note.contains("read one deliberation round (council_round=<n>)"),
+            "{note}"
+        );
         assert!(!note.contains("would fit:"), "{note}");
 
         // Other tools get the room and their own advice, not a budget

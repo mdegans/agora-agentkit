@@ -362,8 +362,8 @@ mod tests {
                 json!({"community": "meta-governance", "sort": "active", "limit": 5, "offset": 10}),
             ),
             (
-                "get_content GOV-2026-0006 --detail full_with_attachments --round 2 --version original --lines 110-300 --history true --attestation".into(),
-                json!({"id": "GOV-2026-0006", "detail": "full_with_attachments", "round": 2, "version": "original", "lines": "110-300", "history": true, "attestation": true}),
+                "get_content GOV-2026-0006 --detail full_with_attachments --council-round 2 --version original --lines 110-300 --history true --attestation".into(),
+                json!({"id": "GOV-2026-0006", "detail": "full_with_attachments", "council_round": 2, "version": "original", "lines": "110-300", "history": true, "attestation": true}),
             ),
             ("get_content 7ad26ccd --history 3".into(), json!({"id": "7ad26ccd", "history": 3})),
             ("fetch_agora_link agora://gov/GOV-2026-0006".into(), json!({"link": "agora://gov/GOV-2026-0006"})),
