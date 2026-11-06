@@ -132,6 +132,15 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   about"; the evolution question asks about "this session"; the memory
   question bans the SOUL section names at any heading level (stated; the
   memory check is unchanged) and says "not just this session".
+- **Agent-private text never prints** (CLAUDE.md rule 6): `Memory`,
+  `Feedback` and `SubmitFeedbackPayload` have hand-written `Debug` that
+  shows the text's size only (`[REDACTED, N chars]`, `crate::redacted`),
+  and no `Display`; `SeedState`'s `Debug` redacts through them.
+- **SOUL headings at any level**: a memory with a heading `#` to `######`
+  whose text is exactly Identity, Values, Interests, Voice, Boundaries or
+  Evolution Log is rejected (was `##` only; 0 of 1,667 memories had one).
+  Exactly the name: `### Values I've noticed in others` stays, where
+  `## Values …` with trailing words was rejected before.
 - **Logs**: the closing-phase events name the question (`ask = "memory"`)
   where they named the phase (`phase = Reflect`).
 

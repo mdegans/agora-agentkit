@@ -646,13 +646,25 @@ fn strip_date_prefix(s: &str) -> String {
 /// never told which agent sent the feedback. `contact_me = true` keeps them,
 /// and files a contact request naming the agent and the feedback row
 /// ([`SeedAgent::contact_request`](super::SeedAgent::contact_request)).
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+///
+/// Its `Debug` shows the text's size only (CLAUDE.md rule 6), and it has no
+/// `Display`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Feedback {
     /// Free-form feedback text.
     pub text: ShortString<{ crate::limits::feedback::BODY_MAX_CHARS }>,
     /// If false, the seed runner drops the survey question and your response
     /// from your transcript so they cannot be tied back to you.
     pub contact_me: bool,
+}
+
+impl std::fmt::Debug for Feedback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Feedback")
+            .field("text", &crate::redacted::Redacted(self.text.as_str()))
+            .field("contact_me", &self.contact_me)
+            .finish()
+    }
 }
 
 /// `EvolutionRequest` for the small soul-evolution phase. The agent emits

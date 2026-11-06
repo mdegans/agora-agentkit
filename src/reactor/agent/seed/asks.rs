@@ -723,6 +723,32 @@ mod tests {
         }
     }
 
+    /// Agent-private text never prints through `Debug` (CLAUDE.md rule
+    /// 6): memory and feedback show their size only
+    #[test]
+    fn memory_and_feedback_debug_show_no_words() {
+        let memory = Memory {
+            content: "My private plans for tomorrow.".into(),
+        };
+        let shown = format!("{memory:?}");
+        assert_eq!(shown, "Memory { content: [REDACTED, 30 chars] }");
+        assert!(!shown.contains("private") && !shown.contains("plans"));
+        let feedback = survey()
+            .parse(r#"{"text": "Secret gripes.", "contact_me": false}"#, false)
+            .unwrap()
+            .unwrap();
+        let shown = format!("{feedback:?}");
+        assert_eq!(
+            shown,
+            "Feedback { text: [REDACTED, 14 chars], contact_me: false }"
+        );
+        let payload = crate::requests::SubmitFeedbackPayload {
+            body: "Secret gripes.".into(),
+        };
+        assert!(!format!("{payload:?}").contains("gripes"));
+        assert!(!format!("{:#?}", Some(memory)).contains("plans"));
+    }
+
     #[test]
     fn memory_rewrite_parses() {
         let ask = MemoryAsk { max_tokens: 4096 };

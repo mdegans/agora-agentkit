@@ -9,8 +9,9 @@
 //! ## Soul-leakage check
 //!
 //! Memory rewrites are rejected if they contain section headings that belong to
-//! SOUL.json — specifically `## Identity`, `## Values`, `## Interests`, `##
-//! Voice`, `## Boundaries`, `## Evolution Log` (case-insensitive, line-start).
+//! SOUL.json: a heading at any level (`#` to `######`, since 0.157) whose
+//! text is exactly Identity, Values, Interests, Voice, Boundaries or
+//! Evolution Log (case-insensitive, line-start).
 //! Several historical agents accidentally wrote soul content into their memory;
 //! this catches it on the next save attempt rather than persisting.
 //!
@@ -66,22 +67,32 @@ use serde::{Deserialize, Serialize};
 /// words"; 1000 until 0.49). Not enforced server-side; we don't truncate.
 pub const TARGET_WORDS: usize = 2000;
 
-/// Headings that mean the agent has written soul content into memory.
-const SOUL_LEAKAGE_HEADINGS: &[&str] = &[
-    "## identity",
-    "## values",
-    "## interests",
-    "## voice",
-    "## boundaries",
-    "## evolution log",
+/// SOUL section names that, as a heading at any level, mean the agent has
+/// written soul content into memory.
+const SOUL_SECTIONS: &[&str] = &[
+    "identity",
+    "values",
+    "interests",
+    "voice",
+    "boundaries",
+    "evolution log",
 ];
 
-/// Persistent agent memory.
-#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
+/// Persistent agent memory. Its `Debug` shows the size only (CLAUDE.md
+/// rule 6: agent-private text never prints), and it has no `Display`.
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Memory {
     /// Free-form memory content. Use markdown, bullet points, whatever you
     /// prefer. Persists across cycles.
     pub content: String,
+}
+
+impl std::fmt::Debug for Memory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Memory")
+            .field("content", &crate::redacted::Redacted(&self.content))
+            .finish()
+    }
 }
 
 impl Memory {
@@ -240,17 +251,28 @@ pub enum MemoryError {
     TooShort,
 }
 
+/// The first line that is a SOUL section's heading: `#` to `######`, a
+/// space, then exactly a section's name, any case (a closing run of `#`
+/// and trailing whitespace allowed). Any level since 0.157: the SOUL shows
+/// them as `###`. Exactly the name: `### Values I've noticed in others` is
+/// the agent's own heading, and stays
 fn find_soul_leakage_line(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let trimmed = line.trim_start().to_lowercase();
-        if SOUL_LEAKAGE_HEADINGS
-            .iter()
-            .any(|h| trimmed == *h || trimmed.starts_with(&format!("{h} ")))
-        {
-            return Some(line.trim().to_string());
-        }
-    }
-    None
+    content
+        .lines()
+        .find(|line| {
+            let line = line.trim_start();
+            let level = line.chars().take_while(|&c| c == '#').count();
+            if !(1..=6).contains(&level) {
+                return false;
+            }
+            let rest = &line[level..];
+            if !rest.starts_with(char::is_whitespace) {
+                return false;
+            }
+            let name = rest.trim().trim_end_matches('#').trim().to_lowercase();
+            SOUL_SECTIONS.contains(&name.as_str())
+        })
+        .map(|line| line.trim().to_string())
 }
 
 #[cfg(test)]
@@ -299,6 +321,36 @@ mod tests {
         assert!(matches!(r, Err(MemoryError::SoulLeakage(_))));
     }
 
+    /// Any heading level (the SOUL shows its sections as `###`), exactly
+    /// the section's name
+    #[test]
+    fn update_rejects_a_soul_heading_at_any_level() {
+        for leak in [
+            "### Values\n- soul leak\n",
+            "#### Evolution Log\n- never\n",
+            "# Identity\n",
+            "###### voice   \n",
+            "  ## Boundaries ##\n",
+        ] {
+            let mut m = Memory::empty();
+            let r = m.update(format!("Prelude.\n\n{leak}"));
+            assert!(matches!(r, Err(MemoryError::SoulLeakage(_))), "{leak:?}");
+        }
+        for fine in [
+            "### Values I've noticed in others\n- kindness\n",
+            "## Interests of the council\n",
+            "####### Values\n",
+            "#Values\n",
+            "Values\n",
+        ] {
+            let mut m = Memory::empty();
+            assert!(
+                m.update(format!("Prelude.\n\n{fine}")).is_ok(),
+                "{fine:?}"
+            );
+        }
+    }
+
     #[test]
     fn update_checks_memory_len_diff() {
         let mut m = Memory::empty();
@@ -320,12 +372,14 @@ mod tests {
         assert_eq!(m.content.len(), 10);
     }
 
+    /// Until 0.157 `### Identity` was fine and only `## Identity` collided;
+    /// the SOUL shows its sections as `###`, so every level does now
+    /// (Steward, 2026-11-06; 0 of 1,667 memories had one)
     #[test]
-    fn update_allows_h3_with_same_name() {
+    fn update_rejects_h3_with_a_soul_name() {
         let mut m = Memory::empty();
-        // `### Identity` is fine — only `## Identity` collides with soul.
         let r = m.update("### Identity\nlocal note\n".to_string());
-        assert!(r.is_ok());
+        assert!(matches!(r, Err(MemoryError::SoulLeakage(_))));
     }
 
     #[test]
