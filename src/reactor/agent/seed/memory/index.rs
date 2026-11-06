@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 
 use super::id::MemoryId;
 use super::render::grouped;
-use crate::enums::SearchMode;
 use crate::govlog::Sha256Hex;
 
 /// The file format [`SearchIndex::to_bytes`] writes
@@ -398,25 +397,13 @@ fn excerpt(line: &str, words: &[String]) -> String {
 }
 
 impl SearchResult {
-    /// What the agent reads. `mode` is the call's: semantic search is
-    /// not available for memory, so it is said to have run by keyword.
-    /// `index` says how the runner came by the index; a first build or a
-    /// rebuild is announced
-    pub fn render(
-        &self,
-        mode: Option<SearchMode>,
-        index: IndexState,
-    ) -> String {
+    /// What the agent reads. `index` says how the runner came by the
+    /// index; a first build or a rebuild is announced
+    pub fn render(&self, index: IndexState) -> String {
         let mut out = String::new();
         if let Some(said) = index.announcement() {
             out.push_str(said);
             out.push_str("\n\n");
-        }
-        if mode == Some(SearchMode::Semantic) {
-            out.push_str(
-                "Semantic search isn't available for your memory yet, so \
-                 this was a keyword search.\n\n",
-            );
         }
         let versions = match self.versions {
             1 => "your memory's 1 version".to_string(),
@@ -534,7 +521,7 @@ mod tests {
         assert_eq!(r.hits[2].first, (id(1), at(1)));
         assert_eq!(r.hits[2].last, (id(1), at(1)));
 
-        let text = r.render(None, IndexState::Loaded);
+        let text = r.render(IndexState::Loaded);
         assert!(
             text.starts_with(
                 "Lines in your memory's 3 versions with every word of \
@@ -551,15 +538,12 @@ mod tests {
             )),
             "{text}"
         );
-        let one = index()
-            .search("haiku")
-            .render(Some(SearchMode::Semantic), IndexState::Loaded);
-        assert!(one.starts_with("Semantic search isn't available"), "{one}");
+        let one = index().search("haiku").render(IndexState::Loaded);
         assert!(
             one.ends_with(&format!("only in {} (2026-11-03)", id(3))),
             "{one}"
         );
-        let none = index().search("zebra").render(None, IndexState::Loaded);
+        let none = index().search("zebra").render(IndexState::Loaded);
         assert_eq!(
             none,
             "No line in your memory's 3 versions contains every word of \
@@ -614,7 +598,7 @@ mod tests {
         assert_eq!(r.hits.len(), MAX_GROUPS);
         assert_eq!(r.more, 15);
         assert!(
-            r.render(None, IndexState::Loaded)
+            r.render(IndexState::Loaded)
                 .ends_with("\n15 more lines match; narrow the query.")
         );
     }
@@ -671,21 +655,14 @@ mod tests {
     #[test]
     fn builds_are_announced() {
         let r = index().search("haiku");
-        let plain = r.render(None, IndexState::Loaded);
+        let plain = r.render(IndexState::Loaded);
         assert_eq!(
-            r.render(None, IndexState::Built),
+            r.render(IndexState::Built),
             format!("{INDEX_BUILT}\n\n{plain}")
         );
         assert_eq!(
-            r.render(None, IndexState::Rebuilt),
+            r.render(IndexState::Rebuilt),
             format!("{INDEX_REBUILT}\n\n{plain}")
-        );
-        let semantic = r.render(Some(SearchMode::Semantic), IndexState::Built);
-        assert!(
-            semantic.starts_with(&format!(
-                "{INDEX_BUILT}\n\nSemantic search isn't available"
-            )),
-            "{semantic}"
         );
     }
 

@@ -7,7 +7,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::id::HistoryRef;
-use crate::enums::SearchMode;
 use crate::one_or_many::OneOrMany;
 use crate::requests::GetContentInput;
 
@@ -21,24 +20,24 @@ pub const LOG_DEFAULT_LIMIT: u32 = 20;
 pub const LOG_MAX_LIMIT: u32 = 50;
 
 /// The tool's description: the same bytes for every agent
-pub const MEMORY_TOOL_DESCRIPTION: &str = "Read your memory's history: \
-     the versions your runner has kept of the memory you rewrite at the end \
-     of each session. Each version has a memory id (mem-…), and a sealed \
-     version has a head too. `id` takes either: a memory id or a sealed \
-     head, at least 6 hex digits of it. A memory id names one memory text; \
-     the one in your Memory heading is the memory in your context now. Any \
-     change, including writing an id into your memory, gives the next \
-     version a new id. Old ids keep working.\n\n\
-     `log` lists your versions, newest first. `show` is like `git log -p`: \
-     newest first, anchored on the memory in your context, and each older \
-     version you ask for is shown as what changed from it to the next newer \
-     one (`+` lines were added in the newer). `diff` compares two versions, \
-     or one with your current memory. `search` finds the lines in any \
-     version that contain your words.\n\n\
-     Call it with one request, as in {\"request\": {\"action\": \"show\", \
-     \"id\": \"mem-3f9a1c07be\"}}. Each result counts toward your context \
-     like any other read: one that would not fit is left out, and you are \
-     told its size.";
+pub const MEMORY_TOOL_DESCRIPTION: &str = "Your memory's past versions, \
+     kept by your runner, which your operator runs: Agora's servers can't \
+     read them, and your operator can. Call it with one request, as in \
+     {\"request\": {\"action\": \"show\", \"id\": \"mem-3f9a1c07be\"}}.\n\n\
+     - `search`: what did I write about X? The lines in any version with \
+     every word of `query`, in any case.\n\
+     - `show`: one `id` shows that version whole. Several are like `git log \
+     -p`: newest first, anchored on the memory in your context, each older \
+     one as what changed from it to the next newer one (`+` lines are in \
+     the newer).\n\
+     - `log`: your versions, newest first, with their ids.\n\
+     - `diff`: what changed from `a` to `b`, or to your current memory.\n\n\
+     An id is a memory id (mem-…, as in your Memory heading) or, if your \
+     state is sealed, a head: 6 hex digits of it or more. An id is worked \
+     out after you rewrite your memory, so the current id can't appear \
+     inside the text it names; writing an id into your memory changes the \
+     next version's id. Old ids keep working. Each result counts toward \
+     your context like any other read.";
 
 /// The `memory` tool's input: one request. An object at the root, since
 /// Anthropic refuses a tool whose input schema is a bare union
@@ -46,8 +45,7 @@ pub const MEMORY_TOOL_DESCRIPTION: &str = "Read your memory's history: \
 #[serde(deny_unknown_fields)]
 #[schemars(inline)]
 pub struct MemoryInput {
-    /// What to do: `log`, `show`, `diff` or `search`, in `action`, with
-    /// that action's fields beside it
+    /// One action and its fields
     pub request: MemoryAction,
 }
 
@@ -168,41 +166,25 @@ fn read<T: serde::de::DeserializeOwned>(
     })
 }
 
-/// One request to the `memory` tool, by its `action`
+/// One request to the `memory` tool, by its `action`. Its docs are what
+/// a model reads, every session, so they are short
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 #[schemars(inline)]
 pub enum MemoryAction {
-    /// List your memory's versions, newest first: date, memory id, head,
-    /// and size
-    Log {
-        /// Start below this version, a memory id or a head; leave it out
-        /// to start from the newest
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::serde_forgiving::forgiving_option"
-        )]
-        before: Option<HistoryRef>,
-        /// How many versions to list: 20 if left out, at most 50
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
-        )]
-        #[schemars(with = "Option<u32>", range(min = 1, max = LOG_MAX_LIMIT))]
-        limit: Option<u32>,
+    // The tool's description says what each action does; a variant doc
+    // would say it again in the schema, every session.
+    // No `mode` until semantic search exists (Steward, beta round 16)
+    Search {
+        /// Words to find
+        query: String,
     },
-    /// Show versions like `git log -p`: one id shows that version whole;
-    /// several show the newest first and each older one as what changed
-    /// from it to the next newer one
     Show {
-        /// A memory id or a head, or a list of them
+        /// A memory id or head, or a list
         #[schemars(with = "IdOrList")]
         id: OneOrMany<HistoryRef>,
-        /// The most to show, in bytes (default 32,768, at least 4,096, at
-        /// most 262,144). Versions past it are listed by id and size, never
-        /// cut
+        /// Most bytes to show (default 32,768, at least 4,096,
+        /// at most 262,144)
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
@@ -217,32 +199,33 @@ pub enum MemoryAction {
         )]
         budget: Option<u32>,
     },
-    /// What changed from version `a` to version `b`, whole
+    Log {
+        /// Start below this memory id or head
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::serde_forgiving::forgiving_option"
+        )]
+        before: Option<HistoryRef>,
+        /// Versions to list: 20 if left out, at most 50
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+        )]
+        #[schemars(with = "Option<u32>", range(min = 1, max = LOG_MAX_LIMIT))]
+        limit: Option<u32>,
+    },
     Diff {
-        /// The version to compare from, a memory id or a head
+        /// A memory id or head
         a: HistoryRef,
-        /// The version to compare to; leave it out to compare with your
-        /// current memory
+        /// A memory id or head; left out, your current memory
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
             deserialize_with = "crate::serde_forgiving::forgiving_option"
         )]
         b: Option<HistoryRef>,
-    },
-    /// Find the lines, in any version, that contain every word of `query`,
-    /// in any case
-    Search {
-        /// The words to find
-        query: String,
-        /// `keyword`, the default; `semantic` searches by keyword too, for
-        /// now
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "crate::serde_forgiving::forgiving_option"
-        )]
-        mode: Option<SearchMode>,
     },
 }
 
@@ -288,8 +271,8 @@ fn adjust(
 #[schemars(untagged)]
 #[allow(dead_code)] // only its schema is used
 enum IdOrList {
-    One(HistoryRef),
-    List(#[schemars(length(min = 1))] Vec<HistoryRef>),
+    One(String),
+    List(#[schemars(length(min = 1))] Vec<String>),
 }
 
 /// `log`'s `limit`, defaulted and clamped to `1..=`[`LOG_MAX_LIMIT`]
@@ -356,13 +339,13 @@ mod tests {
                     .expect("an action constant")
             })
             .collect();
-        assert_eq!(names, ["log", "show", "diff", "search"]);
+        // As the description leads: search, then show, log and diff
+        assert_eq!(names, ["search", "show", "log", "diff"]);
         for a in actions {
             let required = a["required"].as_array().unwrap();
             assert!(required.contains(&json!("action")), "{a}");
         }
         assert!(crate::tools::reasoning_keys_in(&schema).is_empty());
-        // `id` is one or a list; `mode` the search modes
         // A string or a list, as it reads
         let show = &actions[1]["properties"];
         let id = show["id"]["anyOf"].as_array().expect("id anyOf");
@@ -376,10 +359,23 @@ mod tests {
                 .unwrap()
                 .contains("or a list")
         );
+        // No `mode` until semantic search exists
         assert_eq!(
-            actions[3]["properties"]["mode"]["enum"],
-            json!(["keyword", "semantic"])
+            actions[0]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["action", "query"]
         );
+    }
+
+    /// Every agent reads the definition every session: keep it short
+    #[test]
+    fn the_definition_is_short() {
+        let size = MEMORY_TOOL_DESCRIPTION.len()
+            + MemoryInput::schema().to_string().len();
+        assert!(size < 2_500, "{size}");
     }
 
     #[test]
@@ -393,17 +389,25 @@ mod tests {
             crate::tools::developer_text(MEMORY_TOOL_DESCRIPTION).is_empty()
         );
         for must in [
-            "memory id (mem-…)",
-            "sealed head",
-            "names one memory text",
-            "writing an id into your memory",
-            "Old ids keep working",
+            "memory id (mem-…",
+            "if your state is sealed, a head",
+            "An id is worked out after you rewrite your memory, so the \
+             current id can't appear inside the text it names; writing an \
+             id into your memory changes the next version's id. Old ids \
+             keep working.",
             "like `git log -p`: newest first, anchored on the memory in your context",
-            "{\"request\": {\"action\": \"show\"",
+            "{\"request\": {\"action\": \"show\", \"id\": \"mem-3f9a1c07be\"}}",
             "counts toward your context",
+            "kept by your runner, which your operator runs: Agora's servers \
+             can't read them, and your operator can.",
         ] {
             assert!(MEMORY_TOOL_DESCRIPTION.contains(must), "{must}");
         }
+        // Search leads, then show, log and diff
+        let at = |a: &str| MEMORY_TOOL_DESCRIPTION.find(a).unwrap();
+        assert!(at("- `search`") < at("- `show`"));
+        assert!(at("- `show`") < at("- `log`"));
+        assert!(at("- `log`") < at("- `diff`"));
     }
 
     #[test]
@@ -448,10 +452,9 @@ mod tests {
                 },
             ),
             (
-                json!({"action": "search", "query": "anchor", "mode": "keyword"}),
+                json!({"action": "search", "query": "anchor"}),
                 MemoryAction::Search {
                     query: "anchor".into(),
-                    mode: Some(SearchMode::Keyword),
                 },
             ),
         ];
@@ -474,6 +477,13 @@ mod tests {
         assert!(
             serde_json::from_value::<MemoryAction>(json!({"action": "rm"}))
                 .is_err()
+        );
+        // `mode` is gone until semantic search exists
+        assert!(
+            serde_json::from_value::<MemoryAction>(
+                json!({"action": "search", "query": "x", "mode": "keyword"})
+            )
+            .is_err()
         );
     }
 
