@@ -36,9 +36,9 @@ mod projection;
 pub mod render;
 
 pub use action::{
-    LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT, MEMORY_TOOL_DESCRIPTION,
-    MEMORY_TOOL_NAME, MemoryAction, MemoryInput, MemoryInputError, log_limit,
-    show_budget,
+    Adjusted, EMPTY_QUERY, LOG_DEFAULT_LIMIT, LOG_MAX_LIMIT,
+    MEMORY_TOOL_DESCRIPTION, MEMORY_TOOL_NAME, MemoryAction, MemoryInput,
+    MemoryInputError, log_limit, show_budget,
 };
 pub use id::{
     Candidate, ECHO_CHARS, HEAD_SHOWN, HistoryRef, HistoryRefError,

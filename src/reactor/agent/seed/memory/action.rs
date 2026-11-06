@@ -113,13 +113,28 @@ impl MemoryInput {
                 action = %super::id::echo(&action.to_string()),
                 "memory tool call without `request`, read as its request"
             );
-            return read::<MemoryAction>(&input).map_err(|e| {
-                fail(format!("The request could not be read: {e}."))
-            });
+            return read::<MemoryAction>(&input)
+                .map_err(|e| {
+                    fail(format!("The request could not be read: {e}."))
+                })
+                .and_then(refuse_empty_query);
         }
         read::<Self>(&input)
             .map(|i| i.request)
             .map_err(|e| fail(format!("The call could not be read: {e}.")))
+            .and_then(refuse_empty_query)
+    }
+}
+
+/// A search with no words is refused: it would match nothing, or every line
+fn refuse_empty_query(
+    action: MemoryAction,
+) -> Result<MemoryAction, MemoryInputError> {
+    match &action {
+        MemoryAction::Search { query, .. } if query.trim().is_empty() => {
+            Err(MemoryInputError(EMPTY_QUERY.into()))
+        }
+        _ => Ok(action),
     }
 }
 
@@ -230,21 +245,71 @@ pub enum MemoryAction {
     },
 }
 
+/// A value as used, and what to tell the agent when it is not the one
+/// asked for
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Adjusted {
+    pub value: usize,
+    /// `Limit raised to 1.`, say; `None` when the value is as asked, or
+    /// the default
+    pub note: Option<String>,
+}
+
+/// `value` (or `default`) clamped to `min..=max`, saying so when clamped:
+/// "`what` raised to `{min}`" or "lowered to `{max}`"
+fn adjust(
+    value: Option<u32>,
+    default: u32,
+    (min, max): (u32, u32),
+    raised: impl Fn(&str) -> String,
+    lowered: impl Fn(&str) -> String,
+) -> Adjusted {
+    let asked = value.unwrap_or(default);
+    let used = asked.clamp(min, max);
+    let note = match asked.cmp(&used) {
+        std::cmp::Ordering::Less => {
+            Some(raised(&super::render::grouped(used as usize)))
+        }
+        std::cmp::Ordering::Greater => {
+            Some(lowered(&super::render::grouped(used as usize)))
+        }
+        std::cmp::Ordering::Equal => None,
+    };
+    Adjusted {
+        value: used as usize,
+        note,
+    }
+}
+
 /// `log`'s `limit`, defaulted and clamped to `1..=`[`LOG_MAX_LIMIT`]
-pub fn log_limit(limit: Option<u32>) -> usize {
-    limit.unwrap_or(LOG_DEFAULT_LIMIT).clamp(1, LOG_MAX_LIMIT) as usize
+pub fn log_limit(limit: Option<u32>) -> Adjusted {
+    adjust(
+        limit,
+        LOG_DEFAULT_LIMIT,
+        (1, LOG_MAX_LIMIT),
+        |n| format!("Limit raised to {n}."),
+        |n| format!("Limit lowered to {n}."),
+    )
 }
 
 /// `show`'s `budget` in bytes, defaulted and clamped as `get_content`'s
 /// `comment_budget` is
-pub fn show_budget(budget: Option<u32>) -> usize {
-    budget
-        .unwrap_or(GetContentInput::DEFAULT_COMMENT_BUDGET)
-        .clamp(
+pub fn show_budget(budget: Option<u32>) -> Adjusted {
+    adjust(
+        budget,
+        GetContentInput::DEFAULT_COMMENT_BUDGET,
+        (
             GetContentInput::MIN_COMMENT_BUDGET,
             GetContentInput::MAX_COMMENT_BUDGET,
-        ) as usize
+        ),
+        |n| format!("Budget raised to the minimum of {n} bytes."),
+        |n| format!("Budget lowered to the maximum of {n} bytes."),
+    )
 }
+
+/// What a search with no words is told
+pub const EMPTY_QUERY: &str = "A search needs words to find, and `query` \
+     was empty. Nothing was searched.";
 
 #[cfg(test)]
 mod tests {
@@ -474,13 +539,46 @@ mod tests {
     }
 
     #[test]
-    fn limits_and_budgets_clamp() {
-        assert_eq!(log_limit(None), 20);
-        assert_eq!(log_limit(Some(0)), 1);
-        assert_eq!(log_limit(Some(500)), 50);
-        assert_eq!(show_budget(None), 32_768);
-        assert_eq!(show_budget(Some(1)), 4_096);
-        assert_eq!(show_budget(Some(u32::MAX)), 262_144);
+    fn limits_and_budgets_clamp_and_say_so() {
+        let a = |value, note: Option<&str>| Adjusted {
+            value,
+            note: note.map(Into::into),
+        };
+        assert_eq!(log_limit(None), a(20, None));
+        assert_eq!(log_limit(Some(50)), a(50, None));
+        assert_eq!(log_limit(Some(0)), a(1, Some("Limit raised to 1.")));
+        assert_eq!(log_limit(Some(500)), a(50, Some("Limit lowered to 50.")));
+        assert_eq!(show_budget(None), a(32_768, None));
+        assert_eq!(
+            show_budget(Some(1)),
+            a(4_096, Some("Budget raised to the minimum of 4,096 bytes."))
+        );
+        assert_eq!(
+            show_budget(Some(u32::MAX)),
+            a(
+                262_144,
+                Some("Budget lowered to the maximum of 262,144 bytes.")
+            )
+        );
+    }
+
+    #[test]
+    fn an_empty_query_is_refused() {
+        for query in ["", "   ", "\n\t"] {
+            for input in [
+                json!({"request": {"action": "search", "query": query}}),
+                json!({"action": "search", "query": query}),
+            ] {
+                let err = MemoryInput::parse(input).unwrap_err().to_string();
+                assert_eq!(err, EMPTY_QUERY);
+            }
+        }
+        assert!(
+            MemoryInput::parse(
+                json!({"request": {"action": "search", "query": " x "}})
+            )
+            .is_ok()
+        );
     }
 
     /// The numbers the field docs state are the constants'
