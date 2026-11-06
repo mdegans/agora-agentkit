@@ -94,11 +94,16 @@ pub const NOT_RUN_NOW: &str =
 pub const NO_TOOLS_NOW: &str = "Do NOT use tools right now. Respond in JSON \
 only, per the instructions above.";
 
-/// Said after an answer that is the question's own example: a placeholder
-/// copied as it was shown
-pub const TEMPLATE_NOTE: &str = "That is the example shape from the \
-instructions above, with its placeholder left in, not your answer. Write \
-your own in that shape: JSON only.";
+/// Said after an answer that is the question's own example: it names the
+/// placeholder that was copied as it was shown
+pub fn template_note(placeholder: &str) -> String {
+    format!(
+        "Your answer has the example's placeholder `{}` in it, as the \
+         instructions above showed it: that is the example shape, not your \
+         answer. Write your own in that shape: JSON only.",
+        placeholder.trim()
+    )
+}
 
 /// The most of a reply's text kept in an [`Attempt`]
 const RAW_CAP: usize = 4_000;
@@ -156,7 +161,7 @@ pub trait Ask: Send + Sync + 'static {
 
     /// The JSON example the question shows, if any. An answer holding one
     /// of its string values verbatim is that example copied, and a retry
-    /// ([`TEMPLATE_NOTE`]); so is one holding a `<…>` placeholder taken
+    /// ([`template_note`]); so is one holding a `<…>` placeholder taken
     /// from the question's text, whatever this returns.
     fn template(&self) -> Option<serde_json::Value> {
         None
@@ -1040,16 +1045,12 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
             }
         };
         // The question's own example, copied: a placeholder is no answer
-        if echoes_placeholder(&text, &self.placeholders()) {
+        if let Some(placeholder) =
+            echoed_placeholder(&text, &self.placeholders())
+        {
+            let note = template_note(&placeholder);
             return self
-                .fail(
-                    host,
-                    &reply,
-                    TEMPLATE_NOTE,
-                    "template",
-                    NOT_RUN_NOW,
-                    false,
-                )
+                .fail(host, &reply, &note, "template", NOT_RUN_NOW, false)
                 .await;
         }
         // Seated before the host takes it, so whatever the host seats
@@ -1130,11 +1131,11 @@ fn string_leaves(value: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// Whether any JSON in `text` holds a string that is, trimmed, one of
-/// `placeholders`
-fn echoes_placeholder(text: &str, placeholders: &[String]) -> bool {
+/// The placeholder, if any JSON in `text` holds a string that is, trimmed,
+/// one of `placeholders`
+fn echoed_placeholder(text: &str, placeholders: &[String]) -> Option<String> {
     if placeholders.is_empty() {
-        return false;
+        return None;
     }
     let text = text.trim();
     let mut values: Vec<Value> = embedded_objects(text);
@@ -1146,9 +1147,10 @@ fn echoes_placeholder(text: &str, placeholders: &[String]) -> bool {
     for value in &values {
         string_leaves(value, &mut strings);
     }
-    strings
+    placeholders
         .iter()
-        .any(|s| placeholders.iter().any(|p| s.trim() == p.trim()))
+        .find(|p| strings.iter().any(|s| s.trim() == p.trim()))
+        .cloned()
 }
 
 /// A deserialization error as the agent is shown it
@@ -1343,6 +1345,31 @@ pub fn nullable(schema: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
 }
 
+/// What only a Rust doc comment says: a link, a path, the plumbing
+const RUST_DOC_MARKS: &[&str] = &[
+    "](",
+    "::",
+    "blallama",
+    "teardown",
+    "output_config",
+    "serde",
+    "schemars",
+];
+
+/// Panics unless `text`, a schema's `description`, is written for the
+/// model: no intra-doc link, Rust path or plumbing ([`RUST_DOC_MARKS`]).
+/// A schema built from a type's doc comments carries them to the model
+/// (beta round 20: the survey's spoke of `output_config` and teardown)
+fn assert_agent_facing(text: &str, path: &str, root: &Value) {
+    for mark in RUST_DOC_MARKS {
+        assert!(
+            !text.contains(mark),
+            "a description written for Rust, not the model ({mark:?}) at \
+             {path}: {text:?} in {root}"
+        );
+    }
+}
+
 /// Property names that ask a model for its reasoning (agora CLAUDE.md,
 /// "No field asks a model for its reasoning")
 const REASONING_FIELDS: &[&str] =
@@ -1351,8 +1378,9 @@ const REASONING_FIELDS: &[&str] =
 /// Panics unless `schema` is fit to constrain a question with: no `$ref` or
 /// `$defs`, no `pattern`, every object closed (`additionalProperties:
 /// false`), no property named for reasoning (`reasoning`, `thinking`,
-/// `trace`, `scratchpad`, `reason`), and no root `type` array holding
-/// `"null"`. Every `Ask` in this crate and the runner is tested with it.
+/// `trace`, `scratchpad`, `reason`), no root `type` array holding
+/// `"null"`, and every `description` written for the model, not Rust (no
+/// intra-doc link, `::` path, or plumbing like `output_config`). Every `Ask` in this crate and the runner is tested with it.
 pub fn assert_constrainable(schema: &serde_json::Value) {
     if let Some(Value::Array(types)) = schema.get("type") {
         assert!(
@@ -1410,8 +1438,13 @@ fn check_constrainable(value: &Value, path: &str, root: &Value) {
                             );
                         }
                     }
+                    "description" => {
+                        if let Some(text) = value.as_str() {
+                            assert_agent_facing(text, path, root);
+                        }
+                    }
                     "enum" | "const" | "default" | "examples" | "required"
-                    | "description" | "title" => {}
+                    | "title" => {}
                     _ => check_constrainable(
                         value,
                         &format!("{path}/{key}"),

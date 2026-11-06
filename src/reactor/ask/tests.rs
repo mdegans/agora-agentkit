@@ -767,6 +767,7 @@ async fn the_questions_example_is_no_answer() {
         handle(&mut host, text(copied)).await.unwrap();
         assert!(host.answers.is_empty(), "{copied}");
         assert!(last_text(&host).contains("example shape"), "{copied}");
+        assert!(last_text(&host).contains("placeholder `"), "{copied}");
     }
     // Mentioning the placeholder inside a real answer is fine
     let mut host = host();
@@ -1001,4 +1002,16 @@ async fn an_unusable_replys_text_is_logged_at_debug_only() {
     asked(&mut host, [ask]).await;
     handle(&mut host, text("SECRET WORDS again")).await.unwrap();
     assert_eq!(events.0.lock().unwrap().len(), 1, "nothing for the survey");
+}
+
+#[test]
+#[should_panic(expected = "written for Rust")]
+fn a_rust_doc_description_is_not_constrainable() {
+    /// The answer. See [`Asks`](super::Asks): given via output_config.
+    #[derive(schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct Leaky {
+        note: String,
+    }
+    assert_constrainable(&ask_schema::<Leaky>());
 }

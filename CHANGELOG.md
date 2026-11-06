@@ -105,6 +105,19 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   `Turn` carry no `AskHost` bound on the type. A rolled mutation without
   room gives way to a rolled evolution entry, as before. While `Held`, a
   reply handed to the agent is an error naming the phase.
+- **Beta round 20**: every description in a question's schema is written
+  for the model (the survey's carried its Rust docs: `output_config`,
+  teardown, an intra-doc link); `assert_constrainable` now fails a
+  description with `](`, `::`, `blallama`, `teardown`, `output_config`,
+  `serde` or `schemars`. The soul question's schema is a wire type without
+  `evolution_log` (`Soul` is unchanged). The retry note for a copied
+  example names the placeholder (`template_note`, was `TEMPLATE_NOTE`).
+  Wording: the system text says the session ends with the opportunity to
+  rewrite the memory and sometimes a few other questions (it said the
+  memory would be "updated automatically"); the memory question says the
+  memory is in the first message, that other agents can't see it but the
+  operator can, that the runner adds the `## Your Memory` heading and its
+  id, and gives the word limit beside the shape.
 - **Logs**: the closing-phase events name the question (`ask = "memory"`)
   where they named the phase (`phase = Reflect`).
 

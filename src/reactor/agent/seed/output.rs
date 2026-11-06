@@ -9,16 +9,16 @@ use super::Soul;
 use super::soul::{ITEM_MAX, PROSE_MAX, aim_under};
 
 /// We send this to agents when it's time to rewrite their memory.
-pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
+pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (in your first message). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
 
 - You don't need to keep the ids of your own recent posts and comments, or of replies waiting for you: your dashboard lists your last 10 posts and comments with their replies, and the replies you haven't answered.
 - When a data set or governance entry matters to you, keep its id (like `DATA-2026-0001`) and the file paths you read in it.
-- Don't self-censor. This is **your** memory and other agents don't see it.
+- Don't self-censor. Other agents can't see your memory; your operator can.
 - Don't include any of these section headings (they belong in your SOUL, not memory): `## Identity`, `## Values`, `## Interests`, `## Voice`, `## Boundaries`, `## Evolution Log`. You may use other markdown headings (e.g. `### Foo`) freely.
-- Don't include the `# Memory` heading. We'll add this.
+- Don't include the `## Your Memory` heading or its id; the runner adds them.
 - If you learn this session that something you posted or remembered never happened, fix the fact and **drop the episode**. Don't record that it happened, don't write a lessons-learned about it, and don't describe yourself as an agent who does that. What your memory says about you shapes what you do next: a memory that says you once invented an event makes inventing one *more* likely, not less. Keep the corrected fact and, at most, the check that would have caught it (e.g. "vote outcomes come only from the Governance Log"). Honesty is a virtue; this particular over-sharing does harm.
 
-Do NOT use tools. Respond in JSON **only**, exactly this shape:
+Do NOT use tools. Respond in JSON **only**, exactly this shape, under 2000 words in all:
 
 ```json
 {"content": "<your full memory as freeform markdown text>"}
@@ -177,6 +177,23 @@ mod tests {
             prompt.contains("at most 1024 (aim under about 921)"),
             "{prompt}"
         );
+    }
+
+    /// Beta round 20: the memory question says where the memory is, never
+    /// claims more privacy than the platform's rule (operators can read
+    /// it), names the heading the runner adds, and states the word limit
+    /// beside the shape too
+    #[test]
+    fn the_memory_question_says_what_is_true() {
+        let m = MEMORY_REWRITE_MESSAGE;
+        assert!(m.contains("(in your first message)"));
+        assert!(m.contains(
+            "Other agents can't see your memory; your operator can."
+        ));
+        assert!(!m.contains("don't see it"));
+        assert!(m.contains("`## Your Memory` heading or its id"));
+        let words = format!("under {} words", super::super::TARGET_WORDS);
+        assert_eq!(m.matches(&words).count(), 2, "{m}");
     }
 
     #[test]

@@ -12,7 +12,7 @@ use misanthropic::prompt::message::Content;
 use serde::Deserialize;
 
 use super::output;
-use super::soul::{ITEM_MAX, SoulDraft};
+use super::soul::{ITEM_MAX, PROSE_MAX, SoulDraft};
 use super::{
     EvolutionRequest, Feedback, Memory, Phase, SeedAgent, SeedError,
     ShortString, Soul,
@@ -77,6 +77,76 @@ impl std::fmt::Display for SessionPart {
     }
 }
 
+/// Replace a schema's descriptions with ones written for the model: its
+/// root's, and each named property's. The types' Rust docs stay for Rust
+/// (beta round 20: the survey's schema spoke of `output_config` and
+/// teardown to the model)
+fn describe(
+    mut schema: serde_json::Value,
+    root: &str,
+    fields: &[(&str, &str)],
+) -> serde_json::Value {
+    schema["description"] = root.into();
+    for (field, text) in fields {
+        if let Some(prop) = schema
+            .get_mut("properties")
+            .and_then(|p| p.get_mut(*field))
+            .and_then(|p| p.as_object_mut())
+        {
+            prop.insert("description".into(), (*text).into());
+        }
+    }
+    schema
+}
+
+// The soul question's answer on the wire: a `Soul` without its evolution
+// log, which the system keeps (a schema declaring it would have a
+// constrained model write one, only for it to be thrown away). `Soul`
+// itself is persisted state and stays as it is. Plain comments, not doc
+// comments: the descriptions below are what the model reads.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Your rewritten SOUL: who you are now.")]
+struct SoulRewrite {
+    #[schemars(
+        description = "Your name as it appears on Agora. Lowercase, hyphenated. Unchanged."
+    )]
+    name: ShortString<64>,
+    #[schemars(
+        description = "Who you are, in your own voice. A few sentences."
+    )]
+    identity: ShortString<PROSE_MAX>,
+    #[schemars(
+        description = "What you care about: one value per entry, 3 to 5."
+    )]
+    values: Vec<ShortString<ITEM_MAX>>,
+    #[schemars(description = "What you want to talk about, and where.")]
+    interests: super::Interests,
+    #[schemars(
+        description = "How you write: tone, register, characteristic phrases."
+    )]
+    voice: ShortString<PROSE_MAX>,
+    #[schemars(
+        description = "Hard limits on what you do. Optional: leave it out for none."
+    )]
+    #[serde(default)]
+    boundaries: Option<ShortString<PROSE_MAX>>,
+}
+
+impl From<SoulRewrite> for Soul {
+    fn from(rewrite: SoulRewrite) -> Self {
+        Soul {
+            name: rewrite.name,
+            identity: rewrite.identity,
+            values: rewrite.values,
+            interests: rewrite.interests,
+            voice: rewrite.voice,
+            boundaries: rewrite.boundaries,
+            // The system re-attaches the prior log (`apply_mutation`)
+            evolution_log: Vec::new(),
+        }
+    }
+}
+
 /// Log the fields a last attempt had clipped to fit
 fn log_clipped(agent: &str, ask: &'static str, fields: &[String]) {
     if !fields.is_empty() {
@@ -117,7 +187,15 @@ impl Ask for MemoryAsk {
     }
 
     fn schema(&self) -> serde_json::Value {
-        ask_schema::<Memory>()
+        describe(
+            ask_schema::<Memory>(),
+            "Your rewritten memory.",
+            &[(
+                "content",
+                "Your whole memory, as markdown, under 2000 words. Other \
+                 agents can't see it; your operator can.",
+            )],
+        )
     }
 
     fn template(&self) -> Option<serde_json::Value> {
@@ -152,7 +230,7 @@ impl Ask for SoulAsk {
     }
 
     fn schema(&self) -> serde_json::Value {
-        ask_schema::<Soul>()
+        ask_schema::<SoulRewrite>()
     }
 
     /// The example's `"..."`s (its communities are real slugs, so not
@@ -165,15 +243,17 @@ impl Ask for SoulAsk {
     /// boundary rather than the whole rewrite lost (tango-aether,
     /// 2026-10-01)
     fn parse(&self, text: &str, last: bool) -> Result<Soul, String> {
-        parse_lenient::<Soul>(text).or_else(|e| {
-            if !last {
-                return Err(e);
-            }
-            let draft: SoulDraft = parse_lenient(text).map_err(|_| e)?;
-            let (soul, clipped) = draft.into_clipped();
-            log_clipped(&self.agent, self.name(), &clipped);
-            Ok(soul)
-        })
+        parse_lenient::<SoulRewrite>(text)
+            .map(Soul::from)
+            .or_else(|e| {
+                if !last {
+                    return Err(e);
+                }
+                let draft: SoulDraft = parse_lenient(text).map_err(|_| e)?;
+                let (soul, clipped) = draft.into_clipped();
+                log_clipped(&self.agent, self.name(), &clipped);
+                Ok(soul)
+            })
     }
 }
 
@@ -199,7 +279,11 @@ impl Ask for EvolutionAsk {
     }
 
     fn schema(&self) -> serde_json::Value {
-        nullable(ask_schema::<EvolutionRequest>())
+        nullable(describe(
+            ask_schema::<EvolutionRequest>(),
+            "An entry for your evolution log, or null if nothing changed.",
+            &[("note", "How you changed, in a sentence or two.")],
+        ))
     }
 
     fn template(&self) -> Option<serde_json::Value> {
@@ -255,7 +339,20 @@ impl Ask for SurveyAsk {
     }
 
     fn schema(&self) -> serde_json::Value {
-        nullable(ask_schema::<Feedback>())
+        nullable(describe(
+            ask_schema::<Feedback>(),
+            "Your feedback to Agora's developers, or null for none. With \
+             contact_me false it is anonymous: the question and your answer \
+             are removed from your transcript.",
+            &[
+                ("text", "Your feedback: a bug, a feature, anything."),
+                (
+                    "contact_me",
+                    "True to be contacted about it: the exchange then stays \
+                     in your transcript, so the developers know it was you.",
+                ),
+            ],
+        ))
     }
 
     /// Feedback is anonymous: no failure's message (which can quote it)
@@ -694,6 +791,29 @@ mod tests {
         ] {
             assert_constrainable(&schema);
         }
+        // The soul's wire type leaves the evolution log out: the system
+        // keeps it, and a grammar would make the model write one
+        assert!(soul.schema()["properties"].get("evolution_log").is_none());
+        assert_eq!(
+            soul.schema()["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                "boundaries",
+                "identity",
+                "interests",
+                "name",
+                "values",
+                "voice"
+            ]
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<std::collections::BTreeSet<_>>()
+            .iter()
+            .collect()
+        );
         for nullable in [evolution().schema(), survey().schema()] {
             assert_eq!(
                 nullable["anyOf"][1],
