@@ -23,7 +23,7 @@ pub const MAX_GROUPS: usize = 30;
 pub const MAX_LINE_CHARS: usize = 300;
 
 /// A deduplicated line table, and the lines of each memory, keyed by
-/// memory id, oldest first
+/// memory id, with when each of its versions was saved
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchIndex {
     lines: Vec<String>,
@@ -33,10 +33,12 @@ pub struct SearchIndex {
     lookup: HashMap<String, u32>,
 }
 
+/// One memory, and every version that held it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IndexedVersion {
     id: MemoryId,
-    at: DateTime<Utc>,
+    /// When each version holding it was saved, oldest first
+    at: Vec<DateTime<Utc>>,
     /// Places in the line table, in the memory's order
     lines: Vec<u32>,
 }
@@ -58,6 +60,8 @@ pub enum IndexError {
     Format(u32),
     #[error("the index does not match its hash")]
     Mismatch,
+    #[error("the index names a line it does not hold")]
+    LineOutOfRange,
 }
 
 /// One distinct line that matched, across the versions that hold it
@@ -68,7 +72,7 @@ pub struct SearchHit {
     pub first: (MemoryId, DateTime<Utc>),
     /// The newest version holding it
     pub last: (MemoryId, DateTime<Utc>),
-    /// How many versions hold it
+    /// How many versions hold it, as `log` counts them
     pub count: usize,
 }
 
@@ -89,8 +93,13 @@ impl SearchIndex {
         Self::default()
     }
 
-    /// Versions indexed
+    /// Versions indexed, as `log` counts them
     pub fn len(&self) -> usize {
+        self.versions.iter().map(|v| v.at.len()).sum()
+    }
+
+    /// Distinct memories indexed
+    pub fn memories(&self) -> usize {
         self.versions.len()
     }
 
@@ -98,26 +107,41 @@ impl SearchIndex {
         self.versions.is_empty()
     }
 
-    /// Whether `id` is indexed
+    /// Whether the memory `id` is indexed
     pub fn contains(&self, id: &MemoryId) -> bool {
         self.versions.iter().any(|v| v.id == *id)
     }
 
-    /// The memory ids indexed, oldest first
+    /// Whether the version of `id` saved `at` is indexed
+    pub fn contains_version(&self, id: &MemoryId, at: DateTime<Utc>) -> bool {
+        self.versions
+            .iter()
+            .any(|v| v.id == *id && v.at.binary_search(&at).is_ok())
+    }
+
+    /// The memory ids indexed
     pub fn ids(&self) -> impl Iterator<Item = &MemoryId> {
         self.versions.iter().map(|v| &v.id)
     }
 
-    /// Add the memory `content`, whose id is `id`, saved `at`; `false`
-    /// when that memory is already in. Versions may come in any order
+    /// Add the version of the memory `content`, whose id is `id`, saved
+    /// `at`; `false` when that version is already in. Versions may come in
+    /// any order; a memory seen again (A, B, A) is counted again, its lines
+    /// stored once
     pub fn add(
         &mut self,
         id: MemoryId,
         at: DateTime<Utc>,
         content: &str,
     ) -> bool {
-        if self.contains(&id) {
-            return false;
+        if let Some(v) = self.versions.iter_mut().find(|v| v.id == id) {
+            return match v.at.binary_search(&at) {
+                Ok(_) => false,
+                Err(place) => {
+                    v.at.insert(place, at);
+                    true
+                }
+            };
         }
         if self.lookup.len() != self.lines.len() {
             self.lookup = self
@@ -130,15 +154,17 @@ impl SearchIndex {
         let mut ids = Vec::new();
         for line in content.lines().map(str::trim).filter(|l| !l.is_empty()) {
             let next = self.lines.len() as u32;
-            let at = *self.lookup.entry(line.to_string()).or_insert(next);
-            if at == next {
+            let place = *self.lookup.entry(line.to_string()).or_insert(next);
+            if place == next {
                 self.lines.push(line.to_string());
             }
-            ids.push(at);
+            ids.push(place);
         }
-        let place = self.versions.partition_point(|v| v.at <= at);
-        self.versions
-            .insert(place, IndexedVersion { id, at, lines: ids });
+        self.versions.push(IndexedVersion {
+            id,
+            at: vec![at],
+            lines: ids,
+        });
         true
     }
 
@@ -175,11 +201,18 @@ impl SearchIndex {
         if file.index.content_hash() != file.sha256 {
             return Err(IndexError::Mismatch);
         }
+        let held = file.index.lines.len();
+        if file.index.versions.iter().any(|v| {
+            v.at.is_empty() || v.lines.iter().any(|&l| l as usize >= held)
+        }) {
+            return Err(IndexError::LineOutOfRange);
+        }
         Ok(file.index)
     }
 
-    /// The lines holding every word of `query`, in any case, grouped by
-    /// line: newest first, at most [`MAX_GROUPS`]
+    /// The lines holding every word of `query` as a word (not inside a
+    /// longer one), in any case, grouped by line: newest first, at most
+    /// [`MAX_GROUPS`]
     pub fn search(&self, query: &str) -> SearchResult {
         let words: Vec<String> =
             query.split_whitespace().map(str::to_lowercase).collect();
@@ -187,7 +220,7 @@ impl SearchIndex {
             query: query.trim().to_string(),
             hits: Vec::new(),
             more: 0,
-            versions: self.versions.len(),
+            versions: self.len(),
         };
         if words.is_empty() {
             return result;
@@ -197,38 +230,63 @@ impl SearchIndex {
             .iter()
             .map(|l| {
                 let l = l.to_lowercase();
-                words.iter().all(|w| l.contains(w.as_str()))
+                words.iter().all(|w| contains_word(&l, w))
             })
             .collect();
         // Per matched line: oldest version, newest version, count
-        let mut found: HashMap<u32, (usize, usize, usize)> = HashMap::new();
-        for (v, version) in self.versions.iter().enumerate() {
+        type Seen =
+            ((DateTime<Utc>, MemoryId), (DateTime<Utc>, MemoryId), usize);
+        let mut found: HashMap<u32, Seen> = HashMap::new();
+        for version in &self.versions {
+            let (Some(&first), Some(&last)) =
+                (version.at.first(), version.at.last())
+            else {
+                continue;
+            };
             let mut seen = std::collections::HashSet::new();
             for &line in &version.lines {
-                if matched[line as usize] && seen.insert(line) {
-                    let e = found.entry(line).or_insert((v, v, 0));
-                    e.1 = v;
-                    e.2 += 1;
+                if !matched[line as usize] || !seen.insert(line) {
+                    continue;
                 }
+                let e = found.entry(line).or_insert((
+                    (first, version.id),
+                    (last, version.id),
+                    0,
+                ));
+                e.0 = e.0.min((first, version.id));
+                e.1 = e.1.max((last, version.id));
+                e.2 += version.at.len();
             }
         }
-        let mut groups: Vec<(u32, (usize, usize, usize))> =
-            found.into_iter().collect();
-        groups.sort_by_key(|g| std::cmp::Reverse((g.1.1, g.1.0, g.0)));
+        let mut groups: Vec<(u32, Seen)> = found.into_iter().collect();
+        groups.sort_by_key(|(line, (first, last, _))| {
+            std::cmp::Reverse((*last, *first, *line))
+        });
         result.more = groups.len().saturating_sub(MAX_GROUPS);
-        let at = |v: usize| (self.versions[v].id, self.versions[v].at);
         result.hits = groups
             .into_iter()
             .take(MAX_GROUPS)
-            .map(|(line, (first, last, count))| SearchHit {
+            .map(|(line, ((fa, fid), (la, lid), count))| SearchHit {
                 line: self.lines[line as usize].clone(),
-                first: at(first),
-                last: at(last),
+                first: (fid, fa),
+                last: (lid, la),
                 count,
             })
             .collect();
         result
     }
+}
+
+/// Whether `word` is in `text` as a word: not run into letters or digits
+/// on a side where it begins or ends with one. Both lowercase
+fn contains_word(text: &str, word: &str) -> bool {
+    let alnum = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+    let (head, tail) = (word.chars().next(), word.chars().next_back());
+    text.match_indices(word).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + word.len()..].chars().next();
+        !(alnum(head) && alnum(before)) && !(alnum(tail) && alnum(after))
+    })
 }
 
 /// `line`, cut to [`MAX_LINE_CHARS`] around the first of `words` in it
@@ -350,20 +408,20 @@ mod tests {
             at(2),
             "# Memory\n  The anchor is ANC-5.  \nthe anchor was late\n"
         ));
-        assert!(!ix.add(id(2), at(4), "anything"));
+        // The same version again adds nothing
+        assert!(!ix.add(id(2), at(2), "anything"));
         ix
     }
 
     #[test]
-    fn lines_are_deduplicated_and_versions_ordered() {
+    fn lines_are_deduplicated() {
         let ix = index();
         assert_eq!(ix.len(), 3);
+        assert_eq!(ix.memories(), 3);
         assert_eq!(ix.lines.len(), 5);
-        assert_eq!(
-            ix.ids().copied().collect::<Vec<_>>(),
-            [id(1), id(2), id(3)]
-        );
         assert!(ix.contains(&id(1)) && !ix.contains(&id(9)));
+        assert!(ix.contains_version(&id(2), at(2)));
+        assert!(!ix.contains_version(&id(2), at(4)));
     }
 
     #[test]
@@ -390,14 +448,22 @@ mod tests {
         assert_eq!(r.hits[2].last, (id(1), at(1)));
 
         let text = r.render(None);
-        assert!(text.starts_with(
-            "Lines in your memory's 3 versions with every word of \"anchor\", newest first:"
-        ), "{text}");
-        assert!(text.contains(&format!(
-            "- The anchor is ANC-5.\n  in 2 versions, from {} (2026-11-02) to {} (2026-11-03)",
-            id(2),
-            id(3)
-        )), "{text}");
+        assert!(
+            text.starts_with(
+                "Lines in your memory's 3 versions with every word of \
+                 \"anchor\", newest first:"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "- The anchor is ANC-5.\n  in 2 versions, from {} \
+                 (2026-11-02) to {} (2026-11-03)",
+                id(2),
+                id(3)
+            )),
+            "{text}"
+        );
         let one = index().search("haiku").render(Some(SearchMode::Semantic));
         assert!(one.starts_with("Semantic search isn't available"), "{one}");
         assert!(
@@ -407,9 +473,47 @@ mod tests {
         let none = index().search("zebra").render(None);
         assert_eq!(
             none,
-            "No line in your memory's 3 versions contains every word of \"zebra\"."
+            "No line in your memory's 3 versions contains every word of \
+             \"zebra\"."
         );
         assert!(index().search("  ").hits.is_empty());
+    }
+
+    /// Words, not substrings: `anc` is not in "anchor"
+    #[test]
+    fn words_match_whole() {
+        assert!(index().search("anch").hits.is_empty());
+        // Only the line with `ANC-5`, none of the three with "anchor"
+        let anc = index().search("anc");
+        assert_eq!(anc.hits.len(), 1);
+        assert_eq!(anc.hits[0].line, "The anchor is ANC-5.");
+        assert_eq!(index().search("anc-5.").hits.len(), 1);
+        assert!(contains_word("a #tag here", "#tag"));
+        assert!(contains_word("x-ray", "x"));
+        assert!(!contains_word("tags", "tag"));
+        assert!(contains_word("ünïcode word", "word"));
+    }
+
+    /// A memory seen again (A, B, A) counts again, and the dates are its
+    /// oldest and newest, whatever order the versions came in
+    #[test]
+    fn a_memory_seen_again_counts_again() {
+        let mut ix = SearchIndex::new();
+        ix.add(id(1), at(5), "kept line\n");
+        ix.add(id(2), at(3), "other\n");
+        ix.add(id(1), at(1), "kept line\n");
+        assert_eq!((ix.len(), ix.memories()), (3, 2));
+        let r = ix.search("kept");
+        assert_eq!(r.versions, 3);
+        assert_eq!(
+            r.hits,
+            [SearchHit {
+                line: "kept line".into(),
+                first: (id(1), at(1)),
+                last: (id(1), at(5)),
+                count: 2,
+            }]
+        );
     }
 
     #[test]
@@ -471,6 +575,19 @@ mod tests {
         assert!(matches!(
             SearchIndex::from_bytes(b"{"),
             Err(IndexError::Json(_))
+        ));
+    }
+
+    /// A line index past the table is an error, not a panic, even under a
+    /// hash that matches
+    #[test]
+    fn a_line_out_of_range_is_refused() {
+        let mut ix = index();
+        ix.versions[0].lines.push(99);
+        let bytes = ix.to_bytes();
+        assert!(matches!(
+            SearchIndex::from_bytes(&bytes),
+            Err(IndexError::LineOutOfRange)
         ));
     }
 }

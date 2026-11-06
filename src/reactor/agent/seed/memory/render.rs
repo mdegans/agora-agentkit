@@ -3,10 +3,12 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 
-use super::id::{MemoryId, short_head};
+use super::id::{
+    Candidate, HistoryRef, MemoryId, Resolution, resolve, short_head,
+};
 use crate::govlog::Sha256Hex;
 use crate::ids::GovernanceLogId;
-use crate::text::line_diff;
+use crate::text::{change_counts, diff_units, line_diff};
 
 /// Where a version of an agent's memory was found
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +89,34 @@ impl MemoryVersion {
 pub struct CurrentMemory<'a> {
     pub id: MemoryId,
     pub content: &'a str,
+    /// Its place in the history the renderers are given (newest first):
+    /// the newest version with the same text. `None` when no kept version
+    /// has it
+    pub position: Option<usize>,
 }
 
-/// What `log` says above its rows when no version is sealed
+impl<'a> CurrentMemory<'a> {
+    /// `content`, placed in `history` by its text
+    pub fn new(
+        id: MemoryId,
+        content: &'a str,
+        history: &[MemoryVersion],
+    ) -> Self {
+        Self {
+            id,
+            content,
+            position: history.iter().position(|v| v.content == content),
+        }
+    }
+}
+
+/// What `log` says above its rows when every version is a local copy
 pub const LOCAL_ONLY: &str = "These are your runner's local copies. They \
      aren't sealed, so they have no heads.";
+
+/// How `show` and `diff` print a memory
+pub const AS_STORED: &str = "Memory is printed as stored: in your context, \
+     its `#` and `##` headings appear as `###`.";
 
 /// What `show` says first when it shows more than one version
 pub const SHOW_LEGEND: &str = "Newest first. Each change runs forward, \
@@ -130,34 +155,89 @@ fn delta(now: usize, before: usize) -> String {
     }
 }
 
-/// `log`: up to `limit` rows of `history` (every version, newest first)
-/// from `start`, each sized against the version below it. `current` is
-/// the memory in context: its newest version is marked "this session".
+/// Whether a `log` page may end at row `i`: its cursor (its head, or else
+/// its memory id, which [`log_start`] reads as that memory's oldest
+/// version) leads on to the row after it
+fn cursor_row(history: &[MemoryVersion], i: usize) -> bool {
+    history[i].head.is_some()
+        || !history[i + 1..].iter().any(|v| v.id == history[i].id)
+}
+
+/// The cursor that pages on from row `i`: its head, or its memory id
+fn cursor(v: &MemoryVersion) -> String {
+    match &v.head {
+        Some(head) => short_head(head),
+        None => v.id.to_string(),
+    }
+}
+
+/// Where `log` starts for `before`: the row after the version it names.
+/// A head names its version; a memory id names that memory's oldest
+/// version, so a page that ends on it goes on from there. `Err` when it
+/// names none, or several (see [`Resolution`]); the note is for a `mem-`
+/// ref that named a head ([`Resolution::note`])
+pub fn log_start(
+    history: &[MemoryVersion],
+    before: &HistoryRef,
+) -> Result<(usize, Option<String>), Resolution> {
+    let resolution = resolve(
+        before,
+        history.iter().map(|v| &v.id),
+        history.iter().filter_map(|v| v.head.as_ref()),
+    );
+    let note = resolution.note(before);
+    let row = match resolution.candidate() {
+        Some(Candidate::Memory(id)) => history.iter().rposition(|v| v.id == id),
+        Some(Candidate::Head(head)) => {
+            history.iter().rposition(|v| v.head == Some(head))
+        }
+        None => None,
+    };
+    match row {
+        Some(i) => Ok((i + 1, note)),
+        None => Err(resolution),
+    }
+}
+
+/// `log`: about `limit` rows of `history` (every version, newest first)
+/// from `start`, each sized against the version below it. The newest
+/// version of `current` is marked "this session".
 ///
 /// `2026-11-05 21:14  mem-3f9a1c07be  head 346ac9543d0c  memory 13,539
 /// chars (−1,204)  ← this session`
+///
+/// A page ends on a row whose cursor pages on without skipping or
+/// repeating a row ([`log_start`]): one row short of `limit` or more, when
+/// the row at the limit is a memory with older versions and no head.
 pub fn log(
     history: &[MemoryVersion],
     start: usize,
     limit: usize,
-    current: &MemoryId,
+    current: &CurrentMemory<'_>,
 ) -> String {
-    let mut out = String::new();
-    let sealed = history.iter().any(|v| v.source == VersionSource::Sealed);
     if history.is_empty() {
         return "Your runner has kept no versions of your memory.".into();
     }
-    if !sealed {
-        out.push_str(LOCAL_ONLY);
-        out.push_str("\n\n");
-    }
-    let this_session = history.iter().position(|v| v.id == *current);
-    let end = start.saturating_add(limit).min(history.len());
     if start >= history.len() {
         return format!(
             "No versions are older than that: you have {} in all.",
             history.len()
         );
+    }
+    let mut out = String::new();
+    let all_local =
+        history.iter().all(|v| v.source == VersionSource::LocalCopy);
+    if all_local {
+        out.push_str(LOCAL_ONLY);
+        out.push_str("\n\n");
+    }
+    let mut end = start.saturating_add(limit.max(1)).min(history.len());
+    if end < history.len() {
+        end = (start..end)
+            .rev()
+            .find(|&i| cursor_row(history, i))
+            .or_else(|| (end..history.len()).find(|&i| cursor_row(history, i)))
+            .map_or(history.len(), |i| i + 1);
     }
     for i in start..end {
         let v = &history[i];
@@ -165,7 +245,7 @@ pub fn log(
         if let Some(head) = &v.head {
             row.push_str(&format!("  head {}", short_head(head)));
         }
-        if i > start && history[i - 1].id == v.id {
+        if i > start && history[i - 1].content == v.content {
             row.push_str("  (same memory as above)");
         } else {
             row.push_str(&format!("  memory {} chars", grouped(v.chars())));
@@ -174,13 +254,13 @@ pub fn log(
                 row.push_str(&delta(v.chars(), older.chars()));
             }
         }
-        if sealed && let Some(label) = v.source.label() {
+        if let Some(label) = v.source.label().filter(|_| !all_local) {
             row.push_str(&format!("  ({label})"));
         }
         if let Some(anchor) = &v.anchored {
             row.push_str(&format!("  anchored in {anchor}"));
         }
-        if this_session == Some(i) {
+        if current.position == Some(i) {
             row.push_str("  ← this session");
         }
         out.push_str(&row);
@@ -188,27 +268,14 @@ pub fn log(
     }
     let older = history.len() - end;
     if older > 0 {
-        let last = &history[end - 1];
-        let next = match &last.head {
-            Some(head) => short_head(head),
-            None => last.id.to_string(),
-        };
         out.push_str(&format!(
-            "{older} older version{}: ask with `before` set to {next}.\n",
-            if older == 1 { "" } else { "s" }
+            "{older} older version{}: ask with `before` set to {}.\n",
+            if older == 1 { "" } else { "s" },
+            cursor(&history[end - 1])
         ));
     }
     out.truncate(out.trim_end().len());
     out
-}
-
-/// `diff`'s result, and `show`'s changes: from `before` to `after`,
-/// with its line counts
-fn changes(before: &str, after: &str) -> (String, usize, usize) {
-    let diff = line_diff(before, after);
-    let added = diff.lines().filter(|l| l.starts_with("  + ")).count();
-    let removed = diff.lines().filter(|l| l.starts_with("  - ")).count();
-    (diff, added, removed)
 }
 
 /// Whether a diff is too large to stand for the version it describes: over
@@ -217,7 +284,7 @@ fn mostly_rewritten(diff: &str, version: &str) -> bool {
     diff.len() * 2 > version.len()
 }
 
-/// `n versions between not asked for`, or nothing
+/// `, n versions between not asked for`, or nothing
 fn between(n: usize) -> String {
     match n {
         0 => String::new(),
@@ -228,17 +295,65 @@ fn between(n: usize) -> String {
 
 /// A version whole, under its header
 fn whole(header: &str, v: &MemoryVersion) -> String {
-    format!("{header}:\n{}", v.content.trim_end())
+    let content = v.content.trim_end();
+    let content = if content.is_empty() {
+        "(empty)"
+    } else {
+        content
+    };
+    format!("{header}:\n{content}")
+}
+
+/// `show`'s first block, for several versions: the newest asked for,
+/// anchored on the current memory when that is not older than it
+fn anchored(
+    history: &[MemoryVersion],
+    newest: usize,
+    current: &CurrentMemory<'_>,
+) -> String {
+    let v = &history[newest];
+    if v.content == current.content {
+        return format!("{} is {TO_CURRENT}.", v.describe());
+    }
+    let gap = match current.position {
+        // Older than it: a diff would run backward
+        Some(c) if c > newest => {
+            return whole(
+                &format!(
+                    "{}, shown in full: newer than your current memory",
+                    v.describe()
+                ),
+                v,
+            );
+        }
+        Some(c) => between(newest - c - 1),
+        None => {
+            ", your current memory is not among your kept versions".to_string()
+        }
+    };
+    let diff = line_diff(&v.content, current.content);
+    if mostly_rewritten(&diff, &v.content) {
+        whole(
+            &format!(
+                "{}{gap}, shown in full: mostly rewritten since",
+                v.describe()
+            ),
+            v,
+        )
+    } else {
+        format!("{} → {TO_CURRENT}{gap}:\n{}", v.describe(), diff.trim_end())
+    }
 }
 
 /// `show`: the versions `picked` (indexes into `history`, newest first,
 /// in any order) like `git log -p`, at most `budget` bytes.
 ///
-/// One version is shown whole. Of several, the newest opens with what
-/// changed from it to `current`, or whole when that is over half its size;
-/// each older one is what changed from it to the next newer one picked, or
-/// whole ("mostly rewritten") past the same threshold. Past `budget`, the
-/// rest are listed by id and size, never cut.
+/// One version is shown whole, unless it is the current memory. Of
+/// several, the newest opens with what changed from it to `current`, or
+/// whole when that is over half its size or `current` is older; each older
+/// one is what changed from it to the next newer one picked, or whole
+/// ("mostly rewritten") past the same threshold. Past `budget`, the rest
+/// are listed by id and size, never cut.
 pub fn show(
     history: &[MemoryVersion],
     picked: &[usize],
@@ -257,50 +372,30 @@ pub fn show(
     };
 
     let mut blocks: Vec<(usize, String)> = Vec::new();
+    let mut legend = String::new();
     if let [only] = picked.as_slice() {
         let v = &history[*only];
+        if v.content == current.content {
+            return format!("{} is {TO_CURRENT}.", v.describe());
+        }
+        legend.push_str(AS_STORED);
         blocks.push((*only, whole(&v.describe(), v)));
     } else {
-        let v = &history[newest];
-        let block = if v.id == current.id {
-            format!("{} is {TO_CURRENT}.", v.describe())
-        } else {
-            let (diff, _, _) = changes(&v.content, current.content);
-            let gap = history
-                .iter()
-                .position(|h| h.id == current.id)
-                .filter(|&c| c < newest)
-                .map(|c| newest - c - 1)
-                .unwrap_or(0);
-            let gap = between(gap);
-            if mostly_rewritten(&diff, &v.content) {
-                whole(
-                    &format!(
-                        "{}{gap}, shown in full: mostly rewritten since",
-                        v.describe()
-                    ),
-                    v,
-                )
-            } else {
-                format!(
-                    "{} → {TO_CURRENT}{gap}:\n{}",
-                    v.describe(),
-                    diff.trim_end()
-                )
-            }
-        };
-        blocks.push((newest, block));
+        legend.push_str(SHOW_LEGEND);
+        legend.push(' ');
+        legend.push_str(AS_STORED);
+        blocks.push((newest, anchored(history, newest, &current)));
         for pair in picked.windows(2) {
             let (newer, older) = (&history[pair[0]], &history[pair[1]]);
             let gap = between(pair[1] - pair[0] - 1);
-            let block = if older.id == newer.id {
+            let block = if older.content == newer.content {
                 format!(
                     "{} → {}{gap}: the same memory.",
                     older.describe(),
                     newer.id
                 )
             } else {
-                let (diff, _, _) = changes(&older.content, &newer.content);
+                let diff = line_diff(&older.content, &newer.content);
                 if mostly_rewritten(&diff, &older.content) {
                     whole(
                         &format!(
@@ -322,38 +417,51 @@ pub fn show(
         }
     }
 
-    let mut out = String::new();
-    if picked.len() > 1 {
-        out.push_str(SHOW_LEGEND);
+    // The most blocks that fit with the footer listing the rest
+    let footer = |left: &[usize]| -> String {
+        match left {
+            [] => String::new(),
+            [i] if blocks.len() == 1 => format!(
+                "{} takes {} bytes to show, more than your budget of {} \
+                 bytes; ask again with a larger budget.",
+                history[*i].describe(),
+                grouped(blocks[0].1.len()),
+                grouped(budget)
+            ),
+            left => {
+                let mut f = format!(
+                    "Not shown, past your budget of {} bytes; ask for \
+                     fewer, or a larger budget:",
+                    grouped(budget)
+                );
+                for i in left {
+                    f.push_str("\n- ");
+                    f.push_str(&history[*i].describe());
+                }
+                f
+            }
+        }
+    };
+    let join = |parts: &[&str]| -> String {
+        parts
+            .iter()
+            .filter(|p| !p.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let indexes: Vec<usize> = blocks.iter().map(|(i, _)| *i).collect();
+    for shown in (0..=blocks.len()).rev() {
+        let mut parts: Vec<&str> = vec![&legend];
+        parts.extend(blocks[..shown].iter().map(|(_, b)| b.as_str()));
+        let tail = footer(&indexes[shown..]);
+        parts.push(&tail);
+        let out = join(&parts);
+        if out.len() <= budget || shown == 0 {
+            return if shown == 0 { tail } else { out };
+        }
     }
-    let mut used = out.len();
-    let mut left: Vec<usize> = Vec::new();
-    for (i, block) in blocks {
-        if !left.is_empty() || used + block.len() + 2 > budget {
-            left.push(i);
-            continue;
-        }
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        used += block.len() + 2;
-        out.push_str(&block);
-    }
-    if !left.is_empty() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&format!(
-            "Not shown, past your budget of {} bytes; ask for fewer, or a \
-             larger budget:",
-            grouped(budget)
-        ));
-        for i in left {
-            out.push_str("\n- ");
-            out.push_str(&history[i].describe());
-        }
-    }
-    out
+    unreachable!("the loop returns at zero")
 }
 
 /// `diff`: what changed from `a` to `b` (or to `current`, when there is
@@ -363,20 +471,22 @@ pub fn diff(
     b: Option<&MemoryVersion>,
     current: CurrentMemory<'_>,
 ) -> String {
-    let (to_id, to_name, to_text) = match b {
-        Some(b) => (b.id, b.describe(), b.content.as_str()),
-        None => (current.id, TO_CURRENT.to_string(), current.content),
+    let (to_name, to_text) = match b {
+        Some(b) => (b.describe(), b.content.as_str()),
+        None => (TO_CURRENT.to_string(), current.content),
     };
-    if a.id == to_id {
+    if a.content == to_text {
         return format!(
             "{} and {to_name} are the same memory: nothing changed.",
             a.describe()
         );
     }
-    let (diff, added, removed) = changes(&a.content, to_text);
+    let diff = line_diff(&a.content, to_text);
+    let (added, removed) = change_counts(&diff);
     format!(
-        "{} → {to_name} (+{added} / \u{2212}{removed} lines):\n{}",
+        "{} → {to_name} (+{added} / \u{2212}{removed} {}):\n{}\n\n{AS_STORED}",
         a.describe(),
+        diff_units(&a.content, to_text),
         diff.trim_end()
     )
 }
@@ -405,6 +515,14 @@ mod tests {
         }
     }
 
+    fn local(n: u8, day: u32, content: &str) -> MemoryVersion {
+        MemoryVersion {
+            head: None,
+            source: VersionSource::LocalCopy,
+            ..version(n, day, content)
+        }
+    }
+
     /// Twenty numbered lines, `changed` of them edited
     fn lines(tag: &str, changed: usize) -> String {
         (0..20)
@@ -416,6 +534,14 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn current<'a>(
+        n: u8,
+        content: &'a str,
+        history: &[MemoryVersion],
+    ) -> CurrentMemory<'a> {
+        CurrentMemory::new(id(n), content, history)
     }
 
     #[test]
@@ -442,21 +568,22 @@ mod tests {
             side,
             version(4, 1, "a"),
         ];
-        let out = log(&history, 0, 20, &id(1));
+        let now = current(1, "abcdef", &history);
+        let out = log(&history, 0, 20, &now);
         let rows: Vec<&str> = out.lines().collect();
         assert_eq!(
             rows[0],
             format!(
-                "2026-11-05 21:14  {}  head {}  memory 6 chars (±0)  ← this session",
-                id(1),
-                "313131313131"
+                "2026-11-05 21:14  {}  head 313131313131  memory 6 chars (±0)  \
+                 ← this session",
+                id(1)
             )
         );
         assert_eq!(
             rows[1],
             format!(
-                "2026-11-04 21:14  {}  head 313131313131  (same memory as above)  \
-                 anchored in ANC-2026-0005",
+                "2026-11-04 21:14  {}  head 313131313131  (same memory as \
+                 above)  anchored in ANC-2026-0005",
                 id(1)
             )
         );
@@ -470,7 +597,7 @@ mod tests {
         assert_eq!(rows.len(), 5);
 
         // A page, with the way on
-        let out = log(&history, 1, 2, &id(1));
+        let out = log(&history, 1, 2, &now);
         let rows: Vec<&str> = out.lines().collect();
         assert_eq!(rows.len(), 3);
         // The first row of a page is never "same as above": none is shown
@@ -480,34 +607,113 @@ mod tests {
             rows[2],
             "2 older versions: ask with `before` set to 323232323232."
         );
-        assert!(log(&history, 9, 2, &id(1)).starts_with("No versions"));
-        assert!(log(&[], 0, 2, &id(1)).contains("no versions"));
+        assert!(log(&history, 9, 2, &now).starts_with("No versions"));
+        assert!(log(&[], 0, 2, &now).contains("no versions"));
     }
 
     #[test]
     fn log_of_local_copies_says_so_once() {
-        let mut a = version(1, 2, "x");
-        a.head = None;
-        a.source = VersionSource::LocalCopy;
-        let mut b = a.clone();
-        b.id = id(2);
-        b.at = at(1);
-        let out = log(&[a, b], 0, 20, &id(9));
+        let history = [local(1, 2, "x"), local(2, 1, "y")];
+        let out = log(&history, 0, 20, &current(9, "z", &history));
         assert!(out.starts_with(LOCAL_ONLY), "{out}");
         assert!(!out.contains("local copy, not sealed"), "{out}");
         assert!(!out.contains("  head "), "{out}");
         assert!(out.ends_with(&format!("{}  memory 1 chars", id(2))));
     }
 
+    /// Only the local-copy label goes, and only when every row is one
+    #[test]
+    fn other_labels_show_beside_local_copies() {
+        let mut unsaved = local(3, 3, "u");
+        unsaved.source = VersionSource::NeverSaved;
+        let history = [unsaved, local(1, 2, "x"), local(2, 1, "y")];
+        let out = log(&history, 0, 20, &current(9, "z", &history));
+        assert!(!out.starts_with(LOCAL_ONLY), "{out}");
+        assert!(out.contains("(never saved: the run ended before saving)"));
+        assert!(out.contains("(local copy, not sealed)"), "{out}");
+    }
+
+    /// A memory id names its oldest version, so a page never ends on a
+    /// memory that recurs further down: paging visits every row once
+    #[test]
+    fn log_pages_through_repeated_memories() {
+        // All local, A B A B A C: no heads to page by
+        let history = [
+            local(1, 9, "a"),
+            local(2, 8, "b"),
+            local(1, 7, "a"),
+            local(2, 6, "b"),
+            local(1, 5, "a"),
+            local(3, 4, "c"),
+        ];
+        let now = current(1, "a", &history);
+        let mut start = 0;
+        let mut seen = Vec::new();
+        for _ in 0..10 {
+            let out = log(&history, start, 2, &now);
+            seen.extend(
+                out.lines()
+                    .filter(|l| l.starts_with("2026"))
+                    .map(|l| l[..16].to_string()),
+            );
+            let Some(next) =
+                out.lines().last().and_then(|l| l.split("set to ").nth(1))
+            else {
+                break;
+            };
+            let before: HistoryRef =
+                next.trim_end_matches('.').parse().unwrap();
+            start = log_start(&history, &before).unwrap().0;
+        }
+        let want: Vec<String> = history.iter().map(|v| stamp(v.at)).collect();
+        assert_eq!(seen, want);
+    }
+
+    #[test]
+    fn log_start_reads_heads_and_memory_ids() {
+        let history =
+            [version(1, 3, "a"), version(2, 2, "b"), version(1, 1, "a")];
+        let head: HistoryRef = short_head(history[1].head.as_ref().unwrap())
+            .parse()
+            .unwrap();
+        assert_eq!(log_start(&history, &head).unwrap(), (2, None));
+        let mem: HistoryRef = id(1).to_string().parse().unwrap();
+        assert_eq!(log_start(&history, &mem).unwrap(), (3, None));
+        // `mem-` with a head's digits
+        let via: HistoryRef =
+            format!("mem-{}", short_head(history[1].head.as_ref().unwrap()))
+                .parse()
+                .unwrap();
+        let (start, note) = log_start(&history, &via).unwrap();
+        assert_eq!(start, 2);
+        assert!(note.unwrap().contains("matches no memory id"));
+        let none: HistoryRef = "mem-999999".parse().unwrap();
+        assert_eq!(log_start(&history, &none), Err(Resolution::None));
+    }
+
     #[test]
     fn one_version_is_shown_whole() {
-        let history = vec![version(1, 5, "now\n"), version(2, 4, "then\n")];
-        let current = CurrentMemory {
-            id: id(1),
-            content: "now\n",
-        };
-        let out = show(&history, &[1], current, 32_768);
-        assert_eq!(out, format!("{}:\nthen", history[1].describe()));
+        let history = vec![
+            version(1, 5, "now\n"),
+            version(2, 4, "then\n"),
+            version(3, 3, ""),
+        ];
+        let now = current(1, "now\n", &history);
+        let out = show(&history, &[1], now, 32_768);
+        assert_eq!(
+            out,
+            format!("{AS_STORED}\n\n{}:\nthen", history[1].describe())
+        );
+        let out = show(&history, &[2], now, 32_768);
+        assert!(out.ends_with(":\n(empty)"), "{out}");
+        // The current memory alone is named, not repeated
+        assert_eq!(
+            show(&history, &[0], now, 32_768),
+            format!(
+                "{} is your current memory (in context above).",
+                history[0].describe()
+            )
+        );
     }
 
     #[test]
@@ -521,13 +727,9 @@ mod tests {
             version(3, 3, "skipped"),
             version(4, 2, &older),
         ];
-        let current = CurrentMemory {
-            id: id(1),
-            content: &now,
-        };
-        let out = show(&history, &[3, 1], current, 32_768);
+        let out = show(&history, &[3, 1], current(1, &now, &history), 32_768);
         let blocks: Vec<&str> = out.split("\n\n").collect();
-        assert_eq!(blocks[0], SHOW_LEGEND);
+        assert_eq!(blocks[0], format!("{SHOW_LEGEND} {AS_STORED}"));
         assert!(
             blocks[1].starts_with(&format!(
                 "{} → your current memory (in context above):\n",
@@ -551,31 +753,16 @@ mod tests {
         assert!(blocks[2].contains("  - line 2 edited in older"));
         assert!(blocks[2].contains("  + line 2 is a line of memory"));
         assert_eq!(blocks.len(), 3);
-    }
 
-    #[test]
-    fn the_current_memory_is_named_not_repeated() {
-        let now = lines("now", 1);
-        let then = lines("then", 2);
-        let history = vec![version(1, 5, &now), version(2, 4, &then)];
-        let current = CurrentMemory {
-            id: id(1),
-            content: &now,
-        };
-        let out = show(&history, &[0, 1], current, 32_768);
-        let blocks: Vec<&str> = out.split("\n\n").collect();
-        assert_eq!(
-            blocks[1],
-            format!(
-                "{} is your current memory (in context above).",
-                history[0].describe()
-            )
+        // Versions between the current memory and the newest asked for
+        let out = show(&history, &[3, 2], current(1, &now, &history), 32_768);
+        assert!(
+            out.contains(&format!(
+                "{}, 1 version between not asked for, shown in full",
+                history[2].describe()
+            )),
+            "{out}"
         );
-        assert!(blocks[2].starts_with(&format!(
-            "{} → {}:",
-            history[1].describe(),
-            id(1)
-        )));
     }
 
     #[test]
@@ -588,11 +775,7 @@ mod tests {
             version(2, 4, &then),
             version(3, 3, &older),
         ];
-        let current = CurrentMemory {
-            id: id(9),
-            content: &now,
-        };
-        let out = show(&history, &[1, 2], current, 32_768);
+        let out = show(&history, &[1, 2], current(1, &now, &history), 32_768);
         let blocks: Vec<&str> = out.split("\n\n").collect();
         assert_eq!(
             blocks[1].lines().next().unwrap(),
@@ -619,14 +802,12 @@ mod tests {
                 version(i + 1, 5 - u32::from(i), &lines(&format!("v{i}"), 20))
             })
             .collect();
-        let current = CurrentMemory {
-            id: id(1),
-            content: &history[0].content,
-        };
-        let full = show(&history, &[0, 1, 2, 3], current, 1 << 20);
+        let now = current(1, &history[0].content, &history);
+        let full = show(&history, &[0, 1, 2, 3], now, 1 << 20);
         let budget = full.len() / 2;
-        let out = show(&history, &[0, 1, 2, 3], current, budget);
-        assert!(out.len() < full.len());
+        let out = show(&history, &[0, 1, 2, 3], now, budget);
+        // The footer counts too
+        assert!(out.len() <= budget, "{} > {budget}", out.len());
         let (shown, listed) = out.split_once("Not shown").unwrap();
         // Whole blocks only
         for block in shown.trim_end().split("\n\n").skip(1) {
@@ -639,36 +820,35 @@ mod tests {
             &format!("- {}", history[3].describe())
         );
 
-        // One version past the budget is listed too
-        let out = show(&history, &[2], current, 10);
-        assert!(
-            out.starts_with("Not shown, past your budget of 10 bytes"),
-            "{out}"
-        );
+        // One version past the budget asks for a larger budget
+        let out = show(&history, &[2], now, 10);
+        assert!(out.contains("more than your budget of 10 bytes; ask again with a larger budget"), "{out}");
+        assert!(!out.contains("fewer"), "{out}");
     }
 
     #[test]
-    fn diff_is_whole_and_counts_lines() {
+    fn diff_is_whole_and_counts_its_units() {
         let a = version(1, 1, "a\nb\nc\n");
         let b = version(2, 2, "a\nB\nc\nd\n");
-        let current = CurrentMemory {
-            id: id(3),
-            content: "a\n",
-        };
-        let out = diff(&a, Some(&b), current);
+        let now = current(3, "a\n", &[]);
+        let out = diff(&a, Some(&b), now);
         assert_eq!(
             out,
             format!(
-                "{} → {} (+2 / \u{2212}1 lines):\n  (1 line unchanged before)\n  - b\n  + B\n  (1 line unchanged)\n  + d",
+                "{} → {} (+2 / \u{2212}1 lines):\n  (1 line unchanged before)\n  - b\n  + B\n  (1 line unchanged)\n  + d\n\n{AS_STORED}",
                 a.describe(),
                 b.describe()
             )
         );
-        let out = diff(&a, None, current);
+        let out = diff(&a, None, now);
         assert!(out.starts_with(&format!(
             "{} → your current memory (in context above) (+0 / \u{2212}2 lines):",
             a.describe()
         )), "{out}");
-        assert!(diff(&a, Some(&a), current).ends_with("nothing changed."));
+        assert!(diff(&a, Some(&a), now).ends_with("nothing changed."));
+        // Two lines or fewer are compared by sentence
+        let short = version(4, 1, "One. Two.");
+        let out = diff(&short, None, current(5, "One. Three.", &[]));
+        assert!(out.contains("(+1 / \u{2212}1 sentences)"), "{out}");
     }
 }
