@@ -215,8 +215,11 @@ pub fn tool_input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
 ///   and an `anyOf` of a schema and `{"type": "null"}` becomes the
 ///   schema. Leaving the property out says the same, and every input
 ///   reads `null` as absent;
-/// - an `anyOf` or `oneOf` of string constants, or of integer ones,
-///   becomes one flat `enum`.
+/// - every `oneOf` becomes an `anyOf`, which means the same for the
+///   disjoint unions schemars writes: drama_llama ignores `oneOf`, and it
+///   has broken Anthropic's decoding;
+/// - an `anyOf` of string constants, or of integer ones, becomes one flat
+///   `enum`.
 ///   The property's own description says what the values mean; the
 ///   variants' are their Rust docs;
 /// - non-standard integer `format`s (`uint32`, `int64` …) and
@@ -242,7 +245,7 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
         }
     }
 
-    /// The constants an `anyOf`/`oneOf` lists, if that is all it is
+    /// The constants an `anyOf` lists, if that is all it is
     fn constants(alternatives: &[Value]) -> Option<Vec<Value>> {
         let mut out = Vec::new();
         for alt in alternatives {
@@ -255,9 +258,7 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
                     return None;
                 }
                 out.extend(values.iter().cloned());
-            } else if let Some(Value::Array(inner)) =
-                map.get("anyOf").or_else(|| map.get("oneOf"))
-            {
+            } else if let Some(Value::Array(inner)) = map.get("anyOf") {
                 out.extend(constants(inner)?);
             } else {
                 return None;
@@ -282,54 +283,52 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
         if let Some(Value::Array(values)) = map.get_mut("enum") {
             values.retain(|v| !v.is_null());
         }
-        for key in ["anyOf", "oneOf"] {
-            let Some(Value::Array(alts)) = map.get(key) else {
-                continue;
-            };
-            let rest: Vec<Value> = alts
-                .iter()
-                .filter(|a| !is_null_schema(a))
-                .cloned()
-                .collect();
-            if rest.len() == alts.len() {
-                continue;
-            }
-            map.remove(key);
-            if let [only] = rest.as_slice() {
-                let description = map.remove("description");
-                if let Value::Object(inner) = only.clone() {
-                    for (k, val) in inner {
-                        map.entry(k).or_insert(val);
-                    }
-                }
-                if let Some(d) = description {
-                    map.insert("description".into(), d);
-                }
-                // The inner schema may itself be a wrapper
-                drop_null(v);
-                return;
-            }
-            map.insert(key.into(), Value::Array(rest));
+        let key = "anyOf";
+        let Some(Value::Array(alts)) = map.get(key) else {
+            return;
+        };
+        let rest: Vec<Value> = alts
+            .iter()
+            .filter(|a| !is_null_schema(a))
+            .cloned()
+            .collect();
+        if rest.len() == alts.len() {
+            return;
         }
+        map.remove(key);
+        if let [only] = rest.as_slice() {
+            let description = map.remove("description");
+            if let Value::Object(inner) = only.clone() {
+                for (k, val) in inner {
+                    map.entry(k).or_insert(val);
+                }
+            }
+            if let Some(d) = description {
+                map.insert("description".into(), d);
+            }
+            // The inner schema may itself be a wrapper
+            drop_null(v);
+            return;
+        }
+        map.insert(key.into(), Value::Array(rest));
     }
 
     fn flatten_constants(map: &mut serde_json::Map<String, Value>) {
-        for key in ["anyOf", "oneOf"] {
-            let Some(Value::Array(alts)) = map.get(key) else {
-                continue;
-            };
-            let Some(values) = constants(alts) else {
-                continue;
-            };
-            // One type for them all, or the union stays
-            let Some(ty) = values.first().and_then(constant_type) else {
-                continue;
-            };
-            if values.iter().all(|v| constant_type(v) == Some(ty)) {
-                map.remove(key);
-                map.insert("type".into(), ty.into());
-                map.insert("enum".into(), Value::Array(values));
-            }
+        let key = "anyOf";
+        let Some(Value::Array(alts)) = map.get(key) else {
+            return;
+        };
+        let Some(values) = constants(alts) else {
+            return;
+        };
+        // One type for them all, or the union stays
+        let Some(ty) = values.first().and_then(constant_type) else {
+            return;
+        };
+        if values.iter().all(|v| constant_type(v) == Some(ty)) {
+            map.remove(key);
+            map.insert("type".into(), ty.into());
+            map.insert("enum".into(), Value::Array(values));
         }
     }
 
@@ -388,7 +387,36 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
         map.remove("title");
         map.remove("description");
     }
+    // First, so everything after sees only `anyOf`
+    one_of_to_any_of(schema);
     walk(schema);
+}
+
+/// Every `oneOf` in `schema`, at any depth, as an `anyOf`: the same for
+/// the disjoint unions schemars writes (an internally tagged enum's
+/// variants never overlap). Where a schema has both, the `oneOf` joins an
+/// `allOf` beside the `anyOf`, so both still hold
+fn one_of_to_any_of(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+    match schema {
+        Value::Object(map) => {
+            if let Some(alts) = map.remove("oneOf") {
+                if map.contains_key("anyOf") {
+                    let all = map
+                        .entry("allOf")
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Value::Array(all) = all {
+                        all.push(serde_json::json!({ "anyOf": alts }));
+                    }
+                } else {
+                    map.insert("anyOf".into(), alts);
+                }
+            }
+            map.values_mut().for_each(one_of_to_any_of);
+        }
+        Value::Array(items) => items.iter_mut().for_each(one_of_to_any_of),
+        _ => {}
+    }
 }
 
 /// Developer text in `text` that a model should never read, each as what
@@ -990,6 +1018,45 @@ mod tests {
                 },
                 "required": ["d"]
             })
+        );
+    }
+
+    /// Every `oneOf` becomes an `anyOf`, at any depth; a union of objects
+    /// stays a union
+    #[test]
+    fn one_of_becomes_any_of() {
+        let mut schema = serde_json::json!({
+            "oneOf": [
+                {"type": "object", "properties": {
+                    "action": {"type": "string", "const": "a"},
+                    "x": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+                }, "required": ["action"]},
+                {"type": "object", "properties": {
+                    "action": {"type": "string", "const": "b"}
+                }, "required": ["action"]}
+            ]
+        });
+        model_facing_schema(&mut schema);
+        let text = schema.to_string();
+        assert!(!text.contains("oneOf"), "{text}");
+        // Both: the `oneOf` still holds, under `allOf`
+        let mut both = serde_json::json!({"type": "object", "properties": {"p": {
+            "anyOf": [{"type": "string"}, {"type": "integer"}],
+            "oneOf": [{"minLength": 1}, {"minimum": 0}]
+        }}});
+        model_facing_schema(&mut both);
+        assert_eq!(
+            both["properties"]["p"],
+            serde_json::json!({
+                "anyOf": [{"type": "string"}, {"type": "integer"}],
+                "allOf": [{"anyOf": [{"minLength": 1}, {"minimum": 0}]}]
+            })
+        );
+        let alts = schema["anyOf"].as_array().unwrap();
+        assert_eq!(alts.len(), 2);
+        assert_eq!(
+            alts[0]["properties"]["x"]["anyOf"],
+            serde_json::json!([{"type": "string"}, {"type": "integer"}])
         );
     }
 

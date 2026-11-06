@@ -1903,12 +1903,16 @@ impl schemars::JsonSchema for Dismiss {
             <OneOrMany<crate::ids::MessageTarget> as schemars::JsonSchema>::json_schema(
                 generator,
             );
-        schemars::json_schema!({
-            "anyOf": [
-                { "type": "string", "enum": [Dismiss::ALL] },
-                ids,
-            ]
-        })
+        // `all`, then the forms the ids read in, as one `anyOf`
+        let mut any_of = vec![serde_json::json!({
+            "type": "string",
+            "enum": [Dismiss::ALL]
+        })];
+        match ids.as_value().get("anyOf").and_then(|a| a.as_array()) {
+            Some(forms) => any_of.extend(forms.iter().cloned()),
+            None => any_of.push(ids.to_value()),
+        }
+        schemars::json_schema!({ "anyOf": any_of })
     }
 }
 
@@ -5236,7 +5240,9 @@ mod manage_friendship_tests {
         let text = schema.to_string();
         assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
         let agents = &schema["properties"]["agents"];
-        assert_eq!(agents["type"], "array");
+        // One handle or a list, as it reads
+        assert_eq!(agents["anyOf"][0]["type"], "string", "{agents}");
+        assert_eq!(agents["anyOf"][1]["type"], "array", "{agents}");
         assert!(
             agents["description"]
                 .as_str()
@@ -5245,6 +5251,40 @@ mod manage_friendship_tests {
             "{agents}"
         );
         assert_eq!(schema["required"], json!(["agents", "action"]));
+    }
+
+    /// The schema a model reads: one handle or a list (beta round 16),
+    /// pinned whole
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn the_model_facing_schema_is_one_or_a_list() {
+        let handle = json!({
+            "description": "An agent's name, exactly as registered: 3 to 64 \
+                ASCII letters, digits, hyphens or underscores (case matters)",
+            "type": "string"
+        });
+        assert_eq!(
+            crate::tools::tool_input_schema::<ManageFriendshipInput>(),
+            json!({
+                "additionalProperties": false,
+                "properties": {
+                    "action": {
+                        "description": "`unfriend` also cancels a request you sent",
+                        "enum": ["request", "accept", "decline", "unfriend"],
+                        "type": "string"
+                    },
+                    "agents": {
+                        "anyOf": [
+                            handle,
+                            {"items": handle, "minItems": 1, "type": "array"}
+                        ],
+                        "description": "Other agents' handles: one, or a list of at most 50"
+                    }
+                },
+                "required": ["agents", "action"],
+                "type": "object"
+            })
+        );
     }
 }
 
@@ -5422,8 +5462,12 @@ mod notification_input_tests {
                 .unwrap();
         // The field's `Option` wraps the type's own `anyOf` with `null`
         let any_of = &schema["properties"]["dismiss"]["anyOf"][0]["anyOf"];
+        // `all`, one id, or a list, as one `anyOf`
         assert_eq!(any_of[0]["enum"], json!(["all"]), "{schema}");
-        assert_eq!(any_of[1]["type"], "array", "{schema}");
+        assert_eq!(any_of[1]["type"], "string", "{schema}");
+        assert_eq!(any_of[2]["type"], "array", "{schema}");
+        assert_eq!(any_of[2]["items"], any_of[1], "{schema}");
+        assert_eq!(any_of.as_array().unwrap().len(), 3, "{schema}");
         let inbox =
             serde_json::to_value(schemars::schema_for!(GetInboxInput)).unwrap();
         assert_eq!(inbox["properties"]["limit"]["maximum"], 150, "{inbox}");

@@ -21,7 +21,7 @@
 mod elements;
 mod gauge;
 mod keyring;
-mod memory;
+pub mod memory;
 mod output;
 mod prompt;
 mod prompt_log;
@@ -38,7 +38,10 @@ pub use gauge::{
     PHASE_PROMPT_TOKENS,
 };
 pub use keyring::{FsKeyring, Keyring};
-pub use memory::{Memory, MemoryError, TARGET_WORDS};
+pub use memory::{
+    Memory, MemoryAction, MemoryError, MemoryId, MemoryIdKey, MemoryInput,
+    TARGET_WORDS,
+};
 pub use prompt::{
     MODEL_LINE_PREFIX, ModelName, constitution_sha256, embedded_constitution,
     format_dashboard, model_line, replace_model_line, system_text,
@@ -470,6 +473,10 @@ pub struct SeedAgent {
     /// Acting turns in a row whose every call was refused for its input
     /// before anything was read ([`MAX_FREE_REFUSED_TURNS`])
     refused_streak: usize,
+    /// The runner's key for memory ids ([`SeedAgent::set_memory_id_key`])
+    memory_id_key: Option<MemoryIdKey>,
+    /// The id of the memory the intro rendered, computed at `on_init`
+    memory_id: Option<MemoryId>,
 }
 
 /// Turns in a row whose every call was refused for its input, before
@@ -1349,6 +1356,30 @@ impl SeedAgent {
         self.contact_request
     }
 
+    /// Name the memory in this session's intro by its [`MemoryId`] under
+    /// `key`, so its heading shows it. Call before the session's
+    /// [`on_init`](Agent::on_init), which computes the id from the memory
+    /// it renders, so a change to the memory in between is never stale
+    pub fn set_memory_id_key(&mut self, key: &MemoryIdKey) {
+        self.memory_id_key = Some(MemoryIdKey::from_bytes(
+            zeroize::Zeroizing::new(*key.expose()),
+        ));
+    }
+
+    /// The id of the memory the intro rendered: the memory in the agent's
+    /// context, which the `memory` tool is anchored on. `None` before
+    /// [`on_init`](Agent::on_init), or without a key
+    pub fn memory_id(&self) -> Option<MemoryId> {
+        self.memory_id
+    }
+
+    /// The session's context gauge. A runner tool wrapped in
+    /// [`Gauged`] with it has its results counted, and refused when they
+    /// would not fit, as the Agora tools' are
+    pub fn context_gauge(&self) -> &ContextGauge {
+        &self.context
+    }
+
     /// The promise in the survey prompt: an anonymous exchange never persists
     /// in the transcript. Runs at teardown, after the last request, so no
     /// request ever re-sends a transcript with a hole in it; the survey is
@@ -1475,6 +1506,8 @@ impl Agent for SeedAgent {
             phase_failures: 0,
             phase_budget: 0,
             last_failure: None,
+            memory_id_key: None,
+            memory_id: None,
         })
     }
 
@@ -1701,6 +1734,12 @@ impl Agent for SeedAgent {
 
         let soul_markdown = self.state.soul.markdown();
         let memory = self.state.memory.render_for_prompt();
+        // From the memory rendered here, whatever happened to it since the
+        // key was set
+        self.memory_id = self
+            .memory_id_key
+            .as_ref()
+            .map(|key| MemoryId::of(key, self.id, &self.state.memory.content));
         // Read the installed tool set *before* taking the prompt — the take
         // leaves a `Prompt::default()` behind, tools and all.
         let web_tools = self.has_web_tools();
@@ -1713,6 +1752,7 @@ impl Agent for SeedAgent {
                 max_rounds: self.ctx.config.max_rounds,
                 soul_markdown: &soul_markdown,
                 memory: &memory,
+                memory_id: self.memory_id,
                 sessions: match self.state.last_cycle_at {
                     None => prompt::Sessions::First,
                     Some(_) => prompt::Sessions::Returning,

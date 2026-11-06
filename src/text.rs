@@ -24,7 +24,7 @@ pub const LINE_DIFF_TIMEOUT: Duration = Duration::from_secs(2);
 /// coarser one, still correct. The output is not bounded: it can be as
 /// long as both texts together, so callers cap what they show.
 pub fn line_diff(before: &str, after: &str) -> String {
-    let few = before.lines().count() <= 2 && after.lines().count() <= 2;
+    let few = by_sentence(before, after);
     fn split(s: &str, few: bool) -> Vec<&str> {
         if few {
             // Lines first, so a sentence ending one never runs into the
@@ -86,9 +86,39 @@ pub fn line_diff(before: &str, after: &str) -> String {
     out
 }
 
+/// Whether [`line_diff`] compares `before` and `after` by sentence: when
+/// both are on at most two lines
+pub fn by_sentence(before: &str, after: &str) -> bool {
+    before.lines().count() <= 2 && after.lines().count() <= 2
+}
+
+/// What [`line_diff`] compares `before` and `after` by, plural: `lines` or
+/// `sentences`
+pub fn diff_units(before: &str, after: &str) -> &'static str {
+    if by_sentence(before, after) {
+        "sentences"
+    } else {
+        "lines"
+    }
+}
+
+/// The units a [`line_diff`] output adds and removes: `(added, removed)`
+pub fn change_counts(diff: &str) -> (usize, usize) {
+    let count = |prefix| diff.lines().filter(|l| l.starts_with(prefix)).count();
+    (count("  + "), count("  - "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_and_units() {
+        let diff = line_diff("a\nb\nc\n", "a\nB\nc\nd\n");
+        assert_eq!(change_counts(&diff), (2, 1));
+        assert_eq!(diff_units("a\nb\nc", "a"), "lines");
+        assert_eq!(diff_units("One. Two.", "One."), "sentences");
+    }
 
     #[test]
     fn unchanged_ends_are_counted_and_changes_shown() {

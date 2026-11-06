@@ -26,9 +26,9 @@ use crate::responses::{
 use crate::text::line_diff;
 use crate::threads::tidy;
 
-use super::ShownOnce;
 use super::elements::{self, El};
 use super::shown_once::text_key;
+use super::{MemoryId, ShownOnce};
 
 /// Everything the perceive phase gathered, on its way into the prompt. A struct
 /// (not arguments) so a callsite that forgets a section is a compile error, not
@@ -40,6 +40,8 @@ pub(super) struct Perception<'a> {
     pub max_rounds: usize,
     pub soul_markdown: &'a str,
     pub memory: &'a str,
+    /// The memory's id, shown in its heading when known
+    pub memory_id: Option<MemoryId>,
     pub dashboard: &'a DashboardResponse,
     /// The agent's own recent posts; `None` when they could not be loaded,
     /// which the intro says rather than leaving the section out as if the
@@ -155,6 +157,7 @@ pub(super) fn assemble(
         max_rounds,
         soul_markdown,
         memory,
+        memory_id,
         dashboard,
         recent_posts,
         recent_limit,
@@ -173,6 +176,7 @@ pub(super) fn assemble(
     let intro = intro_message(
         soul_markdown,
         memory,
+        memory_id,
         sessions,
         &format_dashboard(dashboard, model),
         max_rounds,
@@ -330,6 +334,7 @@ fn constitution_looks_complete(text: &str) -> bool {
 fn intro_message(
     soul_markdown: &str,
     memory: &str,
+    memory_id: Option<MemoryId>,
     sessions: Sessions,
     dashboard: &str,
     max_rounds: usize,
@@ -362,10 +367,12 @@ fn intro_message(
         .collect::<Vec<_>>()
         .join("\n");
 
+    // `## Your Memory (mem-3f9a1c07be)`: the id the `memory` tool reads it by
+    let memory_id = memory_id.map(|id| format!(" ({id})")).unwrap_or_default();
     let mut out = format!(
         "## Your Personality\n\n\
          {soul}\n\n\
-         ## Your Memory\n\n\
+         ## Your Memory{memory_id}\n\n\
          {memory}\n\n\
          ## Dashboard\n\n\
          {dashboard}\n\n\
@@ -8793,6 +8800,7 @@ mod tests {
         let first = intro_message(
             "## Identity\nA.",
             &initial,
+            None,
             Sessions::First,
             "DASH",
             3,
@@ -8803,6 +8811,7 @@ mod tests {
         let returning = intro_message(
             "## Identity\nA.",
             &initial,
+            None,
             Sessions::Returning,
             "DASH",
             3,
@@ -8812,6 +8821,7 @@ mod tests {
         let kept = intro_message(
             "## Identity\nA.",
             "# Memory\nKept.",
+            None,
             Sessions::First,
             "DASH",
             3,
@@ -8828,6 +8838,7 @@ mod tests {
         let intro = intro_message(
             "## Identity\nA curious agent.",
             "# Memory\nRemembered things.",
+            None,
             Sessions::Returning,
             "DASH",
             3,
@@ -8837,6 +8848,22 @@ mod tests {
         assert!(!intro.contains("# Memory"), "{intro}");
         assert!(intro.contains("Remembered things."), "{intro}");
         assert!(!intro.contains("## Your Recent Activity"), "{intro}");
+    }
+
+    /// The heading names the memory by its id when the runner gave one
+    #[test]
+    fn the_memory_heading_carries_its_id() {
+        let id = MemoryId::from([0x3f; 32]);
+        let intro = |id| {
+            intro_message("", "Kept.", id, Sessions::Returning, "DASH", 3, "")
+        };
+        assert!(
+            intro(Some(id))
+                .contains("## Your Memory (mem-3f3f3f3f3f)\n\nKept."),
+            "{}",
+            intro(Some(id))
+        );
+        assert!(intro(None).contains("## Your Memory\n\nKept."));
     }
 
     // ------------------------------------------------------------------
@@ -10076,6 +10103,7 @@ mod tests {
                 max_rounds: 7,
                 soul_markdown: "## Identity\nA curious agent.",
                 memory: "Remembered things.",
+                memory_id: None,
                 dashboard: &dash(),
                 recent_posts: Some(&[recent_post()]),
                 recent_limit: 5,
@@ -10097,6 +10125,7 @@ mod tests {
                 max_rounds: 5,
                 soul_markdown: "",
                 memory: "",
+                memory_id: None,
                 dashboard: &dash(),
                 recent_posts: Some(&[]),
                 recent_limit: 5,
@@ -10178,6 +10207,7 @@ mod tests {
                 max_rounds: 7,
                 soul_markdown: "## Identity\nA curious agent.",
                 memory: "Remembered things.",
+                memory_id: None,
                 dashboard,
                 recent_posts: None,
                 recent_limit: 5,
@@ -10367,6 +10397,7 @@ mod tests {
                 max_rounds: 7,
                 soul_markdown: "## Identity\nA curious agent.",
                 memory: "Remembered things.",
+                memory_id: None,
                 dashboard: &dashboard,
                 recent_posts: None,
                 recent_limit: 5,
@@ -10399,6 +10430,7 @@ mod tests {
                 max_rounds,
                 soul_markdown: "## Identity\nA curious agent.",
                 memory: "Remembered things.",
+                memory_id: None,
                 dashboard: &dash(),
                 recent_posts: Some(&[recent_post()]),
                 recent_limit: 5,

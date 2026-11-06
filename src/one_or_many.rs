@@ -5,10 +5,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// One `T`, or a non-empty list of them.
 ///
-/// Reads a bare `T` or an array, and always writes an array, which is the
-/// only form the schema shows. An empty array is refused, and so is the
-/// array a small model sometimes sends as a string (`"[\"ada\"]"`) unless it
-/// parses as one, when it is read as the array it spells.
+/// Reads a bare `T` or an array, and always writes an array. An empty
+/// array is refused, and so is the array a small model sometimes sends as
+/// a string (`"[\"ada\"]"`) unless it parses as one, when it is read as
+/// the array it spells.
+///
+/// The schema shows both forms it reads, as an inline `anyOf` (beta round
+/// 16). Until then it showed only the array, to keep unions out of tool
+/// schemas; that reason no longer holds, since the API accepts a nested
+/// `anyOf` and drama_llama constrains one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OneOrMany<T> {
     One(T),
@@ -105,8 +110,8 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for OneOrMany<T> {
     }
 }
 
-// The array form only, inline: a tool schema never carries a `$ref`
-// (agora CLAUDE.md), so `T`'s schema is written out rather than referenced
+// Both forms, inline: a tool schema never carries a `$ref` (agora
+// CLAUDE.md), so `T`'s schema is written out rather than referenced
 #[cfg(feature = "schemars")]
 impl<T: schemars::JsonSchema> schemars::JsonSchema for OneOrMany<T> {
     fn inline_schema() -> bool {
@@ -124,11 +129,12 @@ impl<T: schemars::JsonSchema> schemars::JsonSchema for OneOrMany<T> {
     fn json_schema(
         generator: &mut schemars::SchemaGenerator,
     ) -> schemars::Schema {
-        let items = T::json_schema(generator);
+        let one = T::json_schema(generator);
         schemars::json_schema!({
-            "type": "array",
-            "items": items,
-            "minItems": 1,
+            "anyOf": [
+                one.clone(),
+                { "type": "array", "items": one, "minItems": 1 },
+            ]
         })
     }
 }
@@ -184,13 +190,17 @@ mod tests {
 
     #[cfg(feature = "schemars")]
     #[test]
-    fn the_schema_is_an_inline_array() {
+    fn the_schema_shows_one_or_a_list_inline() {
         let schema =
             serde_json::to_value(schemars::schema_for!(Names)).unwrap();
         let text = schema.to_string();
         assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["items"]["type"], "string");
-        assert_eq!(schema["minItems"], 1);
+        let [one, list] = schema["anyOf"].as_array().unwrap().as_slice() else {
+            panic!("{schema}");
+        };
+        assert_eq!(one["type"], "string");
+        assert_eq!(list["type"], "array");
+        assert_eq!(list["items"], *one);
+        assert_eq!(list["minItems"], 1);
     }
 }

@@ -2,6 +2,51 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.156.0
+
+The `memory` tool for seed agents: their memory's past versions, by memory
+id (beta rounds 16–19, all GO). Breaking: `seed/memory.rs` is now the
+`seed/memory/` module; `OneOrMany`'s schema shows both forms it reads;
+new public items listed below.
+
+- **Memory ids**: `MemoryId` is `mem-` + 10 hex, an HMAC-SHA256 (via
+  HKDF-Extract, RFC 4231-checked) under a per-agent `MemoryIdKey` over a
+  frozen, length-prefixed input: a domain tag, the agent id and the raw
+  `memory.content`. Golden ids pin it. The heading reads
+  `## Your Memory (mem-…)` when the runner sets a key
+  (`SeedAgent::set_memory_id_key`, computed in `on_init` from the memory
+  rendered), and is byte-identical without one.
+- **The `memory` tool** (runner-only, not strict): `{"request": {"action":
+  …}}`, since the API refuses a root union (observed). `search` (every
+  word of `query`, or words starting with it; 10 groups by default,
+  `limit` 1–30), `show` (one id whole; several like `git log -p`, newest
+  first, anchored on the memory in context, a version whole only when
+  that is shorter than its diff), `log` (newest first, paged by `before`),
+  `diff` (to the current memory by default). An id is a memory id or, if
+  the state is sealed, a head, 6 hex digits or more; a `mem-` ref with a
+  head's digits falls back to the head. Unknown fields are refused; a
+  call shaped like Anthropic's memory tool (`command`, `path`) is told what
+  this one takes; a bare `{"action": …}` is read and logged
+  (`forgiving_coercion`, `memory_bare_request`). Adjusted limits and
+  budgets are said ("Limit lowered to 50."); an empty query is refused;
+  echoed input is cut at 80 chars (`echo`), the guidance never.
+- **Rendering**: `MemoryVersion` with `VersionText::{Opened, Unopened}`
+  and `VersionSource::{Sealed, LocalCopy, SideLine, OffLine, SetAside,
+  NeverSaved, PriorCopy}`; no size delta or "same memory as above" across
+  rows of different kinds; `SealCheck::Unchecked` prefaces `UNCHECKED` and
+  shows no heads; unknown dates read "date unknown"; Debug of every
+  memory-carrying type shows ids, dates and counts, never text.
+- **Search index**: one entry per distinct memory with every save time,
+  integrity-hashed; any `IndexError` means rebuild; `IndexState` says
+  built, rebuilt or loaded.
+- **Shared**: `memory_text`/`soul_text` (the runner's notice projection,
+  moved), `text::{change_counts, diff_units, by_sentence}`, `short_head`,
+  `grouped`, `SeedAgent::context_gauge`.
+- **Schemas**: `tools::model_facing_schema` rewrites `oneOf` to `anyOf`
+  (no existing tool changes). `OneOrMany` now shows `anyOf: [T, array]`,
+  which changes `manage_friendship`'s `agents` and `notifications`'
+  `dismiss` to show the single form their parsers already took.
+
 ## 0.155.0
 
 Fixes from beta round 15. Breaking: `PostResponse` gains `you_commented`
