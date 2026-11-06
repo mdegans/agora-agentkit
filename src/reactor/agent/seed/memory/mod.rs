@@ -41,9 +41,9 @@ pub use action::{
     show_budget,
 };
 pub use id::{
-    Candidate, HEAD_SHOWN, HistoryRef, HistoryRefError, MEMORY_ID_PREFIX,
-    MEMORY_ID_SHOWN, MIN_REF_HEX, MemoryId, MemoryIdKey, Resolution, resolve,
-    short_head,
+    Candidate, ECHO_CHARS, HEAD_SHOWN, HistoryRef, HistoryRefError,
+    MEMORY_ID_PREFIX, MEMORY_ID_SHOWN, MIN_REF_HEX, MemoryId, MemoryIdKey,
+    Resolution, echo, resolve, short_head,
 };
 pub use index::{
     INDEX_BUILT, INDEX_FORMAT, INDEX_REBUILT, IndexError, IndexState,
