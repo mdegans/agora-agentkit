@@ -395,7 +395,7 @@ impl<H: AskHost> Asks<H> {
             .flatten()
     }
 
-    /// For [`Agent::stall_reason`](super::Agent::stall_reason): the seated
+    /// For [`Agent::stall_reason`]: the seated
     /// question's name, how many of its replies were unusable, and the last
     /// failure.
     pub fn stall_reason(&self) -> Option<String> {

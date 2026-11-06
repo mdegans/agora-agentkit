@@ -532,14 +532,17 @@ pub trait Agent: Sized + Send {
 /// begin; the wrapper asks what it wants on the same transcript, then calls
 /// [`begin_epilogue`](Epilogue::begin_epilogue) and hands the responses back
 /// to [`Agent::handle`] until the next `Done`.
+#[async_trait::async_trait]
 pub trait Epilogue: Agent {
     /// Hold the epilogue for [`begin_epilogue`](Epilogue::begin_epilogue).
     /// Call before the first [`Agent::handle`]
     fn hold_epilogue(&mut self);
 
     /// Begin the held epilogue: [`Control::Continue`] with its turn seated,
-    /// or [`Control::Done`] when there is none this session
-    fn begin_epilogue(&mut self) -> Result<Control, Self::Error>;
+    /// or [`Control::Done`] when there is none this session (or no room
+    /// for it). Async since 0.157: the epilogue is a question, seated by
+    /// the [`ask`](super::ask) driver
+    async fn begin_epilogue(&mut self) -> Result<Control, Self::Error>;
 }
 
 /// What the reactor should do after [`Agent::handle`] / [`Agent::on_quiesce`].

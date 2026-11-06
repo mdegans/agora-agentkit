@@ -502,23 +502,70 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 }
 
-/// Every phase schema the seed agent constrains with (`constrain::<T>()`:
-/// reflect's `Memory`, mutate's `Soul`) goes out with no `$ref`/`$defs` and no
-/// `pattern` (agora CLAUDE.md). Mirrors agora-appeals'
-/// `strict_is_on_and_ref_free_for_every_decision_tool`.
-#[test]
-fn constrained_phase_schemas_are_ref_and_pattern_free() {
-    fn output_config<T: schemars::JsonSchema>() -> String {
-        let prompt = Prompt::default().structured_output::<T>();
-        serde_json::to_string(&prompt.output_config).unwrap()
-    }
-    for (phase, schema) in [
-        ("reflect (Memory)", output_config::<Memory>()),
-        ("mutate (Soul)", output_config::<Soul>()),
-    ] {
-        for banned in ["$ref", "$defs", "\"pattern\""] {
-            assert!(!schema.contains(banned), "{phase} has {banned}: {schema}");
+/// Every question a seed session asks goes out, where it is constrained,
+/// with a schema fit to constrain with: no `$ref`/`$defs`, no `pattern`,
+/// closed, no reasoning field, `null` writable where it is an answer (agora
+/// CLAUDE.md; [`crate::reactor::ask::assert_constrainable`]). Taken from the
+/// `output_config` the driver actually sends, for each of the four. Mirrors
+/// agora-appeals' `strict_is_on_and_ref_free_for_every_decision_tool`.
+#[tokio::test]
+async fn constrained_phase_schemas_are_ref_and_pattern_free() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let mut sent = Vec::new();
+    for (mutate, evolve) in [(100, 0), (0, 100)] {
+        let config = SeedConfig {
+            mutation_chance: mutate,
+            evolution_chance: evolve,
+            force_survey: true,
+            ..quiet_config()
+        };
+        let mut agent = agent(&server, config);
+        agent.communities = vec!["tech".to_string()];
+        let model = agent.state.model.clone();
+        agent.on_admit(
+            &model,
+            &Quirks {
+                output_config_cache_safe: true,
+                ..Quirks::default()
+            },
+        );
+        seat_start(&mut agent);
+        let soul = r#"{"name": "test-agent", "identity": "x", "values": ["v"], "interests": {"communities": ["tech"], "topics": []}, "voice": "y"}"#;
+        for reply in [
+            "done",
+            MEMORY,
+            if mutate > 0 { soul } else { "null" },
+            "null",
+        ] {
+            let control = agent
+                .handle(text_message(reply, StopReason::EndTurn))
+                .await
+                .unwrap();
+            if let Some(name) = agent.asks.seated() {
+                let config = agent.prompt().output_config.clone().unwrap();
+                let wire = serde_json::to_value(&config).unwrap();
+                sent.push((name, wire["format"]["schema"].clone()));
+            } else {
+                assert_eq!(control, Control::Done(Outcome::Complete));
+            }
         }
+        assert!(agent.unanswered_asks().is_empty());
+    }
+    let names: Vec<_> = sent.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        ["memory", "soul", "survey", "memory", "evolution", "survey"]
+    );
+    for (name, schema) in &sent {
+        let text = schema.to_string();
+        for banned in ["$ref", "$defs", "\"pattern\""] {
+            assert!(!text.contains(banned), "{name} has {banned}: {text}");
+        }
+        crate::reactor::ask::assert_constrainable(schema);
     }
 }
 
@@ -1884,7 +1931,8 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
             .handle(text_message(&over, StopReason::EndTurn))
             .await
             .unwrap();
-        assert_eq!(control, Control::Stalled);
+        // Optional: its own budget, never a stall
+        assert_eq!(control, Control::Continue);
     }
     feedback.assert_calls(0);
     let control = agent
@@ -2017,7 +2065,7 @@ async fn pause_cap_bounds_resumption() {
     let before = agent.prompt().messages.len() - MAX_PAUSES;
     agent.handle(paused_message()).await.unwrap();
     assert!(
-        matches!(agent.phase, Phase::Reflect),
+        agent.asks.seated() == Some("memory"),
         "acting ended at the cap: {:?}",
         agent.phase
     );
@@ -2055,7 +2103,7 @@ async fn tail_pauses_count_against_the_same_budget() {
         .handle(text_message("nothing to do", StopReason::EndTurn))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
 
     for _ in 0..MAX_PAUSES {
         assert_eq!(
@@ -2069,7 +2117,7 @@ async fn tail_pauses_count_against_the_same_budget() {
         agent.handle(paused_message()).await.unwrap(),
         Control::Stalled
     );
-    assert!(matches!(agent.phase, Phase::Reflect), "still in the tail");
+    assert!(agent.asks.seated() == Some("memory"), "still in the tail");
 }
 
 /// A governance entry as the server returns it from the widened content
@@ -2634,7 +2682,7 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(matches!(full.phase, Phase::Reflect), "{:?}", full.phase);
+    assert!(full.asks.seated() == Some("memory"), "{:?}", full.phase);
     assert_eq!(feed.calls(), 2, "the full agent's call never ran");
     let rendered = transcript(&full);
     assert!(
@@ -2718,7 +2766,7 @@ async fn the_admitted_models_window_bounds_the_configs() {
         ))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect), "{:?}", agent.phase);
+    assert!(agent.asks.seated() == Some("memory"), "{:?}", agent.phase);
 }
 
 /// After reflect, an optional phase without room for its whole budget is
@@ -2736,7 +2784,7 @@ async fn the_survey_is_skipped_when_it_would_not_fit() {
         .handle(text_with_usage("nothing to do", 100_000))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     // 128k less 123k held less the instruction leaves under 4096.
     let control = agent
         .handle(text_with_usage(MEMORY, 123_000))
@@ -2759,7 +2807,7 @@ async fn a_failed_reflect_near_the_edge_is_left_out_for_the_retry() {
         .handle(text_with_usage("nothing to do", 120_000))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     assert_eq!(agent.prompt().max_tokens.get(), 4_096);
     let messages = agent.prompt().messages.len();
 
@@ -2833,7 +2881,7 @@ async fn a_closing_phase_asks_for_no_more_than_fits() {
         .handle(text_with_usage("nothing to do", 124_000))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     assert_eq!(agent.prompt().max_tokens.get(), 2_000);
 }
 
@@ -3764,31 +3812,39 @@ fn soul_rewrite(identity_chars: usize) -> String {
     )
 }
 
-/// An agent at the soul-rewrite phase, as `after_reflect` leaves it
-fn mutating_agent(server: &MockServer) -> SeedAgent {
+/// An agent asked the soul rewrite, as the memory rewrite's answer leaves
+/// it when a mutation is rolled
+async fn mutating_agent(server: &MockServer) -> SeedAgent {
     let mut agent = agent(server, quiet_config());
     agent.communities = vec!["tech".to_string()];
     seat_start(&mut agent);
-    agent.phase = Phase::Mutate;
-    let instruction = output::build_soul_mutation_prompt(&agent.state.soul);
-    agent.seat_phase(&instruction, 4096).unwrap();
+    agent.phase = Phase::Asking;
+    agent.asks.push(asks::SoulAsk {
+        question: output::build_soul_mutation_prompt(&agent.state.soul),
+        max_tokens: 4096,
+        agent: "test-agent".into(),
+    });
+    let control = crate::reactor::ask::seat_next(&mut agent, None)
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
     agent
 }
 
-/// Two over-length tries stall as before; the third is clipped at a
-/// sentence boundary instead of losing the rewrite (tango-aether,
-/// 2026-10-01)
+/// Two over-length tries are retried; the third is clipped at a sentence
+/// boundary instead of losing the rewrite (tango-aether, 2026-10-01)
 #[tokio::test]
 async fn the_last_soul_rewrite_attempt_is_clipped_not_lost() {
     let server = MockServer::start();
-    let mut agent = mutating_agent(&server);
+    let mut agent = mutating_agent(&server).await;
     let over = soul_rewrite(soul::PROSE_MAX + 60);
     for _ in 0..2 {
         let control = agent
             .handle(text_message(&over, StopReason::EndTurn))
             .await
             .unwrap();
-        assert_eq!(control, Control::Stalled);
+        // Optional: its own budget, never a stall
+        assert_eq!(control, Control::Continue);
     }
     assert!(transcript(&agent).contains("exceeds 2048 chars"));
     let control = agent
@@ -3810,32 +3866,33 @@ async fn the_last_soul_rewrite_attempt_is_clipped_not_lost() {
     );
 }
 
-/// A closing phase that keeps failing for another reason still fails, and
-/// the reactor is told which phase and why rather than "no successful tool
+/// A memory rewrite that keeps failing stalls the session out, and the
+/// reactor is told which question and why rather than "no successful tool
 /// call"
 #[tokio::test]
 async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
     let server = MockServer::start();
-    let mut mutating = mutating_agent(&server);
+    let mut reflecting = agent(&server, quiet_config());
+    seat_start(&mut reflecting);
+    reflecting
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
     assert_eq!(
-        mutating.stall_reason(),
-        Some(
-            "the soul rewrite (mutate) phase failed 0 times in a row"
-                .to_string()
-        )
+        reflecting.stall_reason(),
+        Some("the memory question".to_string())
     );
     for _ in 0..crate::reactor::MAX_STALLS {
-        let control = mutating
+        let control = reflecting
             .handle(text_message("not json", StopReason::EndTurn))
             .await
             .unwrap();
         assert_eq!(control, Control::Stalled);
     }
-    let reason = mutating.stall_reason().unwrap();
+    let reason = reflecting.stall_reason().unwrap();
     assert!(
         reason.starts_with(
-            "the soul rewrite (mutate) phase failed 3 times in a row; last: \
-             Invalid JSON"
+            "the memory question failed 3 times in a row; last: Invalid JSON"
         ),
         "{reason}"
     );
@@ -3843,6 +3900,67 @@ async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
     // An acting stall keeps the reactor's own wording.
     let acting = agent(&server, quiet_config());
     assert_eq!(acting.stall_reason(), None);
+}
+
+/// A soul rewrite that never parses is missed, not a failed session
+/// (Steward, 2026-11-06: optional questions never fail a session): the
+/// soul is unchanged, the miss is there for the runner to alert on, and the
+/// session completes
+#[tokio::test]
+async fn a_spent_soul_rewrite_is_missed_and_the_session_completes() {
+    let server = MockServer::start();
+    let mut agent = mutating_agent(&server).await;
+    let identity = agent.state.soul.identity.as_str().to_string();
+    for _ in 0..2 {
+        let control = agent
+            .handle(text_message("not json", StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Continue);
+    }
+    let control = agent
+        .handle(text_message("still not json", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(agent.state.completed);
+    assert_eq!(agent.state.soul.identity.as_str(), identity);
+    assert!(matches!(
+        agent.unanswered_asks(),
+        [("soul", crate::reactor::ask::Unanswered::Missed(why))]
+            if why.starts_with("Invalid JSON")
+    ));
+}
+
+/// An API refusal of the survey skips it: the session completes, and the
+/// refused exchange is redacted like any survey
+#[tokio::test]
+async fn a_refused_survey_is_skipped_and_redacted() {
+    let server = MockServer::start();
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let refusal: response::Message =
+        serde_json::from_value(serde_json::json!({
+            "id": "msg_test",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "I can't help with that."}],
+            "model": "claude-haiku-4-5",
+            "stop_reason": "refusal",
+            "stop_sequence": null,
+        }))
+        .unwrap();
+    let control = agent.handle(refusal).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert_eq!(
+        agent.unanswered_asks(),
+        [("survey", crate::reactor::ask::Unanswered::Refused)]
+    );
+    agent.on_teardown().await.unwrap();
+    assert!(!transcript(&agent).contains("anonymous feedback"));
 }
 
 /// The limits only got looser: a soul at the old caps still reads, the new
@@ -4157,8 +4275,8 @@ async fn a_held_survey_comes_after_the_wrappers_question() {
         .push_message((Role::User, "Recorded."))
         .unwrap();
 
-    assert_eq!(agent.begin_epilogue().unwrap(), Control::Continue);
-    assert!(agent.begin_epilogue().is_err(), "begun once");
+    assert_eq!(agent.begin_epilogue().await.unwrap(), Control::Continue);
+    assert!(agent.begin_epilogue().await.is_err(), "begun once");
     let mut script: std::collections::VecDeque<_> = [text_message(
         r#"{"text": "More cat pictures please.", "contact_me": false}"#,
         StopReason::EndTurn,
@@ -4197,14 +4315,15 @@ async fn a_held_session_without_a_survey_ends_at_begin() {
             .unwrap();
     }
     assert_eq!(
-        agent.begin_epilogue().unwrap(),
+        agent.begin_epilogue().await.unwrap(),
         Control::Done(Outcome::Complete)
     );
     assert!(agent.state.completed);
 }
 
-/// A survey that never got a usable answer (the session stalls out on it)
-/// is redacted at teardown all the same, failed attempts included
+/// A survey that never got a usable answer (missed after its three
+/// attempts; the session still completes) is redacted at teardown all the
+/// same, failed attempts included
 #[tokio::test]
 async fn a_survey_that_never_parsed_is_redacted_too() {
     let server = MockServer::start();
@@ -4221,7 +4340,7 @@ async fn a_survey_that_never_parsed_is_redacted_too() {
             .await
             .unwrap();
     }
-    for _ in 0..crate::reactor::MAX_STALLS {
+    for attempt in 1..=3 {
         let control = agent
             .handle(text_message(
                 "Cat pictures, not JSON.",
@@ -4229,8 +4348,13 @@ async fn a_survey_that_never_parsed_is_redacted_too() {
             ))
             .await
             .unwrap();
-        assert_eq!(control, Control::Stalled);
+        if attempt < 3 {
+            assert_eq!(control, Control::Continue);
+        } else {
+            assert_eq!(control, Control::Done(Outcome::Complete));
+        }
     }
+    assert!(agent.state.completed);
     agent.on_teardown().await.unwrap();
     let dumped = dumped(dir.path());
     assert!(dumped.contains("I posted about compilers"), "{dumped}");
@@ -10230,7 +10354,7 @@ async fn a_stop_ends_acting_after_the_turn_and_the_memory_turn_follows() {
     // The signal arrived during that turn: the reactor asks at the boundary.
     let control = agent.on_stop().await.unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(matches!(agent.phase, Phase::Reflect), "{:?}", agent.phase);
+    assert!(agent.asks.seated() == Some("memory"), "{:?}", agent.phase);
     let text = transcript(&agent);
     let stop_at = text.find(super::RUNNER_STOPPING).expect("told why");
     let memory_at = text.find("update your `## Your Memory`").unwrap();
@@ -10279,7 +10403,7 @@ async fn a_stop_during_a_paused_turn_abandons_it() {
     assert_eq!(agent.prompt().messages.len(), before + 1);
 
     assert_eq!(agent.on_stop().await.unwrap(), Control::Continue);
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     assert_eq!(
         agent.prompt().messages.len(),
         before,

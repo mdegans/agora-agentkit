@@ -1,16 +1,12 @@
-//! Phase-output contracts for the [`SeedAgent`] session tail — reflect, evolve,
-//! survey, and the rare deep soul mutation. Each phase pairs an instruction
-//! (seated as the phase's user turn) with a parser. The parse targets double as
-//! [`structured_output`] schemas on endpoints where setting `output_config` is
-//! cache-safe (see [`Quirks`]); elsewhere the instruction's JSON-shape block
-//! plus the parser carry the contract alone.
+//! The words of the questions a [`SeedAgent`] session closes with: the
+//! memory rewrite, the evolution entry, the survey, and the rare deep soul
+//! mutation. The questions themselves, with their parsers and schemas, are
+//! in [`asks`](super::asks).
 //!
 //! [`SeedAgent`]: super::SeedAgent
-//! [`structured_output`]: misanthropic::Prompt::structured_output
-//! [`Quirks`]: crate::reactor::inference::Quirks
 
-use super::soul::{ITEM_MAX, PROSE_MAX, SoulDraft, aim_under};
-use super::{Feedback, Memory, Soul};
+use super::Soul;
+use super::soul::{ITEM_MAX, PROSE_MAX, aim_under};
 
 /// We send this to agents when it's time to rewrite their memory.
 pub const MEMORY_REWRITE_MESSAGE: &str = r#"It's time to update your `## Your Memory` (see way above). Remove what you no longer care about, add what you do, and summarize to keep it under 2000 words in total. This is your rolling memory across ALL past sessions — not just this turn.
@@ -67,13 +63,6 @@ null
 ```"#
     )
 }
-
-/// Seated when a response was clipped by `max_tokens`. Worded to make clear
-/// only the *attempt* was dropped — implying a post or comment was thrown
-/// out invites duplicates.
-pub const TRUNCATION_WARNING: &str = "Your previous attempt at this turn \
-exceeded the max_tokens limit and was cut off, so nothing in it was used. \
-Respond again, more briefly.";
 
 /// Build a prompt for a deep soul mutation — rewriting core sections.
 pub fn build_soul_mutation_prompt(soul: &Soul) -> String {
@@ -133,152 +122,9 @@ pub fn build_soul_mutation_prompt(soul: &Soul) -> String {
     parts.join("\n")
 }
 
-/// Strip a leading ```json (or ```) fence and trailing ``` if present.
-/// Some models add fences even when asked for JSON only; we tolerate them.
-fn strip_code_fences(s: &str) -> &str {
-    let trimmed = s.trim();
-    let after_open = trimmed
-        .strip_prefix("```json\n")
-        .or_else(|| trimmed.strip_prefix("```json"))
-        .or_else(|| trimmed.strip_prefix("```\n"))
-        .or_else(|| trimmed.strip_prefix("```"))
-        .unwrap_or(trimmed);
-    after_open
-        .strip_suffix("\n```")
-        .or_else(|| after_open.strip_suffix("```"))
-        .unwrap_or(after_open)
-        .trim()
-}
-
-/// Render a [`serde_path_to_error::Error`] as a model-facing retry message:
-/// the field's path and serde's message, without the line and column
-/// ([`crate::field_path`])
-fn format_for_agent(
-    e: serde_path_to_error::Error<serde_json::Error>,
-) -> String {
-    crate::field_path::FieldError::new(e).after("Invalid JSON")
-}
-
-/// Parse a [`Memory`] rewrite (`{"content": "..."}`) from the reflect
-/// response. Soul-leakage rejection happens downstream in [`Memory::update`]
-pub fn parse_memory_rewrite(response: &str) -> Result<Memory, String> {
-    let json = strip_code_fences(response);
-    let mut de = serde_json::Deserializer::from_str(json);
-    serde_path_to_error::deserialize::<_, Memory>(&mut de)
-        .map_err(format_for_agent)
-}
-
-/// Parse a [`Soul`] mutation — the full SOUL JSON without `evolution_log`
-/// (the system re-attaches the prior log and auto-appends an entry)
-pub fn parse_soul_mutation(response: &str) -> Result<Soul, String> {
-    let json = strip_code_fences(response);
-    let mut de = serde_json::Deserializer::from_str(json);
-    serde_path_to_error::deserialize::<_, Soul>(&mut de)
-        .map_err(format_for_agent)
-}
-
-/// [`parse_soul_mutation`] for a last attempt: over-length prose fields are
-/// clipped at a sentence boundary instead of failing the rewrite. Returns the
-/// soul and the paths of the fields clipped; any other error still fails.
-pub fn parse_soul_mutation_clipped(
-    response: &str,
-) -> Result<(Soul, Vec<String>), String> {
-    let json = strip_code_fences(response);
-    let mut de = serde_json::Deserializer::from_str(json);
-    serde_path_to_error::deserialize::<_, SoulDraft>(&mut de)
-        .map(SoulDraft::into_clipped)
-        .map_err(format_for_agent)
-}
-
-/// [`parse_evolution`] for a last attempt: an over-length note is clipped at
-/// a sentence boundary. The `bool` says whether it was.
-pub fn parse_evolution_clipped(
-    response: &str,
-) -> Result<(Option<String>, bool), String> {
-    #[derive(serde::Deserialize)]
-    struct Draft {
-        note: String,
-    }
-    let json = strip_code_fences(response);
-    if json.trim() == "null" || json.trim().is_empty() {
-        return Ok((None, false));
-    }
-    let mut de = serde_json::Deserializer::from_str(json);
-    let draft: Draft =
-        serde_path_to_error::deserialize(&mut de).map_err(format_for_agent)?;
-    if draft.note.trim().is_empty() {
-        return Ok((None, false));
-    }
-    let (note, cut) =
-        super::ShortString::<ITEM_MAX>::clipped(draft.note.trim());
-    Ok((Some(note.into_inner()), cut))
-}
-
-/// Parse an evolution entry: `{"note": "..."}`, or `null` for "no change"
-pub fn parse_evolution(response: &str) -> Result<Option<String>, String> {
-    let json = strip_code_fences(response);
-    if json.trim() == "null" || json.trim().is_empty() {
-        return Ok(None);
-    }
-    let mut de = serde_json::Deserializer::from_str(json);
-    let req: super::EvolutionRequest =
-        serde_path_to_error::deserialize(&mut de).map_err(format_for_agent)?;
-    let note = req.note.into_inner();
-    if note.trim().is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(note))
-    }
-}
-
-/// [`parse_feedback`] for a last attempt: an over-length `text` is clipped
-/// at a sentence boundary. The `bool` says whether it was.
-pub fn parse_feedback_clipped(
-    response: &str,
-) -> Result<(Option<Feedback>, bool), String> {
-    #[derive(serde::Deserialize)]
-    struct Draft {
-        text: String,
-        contact_me: bool,
-    }
-    let json = strip_code_fences(response);
-    if json.trim() == "null" || json.trim().is_empty() {
-        return Ok((None, false));
-    }
-    let mut de = serde_json::Deserializer::from_str(json);
-    let draft: Draft =
-        serde_path_to_error::deserialize(&mut de).map_err(format_for_agent)?;
-    let (text, cut) = super::ShortString::clipped(&draft.text);
-    let feedback = Feedback {
-        text,
-        contact_me: draft.contact_me,
-    };
-    Ok((Some(feedback), cut))
-}
-
-/// Parse survey [`Feedback`]: `{"text": "...", "contact_me": bool}`, or
-/// `null` for "no feedback"
-pub fn parse_feedback(response: &str) -> Result<Option<Feedback>, String> {
-    let json = strip_code_fences(response);
-    if json.trim() == "null" || json.trim().is_empty() {
-        return Ok(None);
-    }
-    let mut de = serde_json::Deserializer::from_str(json);
-    serde_path_to_error::deserialize::<_, Feedback>(&mut de)
-        .map(Some)
-        .map_err(format_for_agent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fences_are_tolerated() {
-        assert_eq!(strip_code_fences("```json\n{\"a\":1}\n```"), "{\"a\":1}");
-        assert_eq!(strip_code_fences("```\nnull\n```"), "null");
-        assert_eq!(strip_code_fences("  {\"a\":1}  "), "{\"a\":1}");
-    }
 
     /// The reflect message tells agents to drop a discovered confabulation
     /// rather than memorialise it — a memory that narrates the error primes
@@ -303,53 +149,6 @@ mod tests {
              (like `DATA-2026-0001`) and the file paths you read in it.\n"
         ));
         assert!(!MEMORY_REWRITE_MESSAGE.contains("recall"));
-    }
-
-    #[test]
-    fn memory_rewrite_parses() {
-        let m = parse_memory_rewrite(r#"{"content": "I like tea."}"#).unwrap();
-        assert_eq!(m.content, "I like tea.");
-    }
-
-    #[test]
-    fn memory_rewrite_error_names_the_path() {
-        let err = parse_memory_rewrite(r#"{"content": 42}"#).unwrap_err();
-        // Its path and serde's words, no line or column (0.117.2: it ended
-        // "at line 1 column 14")
-        assert_eq!(
-            err,
-            "Invalid JSON at `content`: invalid type: integer `42`, expected \
-             a string"
-        );
-    }
-
-    #[test]
-    fn evolution_null_is_no_change() {
-        assert_eq!(parse_evolution("null").unwrap(), None);
-        assert_eq!(parse_evolution("").unwrap(), None);
-        assert_eq!(parse_evolution("```json\nnull\n```").unwrap(), None);
-    }
-
-    #[test]
-    fn evolution_note_round_trips() {
-        let note = parse_evolution(r#"{"note": "I argue more."}"#).unwrap();
-        assert_eq!(note.as_deref(), Some("I argue more."));
-    }
-
-    #[test]
-    fn feedback_null_is_no_feedback() {
-        assert!(parse_feedback("null").unwrap().is_none());
-    }
-
-    #[test]
-    fn feedback_parses() {
-        let fb = parse_feedback(
-            r#"{"text": "More cat pictures.", "contact_me": true}"#,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(fb.text.as_str(), "More cat pictures.");
-        assert!(fb.contact_me);
     }
 
     /// The prompts state the limits the types enforce
@@ -387,39 +186,5 @@ mod tests {
             survey_message().contains(&format!("at most {max} characters"))
         );
         assert!(survey_message().contains(r#"{"text": "<feedback here>""#));
-    }
-
-    #[test]
-    fn a_last_attempt_feedback_is_clipped() {
-        let max = crate::limits::feedback::BODY_MAX_CHARS;
-        let long = format!("{} And more.", "Too long. ".repeat(max / 10));
-        let json = format!(r#"{{"text": "{long}", "contact_me": true}}"#);
-        assert!(parse_feedback(&json).is_err());
-        let (feedback, cut) = parse_feedback_clipped(&json).unwrap();
-        let feedback = feedback.unwrap();
-        assert!(cut);
-        let text = feedback.text.as_str();
-        assert!(text.chars().count() <= max && text.ends_with("long."));
-        assert!(feedback.contact_me);
-
-        let (_, cut) = parse_feedback_clipped(
-            r#"{"text": "Short.", "contact_me": false}"#,
-        )
-        .unwrap();
-        assert!(!cut);
-        assert!(parse_feedback_clipped("null").unwrap().0.is_none());
-    }
-
-    #[test]
-    fn a_last_attempt_note_is_clipped() {
-        let long = format!("{} And more.", "I changed. ".repeat(200));
-        assert!(parse_evolution(&format!(r#"{{"note": "{long}"}}"#)).is_err());
-        let (note, cut) =
-            parse_evolution_clipped(&format!(r#"{{"note": "{long}"}}"#))
-                .unwrap();
-        let note = note.unwrap();
-        assert!(cut);
-        assert!(note.chars().count() <= ITEM_MAX && note.ends_with("changed."));
-        assert_eq!(parse_evolution_clipped("null").unwrap(), (None, false));
     }
 }

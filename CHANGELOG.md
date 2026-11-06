@@ -2,6 +2,49 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.157.0
+
+One copy of "ask a question, take the answer as JSON": `reactor::ask`, for
+every question a seed session closes with and every one the runner adds
+(agora `memory/project_ask_unification.md`). Breaking: `Epilogue::
+begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
+`seed` parse functions (`parse_memory_rewrite`, `parse_soul_mutation`,
+`parse_evolution`, `parse_feedback` and their `_clipped` pairs) are gone.
+
+- **The driver**: `Ask` (a question's words, budget, schema and parser),
+  `Answer<A>` (the host's taker, once per question type), `Asks` (the
+  host's queue), `seat_next` and `handle`. One question per turn, each
+  reply's usage recorded and every question fitted to the room left
+  (`phase_budget_clamped`, `context_exhausted`, `phase_retry_unseated`,
+  `phase_skipped_for_context`, as before). Constrained only where
+  `output_config` is cache-safe, keeping the session's effort.
+- **Required and optional** (Steward, 2026-11-06): the memory rewrite
+  stalls under the reactor's cap as before, `NoRoom` failing the session.
+  The soul mutation, evolution entry and survey are optional: three
+  attempts each, then `Missed` (`event_type = "ask_unanswered"`, ERROR), and
+  the session moves on and completes. Until now a spent mutation, evolution
+  or survey stalled the session out as failed. An API refusal of an
+  optional question skips it (`Refused`); pauses are resumed under the
+  session's pause budget. `SeedAgent::unanswered_asks` lists the misses for
+  the runner to alert on. Each failed attempt logs `ask_attempt_failed`
+  (WARN; never the reply's text, since a survey answer is anonymous).
+- **Evolve and survey are constrained too**, as `anyOf [T, {"type":
+  "null"}]` (`nullable`), on blallama.
+- **One lenient parser** (`parse_lenient`): fences in any case or tag, a
+  one-key wrapper (`{"answer_offer": {…}}`), one object in prose; two
+  candidates are an error; empty is `null`.
+- **Schemas**: `ask_schema` (misanthropic's `schema_for`, now with its
+  `schema-inline` feature on; no `pattern`, no root `$schema`/`title`) and
+  `assert_constrainable`, which every seed question's schema passes.
+- **Shared**: `TRUNCATION_WARNING`, `NOT_RUN_CLIPPED`, `NOT_RUN_NOW`,
+  `NOT_RUN_REFUSED`, `NO_TOOLS_NOW` in `reactor::ask`; `Mark` (was the
+  survey's private `SurveyMark`); `gauge::{phase_floor, fit_max_tokens,
+  unseat_for_retry, Fit, MIN_PHASE_TOKENS}` (were `SeedAgent` methods).
+- **Stall reason**: "the memory question failed 3 times in a row; last: …"
+  (was "the memory rewrite (reflect) phase failed …").
+- **Logs**: the closing-phase events name the question (`ask = "memory"`)
+  where they named the phase (`phase = Reflect`).
+
 ## 0.156.0
 
 The `memory` tool for seed agents: their memory's past versions, by memory
