@@ -525,8 +525,8 @@ mod tests {
         assert!(
             err.contains(
                 "is not a memory id or a head: give a memory id (mem- and \
-                 hex digits, as in your Memory heading) or a head, at least \
-                 6 hex digits of either"
+                 hex digits, as in your Memory heading) or, if your state is \
+                 sealed, a head: at least 6 hex digits"
             ),
             "{err}"
         );
