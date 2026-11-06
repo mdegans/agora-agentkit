@@ -338,6 +338,20 @@ pub trait AskHost: Agent {
         None
     }
 
+    /// A failed reply to `ask`'s `attempt` that the driver left out of the
+    /// transcript, near the context edge, so the retry fit: it is in no
+    /// request, so in no prompt log. Keep it for an archive (the seed agent
+    /// writes it after the transcript). Never called for an
+    /// [anonymous](Ask::anonymous) answer. The default drops it.
+    fn left_out(
+        &mut self,
+        ask: &'static str,
+        attempt: usize,
+        reply: &response::Message,
+    ) {
+        let _ = (ask, attempt, reply);
+    }
+
     /// The queue ran out: what the session does next (the memory turn after
     /// a trial review, the survey after the offers, the end).
     /// `last` is the reply that emptied the queue, or `None` when it
@@ -758,6 +772,19 @@ impl<A: Ask> AskTurn<A> {
     ) -> Result<Taken<H>, H::Error> {
         let who = Who::of(host);
         self.push_attempt(reply, note, kind);
+        // The reply's words, for debugging, at DEBUG only: never at INFO or
+        // above, and never for an anonymous answer (the survey)
+        if !self.ask.anonymous() {
+            tracing::debug!(
+                event_type = "ask_attempt_raw",
+                agent = who.agent.as_deref(),
+                agent_id = %who.agent_id,
+                ask = self.ask.name(),
+                attempt = self.attempts.len(),
+                raw = %raw_text(reply),
+                "an unusable reply to a question"
+            );
+        }
         let failure = self.attempts.last().expect("pushed").failure.clone();
         // Never the reply's text, and for an anonymous answer not even the
         // message: serde's quote the value they refused
@@ -799,6 +826,11 @@ impl<A: Ask> AskTurn<A> {
                 window = g.window(),
                 "failed reply left out so the retry fits"
             );
+        }
+        // Left out of the transcript, so it reaches no prompt log: the host
+        // keeps it for its archive (never an anonymous answer)
+        if unseat && !self.ask.anonymous() {
+            host.left_out(self.ask.name(), self.attempts.len(), reply);
         }
         let fits = {
             let (_, prompt) = host.parts();

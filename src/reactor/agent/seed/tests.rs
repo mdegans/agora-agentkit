@@ -177,7 +177,6 @@ fn seat_start(agent: &mut SeedAgent) {
         .prompt
         .push_message((Role::User, "start"))
         .unwrap();
-    agent.begun = true;
 }
 
 const FULL_CONSTITUTION: &str = "Preamble Article I Article II Article III \
@@ -11852,9 +11851,10 @@ async fn an_unexplained_end_is_an_error_and_a_complete_one_is_none() {
     assert_eq!(agent.failure(), None);
 }
 
-/// A session whose `on_init` failed (here: no server at all, as when the
-/// endpoint is down or the constitution gate trips fleet-wide) never began,
-/// and reports no failure: there is nothing to tell the agent
+/// A session that got no reply never began, and reports no failure: there
+/// is nothing to tell the agent (the fleet-outage case). Here its
+/// `on_init` fails (no server at all, as when the constitution gate trips
+/// fleet-wide); then `on_init` succeeds and the first request errs
 #[tokio::test]
 async fn a_session_that_never_began_has_no_failure() {
     let server = MockServer::start();
@@ -11862,16 +11862,10 @@ async fn a_session_that_never_began_has_no_failure() {
     assert!(agent.on_init().await.is_err());
     agent.on_teardown().await.unwrap();
     assert_eq!(agent.failure(), None);
-}
 
-/// A wrapper whose own setup fails after this agent's succeeded unmarks the
-/// session: no failure to report
-#[tokio::test]
-async fn a_wrapper_can_unmark_a_session_begun() {
+    // on_init succeeded; the endpoint is down, so no reply ever comes
     let server = MockServer::start();
-    let mut agent = agent(&server, quiet_config());
-    seat_start(&mut agent);
-    agent.set_begun(false);
+    let mut agent = session_agent(&server, quiet_config()).await;
     agent.on_teardown().await.unwrap();
     assert_eq!(agent.failure(), None);
 }
@@ -12029,4 +12023,32 @@ async fn two_chained_pauses_in_acting() {
         .await
         .unwrap();
     assert_eq!(agent.asks.seated(), Some("memory"));
+}
+
+/// A failed reply left out near the context edge so the retry fit is in
+/// the prompt-log archive, marked, after the transcript; never in the
+/// saved state's transcript
+#[tokio::test]
+async fn a_reply_left_out_for_the_retry_is_archived() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    let mut bad = text_with_usage("LEFT OUT not json", 120_000);
+    bad.usage.output_tokens = 3_000;
+    agent.handle(bad).await.unwrap();
+    agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let archive = dumped(dir.path());
+    assert!(archive.contains("LEFT OUT not json"), "{archive}");
+    assert!(archive.contains("left out of the transcript so the retry fit"));
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("LEFT OUT"), "{saved}");
 }

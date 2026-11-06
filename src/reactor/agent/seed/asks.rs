@@ -525,6 +525,15 @@ impl crate::reactor::ask::AskHost for SeedAgent {
         Some(self.state.soul.name.to_string())
     }
 
+    fn left_out(
+        &mut self,
+        ask: &'static str,
+        attempt: usize,
+        reply: &misanthropic::response::Message,
+    ) {
+        self.left_out.push((ask, attempt, reply.inner.clone()));
+    }
+
     /// The tail is done: held for [`Epilogue`](crate::reactor::Epilogue),
     /// `Done` until the survey is begun; otherwise the session is complete
     async fn asks_done(

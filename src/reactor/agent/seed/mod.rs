@@ -416,10 +416,18 @@ pub struct SeedAgent {
     asks: Asks<SeedAgent>,
     /// Closing questions that ended without an answer this session
     unanswered: Vec<(&'static str, Unanswered)>,
+    /// Failed replies the driver left out of the transcript near the
+    /// context edge, for the prompt-log archive ([`archived_prompt`])
+    ///
+    /// [`archived_prompt`]: SeedAgent::archived_prompt
+    left_out:
+        Vec<(&'static str, usize, misanthropic::prompt::AssistantMessage)>,
     /// Why this session failed, once it did ([`SeedAgent::failure`])
     failure: Option<SessionFailure>,
-    /// Whether `on_init` finished: a session that never began has no
-    /// [`failure`](SeedAgent::failure)
+    /// Whether a reply has arrived (the first `handle`, `on_pause` or
+    /// `on_truncate`): a session that never began (any `on_init` failure,
+    /// the wrapper's too, or an endpoint down before any reply) has no
+    /// [`failure`](SeedAgent::failure). The fleet-outage case stays quiet
     begun: bool,
     /// Replies in a row this agent returned [`Control::Stalled`] for: at
     /// the reactor's cap, a session torn down short of complete stalled out
@@ -705,6 +713,7 @@ impl SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        self.begun = true;
         self.pauses += 1;
         if self.pauses > MAX_PAUSES {
             tracing::warn!(
@@ -867,19 +876,37 @@ impl SeedAgent {
     /// teardown, from how it ended: at the reactor's stall cap
     /// ([`SessionFailure::Stalled`]), else short of complete
     /// ([`SessionFailure::Error`]). `None` for a session that completed,
-    /// and for one that never began (its [`on_init`](Agent::on_init)
-    /// failed). Read it after [`on_teardown`](Agent::on_teardown). No content
+    /// and for one that never began: no reply ever arrived (an `on_init`
+    /// failed, the wrapper's too, or the endpoint was down). Read it after [`on_teardown`](Agent::on_teardown). No content
     pub fn failure(&self) -> Option<&SessionFailure> {
         self.failure.as_ref()
     }
 
-    /// Whether the session counts as begun, so a failure is reported
-    /// ([`failure`](Self::failure)). This agent's own
-    /// [`on_init`](Agent::on_init) sets it when it succeeds; a wrapping
-    /// agent whose own setup then fails sets it back to `false`, so the
-    /// session counts as begun only once both have succeeded
-    pub fn set_begun(&mut self, begun: bool) {
-        self.begun = begun;
+    /// The transcript as the prompt log archives it: the session's, then
+    /// each failed reply left out of it so a retry fit, marked as such, so
+    /// the archive alone holds every reply. Never the saved state's
+    /// transcript, which is unchanged
+    fn archived_prompt(&self) -> std::borrow::Cow<'_, Prompt> {
+        use misanthropic::prompt::message::Role;
+        if self.left_out.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.state.prompt);
+        }
+        let mut archive = self.state.prompt.clone();
+        for (ask, attempt, reply) in &self.left_out {
+            // Pushed as they are: an archive, not a request
+            archive.messages.push(
+                (
+                    Role::User,
+                    format!(
+                        "[archive: the {ask} question's attempt {attempt}, \
+                         left out of the transcript so the retry fit]"
+                    ),
+                )
+                    .into(),
+            );
+            archive.messages.push(reply.clone().into());
+        }
+        std::borrow::Cow::Owned(archive)
     }
 
     /// Record why the session failed, when a wrapping agent knows better
@@ -895,8 +922,8 @@ impl SeedAgent {
     /// [`MAX_STALLS`](crate::reactor::MAX_STALLS) stalls in a row, and the
     /// reactor stops right after the last) or by an error
     fn settle_failure(&mut self) {
-        // A session that never began (on_init failed: the constitution
-        // gate, an endpoint down) did not fail as a session: no notice
+        // A session that never began (no reply: an on_init failed, the
+        // endpoint was down) did not fail as a session: no notice
         if !self.begun || self.state.completed || self.failure.is_some() {
             return;
         }
@@ -1323,6 +1350,7 @@ impl Agent for SeedAgent {
             communities: Vec::new(),
             asks: Asks::default(),
             unanswered: Vec::new(),
+            left_out: Vec::new(),
             failure: None,
             begun: false,
             stalls: 0,
@@ -1401,6 +1429,7 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        self.begun = true;
         // Acting, or a seated question's pause (through the driver)
         if self.phase == Phase::Held {
             return Err(SeedError::Prompt(
@@ -1419,6 +1448,7 @@ impl Agent for SeedAgent {
         &mut self,
         response: &response::Message,
     ) -> Result<Control, SeedError> {
+        self.begun = true;
         if !matches!(self.phase, Phase::Acting { .. }) {
             return Err(SeedError::Prompt(format!(
                 "a clipped reply in the {:?} phase with no question seated",
@@ -1601,7 +1631,6 @@ impl Agent for SeedAgent {
                 },
             },
         )?;
-        self.begun = true;
         Ok(())
     }
 
@@ -1611,6 +1640,7 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        self.begun = true;
         let control = self.handle_turn(response).await;
         match &control {
             Ok(Control::Stalled) => self.stalls += 1,
@@ -1685,7 +1715,7 @@ impl Agent for SeedAgent {
             Some(dir) => {
                 Self::log_prompt(
                     dir,
-                    &self.state.prompt,
+                    &self.archived_prompt(),
                     self.state.soul.name.as_str(),
                     self.id,
                     self.state.model.id.name(),

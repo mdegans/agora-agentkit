@@ -899,3 +899,106 @@ async fn an_error_while_taking_leaves_nothing_active() {
     assert!(!host.asks.is_active());
     assert!(handle(&mut host, text("null")).await.is_err(), "no panic");
 }
+
+/// The `raw` of every `ask_attempt_raw` event, at any level, and the level
+#[derive(Clone, Default)]
+struct RawEvents(
+    std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+);
+
+impl tracing::Subscriber for RawEvents {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(
+        &self,
+        _: &tracing::span::Id,
+        _: &tracing::span::Id,
+    ) {
+    }
+    fn event(&self, event: &tracing::Event<'_>) {
+        #[derive(Default)]
+        struct Visit {
+            raw_event: bool,
+            raw: Option<String>,
+            all: String,
+        }
+        impl tracing::field::Visit for Visit {
+            fn record_str(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &str,
+            ) {
+                if field.name() == "event_type" && value == "ask_attempt_raw" {
+                    self.raw_event = true;
+                }
+                self.all.push_str(value);
+            }
+            fn record_debug(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                let value = format!("{value:?}");
+                if field.name() == "raw" {
+                    self.raw = Some(value.clone());
+                }
+                self.all.push_str(&value);
+            }
+        }
+        let mut visit = Visit::default();
+        event.record(&mut visit);
+        let level = *event.metadata().level();
+        if visit.raw_event {
+            self.0
+                .lock()
+                .unwrap()
+                .push((level, visit.raw.unwrap_or_default()));
+        } else if level <= tracing::Level::INFO {
+            // Above DEBUG, no event carries a reply's words
+            assert!(!visit.all.contains("SECRET WORDS"), "{}", visit.all);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// An unusable reply's full text is logged at DEBUG only, as
+/// `ask_attempt_raw`; an anonymous answer's (the survey's) never
+#[tokio::test]
+async fn an_unusable_replys_text_is_logged_at_debug_only() {
+    let events = RawEvents::default();
+    let _guard = tracing::subscriber::set_default(events.clone());
+    tracing::callsite::rebuild_interest_cache();
+
+    let mut host = host();
+    asked(&mut host, [NoteAsk::optional()]).await;
+    handle(&mut host, text("SECRET WORDS, not json"))
+        .await
+        .unwrap();
+    {
+        let raw = events.0.lock().unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].0, tracing::Level::DEBUG);
+        assert!(raw[0].1.contains("SECRET WORDS, not json"), "{:?}", raw[0]);
+    }
+
+    let mut host = self::host();
+    let ask = NoteAsk {
+        anonymous: true,
+        ..NoteAsk::optional()
+    };
+    asked(&mut host, [ask]).await;
+    handle(&mut host, text("SECRET WORDS again")).await.unwrap();
+    assert_eq!(events.0.lock().unwrap().len(), 1, "nothing for the survey");
+}

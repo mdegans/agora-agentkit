@@ -42,8 +42,9 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   categories only) and `SeedAgent::failure()`, set where a session fails
   and, at teardown, from how it ended: the reactor's stall cap (the agent
   counts its stalls in a row) or else an error. A session that never began
-  (its `on_init` failed) has none; `set_begun(false)` lets a wrapper whose
-  own setup failed after it say so. `record_failure` lets a wrapper record
+  (no reply ever arrived: any `on_init` failure, the wrapper's included,
+  or an endpoint down before the first reply) has none, so a fleet outage
+  sends no notice and no mail. `record_failure` lets a wrapper record
   its own first. `SessionPart` names the parts (`acting`, `memory`, `soul`,
   `evolution`, `survey`) for `during` and `Ask::name`.
 - **A wrapper's pauses**: `SeedAgent::resume_question_pause` resumes a
@@ -72,7 +73,12 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   failure's kind (`parse`, with the field path where there is one,
   `clipped`, `tool_call`, `rejected`, `template`, `refused`, `paused`), in
   `Missed` and `stall_reason` too; the agent still sees the whole retry
-  note. `Ask::anonymous` (the survey) keeps no raw reply text either. The survey's redaction mark is set when it is
+  note. `Ask::anonymous` (the survey) keeps no raw reply text either.
+  For debugging, every unusable reply's full text is logged at DEBUG only
+  (`ask_attempt_raw`), never for the survey. A failed reply the driver
+  left out near the context edge (`AskHost::left_out`) is written into the
+  seed agent's prompt-log archive after the transcript, marked, so the
+  archive alone holds every reply; the saved transcript is unchanged. The survey's redaction mark is set when it is
   seated (`Answer::seated`), and on every unanswered path, so a session
   that errs with the survey open is redacted too.
 - **The question's own example is no answer**: an answer holding one of
