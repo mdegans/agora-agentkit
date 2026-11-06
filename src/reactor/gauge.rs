@@ -2,8 +2,11 @@
 //! [`ask`](super::ask) driver can fit its questions to it; seed's `Gauged`
 //! checks every tool result against it before the result is seated.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use misanthropic::prompt::{Prompt, thinking::Thinking};
 
 /// [`SeedConfig::context_window`](crate::reactor::seed::SeedConfig::context_window)'s default: the smallest window an agent
 /// on the platform is expected to have
@@ -158,6 +161,72 @@ impl ContextGauge {
     pub(crate) fn refuse(&self) -> u64 {
         self.0.refused.fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// The least `max_tokens` a question at the end of a session is sent with
+/// (see [`phase_floor`])
+pub const MIN_PHASE_TOKENS: u32 = 1_024;
+
+/// The least `max_tokens` worth sending a question at the end of a session:
+/// enough to answer in, and more than a fixed thinking budget (the API
+/// refuses `max_tokens` at or under `budget_tokens`)
+pub fn phase_floor(prompt: &Prompt) -> u32 {
+    match prompt.thinking {
+        Some(Thinking::Enabled { budget_tokens, .. }) => {
+            MIN_PHASE_TOKENS.max(budget_tokens.get().saturating_add(1))
+        }
+        _ => MIN_PHASE_TOKENS,
+    }
+}
+
+/// What [`fit_max_tokens`] did to a request's `max_tokens`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fit {
+    /// The whole budget fits; nothing changed
+    Whole,
+    /// Lowered from `from` to `room`, what the context has room for
+    Clamped { from: u32, room: u32 },
+    /// Not even [`phase_floor`] fits: the request would be refused or
+    /// useless, so it is not sent. `max_tokens` is unchanged
+    NoRoom { room: u32, floor: u32 },
+}
+
+/// Lower `prompt`'s `max_tokens` to what the context has room for, so the
+/// request is one the endpoint accepts: blallama refuses input +
+/// `max_tokens` past its window, as Anthropic does. The reserve keeps the
+/// memory rewrite room for its budget less what the last round added
+/// unchecked (framing, refusal notes, estimation error), which this trims,
+/// as it does for retries and the optional questions after it.
+pub fn fit_max_tokens(gauge: &ContextGauge, prompt: &mut Prompt) -> Fit {
+    let room = u32::try_from(gauge.phase_room()).unwrap_or(u32::MAX);
+    let floor = phase_floor(prompt);
+    if room < floor {
+        return Fit::NoRoom { room, floor };
+    }
+    let from = prompt.max_tokens.get();
+    if room >= from {
+        return Fit::Whole;
+    }
+    prompt.max_tokens = NonZeroU32::new(room).expect("room >= floor > 0");
+    Fit::Clamped { from, room }
+}
+
+/// Whether a failed reply to a question is left out of the retry: near the
+/// edge, seating it would leave the retry no room to answer in. The retry
+/// note then joins the question's own turn, which costs that tail on a
+/// prefix cache but gives the retry its whole `budget` back (a memory
+/// rewrite is worth more than the cache). When it is, the reply's
+/// `output_tokens` are taken back off the gauge.
+pub fn unseat_for_retry(
+    gauge: &ContextGauge,
+    budget: u32,
+    output_tokens: u64,
+) -> bool {
+    let unseat = gauge.phase_room() < u64::from(budget);
+    if unseat {
+        gauge.set(gauge.get().saturating_sub(output_tokens));
+    }
+    unseat
 }
 
 /// Bytes per token in [`estimate_tokens`], and in the sizes shown before a
