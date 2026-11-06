@@ -35,11 +35,13 @@
 //! it, and the agent is asked again in a later session. It never fails the
 //! session.
 //!
-//! **Refusals.** An API refusal (`stop_reason: refusal`) of an optional
-//! question is [`Unanswered::Refused`]: logged loudly, that question only;
-//! the questions after it are still asked. Of a required one, it is a failed
-//! attempt. An agent that chooses not to answer answers: each question that
-//! may be declined has a way to say so.
+//! **Refusals.** An API refusal (`stop_reason: refusal`) of any question
+//! ends the session as failed (Steward, 2026-11-06: whatever is in the
+//! context may set the classifier off again). It is logged (`event_type =
+//! "api_refusal"`, ERROR, no content), handed to the host as
+//! [`Unanswered::Refused`], and the refused turn is never seated. An agent
+//! that chooses not to answer answers: each question that may be declined
+//! has a way to say so.
 //!
 //! **Pauses** (a server tool's `pause_turn`) are resumed, under the session's
 //! pause budget, through [`Agent::on_pause`]; a pause is never a miss.
@@ -88,17 +90,15 @@ pub const NOT_RUN_CLIPPED: &str =
 pub const NOT_RUN_NOW: &str =
     "Not run: no tools can be used in this turn. Nothing was done.";
 
-/// The error result a tool call gets in a turn the API stopped as a refusal
-pub const NOT_RUN_REFUSED: &str =
-    "Not run: this turn ended as a refusal. Nothing was done.";
-
 /// Said after a reply to a question that called a tool
 pub const NO_TOOLS_NOW: &str = "Do NOT use tools right now. Respond in JSON \
 only, per the instructions above.";
 
-/// Said after an API refusal of a required question
-const REFUSED_NOTE: &str = "Your reply ended as a refusal, so nothing in it \
-was used. Respond in JSON only, per the instructions above.";
+/// Said after an answer that is the question's own example: a placeholder
+/// copied as it was shown
+pub const TEMPLATE_NOTE: &str = "That is the example shape from the \
+instructions above, with its placeholder left in, not your answer. Write \
+your own in that shape: JSON only.";
 
 /// The failure recorded when a paused reply could not be resumed (the
 /// session's pause budget was spent). Nothing is seated: the question is
@@ -152,6 +152,23 @@ pub trait Ask: Send + Sync + 'static {
         let _ = last;
         parse_lenient(text)
     }
+
+    /// Whether an answer is anonymous (the survey): the driver then logs,
+    /// keeps and hands on only a failure's category (`parse`, `clipped`,
+    /// `tool_call`, `rejected`, …), never its message or the reply's text,
+    /// since serde's messages quote the value they refused. The agent is
+    /// still shown the whole retry note.
+    fn anonymous(&self) -> bool {
+        false
+    }
+
+    /// The JSON example the question shows, if any. An answer holding one
+    /// of its string values verbatim is that example copied, and a retry
+    /// ([`TEMPLATE_NOTE`]); so is one holding a `<…>` placeholder taken
+    /// from the question's text, whatever this returns.
+    fn template(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 /// What to do after an answer was taken.
@@ -177,9 +194,14 @@ pub enum Rejection<E> {
 /// Why a question ended without an answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unanswered {
-    /// The API refused the turn (`stop_reason: refusal`). Optional questions
-    /// only: of a required one it is a failed attempt.
-    Refused,
+    /// The API refused the turn (`stop_reason: refusal`): the session ends
+    /// as failed, whatever the question (Steward, 2026-11-06: what is in the
+    /// context may keep setting the classifier off). The host records it;
+    /// the driver ends the session whatever [`Answer::unanswered`] returns.
+    Refused {
+        /// The refused response's id
+        response_id: String,
+    },
     /// Its attempts were spent; the last failure, as the agent was shown it.
     Missed(String),
     /// No room left in the context to ask it. Not asked at all.
@@ -190,7 +212,7 @@ impl Unanswered {
     /// A short word for logs: `refused`, `missed`, `no_room`
     pub fn kind(&self) -> &'static str {
         match self {
-            Unanswered::Refused => "refused",
+            Unanswered::Refused { .. } => "refused",
             Unanswered::Missed(_) => "missed",
             Unanswered::NoRoom => "no_room",
         }
@@ -279,6 +301,13 @@ pub trait Answer<A: Ask>: AskHost {
         why: Unanswered,
         asked: &Asked,
     ) -> Result<Next, Self::Error>;
+
+    /// The question was seated at `mark`, before any reply: for what must
+    /// hold even if the session ends with the question unanswered (the
+    /// survey's redaction point). The default does nothing.
+    fn seated(&mut self, ask: &A, mark: Mark) {
+        let _ = (ask, mark);
+    }
 }
 
 /// An [`Agent`] that asks questions.
@@ -299,16 +328,18 @@ pub trait AskHost: Agent {
 
     /// The queue ran out: what the session does next (the memory turn after
     /// a trial review, the survey after the offers, the end).
+    /// `last` is the reply that emptied the queue, or `None` when it
+    /// emptied with no reply (every question left skipped for room).
     async fn asks_done(
         &mut self,
-        last: &response::Message,
+        last: Option<&response::Message>,
     ) -> Result<Control, Self::Error>;
 }
 
 /// A queued question, its type erased. Built by [`Asks::push`]; the driver
 /// is its only caller.
 #[async_trait::async_trait]
-pub trait Turn<H: AskHost>: Send {
+pub trait Turn<H>: Send {
     /// [`Ask::name`].
     fn name(&self) -> &'static str;
 
@@ -317,8 +348,9 @@ pub trait Turn<H: AskHost>: Send {
 
     /// Seat the question (constrained where cache-safe, fitted to the room
     /// left, its [`Mark`] taken).
-    async fn seat(self: Box<Self>, host: &mut H)
-    -> Result<Seated<H>, H::Error>;
+    async fn seat(self: Box<Self>, host: &mut H) -> Result<Seated<H>, H::Error>
+    where
+        H: AskHost;
 
     /// Take a reply: classify it (tool call, refusal, pause, clip, text),
     /// parse, hand the outcome to [`Answer`], or seat the retry note.
@@ -326,11 +358,13 @@ pub trait Turn<H: AskHost>: Send {
         self: Box<Self>,
         host: &mut H,
         reply: response::Message,
-    ) -> Result<Taken<H>, H::Error>;
+    ) -> Result<Taken<H>, H::Error>
+    where
+        H: AskHost;
 }
 
 /// What seating a question came to.
-pub enum Seated<H: AskHost> {
+pub enum Seated<H> {
     /// Asked: waiting for the reply.
     Asked(Box<dyn Turn<H>>),
     /// Not asked, for want of room; [`Answer::unanswered`] has run.
@@ -338,7 +372,7 @@ pub enum Seated<H: AskHost> {
 }
 
 /// What a reply came to.
-pub enum Taken<H: AskHost> {
+pub enum Taken<H> {
     /// Another attempt is seated: the turn goes back to the queue's front.
     Again(Box<dyn Turn<H>>, Control),
     /// The question is done, answered or not.
@@ -347,13 +381,13 @@ pub enum Taken<H: AskHost> {
 
 /// A host's questions, in the order they are asked; the head is the one
 /// seated, if any.
-pub struct Asks<H: AskHost> {
+pub struct Asks<H> {
     queue: VecDeque<Box<dyn Turn<H>>>,
     /// Whether the head has been seated and awaits its reply.
     seated: bool,
 }
 
-impl<H: AskHost> Default for Asks<H> {
+impl<H> Default for Asks<H> {
     fn default() -> Self {
         Self {
             queue: VecDeque::new(),
@@ -362,7 +396,7 @@ impl<H: AskHost> Default for Asks<H> {
     }
 }
 
-impl<H: AskHost> Asks<H> {
+impl<H> Asks<H> {
     /// Queue `ask` behind the others.
     pub fn push<A: Ask>(&mut self, ask: A)
     where
@@ -427,9 +461,7 @@ fn error<E: From<Box<dyn std::error::Error + Send + Sync>>>(
 /// Seat the next question: [`Control::Continue`] once one is asked. Questions
 /// skipped for room are settled on the way; with none left,
 /// [`AskHost::asks_done`] decides (`last` is the reply that emptied the queue,
-/// if one did). The queue running out with no `last` (every question
-/// skipped, none answered) is an error: an [`Answer::unanswered`] that may
-/// end the queue so returns [`Next::Done`].
+/// if one did).
 pub async fn seat_next<H: AskHost>(
     host: &mut H,
     last: Option<&response::Message>,
@@ -439,12 +471,7 @@ pub async fn seat_next<H: AskHost>(
     }
     loop {
         let Some(turn) = host.asks().queue.pop_front() else {
-            return match last {
-                Some(last) => host.asks_done(last).await,
-                None => Err(error(
-                    "the questions ran out with no reply to hand asks_done",
-                )),
-            };
+            return host.asks_done(last).await;
         };
         match turn.seat(host).await? {
             Seated::Asked(turn) => {
@@ -484,8 +511,29 @@ pub async fn handle<H: AskHost>(
             asks.seated = true;
             Ok(control)
         }
-        Taken::Done(Next::Continue) => seat_next(host, Some(&last)).await,
-        Taken::Done(Next::Done(outcome)) => Ok(Control::Done(outcome)),
+        Taken::Done(next) => {
+            // A question's format goes with it: a later unconstrained turn
+            // must not be bound to a stale schema (the effort stays)
+            clear_format(host.parts().1);
+            match next {
+                Next::Continue => seat_next(host, Some(&last)).await,
+                Next::Done(outcome) => Ok(Control::Done(outcome)),
+            }
+        }
+    }
+}
+
+/// Drop `prompt`'s output format, keeping its effort
+fn clear_format(prompt: &mut Prompt) {
+    let effort = prompt.output_config.take().and_then(|c| c.effort);
+    prompt.output_config = effort.map(OutputConfig::effort);
+}
+
+/// Take a reply that is not seated back off the gauge: the request after
+/// it holds none of its output
+fn unrecord<H: AskHost>(host: &H, reply: &response::Message) {
+    if let Some(gauge) = host.gauge() {
+        gauge.set(gauge.get().saturating_sub(reply.usage.output_tokens));
     }
 }
 
@@ -552,6 +600,42 @@ impl<A: Ask> AskTurn<A> {
             mark: self.mark.unwrap_or_else(|| Mark::at(prompt)),
             model: self.model.clone(),
         }
+    }
+
+    /// Record an unusable reply: verbatim (capped) with the message the
+    /// agent was shown, or, for an anonymous answer, its `kind` alone
+    fn push_attempt(
+        &mut self,
+        reply: &response::Message,
+        note: &str,
+        kind: &'static str,
+    ) {
+        self.attempts.push(if self.ask.anonymous() {
+            Attempt {
+                raw: String::new(),
+                failure: kind.to_string(),
+            }
+        } else {
+            Attempt {
+                raw: cap(raw_text(reply)),
+                failure: note.to_string(),
+            }
+        });
+    }
+
+    /// The strings an answer that copied the question's example would hold
+    fn placeholders(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for block in self.ask.question().iter() {
+            if let Block::Text { text, .. } = block {
+                out.extend(angle_placeholders(text));
+            }
+        }
+        if let Some(template) = self.ask.template() {
+            string_leaves(&template, &mut out);
+        }
+        out.retain(|p| !p.trim().is_empty());
+        out
     }
 
     /// Log `why`, then hand it to the host
@@ -639,20 +723,21 @@ impl<A: Ask> AskTurn<A> {
     /// (or, near the edge, leave it out) and `note` after it, else settle the
     /// question as missed. `seated` says the reply is already in the
     /// transcript (an answer the host rejected).
+    #[allow(clippy::too_many_arguments)]
     async fn fail<H: Answer<A>>(
         mut self: Box<Self>,
         host: &mut H,
         reply: &response::Message,
         note: &str,
+        kind: &'static str,
         not_run: &str,
         seated: bool,
     ) -> Result<Taken<H>, H::Error> {
         let who = Who::of(host);
-        self.attempts.push(Attempt {
-            raw: cap(raw_text(reply)),
-            failure: note.to_string(),
-        });
-        // Not the reply's text: a survey answer is anonymous
+        self.push_attempt(reply, note, kind);
+        let failure = self.attempts.last().expect("pushed").failure.clone();
+        // Never the reply's text, and for an anonymous answer not even the
+        // message: serde's quote the value they refused
         tracing::warn!(
             event_type = "ask_attempt_failed",
             agent = who.agent.as_deref(),
@@ -664,7 +749,8 @@ impl<A: Ask> AskTurn<A> {
             model = %reply.model,
             stop_reason = ?reply.stop_reason,
             output_tokens = reply.usage.output_tokens,
-            failure = note,
+            kind,
+            failure = %failure,
             "a reply to a question couldn't be used"
         );
         if self.spent() {
@@ -672,7 +758,7 @@ impl<A: Ask> AskTurn<A> {
                 let (_, prompt) = host.parts();
                 seat_unused_reply(prompt, reply, not_run).map_err(error)?;
             }
-            let why = Unanswered::Missed(note.to_string());
+            let why = Unanswered::Missed(failure);
             return self.settle(host, why).await.map(Taken::Done);
         }
         let gauge = host.gauge();
@@ -729,7 +815,10 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
     async fn seat(
         mut self: Box<Self>,
         host: &mut H,
-    ) -> Result<Seated<H>, H::Error> {
+    ) -> Result<Seated<H>, H::Error>
+    where
+        H: AskHost,
+    {
         let who = Who::of(host);
         let budget = self.ask.max_tokens().max(1);
         let gauge = host.gauge();
@@ -777,8 +866,10 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
             let format = OutputConfig::json_schema(self.ask.schema()).format;
             prompt.output_config.get_or_insert_default().format = format;
         }
-        self.mark = Some(Mark::at(prompt));
+        let mark = Mark::at(prompt);
+        self.mark = Some(mark);
         seat_user(prompt, self.ask.question()).map_err(error)?;
+        host.seated(&self.ask, mark);
         Ok(Seated::Asked(self))
     }
 
@@ -786,7 +877,10 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
         mut self: Box<Self>,
         host: &mut H,
         reply: response::Message,
-    ) -> Result<Taken<H>, H::Error> {
+    ) -> Result<Taken<H>, H::Error>
+    where
+        H: AskHost,
+    {
         self.model = Some(reply.model.to_string());
         match reply.stop_reason {
             // Resumed under the session's pause budget; never a miss
@@ -818,21 +912,35 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
                     }
                 };
             }
-            Some(StopReason::Refusal) if !self.ask.required() => {
-                {
-                    let (_, prompt) = host.parts();
-                    seat_unused_reply(prompt, &reply, NOT_RUN_REFUSED)
-                        .map_err(error)?;
-                }
-                return self
-                    .settle(host, Unanswered::Refused)
-                    .await
-                    .map(Taken::Done);
-            }
+            // Any refusal ends the session as failed (Steward, 2026-11-06):
+            // what is in the context may set the classifier off again. The
+            // refused turn is never seated, nor any partial a pause left
             Some(StopReason::Refusal) => {
-                return self
-                    .fail(host, &reply, REFUSED_NOTE, NOT_RUN_REFUSED, false)
-                    .await;
+                unrecord(host, &reply);
+                let (_, prompt) = host.parts();
+                while prompt
+                    .messages
+                    .last()
+                    .is_some_and(|m| m.role == Role::Assistant)
+                {
+                    prompt.messages.pop();
+                }
+                let who = Who::of(host);
+                // No content: neither the reply nor the question
+                tracing::error!(
+                    event_type = "api_refusal",
+                    agent = who.agent.as_deref(),
+                    agent_id = %who.agent_id,
+                    model = %reply.model,
+                    during = self.ask.name(),
+                    response_id = %reply.id,
+                    "the API refused a reply; the session ends"
+                );
+                let why = Unanswered::Refused {
+                    response_id: reply.id.to_string(),
+                };
+                self.settle(host, why).await?;
+                return Ok(Taken::Done(Next::Done(Outcome::Failed)));
             }
             // Nothing from a clipped reply is used: a truncated answer can
             // parse yet be missing what the model never got to write
@@ -842,6 +950,7 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
                         host,
                         &reply,
                         TRUNCATION_WARNING,
+                        "clipped",
                         NOT_RUN_CLIPPED,
                         false,
                     )
@@ -857,15 +966,38 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
             .any(|block| block.tool_use().is_some())
         {
             return self
-                .fail(host, &reply, NO_TOOLS_NOW, NOT_RUN_NOW, false)
+                .fail(
+                    host,
+                    &reply,
+                    NO_TOOLS_NOW,
+                    "tool_call",
+                    NOT_RUN_NOW,
+                    false,
+                )
                 .await;
         }
-        let answer = match self.ask.parse(&raw_text(&reply), self.last()) {
+        let text = raw_text(&reply);
+        let answer = match self.ask.parse(&text, self.last()) {
             Ok(answer) => answer,
             Err(e) => {
-                return self.fail(host, &reply, &e, NOT_RUN_NOW, false).await;
+                return self
+                    .fail(host, &reply, &e, "parse", NOT_RUN_NOW, false)
+                    .await;
             }
         };
+        // The question's own example, copied: a placeholder is no answer
+        if echoes_placeholder(&text, &self.placeholders()) {
+            return self
+                .fail(
+                    host,
+                    &reply,
+                    TEMPLATE_NOTE,
+                    "template",
+                    NOT_RUN_NOW,
+                    false,
+                )
+                .await;
+        }
         // Seated before the host takes it, so whatever the host seats
         // follows it, and the transcript only ever grows
         {
@@ -876,7 +1008,8 @@ impl<A: Ask, H: Answer<A>> Turn<H> for AskTurn<A> {
         match host.answer(&self.ask, answer, &asked).await {
             Ok(next) => Ok(Taken::Done(next)),
             Err(Rejection::Retry(note)) => {
-                self.fail(host, &reply, &note, NOT_RUN_NOW, true).await
+                self.fail(host, &reply, &note, "rejected", NOT_RUN_NOW, true)
+                    .await
             }
             Err(Rejection::Error(e)) => Err(e),
         }
@@ -908,6 +1041,60 @@ fn cap(mut text: String) -> String {
         text.push('…');
     }
     text
+}
+
+/// The `<…>` placeholders in a question's text (`<feedback here>`): a
+/// `<`, a letter, then up to 80 characters on one line to the `>`
+fn angle_placeholders(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let close = after.find(['>', '<', '\n']);
+        match close {
+            Some(close)
+                if after[close..].starts_with('>')
+                    && close <= 80
+                    && after.starts_with(|c: char| c.is_alphabetic()) =>
+            {
+                out.push(format!("<{}>", &after[..close]));
+                rest = &after[close + 1..];
+            }
+            _ => rest = after,
+        }
+    }
+    out
+}
+
+/// Every string in `value`, at any depth
+fn string_leaves(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => items.iter().for_each(|v| string_leaves(v, out)),
+        Value::Object(map) => map.values().for_each(|v| string_leaves(v, out)),
+        _ => {}
+    }
+}
+
+/// Whether any JSON in `text` holds a string that is, trimmed, one of
+/// `placeholders`
+fn echoes_placeholder(text: &str, placeholders: &[String]) -> bool {
+    if placeholders.is_empty() {
+        return false;
+    }
+    let text = text.trim();
+    let mut values: Vec<Value> = embedded_objects(text);
+    values.extend(serde_json::from_str::<Value>(text).ok());
+    if let Some(body) = fenced(text) {
+        values.extend(serde_json::from_str::<Value>(body).ok());
+    }
+    let mut strings = Vec::new();
+    for value in &values {
+        string_leaves(value, &mut strings);
+    }
+    strings
+        .iter()
+        .any(|s| placeholders.iter().any(|p| s.trim() == p.trim()))
 }
 
 /// A deserialization error as the agent is shown it

@@ -96,7 +96,20 @@ pub fn seat_unused_reply(
             )
         })
         .collect();
-    prompt.push_message(turn)?;
+    // After a resumed pause the reply continues the partial turn seated
+    // for it: merged into it where a second assistant turn may not follow
+    let turn: misanthropic::prompt::Message = turn.into();
+    match prompt.messages.last() {
+        Some(last)
+            if last.role == Role::Assistant
+                && last.may_precede(&turn).is_err() =>
+        {
+            prompt.seat(turn, &mut None)?;
+        }
+        _ => {
+            prompt.push_message(turn)?;
+        }
+    }
     if !results.is_empty() {
         prompt.push_message((Role::User, results))?;
     }

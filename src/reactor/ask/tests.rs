@@ -30,6 +30,7 @@ struct Note {
 struct NoteAsk {
     required: bool,
     max_tokens: u32,
+    anonymous: bool,
 }
 
 impl NoteAsk {
@@ -37,6 +38,7 @@ impl NoteAsk {
         Self {
             required: false,
             max_tokens: 2_000,
+            anonymous: false,
         }
     }
 
@@ -56,7 +58,15 @@ impl Ask for NoteAsk {
     }
 
     fn question(&self) -> Content {
-        "Say a note, or null.".into()
+        "Say a note, or null: {\"note\": \"<your note>\"}".into()
+    }
+
+    fn anonymous(&self) -> bool {
+        self.anonymous
+    }
+
+    fn template(&self) -> Option<Value> {
+        Some(serde_json::json!({"note": "An example note."}))
     }
 
     fn max_tokens(&self) -> u32 {
@@ -187,7 +197,7 @@ impl AskHost for Host {
 
     async fn asks_done(
         &mut self,
-        _last: &response::Message,
+        _last: Option<&response::Message>,
     ) -> Result<Control, HostError> {
         self.done = true;
         Ok(Control::Done(Outcome::Complete))
@@ -360,35 +370,6 @@ async fn a_required_question_stalls_until_the_reactor_gives_up() {
             && reason.contains("Invalid JSON"),
         "{reason}"
     );
-}
-
-#[tokio::test]
-async fn an_api_refusal_of_an_optional_question_skips_only_it() {
-    let mut host = host();
-    asked(&mut host, [NoteAsk::optional(), NoteAsk::optional()]).await;
-    let refusal = reply(
-        serde_json::json!([{"type": "text", "text": "No."}]),
-        "refusal",
-    );
-    let control = handle(&mut host, refusal).await.unwrap();
-    assert_eq!(control, Control::Continue);
-    assert_eq!(host.unanswered, [("note", Unanswered::Refused)]);
-    assert!(host.asks.is_active(), "the next question is asked");
-    assert!(last_text(&host).contains("Say a note"));
-}
-
-#[tokio::test]
-async fn an_api_refusal_of_a_required_question_is_a_failed_attempt() {
-    let mut host = host();
-    asked(&mut host, [NoteAsk::required()]).await;
-    let refusal = reply(
-        serde_json::json!([{"type": "text", "text": "No."}]),
-        "refusal",
-    );
-    let control = handle(&mut host, refusal).await.unwrap();
-    assert_eq!(control, Control::Stalled);
-    assert!(host.unanswered.is_empty());
-    assert!(last_text(&host).contains("ended as a refusal"));
 }
 
 #[tokio::test]
@@ -692,4 +673,192 @@ fn pattern_is_stripped() {
     let schema = ask_schema::<Patterned>();
     assert_constrainable(&schema);
     assert!(schema["properties"]["id"].get("pattern").is_none());
+}
+
+fn refusal() -> response::Message {
+    reply(
+        serde_json::json!([{"type": "text", "text": "REFUSED TURN"}]),
+        "refusal",
+    )
+}
+
+/// Any API refusal ends the session as failed (Steward, 2026-11-06), an
+/// optional question's as much as a required one's: the host is told, the
+/// refused turn is not seated, and nothing after it is asked
+#[tokio::test]
+async fn an_api_refusal_ends_the_session_failed() {
+    for ask in [NoteAsk::optional(), NoteAsk::required()] {
+        let mut host = host();
+        asked(&mut host, [ask, NoteAsk::optional()]).await;
+        let control = handle(&mut host, refusal()).await.unwrap();
+        assert_eq!(control, Control::Done(Outcome::Failed));
+        assert!(matches!(
+            host.unanswered.as_slice(),
+            [(_, Unanswered::Refused { response_id })] if response_id == "msg_test"
+        ));
+        assert!(!host.done, "asks_done never ran");
+        let request = serde_json::to_string(&host.prompt).unwrap();
+        assert!(!request.contains("REFUSED TURN"), "{request}");
+    }
+}
+
+/// An anonymous answer's failures are kept, logged and handed on as a
+/// category only: serde's messages quote the value they refused
+#[tokio::test]
+async fn an_anonymous_questions_failures_carry_no_words() {
+    let mut host = host();
+    let ask = NoteAsk {
+        anonymous: true,
+        ..NoteAsk::optional()
+    };
+    asked(&mut host, [ask]).await;
+    for _ in 0..3 {
+        handle(&mut host, text(r#"{"note": ["my", "words"]}"#))
+            .await
+            .unwrap();
+    }
+    // The agent was shown the whole note
+    let seen = serde_json::to_string(&host.prompt).unwrap();
+    assert!(seen.contains("Invalid JSON"), "{seen}");
+    assert_eq!(
+        host.unanswered,
+        [("note", Unanswered::Missed("parse".into()))]
+    );
+    for attempt in &host.asked[0].attempts {
+        assert_eq!(attempt.failure, "parse");
+        assert!(attempt.raw.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn an_anonymous_stall_reason_names_only_the_category() {
+    let mut host = host();
+    let ask = NoteAsk {
+        anonymous: true,
+        ..NoteAsk::required()
+    };
+    asked(&mut host, [ask]).await;
+    handle(&mut host, text(r#"{"note": 42}"#)).await.unwrap();
+    let reason = host.asks.stall_reason().unwrap();
+    assert!(reason.ends_with("last: parse"), "{reason}");
+}
+
+/// The question's own example, copied, is a retry, whether its placeholder
+/// is from the text (`<your note>`) or the template
+#[tokio::test]
+async fn the_questions_example_is_no_answer() {
+    for copied in [
+        r#"{"note": "<your note>"}"#,
+        r#"Here: {"note": "An example note."}"#,
+        "```json\n{\"note\": \" <your note> \"}\n```",
+    ] {
+        let mut host = host();
+        asked(&mut host, [NoteAsk::optional()]).await;
+        handle(&mut host, text(copied)).await.unwrap();
+        assert!(host.answers.is_empty(), "{copied}");
+        assert!(last_text(&host).contains("example shape"), "{copied}");
+    }
+    // Mentioning the placeholder inside a real answer is fine
+    let mut host = host();
+    asked(&mut host, [NoteAsk::optional()]).await;
+    handle(&mut host, text(r#"{"note": "I won't write <your note>."}"#))
+        .await
+        .unwrap();
+    assert_eq!(host.answers.len(), 1);
+}
+
+/// A question's format is cleared when it is done, its effort kept
+#[tokio::test]
+async fn the_format_goes_with_its_question() {
+    let mut host = host();
+    host.prompt = std::mem::take(&mut host.prompt).effort(Effort::Medium);
+    host.quirks.output_config_cache_safe = true;
+    asked(&mut host, [NoteAsk::optional()]).await;
+    assert!(host.prompt.output_config.as_ref().unwrap().format.is_some());
+    handle(&mut host, text("null")).await.unwrap();
+    let config = host.prompt.output_config.clone().unwrap();
+    assert!(config.format.is_none());
+    assert_eq!(config.effort, Some(Effort::Medium));
+}
+
+/// Where `output_config` is not cache-safe, a retry's request is the
+/// question's request extended: the same system, tools, output_config and
+/// thinking, the same messages as a prefix, only the tail appended (and
+/// `max_tokens`, which the cache doesn't key on)
+#[tokio::test]
+async fn a_retry_extends_the_questions_request() {
+    use misanthropic::prompt::thinking::Thinking;
+    let mut host = host();
+    host.prompt = std::mem::take(&mut host.prompt)
+        .system("You are a test.")
+        .thinking(Thinking::adaptive())
+        .effort(Effort::Medium);
+    host.gauge = Some(gauge_with_room(50_000));
+    asked(&mut host, [NoteAsk::required()]).await;
+    let first = host.prompt.clone();
+    for _ in 0..2 {
+        handle(&mut host, text("not json")).await.unwrap();
+        let retry = host.prompt.clone();
+        assert_eq!(retry.system, first.system);
+        assert_eq!(retry.tools, first.tools);
+        assert_eq!(retry.output_config, first.output_config);
+        assert_eq!(retry.thinking, first.thinking);
+        assert_eq!(retry.tool_choice, first.tool_choice);
+        assert_eq!(
+            retry.messages[..first.messages.len()],
+            first.messages[..],
+            "the question's request is a prefix of the retry's"
+        );
+        assert!(retry.messages.len() > first.messages.len());
+    }
+}
+
+/// A pause resumed through the default `Agent::on_pause`, whose partial turn
+/// holds no server tool call, then answered: the answer continues the
+/// partial turn rather than following it as a second assistant turn
+/// (the runner's offers, 0.157 review)
+#[tokio::test]
+async fn a_pause_resumed_by_the_default_then_answered() {
+    let mut host = host();
+    host.max_pauses = 5;
+    asked(&mut host, [NoteAsk::optional(), NoteAsk::optional()]).await;
+    let partial = reply(
+        serde_json::json!([{"type": "text", "text": "Thinking."}]),
+        "pause_turn",
+    );
+    // Resumed as the default on_pause does: the partial is seated
+    let control = handle(&mut host, partial).await.unwrap();
+    assert_eq!(control, Control::Continue);
+    let control = handle(&mut host, text(r#"{"note": "after"}"#))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue, "the next question is asked");
+    assert_eq!(
+        host.answers,
+        [Some(Note {
+            note: "after".into()
+        })]
+    );
+    // And a refusal after a pause leaves the partial out too
+    let partial = reply(
+        serde_json::json!([{"type": "text", "text": "PARTIAL TWO"}]),
+        "pause_turn",
+    );
+    handle(&mut host, partial).await.unwrap();
+    let control = handle(&mut host, refusal()).await.unwrap();
+    let request = serde_json::to_string(&host.prompt).unwrap();
+    assert!(!request.contains("PARTIAL TWO"), "{request}");
+    assert_eq!(host.prompt.messages.last().unwrap().role, Role::User);
+    assert_eq!(control, Control::Done(Outcome::Failed));
+}
+
+/// Every question skipped for room, with no reply: `asks_done(None)`
+#[tokio::test]
+async fn a_queue_skipped_whole_ends_cleanly() {
+    let mut host = host();
+    host.gauge = Some(gauge_with_room(500));
+    host.asks.push(NoteAsk::optional());
+    let control = seat_next(&mut host, None).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(host.done);
 }

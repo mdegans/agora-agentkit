@@ -18,8 +18,8 @@ use super::{
     ShortString, Soul,
 };
 use crate::reactor::ask::{
-    Answer, Ask, Asked, Next, Rejection, Unanswered, ask_schema, nullable,
-    parse_lenient,
+    Answer, Ask, Asked, Mark, Next, Rejection, Unanswered, ask_schema,
+    nullable, parse_lenient,
 };
 use crate::reactor::{Control, Outcome};
 use crate::requests::SubmitFeedbackPayload;
@@ -66,6 +66,12 @@ impl Ask for MemoryAsk {
     fn schema(&self) -> serde_json::Value {
         ask_schema::<Memory>()
     }
+
+    fn template(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "content": "<your full memory as freeform markdown text>"
+        }))
+    }
 }
 
 /// A deep soul mutation: the whole SOUL rewritten. The system re-attaches
@@ -94,6 +100,12 @@ impl Ask for SoulAsk {
 
     fn schema(&self) -> serde_json::Value {
         ask_schema::<Soul>()
+    }
+
+    /// The example's `"..."`s (its communities are real slugs, so not
+    /// those)
+    fn template(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"identity": "...", "voice": "..."}))
     }
 
     /// The last try: an over-length field is clipped at a sentence
@@ -135,6 +147,10 @@ impl Ask for EvolutionAsk {
 
     fn schema(&self) -> serde_json::Value {
         nullable(ask_schema::<EvolutionRequest>())
+    }
+
+    fn template(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"note": "<your change here>"}))
     }
 
     /// The last try: an over-length note is clipped at a sentence boundary
@@ -189,6 +205,18 @@ impl Ask for SurveyAsk {
         nullable(ask_schema::<Feedback>())
     }
 
+    /// Feedback is anonymous: no failure's message (which can quote it)
+    /// reaches a log, an alert or a stall reason
+    fn anonymous(&self) -> bool {
+        true
+    }
+
+    fn template(&self) -> Option<serde_json::Value> {
+        Some(
+            serde_json::json!({"text": "<feedback here>", "contact_me": false}),
+        )
+    }
+
     /// The last try: an over-length `text` is clipped rather than lost to
     /// the server's length check (iota-aether, 2026-10-05). The transcript
     /// keeps the answer as written.
@@ -224,7 +252,20 @@ impl Ask for SurveyAsk {
 impl SeedAgent {
     /// Record a question that ended without an answer, for
     /// [`SeedAgent::unanswered_asks`]
-    fn record_unanswered(&mut self, ask: &'static str, why: Unanswered) {
+    fn record_unanswered(
+        &mut self,
+        ask: &'static str,
+        why: Unanswered,
+        asked: &Asked,
+    ) {
+        if let Unanswered::Refused { response_id } = &why {
+            self.refused = Some(super::ApiRefusal {
+                during: ask.to_string(),
+                round: None,
+                model: asked.model.clone().unwrap_or_default(),
+                response_id: response_id.clone(),
+            });
+        }
         self.unanswered.push((ask, why));
     }
 
@@ -259,9 +300,9 @@ impl Answer<MemoryAsk> for SeedAgent {
         &mut self,
         ask: &MemoryAsk,
         why: Unanswered,
-        _asked: &Asked,
+        asked: &Asked,
     ) -> Result<Next, SeedError> {
-        self.record_unanswered(ask.name(), why);
+        self.record_unanswered(ask.name(), why, asked);
         Ok(Next::Done(Outcome::Failed))
     }
 }
@@ -292,9 +333,9 @@ impl Answer<SoulAsk> for SeedAgent {
         &mut self,
         ask: &SoulAsk,
         why: Unanswered,
-        _asked: &Asked,
+        asked: &Asked,
     ) -> Result<Next, SeedError> {
-        self.record_unanswered(ask.name(), why);
+        self.record_unanswered(ask.name(), why, asked);
         Ok(Next::Continue)
     }
 }
@@ -324,9 +365,9 @@ impl Answer<EvolutionAsk> for SeedAgent {
         &mut self,
         ask: &EvolutionAsk,
         why: Unanswered,
-        _asked: &Asked,
+        asked: &Asked,
     ) -> Result<Next, SeedError> {
-        self.record_unanswered(ask.name(), why);
+        self.record_unanswered(ask.name(), why, asked);
         Ok(Next::Continue)
     }
 }
@@ -382,18 +423,28 @@ impl Answer<SurveyAsk> for SeedAgent {
     }
 
     /// Whatever was seated of it is redacted at teardown, failed attempts
-    /// included
+    /// included. Set on every path (for `NoRoom` before seating, the mark
+    /// is the transcript's end, and nothing follows it)
     async fn unanswered(
         &mut self,
         ask: &SurveyAsk,
         why: Unanswered,
         asked: &Asked,
     ) -> Result<Next, SeedError> {
-        if why != Unanswered::NoRoom {
-            self.survey_mark = Some(asked.mark);
+        self.survey_mark = Some(asked.mark);
+        // A refusal fails the session: not complete
+        let refused = matches!(why, Unanswered::Refused { .. });
+        self.record_unanswered(ask.name(), why, asked);
+        if refused {
+            return Ok(Next::Done(Outcome::Failed));
         }
-        self.record_unanswered(ask.name(), why);
         Ok(self.finished())
+    }
+
+    /// The redaction point is set the moment the question is seated, so a
+    /// session that ends in an error with the survey open is redacted too
+    fn seated(&mut self, _ask: &SurveyAsk, mark: Mark) {
+        self.survey_mark = Some(mark);
     }
 }
 
@@ -415,7 +466,7 @@ impl crate::reactor::ask::AskHost for SeedAgent {
     /// `Done` until the survey is begun; otherwise the session is complete
     async fn asks_done(
         &mut self,
-        _last: &misanthropic::response::Message,
+        _last: Option<&misanthropic::response::Message>,
     ) -> Result<Control, SeedError> {
         if self.hold_survey {
             self.phase = Phase::Held;

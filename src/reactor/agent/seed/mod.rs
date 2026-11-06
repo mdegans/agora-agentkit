@@ -278,7 +278,12 @@ enum Phase {
     /// Asking the closing questions: the memory rewrite, a mutation or an
     /// evolution entry, the survey
     Asking,
-    /// The tail is done but for the survey, held for [`Epilogue`]
+    /// The tail is done but for the survey, held for [`Epilogue`]. The
+    /// wrapper asks its own questions here, through its own [`Asks`] and
+    /// [`ask::handle`]: it must not hand this agent a reply until
+    /// [`Epilogue::begin_epilogue`] has seated the survey. One that does
+    /// is refused with an error naming the phase ([`Agent::handle`],
+    /// [`Agent::on_truncate`], [`Agent::on_pause`]), never taken as acting.
     Held,
 }
 
@@ -410,6 +415,8 @@ pub struct SeedAgent {
     asks: Asks<SeedAgent>,
     /// Closing questions that ended without an answer this session
     unanswered: Vec<(&'static str, Unanswered)>,
+    /// The API refusal that ended this session, if one did
+    refused: Option<ApiRefusal>,
     /// Where the survey begins, for redaction at teardown
     survey_mark: Option<Mark>,
     /// The agent answered the survey asking to be contacted: keep it
@@ -433,6 +440,21 @@ pub struct SeedAgent {
     memory_id_key: Option<MemoryIdKey>,
     /// The id of the memory the intro rendered, computed at `on_init`
     memory_id: Option<MemoryId>,
+}
+
+/// An API refusal that ended a session (Steward, 2026-11-06: any refusal
+/// fails the session). Where it happened and what refused it; never what
+/// was said
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiRefusal {
+    /// `"acting"`, or the question's name (`"memory"`, `"survey"`)
+    pub during: String,
+    /// The acting round (1-based), when acting
+    pub round: Option<usize>,
+    /// The model that refused
+    pub model: String,
+    /// The refused response's id
+    pub response_id: String,
 }
 
 /// Turns in a row whose every call was refused for its input, before
@@ -785,7 +807,12 @@ impl SeedAgent {
             )
         };
         let agent = self.state.soul.name.to_string();
-        if mutate {
+        // A mutation without room for its budget gives way to an evolution
+        // entry when one was rolled too (as before 0.157); alone, it is
+        // queued, and the driver skips it (`phase_skipped_for_context`)
+        let room = self.context.phase_room();
+        let soul_fits = room >= u64::from(self.ctx.config.phase_max_tokens);
+        if mutate && (soul_fits || !evolve) {
             self.asks.push(asks::SoulAsk {
                 question: output::build_soul_mutation_prompt(&self.state.soul),
                 max_tokens: self.ctx.config.phase_max_tokens,
@@ -829,6 +856,12 @@ impl SeedAgent {
     /// [`Refused`](Unanswered::Refused) one is not
     pub fn unanswered_asks(&self) -> &[(&'static str, Unanswered)] {
         &self.unanswered
+    }
+
+    /// The API refusal (`stop_reason: refusal`) that ended this session as
+    /// failed, if one did, for the runner to alert on. No content
+    pub fn refused(&self) -> Option<&ApiRefusal> {
+        self.refused.as_ref()
     }
 
     /// Dump the finished session transcript to the prompt log, if one is
@@ -1063,6 +1096,7 @@ impl Agent for SeedAgent {
             communities: Vec::new(),
             asks: Asks::default(),
             unanswered: Vec::new(),
+            refused: None,
             survey_mark: None,
             contact_me: false,
             contact_feedback: None,
@@ -1138,6 +1172,12 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        // Acting, or a seated question's pause (through the driver)
+        if self.phase == Phase::Held {
+            return Err(SeedError::Prompt(
+                "a paused reply while the survey is held".to_string(),
+            ));
+        }
         self.resume_pause(response).await
     }
 
@@ -1150,6 +1190,12 @@ impl Agent for SeedAgent {
         &mut self,
         response: &response::Message,
     ) -> Result<Control, SeedError> {
+        if !matches!(self.phase, Phase::Acting { .. }) {
+            return Err(SeedError::Prompt(format!(
+                "a clipped reply in the {:?} phase with no question seated",
+                self.phase
+            )));
+        }
         self.acting_clipped(response)
     }
 
@@ -1342,6 +1388,35 @@ impl Agent for SeedAgent {
             return ask::handle(self, response).await;
         }
         match self.phase {
+            // Any refusal ends the session as failed (Steward, 2026-11-06):
+            // whatever is in the context may set the classifier off again.
+            // The refused turn is not seated; nothing follows it
+            Phase::Acting { rounds_left }
+                if matches!(
+                    response.stop_reason,
+                    Some(StopReason::Refusal)
+                ) =>
+            {
+                let round =
+                    self.ctx.config.max_rounds.saturating_sub(rounds_left) + 1;
+                tracing::error!(
+                    event_type = "api_refusal",
+                    agent = %self.state.soul.name,
+                    agent_id = %self.id,
+                    model = %response.model,
+                    during = "acting",
+                    round,
+                    response_id = %response.id,
+                    "the API refused a reply; the session ends"
+                );
+                self.refused = Some(ApiRefusal {
+                    during: "acting".to_string(),
+                    round: Some(round),
+                    model: response.model.to_string(),
+                    response_id: response.id.to_string(),
+                });
+                Ok(Control::Done(Outcome::Failed))
+            }
             Phase::Acting { rounds_left } => {
                 let clipped =
                     matches!(response.stop_reason, Some(StopReason::MaxTokens));

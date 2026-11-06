@@ -2791,7 +2791,10 @@ async fn the_survey_is_skipped_when_it_would_not_fit() {
         .await
         .unwrap();
     assert_eq!(control, Control::Done(Outcome::Complete));
-    assert!(agent.survey_mark.is_none(), "no survey seated");
+    assert_eq!(
+        agent.unanswered_asks(),
+        [("survey", crate::reactor::ask::Unanswered::NoRoom)]
+    );
     assert!(!transcript(&agent).contains("feedback"), "no survey prompt");
 }
 
@@ -3932,35 +3935,149 @@ async fn a_spent_soul_rewrite_is_missed_and_the_session_completes() {
     ));
 }
 
-/// An API refusal of the survey skips it: the session completes, and the
-/// refused exchange is redacted like any survey
+/// Counts `event_type = "api_refusal"` events while it is the default
+#[derive(Clone, Default)]
+struct RefusalEvents(Arc<std::sync::atomic::AtomicUsize>);
+
+impl RefusalEvents {
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl tracing::Subscriber for RefusalEvents {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(
+        &self,
+        _: &tracing::span::Id,
+        _: &tracing::span::Id,
+    ) {
+    }
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visit(bool, bool);
+        impl tracing::field::Visit for Visit {
+            fn record_str(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &str,
+            ) {
+                if field.name() == "event_type" && value == "api_refusal" {
+                    self.0 = true;
+                }
+                // No content: never the reply's words
+                if value.contains("REFUSED WORDS") {
+                    self.1 = true;
+                }
+            }
+            fn record_debug(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                let value = format!("{value:?}");
+                if field.name() == "event_type" && value.contains("api_refusal")
+                {
+                    self.0 = true;
+                }
+                if value.contains("REFUSED WORDS") {
+                    self.1 = true;
+                }
+            }
+        }
+        let mut visit = Visit(false, false);
+        event.record(&mut visit);
+        assert!(!visit.1, "a refusal's words reached a log line");
+        if visit.0 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn refusal_message() -> response::Message {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_refused",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "REFUSED WORDS"}],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "refusal",
+        "stop_sequence": null,
+    }))
+    .unwrap()
+}
+
+/// Any API refusal ends the session as failed (Steward, 2026-11-06), in
+/// acting, the memory rewrite or an optional question: `api_refusal` is
+/// logged without content, the runner can read where from
+/// [`SeedAgent::refused`], the refused turn is not seated, and the session
+/// is not complete
 #[tokio::test]
-async fn a_refused_survey_is_skipped_and_redacted() {
+async fn a_refusal_anywhere_ends_the_session_failed() {
     let server = MockServer::start();
+    let events = RefusalEvents::default();
+    let _guard = tracing::subscriber::set_default(events.clone());
+    tracing::callsite::rebuild_interest_cache();
+
+    // Acting, in its first round
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let control = agent.handle(refusal_message()).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    let refused = agent.refused().unwrap();
+    assert_eq!(
+        (refused.during.as_str(), refused.round),
+        ("acting", Some(1))
+    );
+    assert_eq!(refused.response_id, "msg_refused");
+    assert!(!transcript(&agent).contains("REFUSED WORDS"));
+    assert!(!agent.state.completed);
+    assert_eq!(events.count(), 1);
+
+    // The memory rewrite
+    let mut agent = self::agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    let control = agent.handle(refusal_message()).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    assert_eq!(agent.refused().unwrap().during, "memory");
+    assert!(!transcript(&agent).contains("REFUSED WORDS"));
+    assert_eq!(events.count(), 2);
+
+    // An optional question: the survey, redacted all the same
     let config = SeedConfig {
         force_survey: true,
         ..quiet_config()
     };
-    let mut agent = agent(&server, config);
+    let mut agent = self::agent(&server, config);
     to_the_survey(&mut agent).await;
-    let refusal: response::Message =
-        serde_json::from_value(serde_json::json!({
-            "id": "msg_test",
-            "role": "assistant",
-            "content": [{"type": "text", "text": "I can't help with that."}],
-            "model": "claude-haiku-4-5",
-            "stop_reason": "refusal",
-            "stop_sequence": null,
-        }))
-        .unwrap();
-    let control = agent.handle(refusal).await.unwrap();
-    assert_eq!(control, Control::Done(Outcome::Complete));
-    assert_eq!(
+    let control = agent.handle(refusal_message()).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    assert!(!agent.state.completed, "a refused session is not complete");
+    assert_eq!(agent.refused().unwrap().during, "survey");
+    assert!(matches!(
         agent.unanswered_asks(),
-        [("survey", crate::reactor::ask::Unanswered::Refused)]
-    );
+        [("survey", crate::reactor::ask::Unanswered::Refused { .. })]
+    ));
+    assert_eq!(events.count(), 3);
     agent.on_teardown().await.unwrap();
     assert!(!transcript(&agent).contains("anonymous feedback"));
+    assert!(!transcript(&agent).contains("REFUSED WORDS"));
 }
 
 /// The limits only got looser: a soul at the old caps still reads, the new
@@ -11473,4 +11590,152 @@ fn every_limit_says_what_it_left_out_in_one_form() {
                 .to_string(),
         ]
     );
+}
+
+/// The survey's redaction point is set when it is seated: a session that
+/// errs with the survey open (a failed parse, then a fatal infer error, so
+/// no answer ever settles it) is redacted at teardown all the same
+#[tokio::test]
+async fn a_session_that_errs_with_the_survey_open_is_redacted() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let control = agent
+        .handle(text_message(
+            r#"{"text": ["my secret feedback"], "contact_me": false}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
+    // The reactor ends the session here (an infer error): teardown follows
+    agent.on_teardown().await.unwrap();
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("my secret feedback"), "{saved}");
+    assert!(!saved.contains("anonymous feedback"));
+    assert!(!dumped(dir.path()).contains("my secret feedback"));
+    assert!(
+        saved.contains("mmmmmmmmmmmmmmmmmmmmmmmmmmm"),
+        "the memory is kept"
+    );
+}
+
+/// A copy of the question's own example is no answer: the memory rewrite,
+/// the evolution entry and the survey each retry it rather than writing a
+/// placeholder into the memory, the log or the developers' inbox
+#[tokio::test]
+async fn the_questions_own_example_is_retried() {
+    let server = MockServer::start();
+    let feedback = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    let before = agent.state.memory.content.clone();
+    let control = agent
+        .handle(text_message(
+            r#"{"content": "<your full memory as freeform markdown text>"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(agent.state.memory.content, before);
+    assert!(transcript(&agent).contains("example shape"));
+
+    let config = SeedConfig {
+        evolution_chance: 100,
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = self::agent(&server, config);
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(agent.asks.seated(), Some("evolution"));
+    agent
+        .handle(text_message(
+            r#"{"note": "<your change here>"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("evolution"), "asked again");
+    assert!(agent.state.soul.evolution_log.is_empty());
+    agent
+        .handle(text_message("null", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("survey"));
+    agent
+        .handle(text_message(
+            r#"{"text": "<feedback here>", "contact_me": false}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("survey"), "asked again");
+    feedback.assert_calls(0);
+}
+
+/// A rolled mutation with no room for its budget gives way to a rolled
+/// evolution entry that fits, as before 0.157
+#[tokio::test]
+async fn a_mutation_that_would_not_fit_gives_way_to_evolution() {
+    let server = MockServer::start();
+    let config = SeedConfig {
+        mutation_chance: 100,
+        evolution_chance: 100,
+        evolve_max_tokens: 1_500,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 100_000))
+        .await
+        .unwrap();
+    // 128k less 123k held less the instruction: 3,000, under the soul's
+    // 4,096 and over the evolution's 1,500
+    agent
+        .handle(text_with_usage(MEMORY, 123_000))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("evolution"));
+}
+
+/// While held, a reply handed to the agent is refused with an error naming
+/// the phase, never taken as acting
+#[tokio::test]
+async fn a_reply_while_held_is_an_error() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(agent.phase, Phase::Held);
+    let clipped = text_message("cut", StopReason::MaxTokens);
+    assert!(agent.on_truncate(&clipped).await.is_err());
+    assert!(agent.handle(clipped).await.is_err());
+    assert!(agent.on_pause(paused_message()).await.is_err());
 }

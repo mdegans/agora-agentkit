@@ -23,11 +23,32 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   The soul mutation, evolution entry and survey are optional: three
   attempts each, then `Missed` (`event_type = "ask_unanswered"`, ERROR), and
   the session moves on and completes. Until now a spent mutation, evolution
-  or survey stalled the session out as failed. An API refusal of an
-  optional question skips it (`Refused`); pauses are resumed under the
-  session's pause budget. `SeedAgent::unanswered_asks` lists the misses for
-  the runner to alert on. Each failed attempt logs `ask_attempt_failed`
-  (WARN; never the reply's text, since a survey answer is anonymous).
+  or survey stalled the session out as failed: sessions that used to fail
+  after a soul or survey miss now complete, with their memory written.
+  Pauses are resumed under the session's pause budget, and a reply after a
+  resumed pause continues its partial turn. `SeedAgent::unanswered_asks`
+  lists the misses for the runner to alert on. Each failed attempt logs
+  `ask_attempt_failed` (WARN), never with the reply's text.
+- **Any API refusal ends the session as failed** (Steward, 2026-11-06:
+  what is in the context may set the classifier off again), in acting, the
+  memory rewrite or any optional question. Logged as `event_type =
+  "api_refusal"` (ERROR: agent, model, where, round when acting, response
+  id; no content); the refused turn is never seated. `SeedAgent::refused`
+  returns an `ApiRefusal` for the runner to alert on, and a question's
+  host gets `Unanswered::Refused { response_id }`. Until now a refusal in
+  acting was taken as quiescence and the session went on to its memory.
+- **Anonymous answers** (`Ask::anonymous`, the survey): serde's error
+  messages quote the value they refused, so for these the driver logs,
+  keeps and hands on only a failure's category (`parse`, `clipped`,
+  `tool_call`, `rejected`, `template`, …), in `Missed` too; the agent still
+  sees the whole retry note. The survey's redaction mark is set when it is
+  seated (`Answer::seated`), and on every unanswered path, so a session
+  that errs with the survey open is redacted too.
+- **The question's own example is no answer**: an answer holding one of
+  `Ask::template`'s strings, or a `<…>` placeholder from the question, is a
+  retry (`TEMPLATE_NOTE`). Memory, soul, evolution and survey declare theirs.
+- **A question's format goes with it**: `output_config.format` is cleared
+  (effort kept) when a question is done.
 - **Evolve and survey are constrained too**, as `anyOf [T, {"type":
   "null"}]` (`nullable`), on blallama.
 - **One lenient parser** (`parse_lenient`): fences in any case or tag, a
@@ -37,11 +58,16 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   `schema-inline` feature on; no `pattern`, no root `$schema`/`title`) and
   `assert_constrainable`, which every seed question's schema passes.
 - **Shared**: `TRUNCATION_WARNING`, `NOT_RUN_CLIPPED`, `NOT_RUN_NOW`,
-  `NOT_RUN_REFUSED`, `NO_TOOLS_NOW` in `reactor::ask`; `Mark` (was the
+  `NO_TOOLS_NOW`, `TEMPLATE_NOTE` in `reactor::ask`; `Mark` (was the
   survey's private `SurveyMark`); `gauge::{phase_floor, fit_max_tokens,
   unseat_for_retry, Fit, MIN_PHASE_TOKENS}` (were `SeedAgent` methods).
 - **Stall reason**: "the memory question failed 3 times in a row; last: …"
   (was "the memory rewrite (reflect) phase failed …").
+- **Hosts**: `AskHost::asks_done` takes `Option<&Message>` (`None` when
+  every question was skipped for room); `Asks`, `Seated`, `Taken` and
+  `Turn` carry no `AskHost` bound on the type. A rolled mutation without
+  room gives way to a rolled evolution entry, as before. While `Held`, a
+  reply handed to the agent is an error naming the phase.
 - **Logs**: the closing-phase events name the question (`ask = "memory"`)
   where they named the phase (`phase = Reflect`).
 
