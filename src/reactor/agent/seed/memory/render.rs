@@ -645,7 +645,13 @@ pub fn show(
         parts.push(&tail);
         let out = join(&parts);
         if out.len() <= budget || shown == 0 {
-            return if shown == 0 { tail } else { out };
+            return match (shown, seal) {
+                // Nothing fits: the list alone, but never without saying
+                // why there are no heads
+                (0, SealCheck::Unchecked) => format!("{UNCHECKED}\n\n{tail}"),
+                (0, SealCheck::Checked) => tail,
+                _ => out,
+            };
         }
     }
     unreachable!("the loop returns at zero")
@@ -1209,6 +1215,15 @@ mod tests {
         );
         let out = show(&history, &[0], cur, 32_768, SealCheck::Unchecked);
         assert!(out.starts_with(&format!("{UNCHECKED}\n\n")), "{out}");
+
+        // Nothing fits the budget: the list, still under the preface
+        for picked in [&[1][..], &[0, 1]] {
+            let out = show(&history, picked, cur, 10, SealCheck::Unchecked);
+            assert!(out.starts_with(&format!("{UNCHECKED}\n\n")), "{out}");
+            assert!(out.contains("budget of 10 bytes"), "{out}");
+            let checked = show(&history, picked, cur, 10, SealCheck::Checked);
+            assert_eq!(out, format!("{UNCHECKED}\n\n{checked}"));
+        }
     }
 
     #[test]
