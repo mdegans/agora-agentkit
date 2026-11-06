@@ -445,7 +445,7 @@ impl<H> Asks<H> {
 
     /// Whether a question is in progress: from its seating until it is
     /// done, including while [`handle`] takes its reply (so a host's
-    /// [`Agent::on_pause`](super::Agent::on_pause), called from there,
+    /// [`Agent::on_pause`], called from there,
     /// sees it). The host routes its responses to [`handle`] while this
     /// holds.
     pub fn is_active(&self) -> bool {
