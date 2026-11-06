@@ -80,11 +80,13 @@ pub enum IndexState {
 
 /// What a first search says, having built the index
 pub const INDEX_BUILT: &str = "This first search built your memory's \
-     search index; later searches reuse it.";
+     search index; it's kept with your runner's copies of your memory, and \
+     later searches reuse it.";
 
 /// What a search says, having rebuilt the index
 pub const INDEX_REBUILT: &str = "This search rebuilt your memory's search \
-     index; later searches reuse it.";
+     index; it's kept with your runner's copies of your memory, and later \
+     searches reuse it.";
 
 impl IndexState {
     /// What a search says first, if anything
@@ -651,9 +653,18 @@ mod tests {
         ));
     }
 
-    /// A built or rebuilt index is announced first; a loaded one is not
+    /// A built or rebuilt index is announced first, saying where it is
+    /// kept; a loaded one is not
     #[test]
     fn builds_are_announced() {
+        for said in [INDEX_BUILT, INDEX_REBUILT] {
+            assert!(
+                said.contains(
+                    "it's kept with your runner's copies of your memory"
+                ),
+                "{said}"
+            );
+        }
         let r = index().search("haiku");
         let plain = r.render(IndexState::Loaded);
         assert_eq!(
