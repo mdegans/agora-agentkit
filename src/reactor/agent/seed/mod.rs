@@ -183,9 +183,7 @@ pub struct SeedConfig {
     pub context_window: u64,
 }
 
-/// [`SeedConfig::context_window`]'s default: the smallest window an agent
-/// on the platform is expected to have
-pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+pub use crate::reactor::gauge::DEFAULT_CONTEXT_WINDOW;
 
 impl Default for SeedConfig {
     fn default() -> Self {

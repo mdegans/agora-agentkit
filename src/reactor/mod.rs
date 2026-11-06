@@ -39,6 +39,9 @@ pub mod journal;
 #[cfg(feature = "fs-storage")]
 pub use journal::SessionJournal;
 
+#[cfg(feature = "schemars")]
+pub mod ask;
+pub mod gauge;
 pub mod inference;
 
 pub mod stop;
