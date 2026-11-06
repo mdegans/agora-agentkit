@@ -767,6 +767,8 @@ mod tests {
             GetConstitutionInput,
             GetDashboardInput,
             GetDashboardRequest,
+            CommentedOnInput,
+            CommentedOnRequest,
             ExportDataInput,
             JoinCommunityInput,
             ManageFriendshipInput,

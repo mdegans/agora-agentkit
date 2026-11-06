@@ -1682,7 +1682,12 @@ fn read_input(
             | crate::requests::ReadTarget::Repository => &["commit"],
             _ => &[],
         };
-        return Err(target.refusal(name, more));
+        return Err(crate::requests::ReadTarget::refusal_of(
+            &id,
+            name,
+            more,
+            &[],
+        ));
     }
     options.insert("id".into(), Value::String(id.to_string()));
     if let Some(a) = attachment {

@@ -492,24 +492,46 @@ fn refused_turn_counted() -> String {
     )
 }
 
-/// Whether the last message holds tool results and every one is a
-/// refusal of its call's input ([`tool::is_refusal`])
-fn every_call_refused(prompt: &Prompt) -> bool {
+/// Said after a turn some of whose calls were refused and some not: each
+/// refusal says it charged nothing, but the turn is a round all the same
+/// (beta round 15: "nothing was charged" beside a turn that counted)
+fn refused_in_a_counted_turn(refused: usize) -> String {
+    format!(
+        "({} charged nothing, but this turn counts as a round for your other \
+         calls.)",
+        if refused == 1 {
+            "The refused call"
+        } else {
+            "The refused calls"
+        }
+    )
+}
+
+/// The last message's tool results: how many, and how many of them are
+/// refusals of their call's input ([`tool::is_refusal`]). `(0, 0)` when
+/// it holds none
+fn refusals(prompt: &Prompt) -> (usize, usize) {
     use misanthropic::prompt::message::{Block, Role};
     let Some(last) = prompt.messages.last().filter(|m| m.role == Role::User)
     else {
-        return false;
+        return (0, 0);
     };
-    let mut results = last.content.iter().filter_map(|b| match b {
-        Block::ToolResult { result } => Some(result),
-        _ => None,
-    });
-    let mut any = false;
-    let every = results.all(|r| {
-        any = true;
-        tool::is_refusal(r)
-    });
-    any && every
+    last.content
+        .iter()
+        .filter_map(|b| match b {
+            Block::ToolResult { result } => Some(result),
+            _ => None,
+        })
+        .fold((0, 0), |(all, refused), r| {
+            (all + 1, refused + usize::from(tool::is_refusal(r)))
+        })
+}
+
+/// Whether the last message holds tool results and every one is a
+/// refusal of its call's input ([`tool::is_refusal`])
+fn every_call_refused(prompt: &Prompt) -> bool {
+    let (all, refused) = refusals(prompt);
+    all > 0 && refused == all
 }
 
 /// Server-tool pauses ([`StopReason::PauseTurn`]) a session will resume
@@ -1812,6 +1834,16 @@ impl Agent for SeedAgent {
                         }
                     } else {
                         self.refused_streak = 0;
+                        let (all, refused) = refusals(&self.state.prompt);
+                        // A server tool's turn counts whatever its own
+                        // calls were (review of round 15)
+                        if acting
+                            && refused > 0
+                            && (refused < all || server_tool)
+                        {
+                            refused_note =
+                                Some(refused_in_a_counted_turn(refused));
+                        }
                     }
                     // Said with the round's results, so the agent knows
                     // before it plans the next one (bridge test agents,

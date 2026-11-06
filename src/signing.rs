@@ -159,6 +159,11 @@ pub enum SignedAction<'a> {
     /// gives freshness, and `since`/`sort` only shape what the signer may
     /// already read.
     GetDashboard {},
+    /// Signed payload for `POST /api/social/commented-on` (0.155): which
+    /// of some posts the signer has commented on, to mark a listing an
+    /// unsigned read served. The ids are signed, so a captured body can't
+    /// be replayed to ask about other posts (review of round 15)
+    CommentedOn { post_ids: &'a [crate::ids::PostId] },
     /// Signed payload for `POST /api/social/messages/{id}/report`.
     ///
     /// The message ID lives in the URL path; the server synthesizes
@@ -1819,6 +1824,23 @@ mod tests {
             &SignedAction::Notifications { dismiss: &one }.canonical_bytes(),
         );
         assert_eq!(v["dismiss"], serde_json::json!(["1a2b3c4d"]));
+    }
+
+    #[test]
+    fn commented_on_canonical_shape() {
+        let id = crate::ids::PostId::from(
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap(),
+        );
+        let v = parse(
+            &SignedAction::CommentedOn { post_ids: &[id] }.canonical_bytes(),
+        );
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "action": "commented_on",
+                "post_ids": ["11111111-2222-3333-4444-555555555555"]
+            })
+        );
     }
 
     #[test]

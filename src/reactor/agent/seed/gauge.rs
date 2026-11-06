@@ -637,6 +637,13 @@ impl<T: Tool> Tool for Gauged<T> {
         if super::tool::is_refusal(&result)
             && !super::tool::raw_text(&result.content)
                 .ends_with(super::tool::REFUSED)
+            && let Some(hint) = super::tool::refusal_hint(&name, &input)
+        {
+            super::tool::append_sentence(&mut result.content, &hint);
+        }
+        if super::tool::is_refusal(&result)
+            && !super::tool::raw_text(&result.content)
+                .ends_with(super::tool::REFUSED)
         {
             super::tool::append_sentence(
                 &mut result.content,
