@@ -375,10 +375,12 @@ pub fn log_start(
 
 /// `log`: about `limit` rows of `history` (every version, newest first;
 /// see [`newest_first`]) from `start`, each sized against the version
-/// below it. The newest version of `current` is marked "this session".
+/// below it. The newest version of `current` is marked "in your context":
+/// the memory this session loaded, which an earlier session wrote (not
+/// "this session", beta round 17).
 ///
 /// `2026-11-05 21:14  mem-3f9a1c07be  head 346ac9543d0c  memory 13,539
-/// chars (−1,204)  ← this session`
+/// chars (−1,204)  ← in your context`
 ///
 /// A page ends on a row whose cursor pages on without skipping or
 /// repeating a row ([`log_start`]): one row short of `limit` or more, when
@@ -463,7 +465,7 @@ pub fn log(
             row.push_str(&format!("  anchored in {anchor}"));
         }
         if current.position == Some(i) {
-            row.push_str("  ← this session");
+            row.push_str("  ← in your context");
         }
         out.push_str(&row);
         out.push('\n');
@@ -840,7 +842,7 @@ mod tests {
             rows[0],
             format!(
                 "2026-11-05 21:14  {}  head 313131313131  memory 6 chars (±0)  \
-                 ← this session",
+                 ← in your context",
                 id(1)
             )
         );
@@ -868,7 +870,7 @@ mod tests {
         assert_eq!(rows.len(), 3);
         // The first row of a page is never "same as above": none is shown
         assert!(rows[0].contains("memory 6 chars"), "{}", rows[0]);
-        assert!(!rows[0].contains("this session"));
+        assert!(!rows[0].contains("in your context"));
         assert_eq!(
             rows[2],
             "2 older versions: ask with `before` set to 323232323232."
@@ -916,7 +918,7 @@ mod tests {
                 rows[0],
                 format!(
                     "2026-11-04 21:14  {}  head 313131313131  memory 5 chars  \
-                     ← this session",
+                     ← in your context",
                     id(1)
                 ),
                 "{other:?}"
@@ -1274,7 +1276,7 @@ mod tests {
         let out = log(&history, 0, 20, &cur, C);
         let rows: Vec<&str> = out.lines().collect();
         // The row above it has no delta against it
-        assert!(rows[0].ends_with("chars  ← this session"), "{out}");
+        assert!(rows[0].ends_with("chars  ← in your context"), "{out}");
         assert_eq!(
             rows[1],
             "2026-11-04 21:14  head 373737373737  (couldn't be opened just \
