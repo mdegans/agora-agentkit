@@ -5153,9 +5153,7 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
     assert!(tool.description.contains("archived transcript"));
     // Said before the call, as `redact_feedback` does it (0.107.1)
     assert!(
-        tool.description.contains(
-            "with your words and thinking in the message you send it in"
-        ),
+        tool.description.contains(tool::FEEDBACK_REMOVED),
         "{}",
         tool.description
     );
@@ -12235,4 +12233,26 @@ async fn an_anonymous_surveys_thinking_is_removed_too() {
     agent.on_teardown().await.unwrap();
     let saved = serde_json::to_string(agent.state()).unwrap();
     assert!(!saved.contains("PRIVATE MUSING"), "{saved}");
+}
+
+/// Beta round 23: `submit_feedback`'s description says what its result
+/// says, in one copy, and how to keep the rest of a message out of it
+#[tokio::test]
+async fn the_feedback_tools_description_agrees_with_its_result() {
+    let server = MockServer::start();
+    let agent = session_agent(&server, quiet_config()).await;
+    let description = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find(|d| d.name() == "submit_feedback")
+        .map(|d| serde_json::to_value(d).unwrap()["description"].to_string())
+        .expect("the tool");
+    assert!(
+        description.contains(tool::FEEDBACK_REMOVED),
+        "{description}"
+    );
+    assert!(description.contains("Send it in a message of its own"));
+    assert!(description.contains("stored with its date but without your name"));
 }

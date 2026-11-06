@@ -1831,12 +1831,12 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                 )
             }
             "submit_feedback" => format!(
-                "{} It is stored with its date but without your name. What it \
-                 says is removed from your archived transcript when the \
-                 session ends, with your words and thinking in the message you \
-                 send it in; the call itself stays, so that you sent feedback, \
-                 and when, stays.",
-                registered.description
+                "{} It is stored with its date but without your name. When \
+                 this session ends, {}; the call itself stays, so that you \
+                 sent feedback, and when, stays. Send it in a message of its \
+                 own if you want nothing else removed or kept beside it.",
+                registered.description,
+                tool::FEEDBACK_REMOVED,
             ),
             // Until phase 4: `crate::before_index`
             "get_inbox" => crate::before_index::GET_INBOX_DOC.to_string(),

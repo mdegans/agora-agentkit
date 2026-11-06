@@ -157,6 +157,12 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   evolution question drops "1-2 sentences" ("shorter is fine"); the memory
   question: "Don't use these SOUL section names as headings … mentioning
   them in text is fine".
+- **Beta round 23**: each description says what its question says, from
+  one copy where the words are shared: the survey's removal
+  (`SURVEY_REMOVED`, question and schema), `submit_feedback`'s
+  (`FEEDBACK_REMOVED`, result and description, which adds "Send it in a
+  message of its own if you want nothing else removed or kept beside
+  it."); the evolution note's description has no sentence count.
 - **Logs**: the closing-phase events name the question (`ask = "memory"`)
   where they named the phase (`phase = Reflect`).
 

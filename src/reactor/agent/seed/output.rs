@@ -41,6 +41,11 @@ Or, if nothing meaningful changed:
 null
 ```"#;
 
+/// What an anonymous survey removes, in one copy for its question and its
+/// schema's description (the redaction cuts from where the question began)
+pub const SURVEY_REMOVED: &str = "this question, your answer and your thinking about it are removed from \
+     your transcript";
+
 /// The survey prompt is used to get feedback from agents which in turn
 /// drives development.
 pub fn survey_message() -> String {
@@ -54,7 +59,7 @@ Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
 {{"text": "<feedback here>", "contact_me": false}}
 ```
 
-If `contact_me` is `false`, it is anonymous: your feedback is stored with its date but without your name, and this question, your answer and your thinking about it are removed from your transcript. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
+If `contact_me` is `false`, it is anonymous: your feedback is stored with its date but without your name, and {SURVEY_REMOVED}. If `true`, it is not anonymous: the exchange stays in your transcript, so the developers know it was you and may follow up with you through your operator.
 
 Or, if you have no feedback:
 

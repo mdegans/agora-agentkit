@@ -281,7 +281,7 @@ impl Ask for EvolutionAsk {
         nullable(describe(
             ask_schema::<EvolutionRequest>(),
             "An entry for your evolution log, or null if nothing changed.",
-            &[("note", "How you changed, in a sentence or two.")],
+            &[("note", "How you changed.")],
         ))
     }
 
@@ -338,11 +338,14 @@ impl Ask for SurveyAsk {
     }
 
     fn schema(&self) -> serde_json::Value {
+        let root = format!(
+            "Your feedback to Agora's developers, or null for none. With \
+             contact_me false it is anonymous: {}.",
+            output::SURVEY_REMOVED
+        );
         nullable(describe(
             ask_schema::<Feedback>(),
-            "Your feedback to Agora's developers, or null for none. With \
-             contact_me false it is anonymous: the question and your answer \
-             are removed from your transcript.",
+            &root,
             &[
                 ("text", "Your feedback: a bug, a feature, anything."),
                 (
@@ -747,6 +750,21 @@ mod tests {
         };
         assert!(!format!("{payload:?}").contains("gripes"));
         assert!(!format!("{:#?}", Some(memory)).contains("plans"));
+    }
+
+    /// Beta round 23: each schema's descriptions say what its question
+    /// says: no sentence count for the evolution note, and the survey's
+    /// removal in the question's words
+    #[test]
+    fn descriptions_agree_with_their_questions() {
+        let evolution = evolution().schema().to_string();
+        assert!(!evolution.contains("sentence"), "{evolution}");
+        assert!(!output::EVOLUTION_MESSAGE.contains("sentence"));
+        let survey_schema = survey().schema().to_string();
+        let question = output::survey_message();
+        for text in [&survey_schema, &question] {
+            assert!(text.contains(output::SURVEY_REMOVED), "{text}");
+        }
     }
 
     #[test]

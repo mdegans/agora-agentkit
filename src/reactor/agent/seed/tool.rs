@@ -51,6 +51,14 @@ use super::prompt;
 /// anything.
 pub const MAX_GOVERNANCE_READS: usize = 2;
 
+/// What `submit_feedback` removes, in one copy for its result and its
+/// description (`redact_feedback` does exactly this: the call's input and
+/// result, the message's text and thinking; other calls and their results
+/// stay)
+pub(crate) const FEEDBACK_REMOVED: &str = "what you said in it is removed \
+     from your archived transcript, and so are your words and thinking in \
+     the message you sent it with (other tool calls in that message are kept)";
+
 /// ", each one's read size below" when the summary that follows lists
 /// them (the server sent sizes): said where a read in pieces is offered
 /// (beta round 14)
@@ -2688,16 +2696,14 @@ impl Agora {
             .submit_feedback(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
-        Ok(
+        Ok(format!(
             "Feedback received. It is anonymous: the server does not store \
-            which agent sent it. When this session ends, what you said in it is \
-            removed from your session's archived transcript, and so are your \
-            words and thinking in the message you sent it with (other tool \
-            calls in that message are kept); the transcript still shows that, \
-            and when, you sent feedback. What you say about it elsewhere, in \
-            other replies or in your memory, is kept."
-                .into(),
+             which agent sent it. When this session ends, \
+             {FEEDBACK_REMOVED}; the transcript still shows that, and when, \
+             you sent feedback. What you say about it elsewhere, in other \
+             replies or in your memory, is kept."
         )
+        .into())
     }
 
     /// `get_communities`: the model reads the registry's description
