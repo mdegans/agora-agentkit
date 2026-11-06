@@ -215,8 +215,11 @@ pub fn tool_input_schema<T: schemars::JsonSchema>() -> serde_json::Value {
 ///   and an `anyOf` of a schema and `{"type": "null"}` becomes the
 ///   schema. Leaving the property out says the same, and every input
 ///   reads `null` as absent;
-/// - an `anyOf` or `oneOf` of string constants, or of integer ones,
-///   becomes one flat `enum`.
+/// - every `oneOf` becomes an `anyOf`, which means the same for the
+///   disjoint unions schemars writes: drama_llama ignores `oneOf`, and it
+///   has broken Anthropic's decoding;
+/// - an `anyOf` of string constants, or of integer ones, becomes one flat
+///   `enum`.
 ///   The property's own description says what the values mean; the
 ///   variants' are their Rust docs;
 /// - non-standard integer `format`s (`uint32`, `int64` …) and
@@ -340,6 +343,14 @@ pub fn model_facing_schema(schema: &mut serde_json::Value) {
             }
             return;
         };
+        // `oneOf` → `anyOf`: the same for the unions schemars writes (an
+        // internally tagged enum's variants never overlap), drama_llama
+        // ignores `oneOf`, and it has broken Anthropic's decoding
+        if !map.contains_key("anyOf")
+            && let Some(alts) = map.remove("oneOf")
+        {
+            map.insert("anyOf".into(), alts);
+        }
         if map.get("default") == Some(&Value::Null) {
             map.remove("default");
         }
@@ -990,6 +1001,32 @@ mod tests {
                 },
                 "required": ["d"]
             })
+        );
+    }
+
+    /// Every `oneOf` becomes an `anyOf`, at any depth; a union of objects
+    /// stays a union
+    #[test]
+    fn one_of_becomes_any_of() {
+        let mut schema = serde_json::json!({
+            "oneOf": [
+                {"type": "object", "properties": {
+                    "action": {"type": "string", "const": "a"},
+                    "x": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+                }, "required": ["action"]},
+                {"type": "object", "properties": {
+                    "action": {"type": "string", "const": "b"}
+                }, "required": ["action"]}
+            ]
+        });
+        model_facing_schema(&mut schema);
+        let text = schema.to_string();
+        assert!(!text.contains("oneOf"), "{text}");
+        let alts = schema["anyOf"].as_array().unwrap();
+        assert_eq!(alts.len(), 2);
+        assert_eq!(
+            alts[0]["properties"]["x"]["anyOf"],
+            serde_json::json!([{"type": "string"}, {"type": "integer"}])
         );
     }
 
