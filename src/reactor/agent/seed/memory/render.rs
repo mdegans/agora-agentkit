@@ -172,9 +172,18 @@ impl MemoryVersion {
     /// `mem-3f9a1c07be (2026-11-05 21:14, 13,539 chars)`, with its source's
     /// label when it has one; no size when it couldn't be opened
     pub fn describe(&self) -> String {
+        self.describe_as(false)
+    }
+
+    /// [`describe`](Self::describe), without the local-copy label when
+    /// `hide_local`: every version in view is one, and it is said once
+    fn describe_as(&self, hide_local: bool) -> String {
         let label = self
             .source
             .label()
+            .filter(|_| {
+                !(hide_local && self.source == VersionSource::LocalCopy)
+            })
             .map(|l| format!(", {l}"))
             .unwrap_or_default();
         let size = self
@@ -190,11 +199,11 @@ impl MemoryVersion {
     }
 
     /// An unopened version's block in `show`, or its answer in `diff`
-    fn unopened_note(&self) -> Option<String> {
+    fn unopened_note(&self, hide_local: bool) -> Option<String> {
         match &self.text {
             VersionText::Unopened { reason, .. } => Some(format!(
                 "{} {UNOPENED} ({reason}); ask again later.",
-                self.describe()
+                self.describe_as(hide_local)
             )),
             VersionText::Opened { .. } => None,
         }
@@ -520,10 +529,12 @@ fn anchored(
     newest: usize,
     content: &str,
     current: &CurrentMemory<'_>,
+    hide_local: bool,
 ) -> String {
     let v = &history[newest];
+    let describe = || v.describe_as(hide_local);
     if content == current.content {
-        return format!("{} is {TO_CURRENT}.", v.describe());
+        return format!("{} is {TO_CURRENT}.", describe());
     }
     let gap = match current.position {
         // Older than it: a diff would run backward
@@ -531,7 +542,7 @@ fn anchored(
             return whole(
                 &format!(
                     "{}, shown in full: newer than your current memory",
-                    v.describe()
+                    describe()
                 ),
                 content,
             );
@@ -543,9 +554,9 @@ fn anchored(
     };
     let diff = line_diff(content, current.content);
     if whole_is_shorter(&diff, content) {
-        whole(&format!("{}{gap}, {SHORTER_WHOLE}", v.describe()), content)
+        whole(&format!("{}{gap}, {SHORTER_WHOLE}", describe()), content)
     } else {
-        format!("{} → {TO_CURRENT}{gap}:\n{}", v.describe(), diff.trim_end())
+        format!("{} → {TO_CURRENT}{gap}:\n{}", describe(), diff.trim_end())
     }
 }
 
@@ -556,9 +567,10 @@ fn anchored(
 /// several, the newest opens with what changed from it to `current`, or
 /// whole when that is shorter or `current` is older; each older one is
 /// what changed from it to the next newer one picked, or whole when that
-/// is shorter. A version that couldn't
-/// be opened says so, and the diffs pass over it. Past `budget`, the rest
-/// are listed by id and size, never cut.
+/// is shorter. A version that couldn't be opened says so, and the diffs
+/// pass over it. Past `budget`, the rest are listed by id and size, never
+/// cut. When every version asked for is a local copy, that is said once
+/// ([`LOCAL_ONLY`]) rather than on each, as `log` does.
 pub fn show(
     history: &[MemoryVersion],
     picked: &[usize],
@@ -578,17 +590,26 @@ pub fn show(
     }
 
     let mut blocks: Vec<(usize, String)> = Vec::new();
+    // As `log`: no local-copy label on each version when every one is,
+    // or the history wasn't checked; said once instead
+    let all_local = picked
+        .iter()
+        .all(|&i| history[i].source == VersionSource::LocalCopy);
+    let hide = all_local || seal == SealCheck::Unchecked;
+    let describe = |i: usize| history[i].describe_as(hide);
+    let preface: &[&str] = match (seal, all_local) {
+        (SealCheck::Unchecked, _) => &[UNCHECKED],
+        (SealCheck::Checked, true) => &[LOCAL_ONLY],
+        (SealCheck::Checked, false) => &[],
+    };
     // Joined with spaces: the opening paragraph
-    let mut legend: Vec<&str> = Vec::new();
-    if seal == SealCheck::Unchecked {
-        legend.push(UNCHECKED);
-    }
+    let mut legend: Vec<&str> = preface.to_vec();
     if let [only] = picked.as_slice() {
         let v = &history[*only];
         let block = match v.content() {
-            None => v.unopened_note().unwrap_or_default(),
+            None => v.unopened_note(hide).unwrap_or_default(),
             Some(content) if content == current.content => {
-                let named = format!("{} is {TO_CURRENT}.", v.describe());
+                let named = format!("{} is {TO_CURRENT}.", describe(*only));
                 return match legend.as_slice() {
                     [] => named,
                     _ => format!("{}\n\n{named}", legend.join(" ")),
@@ -596,7 +617,7 @@ pub fn show(
             }
             Some(content) => {
                 legend.push(AS_STORED);
-                whole(&v.describe(), content)
+                whole(&describe(*only), content)
             }
         };
         blocks.push((*only, block));
@@ -608,11 +629,11 @@ pub fn show(
         for &i in &picked {
             let v = &history[i];
             let Some(content) = v.content() else {
-                blocks.push((i, v.unopened_note().unwrap_or_default()));
+                blocks.push((i, v.unopened_note(hide).unwrap_or_default()));
                 continue;
             };
             let block = match newer {
-                None => anchored(history, i, content, &current),
+                None => anchored(history, i, content, &current, hide),
                 Some((n, newer_content)) => {
                     let asked =
                         picked.iter().filter(|&&p| p > n && p < i).count();
@@ -621,7 +642,7 @@ pub fn show(
                     if content == newer_content {
                         format!(
                             "{} → {newer_name}{gap}: the same memory.",
-                            v.describe()
+                            describe(i)
                         )
                     } else {
                         let diff = line_diff(content, newer_content);
@@ -629,14 +650,14 @@ pub fn show(
                             whole(
                                 &format!(
                                     "{}{gap}, {SHORTER_WHOLE}",
-                                    v.describe()
+                                    describe(i)
                                 ),
                                 content,
                             )
                         } else {
                             format!(
                                 "{} → {newer_name}{gap}:\n{}",
-                                v.describe(),
+                                describe(i),
                                 diff.trim_end()
                             )
                         }
@@ -657,14 +678,14 @@ pub fn show(
                 "{} takes {} bytes to show, more than the largest budget \
                  ({} bytes), so it can't be shown whole. Compare it with a \
                  version near it with `diff` instead.",
-                history[*i].describe(),
+                describe(*i),
                 grouped(blocks[0].1.len()),
                 grouped(budget)
             ),
             [i] if blocks.len() == 1 => format!(
                 "{} takes {} bytes to show, more than your budget of {} \
                  bytes; ask again with a larger budget.",
-                history[*i].describe(),
+                describe(*i),
                 grouped(blocks[0].1.len()),
                 grouped(budget)
             ),
@@ -677,7 +698,7 @@ pub fn show(
                 );
                 for i in left {
                     f.push_str("\n- ");
-                    f.push_str(&history[*i].describe());
+                    f.push_str(&describe(*i));
                 }
                 f
             }
@@ -700,11 +721,11 @@ pub fn show(
         parts.push(&tail);
         let out = join(&parts);
         if out.len() <= budget || shown == 0 {
-            return match (shown, seal) {
-                // Nothing fits: the list alone, but never without saying
-                // why there are no heads
-                (0, SealCheck::Unchecked) => format!("{UNCHECKED}\n\n{tail}"),
-                (0, SealCheck::Checked) => tail,
+            // Nothing fits: the list alone, under its preface, so a list
+            // without heads or labels never goes unexplained
+            return match (shown, preface) {
+                (0, []) => tail,
+                (0, preface) => format!("{}\n\n{tail}", preface.join(" ")),
                 _ => out,
             };
         }
@@ -719,30 +740,39 @@ pub fn diff(
     b: Option<&MemoryVersion>,
     current: CurrentMemory<'_>,
 ) -> String {
+    // As `log`: when every version compared is a local copy, it is said
+    // once, not on each
+    let all_local = std::iter::once(a)
+        .chain(b)
+        .all(|v| v.source == VersionSource::LocalCopy);
+    let said = |text: String| match all_local {
+        true => format!("{LOCAL_ONLY}\n\n{text}"),
+        false => text,
+    };
     for v in std::iter::once(a).chain(b) {
-        if let Some(note) = v.unopened_note() {
-            return format!("No diff: {note}");
+        if let Some(note) = v.unopened_note(all_local) {
+            return said(format!("No diff: {note}"));
         }
     }
     let a_text = a.content().unwrap_or_default();
     let (to_name, to_text) = match b {
-        Some(b) => (b.describe(), b.content().unwrap_or_default()),
+        Some(b) => (b.describe_as(all_local), b.content().unwrap_or_default()),
         None => (TO_CURRENT.to_string(), current.content),
     };
     if a_text == to_text {
-        return format!(
+        return said(format!(
             "{} and {to_name} are the same memory: nothing changed.",
-            a.describe()
-        );
+            a.describe_as(all_local)
+        ));
     }
     let diff = line_diff(a_text, to_text);
     let (added, removed) = change_counts(&diff);
-    format!(
+    said(format!(
         "{} → {to_name} (+{added} / \u{2212}{removed} {}):\n{}\n\n{AS_STORED}",
-        a.describe(),
+        a.describe_as(all_local),
         diff_units(a_text, to_text),
         diff.trim_end()
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -1362,9 +1392,57 @@ mod tests {
             let out = show(&history, picked, cur, 10, SealCheck::Unchecked);
             assert!(out.starts_with(&format!("{UNCHECKED}\n\n")), "{out}");
             assert!(out.contains("budget of 10 bytes"), "{out}");
+            // The same list, under the other preface: these are local
+            // copies, so checked says that once instead
             let checked = show(&history, picked, cur, 10, SealCheck::Checked);
-            assert_eq!(out, format!("{UNCHECKED}\n\n{checked}"));
+            assert_eq!(
+                out.strip_prefix(UNCHECKED),
+                checked.strip_prefix(LOCAL_ONLY),
+                "{checked}"
+            );
         }
+    }
+
+    /// As `log`: when every version in view is a local copy, `show` and
+    /// `diff` say so once, not on each version (beta round 17)
+    #[test]
+    fn show_and_diff_say_local_copy_once() {
+        let label = "local copy, not sealed";
+        let history = vec![
+            local(1, 3, &lines("now", 1)),
+            local(2, 2, &lines("then", 2)),
+            local(3, 1, &lines("older", 3)),
+        ];
+        let cur = current(1, history[0].content().unwrap(), &history);
+        for picked in [&[1][..], &[1, 2], &[0, 1, 2]] {
+            let out = show(&history, picked, cur, 32_768, SealCheck::Checked);
+            assert!(!out.contains(label), "{out}");
+            assert!(out.starts_with(&format!("{LOCAL_ONLY} ")), "{out}");
+            assert_eq!(out.matches(LOCAL_ONLY).count(), 1, "{out}");
+        }
+        // Past the budget, the list too
+        let out = show(&history, &[1, 2], cur, 10, SealCheck::Checked);
+        assert!(
+            out.starts_with(&format!("{LOCAL_ONLY}\n\nNot shown")),
+            "{out}"
+        );
+        assert!(!out.contains(label), "{out}");
+        for out in [
+            diff(&history[2], Some(&history[1]), cur),
+            diff(&history[1], None, cur),
+            diff(&history[1], Some(&history[1]), cur),
+        ] {
+            assert!(out.starts_with(&format!("{LOCAL_ONLY}\n\n")), "{out}");
+            assert!(!out.contains(label), "{out}");
+        }
+
+        // Mixed: each version keeps its label, and nothing is said once
+        let mixed = vec![version(1, 3, &lines("now", 1)), history[1].clone()];
+        let cur = current(1, mixed[0].content().unwrap(), &mixed);
+        let out = show(&mixed, &[0, 1], cur, 32_768, SealCheck::Checked);
+        assert!(out.contains(label) && !out.contains(LOCAL_ONLY), "{out}");
+        let out = diff(&mixed[1], Some(&mixed[0]), cur);
+        assert!(out.contains(label) && !out.contains(LOCAL_ONLY), "{out}");
     }
 
     /// 20 of 60 lines changed, the changed ones long: past half the
