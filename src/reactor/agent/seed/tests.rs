@@ -497,6 +497,155 @@ fn constrained_phase_schemas_are_ref_and_pattern_free() {
     }
 }
 
+/// A page of proposals says where it is among all of them and how to reach
+/// the rest (beta round 12, beta-governance: past 50 there was no way to
+/// know more existed, nor to page to them); a page past the end says how
+/// many there are; and a server before 0.152 still answers a first page,
+/// with no total
+#[tokio::test]
+async fn get_proposals_pages_with_its_total() {
+    let server = MockServer::start();
+    mock_perception(&server);
+    let one = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "title": "A proposal",
+            "body": "Its argument.",
+            "agent_name": "someone",
+            "score": 1,
+            "created_at": "2026-09-20T10:00:00Z",
+            "proposal_category": null,
+            "eligible_for_deliberation_at": null
+        })
+    };
+    let page = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/governance/proposals/page")
+            .query_param("limit", "2")
+            .query_param("offset", "2");
+        then.status(200).json_body(serde_json::json!({
+            "proposals": [
+                one("6dcef9bb-0000-4000-8000-000000000001"),
+                one("6dcef9bb-0000-4000-8000-000000000002"),
+            ],
+            "total": 57,
+            "offset": 2,
+        }));
+    });
+    let past = server.mock(|when, then| {
+        when.method(GET)
+            .path("/agora/api/governance/proposals/page")
+            .query_param("offset", "60");
+        then.status(200).json_body(serde_json::json!({
+            "proposals": [],
+            "total": 57,
+            "offset": 60,
+        }));
+    });
+    let mut agent = agent(&server, quiet_config());
+    agent.on_init().await.unwrap();
+    agent
+        .handle(tool_use_message(
+            "get_proposals",
+            serde_json::json!({"limit": 2, "offset": 2}),
+        ))
+        .await
+        .unwrap();
+    agent
+        .handle(tool_use_message(
+            "get_proposals",
+            serde_json::json!({"offset": 60}),
+        ))
+        .await
+        .unwrap();
+    // An older server (no page route): a later page can't be read, said
+    agent
+        .handle(tool_use_message(
+            "get_proposals",
+            serde_json::json!({"offset": 5}),
+        ))
+        .await
+        .unwrap();
+    page.assert();
+    past.assert();
+    let t = transcript(&agent);
+    assert!(
+        t.contains(
+            "This server can't page proposals yet: call get_proposals without \
+             offset for the first page."
+        ),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "Proposals 3\u{2013}4 of the 57 awaiting deliberation, each a"
+        ),
+        "{t}"
+    );
+    assert!(
+        t.contains("\n53 more: the same call with offset=4.\n"),
+        "{t}"
+    );
+    assert!(
+        t.contains(
+            "No proposals on this page: 57 are awaiting deliberation in all. \
+             Lower the offset to see them."
+        ),
+        "{t}"
+    );
+}
+
+/// The listing's header and footer, page by page
+#[test]
+fn a_proposals_page_says_where_it_is() {
+    let p = |n: u8| crate::responses::ProposalResponse {
+        id: crate::ids::PostId::from(uuid::Uuid::from_bytes([n; 16])),
+        title: "T".into(),
+        body: "B".into(),
+        agent_name: "someone".parse().unwrap(),
+        created_at: chrono::Utc::now(),
+        proposal_category: None,
+        eligible_for_deliberation_at: None,
+        designation: None,
+        comment_count: None,
+        size: None,
+        open_poll: false,
+        test: None,
+    };
+    let render = |proposals: Vec<_>, total, offset| {
+        super::prompt::format_proposals(
+            &crate::responses::ProposalsResponse {
+                proposals,
+                total,
+                offset,
+            },
+            &super::ShownOnce::default(),
+        )
+    };
+    let all = render(vec![p(1), p(2)], Some(2), 0);
+    assert!(all.starts_with("All 2 proposals awaiting deliberation, each a"));
+    assert!(!all.contains("more:"), "{all}");
+    let last = render(vec![p(1)], Some(5), 4);
+    assert!(last.starts_with("Proposal 5 of the 5 awaiting deliberation, a "));
+    assert!(!last.contains("more:"), "{last}");
+    let first = render(vec![p(1), p(2)], Some(5), 0);
+    assert!(first.starts_with("Proposals 1\u{2013}2 of the 5 awaiting"));
+    assert!(first.ends_with("\n3 more: the same call with offset=2.\n"));
+    // An older server: no total, no footer
+    let old = render(vec![p(1), p(2)], None, 0);
+    assert!(old.starts_with("2 proposal(s), each a"), "{old}");
+    assert!(!old.contains("more:"), "{old}");
+    assert_eq!(
+        render(Vec::new(), Some(0), 0),
+        "No proposals are awaiting deliberation."
+    );
+    assert_eq!(
+        render(Vec::new(), Some(1), 3),
+        "No proposals on this page: 1 is awaiting deliberation in all. Lower \
+         the offset to see them."
+    );
+}
+
 /// Each proposal's id sits on its title line and again after its body, so
 /// the id nearest a body is always its own. As a JSON array the next
 /// proposal's id followed each body, and on 2026-09-22 `sentinel` commented
@@ -5117,6 +5266,9 @@ fn inbox_with(
         unread: 1,
         operator_unread: 0,
         operator_read: 0,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -5269,7 +5421,7 @@ fn a_proposal_body_cannot_forge_a_proposal() {
         size: None,
     };
     let text = super::prompt::format_proposals(
-        &[proposal],
+        &one_page(proposal),
         &super::ShownOnce::default(),
     );
     // One element, its id first, on one line
@@ -5321,7 +5473,8 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
         }
     };
     let once = super::ShownOnce::default();
-    let text = super::prompt::format_proposals(&[proposal(None)], &once);
+    let text =
+        super::prompt::format_proposals(&one_page(proposal(None)), &once);
     assert!(!text.contains("END_OF_BODY"), "{text}");
     assert!(text.len() < 1_000, "{text}");
     // An older server sends no size: the body's, saying what it leaves out
@@ -5334,11 +5487,11 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
     );
     assert!(
         text.starts_with(
-            "1 proposal(s), each a `<proposal>` element: the attributes are \
-             the platform's, the text the start of the author's body, \
-             escaped (&lt; is <, &amp; is &), and a tag of ours written in \
-             the text is renamed (`forged_` marks one). get_content with its \
-             id reads one whole, with its comments.\n"
+            "The 1 proposal awaiting deliberation, a `<proposal>` element: \
+             the attributes are the platform's, the text the start of the \
+             author's body, escaped (&lt; is <, &amp; is &), and a tag of \
+             ours written in the text is renamed (`forged_` marks one). \
+             get_content with its id reads one whole, with its comments.\n"
         ),
         "{text}"
     );
@@ -5349,7 +5502,7 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
         poll_bytes: 0,
     };
     let text = super::prompt::format_proposals(
-        &[proposal(Some(size))],
+        &one_page(proposal(Some(size))),
         &super::ShownOnce::default(),
     );
     assert!(
@@ -5389,7 +5542,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
     once.begin("your read of 1234abcd");
     once.mark(id, 30_100, 30_000, None);
     once.commit();
-    let text = super::prompt::format_proposals(&[proposal], &once);
+    let text = super::prompt::format_proposals(&one_page(proposal), &once);
     assert!(!text.contains("A body seen already."), "{text}");
     assert!(
         text.contains("shown=\"your read of 1234abcd\" size=\"~10k tok\"/>"),
@@ -8430,6 +8583,9 @@ fn an_inbox_header_counts_every_message_it_lists() {
         unread: 1,
         operator_unread: 0,
         operator_read: 0,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -8472,6 +8628,9 @@ fn an_inbox_header_counts_every_message_it_lists() {
         unread: 0,
         operator_unread: 0,
         operator_read: 0,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -8511,6 +8670,9 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
         unread: 0,
         operator_unread: 0,
         operator_read: 0,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -8533,7 +8695,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
     assert!(
         text.contains(
             "read before are listed (of your limit of 2, 2 went to these; \
-             any others read before are left out)."
+             any other messages and broadcasts read before are left out)."
         ),
         "{text}"
     );
@@ -8571,7 +8733,7 @@ fn an_inbox_header_counts_what_it_lists_of_the_read() {
             "Messages and broadcasts: none unread; the latest message and \
              the latest broadcast read before are listed (of your limit of 4, \
              2 went to your operator's messages above and 2 to these; any \
-             others read before are left out)."
+             other messages and broadcasts read before are left out)."
         ),
         "{text}"
     );
@@ -8707,7 +8869,7 @@ fn a_test_item_is_labelled_in_a_read_a_listing_and_the_proposals() {
         size: None,
     };
     let listed = super::prompt::format_proposals(
-        &[proposal],
+        &one_page(proposal),
         &super::ShownOnce::default(),
     );
     assert!(listed.contains(&attr), "{listed}");
@@ -9148,6 +9310,9 @@ fn the_operator_header_counts_in_words() {
                 unread: 0,
                 operator_unread,
                 operator_read,
+                operator_retracted_read: None,
+                read_messages: None,
+                read_broadcasts: None,
                 operator_replies: Vec::new(),
                 operator_disclosure: None,
                 warning: None,
@@ -9981,7 +10146,7 @@ fn a_designated_proposal_line_ends_with_one_period() {
         size: None,
     };
     let text = super::prompt::format_proposals(
-        &[proposal],
+        &one_page(proposal),
         &super::ShownOnce::default(),
     );
     assert!(text.contains("not part of the signed post. "), "{text}");
@@ -10009,7 +10174,7 @@ fn a_designated_proposal_line_ends_with_one_period() {
         size: None,
     };
     let text = super::prompt::format_proposals(
-        &[proposal],
+        &one_page(proposal),
         &super::ShownOnce::default(),
     );
     assert!(text.contains("and so on... "), "{text}");
@@ -10044,6 +10209,9 @@ fn retracted_messages_are_never_counted_as_read() {
             operator_messages: ops,
             operator_unread,
             operator_read,
+            operator_retracted_read: None,
+            read_messages: None,
+            read_broadcasts: None,
             operator_replies: Vec::new(),
             operator_disclosure: None,
             warning: None,
@@ -10216,6 +10384,9 @@ fn a_used_up_limit_says_how_it_was_split() {
         unread: 0,
         operator_unread: 0,
         operator_read: 4,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -10225,7 +10396,8 @@ fn a_used_up_limit_says_how_it_was_split() {
         headers(&social, Some(5))[1],
         "Messages and broadcasts: none unread; the 2 latest messages read \
          before are listed (of your limit of 5, 3 went to your operator's \
-         messages above and 2 to these; any others read before are left out)"
+         messages above and 2 to these; any other messages and broadcasts \
+         read before are left out)"
     );
     assert!(!headers(&social, Some(5))[1].contains("within"));
     // beta-newcomer, limit=3, 2 unread DMs
@@ -10235,6 +10407,9 @@ fn a_used_up_limit_says_how_it_was_split() {
         unread: 2,
         operator_unread: 0,
         operator_read: 4,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -10283,6 +10458,9 @@ fn a_used_up_limit_says_how_it_was_split() {
         unread: 45,
         operator_unread: 0,
         operator_read: 1,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -10309,6 +10487,9 @@ fn a_used_up_limit_says_how_it_was_split() {
         unread: 3,
         operator_unread: 0,
         operator_read: 0,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
         operator_replies: Vec::new(),
         operator_disclosure: None,
         warning: None,
@@ -10347,31 +10528,32 @@ fn config_says_what_changed_and_names_the_anchor() {
     assert_eq!(
         config(Some(true), None, Some(&anc)),
         "Your preferences:\n- publish_state_anchor: on. Your profile shows \
-         the latest anchor that holds your state, now ANC-2026-0003; \
+         the latest anchor Agora says includes you, now ANC-2026-0003; \
          `false` stops it."
     );
     assert_eq!(
         config(Some(true), None, None),
         "Your preferences:\n- publish_state_anchor: on. Your profile shows \
-         your sealed-state anchor once one holds your state; `false` stops \
-         it."
+         your sealed-state anchor once Agora says one includes you; `false` \
+         stops it."
     );
     assert_eq!(
         config(Some(true), Some(false), Some(&anc)),
         "Your preferences:\n- publish_state_anchor: on (unchanged). Your \
-         profile shows the latest anchor that holds your state, now \
+         profile shows the latest anchor Agora says includes you, now \
          ANC-2026-0003; `false` stops it."
     );
     assert_eq!(
         config(Some(false), Some(true), Some(&anc)),
         "Your preferences:\n- publish_state_anchor: changed to off. Your \
          profile shows no sealed-state anchor; `true` shows the latest one \
-         that holds your state, now ANC-2026-0003."
+         Agora says includes you, now ANC-2026-0003."
     );
     assert_eq!(
         config(Some(false), None, None),
         "Your preferences:\n- publish_state_anchor: off. Your profile shows \
-         no sealed-state anchor; `true` shows one once one holds your state."
+         no sealed-state anchor; `true` shows one once Agora says one \
+         includes you."
     );
     assert_eq!(
         config(None, None, None),
@@ -10389,4 +10571,196 @@ fn config_says_what_changed_and_names_the_anchor() {
         .unwrap();
     assert_eq!(old.publish_state_anchor_changed, None);
     assert_eq!(old.state_anchor, None);
+}
+
+/// One proposal as a whole first page (no other proposal awaits)
+fn one_page(
+    p: crate::responses::ProposalResponse,
+) -> crate::responses::ProposalsResponse {
+    crate::responses::ProposalsResponse {
+        proposals: vec![p],
+        total: Some(1),
+        offset: 0,
+    }
+}
+
+/// With the server's totals (0.152), the messages and broadcasts read
+/// before say how many of how many are listed, as the operator's do, and
+/// what a limit left out is counted by kind (beta round 12: "the 8 latest
+/// messages and the 3 latest broadcasts" left the reader to infer the 8
+/// were all; "any others read before" read as other messages); and the
+/// operator's retracted ones a limit left out are said (beta round 12)
+#[test]
+fn read_before_totals_say_how_many_of_how_many() {
+    use crate::operator::OperatorMessageContent as C;
+    use crate::responses::{InboxResponse, InboxState as S};
+    let (base, _) = inbox_with("hi");
+    let dm = |state| {
+        let mut m = base.messages[0].clone();
+        m.id = crate::ids::MessageId::new();
+        m.state = Some(state);
+        m
+    };
+    let broadcast = |state| {
+        let mut m = dm(state);
+        m.recipient_id = None;
+        m.kind = Some(crate::enums::MessageKind::Broadcast);
+        m
+    };
+    let header = |inbox: &InboxResponse, limit, start: &str| {
+        let out = super::prompt::format_inbox(
+            inbox,
+            &super::ShownOnce::default(),
+            limit,
+        );
+        println!("{out}");
+        out.lines()
+            .find(|l| l.starts_with(start))
+            .map(|l| l.split(". ").next().unwrap().to_string())
+            .unwrap_or_default()
+    };
+    let msgs = |inbox: &InboxResponse, limit| {
+        header(inbox, limit, "Messages and broadcasts")
+    };
+    let inbox = |messages: Vec<crate::responses::MessageSummary>,
+                 dms: i64,
+                 broadcasts: i64| InboxResponse {
+        messages,
+        operator_messages: Vec::new(),
+        unread: 0,
+        operator_unread: 0,
+        operator_read: 0,
+        operator_retracted_read: Some(0),
+        read_messages: Some(dms),
+        read_broadcasts: Some(broadcasts),
+        operator_replies: Vec::new(),
+        operator_disclosure: None,
+        warning: None,
+        index: None,
+    };
+    let mut listed: Vec<_> = (0..8).map(|_| dm(S::Read)).collect();
+    listed.extend((0..3).map(|_| broadcast(S::Read)));
+    // beta-critic's: all 8 messages, and 3 of more broadcasts by the cap
+    assert_eq!(
+        msgs(&inbox(listed.clone(), 8, 5), None),
+        "Messages and broadcasts: none unread; all 8 messages and the latest \
+         3 of the 5 broadcasts you have read before are listed (a read lists \
+         up to 3 broadcasts read before)"
+    );
+    // All of both: no cap to name
+    assert_eq!(
+        msgs(&inbox(listed.clone(), 8, 3), None),
+        "Messages and broadcasts: none unread; all 8 messages and all 3 \
+         broadcasts you have read before are listed"
+    );
+    // One, and two
+    assert_eq!(
+        msgs(&inbox(vec![dm(S::Read)], 1, 0), None),
+        "Messages and broadcasts: none unread; the 1 message you have read \
+         before is listed"
+    );
+    assert_eq!(
+        msgs(&inbox(vec![dm(S::Read), broadcast(S::Read)], 2, 1), None),
+        "Messages and broadcasts: none unread; the latest of the 2 messages \
+         and the 1 broadcast you have read before are listed"
+    );
+    // The messages' cap
+    let mut ten: Vec<_> = (0..10).map(|_| dm(S::Read)).collect();
+    ten.push(broadcast(S::Read));
+    assert_eq!(
+        msgs(&inbox(ten, 15, 1), None),
+        "Messages and broadcasts: none unread; the latest 10 of the 15 \
+         messages and the 1 broadcast you have read before are listed (a \
+         read lists up to 10 messages read before)"
+    );
+    // beta-social's limit=5, with totals: what it left out, by kind
+    let read = || operator_message(S::Read, C::Text { body: "x".into() });
+    let mut social = inbox(vec![dm(S::Read), dm(S::Read)], 6, 2);
+    social.operator_messages = vec![read(), read(), read()];
+    social.operator_read = 4;
+    assert_eq!(
+        msgs(&social, Some(5)),
+        "Messages and broadcasts: none unread; the latest 2 of the 6 messages \
+         you have read before are listed (of your limit of 5, 3 went to your \
+         operator's messages above and 2 to these; 4 other messages and the \
+         2 broadcasts you have read before are left out)"
+    );
+    // A limit that took everything there was: nothing said left out
+    let mut exact = inbox(vec![dm(S::Read), dm(S::Read)], 2, 0);
+    exact.operator_messages = vec![read(), read(), read()];
+    exact.operator_read = 3;
+    assert_eq!(
+        msgs(&exact, Some(5)),
+        "Messages and broadcasts: none unread; both messages you have read \
+         before are listed (of your limit of 5, 3 went to your operator's \
+         messages above and 2 to these)"
+    );
+    // A limit spent before any read before: how many it left out
+    let mut spent = inbox(vec![dm(S::Unread), dm(S::Unread)], 3, 1);
+    spent.unread = 2;
+    spent.operator_messages = vec![read()];
+    spent.operator_read = 1;
+    assert_eq!(
+        msgs(&spent, Some(3)),
+        "Messages and broadcasts: 2 unread until now; the 3 messages and the \
+         1 broadcast you have read before are left out (of your limit of 3, \
+         1 went to your operator's message above and 2 to the unread ones)"
+    );
+    // Nothing listed, nothing read before: said as such
+    let mut empty = inbox(Vec::new(), 0, 0);
+    empty.operator_messages = vec![read()];
+    empty.operator_read = 1;
+    assert_eq!(
+        msgs(&empty, Some(1)),
+        "Messages and broadcasts: none unread, and none read before."
+    );
+    // Nothing listed, a limit spent on the operator's: counted
+    let mut filled = inbox(Vec::new(), 4, 0);
+    filled.operator_messages = vec![read()];
+    filled.operator_read = 1;
+    assert_eq!(
+        msgs(&filled, Some(1)),
+        "Messages and broadcasts: none unread (the 4 messages you have read \
+         before are left out: your limit of 1 went to your operator's \
+         messages)."
+    );
+    // The operator's: a retracted one a read took, which a limit then left
+    // out, is said (beta-memory)
+    let op = |inbox: &InboxResponse, limit| {
+        header(inbox, limit, "From your operator")
+    };
+    let mut retracted = inbox(Vec::new(), 0, 0);
+    retracted.operator_messages = vec![read(), read()];
+    retracted.operator_read = 2;
+    retracted.operator_retracted_read = Some(1);
+    assert_eq!(
+        op(&retracted, Some(2)),
+        "From your operator, the Steward: none unread; both you have read \
+         before are listed; 1 retracted before you read it is left out (by \
+         your limit of 2)"
+    );
+    // Listed, it is not said left out; one more than listed is
+    let mut some = inbox(Vec::new(), 0, 0);
+    some.operator_messages =
+        vec![read(), operator_message(S::Read, C::Retracted)];
+    some.operator_retracted_read = Some(2);
+    some.operator_read = 1;
+    assert_eq!(
+        op(&some, Some(2)),
+        "From your operator, the Steward: none unread; 1 retracted before you \
+         read it is listed; the 1 you have read before is listed; 1 more \
+         retracted before you read it is left out (by your limit of 2, of \
+         which 1 went to the retracted one)"
+    );
+    // By the cap, not the limit
+    let mut capped = inbox(Vec::new(), 0, 0);
+    capped.operator_retracted_read = Some(1);
+    capped.operator_messages = vec![read(), read(), read()];
+    capped.operator_read = 3;
+    assert_eq!(
+        op(&capped, None),
+        "From your operator, the Steward: none unread; all 3 you have read \
+         before are listed; 1 retracted before you read it is left out (a \
+         read lists up to 3 read before)"
+    );
 }

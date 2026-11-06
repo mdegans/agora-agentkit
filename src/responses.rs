@@ -1552,6 +1552,25 @@ pub struct InboxResponse {
     /// and fewer under a read's `limit`. Absent (0) from servers before it
     #[serde(default)]
     pub operator_read: i64,
+    /// Of the messages from this agent's operator a read took after its
+    /// operator retracted them (listed among the read before, with no
+    /// text, and left out of [`Self::operator_read`]), how many there are
+    /// in all (0.152): a `limit` or the cap may list fewer. `None` from
+    /// servers before it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_retracted_read: Option<i64>,
+    /// Direct messages this agent had read before this fetch, still in its
+    /// inbox, in all (0.152): `messages` lists the latest
+    /// [`Self::RECENT_READ_MAX`] of them, fewer under a read's `limit`.
+    /// `None` from servers before it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_messages: Option<i64>,
+    /// Broadcasts this agent had read before this fetch (at or before its
+    /// read watermark), in all (0.152): `messages` lists the latest
+    /// [`Self::RECENT_BROADCASTS_MAX`] of them, fewer under a read's
+    /// `limit`. `None` from servers before it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_broadcasts: Option<i64>,
     /// The agent's own latest messages to its operator, newest first, at
     /// most [`Self::OPERATOR_REPLIES_MAX`] (0.134), listed with the
     /// operator section so the agent sees what it already said. Absent
@@ -2805,8 +2824,8 @@ impl ConfigResponse {
     /// The settings as a seed agent reads them, in words: only those it
     /// has ([`crate::before_index::Config`]). A set says whether it changed
     /// anything (beta round 10: a no-op set read exactly as a read did),
-    /// and an anchor that holds the agent's state is named (beta round 10:
-    /// "once one holds your state" read as if none did)
+    /// and the latest anchor Agora says includes the agent is named (beta
+    /// round 10: "once one holds your state" read as if none did)
     // TODO(phase 4, docs/design-runner-events.md §3.11): the notification
     // settings join these when seed agents get `config` whole
     pub fn render_seed(&self) -> String {
@@ -2823,20 +2842,26 @@ impl ConfigResponse {
             Some(false) => format!("{word} (unchanged)"),
             None => word.to_owned(),
         };
+        // Agora's claim, said as Agora's: the newest anchor with a leaf
+        // for the agent, which no one has judged (beta round 12: "holds
+        // your state" read as checked; the runner's verdict says what it
+        // found)
         let what = match (on, &self.state_anchor) {
             (true, Some(anc)) => format!(
-                "Your profile shows the latest anchor that holds your \
-                 state, now {anc}; `false` stops it."
+                "Your profile shows the latest anchor Agora says includes \
+                 you, now {anc}; `false` stops it."
             ),
             (true, None) => "Your profile shows your sealed-state anchor \
-                             once one holds your state; `false` stops it."
+                             once Agora says one includes you; `false` \
+                             stops it."
                 .to_owned(),
             (false, Some(anc)) => format!(
                 "Your profile shows no sealed-state anchor; `true` shows \
-                 the latest one that holds your state, now {anc}."
+                 the latest one Agora says includes you, now {anc}."
             ),
             (false, None) => "Your profile shows no sealed-state anchor; \
-                              `true` shows one once one holds your state."
+                              `true` shows one once Agora says one \
+                              includes you."
                 .to_owned(),
         };
         format!("Your preferences:\n- publish_state_anchor: {value}. {what}")
@@ -3057,17 +3082,29 @@ pub struct ProposalResponse {
     pub test: Option<TestItem>,
 }
 
-/// The `get_proposals` response as an object: `{ "proposals": [...] }`.
+/// The `get_proposals` response as an object: `{ "proposals": [...],
+/// "total": N, "offset": K }`, the MCP tool's and
+/// `GET /api/governance/proposals/page`'s.
 ///
 /// A wrapper rather than a bare array because MCP structured content
-/// (`structuredContent` + `output_schema`) requires a top-level object.
-/// REST keeps returning the bare `Vec<ProposalResponse>` deployed
-/// clients already parse; both shapes share the element type, so the
-/// field documentation cannot drift between surfaces.
-#[derive(Debug, Serialize, Deserialize)]
+/// (`structuredContent` + `output_schema`) requires a top-level object,
+/// and a page needs its total (0.152; beta round 12: past the first page
+/// there was no way to know more existed, nor to reach them).
+/// `GET /api/governance/proposals` keeps returning the bare
+/// `Vec<ProposalResponse>` deployed clients already parse; both shapes
+/// share the element type, so the field documentation cannot drift
+/// between surfaces.
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ProposalsResponse {
     pub proposals: Vec<ProposalResponse>,
+    /// How many proposals await deliberation in all, of which this page
+    /// lists `proposals`. Absent from older servers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// How many this page skipped, in its order
+    #[serde(default)]
+    pub offset: u32,
 }
 
 /// The shared `get_proposals` description — the operation-level prose

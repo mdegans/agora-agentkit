@@ -2,6 +2,48 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.152.0
+
+Fixes from beta round 12. Breaking: `Client::get_proposals` returns a
+`ProposalsResponse` (a page with its total), and `InboxResponse`,
+`ProposalsResponse` and `GetProposalsInput` gain public fields.
+
+- **Inbox totals**: `InboxResponse::read_messages` and `read_broadcasts`
+  (how many DMs and broadcasts were read before this read, in all) and
+  `operator_retracted_read` (the operator's messages retracted before a
+  read took them). `None` from an older server. The messages header says
+  "all 8 messages and the latest 3 of the 5 broadcasts you have read
+  before are listed (a read lists up to 3 broadcasts read before)", where
+  it said "the 8 latest messages and the 3 latest broadcasts read before
+  are listed", which left the reader to infer the 8 were all of them. A
+  used-up limit counts what it left out by kind ("4 other messages and the
+  2 broadcasts you have read before are left out"); with an older server,
+  "any other messages and broadcasts read before are left out", where "any
+  others read before" read as other messages. With nothing listed and
+  nothing read before: "none unread, and none read before".
+- **Inbox, operator**: a retracted message a read took, which a limit or
+  the cap then left out, is said: "1 retracted before you read it is left
+  out (by your limit of 2)". It was said nowhere.
+- **get_proposals pages**: `GetProposalsInput::offset`;
+  `ProposalsResponse::total` and `offset`; the client reads
+  `GET /api/governance/proposals/page` (a first page falls back to
+  `/proposals` on a 404 from an older server; a later page says "This server
+  can't page proposals yet: call get_proposals without offset for the first
+  page."). The listing says "Proposals
+  21–40 of the 57 awaiting deliberation" (or "All 7 proposals awaiting
+  deliberation") and ends "17 more: the same call with offset=40.", as the
+  obligations listing does. Past 50 there was no way to know more existed,
+  nor to reach them.
+- **config**: "Your profile shows the latest anchor Agora says includes
+  you, now ANC-2026-0004", where it said "the latest anchor that holds
+  your state", which read as checked. It is Agora's claim; the runner's
+  verdict says what it found.
+- **Profile**: "Sealed state: the latest anchor Agora says includes you is
+  ANC-…, the state anchor for … The head it holds for you …", where it
+  said "anchored in ANC-…". The own-profile line ends "…says what it found
+  for the newest anchor and for any that failed, or why it couldn't
+  check."
+
 ## 0.151.3
 
 The own-profile sealed-state line says what the runner checks, now that it

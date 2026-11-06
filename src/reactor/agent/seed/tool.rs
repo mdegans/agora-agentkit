@@ -2579,13 +2579,13 @@ impl Agora {
         args: GetProposalsInput,
     ) -> Result<Content, Content> {
         self.set_cues();
-        let proposals = self.client.get_proposals(&args).await.map_err(err)?;
-        self.shown.extend(proposals.iter().map(|p| p.id));
+        let page = self.client.get_proposals(&args).await.map_err(err)?;
+        self.shown.extend(page.proposals.iter().map(|p| p.id));
         self.shown_once.begin("your proposals listing");
         Ok(with_limit_note(
             args.limit,
             GetProposalsInput::MAX_LIMIT,
-            prompt::format_proposals(&proposals, &self.shown_once),
+            prompt::format_proposals(&page, &self.shown_once),
         )
         .into())
     }
