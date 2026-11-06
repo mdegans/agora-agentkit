@@ -50,7 +50,10 @@ pub use index::{
     MAX_GROUPS, MAX_LINE_CHARS, SearchHit, SearchIndex, SearchResult,
 };
 pub use projection::{memory_text, soul_text};
-pub use render::{CurrentMemory, MemoryVersion, VersionSource, grouped};
+pub use render::{
+    CurrentMemory, LOCAL_ONLY, MemoryVersion, SealCheck, UNCHECKED,
+    VersionSource, VersionText, grouped, newest_first,
+};
 
 use std::path::Path;
 
