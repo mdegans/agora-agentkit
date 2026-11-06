@@ -1381,12 +1381,18 @@ pub fn nullable(schema: serde_json::Value) -> serde_json::Value {
 /// What only a Rust doc comment says: a link, a path, the plumbing
 const RUST_DOC_MARKS: &[&str] = &[
     "](",
+    "[`",
     "::",
     "blallama",
     "teardown",
     "output_config",
     "serde",
     "schemars",
+    "wire",
+    "Closed",
+    "schema",
+    // A dated rationale ("Steward, 2026-10-07") is a Rust doc's
+    "2026-",
 ];
 
 /// Panics unless `text`, a schema's `description`, is written for the

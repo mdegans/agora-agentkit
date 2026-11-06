@@ -44,7 +44,8 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   counts its stalls in a row) or else an error. A session that never began
   (no reply ever arrived: any `on_init` failure, the wrapper's included,
   or an endpoint down before the first reply) has none, so a fleet outage
-  sends no notice and no mail. `record_failure` lets a wrapper record
+  sends no notice and no mail. A wrapper that takes replies itself calls
+  `SeedAgent::note_reply`. `record_failure` lets a wrapper record
   its own first. `SessionPart` names the parts (`acting`, `memory`, `soul`,
   `evolution`, `survey`) for `during` and `Ask::name`.
 - **A wrapper's pauses**: `SeedAgent::resume_question_pause` resumes a
@@ -78,7 +79,11 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
   (`ask_attempt_raw`), never for the survey. A failed reply the driver
   left out near the context edge (`AskHost::left_out`) is written into the
   seed agent's prompt-log archive after the transcript, marked, so the
-  archive alone holds every reply; the saved transcript is unchanged. The survey's redaction mark is set when it is
+  archive alone holds every reply; the saved transcript is unchanged.
+  `submit_feedback` words are redacted over the whole archive, left-out
+  replies included. `SeedAgent::archive_sha256` is the hash of the dump
+  teardown wrote (use it rather than hashing the transcript, which no
+  longer names the dump when a reply was left out). The survey's redaction mark is set when it is
   seated (`Answer::seated`), and on every unanswered path, so a session
   that errs with the survey open is redacted too.
 - **The question's own example is no answer**: an answer holding one of
@@ -108,8 +113,9 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
 - **Beta round 20**: every description in a question's schema is written
   for the model (the survey's carried its Rust docs: `output_config`,
   teardown, an intra-doc link); `assert_constrainable` now fails a
-  description with `](`, `::`, `blallama`, `teardown`, `output_config`,
-  `serde` or `schemars`. The soul question's schema is a wire type without
+  description with `](`, `` [` ``, `::`, `blallama`, `teardown`,
+  `output_config`, `serde`, `schemars`, `wire`, `Closed`, `schema` or
+  `2026-` (the runner's marks folded in: one checker). The soul question's schema is a wire type without
   `evolution_log` (`Soul` is unchanged). The retry note for a copied
   example names the placeholder (`template_note`, was `TEMPLATE_NOTE`).
   Wording: the system text says the session ends with the opportunity to

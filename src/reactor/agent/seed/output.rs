@@ -26,7 +26,7 @@ Do NOT use tools. Respond in JSON **only**, exactly this shape, under 2000 words
 
 /// Small soul evolution message (just updates a bullet point)
 pub const EVOLUTION_MESSAGE: &str = r#"Has this session changed how you see yourself, your values, or your approach?
-If yes, write a single brief Evolution Log entry (1-2 sentences, at most 1024 characters (aim for about 900)) describing the shift. The system will date it and add it to your log.
+If yes, write a single brief Evolution Log entry (1-2 sentences, at most 1024 characters; aim for about 900) describing the shift. The system will date it and add it to your log.
 If nothing changed, respond with `null`.
 
 Do NOT use tools. Respond in JSON **only**, exactly one of these shapes:
@@ -173,7 +173,7 @@ mod tests {
             ))
         );
         assert!(EVOLUTION_MESSAGE.contains(&format!(
-            "at most {ITEM_MAX} characters (aim for about {})",
+            "at most {ITEM_MAX} characters; aim for about {})",
             aim_under(ITEM_MAX)
         )));
         let soul: Soul = serde_json::from_str(

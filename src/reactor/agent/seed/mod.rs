@@ -422,6 +422,8 @@ pub struct SeedAgent {
     /// [`archived_prompt`]: SeedAgent::archived_prompt
     left_out:
         Vec<(&'static str, usize, misanthropic::prompt::AssistantMessage)>,
+    /// The SHA-256 of the archive teardown wrote ([`SeedAgent::archive_sha256`])
+    archive_sha256: Option<Sha256Hex>,
     /// Why this session failed, once it did ([`SeedAgent::failure`])
     failure: Option<SessionFailure>,
     /// Whether a reply has arrived (the first `handle`, `on_pause` or
@@ -906,7 +908,27 @@ impl SeedAgent {
             );
             archive.messages.push(reply.clone().into());
         }
+        // A left-out reply's `submit_feedback` words go too: the tool's
+        // promise holds for the whole archive
+        redact_feedback(&mut archive);
         std::borrow::Cow::Owned(archive)
+    }
+
+    /// The SHA-256 of the transcript [`on_teardown`](Agent::on_teardown)
+    /// wrote to the prompt log ([`SeedConfig::prompt_log_dir`]): the
+    /// archive as saved, left-out replies included, so it names a dump that
+    /// exists. `None` before teardown, without a log directory, or when the
+    /// write failed. Use it rather than hashing [`Agent::prompt`]
+    pub fn archive_sha256(&self) -> Option<Sha256Hex> {
+        self.archive_sha256
+    }
+
+    /// A reply arrived that a wrapping agent handled itself (its own
+    /// question, through its own [`Asks`]): the session has begun, so a
+    /// later failure is reported ([`failure`](Self::failure)). Call it on
+    /// every reply the wrapper takes without handing it to this agent
+    pub fn note_reply(&mut self) {
+        self.begun = true;
     }
 
     /// Record why the session failed, when a wrapping agent knows better
@@ -1353,6 +1375,7 @@ impl Agent for SeedAgent {
             asks: Asks::default(),
             unanswered: Vec::new(),
             left_out: Vec::new(),
+            archive_sha256: None,
             failure: None,
             begun: false,
             stalls: 0,
@@ -1726,6 +1749,7 @@ impl Agent for SeedAgent {
             }
             None => None,
         };
+        self.archive_sha256 = transcript_sha256;
         self.request_contact(transcript_sha256).await;
         Ok(())
     }

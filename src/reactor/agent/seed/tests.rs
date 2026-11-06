@@ -12107,3 +12107,89 @@ async fn an_anonymous_survey_is_indistinguishable_from_none() {
         assert_eq!(session(&server, Some(answer)).await, never, "{answer}");
     }
 }
+
+/// The archive's sha is the one the prompt log wrote, which names the dump
+/// on disk; with a reply left out of the transcript it differs from the
+/// transcript's own hash, which names no dump
+#[tokio::test]
+async fn the_archive_sha_names_the_dump_written() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    assert_eq!(agent.archive_sha256(), None);
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    let mut bad = text_with_usage("not json", 120_000);
+    bad.usage.output_tokens = 3_000;
+    agent.handle(bad).await.unwrap();
+    agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let sha = agent.archive_sha256().expect("written");
+    let archive = agent.archived_prompt().into_owned();
+    assert_eq!(prompt_sha256(&archive).unwrap(), sha.to_string());
+    assert_ne!(prompt_sha256(agent.prompt()).unwrap(), sha.to_string());
+    fn names(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                names(&path, out);
+            } else {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    names(dir.path(), &mut files);
+    assert!(
+        files.iter().any(|f| f.contains(&sha.to_string())),
+        "{files:?} vs {sha}"
+    );
+}
+
+/// A wrapper that takes replies itself says so, and the session counts as
+/// begun: a failure after it is reported
+#[tokio::test]
+async fn a_wrappers_reply_begins_the_session() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent.note_reply();
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), Some(&SessionFailure::Error));
+}
+
+/// A left-out reply that called `submit_feedback` is archived with its
+/// words redacted, as the tool promises for the transcript
+#[tokio::test]
+async fn a_left_out_feedback_call_is_redacted_in_the_archive() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    let mut call = tool_use_message(
+        "submit_feedback",
+        serde_json::json!({"body": "SECRET GRIPES"}),
+    );
+    call.usage.input_tokens = 120_000;
+    call.usage.output_tokens = 3_000;
+    agent.handle(call).await.unwrap();
+    agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let archive = dumped(dir.path());
+    assert!(archive.contains("left out of the transcript"), "{archive}");
+    assert!(!archive.contains("SECRET GRIPES"), "{archive}");
+    assert!(archive.contains(FEEDBACK_REDACTED));
+}
