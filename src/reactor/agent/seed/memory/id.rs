@@ -68,7 +68,10 @@ impl fmt::Display for MemoryIdKey {
 /// One memory text's id: HMAC-SHA256 under the agent's [`MemoryIdKey`].
 /// Shown as `mem-` and its first ten hex digits; held and serialized whole
 /// (64 hex digits)
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
 pub struct MemoryId([u8; 32]);
 
 impl MemoryId {
@@ -143,31 +146,45 @@ impl FromStr for MemoryId {
     }
 }
 
-impl Serialize for MemoryId {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&self.to_hex())
+impl TryFrom<String> for MemoryId {
+    type Error = HistoryRefError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
-impl<'de> Deserialize<'de> for MemoryId {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
+/// All 64 hex digits, without `mem-`
+impl From<MemoryId> for String {
+    fn from(id: MemoryId) -> Self {
+        id.to_hex()
     }
 }
 
-/// A head as shown: its first [`HEAD_SHOWN`] hex digits
+/// A head as shown: its first [`HEAD_SHOWN`] hex digits. The one copy of
+/// that truncation
 pub fn short_head(head: &Sha256Hex) -> String {
     let mut s = head.to_hex();
     s.truncate(HEAD_SHOWN);
     s
 }
 
-/// A version as an agent names it: a memory id (`mem-` optional) or a
-/// sealed head, by [`MIN_REF_HEX`] hex digits or more of its start
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A memory id (mem-3f9a1c07be) or a head, at least 6 hex digits of either
+// The doc comment above is the schema's description, which a model reads.
+// Parsed from a string, written as one: the schema is a plain string,
+// inline, with no `pattern` (the parse says what is wrong)
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(try_from = "String", into = "String")]
+#[schemars(inline)]
 pub struct HistoryRef {
     /// Lowercase
     hex: String,
@@ -244,43 +261,17 @@ impl From<&MemoryId> for HistoryRef {
     }
 }
 
-impl Serialize for HistoryRef {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
+impl TryFrom<String> for HistoryRef {
+    type Error = HistoryRefError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 
-impl<'de> Deserialize<'de> for HistoryRef {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        s.parse().map_err(serde::de::Error::custom)
-    }
-}
-
-// Hand-written so it is inline (a derive's `$ref` is banned in tool
-// schemas, agora CLAUDE.md), and a plain string with no `pattern`: the
-// parse says what is wrong
-impl schemars::JsonSchema for HistoryRef {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "HistoryRef".into()
-    }
-
-    fn schema_id() -> std::borrow::Cow<'static, str> {
-        concat!(module_path!(), "::HistoryRef").into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "description": "A memory id (mem-3f9a1c07be) or a head, at least \
-                            6 hex digits of either",
-        })
+impl From<HistoryRef> for String {
+    fn from(r: HistoryRef) -> Self {
+        r.to_string()
     }
 }
 
@@ -304,6 +295,9 @@ impl fmt::Display for Candidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     One(Candidate),
+    /// Written with `mem-`, it matches no memory id but starts one head the
+    /// agent was shown: that head's version, with [`Resolution::note`]
+    ViaHead(Sha256Hex),
     /// More than one: the agent is shown them, to give more digits
     Ambiguous(Vec<Candidate>),
     None,
@@ -323,20 +317,54 @@ pub fn resolve<'a>(
             found.push(c);
         }
     }
+    // A `mem-` ref looks at heads only when no memory id matches it, so a
+    // head the agent was shown is never "not found"
+    let fallback = found.is_empty() && r.is_memory();
     for head in heads {
         let c = Candidate::Head(*head);
-        if r.matches_head(head) && !found.contains(&c) {
+        let matches = if fallback {
+            head.to_hex().starts_with(&r.hex)
+        } else {
+            r.matches_head(head)
+        };
+        if matches && !found.contains(&c) {
             found.push(c);
         }
     }
-    match found.len() {
-        0 => Resolution::None,
-        1 => Resolution::One(found.pop().expect("one")),
+    match (found.len(), fallback) {
+        (0, _) => Resolution::None,
+        (1, true) => match found.pop() {
+            Some(Candidate::Head(head)) => Resolution::ViaHead(head),
+            _ => unreachable!("only heads are found on the fallback"),
+        },
+        (1, false) => Resolution::One(found.pop().expect("one")),
         _ => Resolution::Ambiguous(found),
     }
 }
 
 impl Resolution {
+    /// The version it names, if one
+    pub fn candidate(&self) -> Option<Candidate> {
+        match self {
+            Self::One(c) => Some(c.clone()),
+            Self::ViaHead(head) => Some(Candidate::Head(*head)),
+            Self::Ambiguous(_) | Self::None => None,
+        }
+    }
+
+    /// What an agent is told of a `mem-` ref that named a head. `None`
+    /// otherwise
+    pub fn note(&self, r: &HistoryRef) -> Option<String> {
+        let Self::ViaHead(head) = self else {
+            return None;
+        };
+        Some(format!(
+            "\"{r}\" matches no memory id, but it is the start of head {}, \
+             so that version is shown.",
+            short_head(head)
+        ))
+    }
+
     /// What an agent is told of an ambiguous `r`: the candidates, to give
     /// more digits. `None` unless ambiguous
     pub fn ambiguity(&self, r: &HistoryRef) -> Option<String> {
@@ -500,6 +528,45 @@ mod tests {
         let r: HistoryRef = "999999".parse().unwrap();
         assert_eq!(resolve(&r, [&a], [&head]), Resolution::None);
         assert_eq!(Resolution::None.ambiguity(&r), None);
+        assert_eq!(Resolution::None.candidate(), None);
+
+        // `mem-` with a head's digits: the head, said so
+        let r: HistoryRef = "mem-121212".parse().unwrap();
+        let res = resolve(&r, [&a], [&head, &other_head]);
+        assert_eq!(res, Resolution::ViaHead(other_head));
+        assert_eq!(res.candidate(), Some(Candidate::Head(other_head)));
+        let note = res.note(&r).unwrap();
+        assert!(note.contains("head 121212121212"), "{note}");
+        // …but only when no memory id matches
+        let r: HistoryRef = "mem-ababab".parse().unwrap();
+        assert_eq!(
+            resolve(&r, [&a], [&head]),
+            Resolution::One(Candidate::Memory(a))
+        );
+    }
+
+    /// Derived: a plain inline string, its description the type's doc
+    #[test]
+    fn the_ref_schema_is_a_plain_string() {
+        let schema =
+            serde_json::to_value(schemars::schema_for!(HistoryRef)).unwrap();
+        assert_eq!(schema["type"], "string");
+        assert!(schema.get("pattern").is_none());
+        assert!(
+            schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("mem-3f9a1c07be")
+        );
+        assert_eq!(
+            serde_json::to_value("mem-ABCDEF".parse::<HistoryRef>().unwrap())
+                .unwrap(),
+            serde_json::json!("mem-abcdef")
+        );
+        assert!(
+            serde_json::from_value::<HistoryRef>(serde_json::json!("abc"))
+                .is_err()
+        );
     }
 
     #[test]
