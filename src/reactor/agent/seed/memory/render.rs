@@ -455,11 +455,15 @@ pub fn log(
     out
 }
 
-/// Whether a diff is too large to stand for the version it describes: over
-/// half its size (the keyframe threshold)
-fn mostly_rewritten(diff: &str, version: &str) -> bool {
-    diff.len() * 2 > version.len()
+/// Whether a version is shorter shown whole than as its diff. A diff of
+/// long changed lines can pass half the version's size with most of it
+/// unchanged (beta round 16), so the test is the length, not a share
+fn whole_is_shorter(diff: &str, version: &str) -> bool {
+    version.len() < diff.len()
 }
+
+/// What a version shown whole in place of its diff is labelled with
+const SHORTER_WHOLE: &str = "shown in full (shorter than its changes)";
 
 /// `, n versions between not asked for`, or nothing
 fn between(n: usize) -> String {
@@ -511,14 +515,8 @@ fn anchored(
         }
     };
     let diff = line_diff(content, current.content);
-    if mostly_rewritten(&diff, content) {
-        whole(
-            &format!(
-                "{}{gap}, shown in full: mostly rewritten since",
-                v.describe()
-            ),
-            content,
-        )
+    if whole_is_shorter(&diff, content) {
+        whole(&format!("{}{gap}, {SHORTER_WHOLE}", v.describe()), content)
     } else {
         format!("{} → {TO_CURRENT}{gap}:\n{}", v.describe(), diff.trim_end())
     }
@@ -529,9 +527,9 @@ fn anchored(
 ///
 /// One version is shown whole, unless it is the current memory. Of
 /// several, the newest opens with what changed from it to `current`, or
-/// whole when that is over half its size or `current` is older; each older
-/// one is what changed from it to the next newer one picked, or whole
-/// ("mostly rewritten") past the same threshold. A version that couldn't
+/// whole when that is shorter or `current` is older; each older one is
+/// what changed from it to the next newer one picked, or whole when that
+/// is shorter. A version that couldn't
 /// be opened says so, and the diffs pass over it. Past `budget`, the rest
 /// are listed by id and size, never cut.
 pub fn show(
@@ -600,10 +598,10 @@ pub fn show(
                         )
                     } else {
                         let diff = line_diff(content, newer_content);
-                        if mostly_rewritten(&diff, content) {
+                        if whole_is_shorter(&diff, content) {
                             whole(
                                 &format!(
-                                    "{}{gap}, shown in full: mostly rewritten",
+                                    "{}{gap}, {SHORTER_WHOLE}",
                                     v.describe()
                                 ),
                                 content,
@@ -1273,8 +1271,40 @@ mod tests {
         }
     }
 
+    /// 20 of 60 lines changed, the changed ones long: past half the
+    /// version's size, but shorter than it, so a diff (beta round 16)
     #[test]
-    fn a_mostly_rewritten_version_is_shown_whole() {
+    fn long_changed_lines_still_diff() {
+        let text = |tag: &str| -> String {
+            (0..60)
+                .map(|i| {
+                    if i < 20 {
+                        format!(
+                            "{i} {tag} {}\n",
+                            "long changed words ".repeat(8)
+                        )
+                    } else {
+                        format!("{i} kept {}\n", "steady words here ".repeat(8))
+                    }
+                })
+                .collect()
+        };
+        let (now, then) = (text("now"), text("then"));
+        let history = vec![version(1, 5, &now), version(2, 4, &then)];
+        let diff = line_diff(&then, &now);
+        assert!(diff.len() * 2 > then.len() && diff.len() < then.len() * 2);
+        let out = show(
+            &history,
+            &[1, 0],
+            current(1, &now, &history),
+            1 << 20,
+            SealCheck::Checked,
+        );
+        assert!(!out.contains("shown in full"), "{out}");
+    }
+
+    #[test]
+    fn a_version_shorter_than_its_changes_is_shown_whole() {
         let now = lines("now", 20);
         let then = lines("then", 0);
         let older = lines("older", 20);
@@ -1294,7 +1324,7 @@ mod tests {
         assert_eq!(
             blocks[1].lines().next().unwrap(),
             format!(
-                "{}, shown in full: mostly rewritten since:",
+                "{}, shown in full (shorter than its changes):",
                 history[1].describe()
             )
         );
@@ -1302,7 +1332,7 @@ mod tests {
         assert_eq!(
             blocks[2].lines().next().unwrap(),
             format!(
-                "{}, shown in full: mostly rewritten:",
+                "{}, shown in full (shorter than its changes):",
                 history[2].describe()
             )
         );
