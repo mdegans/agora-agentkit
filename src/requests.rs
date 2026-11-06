@@ -1308,6 +1308,15 @@ pub struct GetProposalsInput {
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub sort: Option<ProposalSort>,
+    /// How many to skip, in the same order: for paging (0.152; default 0)
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_forgiving::forgiving_option_u32"
+    )]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<u32>"))]
+    #[cfg_attr(feature = "clap", arg(long))]
+    pub offset: Option<u32>,
 }
 
 impl GetProposalsInput {

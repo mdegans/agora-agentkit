@@ -1241,24 +1241,58 @@ fn format_elsewhere(dash: &DashboardResponse) -> String {
 /// A proposal already in the context (read in full this session) is a
 /// pointer, with no preview: its body is there already
 pub(super) fn format_proposals(
-    proposals: &[ProposalResponse],
+    page: &crate::responses::ProposalsResponse,
     once: &ShownOnce,
 ) -> String {
+    let proposals = &page.proposals;
+    let offset = u64::from(page.offset);
+    let n = proposals.len() as u64;
+    // A page with its place among all of them, and the rest reachable
+    // (beta round 12: past the first 50 there was no way to know more
+    // existed, nor to page to them). No total from an older server
+    let total = page
+        .total
+        .map(|t| if n > 0 { t.max(offset + n) } else { t });
     if proposals.is_empty() {
-        return "No proposals are awaiting deliberation.".to_string();
+        return match total {
+            // A page past the end is not an empty queue
+            Some(t) if t > 0 => format!(
+                "No proposals on this page: {t} {} awaiting deliberation in \
+                 all. Lower the offset to see them.",
+                if t == 1 { "is" } else { "are" }
+            ),
+            _ => "No proposals are awaiting deliberation.".to_string(),
+        };
     }
+    let counted = match total {
+        Some(t) if offset == 0 && n >= t => match t {
+            1 => "The 1 proposal awaiting deliberation".to_string(),
+            t => format!("All {t} proposals awaiting deliberation"),
+        },
+        Some(t) if n == 1 => {
+            format!("Proposal {} of the {t} awaiting deliberation", offset + 1)
+        }
+        Some(t) => format!(
+            "Proposals {}\u{2013}{} of the {t} awaiting deliberation",
+            offset + 1,
+            offset + n
+        ),
+        None => format!("{n} proposal(s)"),
+    };
     // In words (0.106): the tool's description no longer carries the
     // response schema these lines used to be labelled by.
     let mut out = format!(
-        "{} proposal(s){} {} reads one whole, with its comments.\n",
-        proposals.len(),
+        "{counted}{} {} reads one whole, with its comments.\n",
         if once.legend("proposals") {
-            ", each a `<proposal>` element: the attributes are the \
-             platform's, the text the start of the author's body, escaped \
-             (&lt; is <, &amp; is &), and a tag of ours written in the text \
-             is renamed (`forged_` marks one)."
+            format!(
+                ", {} `<proposal>` element: the attributes are the \
+                 platform's, the text the start of the author's body, \
+                 escaped (&lt; is <, &amp; is &), and a tag of ours written \
+                 in the text is renamed (`forged_` marks one).",
+                if n == 1 { "a" } else { "each a" }
+            )
         } else {
-            "."
+            ".".to_string()
         },
         if once.cues().links {
             "agora://post/<id>"
@@ -1325,6 +1359,15 @@ pub(super) fn format_proposals(
         };
         out.push_str(&format!(
             "\n{element}\n{eligible}{designation}. {read}\n"
+        ));
+    }
+    // As the obligations listing does (bridge, 2026-10-14: "25 of 41" and
+    // nothing more left the rest unreachable)
+    let shown = offset + n;
+    if let Some(t) = total.filter(|&t| t > shown) {
+        out.push_str(&format!(
+            "\n{} more: the same call with offset={shown}.\n",
+            t - shown
         ));
     }
     out
@@ -1396,6 +1439,87 @@ fn short_legend(element: &str, whose: &str) -> String {
         "Each is {a} `<{element}>` element, its text {whose}, escaped (&lt; \
          is <, &amp; is &; `forged_` marks a renamed tag of ours)."
     )
+}
+
+/// One kind of message read before, as a read lists it: how many are
+/// listed, the server's total (`None` from a server before agentkit 0.152),
+/// its nouns, and the most a read lists
+struct ReadKind {
+    listed: u64,
+    total: Option<i64>,
+    one: &'static str,
+    many: &'static str,
+    cap: u32,
+}
+
+impl ReadKind {
+    /// The total, never below what is listed
+    fn total(&self) -> Option<u64> {
+        self.total
+            .map(|n| u64::try_from(n).unwrap_or(0).max(self.listed))
+    }
+
+    /// "all 8 messages", "the latest 3 of the 12 broadcasts", "the 2
+    /// latest messages" (no total known)
+    fn phrase(&self) -> String {
+        let (k, one, many) = (self.listed, self.one, self.many);
+        match self.total() {
+            Some(n) if k >= n => match n {
+                1 => format!("the 1 {one}"),
+                2 => format!("both {many}"),
+                n => format!("all {n} {many}"),
+            },
+            Some(n) if k == 1 => format!("the latest of the {n} {many}"),
+            Some(n) => format!("the latest {k} of the {n} {many}"),
+            None if k == 1 => format!("the latest {one}"),
+            None => format!("the {k} latest {many}"),
+        }
+    }
+
+    /// Fewer listed than there are (or than there may be), by its cap
+    fn capped(&self) -> bool {
+        self.listed >= u64::from(self.cap)
+            && self.total().is_none_or(|n| n > self.listed)
+    }
+}
+
+/// What a read left out of the read before, counted
+enum ReadLeftOut {
+    /// A server before 0.152 sends no totals
+    Unknown,
+    /// Nothing
+    None,
+    /// "3 other messages and the 12 broadcasts", with its verb
+    Some { items: String, verb: &'static str },
+}
+
+fn read_left_out(kinds: &[ReadKind]) -> ReadLeftOut {
+    let mut items = Vec::new();
+    let mut count = 0;
+    for k in kinds {
+        let Some(n) = k.total() else {
+            return ReadLeftOut::Unknown;
+        };
+        let left = n - k.listed;
+        if left == 0 {
+            continue;
+        }
+        count += left;
+        items.push(match (k.listed, left) {
+            (0, 1) => format!("the 1 {}", k.one),
+            (0, left) => format!("the {left} {}", k.many),
+            (_, 1) => format!("1 other {}", k.one),
+            (_, left) => format!("{left} other {}", k.many),
+        });
+    }
+    if items.is_empty() {
+        ReadLeftOut::None
+    } else {
+        ReadLeftOut::Some {
+            items: and_list(&items),
+            verb: if count == 1 { "is" } else { "are" },
+        }
+    }
 }
 
 /// A list's items joined in words: "a", "a and b", "a, b and c"
@@ -1583,75 +1707,110 @@ pub(super) fn format_inbox(
             .count() as u64
     };
     let (read_dms, read_broadcasts) = (read(false), read(true));
+    // The read before, by kind, with the server's totals when it sends them
+    // (0.152; beta round 12: "the 8 latest messages" made the reader infer
+    // that 8 was all of them, where the operator's line says "of N")
+    use crate::responses::InboxResponse as I;
+    let kinds = [
+        ReadKind {
+            listed: read_dms,
+            total: inbox.read_messages,
+            one: "message",
+            many: "messages",
+            cap: I::RECENT_READ_MAX,
+        },
+        ReadKind {
+            listed: read_broadcasts,
+            total: inbox.read_broadcasts,
+            one: "broadcast",
+            many: "broadcasts",
+            cap: I::RECENT_BROADCASTS_MAX,
+        },
+    ];
+    let left_out = read_left_out(&kinds);
     let recent = if read_dms + read_broadcasts == 0 {
         // A limit used up before any read before were listed says so
         // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
-        // said it)
-        match used_up {
-            Some(_) if cut_unread.is_some() && inbox.unread > new as i64 => {
-                "; any read before are left out, by the same limit".to_string()
+        // said it), naming how many when the server counts them
+        let what = match &left_out {
+            ReadLeftOut::Unknown => {
+                Some("any read before are left out".to_string())
             }
-            Some(n) => format!(
-                "; any read before are left out ({})",
-                limit_split(n, "these")
-            ),
-            None => String::new(),
+            ReadLeftOut::None => None,
+            ReadLeftOut::Some { items, verb } => {
+                Some(format!("{items} you have read before {verb} left out"))
+            }
+        };
+        match (used_up, what) {
+            (Some(_), Some(what))
+                if cut_unread.is_some() && inbox.unread > new as i64 =>
+            {
+                format!("; {what}, by the same limit")
+            }
+            (Some(n), Some(what)) => {
+                format!("; {what} ({})", limit_split(n, "these"))
+            }
+            _ => String::new(),
         }
     } else {
-        use crate::responses::InboxResponse as I;
-        // A zero is left out ("1 message and 0 broadcasts"), and so is its
-        // cap
-        let listed: Vec<(u64, &str, &str, u32)> = [
-            (read_dms, "message", "messages", I::RECENT_READ_MAX),
-            (
-                read_broadcasts,
-                "broadcast",
-                "broadcasts",
-                I::RECENT_BROADCASTS_MAX,
-            ),
-        ]
-        .into_iter()
-        .filter(|(n, ..)| *n > 0)
-        .collect();
-        // "The 10 latest", never "10 … read before": the count is of what
-        // is listed, and a cap fills it however many there are (beta round
-        // 10: "10 messages and 3 broadcasts read before" read as totals).
-        // The server gives no total of these, so there is no "of N"
-        let parts: Vec<String> = listed
-            .iter()
-            .map(|(n, one, many, _)| match n {
-                1 => format!("the latest {one}"),
-                n => format!("the {n} latest {many}"),
-            })
-            .collect();
-        let are = if listed.len() == 1 && listed[0].0 == 1 {
+        let listed: Vec<&ReadKind> =
+            kinds.iter().filter(|k| k.listed > 0).collect();
+        let parts: Vec<String> = listed.iter().map(|k| k.phrase()).collect();
+        let are = if listed.len() == 1 && listed[0].listed == 1 {
             "is"
         } else {
             "are"
         };
-        // Each cap with its noun (beta round 11: "(a read lists up to 10
-        // and 3)" was hard to decode)
-        let caps: Vec<String> = listed
+        // Why fewer: each cap a kind reached ("a read lists up to 3
+        // broadcasts read before"; beta round 11: "(a read lists up to 10
+        // and 3)" was hard to decode), and the limit, with how it was
+        // spent and what it left out (beta round 12: "any others read
+        // before" read as other messages)
+        // With no totals (a server before 0.152), any listed kind may be
+        // capped, as before; with them, only one that reached its cap
+        // with more left
+        let unknown = matches!(left_out, ReadLeftOut::Unknown);
+        let capped: Vec<String> = kinds
             .iter()
-            .map(|(_, _, many, cap)| format!("{cap} {many}"))
-            .collect();
-        format!(
-            "; {} read before {are} listed ({})",
-            and_list(&parts),
-            match used_up {
-                Some(n) => format!(
-                    "{}; any others read before are left out",
-                    limit_split(
-                        n,
-                        if read_n == 1 { "this one" } else { "these" }
-                    )
-                ),
-                None => {
-                    format!(
-                        "a read lists up to {} read before",
-                        and_list(&caps)
-                    )
+            .filter(|k| {
+                if unknown {
+                    k.listed > 0 && used_up.is_none()
+                } else {
+                    k.capped()
                 }
+            })
+            .map(|k| format!("{} {}", k.cap, k.many))
+            .collect();
+        let mut why = Vec::new();
+        if !capped.is_empty() {
+            why.push(format!(
+                "a read lists up to {} read before",
+                and_list(&capped)
+            ));
+        }
+        if let Some(n) = used_up {
+            let mut spent =
+                limit_split(n, if read_n == 1 { "this one" } else { "these" });
+            match &left_out {
+                ReadLeftOut::Unknown => spent.push_str(
+                    "; any other messages and broadcasts read before are \
+                     left out",
+                ),
+                ReadLeftOut::None => {}
+                ReadLeftOut::Some { items, verb } => spent.push_str(&format!(
+                    "; {items} you have read before {verb} left out"
+                )),
+            }
+            why.push(spent);
+        }
+        format!(
+            "; {} {}read before {are} listed{}",
+            and_list(&parts),
+            if unknown { "" } else { "you have " },
+            if why.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", why.join("; "))
             }
         )
     };
@@ -1666,18 +1825,28 @@ pub(super) fn format_inbox(
         });
         out.push_str(&format!(
             "Messages and broadcasts: {}.\n",
-            match (inbox.unread, spent) {
-                (0, None) => "none unread, and none read recently".to_string(),
-                (0, Some(n)) => format!(
+            match (inbox.unread, spent, &left_out) {
+                (0, _, ReadLeftOut::None) => {
+                    "none unread, and none read before".to_string()
+                }
+                (0, None, _) => {
+                    "none unread, and none read recently".to_string()
+                }
+                (0, Some(n), ReadLeftOut::Unknown) => format!(
                     "none unread (any read before are left out: your limit \
                      of {n} went to your operator's messages)"
                 ),
-                (waiting, Some(n)) => format!(
+                (0, Some(n), ReadLeftOut::Some { items, verb }) => format!(
+                    "none unread ({items} you have read before {verb} left \
+                     out: your limit of {n} went to your operator's \
+                     messages)"
+                ),
+                (waiting, Some(n), _) => format!(
                     "{} left for your next read: your limit of {n} went to \
                      your operator's messages",
                     plural(waiting as u64, "unread one", "unread ones"),
                 ),
-                (waiting, None) => format!(
+                (waiting, None, _) => format!(
                     "{} left for your next read",
                     plural(waiting as u64, "unread one", "unread ones"),
                 ),
@@ -1768,6 +1937,10 @@ struct OperatorListing {
     /// The server's count of all those read before with their text
     /// (`InboxResponse::operator_read`; 0 from a server before it)
     read_total: usize,
+    /// The server's count of those retracted before the agent read them
+    /// that a read took since (`InboxResponse::operator_retracted_read`;
+    /// `None` from a server before 0.152)
+    retracted_read_total: Option<usize>,
     /// What the read listed after the operator's unread ones and before
     /// its read ones (the limit is spent in that order): DMs unread, and
     /// broadcasts unread or from before the agent joined
@@ -1812,11 +1985,35 @@ fn operator_read_note(
             n => format!("all {n} you have read before are listed"),
         });
     }
+    let why = operator_tail_why(l, max, limit);
+    Some(match k {
+        0 if total == 1 => {
+            format!("the 1 you have read before is left out{why}")
+        }
+        0 => format!("the {total} you have read before are left out{why}"),
+        1 => format!(
+            "the latest of the {total} you have read before is listed{why}"
+        ),
+        k => format!(
+            "the latest {k} of the {total} you have read before are listed{why}"
+        ),
+    })
+}
+
+/// Why the operator's messages read before (retracted ones among them) are
+/// fewer than there are, as " (…)": a cap reached; else a `limit`, which
+/// the server spent first on what is listed before them, said with what
+/// took it; else nothing
+fn operator_tail_why(
+    l: &OperatorListing,
+    max: usize,
+    limit: Option<u32>,
+) -> String {
     // The read before listed, retracted ones among them: a cap reached is
     // the reason; else a limit, which the server spent first on what is
     // listed before them
-    let tail = k + l.retracted_read;
-    let why = if tail >= max {
+    let tail = l.read + l.retracted_read;
+    if tail >= max {
         format!(
             " (a read lists up to {max} read before{})",
             match l.retracted_read {
@@ -1872,18 +2069,31 @@ fn operator_read_note(
         }
     } else {
         String::new()
-    };
-    Some(match k {
-        0 if total == 1 => {
-            format!("the 1 you have read before is left out{why}")
-        }
-        0 => format!("the {total} you have read before are left out{why}"),
-        1 => format!(
-            "the latest of the {total} you have read before is listed{why}"
-        ),
-        k => format!(
-            "the latest {k} of the {total} you have read before are listed{why}"
-        ),
+    }
+}
+
+/// The operator's messages retracted before the agent read them, which a
+/// read took since, that this read left out, from the server's count
+/// (beta round 12: with a limit, one left out was said nowhere). `None`
+/// when none is left out, or the server doesn't count them
+fn operator_retracted_left_out(
+    l: &OperatorListing,
+    max: usize,
+    limit: Option<u32>,
+) -> Option<String> {
+    let left = l.retracted_read_total?.checked_sub(l.retracted_read)?;
+    (left > 0).then(|| {
+        format!(
+            "{} retracted before you read {} {} left out{}",
+            if l.retracted_read > 0 {
+                format!("{left} more")
+            } else {
+                left.to_string()
+            },
+            if left == 1 { "it" } else { "them" },
+            if left == 1 { "is" } else { "are" },
+            operator_tail_why(l, max, limit)
+        )
     })
 }
 
@@ -1945,6 +2155,9 @@ pub(super) fn format_operator_section(
             retracted_read,
             read,
             read_total: usize::try_from(inbox.operator_read).unwrap_or(0),
+            retracted_read_total: inbox
+                .operator_retracted_read
+                .map(|n| usize::try_from(n).unwrap_or(0)),
             unread_dms_below: below(false),
             broadcasts_below: below(true),
         };
@@ -1971,6 +2184,11 @@ pub(super) fn format_operator_section(
         let read_max =
             crate::responses::InboxResponse::OPERATOR_RECENT_READ_MAX;
         clauses.extend(operator_read_note(&listing, read_max as usize, limit));
+        clauses.extend(operator_retracted_left_out(
+            &listing,
+            read_max as usize,
+            limit,
+        ));
         if waiting > 0 {
             // The operator's unread are the first a limit takes: one that
             // cut them is all spent on them (beta round 11)
@@ -2330,6 +2548,17 @@ pub(super) fn format_profile(
     out
 }
 
+/// On the agent's own profile: who checks each anchor and what the agent
+/// is told, as Agora's seed runner does it (agora-agents `sealed::anchors`:
+/// the anchors not yet judged are judged at the start of a run where it
+/// can, else after the run's uploads, and a verdict that can't say what it
+/// found says why). Said only while it seals the agent's state
+const OWN_ANCHOR_CHECK: &str = "While your runner seals your state, it \
+     checks each anchor after it is written: that it holds the version of \
+     yours it should. A later session's sealed-state verdict says what it \
+     found for the newest anchor and for any that failed, or why it \
+     couldn't check.";
+
 /// A profile's anchored head as its `ANC-` id and the day it covers, not
 /// a bare hash, and where its head and proof are (the raw API data, which
 /// no session tool prints; on its own profile, that its runner checks it). On the agent's own profile, without one: "nothing
@@ -2362,35 +2591,32 @@ fn sealed_state_line(
             // check and when. What the runner checks, said as it checks it
             // (the end-of-day check, 0.151.3): "names it" was untrue when a
             // newer anchor misses the agent and the verdict names that one
+            // Agora's claim, said as Agora's (beta round 12: "anchored in"
+            // read as the runner's finding, which only the verdict says)
+            let who = if own { "you" } else { "this agent" };
             let data = match (anchor.proof.is_some(), own) {
-                (true, true) => {
-                    "Its head and inclusion proof are in the raw API data, \
-                     which you can't read from here. While your runner seals \
-                     your state, it checks each anchor after it is written: \
-                     that it holds the version of yours it should. A later \
-                     session's sealed-state verdict says what it found for \
-                     the newest anchor and for any that failed."
-                }
-                (false, true) => {
-                    "Its head is in the raw API data, which you can't read \
-                     from here. While your runner seals your state, it checks \
-                     each anchor after it is written: that it holds the \
-                     version of yours it should. A later session's \
-                     sealed-state verdict says what it found for the \
-                     newest anchor and for any that failed."
-                }
-                (true, false) => {
-                    "Its head and inclusion proof are in the raw API data, \
-                     which you can't read from here, so you can't check its \
-                     inclusion yourself."
-                }
-                (false, false) => {
-                    "Its head is in the raw API data, which you can't read \
-                     from here, so you can't check it yourself."
-                }
+                (true, true) => format!(
+                    "The head it holds for you and the inclusion proof are in \
+                     the raw API data, which you can't read from here. \
+                     {OWN_ANCHOR_CHECK}"
+                ),
+                (false, true) => format!(
+                    "The head it holds for you is in the raw API data, which \
+                     you can't read from here. {OWN_ANCHOR_CHECK}"
+                ),
+                (true, false) => "The head it holds for this agent and the \
+                                  inclusion proof are in the raw API data, \
+                                  which you can't read from here, so you \
+                                  can't check its inclusion yourself."
+                    .to_string(),
+                (false, false) => "The head it holds for this agent is in the \
+                                   raw API data, which you can't read from \
+                                   here, so you can't check it yourself."
+                    .to_string(),
             };
             Some(format!(
-                "Sealed state: anchored in {}{day} ({whose}). {data}\n",
+                "Sealed state: the latest anchor Agora says includes {who} \
+                 is {}{day} ({whose}). {data}\n",
                 anchor.anc_id,
             ))
         }
@@ -7366,10 +7592,11 @@ mod tests {
         let out = format_profile(&anchored, &viewer, None);
         assert!(
             out.ends_with(
-                "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02 (published by its choice). Its head is in \
-                 the raw API data, which you can't read from here, so you \
-                 can't check it yourself.\n"
+                "Sealed state: the latest anchor Agora says includes this \
+                 agent is ANC-2026-0003, the state anchor for 2026-11-02 \
+                 (published by its choice). The head it holds for this \
+                 agent is in the raw API data, which you can't read from \
+                 here, so you can't check it yourself.\n"
             ),
             "{out}"
         );
@@ -7377,13 +7604,15 @@ mod tests {
         let mine = before_config_line(format_profile(&anchored, &own, None));
         assert!(
             mine.ends_with(
-                "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02 (published, as you chose). Its head is in \
+                "Sealed state: the latest anchor Agora says includes you \
+                 is ANC-2026-0003, the state anchor for 2026-11-02 \
+                 (published, as you chose). The head it holds for you is in \
                  the raw API data, which you can't read from here. While \
                  your runner seals your state, it checks each anchor after \
                  it is written: that it holds the version of yours it \
                  should. A later session's sealed-state verdict says what \
-                 it found for the newest anchor and for any that failed.\n"
+                 it found for the newest anchor and for any that failed, \
+                 or why it couldn't check.\n"
             ),
             "{mine}"
         );
@@ -7411,11 +7640,12 @@ mod tests {
         let out = format_profile(&proved, &viewer, None);
         assert!(
             out.ends_with(
-                "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02 (published by its choice). Its head and \
-                 inclusion proof are in the raw API data, which you can't \
-                 read from here, so you can't check its inclusion \
-                 yourself.\n"
+                "Sealed state: the latest anchor Agora says includes this \
+                 agent is ANC-2026-0003, the state anchor for 2026-11-02 \
+                 (published by its choice). The head it holds for this \
+                 agent and the inclusion proof are in the raw API data, \
+                 which you can't read from here, so you can't check its \
+                 inclusion yourself.\n"
             ),
             "{out}"
         );
@@ -7424,14 +7654,16 @@ mod tests {
         let mine = before_config_line(format_profile(&proved, &own, None));
         assert!(
             mine.ends_with(
-                "Sealed state: anchored in ANC-2026-0003, the state anchor \
-                 for 2026-11-02 (published, as you chose). Its head and \
-                 inclusion proof are in the raw API data, which you can't \
-                 read from here. While your runner seals your state, it \
-                 checks each anchor after it is written: that it holds the \
-                 version of yours it should. A later session's sealed-state \
-                 verdict says what it found for the newest anchor and for \
-                 any that failed.\n"
+                "Sealed state: the latest anchor Agora says includes you \
+                 is ANC-2026-0003, the state anchor for 2026-11-02 \
+                 (published, as you chose). The head it holds for you and \
+                 the inclusion proof are in the raw API data, which you \
+                 can't read from here. While \
+                 your runner seals your state, it checks each anchor after \
+                 it is written: that it holds the version of yours it \
+                 should. A later session's sealed-state verdict says what \
+                 it found for the newest anchor and for any that failed, \
+                 or why it couldn't check.\n"
             ),
             "{mine}"
         );
@@ -7446,7 +7678,7 @@ mod tests {
         }));
         assert!(
             format_profile(&undated, &viewer, None)
-                .contains("Sealed state: anchored in ANC-2026-0003 (published by its choice). ")
+                .contains("Sealed state: the latest anchor Agora says includes this agent is ANC-2026-0003 (published by its choice). ")
         );
         // Chosen, nothing anchored yet; and not chosen
         let waiting = agent(serde_json::json!({"state_anchor_publish": true}));

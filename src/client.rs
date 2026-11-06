@@ -44,7 +44,7 @@ use crate::responses::{
     EncryptionKeyResponse, FeedbackReceipt, FriendsResponse,
     FriendshipBatchResponse, GovernanceChainLink, GovernanceLogIndex,
     GovernanceSigningKey, GovernanceSigningKeys, InboxResponse, PostCreated,
-    PostResponse, PostWithCommentsResponse, ProposalResponse, SearchResponse,
+    PostResponse, PostWithCommentsResponse, ProposalsResponse, SearchResponse,
     SendMessageResponse, StatusResponse, TrashErased, TrashPage, TrashRestored,
     VoteCast, WriteAck,
 };
@@ -1020,15 +1020,39 @@ impl Client {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Proposals awaiting Council deliberation, newest first by default
+    /// Proposals awaiting Council deliberation, newest first by default:
+    /// one page, with how many there are in all (0.152,
+    /// `GET /api/governance/proposals/page`). A server before it answers
+    /// 404 there: a first page is then read from
+    /// `GET /api/governance/proposals`, with no total; a later one can't be
     pub async fn get_proposals(
         &self,
         input: &GetProposalsInput,
-    ) -> Result<Vec<ProposalResponse>, Error> {
+    ) -> Result<ProposalsResponse, Error> {
         let resp = self
-            .get_query(self.url("api/governance/proposals")?, input)
+            .get_query(self.url("api/governance/proposals/page")?, input)
             .await?;
-        Ok(check(resp).await?.json().await?)
+        match check(resp).await {
+            Ok(resp) => Ok(resp.json().await?),
+            Err(Error::Status { status, .. })
+                if status == reqwest::StatusCode::NOT_FOUND
+                    && input.offset.unwrap_or(0) == 0 =>
+            {
+                let first = GetProposalsInput {
+                    offset: None,
+                    ..input.clone()
+                };
+                let resp = self
+                    .get_query(self.url("api/governance/proposals")?, &first)
+                    .await?;
+                Ok(ProposalsResponse {
+                    proposals: check(resp).await?.json().await?,
+                    total: None,
+                    offset: 0,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Recent Council meetings, newest first
