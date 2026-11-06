@@ -96,9 +96,39 @@ pub fn seat_unused_reply(
             )
         })
         .collect();
-    prompt.push_message(turn)?;
+    seat_assistant(prompt, turn)?;
     if !results.is_empty() {
         prompt.push_message((Role::User, results))?;
+    }
+    Ok(())
+}
+
+/// Seat an assistant `turn`. After a paused turn (seated so the next
+/// request continues it) the reply continues it: merged into it where a
+/// second assistant turn may not follow, appended where it may (after a
+/// `server_tool_use`). One copy, for a resumed pause and for a reply after
+/// one
+pub fn seat_assistant(
+    prompt: &mut Prompt,
+    turn: impl Into<misanthropic::prompt::Message>,
+) -> Result<(), TurnOrderError> {
+    let turn: misanthropic::prompt::Message = turn.into();
+    // Only the paused-partial case merges: an assistant turn after one
+    // with no client tool call in it. Anything else (a tool call left
+    // unanswered, say) is a real bug, and errs as `push_message` says
+    let paused_partial = prompt.messages.last().is_some_and(|last| {
+        last.role == Role::Assistant
+            && turn.role == Role::Assistant
+            && !last.content.iter().any(|b| b.tool_use().is_some())
+            && matches!(
+                last.may_precede(&turn),
+                Err(TurnOrderError::BadTransition { .. })
+            )
+    });
+    if paused_partial {
+        prompt.seat(turn, &mut None)?;
+    } else {
+        prompt.push_message(turn)?;
     }
     Ok(())
 }
@@ -199,8 +229,7 @@ pub async fn default_handle<A: Agent>(
         }
         {
             let (_, prompt) = agent.parts();
-            prompt
-                .push_message(turn)
+            seat_assistant(prompt, turn)
                 .map_err(|e| A::Error::from(boxed(e)))?;
         }
         let notes = agent.drain_notifications();
@@ -214,8 +243,7 @@ pub async fn default_handle<A: Agent>(
 
     // Dispatch the tool calls; seat all results as one user turn.
     let (tools, prompt) = agent.parts();
-    prompt
-        .push_message(response.inner)
+    seat_assistant(prompt, response.inner)
         .map_err(|e| A::Error::from(boxed(e)))?;
     let mut results = Vec::with_capacity(calls.len());
     let mut progressed = false;
@@ -352,8 +380,7 @@ pub trait Agent: Sized + Send {
         response: response::Message,
     ) -> Result<Control, Self::Error> {
         let (_, prompt) = self.parts();
-        prompt
-            .push_message(response.inner)
+        seat_assistant(prompt, response.inner)
             .map_err(|e| Self::Error::from(boxed(e)))?;
         Ok(Control::Continue)
     }
@@ -532,14 +559,17 @@ pub trait Agent: Sized + Send {
 /// begin; the wrapper asks what it wants on the same transcript, then calls
 /// [`begin_epilogue`](Epilogue::begin_epilogue) and hands the responses back
 /// to [`Agent::handle`] until the next `Done`.
+#[async_trait::async_trait]
 pub trait Epilogue: Agent {
     /// Hold the epilogue for [`begin_epilogue`](Epilogue::begin_epilogue).
     /// Call before the first [`Agent::handle`]
     fn hold_epilogue(&mut self);
 
     /// Begin the held epilogue: [`Control::Continue`] with its turn seated,
-    /// or [`Control::Done`] when there is none this session
-    fn begin_epilogue(&mut self) -> Result<Control, Self::Error>;
+    /// or [`Control::Done`] when there is none this session (or no room
+    /// for it). Async since 0.157: the epilogue is a question, seated by
+    /// the [`ask`](super::ask) driver
+    async fn begin_epilogue(&mut self) -> Result<Control, Self::Error>;
 }
 
 /// What the reactor should do after [`Agent::handle`] / [`Agent::on_quiesce`].
@@ -553,6 +583,36 @@ pub enum Control {
     Stalled,
     /// The session is over.
     Done(Outcome),
+}
+
+/// Why a session ended as failed ([`Outcome::Failed`]), for the agent to be
+/// told at its next session start (Steward, 2026-11-06), and for an
+/// operator's alert. Categories, a question's name and a round only: never
+/// what was said. Persisted in a session journal's `ended` line
+/// (`reactor::journal`), so it reads back as written.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionFailure {
+    /// The API refused a reply (`stop_reason: refusal`), which ends any
+    /// session (Steward, 2026-11-06)
+    Refused {
+        /// `"acting"`, or the question's name (`"memory"`, `"survey"`)
+        during: String,
+        /// The acting round (1-based), when acting
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        round: Option<usize>,
+        /// The model that refused
+        model: String,
+        /// The refused response's id
+        response_id: String,
+    },
+    /// The reactor's stall cap: acting, or the memory rewrite, got nothing
+    /// usable in a row
+    Stalled { during: String },
+    /// No room left in the context for the memory rewrite
+    NoRoom { during: String },
+    /// Inference or another error, as far as the agent can tell
+    Error,
 }
 
 /// How a finished agent's session resolved.
@@ -688,6 +748,34 @@ mod tests {
             ],
             "{tail}"
         );
+    }
+
+    /// `seat_assistant` merges only a paused partial: after an assistant
+    /// turn holding a client tool call nobody answered, a second assistant
+    /// turn still errs, as it always did
+    #[test]
+    fn seat_assistant_merges_only_a_paused_partial() {
+        let mut prompt = Prompt::default();
+        prompt.push_message((Role::User, "act")).unwrap();
+        seat_assistant(&mut prompt, (Role::Assistant, "Let me")).unwrap();
+        seat_assistant(&mut prompt, (Role::Assistant, " look.")).unwrap();
+        assert_eq!(prompt.messages.len(), 2, "merged");
+
+        let mut prompt = Prompt::default();
+        prompt.push_message((Role::User, "act")).unwrap();
+        let call: misanthropic::prompt::Message =
+            serde_json::from_value(serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "toolu_1",
+                             "name": "agora", "input": {}}]
+            }))
+            .unwrap();
+        prompt.push_message(call).unwrap();
+        assert!(
+            seat_assistant(&mut prompt, (Role::Assistant, "more")).is_err(),
+            "an unanswered tool_use is a bug, not a pause"
+        );
+        assert_eq!(prompt.messages.len(), 2);
     }
 
     /// An unclipped thinking-only reply keeps its thought, closed by the

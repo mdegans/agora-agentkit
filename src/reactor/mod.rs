@@ -21,8 +21,8 @@ pub use agent::cache;
 #[cfg(feature = "seed")]
 pub use agent::seed;
 pub use agent::{
-    Agent, Control, Epilogue, Outcome, State, default_handle,
-    seat_unused_reply, seat_user,
+    Agent, Control, Epilogue, Outcome, SessionFailure, State, default_handle,
+    seat_assistant, seat_unused_reply, seat_user,
 };
 
 mod backend;
@@ -39,6 +39,9 @@ pub mod journal;
 #[cfg(feature = "fs-storage")]
 pub use journal::SessionJournal;
 
+#[cfg(feature = "schemars")]
+pub mod ask;
+pub mod gauge;
 pub mod inference;
 
 pub mod stop;

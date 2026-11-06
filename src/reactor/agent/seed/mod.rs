@@ -18,6 +18,8 @@
 //! [`on_init`]: Agent::on_init
 //! [`on_teardown`]: Agent::on_teardown
 
+mod asks;
+pub use asks::SessionPart;
 mod elements;
 mod gauge;
 mod keyring;
@@ -67,12 +69,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use misanthropic::model::ModelInfo;
-use misanthropic::prompt::{
-    Prompt,
-    message::Block,
-    output::{Effort, OutputConfig},
-    thinking::Thinking,
-};
+use misanthropic::prompt::{Prompt, output::Effort, thinking::Thinking};
 use misanthropic::response::{self, StopReason};
 use misanthropic::tool::{
     MethodDef, Notifications, ServerMethodDef, Tool, ToolBox, WebFetch,
@@ -85,11 +82,12 @@ use crate::client::Client;
 use crate::crypto::SigningKey;
 use crate::govlog::Sha256Hex;
 use crate::ids::{AgentId, ContactRequestId, FeedbackId, PostId};
+use crate::reactor::ask::{self, Asks, Mark, Unanswered};
 use crate::reactor::{
-    Agent, Control, Epilogue, Outcome, RetryAfter, State, default_handle,
-    inference::Quirks, seat_unused_reply, seat_user,
+    Agent, Control, Epilogue, Outcome, RetryAfter, SessionFailure, State,
+    default_handle, inference::Quirks, seat_unused_reply, seat_user,
 };
-use crate::requests::{RequestContactPayload, SubmitFeedbackPayload};
+use crate::requests::RequestContactPayload;
 use tool::MAX_LISTING;
 
 /// Per-process context cloned into every [`SeedAgent`] — see
@@ -183,9 +181,7 @@ pub struct SeedConfig {
     pub context_window: u64,
 }
 
-/// [`SeedConfig::context_window`]'s default: the smallest window an agent
-/// on the platform is expected to have
-pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
+pub use crate::reactor::gauge::DEFAULT_CONTEXT_WINDOW;
 
 impl Default for SeedConfig {
     fn default() -> Self {
@@ -272,56 +268,24 @@ impl SeedState {
 
 impl State for SeedState {}
 
-/// Where the session is. `Acting` is the default tool loop; the rest are
-/// the phase tail, each one structured-output turn.
+/// Where the session is. `Acting` is the default tool loop; then the
+/// closing questions ([`asks`]), one structured-output turn each, driven by
+/// [`Asks`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Acting {
         rounds_left: usize,
     },
-    Reflect,
-    Mutate,
-    Evolve,
-    /// The tail is done but for the survey, held for [`Epilogue`]
+    /// Asking the closing questions: the memory rewrite, a mutation or an
+    /// evolution entry, the survey
+    Asking,
+    /// The tail is done but for the survey, held for [`Epilogue`]. The
+    /// wrapper asks its own questions here, through its own [`Asks`] and
+    /// [`ask::handle`]: it must not hand this agent a reply until
+    /// [`Epilogue::begin_epilogue`] has seated the survey. One that does
+    /// is refused with an error naming the phase ([`Agent::handle`],
+    /// [`Agent::on_truncate`], [`Agent::on_pause`]), never taken as acting.
     Held,
-    Survey,
-}
-
-/// The end of the transcript as the survey found it. The survey question
-/// joins a trailing user turn when there is one (a wrapper's tool results,
-/// say), so the mark is a block as well as a message.
-#[derive(Debug, Clone, Copy)]
-struct SurveyMark {
-    messages: usize,
-    /// Blocks of the last message, when that message is a user turn the
-    /// question was added to
-    blocks: Option<usize>,
-}
-
-impl SurveyMark {
-    fn at(prompt: &Prompt) -> Self {
-        let blocks = prompt
-            .messages
-            .last()
-            .filter(|last| {
-                last.role == misanthropic::prompt::message::Role::User
-            })
-            .map(|last| last.content.len());
-        Self {
-            messages: prompt.messages.len(),
-            blocks,
-        }
-    }
-
-    /// Cut the survey, and everything after it, out of `prompt`
-    fn redact(self, prompt: &mut Prompt) {
-        prompt.messages.truncate(self.messages);
-        if let (Some(blocks), Some(last)) =
-            (self.blocks, prompt.messages.last_mut())
-        {
-            last.content.truncate(blocks);
-        }
-    }
 }
 
 /// What is left of a `submit_feedback` call in the transcript: the tool's
@@ -331,7 +295,7 @@ pub const FEEDBACK_REDACTED: &str =
     "[anonymous feedback: removed from the transcript]";
 
 /// Cut what every `submit_feedback` call said out of `prompt` (0.80), as
-/// [`SurveyMark::redact`] does an anonymous survey: at teardown, after the
+/// [`Mark::redact`] does an anonymous survey: at teardown, after the
 /// last request, before the transcript is archived or saved. The server
 /// stores feedback without the agent's id; this keeps the runner's own
 /// record from re-attaching it.
@@ -448,8 +412,30 @@ pub struct SeedAgent {
     /// The live community slugs, fetched at `on_init` — validates soul
     /// mutations.
     communities: Vec<String>,
+    /// The closing questions ([`asks`]), asked one per turn
+    asks: Asks<SeedAgent>,
+    /// Closing questions that ended without an answer this session
+    unanswered: Vec<(&'static str, Unanswered)>,
+    /// Failed replies the driver left out of the transcript near the
+    /// context edge, for the prompt-log archive ([`archived_prompt`])
+    ///
+    /// [`archived_prompt`]: SeedAgent::archived_prompt
+    left_out:
+        Vec<(&'static str, usize, misanthropic::prompt::AssistantMessage)>,
+    /// The SHA-256 of the archive teardown wrote ([`SeedAgent::archive_sha256`])
+    archive_sha256: Option<Sha256Hex>,
+    /// Why this session failed, once it did ([`SeedAgent::failure`])
+    failure: Option<SessionFailure>,
+    /// Whether a reply has arrived (the first `handle`, `on_pause` or
+    /// `on_truncate`): a session that never began (any `on_init` failure,
+    /// the wrapper's too, or an endpoint down before any reply) has no
+    /// [`failure`](SeedAgent::failure). The fleet-outage case stays quiet
+    begun: bool,
+    /// Replies in a row this agent returned [`Control::Stalled`] for: at
+    /// the reactor's cap, a session torn down short of complete stalled out
+    stalls: usize,
     /// Where the survey begins, for redaction at teardown
-    survey_mark: Option<SurveyMark>,
+    survey_mark: Option<Mark>,
     /// The agent answered the survey asking to be contacted: keep it
     contact_me: bool,
     /// The feedback row to file a contact request for at teardown
@@ -464,12 +450,6 @@ pub struct SeedAgent {
     context: ContextGauge,
     /// Ids shown this session, shared with the tool for short-id lookups
     shown: ShownIds,
-    /// Failed attempts at the current closing phase, and the last failure,
-    /// for the last-attempt rescue and [`Agent::stall_reason`]
-    phase_failures: usize,
-    last_failure: Option<String>,
-    /// The current closing phase's `max_tokens` before any clamp
-    phase_budget: u32,
     /// Acting turns in a row whose every call was refused for its input
     /// before anything was read ([`MAX_FREE_REFUSED_TURNS`])
     refused_streak: usize,
@@ -551,18 +531,6 @@ fn every_call_refused(prompt: &Prompt) -> bool {
 /// stall cap can't see it, because resuming is progress. Matches the runaway
 /// guard misanthropic's own server-tool loop uses.
 const MAX_PAUSES: usize = 5;
-
-/// The error result a tool call gets in a closing-phase turn
-const NOT_RUN_NOW: &str =
-    "Not run: no tools can be used in this turn. Nothing was done.";
-
-/// The error result a tool call gets in a turn clipped at `max_tokens`
-const NOT_RUN_CLIPPED: &str =
-    "Not run: this turn was cut off at the length limit. Nothing was done.";
-
-/// The least `max_tokens` a closing phase is sent with (see
-/// `SeedAgent::phase_floor`)
-const MIN_PHASE_TOKENS: u32 = 1_024;
 
 /// The error result a tool call gets when acting ends because the context
 /// is nearly full. It asks for what the memory rewrite most needs: where
@@ -670,10 +638,8 @@ impl SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<(), SeedError> {
-        self.state
-            .prompt
-            .push_message(response.inner)
-            .map(|_| ())
+        // A resumed pause after another continues it (one copy of the merge)
+        crate::reactor::seat_assistant(&mut self.state.prompt, response.inner)
             .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
@@ -735,18 +701,21 @@ impl SeedAgent {
         })
     }
 
-    /// Resume a paused turn: seat the partial assistant turn (the one holding
-    /// the `server_tool_use` block) so the next request continues the tool
-    /// instead of re-running it, and count the resumption against
-    /// [`MAX_PAUSES`].
+    /// Resume a paused server-tool turn (a web search still working): seat
+    /// the partial assistant turn, so the next request continues the tool
+    /// instead of re-running it, and count the resumption against the
+    /// session-wide [`MAX_PAUSES`]. Past it, the partial is taken back out
+    /// and the turn is [`Control::Stalled`].
     ///
-    /// Past the cap nothing is seated and the acting phase ends — the session
-    /// still reflects, writes memory, and completes; it just stops chasing a
-    /// turn that won't settle.
-    fn resume_pause(
+    /// Phase-independent: it never touches the phase or begins the memory
+    /// rewrite. For a wrapping agent's own questions (its `asks` active,
+    /// this agent `Held` or not yet past acting), whose pauses share this
+    /// session's budget; [`Agent::on_pause`] is for this agent's own turns.
+    pub fn resume_question_pause(
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
+        self.begun = true;
         self.pauses += 1;
         if self.pauses > MAX_PAUSES {
             tracing::warn!(
@@ -756,12 +725,7 @@ impl SeedAgent {
                 "server-tool pause cap reached; abandoning the paused turn"
             );
             self.drop_abandoned_turn();
-            return match self.phase {
-                Phase::Acting { .. } => self.begin_reflect(),
-                // The tail owns its own turn: drop the partial and let the
-                // reactor's stall cap bound the retries.
-                _ => Ok(Control::Stalled),
-            };
+            return Ok(Control::Stalled);
         }
         // Info, not debug: each resumption is a billed round-trip (a whole
         // extra batch on the round-major path), and it's the only signal
@@ -773,6 +737,23 @@ impl SeedAgent {
         );
         self.seat_response(response)?;
         Ok(Control::Continue)
+    }
+
+    /// [`resume_question_pause`](Self::resume_question_pause) for this
+    /// agent's own turns: past the cap, acting ends and the memory rewrite
+    /// begins; a question's turn stalls, and the driver counts a failed
+    /// attempt (the reactor's stall cap bounds the memory rewrite's)
+    async fn resume_pause(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, SeedError> {
+        let acting = matches!(self.phase, Phase::Acting { .. })
+            && !self.asks.is_active();
+        let control = self.resume_question_pause(response)?;
+        if acting && control == Control::Stalled {
+            return self.begin_reflect().await;
+        }
+        Ok(control)
     }
 
     /// Take the abandoned paused turn back out of the prompt: every trailing
@@ -791,35 +772,6 @@ impl SeedAgent {
         }
     }
 
-    /// Seat a phase instruction with [`seat_user`] and set the phase's token
-    /// budget. Clears the previous phase's
-    /// `output_config` format (callers re-add one where it's cache-safe) but
-    /// keeps its effort: thinking stays adaptive across phases, and without
-    /// the effort a phase would think at the model's default.
-    fn seat_phase(
-        &mut self,
-        text: &str,
-        max_tokens: u32,
-    ) -> Result<Control, SeedError> {
-        self.phase_failures = 0;
-        self.last_failure = None;
-        self.phase_budget = max_tokens;
-        self.state.prompt.max_tokens =
-            NonZeroU32::new(max_tokens).expect("nonzero");
-        if !self.fit_max_tokens() {
-            return Ok(self.out_of_room());
-        }
-        let prompt = &mut self.state.prompt;
-        prompt.output_config = prompt
-            .output_config
-            .take()
-            .and_then(|config| config.effort)
-            .map(OutputConfig::effort);
-        seat_user(prompt, text.to_string())
-            .map(|()| Control::Continue)
-            .map_err(|e| SeedError::Prompt(e.to_string()))
-    }
-
     /// Seat a tool-calling turn the round budget has no room for, each call
     /// answered "not run", so the next instruction lands in that new message
     fn seat_unrun_calls(
@@ -834,187 +786,33 @@ impl SeedAgent {
         .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
-    /// Constrain the next response to `T`'s schema — only where changing
-    /// `output_config` doesn't invalidate the prefix cache (blallama); on
-    /// canonical Anthropic the instruction + parser carry the contract and
-    /// Haiku complies without the grammar.
-    fn constrain<T: schemars::JsonSchema>(&mut self) {
-        if self.quirk().output_config_cache_safe {
-            let prompt = &mut self.state.prompt;
-            *prompt = std::mem::take(prompt).structured_output::<T>();
-        }
-    }
-
-    /// Seat the unusable `reply` and a model-facing failure after it, and
-    /// stall — the reactor's stall cap is the retry budget.
-    fn phase_failure(
+    /// A clipped acting turn: seated with its calls answered "not run",
+    /// the warning after it, and a stall, so the reactor's cap bounds the
+    /// retries
+    fn acting_clipped(
         &mut self,
         reply: &response::Message,
-        msg: &str,
     ) -> Result<Control, SeedError> {
-        tracing::debug!(phase = ?self.phase, error = msg, "phase retry");
-        self.phase_failures += 1;
-        self.last_failure = Some(msg.to_string());
-        let not_run = match reply.stop_reason {
-            Some(StopReason::MaxTokens) => NOT_RUN_CLIPPED,
-            _ => NOT_RUN_NOW,
-        };
-        // Near the edge, seating the failed reply would leave the retry no
-        // room to answer in. Leave it out instead: the retry note joins the
-        // phase's own turn, which costs that tail on a prefix cache but
-        // gives the retry its whole budget back. A memory rewrite is worth
-        // more than the cache.
-        let closing = !matches!(self.phase, Phase::Acting { .. });
-        let unseat =
-            closing && self.context.phase_room() < u64::from(self.phase_budget);
-        if unseat {
-            let held = self.context.get();
-            self.context
-                .set(held.saturating_sub(reply.usage.output_tokens));
-            tracing::info!(
-                event_type = "phase_retry_unseated",
-                agent = %self.state.soul.name,
-                phase = ?self.phase,
-                held = self.context.get(),
-                window = self.context.window(),
-                "failed reply left out so the retry fits"
-            );
-        }
-        if closing {
-            self.state.prompt.max_tokens =
-                NonZeroU32::new(self.phase_budget).expect("nonzero");
-            if !self.fit_max_tokens() {
-                return Ok(self.out_of_room());
-            }
-        }
         let prompt = &mut self.state.prompt;
-        if unseat {
-            return seat_user(prompt, msg.to_string())
-                .map(|()| Control::Stalled)
-                .map_err(|e| SeedError::Prompt(e.to_string()));
-        }
-        seat_unused_reply(prompt, reply, not_run)
-            .and_then(|()| seat_user(prompt, msg.to_string()))
+        seat_unused_reply(prompt, reply, ask::NOT_RUN_CLIPPED)
+            .and_then(|()| seat_user(prompt, ask::TRUNCATION_WARNING))
             .map(|()| Control::Stalled)
             .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 
-    /// The least `max_tokens` worth sending a closing phase: enough to
-    /// answer in, and more than a fixed thinking budget (the API refuses
-    /// `max_tokens` at or under `budget_tokens`)
-    fn phase_floor(&self) -> u32 {
-        match self.state.prompt.thinking {
-            Some(Thinking::Enabled { budget_tokens, .. }) => {
-                MIN_PHASE_TOKENS.max(budget_tokens.get().saturating_add(1))
-            }
-            _ => MIN_PHASE_TOKENS,
-        }
+    /// Acting is over, however it ended: the memory rewrite is asked
+    async fn begin_reflect(&mut self) -> Result<Control, SeedError> {
+        self.phase = Phase::Asking;
+        self.asks.push(asks::MemoryAsk {
+            max_tokens: self.ctx.config.phase_max_tokens,
+        });
+        ask::seat_next(self, None).await
     }
 
-    /// End a session whose closing phase has no room left to be sent. With
-    /// the memory rewrite still owed it failed; past it, what is left is
-    /// optional and the session is complete.
-    fn out_of_room(&mut self) -> Control {
-        if matches!(self.phase, Phase::Reflect) {
-            Control::Done(Outcome::Failed)
-        } else {
-            self.finish()
-        }
-    }
-
-    /// Lower a closing phase's `max_tokens` to what the context has room
-    /// for, so the request is one the endpoint accepts: blallama refuses
-    /// input + `max_tokens` past its window, as Anthropic does. The reserve
-    /// keeps reflect room for its budget less what the last round added
-    /// unchecked (framing, refusal notes, estimation error), which this
-    /// trims, as it does for retries and the optional phases after it. False when not
-    /// even [`phase_floor`](Self::phase_floor) fits: the request would be
-    /// refused or useless, so the caller ends the session instead.
-    fn fit_max_tokens(&mut self) -> bool {
-        let room = u32::try_from(self.context.phase_room()).unwrap_or(u32::MAX);
-        let floor = self.phase_floor();
-        if room < floor {
-            tracing::error!(
-                event_type = "context_exhausted",
-                agent = %self.state.soul.name,
-                phase = ?self.phase,
-                room,
-                floor,
-                held = self.context.get(),
-                window = self.context.window(),
-                "no room left to send a closing phase; the session ends"
-            );
-            return false;
-        }
-        let prompt = &mut self.state.prompt;
-        if room >= prompt.max_tokens.get() {
-            return true;
-        }
-        tracing::warn!(
-            event_type = "phase_budget_clamped",
-            agent = %self.state.soul.name,
-            phase = ?self.phase,
-            max_tokens = prompt.max_tokens.get(),
-            room,
-            held = self.context.get(),
-            window = self.context.window(),
-            "closing phase's max_tokens lowered to fit the context"
-        );
-        prompt.max_tokens = NonZeroU32::new(room).expect("room >= floor > 0");
-        true
-    }
-
-    /// Whether an optional closing phase (mutate, evolve, survey) has room
-    /// for its whole `budget`. Skipped when it doesn't: clipped, its JSON
-    /// would not parse, and each retry would only fill the context more.
-    fn phase_fits(&self, phase: Phase, budget: u32) -> bool {
-        let fits = self.context.phase_room() >= u64::from(budget);
-        if !fits {
-            tracing::info!(
-                event_type = "phase_skipped_for_context",
-                agent = %self.state.soul.name,
-                phase = ?phase,
-                budget,
-                room = self.context.phase_room(),
-                "optional closing phase skipped: no room in the context"
-            );
-        }
-        fits
-    }
-
-    /// Whether the response being handled is the closing phase's last try
-    /// before the reactor gives up on the session
-    fn last_attempt(&self) -> bool {
-        self.phase_failures + 1 >= crate::reactor::MAX_STALLS
-    }
-
-    /// Log the fields a last attempt had clipped to fit
-    fn log_clipped(&self, fields: &[String]) {
-        if !fields.is_empty() {
-            tracing::warn!(
-                event_type = "phase_output_clipped",
-                agent = %self.state.soul.name,
-                phase = ?self.phase,
-                fields = ?fields,
-                "last attempt over length: clipped at a sentence boundary \
-                 rather than lose the phase"
-            );
-        }
-    }
-
-    /// Enter the reflect phase (acting is over, however it ended).
-    fn begin_reflect(&mut self) -> Result<Control, SeedError> {
-        self.phase = Phase::Reflect;
-        let budget = self.ctx.config.phase_max_tokens;
-        let control =
-            self.seat_phase(output::MEMORY_REWRITE_MESSAGE, budget)?;
-        self.constrain::<Memory>();
-        Ok(control)
-    }
-
-    /// After a successful reflect: roll for a deep mutation, else an
-    /// evolution-log entry, else straight to the survey roll.
-    fn after_reflect(&mut self) -> Result<Control, SeedError> {
+    /// After the memory rewrite: roll for a deep mutation, else an
+    /// evolution-log entry, then (unless held for [`Epilogue`]) the survey.
+    /// Each is asked only if it fits ([`ask::seat_next`])
+    fn queue_after_memory(&mut self) {
         let (mutate, evolve) = {
             let mut rng = rand::thread_rng();
             (
@@ -1022,53 +820,41 @@ impl SeedAgent {
                 rng.gen_range(0..100) < self.ctx.config.evolution_chance,
             )
         };
-        let mutate = mutate
-            && self.phase_fits(Phase::Mutate, self.ctx.config.phase_max_tokens);
-        let evolve = evolve
-            && self
-                .phase_fits(Phase::Evolve, self.ctx.config.evolve_max_tokens);
-        if mutate {
-            self.phase = Phase::Mutate;
-            let instruction =
-                output::build_soul_mutation_prompt(&self.state.soul);
-            let budget = self.ctx.config.phase_max_tokens;
-            let control = self.seat_phase(&instruction, budget)?;
-            self.constrain::<Soul>();
-            return Ok(control);
+        let agent = self.state.soul.name.to_string();
+        // A mutation without room for its budget gives way to an evolution
+        // entry when one was rolled too (as before 0.157); alone, it is
+        // queued, and the driver skips it (`phase_skipped_for_context`)
+        let room = self.context.phase_room();
+        let soul_fits = room >= u64::from(self.ctx.config.phase_max_tokens);
+        if mutate && (soul_fits || !evolve) {
+            self.asks.push(asks::SoulAsk {
+                question: output::build_soul_mutation_prompt(&self.state.soul),
+                max_tokens: self.ctx.config.phase_max_tokens,
+                agent,
+            });
+        } else if evolve {
+            self.asks.push(asks::EvolutionAsk {
+                max_tokens: self.ctx.config.evolve_max_tokens,
+                agent,
+            });
         }
-        if evolve {
-            self.phase = Phase::Evolve;
-            // No `output_config`: `null` (no change) must stay expressible.
-            let budget = self.ctx.config.evolve_max_tokens;
-            return self.seat_phase(output::EVOLUTION_MESSAGE, budget);
+        if !self.hold_survey && self.roll_survey() {
+            self.push_survey();
         }
-        self.maybe_survey()
     }
 
-    /// The survey, or — held for [`Epilogue`] — `Done` until it is begun
-    fn maybe_survey(&mut self) -> Result<Control, SeedError> {
-        if self.hold_survey {
-            self.phase = Phase::Held;
-            return Ok(Control::Done(Outcome::Complete));
-        }
-        self.roll_survey()
-    }
-
-    /// Roll for the survey, marking the redaction point; otherwise done.
-    fn roll_survey(&mut self) -> Result<Control, SeedError> {
-        let roll = self.ctx.config.force_survey
+    /// Whether this session asks the survey
+    fn roll_survey(&self) -> bool {
+        self.ctx.config.force_survey
             || rand::thread_rng().gen_range(0..100)
-                < self.ctx.config.survey_chance;
-        if roll
-            && self.phase_fits(Phase::Survey, self.ctx.config.phase_max_tokens)
-        {
-            self.phase = Phase::Survey;
-            self.survey_mark = Some(SurveyMark::at(&self.state.prompt));
-            // No `output_config`: `null` (no feedback) must stay expressible.
-            let budget = self.ctx.config.phase_max_tokens;
-            return self.seat_phase(&output::survey_message(), budget);
-        }
-        Ok(self.finish())
+                < self.ctx.config.survey_chance
+    }
+
+    fn push_survey(&mut self) {
+        self.asks.push(asks::SurveyAsk {
+            max_tokens: self.ctx.config.phase_max_tokens,
+            agent: self.state.soul.name.to_string(),
+        });
     }
 
     /// The session ran to a clean end: stamp the snapshot and stop.
@@ -1077,191 +863,102 @@ impl SeedAgent {
         Control::Done(Outcome::Complete)
     }
 
-    /// Consume one phase-tail response: parse it against the current phase's
-    /// contract, apply, advance. Failures stall (bounded by the reactor's cap);
-    /// the failed response is never seated.
-    async fn handle_phase(
-        &mut self,
-        response: response::Message,
-    ) -> Result<Control, SeedError> {
-        if matches!(response.stop_reason, Some(StopReason::PauseTurn)) {
-            return self.resume_pause(response);
+    /// The closing questions that ended without an answer this session,
+    /// by [`Ask::name`](ask::Ask::name), for the runner to alert on. An
+    /// optional question with no room left ([`Unanswered::NoRoom`]) is
+    /// routine near the edge; a [`Missed`](Unanswered::Missed) or
+    /// [`Refused`](Unanswered::Refused) one is not
+    pub fn unanswered_asks(&self) -> &[(&'static str, Unanswered)] {
+        &self.unanswered
+    }
+
+    /// Why this session failed, if it did: for the runner's notice to the
+    /// agent at its next session start, and its alerts. Set where the
+    /// session fails (a refusal, no room for the memory rewrite) or, at
+    /// teardown, from how it ended: at the reactor's stall cap
+    /// ([`SessionFailure::Stalled`]), else short of complete
+    /// ([`SessionFailure::Error`]). `None` for a session that completed,
+    /// and for one that never began: no reply ever arrived (an `on_init`
+    /// failed, the wrapper's too, or the endpoint was down). Read it after [`on_teardown`](Agent::on_teardown). No content
+    pub fn failure(&self) -> Option<&SessionFailure> {
+        self.failure.as_ref()
+    }
+
+    /// The transcript as the prompt log archives it: the session's, then
+    /// each failed reply left out of it so a retry fit, marked as such, so
+    /// the archive alone holds every reply. Never the saved state's
+    /// transcript, which is unchanged
+    fn archived_prompt(&self) -> std::borrow::Cow<'_, Prompt> {
+        use misanthropic::prompt::message::Role;
+        if self.left_out.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.state.prompt);
         }
-        if matches!(response.stop_reason, Some(StopReason::MaxTokens)) {
-            return self.on_truncate(&response).await;
-        }
-        // A tool call in a phase turn can't be dispatched (the phase owns the
-        // turn) nor seated (its `tool_use` would go unanswered).
-        if response
-            .inner
-            .content
-            .iter()
-            .any(|block| block.tool_use().is_some())
-        {
-            return self.phase_failure(
-                &response,
-                "Do NOT use tools right now. Respond in JSON only, per the \
-                 instructions above.",
+        let mut archive = self.state.prompt.clone();
+        for (ask, attempt, reply) in &self.left_out {
+            // Pushed as they are: an archive, not a request
+            archive.messages.push(
+                (
+                    Role::User,
+                    format!(
+                        "[archive: the {ask} question's attempt {attempt}, \
+                         left out of the transcript so the retry fit]"
+                    ),
+                )
+                    .into(),
             );
+            archive.messages.push(reply.clone().into());
         }
+        // A left-out reply's `submit_feedback` words go too: the tool's
+        // promise holds for the whole archive
+        redact_feedback(&mut archive);
+        std::borrow::Cow::Owned(archive)
+    }
 
-        let text: String = response
-            .inner
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                Block::Text { text, .. } => Some(text.as_ref()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+    /// The SHA-256 of the transcript [`on_teardown`](Agent::on_teardown)
+    /// wrote to the prompt log ([`SeedConfig::prompt_log_dir`]): the
+    /// archive as saved, left-out replies included, so it names a dump that
+    /// exists. `None` before teardown, without a log directory, or when the
+    /// write failed. Use it rather than hashing [`Agent::prompt`]
+    pub fn archive_sha256(&self) -> Option<Sha256Hex> {
+        self.archive_sha256
+    }
 
-        match self.phase {
-            Phase::Acting { .. } => unreachable!("routed by handle"),
-            Phase::Held => Err(SeedError::Prompt(
-                "a response while the survey is held".to_string(),
-            )),
-            Phase::Reflect => match output::parse_memory_rewrite(&text) {
-                Ok(rewrite) => {
-                    match self.state.memory.update(rewrite.content) {
-                        Ok(()) => {
-                            self.state.last_cycle_at = Some(Utc::now());
-                            self.seat_response(response)?;
-                            self.after_reflect()
-                        }
-                        Err(e) => self.phase_failure(
-                            &response,
-                            &format!("Memory rejected: {e}. Try again."),
-                        ),
-                    }
-                }
-                Err(e) => self.phase_failure(&response, &e),
-            },
-            Phase::Mutate => {
-                match output::parse_soul_mutation(&text).or_else(|e| {
-                    // The last try: an over-length field is clipped rather
-                    // than the whole rewrite lost (tango-aether, 2026-10-01).
-                    if !self.last_attempt() {
-                        return Err(e);
-                    }
-                    let (soul, clipped) =
-                        output::parse_soul_mutation_clipped(&text)
-                            .map_err(|_| e)?;
-                    self.log_clipped(&clipped);
-                    Ok(soul)
-                }) {
-                    Ok(new_soul) => {
-                        let warnings =
-                            new_soul.validate_communities(&self.communities);
-                        if !warnings.is_empty() {
-                            let bad: Vec<String> = warnings
-                                .iter()
-                                .map(|w| w.message.clone())
-                                .collect();
-                            return self.phase_failure(
-                                &response,
-                                &format!(
-                                    "Invalid communities: {}. Valid slugs: \
-                                     {:?}. Try again.",
-                                    bad.join("; "),
-                                    self.communities,
-                                ),
-                            );
-                        }
-                        self.apply_mutation(new_soul);
-                        self.seat_response(response)?;
-                        self.maybe_survey()
-                    }
-                    Err(e) => self.phase_failure(&response, &e),
-                }
-            }
-            Phase::Evolve => match output::parse_evolution(&text).or_else(|e| {
-                if !self.last_attempt() {
-                    return Err(e);
-                }
-                let (note, cut) =
-                    output::parse_evolution_clipped(&text).map_err(|_| e)?;
-                if cut {
-                    self.log_clipped(&["note".to_string()]);
-                }
-                Ok(note)
-            }) {
-                Ok(note) => {
-                    if let Some(note) = note
-                        && let Err(e) = self.state.soul.push_evolution(note)
-                    {
-                        return self.phase_failure(
-                            &response,
-                            &format!(
-                                "Evolution note rejected: {e}. Try again."
-                            ),
-                        );
-                    }
-                    self.seat_response(response)?;
-                    self.maybe_survey()
-                }
-                Err(e) => self.phase_failure(&response, &e),
-            },
-            Phase::Survey => match output::parse_feedback(&text).or_else(|e| {
-                // The last try: clipped rather than lost to the server's
-                // length check (iota-aether, 2026-10-05). The transcript
-                // keeps the answer as written.
-                if !self.last_attempt() {
-                    return Err(e);
-                }
-                let (feedback, cut) =
-                    output::parse_feedback_clipped(&text).map_err(|_| e)?;
-                if cut {
-                    self.log_clipped(&["text".to_string()]);
-                }
-                Ok(feedback)
-            }) {
-                Ok(feedback) => {
-                    // Seated either way, so the transcript only ever grows
-                    // while the session runs; an anonymous exchange is taken
-                    // out at teardown, after the last request.
-                    self.contact_me = feedback
-                        .as_ref()
-                        .map(|f| f.contact_me)
-                        .unwrap_or(false);
-                    self.seat_response(response)?;
-                    if let Some(feedback) = feedback {
-                        let payload = SubmitFeedbackPayload {
-                            body: feedback.text.to_string(),
-                        };
-                        // Best-effort: a failed survey submission shouldn't
-                        // fail a session whose real work already landed.
-                        match self
-                            .ctx
-                            .client
-                            .submit_feedback(self.id, &payload, &self.key)
-                            .await
-                        {
-                            Ok(receipt) if self.contact_me => {
-                                if receipt.id.is_none() {
-                                    tracing::warn!(
-                                        agent = %self.state.soul.name,
-                                        agent_id = %self.id,
-                                        status = %receipt.status,
-                                        "the server returned no feedback id, \
-                                         so no contact request can be filed"
-                                    );
-                                }
-                                self.contact_feedback = receipt.id;
-                            }
-                            Ok(_) => {}
-                            Err(e) => tracing::warn!(
-                                agent = %self.state.soul.name,
-                                error = %e,
-                                "feedback submission failed"
-                            ),
-                        }
-                    }
-                    Ok(self.finish())
-                }
-                Err(e) => self.phase_failure(&response, &e),
-            },
+    /// A reply arrived that a wrapping agent handled itself (its own
+    /// question, through its own [`Asks`]): the session has begun, so a
+    /// later failure is reported ([`failure`](Self::failure)). Call it on
+    /// every reply the wrapper takes without handing it to this agent
+    pub fn note_reply(&mut self) {
+        self.begun = true;
+    }
+
+    /// Record why the session failed, when a wrapping agent knows better
+    /// (its own question was refused): kept unless one is already recorded.
+    /// Call before [`on_teardown`](Agent::on_teardown), which otherwise
+    /// takes a session short of complete for an error
+    pub fn record_failure(&mut self, failure: SessionFailure) {
+        self.failure.get_or_insert(failure);
+    }
+
+    /// At teardown, a session not complete and not yet explained failed by
+    /// the reactor's stall cap (the agent returned
+    /// [`MAX_STALLS`](crate::reactor::MAX_STALLS) stalls in a row, and the
+    /// reactor stops right after the last) or by an error
+    fn settle_failure(&mut self) {
+        // A session that never began (no reply: an on_init failed, the
+        // endpoint was down) did not fail as a session: no notice
+        if !self.begun || self.state.completed || self.failure.is_some() {
+            return;
         }
+        let during = match self.phase {
+            Phase::Acting { .. } => SessionPart::Acting.as_str(),
+            _ => self.asks.seated().unwrap_or(SessionPart::Memory.as_str()),
+        }
+        .to_string();
+        self.failure = Some(if self.stalls >= crate::reactor::MAX_STALLS {
+            SessionFailure::Stalled { during }
+        } else {
+            SessionFailure::Error
+        });
     }
 
     /// Dump the finished session transcript to the prompt log, if one is
@@ -1389,6 +1086,8 @@ impl SeedAgent {
         if let Some(mark) = self.survey_mark.take()
             && !self.contact_me
         {
+            // Nothing is left: an anonymous survey is indistinguishable from
+            // one never asked (Steward, 2026-11-06)
             mark.redact(&mut self.state.prompt);
         }
     }
@@ -1404,6 +1103,185 @@ impl SeedAgent {
         let stamp = "[SYSTEM] Deep reflection — soul rewritten.";
         if let Err(e) = self.state.soul.push_evolution(stamp) {
             tracing::warn!("evolution stamp rejected: {e}");
+        }
+    }
+}
+
+impl SeedAgent {
+    /// One reply, routed by phase: `Acting` runs the default tool loop
+    /// under the round budget; a seated question's reply goes to the
+    /// [`ask`] driver. [`Agent::handle`] counts the stalls around it
+    async fn handle_turn(
+        &mut self,
+        response: response::Message,
+    ) -> Result<Control, SeedError> {
+        self.shown_once.next_turn();
+        self.context.record(&response.usage);
+        if self.asks.is_active() {
+            return ask::handle(self, response).await;
+        }
+        match self.phase {
+            // Any refusal ends the session as failed (Steward, 2026-11-06):
+            // whatever is in the context may set the classifier off again.
+            // The refused turn is not seated; nothing follows it
+            Phase::Acting { rounds_left }
+                if matches!(
+                    response.stop_reason,
+                    Some(StopReason::Refusal)
+                ) =>
+            {
+                let round =
+                    self.ctx.config.max_rounds.saturating_sub(rounds_left) + 1;
+                tracing::error!(
+                    event_type = "api_refusal",
+                    agent = %self.state.soul.name,
+                    agent_id = %self.id,
+                    model = %response.model,
+                    during = SessionPart::Acting.as_str(),
+                    round,
+                    response_id = %response.id,
+                    "the API refused a reply; the session ends"
+                );
+                self.failure = Some(SessionFailure::Refused {
+                    during: SessionPart::Acting.as_str().to_string(),
+                    round: Some(round),
+                    model: response.model.to_string(),
+                    response_id: response.id.to_string(),
+                });
+                Ok(Control::Done(Outcome::Failed))
+            }
+            Phase::Acting { rounds_left } => {
+                let clipped =
+                    matches!(response.stop_reason, Some(StopReason::MaxTokens));
+                let tool_round = !clipped
+                    && response
+                        .inner
+                        .content
+                        .iter()
+                        .any(|block| block.tool_use().is_some());
+                // A clipped turn continues acting too, so it needs the
+                // same room as a round.
+                if (tool_round || clipped)
+                    && self.context.room() < MIN_ROUND_ROOM
+                {
+                    // Out of context before out of rounds: close now,
+                    // while reflect still fits, rather than run a round
+                    // whose next request the endpoint would refuse and
+                    // lose the memory rewrite with it. Seated like the
+                    // round cap below, for the same cache reason.
+                    tracing::info!(
+                        event_type = "context_quiesce",
+                        agent = %self.state.soul.name,
+                        held = self.context.get(),
+                        window = self.context.window(),
+                        reserve = self.context.reserve(),
+                        rounds_left,
+                        "context nearly full; acting ends early"
+                    );
+                    seat_unused_reply(
+                        &mut self.state.prompt,
+                        &response,
+                        &not_run_context(self.context.room()),
+                    )
+                    .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    return self.begin_reflect().await;
+                }
+                if tool_round {
+                    if rounds_left == 0 {
+                        // Budget spent. The turn is seated and each call
+                        // answered "not run" rather than the turn being
+                        // dropped: dropping it put the reflect instruction
+                        // *inside* the previous tool-result message, which
+                        // grows a message the cache already holds and costs
+                        // the whole tail on prefix caches anchored at
+                        // message ends (blallama hybrid models: windmill,
+                        // 31.2k, 2026-10-02). Seated, the previous prompt and
+                        // this turn stay a prefix, and the instruction
+                        // starts in a fresh user message.
+                        self.seat_unrun_calls(response)?;
+                        return self.begin_reflect().await;
+                    }
+                    // A server tool (web search, web fetch) reads and bills
+                    // whatever happens to the client calls beside it
+                    let server_tool = response.inner.content.iter().any(|b| {
+                        matches!(
+                            b,
+                            misanthropic::prompt::message::Block::ServerToolUse {
+                                ..
+                            }
+                        )
+                    });
+                    let mut left = rounds_left - 1;
+                    self.phase = Phase::Acting { rounds_left: left };
+                    let mut control = default_handle(self, response).await?;
+                    // A turn whose every call was refused for its input is
+                    // free, up to MAX_FREE_REFUSED_TURNS in a row: the round
+                    // is given back, and it is not a stall
+                    let mut refused_note = None;
+                    // Only while still acting: a turn that ended acting (the
+                    // pause cap's reflect) is not given back
+                    let acting = matches!(self.phase, Phase::Acting { .. });
+                    if acting
+                        && !server_tool
+                        && every_call_refused(&self.state.prompt)
+                    {
+                        self.refused_streak += 1;
+                        if self.refused_streak <= MAX_FREE_REFUSED_TURNS {
+                            left = rounds_left;
+                            self.phase = Phase::Acting { rounds_left: left };
+                            if control == Control::Stalled {
+                                control = Control::Continue;
+                            }
+                            refused_note = Some(REFUSED_TURN_FREE.to_string());
+                        } else {
+                            refused_note = Some(refused_turn_counted());
+                        }
+                    } else {
+                        self.refused_streak = 0;
+                        let (all, refused) = refusals(&self.state.prompt);
+                        // A server tool's turn counts whatever its own
+                        // calls were (review of round 15)
+                        if acting
+                            && refused > 0
+                            && (refused < all || server_tool)
+                        {
+                            refused_note =
+                                Some(refused_in_a_counted_turn(refused));
+                        }
+                    }
+                    // Said with the round's results, so the agent knows
+                    // before it plans the next one (bridge test agents,
+                    // 2026-10-13: round 10 of 10 gave no sign it was the
+                    // last, and an 11th call was refused unannounced)
+                    // A round whose every call failed (Stalled) still
+                    // spent a round. Only ever onto the results' user
+                    // turn: a paused server-tool turn is resumed, not
+                    // answered.
+                    let results_seated =
+                        self.state.prompt.messages.last().is_some_and(|m| {
+                            m.role == misanthropic::prompt::message::Role::User
+                        });
+                    let notice = match (refused_note, rounds_notice(left)) {
+                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                        (a, b) => a.or(b.map(str::to_string)),
+                    };
+                    if let (
+                        Control::Continue | Control::Stalled,
+                        Some(notice),
+                        true,
+                    ) = (&control, notice, results_seated)
+                    {
+                        seat_user(&mut self.state.prompt, notice)
+                            .map_err(|e| SeedError::Prompt(e.to_string()))?;
+                    }
+                    return Ok(control);
+                }
+                default_handle(self, response).await
+            }
+            Phase::Asking | Phase::Held => Err(SeedError::Prompt(format!(
+                "a response in the {:?} phase with no question seated",
+                self.phase
+            ))),
         }
     }
 }
@@ -1494,6 +1372,13 @@ impl Agent for SeedAgent {
             ctx,
             key,
             communities: Vec::new(),
+            asks: Asks::default(),
+            unanswered: Vec::new(),
+            left_out: Vec::new(),
+            archive_sha256: None,
+            failure: None,
+            begun: false,
+            stalls: 0,
             survey_mark: None,
             contact_me: false,
             contact_feedback: None,
@@ -1503,9 +1388,6 @@ impl Agent for SeedAgent {
             refused_streak: 0,
             context,
             shown,
-            phase_failures: 0,
-            phase_budget: 0,
-            last_failure: None,
             memory_id_key: None,
             memory_id: None,
         })
@@ -1559,24 +1441,10 @@ impl Agent for SeedAgent {
         self.quirks
     }
 
-    /// A closing phase that kept failing says which, and why, instead of
-    /// the reactor's "no successful tool call"
+    /// A closing question that kept failing says which, and why, instead
+    /// of the reactor's "no successful tool call"
     fn stall_reason(&self) -> Option<String> {
-        let phase = match self.phase {
-            Phase::Acting { .. } | Phase::Held => return None,
-            Phase::Reflect => "memory rewrite (reflect)",
-            Phase::Mutate => "soul rewrite (mutate)",
-            Phase::Evolve => "evolution note (evolve)",
-            Phase::Survey => "survey",
-        };
-        Some(format!(
-            "the {phase} phase failed {} times in a row{}",
-            self.phase_failures,
-            match &self.last_failure {
-                Some(last) => format!("; last: {last}"),
-                None => String::new(),
-            }
-        ))
+        self.asks.stall_reason()
     }
 
     /// Resume the paused server-tool turn, under this session's
@@ -1586,18 +1454,33 @@ impl Agent for SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
-        self.resume_pause(response)
+        self.begun = true;
+        // Acting, or a seated question's pause (through the driver)
+        if self.phase == Phase::Held {
+            return Err(SeedError::Prompt(
+                "a paused reply while the survey is held".to_string(),
+            ));
+        }
+        self.resume_pause(response).await
     }
 
     /// Seat the clipped response (its calls answered "not run"), warn the
     /// model, and stall-retry at the same budget (the trait default's
     /// doubling is unbounded on local endpoints, which declare no ceiling).
-    /// The reactor's stall cap bounds attempts.
+    /// The reactor's stall cap bounds attempts. Acting only: a clipped
+    /// answer to a question is the driver's ([`ask::handle`]).
     async fn on_truncate(
         &mut self,
         response: &response::Message,
     ) -> Result<Control, SeedError> {
-        self.phase_failure(response, output::TRUNCATION_WARNING)
+        self.begun = true;
+        if !matches!(self.phase, Phase::Acting { .. }) {
+            return Err(SeedError::Prompt(format!(
+                "a clipped reply in the {:?} phase with no question seated",
+                self.phase
+            )));
+        }
+        self.acting_clipped(response)
     }
 
     /// Perceive: install tools, subscribe to their pushes, then hand everything
@@ -1777,145 +1660,19 @@ impl Agent for SeedAgent {
     }
 
     /// Route by phase: `Acting` runs the default tool loop under the round
-    /// budget; everything after runs the phase tail.
+    /// budget; a seated question's reply goes to the [`ask`] driver.
     async fn handle(
         &mut self,
         response: response::Message,
     ) -> Result<Control, SeedError> {
-        // One response, one turn: what a turn showed is in its context
-        self.shown_once.next_turn();
-        self.context.record(&response.usage);
-        match self.phase {
-            Phase::Acting { rounds_left } => {
-                let clipped =
-                    matches!(response.stop_reason, Some(StopReason::MaxTokens));
-                let tool_round = !clipped
-                    && response
-                        .inner
-                        .content
-                        .iter()
-                        .any(|block| block.tool_use().is_some());
-                // A clipped turn continues acting too, so it needs the
-                // same room as a round.
-                if (tool_round || clipped)
-                    && self.context.room() < MIN_ROUND_ROOM
-                {
-                    // Out of context before out of rounds: close now,
-                    // while reflect still fits, rather than run a round
-                    // whose next request the endpoint would refuse and
-                    // lose the memory rewrite with it. Seated like the
-                    // round cap below, for the same cache reason.
-                    tracing::info!(
-                        event_type = "context_quiesce",
-                        agent = %self.state.soul.name,
-                        held = self.context.get(),
-                        window = self.context.window(),
-                        reserve = self.context.reserve(),
-                        rounds_left,
-                        "context nearly full; acting ends early"
-                    );
-                    seat_unused_reply(
-                        &mut self.state.prompt,
-                        &response,
-                        &not_run_context(self.context.room()),
-                    )
-                    .map_err(|e| SeedError::Prompt(e.to_string()))?;
-                    return self.begin_reflect();
-                }
-                if tool_round {
-                    if rounds_left == 0 {
-                        // Budget spent. The turn is seated and each call
-                        // answered "not run" rather than the turn being
-                        // dropped: dropping it put the reflect instruction
-                        // *inside* the previous tool-result message, which
-                        // grows a message the cache already holds and costs
-                        // the whole tail on prefix caches anchored at
-                        // message ends (blallama hybrid models: windmill,
-                        // 31.2k, 2026-10-02). Seated, the previous prompt and
-                        // this turn stay a prefix, and the instruction
-                        // starts in a fresh user message.
-                        self.seat_unrun_calls(response)?;
-                        return self.begin_reflect();
-                    }
-                    // A server tool (web search, web fetch) reads and bills
-                    // whatever happens to the client calls beside it
-                    let server_tool = response.inner.content.iter().any(|b| {
-                        matches!(
-                            b,
-                            misanthropic::prompt::message::Block::ServerToolUse {
-                                ..
-                            }
-                        )
-                    });
-                    let mut left = rounds_left - 1;
-                    self.phase = Phase::Acting { rounds_left: left };
-                    let mut control = default_handle(self, response).await?;
-                    // A turn whose every call was refused for its input is
-                    // free, up to MAX_FREE_REFUSED_TURNS in a row: the round
-                    // is given back, and it is not a stall
-                    let mut refused_note = None;
-                    // Only while still acting: a turn that ended acting (the
-                    // pause cap's reflect) is not given back
-                    let acting = matches!(self.phase, Phase::Acting { .. });
-                    if acting
-                        && !server_tool
-                        && every_call_refused(&self.state.prompt)
-                    {
-                        self.refused_streak += 1;
-                        if self.refused_streak <= MAX_FREE_REFUSED_TURNS {
-                            left = rounds_left;
-                            self.phase = Phase::Acting { rounds_left: left };
-                            if control == Control::Stalled {
-                                control = Control::Continue;
-                            }
-                            refused_note = Some(REFUSED_TURN_FREE.to_string());
-                        } else {
-                            refused_note = Some(refused_turn_counted());
-                        }
-                    } else {
-                        self.refused_streak = 0;
-                        let (all, refused) = refusals(&self.state.prompt);
-                        // A server tool's turn counts whatever its own
-                        // calls were (review of round 15)
-                        if acting
-                            && refused > 0
-                            && (refused < all || server_tool)
-                        {
-                            refused_note =
-                                Some(refused_in_a_counted_turn(refused));
-                        }
-                    }
-                    // Said with the round's results, so the agent knows
-                    // before it plans the next one (bridge test agents,
-                    // 2026-10-13: round 10 of 10 gave no sign it was the
-                    // last, and an 11th call was refused unannounced)
-                    // A round whose every call failed (Stalled) still
-                    // spent a round. Only ever onto the results' user
-                    // turn: a paused server-tool turn is resumed, not
-                    // answered.
-                    let results_seated =
-                        self.state.prompt.messages.last().is_some_and(|m| {
-                            m.role == misanthropic::prompt::message::Role::User
-                        });
-                    let notice = match (refused_note, rounds_notice(left)) {
-                        (Some(a), Some(b)) => Some(format!("{a} {b}")),
-                        (a, b) => a.or(b.map(str::to_string)),
-                    };
-                    if let (
-                        Control::Continue | Control::Stalled,
-                        Some(notice),
-                        true,
-                    ) = (&control, notice, results_seated)
-                    {
-                        seat_user(&mut self.state.prompt, notice)
-                            .map_err(|e| SeedError::Prompt(e.to_string()))?;
-                    }
-                    return Ok(control);
-                }
-                default_handle(self, response).await
-            }
-            _ => self.handle_phase(response).await,
+        self.begun = true;
+        let control = self.handle_turn(response).await;
+        match &control {
+            Ok(Control::Stalled) => self.stalls += 1,
+            Ok(_) => self.stalls = 0,
+            Err(_) => {}
         }
+        control
     }
 
     /// The model stopped calling tools: acting is over, reflect begins.
@@ -1927,7 +1684,7 @@ impl Agent for SeedAgent {
             matches!(self.phase, Phase::Acting { .. }),
             "on_quiesce fires only from the acting phase's default_handle"
         );
-        self.begin_reflect()
+        self.begin_reflect().await
     }
 
     /// The run is stopping: acting ends here, as a spent round budget ends
@@ -1951,7 +1708,7 @@ impl Agent for SeedAgent {
         self.drop_abandoned_turn();
         seat_user(&mut self.state.prompt, RUNNER_STOPPING.to_string())
             .map_err(|e| SeedError::Prompt(e.to_string()))?;
-        self.begin_reflect()
+        self.begin_reflect().await
     }
 
     /// Redact an anonymous survey, tear tools down, archive the session
@@ -1963,6 +1720,9 @@ impl Agent for SeedAgent {
     /// including one whose state fails to persist, which is exactly when
     /// having the transcript on disk matters most.
     async fn on_teardown(&mut self) -> Result<(), SeedError> {
+        // First: why the session failed, if it did, before anything else
+        // here can err
+        self.settle_failure();
         // Before the state is saved (the reactor settles after teardown)
         {
             let mut ledger = self.state.ledger.write().expect("ledger lock");
@@ -1980,7 +1740,7 @@ impl Agent for SeedAgent {
             Some(dir) => {
                 Self::log_prompt(
                     dir,
-                    &self.state.prompt,
+                    &self.archived_prompt(),
                     self.state.soul.name.as_str(),
                     self.id,
                     self.state.model.id.name(),
@@ -1989,20 +1749,22 @@ impl Agent for SeedAgent {
             }
             None => None,
         };
+        self.archive_sha256 = transcript_sha256;
         self.request_contact(transcript_sha256).await;
         Ok(())
     }
 }
 
-/// The survey is the epilogue: held, the session is `Done` after reflect and
-/// any mutation or evolution, and the survey (if rolled) waits for
-/// `begin_epilogue`
+/// The survey is the epilogue: held, the session is `Done` after the memory
+/// rewrite and any mutation or evolution, and the survey (if rolled) waits
+/// for `begin_epilogue`
+#[async_trait::async_trait]
 impl Epilogue for SeedAgent {
     fn hold_epilogue(&mut self) {
         self.hold_survey = true;
     }
 
-    fn begin_epilogue(&mut self) -> Result<Control, SeedError> {
+    async fn begin_epilogue(&mut self) -> Result<Control, SeedError> {
         if self.phase != Phase::Held {
             return Err(SeedError::Prompt(format!(
                 "the survey was begun in the {:?} phase, not after the tail",
@@ -2010,7 +1772,12 @@ impl Epilogue for SeedAgent {
             )));
         }
         self.hold_survey = false;
-        self.roll_survey()
+        if !self.roll_survey() {
+            return Ok(self.finish());
+        }
+        self.phase = Phase::Asking;
+        self.push_survey();
+        ask::seat_next(self, None).await
     }
 }
 
@@ -2064,10 +1831,12 @@ fn describe_tool_responses(prompt: &mut Prompt) {
                 )
             }
             "submit_feedback" => format!(
-                "{} What it says is removed from your archived transcript when \
-                 the session ends, with your words and thinking in the message \
-                 you send it in; that you sent feedback, and when, stays.",
-                registered.description
+                "{} It is stored with its date but without your name. When \
+                 this session ends, {}; the call itself stays, so that you \
+                 sent feedback, and when, stays. Send it in a message of its \
+                 own if you want nothing else removed or kept beside it.",
+                registered.description,
+                tool::FEEDBACK_REMOVED,
             ),
             // Until phase 4: `crate::before_index`
             "get_inbox" => crate::before_index::GET_INBOX_DOC.to_string(),

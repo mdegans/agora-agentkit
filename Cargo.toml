@@ -1,6 +1,6 @@
 [package]
 name = "agora-agentkit"
-version = "0.156.0"
+version = "0.157.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
@@ -105,7 +105,10 @@ sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono"], optional = 
 # semver "1.0.0-alpha.17" admitted alpha.21, which changed the
 # cache-placement builders to return Result, and fresh resolves of 0.61.0
 # stopped compiling (2026-10-05). Move this pin deliberately, with a port.
-misanthropic = { version = "=1.0.0-alpha.23", default-features = false, features = ["batch", "derive", "partial-eq"] }
+# `schema-inline`: `schema_for` inlines every subschema, so `ask_schema` (the
+# one generator for every `Ask`) is `$ref`-free in every build, not only in
+# the runner's, which turns it on too.
+misanthropic = { version = "=1.0.0-alpha.23", default-features = false, features = ["batch", "derive", "partial-eq", "schema-inline"] }
 tokio = { version = "1", features = ["time"], optional = true }
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }

@@ -169,6 +169,8 @@ fn transcript(agent: &SeedAgent) -> String {
 
 /// Seat the "session started" user turn `on_init` would have (the tests
 /// below skip perception's network round-trips where they can).
+/// What `on_init` leaves, without the network: a user turn, and the
+/// session begun
 fn seat_start(agent: &mut SeedAgent) {
     agent
         .state
@@ -502,23 +504,70 @@ async fn seed_tool_id_params_are_patterned_and_ref_free() {
     }
 }
 
-/// Every phase schema the seed agent constrains with (`constrain::<T>()`:
-/// reflect's `Memory`, mutate's `Soul`) goes out with no `$ref`/`$defs` and no
-/// `pattern` (agora CLAUDE.md). Mirrors agora-appeals'
-/// `strict_is_on_and_ref_free_for_every_decision_tool`.
-#[test]
-fn constrained_phase_schemas_are_ref_and_pattern_free() {
-    fn output_config<T: schemars::JsonSchema>() -> String {
-        let prompt = Prompt::default().structured_output::<T>();
-        serde_json::to_string(&prompt.output_config).unwrap()
-    }
-    for (phase, schema) in [
-        ("reflect (Memory)", output_config::<Memory>()),
-        ("mutate (Soul)", output_config::<Soul>()),
-    ] {
-        for banned in ["$ref", "$defs", "\"pattern\""] {
-            assert!(!schema.contains(banned), "{phase} has {banned}: {schema}");
+/// Every question a seed session asks goes out, where it is constrained,
+/// with a schema fit to constrain with: no `$ref`/`$defs`, no `pattern`,
+/// closed, no reasoning field, `null` writable where it is an answer (agora
+/// CLAUDE.md; [`crate::reactor::ask::assert_constrainable`]). Taken from the
+/// `output_config` the driver actually sends, for each of the four. Mirrors
+/// agora-appeals' `strict_is_on_and_ref_free_for_every_decision_tool`.
+#[tokio::test]
+async fn constrained_phase_schemas_are_ref_and_pattern_free() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let mut sent = Vec::new();
+    for (mutate, evolve) in [(100, 0), (0, 100)] {
+        let config = SeedConfig {
+            mutation_chance: mutate,
+            evolution_chance: evolve,
+            force_survey: true,
+            ..quiet_config()
+        };
+        let mut agent = agent(&server, config);
+        agent.communities = vec!["tech".to_string()];
+        let model = agent.state.model.clone();
+        agent.on_admit(
+            &model,
+            &Quirks {
+                output_config_cache_safe: true,
+                ..Quirks::default()
+            },
+        );
+        seat_start(&mut agent);
+        let soul = r#"{"name": "test-agent", "identity": "x", "values": ["v"], "interests": {"communities": ["tech"], "topics": []}, "voice": "y"}"#;
+        for reply in [
+            "done",
+            MEMORY,
+            if mutate > 0 { soul } else { "null" },
+            "null",
+        ] {
+            let control = agent
+                .handle(text_message(reply, StopReason::EndTurn))
+                .await
+                .unwrap();
+            if let Some(name) = agent.asks.seated() {
+                let config = agent.prompt().output_config.clone().unwrap();
+                let wire = serde_json::to_value(&config).unwrap();
+                sent.push((name, wire["format"]["schema"].clone()));
+            } else {
+                assert_eq!(control, Control::Done(Outcome::Complete));
+            }
         }
+        assert!(agent.unanswered_asks().is_empty());
+    }
+    let names: Vec<_> = sent.iter().map(|(name, _)| *name).collect();
+    assert_eq!(
+        names,
+        ["memory", "soul", "survey", "memory", "evolution", "survey"]
+    );
+    for (name, schema) in &sent {
+        let text = schema.to_string();
+        for banned in ["$ref", "$defs", "\"pattern\""] {
+            assert!(!text.contains(banned), "{name} has {banned}: {text}");
+        }
+        crate::reactor::ask::assert_constrainable(schema);
     }
 }
 
@@ -1166,7 +1215,7 @@ async fn anonymous_survey_submits_then_redacts() {
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(transcript(&agent).contains("anonymous feedback"));
+    assert!(transcript(&agent).contains("feedback to the developers of Agora"));
 
     let control = agent
         .handle(text_message(
@@ -1185,7 +1234,10 @@ async fn anonymous_survey_submits_then_redacts() {
     // survey prompt.
     agent.on_teardown().await.unwrap();
     let text = transcript(&agent);
-    assert!(!text.contains("anonymous feedback"), "instruction redacted");
+    assert!(
+        !text.contains("feedback to the developers of Agora"),
+        "instruction redacted"
+    );
     assert!(!text.contains("cat pictures"), "feedback redacted");
     let saved = serde_json::to_string(agent.state()).unwrap();
     assert!(!saved.contains("cat pictures"), "nor in the saved state");
@@ -1573,7 +1625,7 @@ async fn anonymous_survey_never_reaches_the_prompt_log() {
         "anonymous feedback must never land on disk"
     );
     assert!(
-        !dumped.contains("anonymous feedback"),
+        !dumped.contains("feedback to the developers of Agora"),
         "the survey question must never land on disk"
     );
 }
@@ -1769,7 +1821,7 @@ async fn anonymous_feedback_files_no_contact_request() {
     let dumped = dumped(dir.path());
     assert!(!dumped.is_empty());
     assert!(!dumped.contains("cat pictures"));
-    assert!(!dumped.contains("anonymous feedback"));
+    assert!(!dumped.contains("feedback to the developers of Agora"));
 }
 
 /// A server that predates the feedback id answers `{"status": "received"}`:
@@ -1884,7 +1936,8 @@ async fn the_last_survey_attempt_is_clipped_before_submission() {
             .handle(text_message(&over, StopReason::EndTurn))
             .await
             .unwrap();
-        assert_eq!(control, Control::Stalled);
+        // Optional: its own budget, never a stall
+        assert_eq!(control, Control::Continue);
     }
     feedback.assert_calls(0);
     let control = agent
@@ -2017,7 +2070,7 @@ async fn pause_cap_bounds_resumption() {
     let before = agent.prompt().messages.len() - MAX_PAUSES;
     agent.handle(paused_message()).await.unwrap();
     assert!(
-        matches!(agent.phase, Phase::Reflect),
+        agent.asks.seated() == Some("memory"),
         "acting ended at the cap: {:?}",
         agent.phase
     );
@@ -2055,7 +2108,7 @@ async fn tail_pauses_count_against_the_same_budget() {
         .handle(text_message("nothing to do", StopReason::EndTurn))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
 
     for _ in 0..MAX_PAUSES {
         assert_eq!(
@@ -2069,7 +2122,7 @@ async fn tail_pauses_count_against_the_same_budget() {
         agent.handle(paused_message()).await.unwrap(),
         Control::Stalled
     );
-    assert!(matches!(agent.phase, Phase::Reflect), "still in the tail");
+    assert!(agent.asks.seated() == Some("memory"), "still in the tail");
 }
 
 /// A governance entry as the server returns it from the widened content
@@ -2634,7 +2687,7 @@ async fn a_nearly_full_context_ends_acting_and_reflects() {
         .await
         .unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(matches!(full.phase, Phase::Reflect), "{:?}", full.phase);
+    assert!(full.asks.seated() == Some("memory"), "{:?}", full.phase);
     assert_eq!(feed.calls(), 2, "the full agent's call never ran");
     let rendered = transcript(&full);
     assert!(
@@ -2718,7 +2771,7 @@ async fn the_admitted_models_window_bounds_the_configs() {
         ))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect), "{:?}", agent.phase);
+    assert!(agent.asks.seated() == Some("memory"), "{:?}", agent.phase);
 }
 
 /// After reflect, an optional phase without room for its whole budget is
@@ -2736,14 +2789,17 @@ async fn the_survey_is_skipped_when_it_would_not_fit() {
         .handle(text_with_usage("nothing to do", 100_000))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     // 128k less 123k held less the instruction leaves under 4096.
     let control = agent
         .handle(text_with_usage(MEMORY, 123_000))
         .await
         .unwrap();
     assert_eq!(control, Control::Done(Outcome::Complete));
-    assert!(agent.survey_mark.is_none(), "no survey seated");
+    assert_eq!(
+        agent.unanswered_asks(),
+        [("survey", crate::reactor::ask::Unanswered::NoRoom)]
+    );
     assert!(!transcript(&agent).contains("feedback"), "no survey prompt");
 }
 
@@ -2759,7 +2815,7 @@ async fn a_failed_reflect_near_the_edge_is_left_out_for_the_retry() {
         .handle(text_with_usage("nothing to do", 120_000))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     assert_eq!(agent.prompt().max_tokens.get(), 4_096);
     let messages = agent.prompt().messages.len();
 
@@ -2833,7 +2889,7 @@ async fn a_closing_phase_asks_for_no_more_than_fits() {
         .handle(text_with_usage("nothing to do", 124_000))
         .await
         .unwrap();
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     assert_eq!(agent.prompt().max_tokens.get(), 2_000);
 }
 
@@ -3764,31 +3820,39 @@ fn soul_rewrite(identity_chars: usize) -> String {
     )
 }
 
-/// An agent at the soul-rewrite phase, as `after_reflect` leaves it
-fn mutating_agent(server: &MockServer) -> SeedAgent {
+/// An agent asked the soul rewrite, as the memory rewrite's answer leaves
+/// it when a mutation is rolled
+async fn mutating_agent(server: &MockServer) -> SeedAgent {
     let mut agent = agent(server, quiet_config());
     agent.communities = vec!["tech".to_string()];
     seat_start(&mut agent);
-    agent.phase = Phase::Mutate;
-    let instruction = output::build_soul_mutation_prompt(&agent.state.soul);
-    agent.seat_phase(&instruction, 4096).unwrap();
+    agent.phase = Phase::Asking;
+    agent.asks.push(asks::SoulAsk {
+        question: output::build_soul_mutation_prompt(&agent.state.soul),
+        max_tokens: 4096,
+        agent: "test-agent".into(),
+    });
+    let control = crate::reactor::ask::seat_next(&mut agent, None)
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
     agent
 }
 
-/// Two over-length tries stall as before; the third is clipped at a
-/// sentence boundary instead of losing the rewrite (tango-aether,
-/// 2026-10-01)
+/// Two over-length tries are retried; the third is clipped at a sentence
+/// boundary instead of losing the rewrite (tango-aether, 2026-10-01)
 #[tokio::test]
 async fn the_last_soul_rewrite_attempt_is_clipped_not_lost() {
     let server = MockServer::start();
-    let mut agent = mutating_agent(&server);
+    let mut agent = mutating_agent(&server).await;
     let over = soul_rewrite(soul::PROSE_MAX + 60);
     for _ in 0..2 {
         let control = agent
             .handle(text_message(&over, StopReason::EndTurn))
             .await
             .unwrap();
-        assert_eq!(control, Control::Stalled);
+        // Optional: its own budget, never a stall
+        assert_eq!(control, Control::Continue);
     }
     assert!(transcript(&agent).contains("exceeds 2048 chars"));
     let control = agent
@@ -3810,32 +3874,33 @@ async fn the_last_soul_rewrite_attempt_is_clipped_not_lost() {
     );
 }
 
-/// A closing phase that keeps failing for another reason still fails, and
-/// the reactor is told which phase and why rather than "no successful tool
+/// A memory rewrite that keeps failing stalls the session out, and the
+/// reactor is told which question and why rather than "no successful tool
 /// call"
 #[tokio::test]
 async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
     let server = MockServer::start();
-    let mut mutating = mutating_agent(&server);
+    let mut reflecting = agent(&server, quiet_config());
+    seat_start(&mut reflecting);
+    reflecting
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
     assert_eq!(
-        mutating.stall_reason(),
-        Some(
-            "the soul rewrite (mutate) phase failed 0 times in a row"
-                .to_string()
-        )
+        reflecting.stall_reason(),
+        Some("the memory question".to_string())
     );
     for _ in 0..crate::reactor::MAX_STALLS {
-        let control = mutating
+        let control = reflecting
             .handle(text_message("not json", StopReason::EndTurn))
             .await
             .unwrap();
         assert_eq!(control, Control::Stalled);
     }
-    let reason = mutating.stall_reason().unwrap();
+    let reason = reflecting.stall_reason().unwrap();
     assert!(
         reason.starts_with(
-            "the soul rewrite (mutate) phase failed 3 times in a row; last: \
-             Invalid JSON"
+            "the memory question failed 3 times in a row; last: parse"
         ),
         "{reason}"
     );
@@ -3843,6 +3908,192 @@ async fn a_failing_closing_phase_names_itself_as_the_stall_reason() {
     // An acting stall keeps the reactor's own wording.
     let acting = agent(&server, quiet_config());
     assert_eq!(acting.stall_reason(), None);
+}
+
+/// A soul rewrite that never parses is missed, not a failed session
+/// (Steward, 2026-11-06: optional questions never fail a session): the
+/// soul is unchanged, the miss is there for the runner to alert on, and the
+/// session completes
+#[tokio::test]
+async fn a_spent_soul_rewrite_is_missed_and_the_session_completes() {
+    let server = MockServer::start();
+    let mut agent = mutating_agent(&server).await;
+    let identity = agent.state.soul.identity.as_str().to_string();
+    for _ in 0..2 {
+        let control = agent
+            .handle(text_message("not json", StopReason::EndTurn))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Continue);
+    }
+    let control = agent
+        .handle(text_message("still not json", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(agent.state.completed);
+    assert_eq!(agent.state.soul.identity.as_str(), identity);
+    assert!(matches!(
+        agent.unanswered_asks(),
+        [("soul", crate::reactor::ask::Unanswered::Missed(why))]
+            if why == "parse"
+    ));
+}
+
+/// Counts `event_type = "api_refusal"` events while it is the default
+#[derive(Clone, Default)]
+struct RefusalEvents(Arc<std::sync::atomic::AtomicUsize>);
+
+impl RefusalEvents {
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl tracing::Subscriber for RefusalEvents {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::always()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(
+        &self,
+        _: &tracing::span::Id,
+        _: &tracing::span::Id,
+    ) {
+    }
+    fn event(&self, event: &tracing::Event<'_>) {
+        struct Visit(bool, bool);
+        impl tracing::field::Visit for Visit {
+            fn record_str(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &str,
+            ) {
+                if field.name() == "event_type" && value == "api_refusal" {
+                    self.0 = true;
+                }
+                // No content: never the reply's words
+                if value.contains("REFUSED WORDS") {
+                    self.1 = true;
+                }
+            }
+            fn record_debug(
+                &mut self,
+                field: &tracing::field::Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                let value = format!("{value:?}");
+                if field.name() == "event_type" && value.contains("api_refusal")
+                {
+                    self.0 = true;
+                }
+                if value.contains("REFUSED WORDS") {
+                    self.1 = true;
+                }
+            }
+        }
+        let mut visit = Visit(false, false);
+        event.record(&mut visit);
+        assert!(!visit.1, "a refusal's words reached a log line");
+        if visit.0 {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+fn refusal_message() -> response::Message {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_refused",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "REFUSED WORDS"}],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "refusal",
+        "stop_sequence": null,
+    }))
+    .unwrap()
+}
+
+/// Any API refusal ends the session as failed (Steward, 2026-11-06), in
+/// acting, the memory rewrite or an optional question: `api_refusal` is
+/// logged without content, the runner can read where from
+/// [`SeedAgent::refused`], the refused turn is not seated, and the session
+/// is not complete
+#[tokio::test]
+async fn a_refusal_anywhere_ends_the_session_failed() {
+    let server = MockServer::start();
+    let events = RefusalEvents::default();
+    let _guard = tracing::subscriber::set_default(events.clone());
+    tracing::callsite::rebuild_interest_cache();
+
+    // Acting, in its first round
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let control = agent.handle(refusal_message()).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::Refused {
+            during: "acting".into(),
+            round: Some(1),
+            model: "claude-haiku-4-5".into(),
+            response_id: "msg_refused".into(),
+        })
+    );
+    assert!(!transcript(&agent).contains("REFUSED WORDS"));
+    assert!(!agent.state.completed);
+    assert_eq!(events.count(), 1);
+
+    // The memory rewrite
+    let mut agent = self::agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    let control = agent.handle(refusal_message()).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    assert!(matches!(
+        agent.failure(),
+        Some(SessionFailure::Refused { during, round: None, .. }) if during == "memory"
+    ));
+    assert!(!transcript(&agent).contains("REFUSED WORDS"));
+    assert_eq!(events.count(), 2);
+
+    // An optional question: the survey, redacted all the same
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = self::agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let control = agent.handle(refusal_message()).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    assert!(!agent.state.completed, "a refused session is not complete");
+    assert!(matches!(
+        agent.failure(),
+        Some(SessionFailure::Refused { during, .. }) if during == "survey"
+    ));
+    assert!(matches!(
+        agent.unanswered_asks(),
+        [("survey", crate::reactor::ask::Unanswered::Refused { .. })]
+    ));
+    assert_eq!(events.count(), 3);
+    agent.on_teardown().await.unwrap();
+    assert!(
+        !transcript(&agent).contains("feedback to the developers of Agora")
+    );
+    assert!(!transcript(&agent).contains("REFUSED WORDS"));
 }
 
 /// The limits only got looser: a soul at the old caps still reads, the new
@@ -4064,7 +4315,7 @@ async fn a_whole_session_only_appends_and_the_anonymous_survey_is_gone() {
     // The survey was the last request: its question is in it
     let last =
         serde_json::to_string(&requests.last().unwrap().messages).unwrap();
-    assert!(last.contains("anonymous feedback"));
+    assert!(last.contains("feedback to the developers of Agora"));
 
     agent.on_teardown().await.unwrap();
     let dumped = dumped(dir.path());
@@ -4076,7 +4327,7 @@ async fn a_whole_session_only_appends_and_the_anonymous_survey_is_gone() {
             "survey answer in the {what}"
         );
         assert!(
-            !text.contains("anonymous feedback"),
+            !text.contains("feedback to the developers of Agora"),
             "survey question in the {what}"
         );
     }
@@ -4157,8 +4408,8 @@ async fn a_held_survey_comes_after_the_wrappers_question() {
         .push_message((Role::User, "Recorded."))
         .unwrap();
 
-    assert_eq!(agent.begin_epilogue().unwrap(), Control::Continue);
-    assert!(agent.begin_epilogue().is_err(), "begun once");
+    assert_eq!(agent.begin_epilogue().await.unwrap(), Control::Continue);
+    assert!(agent.begin_epilogue().await.is_err(), "begun once");
     let mut script: std::collections::VecDeque<_> = [text_message(
         r#"{"text": "More cat pictures please.", "contact_me": false}"#,
         StopReason::EndTurn,
@@ -4171,7 +4422,7 @@ async fn a_held_survey_comes_after_the_wrappers_question() {
     let last =
         serde_json::to_string(&requests.last().unwrap().messages).unwrap();
     assert!(last.contains("A question from the wrapper."));
-    assert!(last.contains("anonymous feedback"));
+    assert!(last.contains("feedback to the developers of Agora"));
 
     agent.on_teardown().await.unwrap();
     let text = transcript(&agent);
@@ -4179,7 +4430,7 @@ async fn a_held_survey_comes_after_the_wrappers_question() {
         text.contains("An answer."),
         "the wrapper's exchange is kept"
     );
-    assert!(!text.contains("anonymous feedback"));
+    assert!(!text.contains("feedback to the developers of Agora"));
     assert!(!dumped(dir.path()).contains("cat pictures"));
 }
 
@@ -4197,14 +4448,15 @@ async fn a_held_session_without_a_survey_ends_at_begin() {
             .unwrap();
     }
     assert_eq!(
-        agent.begin_epilogue().unwrap(),
+        agent.begin_epilogue().await.unwrap(),
         Control::Done(Outcome::Complete)
     );
     assert!(agent.state.completed);
 }
 
-/// A survey that never got a usable answer (the session stalls out on it)
-/// is redacted at teardown all the same, failed attempts included
+/// A survey that never got a usable answer (missed after its three
+/// attempts; the session still completes) is redacted at teardown all the
+/// same, failed attempts included
 #[tokio::test]
 async fn a_survey_that_never_parsed_is_redacted_too() {
     let server = MockServer::start();
@@ -4221,7 +4473,7 @@ async fn a_survey_that_never_parsed_is_redacted_too() {
             .await
             .unwrap();
     }
-    for _ in 0..crate::reactor::MAX_STALLS {
+    for attempt in 1..=3 {
         let control = agent
             .handle(text_message(
                 "Cat pictures, not JSON.",
@@ -4229,12 +4481,17 @@ async fn a_survey_that_never_parsed_is_redacted_too() {
             ))
             .await
             .unwrap();
-        assert_eq!(control, Control::Stalled);
+        if attempt < 3 {
+            assert_eq!(control, Control::Continue);
+        } else {
+            assert_eq!(control, Control::Done(Outcome::Complete));
+        }
     }
+    assert!(agent.state.completed);
     agent.on_teardown().await.unwrap();
     let dumped = dumped(dir.path());
     assert!(dumped.contains("I posted about compilers"), "{dumped}");
-    assert!(!dumped.contains("anonymous feedback"));
+    assert!(!dumped.contains("feedback to the developers of Agora"));
     assert!(!dumped.contains("Cat pictures"));
 }
 
@@ -4896,9 +5153,7 @@ async fn submit_feedback_is_a_tool_and_is_redacted_at_teardown() {
     assert!(tool.description.contains("archived transcript"));
     // Said before the call, as `redact_feedback` does it (0.107.1)
     assert!(
-        tool.description.contains(
-            "with your words and thinking in the message you send it in"
-        ),
+        tool.description.contains(tool::FEEDBACK_REMOVED),
         "{}",
         tool.description
     );
@@ -10230,7 +10485,7 @@ async fn a_stop_ends_acting_after_the_turn_and_the_memory_turn_follows() {
     // The signal arrived during that turn: the reactor asks at the boundary.
     let control = agent.on_stop().await.unwrap();
     assert_eq!(control, Control::Continue);
-    assert!(matches!(agent.phase, Phase::Reflect), "{:?}", agent.phase);
+    assert!(agent.asks.seated() == Some("memory"), "{:?}", agent.phase);
     let text = transcript(&agent);
     let stop_at = text.find(super::RUNNER_STOPPING).expect("told why");
     let memory_at = text.find("update your `## Your Memory`").unwrap();
@@ -10279,7 +10534,7 @@ async fn a_stop_during_a_paused_turn_abandons_it() {
     assert_eq!(agent.prompt().messages.len(), before + 1);
 
     assert_eq!(agent.on_stop().await.unwrap(), Control::Continue);
-    assert!(matches!(agent.phase, Phase::Reflect));
+    assert!(agent.asks.seated() == Some("memory"));
     assert_eq!(
         agent.prompt().messages.len(),
         before,
@@ -11349,4 +11604,655 @@ fn every_limit_says_what_it_left_out_in_one_form() {
                 .to_string(),
         ]
     );
+}
+
+/// The survey's redaction point is set when it is seated: a session that
+/// errs with the survey open (a failed parse, then a fatal infer error, so
+/// no answer ever settles it) is redacted at teardown all the same
+#[tokio::test]
+async fn a_session_that_errs_with_the_survey_open_is_redacted() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let config = SeedConfig {
+        force_survey: true,
+        ..logging_config(&dir)
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let control = agent
+        .handle(text_message(
+            r#"{"text": ["my secret feedback"], "contact_me": false}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Continue);
+    // The reactor ends the session here (an infer error): teardown follows
+    agent.on_teardown().await.unwrap();
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("my secret feedback"), "{saved}");
+    assert!(!saved.contains("feedback to the developers of Agora"));
+    assert!(!dumped(dir.path()).contains("my secret feedback"));
+    assert!(
+        saved.contains("mmmmmmmmmmmmmmmmmmmmmmmmmmm"),
+        "the memory is kept"
+    );
+}
+
+/// A copy of the question's own example is no answer: the memory rewrite,
+/// the evolution entry and the survey each retry it rather than writing a
+/// placeholder into the memory, the log or the developers' inbox
+#[tokio::test]
+async fn the_questions_own_example_is_retried() {
+    let server = MockServer::start();
+    let feedback = server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    let before = agent.state.memory.content.clone();
+    let control = agent
+        .handle(text_message(
+            r#"{"content": "<your full memory as freeform markdown text>"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(agent.state.memory.content, before);
+    assert!(transcript(&agent).contains(
+        "replacing each placeholder (`<…>` or `...`) with your own words"
+    ));
+
+    let config = SeedConfig {
+        evolution_chance: 100,
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = self::agent(&server, config);
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(agent.asks.seated(), Some("evolution"));
+    agent
+        .handle(text_message(
+            r#"{"note": "<your change here>"}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("evolution"), "asked again");
+    assert!(agent.state.soul.evolution_log.is_empty());
+    agent
+        .handle(text_message("null", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("survey"));
+    agent
+        .handle(text_message(
+            r#"{"text": "<feedback here>", "contact_me": false}"#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("survey"), "asked again");
+    feedback.assert_calls(0);
+}
+
+/// A rolled mutation with no room for its budget gives way to a rolled
+/// evolution entry that fits, as before 0.157
+#[tokio::test]
+async fn a_mutation_that_would_not_fit_gives_way_to_evolution() {
+    let server = MockServer::start();
+    let config = SeedConfig {
+        mutation_chance: 100,
+        evolution_chance: 100,
+        evolve_max_tokens: 1_500,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 100_000))
+        .await
+        .unwrap();
+    // 128k less 123k held less the instruction: 3,000, under the soul's
+    // 4,096 and over the evolution's 1,500
+    agent
+        .handle(text_with_usage(MEMORY, 123_000))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("evolution"));
+}
+
+/// While held, a reply handed to the agent is refused with an error naming
+/// the phase, never taken as acting
+#[tokio::test]
+async fn a_reply_while_held_is_an_error() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(agent.phase, Phase::Held);
+    let clipped = text_message("cut", StopReason::MaxTokens);
+    assert!(agent.on_truncate(&clipped).await.is_err());
+    assert!(agent.handle(clipped).await.is_err());
+    assert!(agent.on_pause(paused_message()).await.is_err());
+}
+
+/// A session that stalls out on the memory rewrite says so at teardown
+#[tokio::test]
+async fn a_stalled_out_memory_rewrite_is_the_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    for _ in 0..crate::reactor::MAX_STALLS {
+        agent
+            .handle(text_message("not json", StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    // The reactor stops at its cap and tears down
+    agent.on_teardown().await.unwrap();
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::Stalled {
+            during: "memory".into()
+        })
+    );
+}
+
+/// Acting that stalls out (no successful tool call in a row) says so too
+#[tokio::test]
+async fn a_stalled_out_acting_phase_is_the_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for _ in 0..crate::reactor::MAX_STALLS {
+        let control = agent
+            .handle(text_message("an over-long ramb", StopReason::MaxTokens))
+            .await
+            .unwrap();
+        assert_eq!(control, Control::Stalled);
+    }
+    agent.on_teardown().await.unwrap();
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::Stalled {
+            during: "acting".into()
+        })
+    );
+}
+
+/// No room for the memory rewrite is its own failure
+#[tokio::test]
+async fn no_room_for_the_memory_rewrite_is_the_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let control = agent
+        .handle(text_with_usage("nothing to do", 125_500))
+        .await
+        .unwrap();
+    assert_eq!(control, Control::Done(Outcome::Failed));
+    agent.on_teardown().await.unwrap();
+    assert_eq!(
+        agent.failure(),
+        Some(&SessionFailure::NoRoom {
+            during: "memory".into()
+        })
+    );
+}
+
+/// A session torn down short of complete for any other reason (an
+/// inference error, here after one stall, so short of the cap) is an
+/// error; a complete one has no failure
+#[tokio::test]
+async fn an_unexplained_end_is_an_error_and_a_complete_one_is_none() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message("not json", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), Some(&SessionFailure::Error));
+
+    let mut agent = self::agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert!(agent.state.completed);
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), None);
+}
+
+/// A session that got no reply never began, and reports no failure: there
+/// is nothing to tell the agent (the fleet-outage case). Here its
+/// `on_init` fails (no server at all, as when the constitution gate trips
+/// fleet-wide); then `on_init` succeeds and the first request errs
+#[tokio::test]
+async fn a_session_that_never_began_has_no_failure() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    assert!(agent.on_init().await.is_err());
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), None);
+
+    // on_init succeeded; the endpoint is down, so no reply ever comes
+    let server = MockServer::start();
+    let mut agent = session_agent(&server, quiet_config()).await;
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), None);
+}
+
+/// A wrapper's own question pauses on a web search while this agent is
+/// held: resumed under the session's budget, never refused, and past the
+/// budget the partial is dropped and the turn stalls, with the phase
+/// untouched
+#[tokio::test]
+async fn a_wrappers_question_pause_resumes_while_held() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    assert_eq!(agent.phase, Phase::Held);
+    // The wrapper's question
+    seat_user(&mut agent.state.prompt, "A question from the wrapper.").unwrap();
+    let before = agent.prompt().messages.len();
+    for i in 1..=MAX_PAUSES {
+        let control = agent.resume_question_pause(paused_message()).unwrap();
+        assert_eq!(control, Control::Continue, "pause {i}");
+    }
+    assert_eq!(agent.prompt().messages.len(), before + MAX_PAUSES);
+    let control = agent.resume_question_pause(paused_message()).unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(
+        agent.prompt().messages.len(),
+        before,
+        "the partial is dropped"
+    );
+    assert_eq!(agent.phase, Phase::Held, "the phase is untouched");
+}
+
+/// Past the budget during a wrapper's question while still acting (a
+/// trial review), the memory rewrite is not begun under it
+#[tokio::test]
+async fn a_wrappers_question_pause_past_the_budget_never_begins_memory() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    for _ in 0..MAX_PAUSES {
+        agent.resume_question_pause(paused_message()).unwrap();
+    }
+    let control = agent.resume_question_pause(paused_message()).unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert!(matches!(agent.phase, Phase::Acting { .. }));
+    assert!(!transcript(&agent).contains("update your `## Your Memory`"));
+}
+
+/// We don't read agent memory: a memory rewrite sent as a bare string
+/// fails with serde quoting the whole of it, and none of that reaches the
+/// stall reason or the record; the agent still sees the whole note
+#[tokio::test]
+async fn a_failed_memory_rewrite_keeps_no_words() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent
+        .handle(text_message("done", StopReason::EndTurn))
+        .await
+        .unwrap();
+    agent
+        .handle(text_message(
+            r#""My private plans for tomorrow.""#,
+            StopReason::EndTurn,
+        ))
+        .await
+        .unwrap();
+    let reason = agent.stall_reason().unwrap();
+    assert!(reason.ends_with("last: parse"), "{reason}");
+    assert!(!reason.contains("private plans"));
+    let last =
+        serde_json::to_string(agent.prompt().messages.last().unwrap()).unwrap();
+    assert!(last.contains("Invalid JSON"), "the agent sees it: {last}");
+}
+
+/// A paused turn as some endpoints send it: partial text, no server tool
+/// call in it. A second pause after it continues it (merged), rather than
+/// following it as a second assistant turn
+fn paused_text_message(text: &str) -> response::Message {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [{ "type": "text", "text": text }],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "pause_turn",
+        "stop_sequence": null,
+    }))
+    .unwrap()
+}
+
+/// Six pauses in a row during a wrapper's question: five resumed, chained
+/// into one partial turn, then the budget is spent and the merged partial
+/// is dropped whole
+#[tokio::test]
+async fn six_pauses_in_a_row_during_a_wrappers_question() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    seat_user(&mut agent.state.prompt, "A question from the wrapper.").unwrap();
+    let before = agent.prompt().messages.len();
+    for i in 1..=MAX_PAUSES {
+        let control = agent
+            .resume_question_pause(paused_text_message(&format!("part {i}")))
+            .unwrap();
+        assert_eq!(control, Control::Continue, "pause {i}");
+        assert_eq!(
+            agent.prompt().messages.len(),
+            before + 1,
+            "pause {i} continues the one partial turn"
+        );
+    }
+    let control = agent
+        .resume_question_pause(paused_text_message("part 6"))
+        .unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(agent.prompt().messages.len(), before, "dropped whole");
+    assert_eq!(
+        agent.prompt().messages.last().unwrap().role,
+        Role::User,
+        "the request ends on the question"
+    );
+}
+
+/// Two pauses in a row while acting chain too, and the reply after them
+/// continues the same turn
+#[tokio::test]
+async fn two_chained_pauses_in_acting() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let before = agent.prompt().messages.len();
+    for text in ["Let me", " search."] {
+        let control = agent.handle(paused_text_message(text)).await.unwrap();
+        assert_eq!(control, Control::Continue);
+    }
+    assert_eq!(agent.prompt().messages.len(), before + 1);
+    assert!(matches!(agent.phase, Phase::Acting { .. }));
+    // The quiescent reply after them, then the memory rewrite
+    agent
+        .handle(text_message("Nothing more.", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("memory"));
+}
+
+/// A failed reply left out near the context edge so the retry fit is in
+/// the prompt-log archive, marked, after the transcript; never in the
+/// saved state's transcript
+#[tokio::test]
+async fn a_reply_left_out_for_the_retry_is_archived() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    let mut bad = text_with_usage("LEFT OUT not json", 120_000);
+    bad.usage.output_tokens = 3_000;
+    agent.handle(bad).await.unwrap();
+    agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let archive = dumped(dir.path());
+    assert!(archive.contains("LEFT OUT not json"), "{archive}");
+    assert!(archive.contains("left out of the transcript so the retry fit"));
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("LEFT OUT"), "{saved}");
+}
+
+/// An anonymous survey leaves no trace (Steward, 2026-11-06): answered with
+/// `contact_me` false or with `null`, the saved transcript and the archive
+/// equal those of a session never asked
+#[tokio::test]
+async fn an_anonymous_survey_is_indistinguishable_from_none() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    async fn session(
+        server: &MockServer,
+        survey: Option<&str>,
+    ) -> (serde_json::Value, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = SeedConfig {
+            force_survey: survey.is_some(),
+            ..logging_config(&dir)
+        };
+        let mut agent = agent(server, config);
+        seat_start(&mut agent);
+        let mut replies = vec!["done", MEMORY];
+        replies.extend(survey);
+        for reply in replies {
+            agent
+                .handle(text_message(reply, StopReason::EndTurn))
+                .await
+                .unwrap();
+        }
+        assert!(agent.state.completed);
+        agent.on_teardown().await.unwrap();
+        let saved =
+            serde_json::to_value(&agent.state().prompt.messages).unwrap();
+        let archive = dumped(dir.path());
+        let archived: serde_json::Value =
+            serde_json::from_str(&archive).unwrap();
+        assert!(
+            archived["messages"]
+                .as_array()
+                .is_some_and(|m| m.len() >= 3)
+        );
+        (saved, archived["messages"].to_string())
+    }
+    let never = session(&server, None).await;
+    for answer in [r#"{"text": "Cat pictures.", "contact_me": false}"#, "null"]
+    {
+        assert_eq!(session(&server, Some(answer)).await, never, "{answer}");
+    }
+}
+
+/// The archive's sha is the one the prompt log wrote, which names the dump
+/// on disk; with a reply left out of the transcript it differs from the
+/// transcript's own hash, which names no dump
+#[tokio::test]
+async fn the_archive_sha_names_the_dump_written() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    assert_eq!(agent.archive_sha256(), None);
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    let mut bad = text_with_usage("not json", 120_000);
+    bad.usage.output_tokens = 3_000;
+    agent.handle(bad).await.unwrap();
+    agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let sha = agent.archive_sha256().expect("written");
+    let archive = agent.archived_prompt().into_owned();
+    assert_eq!(prompt_sha256(&archive).unwrap(), sha.to_string());
+    assert_ne!(prompt_sha256(agent.prompt()).unwrap(), sha.to_string());
+    fn names(dir: &std::path::Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                names(&path, out);
+            } else {
+                out.push(path.display().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    names(dir.path(), &mut files);
+    assert!(
+        files.iter().any(|f| f.contains(&sha.to_string())),
+        "{files:?} vs {sha}"
+    );
+}
+
+/// A wrapper that takes replies itself says so, and the session counts as
+/// begun: a failure after it is reported
+#[tokio::test]
+async fn a_wrappers_reply_begins_the_session() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    agent.note_reply();
+    agent.on_teardown().await.unwrap();
+    assert_eq!(agent.failure(), Some(&SessionFailure::Error));
+}
+
+/// A left-out reply that called `submit_feedback` is archived with its
+/// words redacted, as the tool promises for the transcript
+#[tokio::test]
+async fn a_left_out_feedback_call_is_redacted_in_the_archive() {
+    let server = MockServer::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut agent = agent(&server, logging_config(&dir));
+    seat_start(&mut agent);
+    agent
+        .handle(text_with_usage("nothing to do", 120_000))
+        .await
+        .unwrap();
+    let mut call = tool_use_message(
+        "submit_feedback",
+        serde_json::json!({"body": "SECRET GRIPES"}),
+    );
+    call.usage.input_tokens = 120_000;
+    call.usage.output_tokens = 3_000;
+    agent.handle(call).await.unwrap();
+    agent
+        .handle(text_with_usage(MEMORY, 120_000))
+        .await
+        .unwrap();
+    agent.on_teardown().await.unwrap();
+    let archive = dumped(dir.path());
+    assert!(archive.contains("left out of the transcript"), "{archive}");
+    assert!(!archive.contains("SECRET GRIPES"), "{archive}");
+    assert!(archive.contains(FEEDBACK_REDACTED));
+}
+
+/// The survey's promise: the question, the answer and the thinking about
+/// it are removed from the transcript (the redaction cuts from where the
+/// question began, so the answer's thought blocks go with it)
+#[tokio::test]
+async fn an_anonymous_surveys_thinking_is_removed_too() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/agora/api/social/feedback");
+        then.status(201).json_body(serde_json::json!({}));
+    });
+    let config = SeedConfig {
+        force_survey: true,
+        ..quiet_config()
+    };
+    let mut agent = agent(&server, config);
+    to_the_survey(&mut agent).await;
+    let answer: response::Message = serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [
+            {"type": "thinking", "thinking": "PRIVATE MUSING about the survey",
+             "signature": "sig"},
+            {"type": "text", "text": "{\"text\": \"Fine.\", \"contact_me\": false}"},
+        ],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+    }))
+    .unwrap();
+    let control = agent.handle(answer).await.unwrap();
+    assert_eq!(control, Control::Done(Outcome::Complete));
+    assert!(
+        serde_json::to_string(agent.prompt())
+            .unwrap()
+            .contains("PRIVATE MUSING")
+    );
+    agent.on_teardown().await.unwrap();
+    let saved = serde_json::to_string(agent.state()).unwrap();
+    assert!(!saved.contains("PRIVATE MUSING"), "{saved}");
+}
+
+/// Beta round 23: `submit_feedback`'s description says what its result
+/// says, in one copy, and how to keep the rest of a message out of it
+#[tokio::test]
+async fn the_feedback_tools_description_agrees_with_its_result() {
+    let server = MockServer::start();
+    let agent = session_agent(&server, quiet_config()).await;
+    let description = agent
+        .prompt()
+        .tools
+        .iter()
+        .flatten()
+        .find(|d| d.name() == "submit_feedback")
+        .map(|d| serde_json::to_value(d).unwrap()["description"].to_string())
+        .expect("the tool");
+    assert!(
+        description.contains(tool::FEEDBACK_REMOVED),
+        "{description}"
+    );
+    assert!(description.contains("Send it in a message of its own"));
+    assert!(description.contains("stored with its date but without your name"));
 }

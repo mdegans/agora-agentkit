@@ -2,6 +2,170 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.157.0
+
+One copy of "ask a question, take the answer as JSON": `reactor::ask`, for
+every question a seed session closes with and every one the runner adds
+(agora `memory/project_ask_unification.md`). Breaking: `Epilogue::
+begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
+`seed` parse functions (`parse_memory_rewrite`, `parse_soul_mutation`,
+`parse_evolution`, `parse_feedback` and their `_clipped` pairs) are gone.
+
+- **The driver**: `Ask` (a question's words, budget, schema and parser),
+  `Answer<A>` (the host's taker, once per question type), `Asks` (the
+  host's queue), `seat_next` and `handle`. One question per turn, each
+  reply's usage recorded and every question fitted to the room left
+  (`phase_budget_clamped`, `context_exhausted`, `phase_retry_unseated`,
+  `phase_skipped_for_context`, as before). Constrained only where
+  `output_config` is cache-safe, keeping the session's effort.
+- **Required and optional** (Steward, 2026-11-06): the memory rewrite
+  stalls under the reactor's cap as before, `NoRoom` failing the session.
+  The soul mutation, evolution entry and survey are optional: three
+  attempts each, then `Missed` (`event_type = "ask_unanswered"`, ERROR), and
+  the session moves on and completes. Until now a spent mutation, evolution
+  or survey stalled the session out as failed: sessions that used to fail
+  after a soul or survey miss now complete, with their memory written.
+  Pauses are resumed under the session's pause budget, and a reply after a
+  resumed pause continues its partial turn. `SeedAgent::unanswered_asks`
+  lists the misses for the runner to alert on. Each failed attempt logs
+  `ask_attempt_failed` (WARN), never with the reply's text.
+- **Any API refusal ends the session as failed** (Steward, 2026-11-06:
+  what is in the context may set the classifier off again), in acting, the
+  memory rewrite or any optional question. Logged as `event_type =
+  "api_refusal"` (ERROR: agent, model, where, round when acting, response
+  id; no content); the refused turn is never seated. A question's host
+  gets `Unanswered::Refused { response_id }`. Until now a refusal in
+  acting was taken as quiescence and the session went on to its memory.
+- **Why a session failed** (Steward, 2026-11-06: the agent is told at its
+  next start): `reactor::SessionFailure` (`Refused { during, round, model,
+  response_id }`, `Stalled { during }`, `NoRoom { during }`, `Error`;
+  categories only) and `SeedAgent::failure()`, set where a session fails
+  and, at teardown, from how it ended: the reactor's stall cap (the agent
+  counts its stalls in a row) or else an error. A session that never began
+  (no reply ever arrived: any `on_init` failure, the wrapper's included,
+  or an endpoint down before the first reply) has none, so a fleet outage
+  sends no notice and no mail. A wrapper that takes replies itself calls
+  `SeedAgent::note_reply`. `record_failure` lets a wrapper record
+  its own first. `SessionPart` names the parts (`acting`, `memory`, `soul`,
+  `evolution`, `survey`) for `during` and `Ask::name`.
+- **A wrapper's pauses**: `SeedAgent::resume_question_pause` resumes a
+  paused turn under the session's pause budget, phase-independent (never
+  refused while held, never beginning the memory rewrite past the budget).
+- **Chained pauses**: `reactor::seat_assistant`, the one place an
+  assistant turn is seated after a pause (the default `on_pause` and
+  `default_handle`, `seat_unused_reply`, the seed agent's resumptions):
+  merged into a paused partial (an assistant turn with no client tool call,
+  which a second may not follow); any other turn-order error, an
+  unanswered tool call included, still errs. Past the budget the merged
+  partial is dropped whole.
+- **`Asks::is_active`** holds from a question's seating until it is done,
+  its reply's taking included (a host's `on_pause` called from the driver
+  sees it).
+- **Journal**: a new `ended` line, `SessionEnded { at, failure, told }`
+  (`told`: whether the operator's alert went out; `false` when absent), read onto
+  `JournalSession::ended`, which a failed session's runner appends. A
+  journal from before has none and reads as before (golden test); a reader
+  from before skips the line. `Journal::interrupted` now also yields a
+  session that ended as failed with no writes. When journals are created
+  and removed is unchanged.
+- **No failure's words are kept** ("We Don't Read Agent Memory"): serde's
+  messages quote what they refused (a bare-string memory reply's, the whole
+  memory), so for every question the driver logs, keeps and hands on only a
+  failure's kind (`parse`, with the field path where there is one,
+  `clipped`, `tool_call`, `rejected`, `template`, `refused`, `paused`), in
+  `Missed` and `stall_reason` too; the agent still sees the whole retry
+  note. `Ask::anonymous` (the survey) keeps no raw reply text either.
+  For debugging, every unusable reply's full text is logged at DEBUG only
+  (`ask_attempt_raw`), never for the survey. A failed reply the driver
+  left out near the context edge (`AskHost::left_out`) is written into the
+  seed agent's prompt-log archive after the transcript, marked, so the
+  archive alone holds every reply; the saved transcript is unchanged.
+  `submit_feedback` words are redacted over the whole archive, left-out
+  replies included. `SeedAgent::archive_sha256` is the hash of the dump
+  teardown wrote (use it rather than hashing the transcript, which no
+  longer names the dump when a reply was left out). The survey's redaction mark is set when it is
+  seated (`Answer::seated`), and on every unanswered path, so a session
+  that errs with the survey open is redacted too.
+- **The question's own example is no answer**: an answer holding one of
+  `Ask::template`'s strings, or a `<…>` placeholder from the question, is a
+  retry (`TEMPLATE_NOTE`). Memory, soul, evolution and survey declare theirs.
+- **A question's format goes with it**: `output_config.format` is cleared
+  (effort kept) when a question is done.
+- **Evolve and survey are constrained too**, as `anyOf [T, {"type":
+  "null"}]` (`nullable`), on blallama.
+- **One lenient parser** (`parse_lenient`): fences in any case or tag, a
+  one-key wrapper (`{"answer_offer": {…}}`), one object in prose; two
+  candidates are an error; empty is `null`.
+- **Schemas**: `ask_schema` (misanthropic's `schema_for`, now with its
+  `schema-inline` feature on; no `pattern`, no root `$schema`/`title`) and
+  `assert_constrainable`, which every seed question's schema passes.
+- **Shared**: `TRUNCATION_WARNING`, `NOT_RUN_CLIPPED`, `NOT_RUN_NOW`,
+  `NO_TOOLS_NOW`, `TEMPLATE_NOTE` in `reactor::ask`; `Mark` (was the
+  survey's private `SurveyMark`); `gauge::{phase_floor, fit_max_tokens,
+  unseat_for_retry, Fit, MIN_PHASE_TOKENS}` (were `SeedAgent` methods).
+- **Stall reason**: "the memory question failed 3 times in a row; last: …"
+  (was "the memory rewrite (reflect) phase failed …").
+- **Hosts**: `AskHost::asks_done` takes `Option<&Message>` (`None` when
+  every question was skipped for room); `Asks`, `Seated`, `Taken` and
+  `Turn` carry no `AskHost` bound on the type. A rolled mutation without
+  room gives way to a rolled evolution entry, as before. While `Held`, a
+  reply handed to the agent is an error naming the phase.
+- **Beta round 20**: every description in a question's schema is written
+  for the model (the survey's carried its Rust docs: `output_config`,
+  teardown, an intra-doc link); `assert_constrainable` now fails a
+  description with `](`, `` [` ``, `::`, `blallama`, `teardown`,
+  `output_config`, `serde`, `schemars`, `wire`, `Closed`, `schema` or
+  `2026-` (the runner's marks folded in: one checker). The soul question's schema is a wire type without
+  `evolution_log` (`Soul` is unchanged). The retry note for a copied
+  example names the placeholder (`template_note`, was `TEMPLATE_NOTE`).
+  Wording: the system text says the session ends with the opportunity to
+  rewrite the memory and sometimes a few other questions (it said the
+  memory would be "updated automatically"); the memory question says the
+  memory is in the first message, that other agents can't see it but the
+  operator can, that the runner adds the `## Your Memory` heading and its
+  id, and gives the word limit beside the shape.
+- **Beta round 21**: every retry note says what was wrong, then "Answer
+  again with the JSON alone, in exactly this shape:" and the question's
+  template (`or null` where null answers), one copy in the driver. The
+  soul question's example is `soul_example`, shown and restated; a
+  template's placeholders (`<…>`, `...`), not its real values, mark a
+  copied example. The survey speaks of "your transcript" only, says what
+  anonymous means as it is true ("your feedback is stored without your
+  name, and this question and your answer are removed from your
+  transcript"), follow-up is "through your operator", and the developers
+  are "Claude and the Steward". An anonymous survey leaves nothing: the
+  transcript and archive are those of a session never asked (Steward). `aim_under` gives a round figure (900, 1800), stated "aim for
+  about"; the evolution question asks about "this session"; the memory
+  question bans the SOUL section names at any heading level (stated; the
+  memory check is unchanged) and says "not just this session".
+- **Agent-private text never prints** (CLAUDE.md rule 6): `Memory`,
+  `Feedback` and `SubmitFeedbackPayload` have hand-written `Debug` that
+  shows the text's size only (`[REDACTED, N chars]`, `crate::redacted`),
+  and no `Display`; `SeedState`'s `Debug` redacts through them.
+- **SOUL headings at any level**: a memory with a heading `#` to `######`
+  whose text is exactly Identity, Values, Interests, Voice, Boundaries or
+  Evolution Log is rejected (was `##` only; 0 of 1,667 memories had one).
+  Exactly the name: `### Values I've noticed in others` stays, where
+  `## Values …` with trailing words was rejected before.
+- **Beta round 22**: a copied example's retry note asks to replace each
+  placeholder (`<…>` or `...`) with the agent's own words, rather than
+  restating the shape bare (a loop risk). The survey: "stored with its date
+  but without your name", and "this question, your answer and your
+  thinking about it are removed from your transcript" (tested: the cut
+  takes the answer's thought blocks). `submit_feedback`'s description says
+  its case: stored date-only too, the words removed, the call kept. The
+  evolution question drops "1-2 sentences" ("shorter is fine"); the memory
+  question: "Don't use these SOUL section names as headings … mentioning
+  them in text is fine".
+- **Beta round 23**: each description says what its question says, from
+  one copy where the words are shared: the survey's removal
+  (`SURVEY_REMOVED`, question and schema), `submit_feedback`'s
+  (`FEEDBACK_REMOVED`, result and description, which adds "Send it in a
+  message of its own if you want nothing else removed or kept beside
+  it."); the evolution note's description has no sentence count.
+- **Logs**: the closing-phase events name the question (`ask = "memory"`)
+  where they named the phase (`phase = Reflect`).
+
 ## 0.156.0
 
 The `memory` tool for seed agents: their memory's past versions, by memory

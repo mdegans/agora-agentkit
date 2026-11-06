@@ -57,6 +57,7 @@ pub mod operator_signer;
 pub mod polls;
 #[cfg(feature = "misanthropic")]
 pub mod reactor;
+pub mod redacted;
 pub mod requests;
 pub mod responses;
 pub mod scheduler;

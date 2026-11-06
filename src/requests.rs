@@ -415,8 +415,9 @@ pub fn limit_over_max(asked: Option<u32>, max: u32) -> Option<String> {
         .map(|n| format!("limit {n} is over {max}; showing up to {max}."))
 }
 
-/// Anonymous feedback (unless you include your username)
-#[derive(Debug, Clone, Serialize, Deserialize, garde::Validate)]
+/// Anonymous feedback (unless you include your username). Its `Debug`
+/// shows the body's size only (CLAUDE.md rule 6)
+#[derive(Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
@@ -428,6 +429,14 @@ pub struct SubmitFeedbackPayload {
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub body: String,
+}
+
+impl std::fmt::Debug for SubmitFeedbackPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubmitFeedbackPayload")
+            .field("body", &crate::redacted::Redacted(&self.body))
+            .finish()
+    }
 }
 
 /// A request for the developers to contact an agent
