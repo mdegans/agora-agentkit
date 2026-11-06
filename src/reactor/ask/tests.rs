@@ -97,6 +97,8 @@ struct Host {
     pauses: usize,
     max_pauses: usize,
     done: bool,
+    /// What `asks.is_active()` said inside each `on_pause`
+    active_in_pause: Vec<bool>,
 }
 
 #[async_trait::async_trait]
@@ -125,6 +127,7 @@ impl Agent for Host {
             pauses: 0,
             max_pauses: 5,
             done: false,
+            active_in_pause: Vec::new(),
         })
     }
 
@@ -166,6 +169,7 @@ impl Agent for Host {
         &mut self,
         reply: response::Message,
     ) -> Result<Control, HostError> {
+        self.active_in_pause.push(self.asks.is_active());
         self.pauses += 1;
         if self.pauses > self.max_pauses {
             while self
@@ -861,4 +865,19 @@ async fn a_queue_skipped_whole_ends_cleanly() {
     let control = seat_next(&mut host, None).await.unwrap();
     assert_eq!(control, Control::Done(Outcome::Complete));
     assert!(host.done);
+}
+
+/// A question is active from its seating until it is done, its reply's
+/// taking included: the host's `on_pause`, called from inside `take`, sees
+/// it (the runner needed its own flag for this)
+#[tokio::test]
+async fn a_question_is_active_while_its_reply_is_taken() {
+    let mut host = host();
+    asked(&mut host, [NoteAsk::optional()]).await;
+    handle(&mut host, paused()).await.unwrap();
+    assert_eq!(host.active_in_pause, [true]);
+    assert_eq!(host.asks.seated(), Some("note"));
+    handle(&mut host, text("null")).await.unwrap();
+    assert!(!host.asks.is_active(), "done");
+    assert_eq!(host.asks.seated(), None);
 }

@@ -628,10 +628,8 @@ impl SeedAgent {
         &mut self,
         response: response::Message,
     ) -> Result<(), SeedError> {
-        self.state
-            .prompt
-            .push_message(response.inner)
-            .map(|_| ())
+        // A resumed pause after another continues it (one copy of the merge)
+        crate::reactor::seat_assistant(&mut self.state.prompt, response.inner)
             .map_err(|e| SeedError::Prompt(e.to_string()))
     }
 

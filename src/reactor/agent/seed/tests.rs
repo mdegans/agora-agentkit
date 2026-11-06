@@ -11941,3 +11941,80 @@ async fn a_failed_memory_rewrite_keeps_no_words() {
         serde_json::to_string(agent.prompt().messages.last().unwrap()).unwrap();
     assert!(last.contains("Invalid JSON"), "the agent sees it: {last}");
 }
+
+/// A paused turn as some endpoints send it: partial text, no server tool
+/// call in it. A second pause after it continues it (merged), rather than
+/// following it as a second assistant turn
+fn paused_text_message(text: &str) -> response::Message {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_test",
+        "role": "assistant",
+        "content": [{ "type": "text", "text": text }],
+        "model": "claude-haiku-4-5",
+        "stop_reason": "pause_turn",
+        "stop_sequence": null,
+    }))
+    .unwrap()
+}
+
+/// Six pauses in a row during a wrapper's question: five resumed, chained
+/// into one partial turn, then the budget is spent and the merged partial
+/// is dropped whole
+#[tokio::test]
+async fn six_pauses_in_a_row_during_a_wrappers_question() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    agent.hold_epilogue();
+    seat_start(&mut agent);
+    for reply in ["done", MEMORY] {
+        agent
+            .handle(text_message(reply, StopReason::EndTurn))
+            .await
+            .unwrap();
+    }
+    seat_user(&mut agent.state.prompt, "A question from the wrapper.").unwrap();
+    let before = agent.prompt().messages.len();
+    for i in 1..=MAX_PAUSES {
+        let control = agent
+            .resume_question_pause(paused_text_message(&format!("part {i}")))
+            .unwrap();
+        assert_eq!(control, Control::Continue, "pause {i}");
+        assert_eq!(
+            agent.prompt().messages.len(),
+            before + 1,
+            "pause {i} continues the one partial turn"
+        );
+    }
+    let control = agent
+        .resume_question_pause(paused_text_message("part 6"))
+        .unwrap();
+    assert_eq!(control, Control::Stalled);
+    assert_eq!(agent.prompt().messages.len(), before, "dropped whole");
+    assert_eq!(
+        agent.prompt().messages.last().unwrap().role,
+        Role::User,
+        "the request ends on the question"
+    );
+}
+
+/// Two pauses in a row while acting chain too, and the reply after them
+/// continues the same turn
+#[tokio::test]
+async fn two_chained_pauses_in_acting() {
+    let server = MockServer::start();
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let before = agent.prompt().messages.len();
+    for text in ["Let me", " search."] {
+        let control = agent.handle(paused_text_message(text)).await.unwrap();
+        assert_eq!(control, Control::Continue);
+    }
+    assert_eq!(agent.prompt().messages.len(), before + 1);
+    assert!(matches!(agent.phase, Phase::Acting { .. }));
+    // The quiescent reply after them, then the memory rewrite
+    agent
+        .handle(text_message("Nothing more.", StopReason::EndTurn))
+        .await
+        .unwrap();
+    assert_eq!(agent.asks.seated(), Some("memory"));
+}

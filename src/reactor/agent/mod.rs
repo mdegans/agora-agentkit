@@ -96,8 +96,22 @@ pub fn seat_unused_reply(
             )
         })
         .collect();
-    // After a resumed pause the reply continues the partial turn seated
-    // for it: merged into it where a second assistant turn may not follow
+    seat_assistant(prompt, turn)?;
+    if !results.is_empty() {
+        prompt.push_message((Role::User, results))?;
+    }
+    Ok(())
+}
+
+/// Seat an assistant `turn`. After a paused turn (seated so the next
+/// request continues it) the reply continues it: merged into it where a
+/// second assistant turn may not follow, appended where it may (after a
+/// `server_tool_use`). One copy, for a resumed pause and for a reply after
+/// one
+pub fn seat_assistant(
+    prompt: &mut Prompt,
+    turn: impl Into<misanthropic::prompt::Message>,
+) -> Result<(), TurnOrderError> {
     let turn: misanthropic::prompt::Message = turn.into();
     match prompt.messages.last() {
         Some(last)
@@ -109,9 +123,6 @@ pub fn seat_unused_reply(
         _ => {
             prompt.push_message(turn)?;
         }
-    }
-    if !results.is_empty() {
-        prompt.push_message((Role::User, results))?;
     }
     Ok(())
 }
@@ -212,8 +223,7 @@ pub async fn default_handle<A: Agent>(
         }
         {
             let (_, prompt) = agent.parts();
-            prompt
-                .push_message(turn)
+            seat_assistant(prompt, turn)
                 .map_err(|e| A::Error::from(boxed(e)))?;
         }
         let notes = agent.drain_notifications();
@@ -227,8 +237,7 @@ pub async fn default_handle<A: Agent>(
 
     // Dispatch the tool calls; seat all results as one user turn.
     let (tools, prompt) = agent.parts();
-    prompt
-        .push_message(response.inner)
+    seat_assistant(prompt, response.inner)
         .map_err(|e| A::Error::from(boxed(e)))?;
     let mut results = Vec::with_capacity(calls.len());
     let mut progressed = false;
@@ -365,8 +374,7 @@ pub trait Agent: Sized + Send {
         response: response::Message,
     ) -> Result<Control, Self::Error> {
         let (_, prompt) = self.parts();
-        prompt
-            .push_message(response.inner)
+        seat_assistant(prompt, response.inner)
             .map_err(|e| Self::Error::from(boxed(e)))?;
         Ok(Control::Continue)
     }

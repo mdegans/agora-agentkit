@@ -48,6 +48,14 @@ begin_epilogue` is async; `SeedAgent`'s closing phases are `Ask`s; the
 - **A wrapper's pauses**: `SeedAgent::resume_question_pause` resumes a
   paused turn under the session's pause budget, phase-independent (never
   refused while held, never beginning the memory rewrite past the budget).
+- **Chained pauses**: `reactor::seat_assistant`, the one place an
+  assistant turn is seated after a pause (the default `on_pause` and
+  `default_handle`, `seat_unused_reply`, the seed agent's resumptions):
+  merged into a partial turn a second assistant turn may not follow. Past
+  the budget the merged partial is dropped whole.
+- **`Asks::is_active`** holds from a question's seating until it is done,
+  its reply's taking included (a host's `on_pause` called from the driver
+  sees it).
 - **Journal**: a new `ended` line, `SessionEnded { at, failure, told }`
   (`told`: whether the operator's alert went out; `false` when absent), read onto
   `JournalSession::ended`, which a failed session's runner appends. A

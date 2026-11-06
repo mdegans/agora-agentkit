@@ -392,18 +392,19 @@ pub enum Taken<H> {
 }
 
 /// A host's questions, in the order they are asked; the head is the one
-/// seated, if any.
+/// seated, if any (out of the queue while its reply is taken).
 pub struct Asks<H> {
     queue: VecDeque<Box<dyn Turn<H>>>,
-    /// Whether the head has been seated and awaits its reply.
-    seated: bool,
+    /// The question seated, from its seating until it is done, its reply's
+    /// taking included
+    active: Option<&'static str>,
 }
 
 impl<H> Default for Asks<H> {
     fn default() -> Self {
         Self {
             queue: VecDeque::new(),
-            seated: false,
+            active: None,
         }
     }
 }
@@ -423,10 +424,13 @@ impl<H> Asks<H> {
         }));
     }
 
-    /// Whether a question is seated and awaiting its reply: the host routes
-    /// its responses to [`handle`] while this holds.
+    /// Whether a question is in progress: from its seating until it is
+    /// done, including while [`handle`] takes its reply (so a host's
+    /// [`Agent::on_pause`](super::Agent::on_pause), called from there,
+    /// sees it). The host routes its responses to [`handle`] while this
+    /// holds.
     pub fn is_active(&self) -> bool {
-        self.seated
+        self.active.is_some()
     }
 
     /// Whether any question is queued.
@@ -436,16 +440,18 @@ impl<H> Asks<H> {
 
     /// The seated question's name, if one is seated.
     pub fn seated(&self) -> Option<&'static str> {
-        self.seated
-            .then(|| self.queue.front().map(|t| t.name()))
-            .flatten()
+        self.active
     }
 
     /// For [`Agent::stall_reason`]: the seated
     /// question's name, how many of its replies were unusable, and the last
     /// failure.
     pub fn stall_reason(&self) -> Option<String> {
-        let turn = self.seated.then(|| self.queue.front()).flatten()?;
+        let name = self.active?;
+        // Out of the queue while its reply is taken: the name alone
+        let Some(turn) = self.queue.front().filter(|t| t.name() == name) else {
+            return Some(format!("the {name} question"));
+        };
         let attempts = turn.attempts();
         Some(match attempts.last() {
             Some(last) => format!(
@@ -478,7 +484,7 @@ pub async fn seat_next<H: AskHost>(
     host: &mut H,
     last: Option<&response::Message>,
 ) -> Result<Control, H::Error> {
-    if host.asks().seated {
+    if host.asks().active.is_some() {
         return Err(error("a question is already seated"));
     }
     loop {
@@ -488,8 +494,8 @@ pub async fn seat_next<H: AskHost>(
         match turn.seat(host).await? {
             Seated::Asked(turn) => {
                 let asks = host.asks();
+                asks.active = Some(turn.name());
                 asks.queue.push_front(turn);
-                asks.seated = true;
                 return Ok(Control::Continue);
             }
             Seated::Skipped(Next::Continue) => continue,
@@ -510,20 +516,19 @@ pub async fn handle<H: AskHost>(
         gauge.record(&reply.usage);
     }
     let asks = host.asks();
-    if !asks.seated {
+    if asks.active.is_none() {
         return Err(error("a reply with no question seated"));
     }
-    let turn = asks.queue.pop_front().expect("seated implies a head");
-    asks.seated = false;
+    // Still active while its reply is taken
+    let turn = asks.queue.pop_front().expect("active implies a head");
     let last = reply.clone();
     match turn.take(host, reply).await? {
         Taken::Again(turn, control) => {
-            let asks = host.asks();
-            asks.queue.push_front(turn);
-            asks.seated = true;
+            host.asks().queue.push_front(turn);
             Ok(control)
         }
         Taken::Done(next) => {
+            host.asks().active = None;
             // A question's format goes with it: a later unconstrained turn
             // must not be bound to a stale schema (the effort stays)
             clear_format(host.parts().1);

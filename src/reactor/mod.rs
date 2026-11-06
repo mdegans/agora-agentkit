@@ -22,7 +22,7 @@ pub use agent::cache;
 pub use agent::seed;
 pub use agent::{
     Agent, Control, Epilogue, Outcome, SessionFailure, State, default_handle,
-    seat_unused_reply, seat_user,
+    seat_assistant, seat_unused_reply, seat_user,
 };
 
 mod backend;
