@@ -28,6 +28,9 @@ pub enum VersionSource {
     SetAside { on: Option<NaiveDate> },
     /// Never saved: the run ended before saving (unsigned)
     NeverSaved,
+    /// A copy from before a memory loss, written into the chain later: it
+    /// was never the agent's memory on the day it is dated next to
+    PriorCopy,
 }
 
 impl VersionSource {
@@ -49,7 +52,15 @@ impl VersionSource {
             Self::NeverSaved => {
                 Some("never saved: the run ended before saving".into())
             }
+            Self::PriorCopy => Some("a copy from before a memory loss".into()),
         }
+    }
+
+    /// Whether a version from here is on the agent's main line: sealed
+    /// there, or a local copy of it. `log` compares a version's size and
+    /// text only with another on the main line
+    pub fn main_line(&self) -> bool {
+        matches!(self, Self::Sealed | Self::LocalCopy)
     }
 }
 
@@ -299,6 +310,14 @@ fn delta(now: usize, before: usize) -> String {
     }
 }
 
+/// Whether `log` compares `a` and `b` (size, sameness): only two versions
+/// on the main line. Across a prior copy, a side line or a set-aside one,
+/// a size change would read as a loss or a gain that never happened (beta
+/// round 16: −449 on a first day, against a copy from before a loss)
+fn comparable(a: &MemoryVersion, b: &MemoryVersion) -> bool {
+    a.source.main_line() && b.source.main_line()
+}
+
 /// A version's head as shown: none when the history wasn't checked
 fn shown_head(v: &MemoryVersion, seal: SealCheck) -> Option<&Sha256Hex> {
     v.head.as_ref().filter(|_| seal == SealCheck::Checked)
@@ -413,12 +432,18 @@ pub fn log(
             (VersionText::Unopened { reason, .. }, _) => {
                 row.push_str(&format!("  ({UNOPENED}: {reason})"));
             }
-            _ if i > start && history[i - 1].same_text(v) => {
+            _ if i > start
+                && comparable(&history[i - 1], v)
+                && history[i - 1].same_text(v) =>
+            {
                 row.push_str("  (same memory as above)");
             }
             (_, Some(chars)) => {
                 row.push_str(&format!("  memory {} chars", grouped(chars)));
-                if let Some(older) = history.get(i + 1).and_then(|o| o.chars())
+                if let Some(older) = history
+                    .get(i + 1)
+                    .filter(|o| comparable(v, o))
+                    .and_then(|o| o.chars())
                 {
                     row.push(' ');
                     row.push_str(&delta(chars, older));
@@ -827,7 +852,8 @@ mod tests {
                 id(1)
             )
         );
-        assert!(rows[2].ends_with("memory 8 chars (+5)"), "{}", rows[2]);
+        // No size change against the side line below it
+        assert!(rows[2].ends_with("memory 8 chars"), "{}", rows[2]);
         assert!(
             rows[3].ends_with("(on a side line your operator rebased)"),
             "{}",
@@ -853,6 +879,74 @@ mod tests {
         );
         assert!(
             log(&[], 0, 2, &now, SealCheck::Checked).contains("no versions")
+        );
+    }
+
+    /// A prior copy, a side line or a set-aside version is never compared
+    /// with a main-line one: no size change, never "same memory as above"
+    #[test]
+    fn log_compares_only_main_line_rows() {
+        assert_eq!(
+            VersionSource::PriorCopy.label().unwrap(),
+            "a copy from before a memory loss"
+        );
+        for other in [
+            VersionSource::PriorCopy,
+            VersionSource::SideLine,
+            VersionSource::OffLine,
+            VersionSource::SetAside { on: None },
+            VersionSource::NeverSaved,
+        ] {
+            let mut prior = version(2, 3, &"x".repeat(473));
+            prior.source = other;
+            let mut same = version(3, 2, "short");
+            same.source = other;
+            let history =
+                [version(1, 4, "short"), same, prior, version(4, 1, "short")];
+            let out = log(
+                &history,
+                0,
+                20,
+                &current(1, "short", &history),
+                SealCheck::Checked,
+            );
+            let rows: Vec<&str> = out.lines().collect();
+            // Nothing on the main line below the newest row to compare
+            assert_eq!(
+                rows[0],
+                format!(
+                    "2026-11-04 21:14  {}  head 313131313131  memory 5 chars  \
+                     ← this session",
+                    id(1)
+                ),
+                "{other:?}"
+            );
+            assert!(
+                !rows[1].contains("same memory as above"),
+                "{other:?}: {out}"
+            );
+            assert!(
+                !out.contains('\u{2212}')
+                    && !out.contains("(+")
+                    && !out.contains('±'),
+                "{other:?}: {out}"
+            );
+        }
+        // Main-line rows still compare: sealed with a local copy
+        let mut copy = version(2, 1, "abc");
+        copy.source = VersionSource::LocalCopy;
+        copy.head = None;
+        let history = [version(1, 2, "abcdef"), copy];
+        let out = log(
+            &history,
+            0,
+            20,
+            &current(9, "z", &history),
+            SealCheck::Checked,
+        );
+        assert!(
+            out.lines().next().unwrap().ends_with("memory 6 chars (+3)"),
+            "{out}"
         );
     }
 
