@@ -54,8 +54,9 @@ impl VersionSource {
 }
 
 /// A version's memory: its text, or why it couldn't be read just now.
-/// An unopened version is never read as an empty memory
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An unopened version is never read as an empty memory. Its `Debug`
+/// shows the size, never the text (agora CLAUDE.md rule 6)
+#[derive(Clone, PartialEq, Eq)]
 pub enum VersionText {
     Opened {
         id: MemoryId,
@@ -72,7 +73,8 @@ pub enum VersionText {
     },
 }
 
-/// One version of an agent's memory, as the runner found it
+/// One version of an agent's memory, as the runner found it. `Debug`
+/// shows no memory text
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryVersion {
     /// Its sealed head, when it has one
@@ -84,6 +86,23 @@ pub struct MemoryVersion {
     /// The anchor its head is in, if any
     pub anchored: Option<GovernanceLogId>,
     pub text: VersionText,
+}
+
+impl std::fmt::Debug for VersionText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Opened { id, content } => f
+                .debug_struct("Opened")
+                .field("id", id)
+                .field("chars", &content.chars().count())
+                .finish(),
+            Self::Unopened { id, reason } => f
+                .debug_struct("Unopened")
+                .field("id", id)
+                .field("reason", reason)
+                .finish(),
+        }
+    }
 }
 
 /// What an unopened version's row and block say
@@ -188,8 +207,9 @@ pub enum SealCheck {
 }
 
 /// The memory in the agent's context this session: what `show` is
-/// anchored on and `diff` compares with when it is given one version
-#[derive(Debug, Clone, Copy)]
+/// anchored on and `diff` compares with when it is given one version.
+/// `Debug` shows its size, not its text
+#[derive(Clone, Copy)]
 pub struct CurrentMemory<'a> {
     pub id: MemoryId,
     pub content: &'a str,
@@ -197,6 +217,16 @@ pub struct CurrentMemory<'a> {
     /// the newest version with the same text. `None` when no kept version
     /// has it
     pub position: Option<usize>,
+}
+
+impl std::fmt::Debug for CurrentMemory<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CurrentMemory")
+            .field("id", &self.id)
+            .field("chars", &self.content.chars().count())
+            .field("position", &self.position)
+            .finish()
+    }
 }
 
 impl<'a> CurrentMemory<'a> {
@@ -742,6 +772,18 @@ mod tests {
         history: &[MemoryVersion],
     ) -> CurrentMemory<'a> {
         CurrentMemory::new(id(n), content, history)
+    }
+
+    /// `Debug` never shows memory text
+    #[test]
+    fn debug_shows_no_memory() {
+        let secret = "SECRET-MEMORY-TEXT";
+        let opened = version(1, 1, secret);
+        let cur = current(1, secret, std::slice::from_ref(&opened));
+        let text = format!("{opened:?} {cur:?} {:?}", opened.text);
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("chars: 18"), "{text}");
+        assert!(text.contains(&id(1).to_hex()), "{text}");
     }
 
     #[test]

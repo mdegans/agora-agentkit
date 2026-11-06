@@ -23,8 +23,9 @@ pub const MAX_GROUPS: usize = 30;
 pub const MAX_LINE_CHARS: usize = 300;
 
 /// A deduplicated line table, and the lines of each memory, keyed by
-/// memory id, with when each of its versions was saved
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// memory id, with when each of its versions was saved. `Debug` shows
+/// counts, never lines
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SearchIndex {
     lines: Vec<String>,
     versions: Vec<IndexedVersion>,
@@ -97,8 +98,9 @@ impl IndexState {
     }
 }
 
-/// One distinct line that matched, across the versions that hold it
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One distinct line that matched, across the versions that hold it.
+/// `Debug` shows the line's size, not its text
+#[derive(Clone, PartialEq, Eq)]
 pub struct SearchHit {
     pub line: String,
     /// The oldest version holding it
@@ -109,8 +111,9 @@ pub struct SearchHit {
     pub count: usize,
 }
 
-/// What a search found, newest first
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a search found, newest first. `Debug` shows no line text, nor
+/// the query
+#[derive(Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub query: String,
     /// At most [`MAX_GROUPS`]
@@ -119,6 +122,38 @@ pub struct SearchResult {
     pub more: usize,
     /// Versions searched
     pub versions: usize,
+}
+
+impl std::fmt::Debug for SearchIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchIndex")
+            .field("lines", &self.lines.len())
+            .field("memories", &self.memories())
+            .field("versions", &self.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SearchHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchHit")
+            .field("line_chars", &self.line.chars().count())
+            .field("first", &self.first)
+            .field("last", &self.last)
+            .field("count", &self.count)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SearchResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SearchResult")
+            .field("query_chars", &self.query.chars().count())
+            .field("hits", &self.hits)
+            .field("more", &self.more)
+            .field("versions", &self.versions)
+            .finish()
+    }
 }
 
 impl SearchIndex {
@@ -652,6 +687,18 @@ mod tests {
             )),
             "{semantic}"
         );
+    }
+
+    /// `Debug` never shows a line, or the query
+    #[test]
+    fn debug_shows_no_lines() {
+        let ix = index();
+        let r = ix.search("haiku");
+        let text = format!("{ix:?} {r:?} {:?}", r.hits);
+        for secret in ["Haiku", "haiku", "anchor", "ANC-5"] {
+            assert!(!text.contains(secret), "{secret}: {text}");
+        }
+        assert!(text.contains("line_chars: 18"), "{text}");
     }
 
     /// One version's lines list top-down
