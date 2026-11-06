@@ -198,6 +198,7 @@ pub enum MemoryAction {
     /// from it to the next newer one
     Show {
         /// A memory id or a head, or a list of them
+        #[schemars(with = "IdOrList")]
         id: OneOrMany<HistoryRef>,
         /// The most to show, in bytes (default 32,768, at least 4,096, at
         /// most 262,144). Versions past it are listed by id and size, never
@@ -281,6 +282,16 @@ fn adjust(
     }
 }
 
+/// `show`'s `id` as the schema shows it: a string or a list, as it reads
+/// ([`OneOrMany`] writes only the list, and its own schema says so)
+#[derive(JsonSchema)]
+#[schemars(untagged)]
+#[allow(dead_code)] // only its schema is used
+enum IdOrList {
+    One(HistoryRef),
+    List(#[schemars(length(min = 1))] Vec<HistoryRef>),
+}
+
 /// `log`'s `limit`, defaulted and clamped to `1..=`[`LOG_MAX_LIMIT`]
 pub fn log_limit(limit: Option<u32>) -> Adjusted {
     adjust(
@@ -352,9 +363,19 @@ mod tests {
         }
         assert!(crate::tools::reasoning_keys_in(&schema).is_empty());
         // `id` is one or a list; `mode` the search modes
+        // A string or a list, as it reads
         let show = &actions[1]["properties"];
-        assert_eq!(show["id"]["type"], "array");
-        assert_eq!(show["id"]["items"]["type"], "string");
+        let id = show["id"]["anyOf"].as_array().expect("id anyOf");
+        assert_eq!(id[0]["type"], "string");
+        assert_eq!(id[1]["type"], "array");
+        assert_eq!(id[1]["items"]["type"], "string");
+        assert_eq!(id[1]["minItems"], 1);
+        assert!(
+            show["id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("or a list")
+        );
         assert_eq!(
             actions[3]["properties"]["mode"]["enum"],
             json!(["keyword", "semantic"])
