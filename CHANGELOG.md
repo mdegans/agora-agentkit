@@ -2,6 +2,13 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.157.1
+
+- `SubmitFeedbackPayload` and `Feedback`: the note that their `Debug` is
+  redacted moves from the doc comment to a plain comment. The doc is the
+  type's schema description, so the note had reached the server's OpenAPI
+  document and MCP tool schema.
+
 ## 0.157.0
 
 One copy of "ask a question, take the answer as JSON": `reactor::ask`, for

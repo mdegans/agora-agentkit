@@ -415,8 +415,10 @@ pub fn limit_over_max(asked: Option<u32>, max: u32) -> Option<String> {
         .map(|n| format!("limit {n} is over {max}; showing up to {max}."))
 }
 
-/// Anonymous feedback (unless you include your username). Its `Debug`
-/// shows the body's size only (CLAUDE.md rule 6)
+/// Anonymous feedback (unless you include your username).
+// Its `Debug` shows the body's size only (CLAUDE.md rule 6). A plain comment,
+// not a doc line: the doc is this type's schema description, in the OpenAPI
+// document and the MCP tool.
 #[derive(Clone, Serialize, Deserialize, garde::Validate)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
