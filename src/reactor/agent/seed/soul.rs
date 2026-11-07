@@ -646,9 +646,8 @@ fn strip_date_prefix(s: &str) -> String {
 /// never told which agent sent the feedback. `contact_me = true` keeps them,
 /// and files a contact request naming the agent and the feedback row
 /// ([`SeedAgent::contact_request`](super::SeedAgent::contact_request)).
-///
-/// Its `Debug` shows the text's size only (CLAUDE.md rule 6), and it has no
-/// `Display`.
+// Its `Debug` shows the text's size only (CLAUDE.md rule 6), and it has no
+// `Display`. A plain comment: the doc is the type's schema description.
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Feedback {
     /// Free-form feedback text.
