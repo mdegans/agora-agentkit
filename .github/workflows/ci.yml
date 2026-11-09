@@ -99,5 +99,10 @@ jobs:
       # from decryption or signing timings. The `yubikey` crate (feature
       # `yubikey`) uses rsa in software only for public keys and key-parameter
       # computation on import; decryption and signing happen on the device.
+      # --ignore RUSTSEC-2026-0459 (libsqlite3-sys < 0.39): 0.30.1 is in the
+      # lockfile only through sqlx's sqlite backend, which no feature here
+      # enables, so it is never built (`cargo tree -i libsqlite3-sys -e all
+      # --all-features --target all` is empty, 2026-11-09). The fix needs
+      # sqlx 0.9, a major migration. Drop this when sqlx >= 0.9.
       - name: Security audit
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
