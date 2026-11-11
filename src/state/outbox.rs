@@ -29,6 +29,16 @@ pub struct DrainStatus {
 
 /// What one [`AgoraOutbox::drain`] did
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Drained {
+    Ran(DrainReport),
+    /// Nothing was read or sent: the agent doesn't
+    /// [`upload`](Enrolment::uploads), so nothing of its chain is on Agora
+    /// from this drain
+    LocalOnly,
+}
+
+/// What a [`Drained::Ran`] uploaded, and how it left the agent
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainReport {
     pub uploaded: usize,
     pub status: HeadStatus,
@@ -93,8 +103,17 @@ impl<E: Enrolment> AgoraOutbox<E> {
     }
 
     /// Upload `id`'s outbox, oldest first: the blob, then the entry. On a
-    /// `409` the rest is held and the status recorded. Never deletes
-    pub async fn drain(&self, id: AgentId) -> Result<DrainReport, DrainError> {
+    /// `409` the rest is held and the status recorded. Never deletes, and
+    /// touches nothing for an agent that doesn't
+    /// [`upload`](Enrolment::uploads)
+    pub async fn drain(&self, id: AgentId) -> Result<Drained, DrainError> {
+        if !self.enrolment.uploads(id) {
+            return Ok(Drained::LocalOnly);
+        }
+        self.upload(id).await.map(Drained::Ran)
+    }
+
+    async fn upload(&self, id: AgentId) -> Result<DrainReport, DrainError> {
         let seal = self.seal(id);
         if !seal.is_enrolled().await? {
             return Ok(DrainReport {
@@ -217,24 +236,35 @@ mod tests {
     use super::*;
     use crate::crypto::SigningKey;
     use crate::enums::StateEntryKind;
+    use crate::state::SignedStateEntry;
     use crate::state::codec::KeyframePolicy;
     use crate::state::crypto::StateKey;
     use crate::state::storage::SealKeys;
+    use crate::state::verify::{TrustedKeys, verify_chain};
     use crate::state::{GenesisClass, GenesisOrigin};
     use httpmock::prelude::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    struct One([u8; 32], [u8; 32]);
+    /// One agent's keys, and whether it uploads
+    struct One {
+        signing: [u8; 32],
+        state: [u8; 32],
+        uploads: AtomicBool,
+        key_reads: AtomicUsize,
+    }
 
     impl Enrolment for One {
-        fn opted_in(&self, _: AgentId) -> bool {
-            true
+        fn uploads(&self, _: AgentId) -> bool {
+            self.uploads.load(Ordering::SeqCst)
         }
 
         fn keys(&self, _: AgentId) -> Option<SealKeys> {
+            self.key_reads.fetch_add(1, Ordering::SeqCst);
             Some(SealKeys {
-                signing: SigningKey::from_bytes(&self.0),
+                signing: SigningKey::from_bytes(&self.signing),
                 state_key: StateKey::from_bytes(zeroize::Zeroizing::new(
-                    self.1,
+                    self.state,
                 )),
                 key_gen: 0,
             })
@@ -244,9 +274,22 @@ mod tests {
     async fn setup(
         server: &MockServer,
     ) -> (tempfile::TempDir, AgoraOutbox<One>, AgentId) {
+        setup_uploading(server, true).await
+    }
+
+    /// An enrolled agent with its genesis and one state in the outbox
+    async fn setup_uploading(
+        server: &MockServer,
+        uploads: bool,
+    ) -> (tempfile::TempDir, AgoraOutbox<One>, AgentId) {
         let dir = tempfile::tempdir().unwrap();
         let id = AgentId::new();
-        let enrolment = Arc::new(One([3; 32], *StateKey::generate().expose()));
+        let enrolment = Arc::new(One {
+            signing: [3; 32],
+            state: *StateKey::generate().expose(),
+            uploads: AtomicBool::new(uploads),
+            key_reads: AtomicUsize::new(0),
+        });
         let seal = AgentSeal::new(&dir.path().join(id.to_string()), id);
         let keys = enrolment.keys(id).unwrap();
         let origin = GenesisOrigin {
@@ -270,6 +313,23 @@ mod tests {
             Client::new(url::Url::parse(&server.base_url()).unwrap()).unwrap();
         let outbox = AgoraOutbox::new(client, dir.path(), enrolment);
         (dir, outbox, id)
+    }
+
+    fn ran(drained: Drained) -> DrainReport {
+        match drained {
+            Drained::Ran(report) => report,
+            Drained::LocalOnly => panic!("drained as local-only"),
+        }
+    }
+
+    async fn blob_count(seal: &AgentSeal) -> usize {
+        let mut n = 0;
+        let mut rd =
+            tokio::fs::read_dir(seal.dir().join("blobs")).await.unwrap();
+        while rd.next_entry().await.unwrap().is_some() {
+            n += 1;
+        }
+        n
     }
 
     fn head_json() -> serde_json::Value {
@@ -297,7 +357,7 @@ mod tests {
                 then.status(200).json_body(head_json());
             })
             .await;
-        let report = outbox.drain(id).await.unwrap();
+        let report = ran(outbox.drain(id).await.unwrap());
         assert_eq!(report.uploaded, 2);
         assert_eq!(report.status, HeadStatus::Same);
         blobs.assert_calls_async(2).await;
@@ -363,7 +423,7 @@ mod tests {
                 }));
             })
             .await;
-        let report = outbox.drain(id).await.unwrap();
+        let report = ran(outbox.drain(id).await.unwrap());
         assert_eq!(report.uploaded, 0);
         assert_eq!(report.status, HeadStatus::Diverged);
         assert_eq!(report.waiting, 2);
@@ -387,5 +447,101 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 2);
+    }
+
+    /// An agent that doesn't upload: no key read, no call made, nothing
+    /// moved or written, and an outcome of its own
+    #[tokio::test]
+    async fn a_local_only_agent_drains_nothing() {
+        let server = MockServer::start_async().await;
+        let any = server
+            .mock_async(|_, then| {
+                then.status(500);
+            })
+            .await;
+        let (_dir, outbox, id) = setup_uploading(&server, false).await;
+        let seal = outbox.seal(id);
+        let items = seal.outbox().await.unwrap();
+        let blobs = blob_count(&seal).await;
+        let key_reads = outbox.enrolment.key_reads.load(Ordering::SeqCst);
+
+        assert_eq!(outbox.drain(id).await.unwrap(), Drained::LocalOnly);
+        any.assert_calls_async(0).await;
+        assert_eq!(
+            outbox.enrolment.key_reads.load(Ordering::SeqCst),
+            key_reads,
+            "no key read"
+        );
+        assert_eq!(seal.outbox().await.unwrap(), items);
+        assert!(seal.sent().await.unwrap().is_empty());
+        assert_eq!(blob_count(&seal).await, blobs);
+        assert_eq!(outbox.status(id).await.unwrap(), None, "nothing written");
+    }
+
+    /// Chained while local-only, then uploading: the whole chain goes up
+    /// in order and verifies as the server received it
+    #[tokio::test]
+    async fn uploads_switched_on_sends_the_whole_local_chain_in_order() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = setup_uploading(&server, false).await;
+        let seal = outbox.seal(id);
+        let keys = outbox.enrolment.keys(id).unwrap();
+        for n in 0..4 {
+            seal.append_state(
+                &keys,
+                &KeyframePolicy::default(),
+                StateEntryKind::Snapshot,
+                &serde_json::json!({ "memory": format!("m{n}").repeat(200) }),
+                Utc::now(),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(outbox.drain(id).await.unwrap(), Drained::LocalOnly);
+        let local: Vec<_> = seal
+            .outbox()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.entry)
+            .collect();
+        assert_eq!(local.len(), 6, "genesis, a state, four more");
+
+        outbox.enrolment.uploads.store(true, Ordering::SeqCst);
+        server
+            .mock_async(|when, then| {
+                when.method(PUT).path_includes("/api/state/blobs/");
+                then.status(200).json_body(serde_json::json!({
+                    "id": uuid::Uuid::nil(), "sha256": "00".repeat(32), "size_bytes": 1,
+                }));
+            })
+            .await;
+        #[derive(serde::Deserialize)]
+        struct Posted {
+            entry: SignedStateEntry,
+        }
+        let posted = Arc::new(Mutex::new(Vec::new()));
+        let record = posted.clone();
+        server
+            .mock_async(move |when, then| {
+                when.method(POST).path("/agora/api/state/entries").is_true(
+                    move |req| {
+                        let p: Posted =
+                            serde_json::from_slice(req.body_ref()).unwrap();
+                        record.lock().unwrap().push(p.entry);
+                        true
+                    },
+                );
+                then.status(200).json_body(head_json());
+            })
+            .await;
+        let report = ran(outbox.drain(id).await.unwrap());
+        assert_eq!(report.uploaded, 6);
+        assert_eq!(report.status, HeadStatus::Same);
+        let posted = posted.lock().unwrap().clone();
+        assert_eq!(posted, local, "every entry, in order");
+        let vk = SigningKey::from_bytes(&[3; 32]).verifying_key();
+        let report = verify_chain(id, &posted, &TrustedKeys::new(vk));
+        assert!(report.intact, "{:?}", report.problems);
     }
 }

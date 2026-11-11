@@ -2,6 +2,23 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+Every enrolled agent is chained locally; consent decides only the upload
+(agora `memory/project_local_chain_for_all.md`, 2026-11-11). Breaking.
+
+- **`Enrolment::opted_in` is `Enrolment::uploads`**, and decides only the
+  upload: `Mirrored` seals, commits and checks at load every agent with
+  `sealed/enrolled`, whatever it says, and calls `Outbox::notify` only for
+  an agent that uploads. An enrolled agent that doesn't upload used to be
+  written unsealed with `seal_failed.json` (`OptedOut`); it is now chained.
+  `SealFailureKind::OptedOut` stays, for an old `seal_failed.json`, and is
+  never written.
+- **`AgoraOutbox::drain` returns `Drained`**: `Ran(DrainReport)`, or
+  `LocalOnly` for an agent that doesn't upload, for which it reads no key,
+  makes no call and writes nothing. Its blobs are never pruned (nothing is
+  sent), so a local-only agent keeps every version.
+
 ## 0.157.1
 
 - `SubmitFeedbackPayload` and `Feedback`: the note that their `Debug` is

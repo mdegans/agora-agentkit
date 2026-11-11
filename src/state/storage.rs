@@ -1,5 +1,6 @@
-//! [`Mirrored`]: a local [`Storage`] whose saves are also sealed, chained
-//! and queued for upload, for agents that opted in and are enrolled.
+//! [`Mirrored`]: a local [`Storage`] whose saves are also sealed and
+//! chained for every enrolled agent, and queued for upload for one that
+//! [`uploads`](Enrolment::uploads).
 //!
 //! Under `<agent_dir>/sealed/`:
 //!
@@ -7,8 +8,9 @@
 //!   sealed
 //! - `lock`: held across a save's three steps ([`SealLock`])
 //! - `head.json`: the local head ([`HeadFile`])
-//! - `blobs/<sha256>`: sealed blobs not yet uploaded, and the current
-//!   keyframe's ([`AgentSeal::prune_blobs`])
+//! - `blobs/<sha256>`: sealed blobs not yet uploaded (every one, for an
+//!   agent that doesn't upload), and the current keyframe's
+//!   ([`AgentSeal::prune_blobs`])
 //! - `outbox/<ord>.json`: committed entries not yet uploaded, `<ord>.tmp`
 //!   one being written, `<ord>-<hash>.abandoned` one whose local write
 //!   never came, `<ord>-<hash>.displaced` one set aside by
@@ -115,17 +117,22 @@ impl std::fmt::Debug for SealKeys {
     }
 }
 
-/// The runner's say on who is sealed and with what
+/// The runner's say on who uploads and with what keys. Whether an agent
+/// is sealed is `sealed/enrolled`'s alone
 pub trait Enrolment: Send + Sync {
-    /// Whether the agent opted in (the consent ledger)
-    fn opted_in(&self, id: AgentId) -> bool;
+    /// Whether the agent's chain is uploaded to Agora (the consent ledger).
+    /// Decides only [`Outbox::notify`] and [`AgoraOutbox::drain`], never the
+    /// seal or the load's check
+    ///
+    /// [`AgoraOutbox::drain`]: super::outbox::AgoraOutbox::drain
+    fn uploads(&self, id: AgentId) -> bool;
     /// Its keys, from the runner's own secrets
     fn keys(&self, id: AgentId) -> Option<SealKeys>;
 }
 
 impl<E: Enrolment> Enrolment for std::sync::Arc<E> {
-    fn opted_in(&self, id: AgentId) -> bool {
-        (**self).opted_in(id)
+    fn uploads(&self, id: AgentId) -> bool {
+        (**self).uploads(id)
     }
 
     fn keys(&self, id: AgentId) -> Option<SealKeys> {
@@ -133,7 +140,8 @@ impl<E: Enrolment> Enrolment for std::sync::Arc<E> {
     }
 }
 
-/// Told when an entry is committed, to wake a drainer. Never does network
+/// Told when an entry is committed for an agent that
+/// [`uploads`](Enrolment::uploads), to wake a drainer. Never does network
 /// work itself: it is called under the reactor's storage lock
 pub trait Outbox: Send + Sync {
     fn notify(&self, _id: AgentId) {}
@@ -242,7 +250,9 @@ pub enum SealFailureKind {
     Raced,
     /// Not a failure: the agent is refused
     Refused,
-    /// Not a failure: the agent opted out after enrolling
+    /// Not a failure: the agent opted out after enrolling. Written before
+    /// 0.158, when opting out stopped the seal; never written now, but an
+    /// old `seal_failed.json` still reads
     OptedOut,
 }
 
@@ -1365,9 +1375,10 @@ impl<E: crate::reactor::RetryAfter> crate::reactor::RetryAfter
     }
 }
 
-/// A local [`Storage`] whose saves are sealed first, for agents the
-/// [`Enrolment`] opted in that are enrolled and not refused. Loads stay
-/// local; uploads are the [`Outbox`]'s, never inside a save
+/// A local [`Storage`] whose saves are sealed first, for agents that are
+/// enrolled and not refused. Loads stay local; uploads are the
+/// [`Outbox`]'s, never inside a save, and only for an agent that
+/// [`uploads`](Enrolment::uploads)
 pub struct Mirrored<L, O, E> {
     local: L,
     outbox: O,
@@ -1463,7 +1474,7 @@ enum Step {
 }
 
 impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
-    /// Step 1 of a save of an opted-in agent, under `lock`
+    /// Step 1 of a save of an enrolled agent, under `lock`
     async fn prepare(
         &self,
         lock: &SealLock,
@@ -1614,8 +1625,7 @@ where
     type Version = HeadRef;
 
     /// A seal that fails never stops the local write: it is recorded in
-    /// `seal_failed.json` instead, as is a write of a refused or opted-out
-    /// agent's state
+    /// `seal_failed.json` instead, as is a write of a refused agent's state
     async fn save_raw(
         &mut self,
         id: AgentId,
@@ -1628,22 +1638,6 @@ where
         let plaintext = codec::plaintext(&reloaded);
         let plaintext_sha256 = sha256(&plaintext);
         drop(reloaded);
-
-        if !self.enrolment.opted_in(id) {
-            let enrolled = seal.is_enrolled().await.unwrap_or(true);
-            self.write_local(id, value, enrolled).await?;
-            if enrolled {
-                Self::unsealed(
-                    &seal,
-                    id,
-                    plaintext_sha256,
-                    SealFailureKind::OptedOut,
-                    None,
-                )
-                .await;
-            }
-            return Ok(None);
-        }
 
         // An agent not enrolled gets no `sealed/` at all
         if let Ok(false) = seal.is_enrolled().await {
@@ -1687,7 +1681,9 @@ where
                                 "sealed save forked from an older head; held for a merge"
                             );
                         }
-                        self.outbox.notify(id);
+                        if self.enrolment.uploads(id) {
+                            self.outbox.notify(id);
+                        }
                         Ok(Some(new))
                     }
                     Settled::Failed { error, kind, base } => {
@@ -1719,9 +1715,7 @@ where
         id: AgentId,
     ) -> Result<Loaded<serde_json::Value, HeadRef>, Self::Error> {
         let seal = self.seal(id);
-        let sealed = self.enrolment.opted_in(id)
-            && seal.is_enrolled().await.unwrap_or(true);
-        if !sealed {
+        if let Ok(false) = seal.is_enrolled().await {
             let Loaded { value, .. } = self
                 .local
                 .load_raw(id)
@@ -1784,11 +1778,11 @@ mod tests {
     /// A signing key and a state key, raw
     type KeyBytes = ([u8; 32], [u8; 32]);
 
-    /// Every agent opted in, with fixed keys
+    /// Fixed keys; every agent uploads except those in `local_only`
     #[derive(Clone, Default)]
     struct Keys {
         keys: Arc<Mutex<HashMap<AgentId, KeyBytes>>>,
-        out: Arc<Mutex<Vec<AgentId>>>,
+        local_only: Arc<Mutex<Vec<AgentId>>>,
     }
 
     impl Keys {
@@ -1804,8 +1798,8 @@ mod tests {
     }
 
     impl Enrolment for Keys {
-        fn opted_in(&self, id: AgentId) -> bool {
-            !self.out.lock().unwrap().contains(&id)
+        fn uploads(&self, id: AgentId) -> bool {
+            !self.local_only.lock().unwrap().contains(&id)
         }
 
         fn keys(&self, id: AgentId) -> Option<SealKeys> {
@@ -1824,7 +1818,23 @@ mod tests {
         serde_json::json!({ "memory": memory })
     }
 
-    type Store = Mirrored<FsStorage, (), Keys>;
+    /// Counts [`Outbox::notify`] calls, by agent
+    #[derive(Clone, Default)]
+    struct Wakes(Arc<Mutex<Vec<AgentId>>>);
+
+    impl Outbox for Wakes {
+        fn notify(&self, id: AgentId) {
+            self.0.lock().unwrap().push(id);
+        }
+    }
+
+    impl Wakes {
+        fn of(&self, id: AgentId) -> usize {
+            self.0.lock().unwrap().iter().filter(|&&w| w == id).count()
+        }
+    }
+
+    type Store = Mirrored<FsStorage, Wakes, Keys>;
 
     /// An enrolled agent: genesis and its first state, sealed
     async fn enrolled(
@@ -1833,7 +1843,8 @@ mod tests {
         let keys = Keys::default();
         let id = AgentId::new();
         let vk = keys.add(id);
-        let store = Mirrored::new(FsStorage::new(dir), (), keys.clone());
+        let store =
+            Mirrored::new(FsStorage::new(dir), Wakes::default(), keys.clone());
         store
             .local
             .clone()
@@ -1882,6 +1893,7 @@ mod tests {
         let same = store.save_raw(id, state(14), base.as_ref()).await.unwrap();
         assert_eq!(same, base);
         assert_eq!(store.seal(id).outbox().await.unwrap().len(), before);
+        assert_eq!(store.outbox.of(id), 4, "one wake per commit");
 
         let entries = chain(&store.seal(id)).await;
         assert_eq!(entries.len(), 6, "genesis, enrolment state, four saves");
@@ -1937,30 +1949,143 @@ mod tests {
         }
     }
 
+    /// No `sealed/enrolled`, no `sealed/`, whether it uploads or not
     #[tokio::test]
-    async fn an_agent_not_enrolled_or_not_opted_in_is_never_sealed() {
+    async fn an_agent_not_enrolled_is_never_sealed() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::default();
-        let id = AgentId::new();
-        keys.add(id);
         let mut store =
-            Mirrored::new(FsStorage::new(dir.path()), (), keys.clone());
-        assert_eq!(store.save_raw(id, state(1), None).await.unwrap(), None);
-        assert!(!exists(&store.seal(id).dir).await.unwrap());
+            Mirrored::new(FsStorage::new(dir.path()), Wakes::default(), keys);
+        for uploads in [true, false] {
+            let id = AgentId::new();
+            store.enrolment.add(id);
+            if !uploads {
+                store.enrolment.local_only.lock().unwrap().push(id);
+            }
+            assert_eq!(store.save_raw(id, state(1), None).await.unwrap(), None);
+            assert_eq!(store.load_raw(id).await.unwrap().base, None);
+            assert_eq!(store.save_raw(id, state(2), None).await.unwrap(), None);
+            assert!(!exists(&store.seal(id).dir).await.unwrap(), "{uploads}");
+            assert_eq!(store.outbox.of(id), 0);
+        }
+    }
 
-        let (mut store, id, _) = enrolled(dir.path()).await;
-        store.enrolment.out.lock().unwrap().push(id);
-        let before = store.seal(id).outbox().await.unwrap().len();
-        assert_eq!(store.save_raw(id, state(50), None).await.unwrap(), None);
-        assert_eq!(store.seal(id).outbox().await.unwrap().len(), before);
+    /// Each snapshot's state, opened from the blobs on disk
+    async fn open_all(
+        seal: &AgentSeal,
+        keys: &SealKeys,
+        entries: &[SignedStateEntry],
+    ) -> Vec<serde_json::Value> {
+        let mut states = Vec::new();
+        for e in entries
+            .iter()
+            .filter(|e| e.entry.kind == StateEntryKind::Snapshot)
+        {
+            let keyframe = match e.entry.blob.as_ref().unwrap().encoding {
+                BlobEncoding::Delta { base } => entries
+                    .iter()
+                    .map(|s| &s.entry)
+                    .find(|k| k.entry_hash() == base),
+                BlobEncoding::Keyframe => None,
+            };
+            states
+                .push(seal.open_state(keys, &e.entry, keyframe).await.unwrap());
+        }
+        states
+    }
+
+    /// Enrolled but not uploading: chained, delta'd and checked at load
+    /// exactly as an uploading agent is, and the outbox never woken
+    #[tokio::test]
+    async fn an_enrolled_agent_that_doesnt_upload_is_chained_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, vk) = enrolled(dir.path()).await;
+        store.enrolment.local_only.lock().unwrap().push(id);
+        let mut base = store.load_raw(id).await.unwrap().base;
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        for n in 11..19 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+            assert!(base.is_some());
+            store.load_raw(id).await.unwrap();
+            assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        }
+        assert_eq!(store.outbox.of(id), 0, "nothing to upload");
+        let seal = store.seal(id);
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        assert_eq!(format_of(&store, id), 2);
+
+        let entries = chain(&seal).await;
+        assert_eq!(entries.len(), 10, "genesis, enrolment state, eight saves");
+        let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
+        assert!(report.intact, "{:?}", report.problems);
+        assert!(entries.iter().any(|e| matches!(
+            e.entry.blob.as_ref().unwrap().encoding,
+            BlobEncoding::Delta { .. }
+        )));
+
+        // A change outside the store is caught, as for anyone
+        store
+            .local
+            .clone()
+            .save_raw(id, state(1), None)
+            .await
+            .unwrap();
         assert_eq!(store.load_raw(id).await.unwrap().base, None);
-        // Opted in again: the write is known, not a mismatch
-        store.enrolment.out.lock().unwrap().clear();
-        store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Mismatch(_))));
+    }
+
+    /// Nothing is ever sent for a local-only agent, so pruning keeps every
+    /// version it has
+    #[tokio::test]
+    async fn pruning_keeps_every_blob_of_an_agent_that_doesnt_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        store.enrolment.local_only.lock().unwrap().push(id);
+        let mut base = store.load_raw(id).await.unwrap().base;
+        for n in 11..19 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+        }
+        let seal = store.seal(id);
+        let before = blobs(&seal).await;
+        assert_eq!(seal.prune_blobs().await.unwrap(), 0);
+        assert_eq!(blobs(&seal).await, before);
+
+        let k = store.enrolment.keys(id).unwrap();
+        let entries = chain(&seal).await;
+        let opened = open_all(&seal, &k, &entries).await;
+        let saved: Vec<_> = (10..19).map(state).collect();
+        assert_eq!(opened, saved);
+    }
+
+    /// A `seal_failed.json` written for an opted-out agent before 0.158
+    /// still reads, and the next seal clears it
+    #[tokio::test]
+    async fn an_old_opted_out_record_reads_and_the_next_save_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        store.local.save_marked(id, state(50)).await.unwrap();
+        let local = store.local.load_raw(id).await.unwrap().value;
+        let old = serde_json::json!({
+            "at": "2026-11-01T00:00:00Z",
+            "local_plaintext_sha256": plaintext_hash(&local),
+            "error": "opted_out",
+        });
+        write_atomic(
+            &seal.dir().join(SEAL_FAILED),
+            &serde_json::to_vec(&old).unwrap(),
+        )
+        .await
+        .unwrap();
+        let base = store.load_raw(id).await.unwrap().base;
         assert!(matches!(
             store.recovery(id),
             Some(Recovery::SealFailed(_, SealFailureKind::OptedOut))
         ));
+        store.save_raw(id, state(51), base.as_ref()).await.unwrap();
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
     }
 
     #[tokio::test]
@@ -2217,8 +2342,11 @@ mod tests {
     async fn two_concurrent_writers_lose_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (mut a, id, _) = enrolled(dir.path()).await;
-        let mut b =
-            Mirrored::new(FsStorage::new(dir.path()), (), a.enrolment.clone());
+        let mut b = Mirrored::new(
+            FsStorage::new(dir.path()),
+            Wakes::default(),
+            a.enrolment.clone(),
+        );
         let base = a.load_raw(id).await.unwrap().base;
         let before = a.seal(id).outbox().await.unwrap().len();
         let (ra, rb) = tokio::join!(
@@ -2828,8 +2956,8 @@ mod tests {
         assert_eq!(format_of(&store, id), 2);
         store.load_raw(id).await.unwrap();
         assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
-        // Opted out but enrolled: still marked
-        store.enrolment.out.lock().unwrap().push(id);
+        // Enrolled but not uploading: still marked
+        store.enrolment.local_only.lock().unwrap().push(id);
         store.save_raw(id, state(91), None).await.unwrap();
         assert_eq!(format_of(&store, id), 2);
 
