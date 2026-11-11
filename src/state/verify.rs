@@ -389,6 +389,9 @@ pub enum HeadStatus {
     LocalMissing,
     /// Local writes wait in the outbox on the server's head
     Pending,
+    /// Not known: the server's head couldn't be read. Never from
+    /// [`head_status`]
+    Unchecked,
 }
 
 /// [`HeadStatus`] from the local head, the local outbox (oldest first) and

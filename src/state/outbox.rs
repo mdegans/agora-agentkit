@@ -16,6 +16,10 @@ use crate::govlog::Sha256Hex;
 use crate::ids::AgentId;
 
 const STATUS: &str = "status.json";
+/// `sealed/healing.json`: [`HealMemory`]
+const HEALING: &str = "healing.json";
+/// How long a damaged list is trusted when Agora's count is unchanged
+const RELIST_AFTER: chrono::TimeDelta = chrono::TimeDelta::days(1);
 
 /// Damaged blobs one drain sends again, at most
 pub const HEAL_PER_DRAIN: usize = 64;
@@ -46,6 +50,8 @@ pub enum Drained {
     /// network error
     Withdrawn {
         uploaded: usize,
+        /// Damaged blobs sent again before it
+        healed: usize,
     },
 }
 
@@ -78,13 +84,44 @@ pub struct DrainReport {
 /// drain did about them
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Healing {
-    /// As Agora counted them before this drain; `None` when it didn't say
-    /// (a server before the check, a held drain, or the head unreadable)
-    pub damaged: Option<u64>,
+    pub damaged: Damage,
     /// Sent again from here, whole
     pub healed: usize,
-    /// Not here, or here but not hashing to its name: nothing to send
+    /// Not here, or here but not hashing to its name: nothing to send. As
+    /// last listed, when the list wasn't fetched again
     pub unhealable: usize,
+    /// An error stopped it before the list's end: the counts are partial
+    pub interrupted: bool,
+}
+
+/// What a drain learned of Agora's damaged blobs
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Damage {
+    /// Not learned this drain (the head unread, or the drain held): never
+    /// read it as none
+    #[default]
+    Unknown,
+    /// The server says nothing of it (one before the check)
+    NotReported,
+    /// Agora's count; 0 is none
+    Reported(u64),
+}
+
+/// `sealed/healing.json`: the last damaged list fetched, so an unchanged
+/// count isn't listed again within [`RELIST_AFTER`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct HealMemory {
+    damaged: u64,
+    listed_at: DateTime<Utc>,
+    unhealable: usize,
+}
+
+/// How a heal ended
+#[derive(PartialEq)]
+enum Healed {
+    Done,
+    /// `uploads` turned false
+    Withdrawn,
 }
 
 /// A drain that stopped; the items stay where they are
@@ -180,7 +217,10 @@ impl<E: Enrolment> AgoraOutbox<E> {
                     waiting = items.len() - i,
                     "sealed uploads stopped: uploading was switched off"
                 );
-                return Ok(Drained::Withdrawn { uploaded });
+                return Ok(Drained::Withdrawn {
+                    uploaded,
+                    healed: 0,
+                });
             }
             if i == 0 {
                 before.before_upload(&items).await;
@@ -236,48 +276,130 @@ impl<E: Enrolment> AgoraOutbox<E> {
         }
         let pruned = seal.remove_unnamed_blobs().await?;
         tracing::debug!(agent_id = %id, uploaded, pruned, "sealed outbox drained");
-        let healing = match self.heal(id, &seal, auth).await {
-            Ok(Some(healing)) => healing,
-            Ok(None) => return Ok(Drained::Withdrawn { uploaded }),
-            // The uploads stand; the next drain looks again
+        if !self.enrolment.uploads(id) {
+            return Ok(Drained::Withdrawn {
+                uploaded,
+                healed: 0,
+            });
+        }
+        let (status, healing) = match self.client.get_state_head(auth).await {
             Err(e) => {
                 tracing::warn!(
                     agent_id = %id,
                     error = %e,
-                    "damaged sealed blobs not checked this drain"
+                    "Agora's head unread after a drain; status unchecked"
                 );
-                Healing::default()
+                (HeadStatus::Unchecked, Healing::default())
+            }
+            Ok(head) => {
+                let status = self
+                    .status_against(
+                        &seal,
+                        auth,
+                        head.head.map(|h| h.entry_hash),
+                    )
+                    .await?;
+                let mut healing = Healing {
+                    damaged: head
+                        .damaged_blobs
+                        .map_or(Damage::NotReported, Damage::Reported),
+                    ..Healing::default()
+                };
+                match self.heal(id, &seal, auth, &mut healing).await {
+                    Ok(Healed::Done) => {}
+                    Ok(Healed::Withdrawn) => {
+                        return Ok(Drained::Withdrawn {
+                            uploaded,
+                            healed: healing.healed,
+                        });
+                    }
+                    // The uploads stand; the next drain looks again
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %id,
+                            error = %e,
+                            healed = healing.healed,
+                            "healing damaged sealed blobs stopped"
+                        );
+                        healing.interrupted = true;
+                    }
+                }
+                (status, healing)
             }
         };
-        self.finish(&seal, uploaded, HeadStatus::Same, 0, healing)
+        self.finish(&seal, uploaded, status, 0, healing)
             .await
             .map(Drained::Ran)
     }
 
-    /// Send again, up to [`HEAL_PER_DRAIN`], the blobs Agora's check at
-    /// rest found missing or damaged that are here and hash to their names.
-    /// `None` when [`uploads`](Enrolment::uploads) turned false
+    /// The local head against the server's: the same hash is `Same`;
+    /// otherwise the chain decides, and a chain that can't be read leaves
+    /// it [`Unchecked`](HeadStatus::Unchecked)
+    async fn status_against(
+        &self,
+        seal: &AgentSeal,
+        auth: StateAuth<'_>,
+        server_head: Option<Sha256Hex>,
+    ) -> Result<HeadStatus, DrainError> {
+        let local = seal.head().await?.map(|h| h.head.entry_hash);
+        if local == server_head {
+            return Ok(HeadStatus::Same);
+        }
+        match self.client.get_state_chain(auth).await {
+            Ok(chain) => {
+                let server: Vec<Sha256Hex> =
+                    chain.iter().map(|e| e.entry_hash()).collect();
+                Ok(head_status(local.as_ref(), &[], &server))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %seal.agent_id(),
+                    error = %e,
+                    "Agora's chain unread; status unchecked"
+                );
+                Ok(HeadStatus::Unchecked)
+            }
+        }
+    }
+
+    /// Send again, up to [`HEAL_PER_DRAIN`] PUTs, the blobs Agora's check
+    /// at rest found missing or damaged that are here and hash to their
+    /// names, counting into `healing` as it goes. An unchanged count isn't
+    /// listed again within [`RELIST_AFTER`]
     async fn heal(
         &self,
         id: AgentId,
         seal: &AgentSeal,
         auth: StateAuth<'_>,
-    ) -> Result<Option<Healing>, DrainError> {
-        if !self.enrolment.uploads(id) {
-            return Ok(None);
-        }
-        let damaged = self.client.get_state_head(auth).await?.damaged_blobs;
-        let mut healing = Healing {
-            damaged,
-            ..Healing::default()
+        healing: &mut Healing,
+    ) -> Result<Healed, DrainError> {
+        let Damage::Reported(damaged) = healing.damaged else {
+            return Ok(Healed::Done);
         };
-        if damaged.unwrap_or(0) == 0 {
-            return Ok(Some(healing));
+        let memory_path = seal.dir().join(HEALING);
+        let memory: Option<HealMemory> =
+            match tokio::fs::read(&memory_path).await {
+                Ok(bytes) => serde_json::from_slice(&bytes).ok(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e.into()),
+            };
+        if damaged == 0 {
+            if memory.is_some() {
+                tokio::fs::remove_file(&memory_path).await?;
+            }
+            return Ok(Healed::Done);
         }
-        let problems = self.client.get_state_problems(auth).await?;
-        for blob in problems.damaged_blobs.iter().take(HEAL_PER_DRAIN) {
-            if !self.enrolment.uploads(id) {
-                return Ok(None);
+        if let Some(m) = memory
+            && m.damaged == damaged
+            && Utc::now() - m.listed_at < RELIST_AFTER
+        {
+            healing.unhealable = m.unhealable;
+            return Ok(Healed::Done);
+        }
+        let listed = self.client.get_state_problems(auth).await?.damaged_blobs;
+        for blob in &listed {
+            if healing.healed == HEAL_PER_DRAIN {
+                break;
             }
             let bytes = match seal.read_blob(&blob.sha256).await {
                 Ok(bytes) => bytes,
@@ -299,19 +421,35 @@ impl<E: Enrolment> AgoraOutbox<E> {
                 healing.unhealable += 1;
                 continue;
             }
+            if !self.enrolment.uploads(id) {
+                return Ok(Healed::Withdrawn);
+            }
             self.client
                 .put_state_blob(auth, &blob.sha256, &bytes)
                 .await?;
             healing.healed += 1;
         }
-        tracing::warn!(
-            agent_id = %id,
-            damaged = damaged.unwrap_or(0),
-            healed = healing.healed,
-            unhealable = healing.unhealable,
-            "blobs Agora found damaged at rest; whole copies sent again"
-        );
-        Ok(Some(healing))
+        let changed = memory.is_none_or(|m| m.unhealable != healing.unhealable);
+        if changed || healing.healed > 0 {
+            tracing::warn!(
+                agent_id = %id,
+                damaged,
+                healed = healing.healed,
+                unhealable = healing.unhealable,
+                "blobs Agora found damaged at rest; whole copies sent again"
+            );
+        }
+        let memory = HealMemory {
+            damaged,
+            listed_at: Utc::now(),
+            unhealable: healing.unhealable,
+        };
+        super::storage::write_atomic(
+            &memory_path,
+            &serde_json::to_vec_pretty(&memory).map_err(SealError::from)?,
+        )
+        .await?;
+        Ok(Healed::Done)
     }
 
     async fn finish(
@@ -470,6 +608,29 @@ mod tests {
         n
     }
 
+    /// `GET /api/state/head` answering the local head, and `damaged`
+    async fn serve_head<'a>(
+        server: &'a MockServer,
+        outbox: &AgoraOutbox<One>,
+        id: AgentId,
+        damaged: Option<u64>,
+    ) -> httpmock::Mock<'a> {
+        let head = outbox.seal(id).head().await.unwrap().unwrap().head;
+        let mut body = serde_json::json!({
+            "head": { "entry_hash": head.entry_hash.to_hex(), "seq": head.seq, "updated_at": "2026-11-02T00:00:00Z" },
+            "stored_bytes": 0,
+        });
+        if let Some(n) = damaged {
+            body["damaged_blobs"] = n.into();
+        }
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/head");
+                then.status(200).json_body(body);
+            })
+            .await
+    }
+
     fn head_json() -> serde_json::Value {
         serde_json::json!({
             "id": uuid::Uuid::nil(),
@@ -495,9 +656,11 @@ mod tests {
                 then.status(200).json_body(head_json());
             })
             .await;
+        serve_head(&server, &outbox, id, None).await;
         let report = ran(outbox.drain(id).await.unwrap());
         assert_eq!(report.uploaded, 2);
         assert_eq!(report.status, HeadStatus::Same);
+        assert_eq!(report.healing.damaged, Damage::NotReported);
         blobs.assert_calls_async(2).await;
         entries.assert_calls_async(2).await;
         let seal = outbox.seal(id);
@@ -670,6 +833,7 @@ mod tests {
                 then.status(200).json_body(head_json());
             })
             .await;
+        serve_head(&server, &outbox, id, None).await;
         let report = ran(outbox.drain(id).await.unwrap());
         assert_eq!(report.uploaded, 6);
         assert_eq!(report.status, HeadStatus::Same);
@@ -698,7 +862,7 @@ mod tests {
         }
     }
 
-    async fn accept_blobs(server: &MockServer) {
+    async fn accept_blobs(server: &MockServer) -> httpmock::Mock<'_> {
         server
             .mock_async(|when, then| {
                 when.method(PUT).path_includes("/api/state/blobs/");
@@ -706,7 +870,7 @@ mod tests {
                     "id": uuid::Uuid::nil(), "sha256": "00".repeat(32), "size_bytes": 1,
                 }));
             })
-            .await;
+            .await
     }
 
     /// Uploading switched off after the first item: that one is on the
@@ -731,7 +895,10 @@ mod tests {
             .await;
         assert_eq!(
             outbox.drain(id).await.unwrap(),
-            Drained::Withdrawn { uploaded: 1 }
+            Drained::Withdrawn {
+                uploaded: 1,
+                healed: 0
+            }
         );
         entries.assert_calls_async(1).await;
         let seal = outbox.seal(id);
@@ -871,7 +1038,7 @@ mod tests {
         // An older server says nothing: nothing more is asked
         let report = ran(outbox.drain(id).await.unwrap());
         assert_eq!(report.uploaded, 2);
-        assert_eq!(report.healing, Healing::default());
+        assert_eq!(report.healing.damaged, Damage::NotReported);
         head.delete_async().await;
 
         std::fs::write(seal.dir().join("blobs").join(rotten.to_hex()), b"rot")
@@ -908,14 +1075,283 @@ mod tests {
         assert_eq!(
             report.healing,
             Healing {
-                damaged: Some(3),
+                damaged: Damage::Reported(3),
                 healed: 1,
                 unhealable: 2,
+                interrupted: false,
             }
         );
         problems.assert_calls_async(1).await;
         put_whole.assert_calls_async(2).await;
         put_rotten.assert_calls_async(1).await;
         put_absent.assert_calls_async(0).await;
+    }
+
+    /// `n` whole blobs here, named by a set-aside record so the sweep
+    /// keeps them, oldest first
+    async fn held_blobs(seal: &AgentSeal, n: usize) -> Vec<Sha256Hex> {
+        use sha2::Digest;
+        let template = seal
+            .sent()
+            .await
+            .unwrap()
+            .pop()
+            .unwrap_or_else(|| panic!("a sent item to copy"));
+        let mut items = Vec::new();
+        let mut shas = Vec::new();
+        for i in 0..n {
+            let bytes = format!("blob {i}").into_bytes();
+            let sha =
+                Sha256Hex::from(<[u8; 32]>::from(sha2::Sha256::digest(&bytes)));
+            std::fs::write(seal.dir().join("blobs").join(sha.to_hex()), &bytes)
+                .unwrap();
+            let mut item = template.clone();
+            item.entry.entry.blob.as_mut().unwrap().sha256 = sha;
+            items.push(item);
+            shas.push(sha);
+        }
+        let lost = seal.dir().join("lost").join("t");
+        std::fs::create_dir_all(&lost).unwrap();
+        std::fs::write(
+            lost.join("INTENT"),
+            serde_json::to_vec(&serde_json::json!({ "items": items })).unwrap(),
+        )
+        .unwrap();
+        shas
+    }
+
+    fn problems_body(shas: &[Sha256Hex]) -> serde_json::Value {
+        let listed: Vec<_> = shas
+            .iter()
+            .map(|sha| {
+                serde_json::json!({
+                    "sha256": sha.to_hex(), "kind": "missing", "since": "2026-11-11T00:00:00Z",
+                })
+            })
+            .collect();
+        serde_json::json!({ "damaged_blobs": listed })
+    }
+
+    /// Everything sent, and an empty outbox, as the healing tests start
+    async fn drained(
+        server: &MockServer,
+    ) -> (tempfile::TempDir, AgoraOutbox<One>, AgentId) {
+        let (dir, outbox, id) = setup(server).await;
+        let blobs = accept_blobs(server).await;
+        let entries = server
+            .mock_async(|when, then| {
+                when.method(POST).path("/agora/api/state/entries");
+                then.status(200).json_body(head_json());
+            })
+            .await;
+        let head = serve_head(server, &outbox, id, None).await;
+        ran(outbox.drain(id).await.unwrap());
+        entries.delete_async().await;
+        head.delete_async().await;
+        blobs.delete_async().await;
+        (dir, outbox, id)
+    }
+
+    /// The cap counts blobs sent, not blobs listed: ones not here are
+    /// passed over
+    #[tokio::test]
+    async fn the_heal_cap_counts_puts() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = drained(&server).await;
+        let seal = outbox.seal(id);
+        let mut listed: Vec<_> =
+            (0..3u8).map(|i| Sha256Hex::from([0xe0 + i; 32])).collect();
+        listed.extend(held_blobs(&seal, HEAL_PER_DRAIN + 2).await);
+        serve_head(&server, &outbox, id, Some(listed.len() as u64)).await;
+        let body = problems_body(&listed);
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/problems");
+                then.status(200).json_body(body);
+            })
+            .await;
+        let puts = server
+            .mock_async(|when, then| {
+                when.method(PUT).path_includes("/api/state/blobs/");
+                then.status(200).json_body(serde_json::json!({
+                    "id": uuid::Uuid::nil(), "sha256": "00".repeat(32), "size_bytes": 1,
+                }));
+            })
+            .await;
+        let report = ran(outbox.drain(id).await.unwrap());
+        assert_eq!(report.status, HeadStatus::Same);
+        assert_eq!(report.healing.healed, HEAL_PER_DRAIN);
+        assert_eq!(report.healing.unhealable, 3);
+        assert!(!report.healing.interrupted);
+        puts.assert_calls_async(HEAL_PER_DRAIN).await;
+    }
+
+    /// Withdrawn mid-heal: what was sent is said, nothing more goes
+    #[tokio::test]
+    async fn a_withdrawal_mid_heal_stops_it() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = drained(&server).await;
+        let listed = held_blobs(&outbox.seal(id), 3).await;
+        serve_head(&server, &outbox, id, Some(3)).await;
+        let body = problems_body(&listed);
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/problems");
+                then.status(200).json_body(body);
+            })
+            .await;
+        let enrolment = outbox.enrolment.clone();
+        let puts = server
+            .mock_async(move |when, then| {
+                when.method(PUT).is_true(move |_| {
+                    enrolment.uploads.store(false, Ordering::SeqCst);
+                    true
+                });
+                then.status(200).json_body(serde_json::json!({
+                    "id": uuid::Uuid::nil(), "sha256": "00".repeat(32), "size_bytes": 1,
+                }));
+            })
+            .await;
+        assert_eq!(
+            outbox.drain(id).await.unwrap(),
+            Drained::Withdrawn {
+                uploaded: 0,
+                healed: 1
+            }
+        );
+        puts.assert_calls_async(1).await;
+    }
+
+    /// An error mid-heal leaves the uploads standing and says how far it
+    /// got; the head unread says nothing is known
+    #[tokio::test]
+    async fn an_error_mid_heal_reports_partial_counts() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = setup(&server).await;
+        let listed = {
+            // Upload first, so held_blobs has a sent item to copy
+            let blobs = accept_blobs(&server).await;
+            let entries = server
+                .mock_async(|when, then| {
+                    when.method(POST).path("/agora/api/state/entries");
+                    then.status(200).json_body(head_json());
+                })
+                .await;
+            let head = serve_head(&server, &outbox, id, None).await;
+            ran(outbox.drain(id).await.unwrap());
+            entries.delete_async().await;
+            head.delete_async().await;
+            blobs.delete_async().await;
+            held_blobs(&outbox.seal(id), 3).await
+        };
+        more(&outbox, id, 1).await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/agora/api/state/entries");
+                then.status(200).json_body(head_json());
+            })
+            .await;
+        let head = serve_head(&server, &outbox, id, Some(3)).await;
+        let body = problems_body(&listed);
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/problems");
+                then.status(200).json_body(body);
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(PUT).path_includes(listed[1].to_hex());
+                then.status(422);
+            })
+            .await;
+        accept_blobs(&server).await;
+        let report = ran(outbox.drain(id).await.unwrap());
+        assert_eq!(report.uploaded, 1, "the upload stands");
+        assert!(outbox.seal(id).outbox().await.unwrap().is_empty());
+        assert_eq!(report.healing.damaged, Damage::Reported(3));
+        assert_eq!(report.healing.healed, 1);
+        assert!(report.healing.interrupted);
+
+        // The head unread: unchecked, never `Same`, nothing known of damage
+        head.delete_async().await;
+        let report = ran(outbox.drain(id).await.unwrap());
+        assert_eq!(report.status, HeadStatus::Unchecked);
+        assert_eq!(report.healing.damaged, Damage::Unknown);
+        assert_eq!(
+            outbox.status(id).await.unwrap().unwrap().status,
+            HeadStatus::Unchecked
+        );
+    }
+
+    /// An unhealable blob isn't listed again while Agora's count stands,
+    /// for a day; a new count lists again
+    #[tokio::test]
+    async fn an_unchanged_count_is_not_listed_again() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = drained(&server).await;
+        let absent = [Sha256Hex::from([0xee; 32])];
+        let body = problems_body(&absent);
+        let problems = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/problems");
+                then.status(200).json_body(body);
+            })
+            .await;
+        let head = serve_head(&server, &outbox, id, Some(1)).await;
+        for _ in 0..3 {
+            let report = ran(outbox.drain(id).await.unwrap());
+            assert_eq!(report.healing.unhealable, 1);
+            assert_eq!(report.healing.healed, 0);
+        }
+        problems.assert_calls_async(1).await;
+        head.delete_async().await;
+        serve_head(&server, &outbox, id, Some(2)).await;
+        ran(outbox.drain(id).await.unwrap());
+        problems.assert_calls_async(2).await;
+        // A day on, listed again
+        let path = outbox.seal(id).dir().join(HEALING);
+        let mut memory: HealMemory =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        memory.listed_at -= RELIST_AFTER;
+        std::fs::write(&path, serde_json::to_vec(&memory).unwrap()).unwrap();
+        ran(outbox.drain(id).await.unwrap());
+        problems.assert_calls_async(3).await;
+    }
+
+    /// An empty drain checks the server's head: a server rolled back to
+    /// before the local head says so, never `Same`
+    #[tokio::test]
+    async fn an_empty_drain_checks_the_head() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = drained(&server).await;
+        let sent = outbox.seal(id).sent().await.unwrap();
+        let first = &sent[0].entry;
+        let stored = serde_json::json!({
+            "id": uuid::Uuid::nil(),
+            "entry": first.entry,
+            "signature": first.signature,
+            "received_at": "2026-11-02T00:00:00Z",
+        });
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/head");
+                then.status(200).json_body(serde_json::json!({
+                    "head": { "entry_hash": first.entry_hash().to_hex(), "seq": 0, "updated_at": "2026-11-02T00:00:00Z" },
+                    "stored_bytes": 0,
+                }));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/entries");
+                then.status(200).json_body(serde_json::json!({
+                    "entries": [stored], "next_after": null,
+                }));
+            })
+            .await;
+        let report = ran(outbox.drain(id).await.unwrap());
+        assert_eq!(report.uploaded, 0);
+        assert_eq!(report.status, HeadStatus::LocalMissing);
     }
 }
