@@ -1285,6 +1285,20 @@ impl AgentSeal {
         Ok(envelope.get_mut("state").ok_or(OpenError::NoBlob)?.take())
     }
 
+    /// Open the [`GenesisOrigin`] a genesis entry seals. Its blob must
+    /// still be local
+    pub async fn open_origin(
+        &self,
+        keys: &SealKeys,
+        genesis: &StateEntry,
+    ) -> Result<GenesisOrigin, OpenError> {
+        if genesis.kind != StateEntryKind::Genesis {
+            return Err(OpenError::NotGenesis(genesis.kind));
+        }
+        let plaintext = self.open_plaintext(keys, genesis, None).await?;
+        Ok(serde_json::from_slice(&plaintext)?)
+    }
+
     async fn open_plaintext(
         &self,
         keys: &SealKeys,
@@ -1474,6 +1488,8 @@ pub enum OpenError {
     WrongBase,
     #[error("sealed under key generation {0}, which isn't held")]
     KeyGen(u32),
+    #[error("a {0:?} entry, not a genesis")]
+    NotGenesis(StateEntryKind),
 }
 
 /// [`Mirrored`]'s errors: the local store's alone, since a seal never
@@ -3096,6 +3112,29 @@ mod tests {
         let entries = chain(&seal).await;
         let opened = open_all(&seal, &k, &entries).await;
         assert_eq!(opened, (10..19).map(state).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn a_genesis_origin_opens_and_nothing_else_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let entries = chain(&seal).await;
+        let origin = seal.open_origin(&k, &entries[0].entry).await.unwrap();
+        assert_eq!(
+            origin,
+            GenesisOrigin {
+                class: crate::state::GenesisClass::None,
+                incident: None,
+                prior_copy_held: false,
+                verified_at: None,
+            }
+        );
+        assert!(matches!(
+            seal.open_origin(&k, &entries[1].entry).await,
+            Err(OpenError::NotGenesis(StateEntryKind::Snapshot))
+        ));
     }
 
     #[test]

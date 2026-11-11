@@ -66,6 +66,9 @@ upload a locally chained agent's state without consent.
   version it sealed. About 0.4-0.7 GB for the fleet today. Versions sent
   before this release had their blobs pruned already: those are sealed on
   Agora only (and in plaintext in `FsStorage`'s archives).
+- **`AgentSeal::open_origin`**: the `GenesisOrigin` a genesis entry
+  seals, read-only beside `open_state` (which wants a state envelope).
+  `OpenError::NotGenesis` for any other entry.
 - **`FsStorage` archives with a hard link**, not a rename: `state.json` is
   never absent mid-save. A crash between the link and the rename leaves
   `state.json` (the old value, the same inode as the newest archive) beside
