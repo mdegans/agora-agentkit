@@ -400,11 +400,22 @@ fn item_blobs(item: &OutboxItem) -> impl Iterator<Item = Sha256Hex> + '_ {
     entry.into_iter().chain(keyframe)
 }
 
+/// Why [`AgentSeal::remove_unnamed_blobs`] removed nothing
+#[derive(Debug, thiserror::Error)]
+enum Unnamed {
+    #[error(transparent)]
+    Seal(#[from] SealError),
+    /// A record that should name blobs doesn't parse: fail closed
+    #[error("{0} doesn't parse as a record")]
+    Unparseable(PathBuf),
+}
+
 /// The blobs every entry record under `dir` names, at any depth: a file
 /// holding an [`OutboxItem`], a [`HeadFile`] (its keyframe), or a list of
-/// items (a runner's record of what it set aside). Anything else there is
-/// not a record
-async fn lost_blobs(dir: &Path) -> Result<HashSet<Sha256Hex>, SealError> {
+/// items (a runner's record of what it set aside). `blobs/` directories
+/// are copies, not records, and skipped; another file is a record when it
+/// is `INTENT`, `DONE`, `head.json` or `*.json`, and must then parse
+async fn lost_blobs(dir: &Path) -> Result<HashSet<Sha256Hex>, Unnamed> {
     #[derive(Deserialize)]
     struct Listed {
         items: Vec<OutboxItem>,
@@ -415,18 +426,25 @@ async fn lost_blobs(dir: &Path) -> Result<HashSet<Sha256Hex>, SealError> {
         let mut rd = match tokio::fs::read_dir(&dir).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(SealError::from(e).into()),
         };
-        while let Some(e) = rd.next_entry().await? {
-            let kind = e.file_type().await?;
+        while let Some(e) = rd.next_entry().await.map_err(SealError::from)? {
+            let kind = e.file_type().await.map_err(SealError::from)?;
+            let path = e.path();
             if kind.is_dir() {
-                dirs.push(e.path());
+                if e.file_name() != BLOBS {
+                    dirs.push(path);
+                }
                 continue;
             }
-            if !kind.is_file() {
+            let name = e.file_name();
+            let record = matches!(name.to_str(), Some("INTENT" | "DONE"))
+                || path.extension().is_some_and(|x| x == "json");
+            if !kind.is_file() || !record {
                 continue;
             }
-            let bytes = tokio::fs::read(e.path()).await?;
+            let bytes =
+                tokio::fs::read(&path).await.map_err(SealError::from)?;
             if let Ok(item) = serde_json::from_slice::<OutboxItem>(&bytes) {
                 named.extend(item_blobs(&item));
             } else if let Ok(head) = serde_json::from_slice::<HeadFile>(&bytes)
@@ -435,6 +453,8 @@ async fn lost_blobs(dir: &Path) -> Result<HashSet<Sha256Hex>, SealError> {
             } else if let Ok(listed) = serde_json::from_slice::<Listed>(&bytes)
             {
                 named.extend(listed.items.iter().flat_map(item_blobs));
+            } else {
+                return Err(Unnamed::Unparseable(path));
             }
         }
     }
@@ -1058,7 +1078,8 @@ impl AgentSeal {
     /// has passed, and one a crash left before its item. Never one an entry
     /// of the main line or a kept side line names (`sent/`, the outbox,
     /// `.displaced`, anything under `lost/`), whatever the server holds, so
-    /// every version still opens from here. While a fork is unresolved
+    /// every version still opens from here. A record that doesn't parse
+    /// might name any blob: then nothing is removed, with an error logged. While a fork is unresolved
     /// nothing is deleted, with an alert past [`BLOB_ALERT`] such blobs.
     /// Touches nothing outside `blobs/`
     pub async fn remove_unnamed_blobs(&self) -> Result<usize, SealError> {
@@ -1066,7 +1087,19 @@ impl AgentSeal {
         let Some(head) = self.head().await? else {
             return Ok(0);
         };
-        let named = self.named_blobs(&head).await?;
+        let named = match self.named_blobs(&head).await {
+            Ok(named) => named,
+            Err(Unnamed::Seal(SealError::Io(e))) => return Err(e.into()),
+            // A record here that doesn't parse might name any blob
+            Err(e) => {
+                tracing::error!(
+                    agent_id = %self.agent_id,
+                    error = %e,
+                    "a sealed record doesn't parse; no blob removed"
+                );
+                return Ok(0);
+            }
+        };
         // Under the lock, so no prepare is between writing a blob and its
         // item
         let blobs = self.dir.join(BLOBS);
@@ -1118,7 +1151,7 @@ impl AgentSeal {
     async fn named_blobs(
         &self,
         head: &HeadFile,
-    ) -> Result<HashSet<Sha256Hex>, SealError> {
+    ) -> Result<HashSet<Sha256Hex>, Unnamed> {
         let mut named = lost_blobs(&self.dir.join(LOST)).await?;
         for ext in ["json", "lost"] {
             for item in self.items(SENT, ext).await? {
@@ -3203,6 +3236,160 @@ mod tests {
             seal.open_origin(&k, &entries[1].entry).await,
             Err(OpenError::NotGenesis(StateEntryKind::Snapshot))
         ));
+    }
+
+    /// A record that doesn't parse, wherever it is, removes nothing
+    #[tokio::test]
+    async fn an_unparseable_record_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let base = store.load_raw(id).await.unwrap().base;
+        store.save_raw(id, state(11), base.as_ref()).await.unwrap();
+        let orphan = Sha256Hex::from([0xab; 32]);
+        let orphan_path = seal.dir().join(BLOBS).join(orphan.to_hex());
+        let lost = seal.dir().join("lost").join("20261111T000000Z");
+        std::fs::create_dir_all(lost.join("items")).unwrap();
+        let bad = [
+            seal.dir().join(SENT).join("bad.json"),
+            seal.dir().join(OUTBOX).join("bad.json"),
+            lost.join("INTENT"),
+            lost.join("items").join("x.json"),
+        ];
+        std::fs::create_dir_all(seal.dir().join(SENT)).unwrap();
+        for path in &bad {
+            std::fs::write(&orphan_path, b"x").unwrap();
+            let body: &[u8] = if path.ends_with("x.json") {
+                br#"{"items": [{"ord": "not one"}]}"#
+            } else {
+                b"{ not json"
+            };
+            std::fs::write(path, body).unwrap();
+            assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 0);
+            assert!(orphan_path.exists(), "{}", path.display());
+            std::fs::remove_file(path).unwrap();
+        }
+        // A blob copy under lost/ is not a record; other names are ignored
+        std::fs::create_dir_all(lost.join("sealed").join(BLOBS)).unwrap();
+        std::fs::write(lost.join("sealed").join(BLOBS).join("ab"), b"\0")
+            .unwrap();
+        std::fs::write(lost.join("NOTE"), b"free text").unwrap();
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 1);
+        assert!(!orphan_path.exists());
+    }
+
+    /// Side lines keep their blobs: a `.displaced` delta and the keyframe
+    /// it needs, `sent/*.lost` items, and a `HeadFile` under `lost/` with
+    /// its keyframe, all still there and opening after a sweep
+    #[tokio::test]
+    async fn side_lines_still_open_after_a_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let mut base = store.load_raw(id).await.unwrap().base;
+        for n in 11..16 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+        }
+        for item in seal.outbox().await.unwrap() {
+            seal.mark_sent(item.ord).await.unwrap();
+        }
+        let sent = seal.sent().await.unwrap();
+        let entries: Vec<_> = sent.iter().map(|i| i.entry.clone()).collect();
+        // The last delta goes aside as displaced, the rest as lost; the
+        // head names no keyframe, so only the side lines name blobs
+        let delta = sent
+            .iter()
+            .rev()
+            .find(|i| {
+                matches!(
+                    i.entry.entry.blob.as_ref().unwrap().encoding,
+                    BlobEncoding::Delta { .. }
+                )
+            })
+            .unwrap()
+            .clone();
+        for item in &sent {
+            let from = seal.dir().join(SENT).join(ord_name(item.ord, "json"));
+            let to = if item.ord == delta.ord {
+                seal.dir().join(OUTBOX).join(set_aside(item, "displaced"))
+            } else {
+                seal.dir().join(SENT).join(set_aside(item, "lost"))
+            };
+            std::fs::rename(from, to).unwrap();
+        }
+        let mut head = seal.head().await.unwrap().unwrap();
+        let keyframe = head.keyframe.take().unwrap();
+        write_atomic(
+            &seal.dir().join(HEAD),
+            &serde_json::to_vec(&head).unwrap(),
+        )
+        .await
+        .unwrap();
+        // A HeadFile under lost/ names an otherwise unnamed blob
+        let orphan = Sha256Hex::from([0xcd; 32]);
+        std::fs::write(seal.dir().join(BLOBS).join(orphan.to_hex()), b"x")
+            .unwrap();
+        let mut lost_head = head.clone();
+        let mut lost_kf = keyframe.clone();
+        lost_kf.entry.blob.as_mut().unwrap().sha256 = orphan;
+        lost_head.keyframe = Some(lost_kf);
+        let lost = seal.dir().join("lost").join("x").join(SEALED_DIR);
+        std::fs::create_dir_all(&lost).unwrap();
+        std::fs::write(
+            lost.join(HEAD),
+            serde_json::to_vec(&lost_head).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 0);
+        assert!(seal.read_blob(&orphan).await.is_ok());
+        let opened = open_all(&seal, &k, &entries).await;
+        assert_eq!(opened, (10..16).map(state).collect::<Vec<_>>());
+        assert!(
+            seal.open_state(&k, &delta.entry.entry, Some(&keyframe.entry))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Two migrations of one agent at once: both succeed, one marker is
+    /// left, and it keeps the old one's time
+    #[tokio::test]
+    async fn concurrent_migrations_agree() {
+        let at = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_760_000_000);
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let id = AgentId::new();
+            let a = AgentSeal::new(dir.path(), id);
+            let b = AgentSeal::new(dir.path(), id);
+            std::fs::create_dir_all(a.dir()).unwrap();
+            let old = a.dir().join(LEGACY_ENROLLED);
+            std::fs::write(&old, b"since").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&old)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            let (x, y) = tokio::join!(
+                tokio::spawn(async move { a.migrate_marker().await.unwrap() }),
+                tokio::spawn(async move { b.migrate_marker().await.unwrap() }),
+            );
+            let got = [x.unwrap(), y.unwrap()];
+            assert!(got.contains(&MarkerMigration::Migrated), "{got:?}");
+            assert!(!got.contains(&MarkerMigration::NotEnrolled), "{got:?}");
+            let seal = AgentSeal::new(dir.path(), id);
+            assert!(seal.is_enrolled().await.unwrap());
+            assert!(!seal.has_legacy_marker().await.unwrap());
+            let new = seal.dir().join(CHAINED);
+            assert_eq!(
+                std::fs::metadata(&new).unwrap().modified().unwrap(),
+                at
+            );
+            assert_eq!(std::fs::read(&new).unwrap(), b"since");
+        }
     }
 
     #[test]
