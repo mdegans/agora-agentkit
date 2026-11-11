@@ -23,6 +23,10 @@ pub const MAX_FORMAT: u64 = SEALED_FORMAT;
 
 /// The value file inside an agent's directory.
 const STATE_FILE: &str = "state.json";
+/// A save's new value, before its rename over [`STATE_FILE`]
+const TMP_FILE: &str = "state.json.tmp";
+/// Archive and aside names' timestamps (UTC, milliseconds)
+const STAMP: &str = "%Y%m%dT%H%M%S%3fZ";
 
 /// A [`Storage`] over `<root>/<agent_id>/state.json`, agent-kind-agnostic.
 ///
@@ -31,8 +35,16 @@ const STATE_FILE: &str = "state.json";
 /// the previous value** to a `state.<utc-ms>.json` hard link first, so
 /// `state.json` is never absent — retention is deliberately infinite
 /// (rollback + transcript history; compress cold archives externally if a
-/// deployment ever cares). A filesystem without hard links fails every
-/// overwrite.
+/// deployment ever cares).
+///
+/// A save holds an exclusive lock on the agent's directory, and never
+/// truncates a `state.json.tmp` it finds there: that is a save cut short,
+/// set aside as `state.json.tmp.<utc-ms>.aside` first.
+///
+/// Every overwrite fails, loudly, on a filesystem without hard links, and
+/// where Linux's `fs.protected_hardlinks` refuses the link: the runner's
+/// user must own `state.json` or be able to read and write it, so a state
+/// file restored as another user fails every save with EPERM.
 #[derive(Debug, Clone)]
 pub struct FsStorage {
     root: PathBuf,
@@ -59,35 +71,81 @@ impl FsStorage {
 
     /// Hard-link `state.json` as `state.<utc-ms>.json`, if there is one
     async fn archive(&self, dir: &Path) -> Result<(), std::io::Error> {
-        archive_as(dir, chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ")).await
+        archive_as(dir, chrono::Utc::now().format(STAMP)).await
     }
 }
 
-/// Hard-link `state.json` as `state.<ts>.json`, suffixing `-N` on a
-/// same-millisecond collision (retries, tests), and fsync `dir` so the link
-/// is durable before the rename that replaces `state.json`
-async fn archive_as(
+/// Hard-link `dir/<from>` as `dir/<prefix><ts><suffix>`, suffixing `-N` to
+/// `ts` on a collision; never replaces a file. `None` when there is no
+/// `from`
+async fn link_unique(
     dir: &Path,
+    from: &str,
+    prefix: &str,
     ts: impl std::fmt::Display,
-) -> Result<(), std::io::Error> {
-    let current = dir.join(STATE_FILE);
-    let mut candidate = dir.join(format!("state.{ts}.json"));
+    suffix: &str,
+) -> Result<Option<PathBuf>, std::io::Error> {
+    let from = dir.join(from);
+    let mut candidate = dir.join(format!("{prefix}{ts}{suffix}"));
     let mut n = 0u32;
     loop {
-        match tokio::fs::hard_link(&current, &candidate).await {
-            Ok(()) => break,
+        match tokio::fs::hard_link(&from, &candidate).await {
+            Ok(()) => return Ok(Some(candidate)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 n += 1;
-                candidate = dir.join(format!("state.{ts}-{n}.json"));
+                candidate = dir.join(format!("{prefix}{ts}-{n}{suffix}"));
             }
-            // No `state.json`: nothing to archive
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(());
+                return Ok(None);
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Hard-link `state.json` as `state.<ts>.json` (`-N` on a same-millisecond
+/// collision), and fsync `dir` so the link is durable before the rename
+/// that replaces `state.json`
+async fn archive_as(
+    dir: &Path,
+    ts: impl std::fmt::Display,
+) -> Result<(), std::io::Error> {
+    if link_unique(dir, STATE_FILE, "state.", ts, ".json")
+        .await?
+        .is_some()
+    {
+        sync_dir(dir).await?;
+    }
+    Ok(())
+}
+
+/// Move a leftover `state.json.tmp` (a save cut short) to
+/// `state.json.tmp.<ts>.aside` (`-N` on a collision), never over another
+/// file, and fsync `dir`
+async fn set_tmp_aside(
+    dir: &Path,
+    ts: impl std::fmt::Display,
+) -> Result<Option<PathBuf>, std::io::Error> {
+    let Some(aside) =
+        link_unique(dir, TMP_FILE, "state.json.tmp.", ts, ".aside").await?
+    else {
+        return Ok(None);
+    };
+    tokio::fs::remove_file(dir.join(TMP_FILE)).await?;
+    sync_dir(dir).await?;
+    Ok(Some(aside))
+}
+
+async fn sync_dir(dir: &Path) -> Result<(), std::io::Error> {
     tokio::fs::File::open(dir).await?.sync_all().await
+}
+
+/// An exclusive advisory lock on `dir` itself, held across a save
+async fn lock_dir(dir: &Path) -> Result<std::fs::File, std::io::Error> {
+    let file = std::fs::File::open(dir)?;
+    tokio::task::spawn_blocking(move || file.lock().map(|()| file))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 /// Error type for [`FsStorage`]. All variants are fatal
@@ -176,20 +234,37 @@ impl FsStorage {
         // operator.
         let bytes = serde_json::to_vec_pretty(&envelope)?;
 
-        // tmp + fsync + archive (a hard link) + rename + dir fsync:
-        // `state.json` always exists, whole. A crash between the link and
-        // the rename leaves `state.json` the old value, the same inode as
-        // the newest archive, and `state.json.tmp` the complete new one; an
-        // in-place edit of `state.json` then would alter that archive too.
-        let tmp = dir.join("state.json.tmp");
+        // lock + set aside a leftover tmp + new tmp + fsync + archive (a
+        // hard link) + rename + dir fsync: `state.json` always exists,
+        // whole. A crash between the link and the rename leaves
+        // `state.json` the old value, the same inode as the newest archive,
+        // and `state.json.tmp` the complete new one; an in-place edit of
+        // `state.json` then would alter that archive too. The next save
+        // sets that tmp aside, whole, before it writes its own
+        let _lock = lock_dir(&dir).await?;
+        if let Some(aside) =
+            set_tmp_aside(&dir, chrono::Utc::now().format(STAMP)).await?
         {
-            let mut file = tokio::fs::File::create(&tmp).await?;
+            tracing::warn!(
+                agent_id = %id,
+                aside = %aside.display(),
+                "a save cut short left state.json.tmp; set aside"
+            );
+        }
+        let tmp = dir.join(TMP_FILE);
+        {
+            // `create_new`: never another writer's file
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .await?;
             tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await?;
             file.sync_all().await?;
         }
         self.archive(&dir).await?;
         tokio::fs::rename(&tmp, dir.join(STATE_FILE)).await?;
-        tokio::fs::File::open(&dir).await?.sync_all().await?;
+        sync_dir(&dir).await?;
         Ok(())
     }
 
@@ -325,7 +400,7 @@ mod tests {
             for archive in archives(&agent_dir) {
                 assert_ne!(ino(&archive), current, "{}", archive.display());
             }
-            assert!(!agent_dir.join("state.json.tmp").exists());
+            assert!(!agent_dir.join(TMP_FILE).exists());
         }
     }
 
@@ -349,11 +424,86 @@ mod tests {
         assert_eq!(ino(archive), ino(&state), "the same inode");
         assert_eq!(storage.load_raw(id).await.unwrap().value, value(1));
 
-        let tmp = agent_dir.join("state.json.tmp");
+        let tmp = agent_dir.join(TMP_FILE);
         std::fs::write(&tmp, b"new").unwrap();
         std::fs::rename(&tmp, &state).unwrap();
         assert_eq!(std::fs::read(archive).unwrap(), old, "the old inode kept");
         assert_ne!(ino(archive), ino(&state));
+    }
+
+    /// Aside files in `dir`
+    fn asides(dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.to_string_lossy().ends_with(".aside"))
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The crash state (`state.json` linked as the newest archive, the cut
+    /// save whole in the tmp), then a save: the cut save is kept aside byte
+    /// for byte, and the extra archive of the same inode is harmless
+    #[tokio::test]
+    async fn a_save_after_a_cut_one_sets_its_tmp_aside_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        let agent_dir = storage.agent_dir(id);
+        let state = agent_dir.join(STATE_FILE);
+        storage.save_raw(id, value(1), None).await.unwrap();
+        let old = std::fs::read(&state).unwrap();
+        storage.archive(&agent_dir).await.unwrap();
+        let cut = serde_json::to_vec_pretty(
+            &serde_json::json!({ "format": 1, "state": value(2) }),
+        )
+        .unwrap();
+        std::fs::write(agent_dir.join(TMP_FILE), &cut).unwrap();
+
+        storage.save_raw(id, value(3), None).await.unwrap();
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(3));
+        let [aside] = &asides(&agent_dir)[..] else {
+            panic!("one aside");
+        };
+        assert_eq!(std::fs::read(aside).unwrap(), cut, "the cut save, whole");
+        assert!(!agent_dir.join(TMP_FILE).exists());
+        let archived = archives(&agent_dir);
+        assert_eq!(archived.len(), 2, "the old value, archived twice");
+        for a in &archived {
+            assert_eq!(std::fs::read(a).unwrap(), old);
+            assert_ne!(ino(a), ino(&state));
+        }
+        assert_eq!(ino(&archived[0]), ino(&archived[1]), "one inode");
+    }
+
+    /// A tmp is set aside, never truncated, even with no `state.json`
+    /// (the old write order's crash state) and on a name collision
+    #[tokio::test]
+    async fn a_leftover_tmp_is_never_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        let agent_dir = storage.agent_dir(id);
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join(TMP_FILE), b"first").unwrap();
+        storage.save_raw(id, value(1), None).await.unwrap();
+        assert!(archives(&agent_dir).is_empty(), "no state.json to archive");
+
+        std::fs::write(agent_dir.join(TMP_FILE), b"second").unwrap();
+        std::fs::write(agent_dir.join("state.json.tmp.T.aside"), b"taken")
+            .unwrap();
+        let aside = set_tmp_aside(&agent_dir, "T").await.unwrap().unwrap();
+        assert_eq!(aside, agent_dir.join("state.json.tmp.T-1.aside"));
+        let kept: Vec<_> = asides(&agent_dir)
+            .iter()
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
+        assert!(kept.contains(&b"first".to_vec()));
+        assert!(kept.contains(&b"second".to_vec()));
+        assert!(kept.contains(&b"taken".to_vec()));
+        assert_eq!(set_tmp_aside(&agent_dir, "T").await.unwrap(), None);
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(1));
     }
 
     #[tokio::test]
