@@ -211,7 +211,7 @@ impl<E: Enrolment> AgoraOutbox<E> {
             seal.mark_sent(item.ord).await?;
             uploaded += 1;
         }
-        let pruned = seal.prune_blobs().await?;
+        let pruned = seal.remove_unnamed_blobs().await?;
         tracing::debug!(agent_id = %id, uploaded, pruned, "sealed outbox drained");
         self.finish(&seal, uploaded, HeadStatus::Same, 0)
             .await
@@ -405,15 +405,12 @@ mod tests {
         let seal = outbox.seal(id);
         assert!(seal.outbox().await.unwrap().is_empty());
         assert_eq!(seal.sent().await.unwrap().len(), 2);
-        // Only the current keyframe's blob stays; the genesis blob went
-        let kf = seal.head().await.unwrap().unwrap().keyframe.unwrap();
-        let mut left = Vec::new();
-        let mut rd =
-            tokio::fs::read_dir(seal.dir().join("blobs")).await.unwrap();
-        while let Some(e) = rd.next_entry().await.unwrap() {
-            left.push(e.file_name().into_string().unwrap());
+        // Every sent version's blob stays
+        for item in seal.sent().await.unwrap() {
+            let sha = item.entry.entry.blob.unwrap().sha256;
+            assert!(seal.read_blob(&sha).await.is_ok());
         }
-        assert_eq!(left, vec![kf.blob_sha256().unwrap().to_hex()]);
+        assert_eq!(blob_count(&seal).await, 2);
         // Its siblings untouched
         for f in ["head.json", "chained"] {
             assert!(seal.dir().join(f).exists(), "{f}");

@@ -10,11 +10,11 @@
 //!   is only chained ([`AgentSeal::migrate_marker`])
 //! - `lock`: held across a save's three steps ([`SealLock`])
 //! - `head.json`: the local head ([`HeadFile`])
-//! - `blobs/<sha256>`: sealed blobs not yet uploaded, and the current
-//!   keyframe's ([`AgentSeal::prune_blobs`]). An agent that never uploaded
-//!   keeps every one; one that uploaded and stopped keeps those written
-//!   since, and the versions it sent before are sealed on Agora only (and
-//!   in plaintext in `FsStorage`'s archives)
+//! - `blobs/<sha256>`: every sealed blob an entry here names, sent or not,
+//!   so each version opens from here whatever Agora holds; only unnamed
+//!   ones go ([`AgentSeal::remove_unnamed_blobs`]). Before 0.158 the blobs
+//!   of sent versions were pruned: those versions are sealed on Agora only
+//!   (and in plaintext in `FsStorage`'s archives)
 //! - `outbox/<ord>.json`: committed entries not yet uploaded, `<ord>.tmp`
 //!   one being written, `<ord>-<hash>.abandoned` one whose local write
 //!   never came, `<ord>-<hash>.displaced` one set aside by
@@ -27,8 +27,7 @@
 //! local write, then commit (the rename and `head.json`).
 //! [`AgentSeal::recover`] finishes a commit a crash interrupted. A seal
 //! that fails never stops the local write. Nothing outside `sealed/` is
-//! ever deleted, and inside it only blobs the server holds and blobs no
-//! record names.
+//! ever deleted, and inside it only blobs no record names.
 //!
 //! What Agora can see besides sizes (to a bucket) and times: whether a
 //! blob is a keyframe or a delta, which says a little about how much a
@@ -73,6 +72,8 @@ const OUTBOX: &str = "outbox";
 const SENT: &str = "sent";
 const BLOBS: &str = "blobs";
 const SEAL_FAILED: &str = "seal_failed.json";
+/// A runner's set-aside lines, each in a directory of its own
+const LOST: &str = "lost";
 
 /// Blobs kept while a fork holds pruning, past which it alerts
 pub const BLOB_ALERT: usize = 256;
@@ -386,6 +387,54 @@ pub fn as_reloaded(
 
 async fn exists(path: &Path) -> std::io::Result<bool> {
     tokio::fs::try_exists(path).await
+}
+
+/// The blobs an item names: its entry's, and its keyframe's
+fn item_blobs(item: &OutboxItem) -> impl Iterator<Item = Sha256Hex> + '_ {
+    let entry = item.entry.entry.blob.as_ref().map(|b| b.sha256);
+    let keyframe = item.keyframe_after.as_ref().and_then(|k| k.blob_sha256());
+    entry.into_iter().chain(keyframe)
+}
+
+/// The blobs every entry record under `dir` names, at any depth: a file
+/// holding an [`OutboxItem`], a [`HeadFile`] (its keyframe), or a list of
+/// items (a runner's record of what it set aside). Anything else there is
+/// not a record
+async fn lost_blobs(dir: &Path) -> Result<HashSet<Sha256Hex>, SealError> {
+    #[derive(Deserialize)]
+    struct Listed {
+        items: Vec<OutboxItem>,
+    }
+    let mut named = HashSet::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(e) = rd.next_entry().await? {
+            let kind = e.file_type().await?;
+            if kind.is_dir() {
+                dirs.push(e.path());
+                continue;
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let bytes = tokio::fs::read(e.path()).await?;
+            if let Ok(item) = serde_json::from_slice::<OutboxItem>(&bytes) {
+                named.extend(item_blobs(&item));
+            } else if let Ok(head) = serde_json::from_slice::<HeadFile>(&bytes)
+            {
+                named.extend(head.keyframe.and_then(|k| k.blob_sha256()));
+            } else if let Ok(listed) = serde_json::from_slice::<Listed>(&bytes)
+            {
+                named.extend(listed.items.iter().flat_map(item_blobs));
+            }
+        }
+    }
+    Ok(named)
 }
 
 /// tmp, fsync, rename, directory fsync
@@ -993,48 +1042,23 @@ impl AgentSeal {
         Ok(())
     }
 
-    /// Delete blobs the server holds and nothing here needs: those of
-    /// `sent/` entries, and of abandoned items the head has moved past,
-    /// but never the current keyframe's or one an outbox item names. While
-    /// a fork is unresolved nothing is deleted, with an alert past
-    /// [`BLOB_ALERT`]. Touches nothing outside `blobs/`
-    pub async fn prune_blobs(&self) -> Result<usize, SealError> {
+    /// Delete the blobs nothing here names: an abandoned item's the head
+    /// has passed, and one a crash left before its item. Never one an entry
+    /// of the main line or a kept side line names (`sent/`, the outbox,
+    /// `.displaced`, anything under `lost/`), whatever the server holds, so
+    /// every version still opens from here. While a fork is unresolved
+    /// nothing is deleted, with an alert past [`BLOB_ALERT`] such blobs.
+    /// Touches nothing outside `blobs/`
+    pub async fn remove_unnamed_blobs(&self) -> Result<usize, SealError> {
         let _lock = self.lock().await?;
         let Some(head) = self.head().await? else {
             return Ok(0);
         };
-        if !head.displaced.is_empty() {
-            let held = self.held().await?;
-            if held.blobs > BLOB_ALERT {
-                tracing::error!(
-                    agent_id = %self.agent_id,
-                    blobs = held.blobs,
-                    blob_bytes = held.blob_bytes,
-                    forks = held.displaced,
-                    "sealed blobs held for an unresolved fork"
-                );
-            }
-            return Ok(0);
-        }
-        // Named by something that still needs it
-        let mut keep = HashSet::new();
-        keep.extend(head.keyframe.as_ref().and_then(|k| k.blob_sha256()));
-        for ext in ["json", "tmp", "displaced"] {
-            for item in self.items(OUTBOX, ext).await? {
-                keep.extend(item.entry.entry.blob.map(|b| b.sha256));
-            }
-        }
-        for item in self.items(OUTBOX, "abandoned").await? {
-            if item.ord >= head.next_ord {
-                keep.extend(item.entry.entry.blob.map(|b| b.sha256));
-            }
-        }
-        // Everything else under blobs/ goes: the server holds the sent
-        // ones, and the rest (an abandoned item's the head is past, or one
-        // a crash left before its item) nothing names. Under the lock, so
-        // no prepare is between writing a blob and its item
-        let mut pruned = 0;
+        let named = self.named_blobs(&head).await?;
+        // Under the lock, so no prepare is between writing a blob and its
+        // item
         let blobs = self.dir.join(BLOBS);
+        let mut unnamed = Vec::new();
         let mut rd = match tokio::fs::read_dir(&blobs).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -1048,19 +1072,59 @@ impl AgentSeal {
             else {
                 continue;
             };
-            if keep.contains(&sha) {
-                continue;
+            if !named.contains(&sha) {
+                unnamed.push(e.path());
             }
-            match tokio::fs::remove_file(e.path()).await {
-                Ok(()) => pruned += 1,
+        }
+        if !head.displaced.is_empty() {
+            if unnamed.len() > BLOB_ALERT {
+                tracing::error!(
+                    agent_id = %self.agent_id,
+                    unnamed = unnamed.len(),
+                    forks = head.displaced.len(),
+                    "unnamed sealed blobs held for an unresolved fork"
+                );
+            }
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for path in unnamed {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => removed += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
         }
-        if pruned > 0 {
+        if removed > 0 {
             sync_dir(&blobs).await?;
         }
-        Ok(pruned)
+        Ok(removed)
+    }
+
+    /// Every blob an entry here names, but an abandoned item's the head
+    /// has passed
+    async fn named_blobs(
+        &self,
+        head: &HeadFile,
+    ) -> Result<HashSet<Sha256Hex>, SealError> {
+        let mut named = lost_blobs(&self.dir.join(LOST)).await?;
+        for ext in ["json", "lost"] {
+            for item in self.items(SENT, ext).await? {
+                named.extend(item_blobs(&item));
+            }
+        }
+        for ext in ["json", "tmp", "displaced"] {
+            for item in self.items(OUTBOX, ext).await? {
+                named.extend(item_blobs(&item));
+            }
+        }
+        for item in self.items(OUTBOX, "abandoned").await? {
+            if item.ord >= head.next_ord {
+                named.extend(item_blobs(&item));
+            }
+        }
+        named.extend(head.keyframe.as_ref().and_then(|k| k.blob_sha256()));
+        Ok(named)
     }
 
     /// What is held back from the server
@@ -2111,7 +2175,7 @@ mod tests {
         }
         let seal = store.seal(id);
         let before = blobs(&seal).await;
-        assert_eq!(seal.prune_blobs().await.unwrap(), 0);
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 0);
         assert_eq!(blobs(&seal).await, before);
 
         let k = store.enrolment.keys(id).unwrap();
@@ -2266,7 +2330,7 @@ mod tests {
         for ord in 0..3 {
             store.seal(id).mark_sent(ord).await.unwrap();
         }
-        assert_eq!(store.seal(id).prune_blobs().await.unwrap(), 0);
+        assert_eq!(store.seal(id).remove_unnamed_blobs().await.unwrap(), 0);
         // Both are kept, and the chain shows the fork
         let entries = chain(&store.seal(id)).await;
         let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
@@ -2470,7 +2534,7 @@ mod tests {
         // committed one's stays until uploaded
         let blob =
             |p: &Prepared| p.item.entry.entry.blob.as_ref().unwrap().sha256;
-        assert_eq!(seal.prune_blobs().await.unwrap(), 1);
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 1);
         assert!(seal.read_blob(&blob(&first)).await.is_err());
         assert!(seal.read_blob(&blob(&second)).await.is_ok());
         // The abandoned record itself is kept
@@ -2784,7 +2848,7 @@ mod tests {
         // The other line is kept, with its blob, through a prune
         let aside = seal.items(OUTBOX, "displaced").await.unwrap();
         assert_eq!(aside[0].entry.entry_hash(), h2.entry_hash);
-        seal.prune_blobs().await.unwrap();
+        seal.remove_unnamed_blobs().await.unwrap();
         assert!(seal.read_blob(&h2_blob).await.is_ok());
         // The server's line plus the rebased entry verify
         let mut line = server.clone();
@@ -2955,13 +3019,83 @@ mod tests {
         tokio::fs::write(seal.dir().join(BLOBS).join("not-a-blob"), b"x")
             .await
             .unwrap();
-        seal.prune_blobs().await.unwrap();
+        seal.remove_unnamed_blobs().await.unwrap();
         assert!(seal.read_blob(&orphan).await.is_err());
         assert!(seal.dir().join(BLOBS).join("not-a-blob").exists());
         // The pending tmp's blob is kept
         let tmp = seal.items(OUTBOX, "tmp").await.unwrap();
         let sha = tmp[0].entry.entry.blob.as_ref().unwrap().sha256;
         assert!(seal.read_blob(&sha).await.is_ok());
+    }
+
+    /// Sent versions keep their blobs: after every version is
+    /// acknowledged and a sweep, each still opens from here. What goes is
+    /// what nothing names: an orphan, and an abandoned item the head has
+    /// passed, unless a set-aside record under `lost/` names it
+    #[tokio::test]
+    async fn every_acknowledged_version_still_opens_after_a_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let policy = KeyframePolicy::default();
+        let mut base = store.load_raw(id).await.unwrap().base;
+        // Abandon an item at the next number, twice; each save then
+        // passes it
+        let mut abandoned = Vec::new();
+        for n in 11..19 {
+            if n == 12 || n == 14 {
+                let lock = seal.lock().await.unwrap();
+                seal.prepare(
+                    &lock,
+                    &k,
+                    &policy,
+                    Append {
+                        kind: StateEntryKind::Snapshot,
+                        plaintext: b"never written",
+                        plaintext_sha256: Some(sha256(b"never written")),
+                        state_at: Utc::now(),
+                        parent: base,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+            if n == 12 || n == 14 {
+                let items = seal.items(OUTBOX, "abandoned").await.unwrap();
+                abandoned.push(
+                    items.into_iter().find(|i| !abandoned.contains(i)).unwrap(),
+                );
+            }
+        }
+        for item in seal.outbox().await.unwrap() {
+            seal.mark_sent(item.ord).await.unwrap();
+        }
+        // One abandoned item is named by a runner's set-aside record
+        let lost = seal.dir().join("lost").join("20261111T000000Z");
+        std::fs::create_dir_all(&lost).unwrap();
+        std::fs::write(
+            lost.join("INTENT"),
+            serde_json::to_vec(&serde_json::json!({
+                "note": "n", "items": [abandoned[1]],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let orphan = Sha256Hex::from([0xab; 32]);
+        std::fs::write(seal.dir().join(BLOBS).join(orphan.to_hex()), b"x")
+            .unwrap();
+
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 2);
+        assert!(seal.read_blob(&orphan).await.is_err());
+        let blob = |i: &OutboxItem| i.entry.entry.blob.as_ref().unwrap().sha256;
+        assert!(seal.read_blob(&blob(&abandoned[0])).await.is_err());
+        assert!(seal.read_blob(&blob(&abandoned[1])).await.is_ok());
+        assert!(seal.outbox().await.unwrap().is_empty());
+        let entries = chain(&seal).await;
+        let opened = open_all(&seal, &k, &entries).await;
+        assert_eq!(opened, (10..19).map(state).collect::<Vec<_>>());
     }
 
     #[test]

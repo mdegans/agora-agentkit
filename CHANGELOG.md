@@ -51,11 +51,21 @@ upload a locally chained agent's state without consent.
   for the first item and before its first network call (never when there
   is nothing to send), so a caller records first-send times only for a
   drain that really uploads. `drain` is `drain_with(id, &mut ())`.
-- **Blobs of an agent that doesn't upload are never pruned** (nothing is
-  sent). An agent that never uploaded keeps every version; one that
-  uploaded and then stopped keeps those written since, while the versions
-  it sent before were pruned locally and are sealed on Agora only (and in
-  plaintext in `FsStorage`'s archives).
+- **Sent blobs are kept: `AgentSeal::prune_blobs` is
+  `AgentSeal::remove_unnamed_blobs`** (renamed, as its meaning changed).
+  It used to delete the local blob of every version Agora acknowledged,
+  leaving Agora's disk the only sealed copy: a blob that rotted or went
+  missing there could never be healed (a re-seal has a new nonce and hash),
+  and a server wrongly answering "stored" cost the agent its history. Now
+  it removes only what nothing names (an abandoned item the head has
+  passed, an orphan a crash left), never a blob an entry of the main line
+  or a kept side line names (`sent/`, including a runner's `.lost` items,
+  the outbox, `.displaced`, any record under `sealed/lost/`). Nothing is
+  deleted while a fork is unresolved, as before; `BLOB_ALERT` now counts
+  the unnamed blobs held. Every agent, uploading or not, keeps every
+  version it sealed. About 0.4-0.7 GB for the fleet today. Versions sent
+  before this release had their blobs pruned already: those are sealed on
+  Agora only (and in plaintext in `FsStorage`'s archives).
 - **`FsStorage` archives with a hard link**, not a rename: `state.json` is
   never absent mid-save. A crash between the link and the rename leaves
   `state.json` (the old value, the same inode as the newest archive) beside
