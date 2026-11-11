@@ -1,14 +1,20 @@
-//! [`Mirrored`]: a local [`Storage`] whose saves are also sealed, chained
-//! and queued for upload, for agents that opted in and are enrolled.
+//! [`Mirrored`]: a local [`Storage`] whose saves are also sealed and
+//! chained for every enrolled agent, and queued for upload for one that
+//! [`uploads`](Enrolment::uploads).
 //!
 //! Under `<agent_dir>/sealed/`:
 //!
-//! - `enrolled`, `refused`: markers. Only an enrolled, unrefused agent is
-//!   sealed
+//! - `chained`, `refused`: markers. Only a chained, unrefused agent is
+//!   sealed. `chained` was `enrolled` before 0.158, when it also meant
+//!   "uploads"; renamed so no older runner seals or uploads an agent that
+//!   is only chained ([`AgentSeal::migrate_marker`])
 //! - `lock`: held across a save's three steps ([`SealLock`])
 //! - `head.json`: the local head ([`HeadFile`])
-//! - `blobs/<sha256>`: sealed blobs not yet uploaded, and the current
-//!   keyframe's ([`AgentSeal::prune_blobs`])
+//! - `blobs/<sha256>`: every sealed blob an entry here names, sent or not,
+//!   so each version opens from here whatever Agora holds; only unnamed
+//!   ones go ([`AgentSeal::remove_unnamed_blobs`]). Before 0.158 the blobs
+//!   of sent versions were pruned: those versions are sealed on Agora only
+//!   (and in plaintext in `FsStorage`'s archives)
 //! - `outbox/<ord>.json`: committed entries not yet uploaded, `<ord>.tmp`
 //!   one being written, `<ord>-<hash>.abandoned` one whose local write
 //!   never came, `<ord>-<hash>.displaced` one set aside by
@@ -21,8 +27,7 @@
 //! local write, then commit (the rename and `head.json`).
 //! [`AgentSeal::recover`] finishes a commit a crash interrupted. A seal
 //! that fails never stops the local write. Nothing outside `sealed/` is
-//! ever deleted, and inside it only blobs the server holds and blobs no
-//! record names.
+//! ever deleted, and inside it only blobs no record names.
 //!
 //! What Agora can see besides sizes (to a bucket) and times: whether a
 //! blob is a keyframe or a delta, which says a little about how much a
@@ -56,7 +61,10 @@ use crate::reactor::{AgentNotFound, FsStorage, Loaded, Storage};
 
 /// The sealed directory, in an agent's
 pub const SEALED_DIR: &str = "sealed";
-const ENROLLED: &str = "enrolled";
+/// The marker of a chained agent, in its `sealed/`
+pub const CHAINED: &str = "chained";
+/// The marker before 0.158, read only by [`AgentSeal::migrate_marker`]
+const LEGACY_ENROLLED: &str = "enrolled";
 const REFUSED: &str = "refused";
 const LOCK: &str = "lock";
 const HEAD: &str = "head.json";
@@ -64,6 +72,8 @@ const OUTBOX: &str = "outbox";
 const SENT: &str = "sent";
 const BLOBS: &str = "blobs";
 const SEAL_FAILED: &str = "seal_failed.json";
+/// A runner's set-aside lines, each in a directory of its own
+const LOST: &str = "lost";
 
 /// Blobs kept while a fork holds pruning, past which it alerts
 pub const BLOB_ALERT: usize = 256;
@@ -79,8 +89,8 @@ impl AgentDir for FsStorage {
     }
 }
 
-/// A local [`Storage`] that can mark a sealed agent's state so binaries
-/// before 0.147 refuse it instead of overwriting it unsealed
+/// A local [`Storage`] that can mark a chained agent's state so binaries
+/// before 0.158 refuse it instead of running it unsealed
 #[async_trait::async_trait]
 pub trait MarkedLocal: Storage {
     async fn save_marked(
@@ -92,7 +102,7 @@ pub trait MarkedLocal: Storage {
 
 #[async_trait::async_trait]
 impl MarkedLocal for FsStorage {
-    /// Format 2 ([`SEALED_FORMAT`](crate::reactor::storage::SEALED_FORMAT))
+    /// [`SEALED_FORMAT`](crate::reactor::storage::SEALED_FORMAT)
     async fn save_marked(
         &mut self,
         id: AgentId,
@@ -115,17 +125,22 @@ impl std::fmt::Debug for SealKeys {
     }
 }
 
-/// The runner's say on who is sealed and with what
+/// The runner's say on who uploads and with what keys. Whether an agent
+/// is sealed is `sealed/chained`'s alone
 pub trait Enrolment: Send + Sync {
-    /// Whether the agent opted in (the consent ledger)
-    fn opted_in(&self, id: AgentId) -> bool;
+    /// Whether the agent's chain is uploaded to Agora (the consent ledger).
+    /// Decides only [`Outbox::notify`] and [`AgoraOutbox::drain`], never the
+    /// seal or the load's check
+    ///
+    /// [`AgoraOutbox::drain`]: super::outbox::AgoraOutbox::drain
+    fn uploads(&self, id: AgentId) -> bool;
     /// Its keys, from the runner's own secrets
     fn keys(&self, id: AgentId) -> Option<SealKeys>;
 }
 
 impl<E: Enrolment> Enrolment for std::sync::Arc<E> {
-    fn opted_in(&self, id: AgentId) -> bool {
-        (**self).opted_in(id)
+    fn uploads(&self, id: AgentId) -> bool {
+        (**self).uploads(id)
     }
 
     fn keys(&self, id: AgentId) -> Option<SealKeys> {
@@ -133,7 +148,8 @@ impl<E: Enrolment> Enrolment for std::sync::Arc<E> {
     }
 }
 
-/// Told when an entry is committed, to wake a drainer. Never does network
+/// Told when an entry is committed for an agent that
+/// [`uploads`](Enrolment::uploads), to wake a drainer. Never does network
 /// work itself: it is called under the reactor's storage lock
 pub trait Outbox: Send + Sync {
     fn notify(&self, _id: AgentId) {}
@@ -242,7 +258,13 @@ pub enum SealFailureKind {
     Raced,
     /// Not a failure: the agent is refused
     Refused,
-    /// Not a failure: the agent opted out after enrolling
+    /// The pre-0.158 `sealed/enrolled` is here and `sealed/chained` isn't:
+    /// [`AgentSeal::migrate_marker`] hasn't run. Written marked, never
+    /// plain, so no older runner takes it for an unsealed agent
+    Unmigrated,
+    /// Not a failure: the agent opted out after enrolling. Written before
+    /// 0.158, when opting out stopped the seal; never written now, but an
+    /// old `seal_failed.json` still reads
     OptedOut,
 }
 
@@ -325,6 +347,17 @@ pub enum Recovery {
     Unreadable(SealFailureKind),
 }
 
+/// What [`AgentSeal::migrate_marker`] did
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerMigration {
+    /// `enrolled` is now `chained`
+    Migrated,
+    /// Already `chained`, with no `enrolled`
+    Already,
+    /// Neither marker
+    NotEnrolled,
+}
+
 /// The per-agent advisory lock on `sealed/lock`, held across a save's
 /// three steps. Released on drop
 #[derive(Debug)]
@@ -358,6 +391,74 @@ pub fn as_reloaded(
 
 async fn exists(path: &Path) -> std::io::Result<bool> {
     tokio::fs::try_exists(path).await
+}
+
+/// The blobs an item names: its entry's, and its keyframe's
+fn item_blobs(item: &OutboxItem) -> impl Iterator<Item = Sha256Hex> + '_ {
+    let entry = item.entry.entry.blob.as_ref().map(|b| b.sha256);
+    let keyframe = item.keyframe_after.as_ref().and_then(|k| k.blob_sha256());
+    entry.into_iter().chain(keyframe)
+}
+
+/// Why [`AgentSeal::remove_unnamed_blobs`] removed nothing
+#[derive(Debug, thiserror::Error)]
+enum Unnamed {
+    #[error(transparent)]
+    Seal(#[from] SealError),
+    /// A record that should name blobs doesn't parse: fail closed
+    #[error("{0} doesn't parse as a record")]
+    Unparseable(PathBuf),
+}
+
+/// The blobs every entry record under `dir` names, at any depth: a file
+/// holding an [`OutboxItem`], a [`HeadFile`] (its keyframe), or a list of
+/// items (a runner's record of what it set aside). `blobs/` directories
+/// are copies, not records, and skipped; another file is a record when it
+/// is `INTENT`, `DONE`, `head.json` or `*.json`, and must then parse
+async fn lost_blobs(dir: &Path) -> Result<HashSet<Sha256Hex>, Unnamed> {
+    #[derive(Deserialize)]
+    struct Listed {
+        items: Vec<OutboxItem>,
+    }
+    let mut named = HashSet::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(SealError::from(e).into()),
+        };
+        while let Some(e) = rd.next_entry().await.map_err(SealError::from)? {
+            let kind = e.file_type().await.map_err(SealError::from)?;
+            let path = e.path();
+            if kind.is_dir() {
+                if e.file_name() != BLOBS {
+                    dirs.push(path);
+                }
+                continue;
+            }
+            let name = e.file_name();
+            let record = matches!(name.to_str(), Some("INTENT" | "DONE"))
+                || path.extension().is_some_and(|x| x == "json");
+            if !kind.is_file() || !record {
+                continue;
+            }
+            let bytes =
+                tokio::fs::read(&path).await.map_err(SealError::from)?;
+            if let Ok(item) = serde_json::from_slice::<OutboxItem>(&bytes) {
+                named.extend(item_blobs(&item));
+            } else if let Ok(head) = serde_json::from_slice::<HeadFile>(&bytes)
+            {
+                named.extend(head.keyframe.and_then(|k| k.blob_sha256()));
+            } else if let Ok(listed) = serde_json::from_slice::<Listed>(&bytes)
+            {
+                named.extend(listed.items.iter().flat_map(item_blobs));
+            } else {
+                return Err(Unnamed::Unparseable(path));
+            }
+        }
+    }
+    Ok(named)
 }
 
 /// tmp, fsync, rename, directory fsync
@@ -485,17 +586,70 @@ impl AgentSeal {
         Ok(SealLock(file))
     }
 
+    /// Whether `sealed/chained` exists. The pre-0.158 `sealed/enrolled`
+    /// counts only once [`migrate_marker`](Self::migrate_marker) has run;
+    /// until then [`Mirrored`] writes the agent marked and unsealed
+    /// ([`SealFailureKind::Unmigrated`]), so a runner calls it first
     pub async fn is_enrolled(&self) -> std::io::Result<bool> {
-        exists(&self.dir.join(ENROLLED)).await
+        exists(&self.dir.join(CHAINED)).await
+    }
+
+    /// Whether the pre-0.158 `sealed/enrolled` is still here, for a dry
+    /// run of [`migrate_marker`](Self::migrate_marker). Read-only
+    pub async fn has_legacy_marker(&self) -> std::io::Result<bool> {
+        exists(&self.dir.join(LEGACY_ENROLLED)).await
+    }
+
+    /// Replace a pre-0.158 `sealed/enrolled` with `sealed/chained`: the new
+    /// marker first, then the old one removed, each made durable, so a
+    /// crash at any point leaves at least one and a rerun finishes. The new
+    /// marker keeps the old one's bytes and modification time, which a
+    /// runner reads as when the agent enrolled. Run it before anything
+    /// reads the marker
+    pub async fn migrate_marker(&self) -> Result<MarkerMigration, SealError> {
+        let legacy = self.dir.join(LEGACY_ENROLLED);
+        let chained = self.dir.join(CHAINED);
+        if !exists(&legacy).await? {
+            return Ok(if exists(&chained).await? {
+                MarkerMigration::Already
+            } else {
+                MarkerMigration::NotEnrolled
+            });
+        }
+        let _lock = self.lock().await?;
+        if !exists(&chained).await? {
+            let bytes = tokio::fs::read(&legacy).await?;
+            let modified = tokio::fs::metadata(&legacy).await?.modified()?;
+            let tmp = self.dir.join(format!("{CHAINED}.writing"));
+            let mut file =
+                tokio::fs::File::create(&tmp).await?.into_std().await;
+            tokio::task::spawn_blocking(move || {
+                std::io::Write::write_all(&mut file, &bytes)?;
+                file.set_modified(modified)?;
+                file.sync_all()
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            tokio::fs::rename(&tmp, &chained).await?;
+            sync_dir(&self.dir).await?;
+        }
+        match tokio::fs::remove_file(&legacy).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        sync_dir(&self.dir).await?;
+        Ok(MarkerMigration::Migrated)
     }
 
     pub async fn is_refused(&self) -> std::io::Result<bool> {
         exists(&self.dir.join(REFUSED)).await
     }
 
-    /// Mark enrolment done: uploads and sealed saves start
+    /// Mark the agent chained (`sealed/chained`): sealed saves start.
+    /// Uploads are [`Enrolment::uploads`]'s
     pub async fn enroll(&self) -> std::io::Result<()> {
-        write_atomic(&self.dir.join(ENROLLED), b"").await
+        write_atomic(&self.dir.join(CHAINED), b"").await
     }
 
     /// Block every seal until an operator clears it
@@ -920,48 +1074,36 @@ impl AgentSeal {
         Ok(())
     }
 
-    /// Delete blobs the server holds and nothing here needs: those of
-    /// `sent/` entries, and of abandoned items the head has moved past,
-    /// but never the current keyframe's or one an outbox item names. While
-    /// a fork is unresolved nothing is deleted, with an alert past
-    /// [`BLOB_ALERT`]. Touches nothing outside `blobs/`
-    pub async fn prune_blobs(&self) -> Result<usize, SealError> {
+    /// Delete the blobs nothing here names: an abandoned item's the head
+    /// has passed, and one a crash left before its item. Never one an entry
+    /// of the main line or a kept side line names (`sent/`, the outbox,
+    /// `.displaced`, anything under `lost/`), whatever the server holds, so
+    /// every version still opens from here. A record that doesn't parse
+    /// might name any blob: then nothing is removed, with an error logged. While a fork is unresolved
+    /// nothing is deleted, with an alert past [`BLOB_ALERT`] such blobs.
+    /// Touches nothing outside `blobs/`
+    pub async fn remove_unnamed_blobs(&self) -> Result<usize, SealError> {
         let _lock = self.lock().await?;
         let Some(head) = self.head().await? else {
             return Ok(0);
         };
-        if !head.displaced.is_empty() {
-            let held = self.held().await?;
-            if held.blobs > BLOB_ALERT {
+        let named = match self.named_blobs(&head).await {
+            Ok(named) => named,
+            Err(Unnamed::Seal(SealError::Io(e))) => return Err(e.into()),
+            // A record here that doesn't parse might name any blob
+            Err(e) => {
                 tracing::error!(
                     agent_id = %self.agent_id,
-                    blobs = held.blobs,
-                    blob_bytes = held.blob_bytes,
-                    forks = held.displaced,
-                    "sealed blobs held for an unresolved fork"
+                    error = %e,
+                    "a sealed record doesn't parse; no blob removed"
                 );
+                return Ok(0);
             }
-            return Ok(0);
-        }
-        // Named by something that still needs it
-        let mut keep = HashSet::new();
-        keep.extend(head.keyframe.as_ref().and_then(|k| k.blob_sha256()));
-        for ext in ["json", "tmp", "displaced"] {
-            for item in self.items(OUTBOX, ext).await? {
-                keep.extend(item.entry.entry.blob.map(|b| b.sha256));
-            }
-        }
-        for item in self.items(OUTBOX, "abandoned").await? {
-            if item.ord >= head.next_ord {
-                keep.extend(item.entry.entry.blob.map(|b| b.sha256));
-            }
-        }
-        // Everything else under blobs/ goes: the server holds the sent
-        // ones, and the rest (an abandoned item's the head is past, or one
-        // a crash left before its item) nothing names. Under the lock, so
-        // no prepare is between writing a blob and its item
-        let mut pruned = 0;
+        };
+        // Under the lock, so no prepare is between writing a blob and its
+        // item
         let blobs = self.dir.join(BLOBS);
+        let mut unnamed = Vec::new();
         let mut rd = match tokio::fs::read_dir(&blobs).await {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -975,19 +1117,59 @@ impl AgentSeal {
             else {
                 continue;
             };
-            if keep.contains(&sha) {
-                continue;
+            if !named.contains(&sha) {
+                unnamed.push(e.path());
             }
-            match tokio::fs::remove_file(e.path()).await {
-                Ok(()) => pruned += 1,
+        }
+        if !head.displaced.is_empty() {
+            if unnamed.len() > BLOB_ALERT {
+                tracing::error!(
+                    agent_id = %self.agent_id,
+                    unnamed = unnamed.len(),
+                    forks = head.displaced.len(),
+                    "unnamed sealed blobs held for an unresolved fork"
+                );
+            }
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for path in unnamed {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => removed += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
         }
-        if pruned > 0 {
+        if removed > 0 {
             sync_dir(&blobs).await?;
         }
-        Ok(pruned)
+        Ok(removed)
+    }
+
+    /// Every blob an entry here names, but an abandoned item's the head
+    /// has passed
+    async fn named_blobs(
+        &self,
+        head: &HeadFile,
+    ) -> Result<HashSet<Sha256Hex>, Unnamed> {
+        let mut named = lost_blobs(&self.dir.join(LOST)).await?;
+        for ext in ["json", "lost"] {
+            for item in self.items(SENT, ext).await? {
+                named.extend(item_blobs(&item));
+            }
+        }
+        for ext in ["json", "tmp", "displaced"] {
+            for item in self.items(OUTBOX, ext).await? {
+                named.extend(item_blobs(&item));
+            }
+        }
+        for item in self.items(OUTBOX, "abandoned").await? {
+            if item.ord >= head.next_ord {
+                named.extend(item_blobs(&item));
+            }
+        }
+        named.extend(head.keyframe.as_ref().and_then(|k| k.blob_sha256()));
+        Ok(named)
     }
 
     /// What is held back from the server
@@ -1146,6 +1328,20 @@ impl AgentSeal {
         let mut envelope: serde_json::Value =
             serde_json::from_slice(&plaintext)?;
         Ok(envelope.get_mut("state").ok_or(OpenError::NoBlob)?.take())
+    }
+
+    /// Open the [`GenesisOrigin`] a genesis entry seals. Its blob must
+    /// still be local
+    pub async fn open_origin(
+        &self,
+        keys: &SealKeys,
+        genesis: &StateEntry,
+    ) -> Result<GenesisOrigin, OpenError> {
+        if genesis.kind != StateEntryKind::Genesis {
+            return Err(OpenError::NotGenesis(genesis.kind));
+        }
+        let plaintext = self.open_plaintext(keys, genesis, None).await?;
+        Ok(serde_json::from_slice(&plaintext)?)
     }
 
     async fn open_plaintext(
@@ -1337,6 +1533,8 @@ pub enum OpenError {
     WrongBase,
     #[error("sealed under key generation {0}, which isn't held")]
     KeyGen(u32),
+    #[error("a {0:?} entry, not a genesis")]
+    NotGenesis(StateEntryKind),
 }
 
 /// [`Mirrored`]'s errors: the local store's alone, since a seal never
@@ -1365,9 +1563,10 @@ impl<E: crate::reactor::RetryAfter> crate::reactor::RetryAfter
     }
 }
 
-/// A local [`Storage`] whose saves are sealed first, for agents the
-/// [`Enrolment`] opted in that are enrolled and not refused. Loads stay
-/// local; uploads are the [`Outbox`]'s, never inside a save
+/// A local [`Storage`] whose saves are sealed first, for agents that are
+/// enrolled and not refused. Loads stay local; uploads are the
+/// [`Outbox`]'s, never inside a save, and only for an agent that
+/// [`uploads`](Enrolment::uploads)
 pub struct Mirrored<L, O, E> {
     local: L,
     outbox: O,
@@ -1454,6 +1653,25 @@ fn settle(
     }
 }
 
+/// Which marker an agent's `sealed/` has
+enum Marker {
+    None,
+    /// Only the pre-0.158 `enrolled`
+    Legacy,
+    Chained,
+}
+
+/// An unreadable marker counts as there: never a silent plain save
+async fn marker(seal: &AgentSeal) -> Marker {
+    match seal.is_enrolled().await {
+        Ok(false) => match seal.has_legacy_marker().await {
+            Ok(false) => Marker::None,
+            _ => Marker::Legacy,
+        },
+        _ => Marker::Chained,
+    }
+}
+
 /// How far a save's seal got before the local write
 enum Step {
     NotEnrolled,
@@ -1463,7 +1681,7 @@ enum Step {
 }
 
 impl<L: AgentDir, O, E: Enrolment> Mirrored<L, O, E> {
-    /// Step 1 of a save of an opted-in agent, under `lock`
+    /// Step 1 of a save of an enrolled agent, under `lock`
     async fn prepare(
         &self,
         lock: &SealLock,
@@ -1614,8 +1832,7 @@ where
     type Version = HeadRef;
 
     /// A seal that fails never stops the local write: it is recorded in
-    /// `seal_failed.json` instead, as is a write of a refused or opted-out
-    /// agent's state
+    /// `seal_failed.json` instead, as is a write of a refused agent's state
     async fn save_raw(
         &mut self,
         id: AgentId,
@@ -1629,26 +1846,25 @@ where
         let plaintext_sha256 = sha256(&plaintext);
         drop(reloaded);
 
-        if !self.enrolment.opted_in(id) {
-            let enrolled = seal.is_enrolled().await.unwrap_or(true);
-            self.write_local(id, value, enrolled).await?;
-            if enrolled {
+        match marker(&seal).await {
+            // An agent not enrolled gets no `sealed/` at all
+            Marker::None => {
+                self.write_local(id, value, false).await?;
+                return Ok(None);
+            }
+            Marker::Legacy => {
+                self.write_local(id, value, true).await?;
                 Self::unsealed(
                     &seal,
                     id,
                     plaintext_sha256,
-                    SealFailureKind::OptedOut,
+                    SealFailureKind::Unmigrated,
                     None,
                 )
                 .await;
+                return Ok(base.copied());
             }
-            return Ok(None);
-        }
-
-        // An agent not enrolled gets no `sealed/` at all
-        if let Ok(false) = seal.is_enrolled().await {
-            self.write_local(id, value, false).await?;
-            return Ok(None);
+            Marker::Chained => {}
         }
         let lock = match seal.lock().await {
             Ok(lock) => lock,
@@ -1687,7 +1903,9 @@ where
                                 "sealed save forked from an older head; held for a merge"
                             );
                         }
-                        self.outbox.notify(id);
+                        if self.enrolment.uploads(id) {
+                            self.outbox.notify(id);
+                        }
                         Ok(Some(new))
                     }
                     Settled::Failed { error, kind, base } => {
@@ -1719,15 +1937,35 @@ where
         id: AgentId,
     ) -> Result<Loaded<serde_json::Value, HeadRef>, Self::Error> {
         let seal = self.seal(id);
-        let sealed = self.enrolment.opted_in(id)
-            && seal.is_enrolled().await.unwrap_or(true);
-        if !sealed {
-            let Loaded { value, .. } = self
-                .local
-                .load_raw(id)
-                .await
-                .map_err(MirroredError::Local)?;
-            return Ok(Loaded { value, base: None });
+        match marker(&seal).await {
+            Marker::None => {
+                let Loaded { value, .. } = self
+                    .local
+                    .load_raw(id)
+                    .await
+                    .map_err(MirroredError::Local)?;
+                return Ok(Loaded { value, base: None });
+            }
+            Marker::Legacy => {
+                tracing::error!(
+                    agent_id = %id,
+                    "sealed/enrolled not migrated to sealed/chained; loaded without a base"
+                );
+                let Loaded { value, .. } = self
+                    .local
+                    .load_raw(id)
+                    .await
+                    .map_err(MirroredError::Local)?;
+                self.recoveries
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        id,
+                        Recovery::Unreadable(SealFailureKind::Unmigrated),
+                    );
+                return Ok(Loaded { value, base: None });
+            }
+            Marker::Chained => {}
         }
         // The local read and the check under one lock, so no save lands
         // between them
@@ -1777,6 +2015,7 @@ where
 mod tests {
     use super::*;
     use crate::crypto::generate_keypair;
+    use crate::reactor::storage::SEALED_FORMAT;
     use crate::state::verify::{TrustedKeys, verify_chain};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -1784,11 +2023,11 @@ mod tests {
     /// A signing key and a state key, raw
     type KeyBytes = ([u8; 32], [u8; 32]);
 
-    /// Every agent opted in, with fixed keys
+    /// Fixed keys; every agent uploads except those in `local_only`
     #[derive(Clone, Default)]
     struct Keys {
         keys: Arc<Mutex<HashMap<AgentId, KeyBytes>>>,
-        out: Arc<Mutex<Vec<AgentId>>>,
+        local_only: Arc<Mutex<Vec<AgentId>>>,
     }
 
     impl Keys {
@@ -1804,8 +2043,8 @@ mod tests {
     }
 
     impl Enrolment for Keys {
-        fn opted_in(&self, id: AgentId) -> bool {
-            !self.out.lock().unwrap().contains(&id)
+        fn uploads(&self, id: AgentId) -> bool {
+            !self.local_only.lock().unwrap().contains(&id)
         }
 
         fn keys(&self, id: AgentId) -> Option<SealKeys> {
@@ -1824,7 +2063,23 @@ mod tests {
         serde_json::json!({ "memory": memory })
     }
 
-    type Store = Mirrored<FsStorage, (), Keys>;
+    /// Counts [`Outbox::notify`] calls, by agent
+    #[derive(Clone, Default)]
+    struct Wakes(Arc<Mutex<Vec<AgentId>>>);
+
+    impl Outbox for Wakes {
+        fn notify(&self, id: AgentId) {
+            self.0.lock().unwrap().push(id);
+        }
+    }
+
+    impl Wakes {
+        fn of(&self, id: AgentId) -> usize {
+            self.0.lock().unwrap().iter().filter(|&&w| w == id).count()
+        }
+    }
+
+    type Store = Mirrored<FsStorage, Wakes, Keys>;
 
     /// An enrolled agent: genesis and its first state, sealed
     async fn enrolled(
@@ -1833,7 +2088,8 @@ mod tests {
         let keys = Keys::default();
         let id = AgentId::new();
         let vk = keys.add(id);
-        let store = Mirrored::new(FsStorage::new(dir), (), keys.clone());
+        let store =
+            Mirrored::new(FsStorage::new(dir), Wakes::default(), keys.clone());
         store
             .local
             .clone()
@@ -1882,6 +2138,7 @@ mod tests {
         let same = store.save_raw(id, state(14), base.as_ref()).await.unwrap();
         assert_eq!(same, base);
         assert_eq!(store.seal(id).outbox().await.unwrap().len(), before);
+        assert_eq!(store.outbox.of(id), 4, "one wake per commit");
 
         let entries = chain(&store.seal(id)).await;
         assert_eq!(entries.len(), 6, "genesis, enrolment state, four saves");
@@ -1937,30 +2194,143 @@ mod tests {
         }
     }
 
+    /// No `sealed/chained`, no `sealed/`, whether it uploads or not
     #[tokio::test]
-    async fn an_agent_not_enrolled_or_not_opted_in_is_never_sealed() {
+    async fn an_agent_not_enrolled_is_never_sealed() {
         let dir = tempfile::tempdir().unwrap();
         let keys = Keys::default();
-        let id = AgentId::new();
-        keys.add(id);
         let mut store =
-            Mirrored::new(FsStorage::new(dir.path()), (), keys.clone());
-        assert_eq!(store.save_raw(id, state(1), None).await.unwrap(), None);
-        assert!(!exists(&store.seal(id).dir).await.unwrap());
+            Mirrored::new(FsStorage::new(dir.path()), Wakes::default(), keys);
+        for uploads in [true, false] {
+            let id = AgentId::new();
+            store.enrolment.add(id);
+            if !uploads {
+                store.enrolment.local_only.lock().unwrap().push(id);
+            }
+            assert_eq!(store.save_raw(id, state(1), None).await.unwrap(), None);
+            assert_eq!(store.load_raw(id).await.unwrap().base, None);
+            assert_eq!(store.save_raw(id, state(2), None).await.unwrap(), None);
+            assert!(!exists(&store.seal(id).dir).await.unwrap(), "{uploads}");
+            assert_eq!(store.outbox.of(id), 0);
+        }
+    }
 
-        let (mut store, id, _) = enrolled(dir.path()).await;
-        store.enrolment.out.lock().unwrap().push(id);
-        let before = store.seal(id).outbox().await.unwrap().len();
-        assert_eq!(store.save_raw(id, state(50), None).await.unwrap(), None);
-        assert_eq!(store.seal(id).outbox().await.unwrap().len(), before);
+    /// Each snapshot's state, opened from the blobs on disk
+    async fn open_all(
+        seal: &AgentSeal,
+        keys: &SealKeys,
+        entries: &[SignedStateEntry],
+    ) -> Vec<serde_json::Value> {
+        let mut states = Vec::new();
+        for e in entries
+            .iter()
+            .filter(|e| e.entry.kind == StateEntryKind::Snapshot)
+        {
+            let keyframe = match e.entry.blob.as_ref().unwrap().encoding {
+                BlobEncoding::Delta { base } => entries
+                    .iter()
+                    .map(|s| &s.entry)
+                    .find(|k| k.entry_hash() == base),
+                BlobEncoding::Keyframe => None,
+            };
+            states
+                .push(seal.open_state(keys, &e.entry, keyframe).await.unwrap());
+        }
+        states
+    }
+
+    /// Enrolled but not uploading: chained, delta'd and checked at load
+    /// exactly as an uploading agent is, and the outbox never woken
+    #[tokio::test]
+    async fn an_enrolled_agent_that_doesnt_upload_is_chained_locally() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, vk) = enrolled(dir.path()).await;
+        store.enrolment.local_only.lock().unwrap().push(id);
+        let mut base = store.load_raw(id).await.unwrap().base;
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        for n in 11..19 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+            assert!(base.is_some());
+            store.load_raw(id).await.unwrap();
+            assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        }
+        assert_eq!(store.outbox.of(id), 0, "nothing to upload");
+        let seal = store.seal(id);
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
+
+        let entries = chain(&seal).await;
+        assert_eq!(entries.len(), 10, "genesis, enrolment state, eight saves");
+        let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
+        assert!(report.intact, "{:?}", report.problems);
+        assert!(entries.iter().any(|e| matches!(
+            e.entry.blob.as_ref().unwrap().encoding,
+            BlobEncoding::Delta { .. }
+        )));
+
+        // A change outside the store is caught, as for anyone
+        store
+            .local
+            .clone()
+            .save_raw(id, state(1), None)
+            .await
+            .unwrap();
         assert_eq!(store.load_raw(id).await.unwrap().base, None);
-        // Opted in again: the write is known, not a mismatch
-        store.enrolment.out.lock().unwrap().clear();
-        store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Mismatch(_))));
+    }
+
+    /// Nothing is ever sent for an agent that never uploaded, so pruning
+    /// keeps every version it has
+    #[tokio::test]
+    async fn pruning_keeps_every_blob_of_an_agent_that_doesnt_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        store.enrolment.local_only.lock().unwrap().push(id);
+        let mut base = store.load_raw(id).await.unwrap().base;
+        for n in 11..19 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+        }
+        let seal = store.seal(id);
+        let before = blobs(&seal).await;
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 0);
+        assert_eq!(blobs(&seal).await, before);
+
+        let k = store.enrolment.keys(id).unwrap();
+        let entries = chain(&seal).await;
+        let opened = open_all(&seal, &k, &entries).await;
+        let saved: Vec<_> = (10..19).map(state).collect();
+        assert_eq!(opened, saved);
+    }
+
+    /// A `seal_failed.json` written for an opted-out agent before 0.158
+    /// still reads, and the next seal clears it
+    #[tokio::test]
+    async fn an_old_opted_out_record_reads_and_the_next_save_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        store.local.save_marked(id, state(50)).await.unwrap();
+        let local = store.local.load_raw(id).await.unwrap().value;
+        let old = serde_json::json!({
+            "at": "2026-11-01T00:00:00Z",
+            "local_plaintext_sha256": plaintext_hash(&local),
+            "error": "opted_out",
+        });
+        write_atomic(
+            &seal.dir().join(SEAL_FAILED),
+            &serde_json::to_vec(&old).unwrap(),
+        )
+        .await
+        .unwrap();
+        let base = store.load_raw(id).await.unwrap().base;
         assert!(matches!(
             store.recovery(id),
             Some(Recovery::SealFailed(_, SealFailureKind::OptedOut))
         ));
+        store.save_raw(id, state(51), base.as_ref()).await.unwrap();
+        assert_eq!(seal.seal_failed().await.unwrap(), None);
+        store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
     }
 
     #[tokio::test]
@@ -2077,7 +2447,7 @@ mod tests {
         for ord in 0..3 {
             store.seal(id).mark_sent(ord).await.unwrap();
         }
-        assert_eq!(store.seal(id).prune_blobs().await.unwrap(), 0);
+        assert_eq!(store.seal(id).remove_unnamed_blobs().await.unwrap(), 0);
         // Both are kept, and the chain shows the fork
         let entries = chain(&store.seal(id)).await;
         let report = verify_chain(id, &entries, &TrustedKeys::new(vk));
@@ -2217,8 +2587,11 @@ mod tests {
     async fn two_concurrent_writers_lose_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (mut a, id, _) = enrolled(dir.path()).await;
-        let mut b =
-            Mirrored::new(FsStorage::new(dir.path()), (), a.enrolment.clone());
+        let mut b = Mirrored::new(
+            FsStorage::new(dir.path()),
+            Wakes::default(),
+            a.enrolment.clone(),
+        );
         let base = a.load_raw(id).await.unwrap().base;
         let before = a.seal(id).outbox().await.unwrap().len();
         let (ra, rb) = tokio::join!(
@@ -2278,7 +2651,7 @@ mod tests {
         // committed one's stays until uploaded
         let blob =
             |p: &Prepared| p.item.entry.entry.blob.as_ref().unwrap().sha256;
-        assert_eq!(seal.prune_blobs().await.unwrap(), 1);
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 1);
         assert!(seal.read_blob(&blob(&first)).await.is_err());
         assert!(seal.read_blob(&blob(&second)).await.is_ok());
         // The abandoned record itself is kept
@@ -2592,7 +2965,7 @@ mod tests {
         // The other line is kept, with its blob, through a prune
         let aside = seal.items(OUTBOX, "displaced").await.unwrap();
         assert_eq!(aside[0].entry.entry_hash(), h2.entry_hash);
-        seal.prune_blobs().await.unwrap();
+        seal.remove_unnamed_blobs().await.unwrap();
         assert!(seal.read_blob(&h2_blob).await.is_ok());
         // The server's line plus the rebased entry verify
         let mut line = server.clone();
@@ -2763,13 +3136,260 @@ mod tests {
         tokio::fs::write(seal.dir().join(BLOBS).join("not-a-blob"), b"x")
             .await
             .unwrap();
-        seal.prune_blobs().await.unwrap();
+        seal.remove_unnamed_blobs().await.unwrap();
         assert!(seal.read_blob(&orphan).await.is_err());
         assert!(seal.dir().join(BLOBS).join("not-a-blob").exists());
         // The pending tmp's blob is kept
         let tmp = seal.items(OUTBOX, "tmp").await.unwrap();
         let sha = tmp[0].entry.entry.blob.as_ref().unwrap().sha256;
         assert!(seal.read_blob(&sha).await.is_ok());
+    }
+
+    /// Sent versions keep their blobs: after every version is
+    /// acknowledged and a sweep, each still opens from here. What goes is
+    /// what nothing names: an orphan, and an abandoned item the head has
+    /// passed, unless a set-aside record under `lost/` names it
+    #[tokio::test]
+    async fn every_acknowledged_version_still_opens_after_a_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let policy = KeyframePolicy::default();
+        let mut base = store.load_raw(id).await.unwrap().base;
+        // Abandon an item at the next number, twice; each save then
+        // passes it
+        let mut abandoned = Vec::new();
+        for n in 11..19 {
+            if n == 12 || n == 14 {
+                let lock = seal.lock().await.unwrap();
+                seal.prepare(
+                    &lock,
+                    &k,
+                    &policy,
+                    Append {
+                        kind: StateEntryKind::Snapshot,
+                        plaintext: b"never written",
+                        plaintext_sha256: Some(sha256(b"never written")),
+                        state_at: Utc::now(),
+                        parent: base,
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+            if n == 12 || n == 14 {
+                let items = seal.items(OUTBOX, "abandoned").await.unwrap();
+                abandoned.push(
+                    items.into_iter().find(|i| !abandoned.contains(i)).unwrap(),
+                );
+            }
+        }
+        for item in seal.outbox().await.unwrap() {
+            seal.mark_sent(item.ord).await.unwrap();
+        }
+        // One abandoned item is named by a runner's set-aside record
+        let lost = seal.dir().join("lost").join("20261111T000000Z");
+        std::fs::create_dir_all(&lost).unwrap();
+        std::fs::write(
+            lost.join("INTENT"),
+            serde_json::to_vec(&serde_json::json!({
+                "note": "n", "items": [abandoned[1]],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let orphan = Sha256Hex::from([0xab; 32]);
+        std::fs::write(seal.dir().join(BLOBS).join(orphan.to_hex()), b"x")
+            .unwrap();
+
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 2);
+        assert!(seal.read_blob(&orphan).await.is_err());
+        let blob = |i: &OutboxItem| i.entry.entry.blob.as_ref().unwrap().sha256;
+        assert!(seal.read_blob(&blob(&abandoned[0])).await.is_err());
+        assert!(seal.read_blob(&blob(&abandoned[1])).await.is_ok());
+        assert!(seal.outbox().await.unwrap().is_empty());
+        let entries = chain(&seal).await;
+        let opened = open_all(&seal, &k, &entries).await;
+        assert_eq!(opened, (10..19).map(state).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn a_genesis_origin_opens_and_nothing_else_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let entries = chain(&seal).await;
+        let origin = seal.open_origin(&k, &entries[0].entry).await.unwrap();
+        assert_eq!(
+            origin,
+            GenesisOrigin {
+                class: crate::state::GenesisClass::None,
+                incident: None,
+                prior_copy_held: false,
+                verified_at: None,
+            }
+        );
+        assert!(matches!(
+            seal.open_origin(&k, &entries[1].entry).await,
+            Err(OpenError::NotGenesis(StateEntryKind::Snapshot))
+        ));
+    }
+
+    /// A record that doesn't parse, wherever it is, removes nothing
+    #[tokio::test]
+    async fn an_unparseable_record_removes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let base = store.load_raw(id).await.unwrap().base;
+        store.save_raw(id, state(11), base.as_ref()).await.unwrap();
+        let orphan = Sha256Hex::from([0xab; 32]);
+        let orphan_path = seal.dir().join(BLOBS).join(orphan.to_hex());
+        let lost = seal.dir().join("lost").join("20261111T000000Z");
+        std::fs::create_dir_all(lost.join("items")).unwrap();
+        let bad = [
+            seal.dir().join(SENT).join("bad.json"),
+            seal.dir().join(OUTBOX).join("bad.json"),
+            lost.join("INTENT"),
+            lost.join("items").join("x.json"),
+        ];
+        std::fs::create_dir_all(seal.dir().join(SENT)).unwrap();
+        for path in &bad {
+            std::fs::write(&orphan_path, b"x").unwrap();
+            let body: &[u8] = if path.ends_with("x.json") {
+                br#"{"items": [{"ord": "not one"}]}"#
+            } else {
+                b"{ not json"
+            };
+            std::fs::write(path, body).unwrap();
+            assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 0);
+            assert!(orphan_path.exists(), "{}", path.display());
+            std::fs::remove_file(path).unwrap();
+        }
+        // A blob copy under lost/ is not a record; other names are ignored
+        std::fs::create_dir_all(lost.join("sealed").join(BLOBS)).unwrap();
+        std::fs::write(lost.join("sealed").join(BLOBS).join("ab"), b"\0")
+            .unwrap();
+        std::fs::write(lost.join("NOTE"), b"free text").unwrap();
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 1);
+        assert!(!orphan_path.exists());
+    }
+
+    /// Side lines keep their blobs: a `.displaced` delta and the keyframe
+    /// it needs, `sent/*.lost` items, and a `HeadFile` under `lost/` with
+    /// its keyframe, all still there and opening after a sweep
+    #[tokio::test]
+    async fn side_lines_still_open_after_a_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let k = store.enrolment.keys(id).unwrap();
+        let mut base = store.load_raw(id).await.unwrap().base;
+        for n in 11..16 {
+            base = store.save_raw(id, state(n), base.as_ref()).await.unwrap();
+        }
+        for item in seal.outbox().await.unwrap() {
+            seal.mark_sent(item.ord).await.unwrap();
+        }
+        let sent = seal.sent().await.unwrap();
+        let entries: Vec<_> = sent.iter().map(|i| i.entry.clone()).collect();
+        // The last delta goes aside as displaced, the rest as lost; the
+        // head names no keyframe, so only the side lines name blobs
+        let delta = sent
+            .iter()
+            .rev()
+            .find(|i| {
+                matches!(
+                    i.entry.entry.blob.as_ref().unwrap().encoding,
+                    BlobEncoding::Delta { .. }
+                )
+            })
+            .unwrap()
+            .clone();
+        for item in &sent {
+            let from = seal.dir().join(SENT).join(ord_name(item.ord, "json"));
+            let to = if item.ord == delta.ord {
+                seal.dir().join(OUTBOX).join(set_aside(item, "displaced"))
+            } else {
+                seal.dir().join(SENT).join(set_aside(item, "lost"))
+            };
+            std::fs::rename(from, to).unwrap();
+        }
+        let mut head = seal.head().await.unwrap().unwrap();
+        let keyframe = head.keyframe.take().unwrap();
+        write_atomic(
+            &seal.dir().join(HEAD),
+            &serde_json::to_vec(&head).unwrap(),
+        )
+        .await
+        .unwrap();
+        // A HeadFile under lost/ names an otherwise unnamed blob
+        let orphan = Sha256Hex::from([0xcd; 32]);
+        std::fs::write(seal.dir().join(BLOBS).join(orphan.to_hex()), b"x")
+            .unwrap();
+        let mut lost_head = head.clone();
+        let mut lost_kf = keyframe.clone();
+        lost_kf.entry.blob.as_mut().unwrap().sha256 = orphan;
+        lost_head.keyframe = Some(lost_kf);
+        let lost = seal.dir().join("lost").join("x").join(SEALED_DIR);
+        std::fs::create_dir_all(&lost).unwrap();
+        std::fs::write(
+            lost.join(HEAD),
+            serde_json::to_vec(&lost_head).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(seal.remove_unnamed_blobs().await.unwrap(), 0);
+        assert!(seal.read_blob(&orphan).await.is_ok());
+        let opened = open_all(&seal, &k, &entries).await;
+        assert_eq!(opened, (10..16).map(state).collect::<Vec<_>>());
+        assert!(
+            seal.open_state(&k, &delta.entry.entry, Some(&keyframe.entry))
+                .await
+                .is_ok()
+        );
+    }
+
+    /// Two migrations of one agent at once: both succeed, one marker is
+    /// left, and it keeps the old one's time
+    #[tokio::test]
+    async fn concurrent_migrations_agree() {
+        let at = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_760_000_000);
+        for _ in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let id = AgentId::new();
+            let a = AgentSeal::new(dir.path(), id);
+            let b = AgentSeal::new(dir.path(), id);
+            std::fs::create_dir_all(a.dir()).unwrap();
+            let old = a.dir().join(LEGACY_ENROLLED);
+            std::fs::write(&old, b"since").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&old)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+            let (x, y) = tokio::join!(
+                tokio::spawn(async move { a.migrate_marker().await.unwrap() }),
+                tokio::spawn(async move { b.migrate_marker().await.unwrap() }),
+            );
+            let got = [x.unwrap(), y.unwrap()];
+            assert!(got.contains(&MarkerMigration::Migrated), "{got:?}");
+            assert!(!got.contains(&MarkerMigration::NotEnrolled), "{got:?}");
+            let seal = AgentSeal::new(dir.path(), id);
+            assert!(seal.is_enrolled().await.unwrap());
+            assert!(!seal.has_legacy_marker().await.unwrap());
+            let new = seal.dir().join(CHAINED);
+            assert_eq!(
+                std::fs::metadata(&new).unwrap().modified().unwrap(),
+                at
+            );
+            assert_eq!(std::fs::read(&new).unwrap(), b"since");
+        }
     }
 
     #[test]
@@ -2815,23 +3435,23 @@ mod tests {
         raw["format"].clone()
     }
 
-    /// An enrolled agent's state is marked so binaries before 0.147 refuse
+    /// An enrolled agent's state is marked so binaries before 0.158 refuse
     /// it; anyone else's is written as before. The mark changes no hash
     #[tokio::test]
     async fn an_enrolled_agents_state_is_marked_and_others_are_not() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, id, _) = enrolled(dir.path()).await;
-        assert_eq!(format_of(&store, id), 2, "marked at enrolment");
+        assert_eq!(format_of(&store, id), SEALED_FORMAT, "marked at enrolment");
         let base = store.load_raw(id).await.unwrap().base;
         assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
         store.save_raw(id, state(90), base.as_ref()).await.unwrap();
-        assert_eq!(format_of(&store, id), 2);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
         store.load_raw(id).await.unwrap();
         assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
-        // Opted out but enrolled: still marked
-        store.enrolment.out.lock().unwrap().push(id);
+        // Enrolled but not uploading: still marked
+        store.enrolment.local_only.lock().unwrap().push(id);
         store.save_raw(id, state(91), None).await.unwrap();
-        assert_eq!(format_of(&store, id), 2);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
 
         // Not enrolled: format 1, byte for byte what FsStorage writes
         let other = AgentId::new();
@@ -2847,5 +3467,126 @@ mod tests {
             std::fs::read(plain.agent_dir(other).join("state.json")).unwrap();
         assert_eq!(ours, theirs);
         assert!(!store.seal(other).dir().exists());
+    }
+
+    /// A state saved at format 2 (0.147-0.157) loads intact and saves at
+    /// format 3 with the same plaintext hash
+    #[tokio::test]
+    async fn a_format_2_state_saves_at_3_with_the_same_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let path = store.local.agent_dir(id).join("state.json");
+        let v2 = serde_json::to_vec_pretty(&serde_json::json!({
+            "format": 2, "sealed": true, "state": state(10),
+        }))
+        .unwrap();
+        std::fs::write(&path, v2).unwrap();
+        let loaded = store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        let hash = plaintext_hash(&loaded.value);
+        store
+            .save_raw(id, loaded.value, loaded.base.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(format_of(&store, id), 3);
+        let again = store.load_raw(id).await.unwrap().value;
+        assert_eq!(plaintext_hash(&again), hash);
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        assert_eq!(codec::PLAINTEXT_FORMAT, 1);
+    }
+
+    /// The pre-0.158 marker, at every point a migration can stop: never
+    /// read as chained until migrated, never left with neither marker, and
+    /// a rerun finishes
+    #[tokio::test]
+    async fn the_old_marker_migrates_and_a_crash_never_loses_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let old = seal.dir().join(LEGACY_ENROLLED);
+        let new = seal.dir().join(CHAINED);
+        let enrolled_at = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_760_000_000);
+        // (old, new, leftover tmp) as a crash leaves them
+        let states = [
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (false, true, false),
+        ];
+        for (has_old, has_new, writing) in states {
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::remove_file(&new);
+            for (path, present) in [(&old, has_old), (&new, has_new)] {
+                // A completed earlier run's `new` already has the old time
+                if present {
+                    std::fs::write(path, b"since").unwrap();
+                    std::fs::File::options()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_modified(enrolled_at)
+                        .unwrap();
+                }
+            }
+            if writing {
+                std::fs::write(seal.dir().join("chained.writing"), b"")
+                    .unwrap();
+            }
+            let label = format!("{has_old} {has_new} {writing}");
+            assert_eq!(seal.has_legacy_marker().await.unwrap(), has_old);
+            assert_eq!(seal.is_enrolled().await.unwrap(), has_new, "{label}");
+            let got = seal.migrate_marker().await.unwrap();
+            let want = if has_old {
+                MarkerMigration::Migrated
+            } else {
+                MarkerMigration::Already
+            };
+            assert_eq!(got, want, "{label}");
+            assert!(new.exists() && !old.exists(), "{label}");
+            assert!(!seal.has_legacy_marker().await.unwrap());
+            let modified = std::fs::metadata(&new).unwrap().modified().unwrap();
+            assert_eq!(modified, enrolled_at, "{label}");
+            assert_eq!(std::fs::read(&new).unwrap(), b"since", "{label}");
+            assert_eq!(
+                seal.migrate_marker().await.unwrap(),
+                MarkerMigration::Already
+            );
+        }
+        // Old marker only: never a plain save. The state is written marked,
+        // the load has no base and says why, and the unsealed write is
+        // recorded, so the start after the migration holds the agent
+        std::fs::remove_file(&new).unwrap();
+        std::fs::write(&old, b"").unwrap();
+        let before = chain(&seal).await.len();
+        assert_eq!(store.load_raw(id).await.unwrap().base, None);
+        assert_eq!(
+            store.recovery(id),
+            Some(Recovery::Unreadable(SealFailureKind::Unmigrated))
+        );
+        store.save_raw(id, state(70), None).await.unwrap();
+        assert_eq!(chain(&seal).await.len(), before, "not sealed");
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
+        assert_eq!(
+            seal.seal_failed().await.unwrap().unwrap().error,
+            SealFailureKind::Unmigrated
+        );
+        assert_eq!(
+            seal.migrate_marker().await.unwrap(),
+            MarkerMigration::Migrated
+        );
+        store.load_raw(id).await.unwrap();
+        assert!(matches!(
+            store.recovery(id),
+            Some(Recovery::SealFailed(_, SealFailureKind::Unmigrated))
+        ));
+
+        // Neither: nothing created
+        let other = store.seal(AgentId::new());
+        assert_eq!(
+            other.migrate_marker().await.unwrap(),
+            MarkerMigration::NotEnrolled
+        );
+        assert!(!other.dir().exists());
     }
 }

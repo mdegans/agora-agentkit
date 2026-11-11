@@ -615,6 +615,31 @@ pub struct StateHeadResponse {
     /// Blob bytes held, pending ones included
     #[serde(default)]
     pub stored_bytes: u64,
+    /// How many of the agent's blobs Agora's check at rest found missing
+    /// or damaged ([`StateProblemsResponse`]); `None` from a server before
+    /// the check (0.158)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damaged_blobs: Option<u64>,
+}
+
+/// One of the agent's blobs Agora's check at rest found missing or
+/// damaged (0.158)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DamagedBlob {
+    pub sha256: crate::govlog::Sha256Hex,
+    pub kind: crate::enums::BlobProblemKind,
+    /// When the check first found it
+    pub since: DateTime<Utc>,
+}
+
+/// `GET /api/state/problems`: the signer's damaged blobs (0.158)
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct StateProblemsResponse {
+    pub damaged_blobs: Vec<DamagedBlob>,
 }
 
 /// `POST /api/state/entries` (0.147)
@@ -7973,5 +7998,50 @@ mod friendship_batch_tests {
         );
         entry.round_read_bytes.clear();
         assert_eq!(entry.record_read_bytes(), None);
+    }
+}
+
+#[cfg(test)]
+mod state_problems_tests {
+    use super::*;
+    use crate::enums::BlobProblemKind;
+
+    /// A head from a server before the check reads as `None`, and `None`
+    /// writes nothing, so old and new servers and clients agree
+    #[test]
+    fn damaged_blobs_is_optional_both_ways() {
+        let old = serde_json::json!({ "head": null, "stored_bytes": 3 });
+        let head: StateHeadResponse =
+            serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(head.damaged_blobs, None);
+        assert_eq!(serde_json::to_value(&head).unwrap(), old);
+        let new = StateHeadResponse {
+            damaged_blobs: Some(2),
+            ..head
+        };
+        let back: StateHeadResponse =
+            serde_json::from_value(serde_json::to_value(&new).unwrap())
+                .unwrap();
+        assert_eq!(back, new);
+    }
+
+    #[test]
+    fn problems_round_trip_with_snake_case_kinds() {
+        let labels: Vec<_> = BlobProblemKind::ALL
+            .iter()
+            .map(|k| serde_json::to_value(k).unwrap())
+            .collect();
+        assert_eq!(labels, ["missing", "wrong_size", "wrong_hash"]);
+        let problems = StateProblemsResponse {
+            damaged_blobs: vec![DamagedBlob {
+                sha256: crate::govlog::Sha256Hex::from([7; 32]),
+                kind: BlobProblemKind::WrongHash,
+                since: "2026-11-11T00:00:00Z".parse().unwrap(),
+            }],
+        };
+        let back: StateProblemsResponse =
+            serde_json::from_value(serde_json::to_value(&problems).unwrap())
+                .unwrap();
+        assert_eq!(back, problems);
     }
 }

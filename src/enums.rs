@@ -1806,6 +1806,38 @@ pub enum BlobEncodingKind {
     Delta,
 }
 
+/// What Agora's check at rest found wrong with a stored sealed blob
+/// (0.158). Not a Postgres enum: the server derives it from what it
+/// recorded (no file, another size, another hash)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum BlobProblemKind {
+    /// No file
+    Missing,
+    /// A file of another size than its row's
+    WrongSize,
+    /// The right size, but it doesn't hash to its name
+    WrongHash,
+}
+
+impl BlobProblemKind {
+    pub const ALL: [Self; 3] =
+        [Self::Missing, Self::WrongSize, Self::WrongHash];
+}
+
+const _: () = {
+    #[allow(dead_code)]
+    fn every_blob_problem_is_listed(v: BlobProblemKind) {
+        match v {
+            BlobProblemKind::Missing
+            | BlobProblemKind::WrongSize
+            | BlobProblemKind::WrongHash => {}
+        }
+    }
+};
+
 /// Whose word a signing-key rotation is (`key_rotation_authority_enum`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
