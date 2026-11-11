@@ -27,8 +27,17 @@ pub const MAX_FORMAT: u64 = SEALED_FORMAT;
 const STATE_FILE: &str = "state.json";
 /// A save's new value, before its rename over [`STATE_FILE`]
 const TMP_FILE: &str = "state.json.tmp";
+/// A test's file: a save in its directory fails after creating its tmp
+#[cfg(test)]
+const FAIL_AFTER_TMP: &str = "fail-after-tmp";
 /// Archive and aside names' timestamps (UTC, milliseconds)
 const STAMP: &str = "%Y%m%dT%H%M%S%3fZ";
+
+/// How long a save waits for another save of the same agent to release
+/// the directory's lock: room for a slow fsync of a large state on a busy
+/// disk
+pub const LOCK_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(60);
 
 /// A [`Storage`] over `<root>/<agent_id>/state.json`, agent-kind-agnostic.
 ///
@@ -39,14 +48,20 @@ const STAMP: &str = "%Y%m%dT%H%M%S%3fZ";
 /// (rollback + transcript history; compress cold archives externally if a
 /// deployment ever cares).
 ///
-/// A save holds an exclusive lock on the agent's directory, and never
-/// truncates a `state.json.tmp` it finds there: that is a save cut short,
-/// set aside as `state.json.tmp.<utc-ms>.aside` first.
+/// A save holds an exclusive lock on the agent's directory, waiting at
+/// most [`LOCK_DEADLINE`] for it, and never truncates a `state.json.tmp`
+/// it finds there: that is a save cut short, set aside as
+/// `state.json.tmp.<utc-ms>.aside` first. A save that fails removes what
+/// it made itself (its tmp, and its archive link before the rename), so
+/// retries leave nothing behind.
 ///
-/// Every overwrite fails, loudly, on a filesystem without hard links, and
-/// where Linux's `fs.protected_hardlinks` refuses the link: the runner's
-/// user must own `state.json` or be able to read and write it, so a state
-/// file restored as another user fails every save with EPERM.
+/// Every save fails, loudly:
+/// - on a filesystem without hard links;
+/// - where Linux's `fs.protected_hardlinks` refuses the link: the runner's
+///   user must own `state.json` or be able to read and write it, so a
+///   state file restored as another user fails every save with EPERM;
+/// - where the agent's directory can't be locked (`flock` on a directory
+///   descriptor; NFS emulates it, and it may fail there).
 #[derive(Debug, Clone)]
 pub struct FsStorage {
     root: PathBuf,
@@ -72,7 +87,10 @@ impl FsStorage {
     }
 
     /// Hard-link `state.json` as `state.<utc-ms>.json`, if there is one
-    async fn archive(&self, dir: &Path) -> Result<(), std::io::Error> {
+    async fn archive(
+        &self,
+        dir: &Path,
+    ) -> Result<Option<PathBuf>, std::io::Error> {
         archive_as(dir, chrono::Utc::now().format(STAMP)).await
     }
 }
@@ -107,18 +125,16 @@ async fn link_unique(
 
 /// Hard-link `state.json` as `state.<ts>.json` (`-N` on a same-millisecond
 /// collision), and fsync `dir` so the link is durable before the rename
-/// that replaces `state.json`
+/// that replaces `state.json`. The link, if there was a `state.json`
 async fn archive_as(
     dir: &Path,
     ts: impl std::fmt::Display,
-) -> Result<(), std::io::Error> {
-    if link_unique(dir, STATE_FILE, "state.", ts, ".json")
-        .await?
-        .is_some()
-    {
+) -> Result<Option<PathBuf>, std::io::Error> {
+    let link = link_unique(dir, STATE_FILE, "state.", ts, ".json").await?;
+    if link.is_some() {
         sync_dir(dir).await?;
     }
-    Ok(())
+    Ok(link)
 }
 
 /// Move a leftover `state.json.tmp` (a save cut short) to
@@ -142,12 +158,25 @@ async fn sync_dir(dir: &Path) -> Result<(), std::io::Error> {
     tokio::fs::File::open(dir).await?.sync_all().await
 }
 
-/// An exclusive advisory lock on `dir` itself, held across a save
-async fn lock_dir(dir: &Path) -> Result<std::fs::File, std::io::Error> {
+/// An exclusive advisory lock on `dir` itself, held across a save, or
+/// `None` once `deadline` has passed. Never blocks a thread
+async fn lock_dir(
+    dir: &Path,
+    deadline: std::time::Duration,
+) -> Result<Option<std::fs::File>, std::io::Error> {
     let file = std::fs::File::open(dir)?;
-    tokio::task::spawn_blocking(move || file.lock().map(|()| file))
-        .await
-        .map_err(std::io::Error::other)?
+    let until = tokio::time::Instant::now() + deadline;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+        if tokio::time::Instant::now() >= until {
+            return Ok(None);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 /// Error type for [`FsStorage`]. All variants are fatal
@@ -168,6 +197,9 @@ pub enum FsStorageError {
     Format { found: u64 },
     #[error("not an FsStorage envelope: missing {0}")]
     Envelope(&'static str),
+    /// Another save held the agent's directory past [`LOCK_DEADLINE`]
+    #[error("agent {0}'s directory stayed locked by another save")]
+    Locked(AgentId),
 }
 
 impl crate::reactor::RetryAfter for FsStorageError {}
@@ -236,14 +268,17 @@ impl FsStorage {
         // operator.
         let bytes = serde_json::to_vec_pretty(&envelope)?;
 
-        // lock + set aside a leftover tmp + new tmp + fsync + archive (a
-        // hard link) + rename + dir fsync: `state.json` always exists,
-        // whole. A crash between the link and the rename leaves
-        // `state.json` the old value, the same inode as the newest archive,
-        // and `state.json.tmp` the complete new one; an in-place edit of
-        // `state.json` then would alter that archive too. The next save
-        // sets that tmp aside, whole, before it writes its own
-        let _lock = lock_dir(&dir).await?;
+        // lock + set aside a leftover tmp + archive (a hard link) + tmp +
+        // fsync + rename + dir fsync: `state.json` always exists, whole. A
+        // crash between the link and the rename leaves `state.json` the old
+        // value, the same inode as the newest archive, and maybe a
+        // `state.json.tmp`, whole if the crash came after its fsync; an
+        // in-place edit of `state.json` then would alter that archive too.
+        // The next save sets that tmp aside, whole, before it writes its
+        // own
+        let Some(_lock) = lock_dir(&dir, LOCK_DEADLINE).await? else {
+            return Err(FsStorageError::Locked(id));
+        };
         if let Some(aside) =
             set_tmp_aside(&dir, chrono::Utc::now().format(STAMP)).await?
         {
@@ -253,19 +288,41 @@ impl FsStorage {
                 "a save cut short left state.json.tmp; set aside"
             );
         }
+        let link = self.archive(&dir).await?;
         let tmp = dir.join(TMP_FILE);
-        {
+        let mut made_tmp = false;
+        let replaced = async {
             // `create_new`: never another writer's file
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&tmp)
                 .await?;
+            made_tmp = true;
+            #[cfg(test)]
+            if dir.join(FAIL_AFTER_TMP).exists() {
+                return Err(std::io::Error::other("injected"));
+            }
             tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await?;
             file.sync_all().await?;
+            tokio::fs::rename(&tmp, dir.join(STATE_FILE)).await
         }
-        self.archive(&dir).await?;
-        tokio::fs::rename(&tmp, dir.join(STATE_FILE)).await?;
+        .await;
+        if let Err(e) = replaced {
+            // Nothing replaced: take back what this save made
+            let mine = made_tmp.then_some(&tmp).into_iter().chain(&link);
+            for path in mine {
+                if let Err(err) = tokio::fs::remove_file(path).await {
+                    tracing::error!(
+                        agent_id = %id,
+                        path = %path.display(),
+                        error = %err,
+                        "a failed save's own file couldn't be removed"
+                    );
+                }
+            }
+            return Err(e.into());
+        }
         sync_dir(&dir).await?;
         Ok(())
     }
@@ -506,6 +563,88 @@ mod tests {
         assert!(kept.contains(&b"taken".to_vec()));
         assert_eq!(set_tmp_aside(&agent_dir, "T").await.unwrap(), None);
         assert_eq!(storage.load_raw(id).await.unwrap().value, value(1));
+    }
+
+    /// Every file in `dir`, by name
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A save that fails after making its tmp takes back what it made:
+    /// retries leave nothing behind, the value stands, and the lock is free
+    #[tokio::test]
+    async fn a_failed_save_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        let agent_dir = storage.agent_dir(id);
+        storage.save_raw(id, value(1), None).await.unwrap();
+        storage.save_raw(id, value(2), None).await.unwrap();
+        std::fs::write(agent_dir.join(FAIL_AFTER_TMP), b"").unwrap();
+        let before = names(&agent_dir);
+        for _ in 0..5 {
+            assert!(storage.save_raw(id, value(3), None).await.is_err());
+            assert_eq!(names(&agent_dir), before);
+        }
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(2));
+        let lock = lock_dir(&agent_dir, std::time::Duration::ZERO).await;
+        assert!(lock.unwrap().is_some(), "the lock was released");
+
+        std::fs::remove_file(agent_dir.join(FAIL_AFTER_TMP)).unwrap();
+        storage.save_raw(id, value(3), None).await.unwrap();
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(3));
+        assert_eq!(archives(&agent_dir).len(), 2);
+        assert!(asides(&agent_dir).is_empty());
+    }
+
+    /// A held lock is waited for until the deadline, then given up
+    #[tokio::test]
+    async fn the_directory_lock_has_a_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = std::time::Duration::from_millis(100);
+        let held = lock_dir(dir.path(), short).await.unwrap().unwrap();
+        assert!(lock_dir(dir.path(), short).await.unwrap().is_none());
+        drop(held);
+        assert!(lock_dir(dir.path(), short).await.unwrap().is_some());
+    }
+
+    /// Two saves of one agent at once both land, one after the other
+    #[tokio::test]
+    async fn concurrent_saves_of_one_agent_take_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        storage.clone().save_raw(id, value(0), None).await.unwrap();
+        let mut tasks = Vec::new();
+        for n in 1..=8 {
+            let mut s = storage.clone();
+            tasks.push(tokio::spawn(async move {
+                s.save_raw(id, value(n), None).await
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let agent_dir = storage.agent_dir(id);
+        assert_eq!(archives(&agent_dir).len(), 8, "one archive per save");
+        assert!(!agent_dir.join(TMP_FILE).exists());
+        assert!(asides(&agent_dir).is_empty());
+        let mut rounds: Vec<u64> = archives(&agent_dir)
+            .iter()
+            .chain([&agent_dir.join(STATE_FILE)])
+            .map(|p| {
+                let env: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(p).unwrap()).unwrap();
+                env["state"]["round"].as_u64().unwrap()
+            })
+            .collect();
+        rounds.sort_unstable();
+        assert_eq!(rounds, (0..=8).collect::<Vec<_>>(), "nothing lost");
     }
 
     #[tokio::test]
