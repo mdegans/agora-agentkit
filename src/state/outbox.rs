@@ -7,7 +7,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::storage::{AgentSeal, Enrolment, Held, Outbox, SealError};
+use super::storage::{
+    AgentSeal, Enrolment, Held, Outbox, OutboxItem, SealError,
+};
 use super::verify::{HeadStatus, head_status};
 use crate::client::{Client, Error as ClientError, StateAuth, state_conflict};
 use crate::govlog::Sha256Hex;
@@ -32,9 +34,31 @@ pub struct DrainStatus {
 pub enum Drained {
     Ran(DrainReport),
     /// Nothing was read or sent: the agent doesn't
-    /// [`upload`](Enrolment::uploads), so nothing of its chain is on Agora
-    /// from this drain
+    /// [`upload`](Enrolment::uploads). Checked first
     LocalOnly,
+    /// Nothing was sent: no `sealed/enrolled`, so no chain
+    NotEnrolled,
+    /// [`uploads`](Enrolment::uploads) turned false mid-drain: `uploaded`
+    /// items went before it, and the rest wait in the outbox, as after a
+    /// network error
+    Withdrawn {
+        uploaded: usize,
+    },
+}
+
+/// Called once by a [`drain_with`](AgoraOutbox::drain_with) that is about
+/// to upload, so a caller can record what it sends
+#[async_trait::async_trait]
+pub trait BeforeUpload: Send {
+    /// After the drain's [`uploads`](Enrolment::uploads) check passed for
+    /// the first item, before its first network call, with every item it
+    /// will try in order. Never called when there is nothing to send
+    async fn before_upload(&mut self, items: &[OutboxItem]);
+}
+
+#[async_trait::async_trait]
+impl BeforeUpload for () {
+    async fn before_upload(&mut self, _: &[OutboxItem]) {}
 }
 
 /// What a [`Drained::Ran`] uploaded, and how it left the agent
@@ -105,23 +129,24 @@ impl<E: Enrolment> AgoraOutbox<E> {
     /// Upload `id`'s outbox, oldest first: the blob, then the entry. On a
     /// `409` the rest is held and the status recorded. Never deletes, and
     /// touches nothing for an agent that doesn't
-    /// [`upload`](Enrolment::uploads)
+    /// [`upload`](Enrolment::uploads), which is asked again before each
+    /// item
     pub async fn drain(&self, id: AgentId) -> Result<Drained, DrainError> {
+        self.drain_with(id, &mut ()).await
+    }
+
+    /// [`drain`](Self::drain), telling `before` what it is about to send
+    pub async fn drain_with<B: BeforeUpload + ?Sized>(
+        &self,
+        id: AgentId,
+        before: &mut B,
+    ) -> Result<Drained, DrainError> {
         if !self.enrolment.uploads(id) {
             return Ok(Drained::LocalOnly);
         }
-        self.upload(id).await.map(Drained::Ran)
-    }
-
-    async fn upload(&self, id: AgentId) -> Result<DrainReport, DrainError> {
         let seal = self.seal(id);
         if !seal.is_enrolled().await? {
-            return Ok(DrainReport {
-                uploaded: 0,
-                status: HeadStatus::Same,
-                waiting: 0,
-                held: Held::default(),
-            });
+            return Ok(Drained::NotEnrolled);
         }
         let keys = self.enrolment.keys(id).ok_or(DrainError::NoKeys)?;
         let auth = StateAuth {
@@ -131,6 +156,18 @@ impl<E: Enrolment> AgoraOutbox<E> {
         let items = seal.outbox().await?;
         let mut uploaded = 0;
         for (i, item) in items.iter().enumerate() {
+            if !self.enrolment.uploads(id) {
+                tracing::info!(
+                    agent_id = %id,
+                    uploaded,
+                    waiting = items.len() - i,
+                    "sealed uploads stopped: uploading was switched off"
+                );
+                return Ok(Drained::Withdrawn { uploaded });
+            }
+            if i == 0 {
+                before.before_upload(&items).await;
+            }
             if let Some(blob) = &item.entry.entry.blob {
                 let sealed = seal.read_blob(&blob.sha256).await?;
                 self.client
@@ -164,7 +201,8 @@ impl<E: Enrolment> AgoraOutbox<E> {
                         );
                         return self
                             .finish(&seal, uploaded, status, rest.len())
-                            .await;
+                            .await
+                            .map(Drained::Ran);
                     }
                     // Taken before, unacknowledged
                 }
@@ -175,7 +213,9 @@ impl<E: Enrolment> AgoraOutbox<E> {
         }
         let pruned = seal.prune_blobs().await?;
         tracing::debug!(agent_id = %id, uploaded, pruned, "sealed outbox drained");
-        self.finish(&seal, uploaded, HeadStatus::Same, 0).await
+        self.finish(&seal, uploaded, HeadStatus::Same, 0)
+            .await
+            .map(Drained::Ran)
     }
 
     async fn finish(
@@ -318,7 +358,7 @@ mod tests {
     fn ran(drained: Drained) -> DrainReport {
         match drained {
             Drained::Ran(report) => report,
-            Drained::LocalOnly => panic!("drained as local-only"),
+            other => panic!("{other:?}"),
         }
     }
 
@@ -543,5 +583,151 @@ mod tests {
         let vk = SigningKey::from_bytes(&[3; 32]).verifying_key();
         let report = verify_chain(id, &posted, &TrustedKeys::new(vk));
         assert!(report.intact, "{:?}", report.problems);
+    }
+
+    /// Appends `n` more states to `id`'s chain
+    async fn more(outbox: &AgoraOutbox<One>, id: AgentId, n: usize) {
+        let keys = outbox.enrolment.keys(id).unwrap();
+        for i in 0..n {
+            outbox
+                .seal(id)
+                .append_state(
+                    &keys,
+                    &KeyframePolicy::default(),
+                    StateEntryKind::Snapshot,
+                    &serde_json::json!({ "memory": format!("x{i}").repeat(100) }),
+                    Utc::now(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn accept_blobs(server: &MockServer) {
+        server
+            .mock_async(|when, then| {
+                when.method(PUT).path_includes("/api/state/blobs/");
+                then.status(200).json_body(serde_json::json!({
+                    "id": uuid::Uuid::nil(), "sha256": "00".repeat(32), "size_bytes": 1,
+                }));
+            })
+            .await;
+    }
+
+    /// Uploading switched off after the first item: that one is on the
+    /// server and in `sent/`, the rest wait, and nothing else is written
+    #[tokio::test]
+    async fn a_withdrawal_stops_the_drain_at_the_next_item() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = setup(&server).await;
+        more(&outbox, id, 2).await;
+        accept_blobs(&server).await;
+        let enrolment = outbox.enrolment.clone();
+        let entries = server
+            .mock_async(move |when, then| {
+                when.method(POST).path("/agora/api/state/entries").is_true(
+                    move |_| {
+                        enrolment.uploads.store(false, Ordering::SeqCst);
+                        true
+                    },
+                );
+                then.status(200).json_body(head_json());
+            })
+            .await;
+        assert_eq!(
+            outbox.drain(id).await.unwrap(),
+            Drained::Withdrawn { uploaded: 1 }
+        );
+        entries.assert_calls_async(1).await;
+        let seal = outbox.seal(id);
+        assert_eq!(seal.sent().await.unwrap().len(), 1);
+        assert_eq!(seal.outbox().await.unwrap().len(), 3);
+        assert_eq!(outbox.status(id).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_agent_without_the_marker_is_not_enrolled() {
+        let server = MockServer::start_async().await;
+        let any = server
+            .mock_async(|_, then| {
+                then.status(500);
+            })
+            .await;
+        let (_dir, outbox, _) = setup(&server).await;
+        let other = AgentId::new();
+        assert_eq!(outbox.drain(other).await.unwrap(), Drained::NotEnrolled);
+        any.assert_calls_async(0).await;
+        assert!(!outbox.seal(other).dir().exists());
+    }
+
+    /// What a [`BeforeUpload`] saw, and how many entries had been posted
+    /// when it did
+    struct Seen {
+        calls: Vec<(Vec<u64>, usize)>,
+        posted: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl BeforeUpload for Seen {
+        async fn before_upload(&mut self, items: &[OutboxItem]) {
+            self.calls.push((
+                items.iter().map(|i| i.ord).collect(),
+                self.posted.load(Ordering::SeqCst),
+            ));
+        }
+    }
+
+    /// Told once, before any upload, with every item; never for a drain
+    /// that sends nothing
+    #[tokio::test]
+    async fn before_upload_hears_only_of_a_drain_that_sends() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = setup_uploading(&server, false).await;
+        more(&outbox, id, 1).await;
+        accept_blobs(&server).await;
+        let posted = Arc::new(AtomicUsize::new(0));
+        let count = posted.clone();
+        server
+            .mock_async(move |when, then| {
+                when.method(POST).path("/agora/api/state/entries").is_true(
+                    move |_| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        true
+                    },
+                );
+                then.status(200).json_body(head_json());
+            })
+            .await;
+        let mut seen = Seen {
+            calls: Vec::new(),
+            posted: posted.clone(),
+        };
+        assert_eq!(
+            outbox.drain_with(id, &mut seen).await.unwrap(),
+            Drained::LocalOnly
+        );
+        assert!(seen.calls.is_empty());
+
+        outbox.enrolment.uploads.store(true, Ordering::SeqCst);
+        let ords: Vec<u64> = outbox
+            .seal(id)
+            .outbox()
+            .await
+            .unwrap()
+            .iter()
+            .map(|i| i.ord)
+            .collect();
+        assert_eq!(
+            ran(outbox.drain_with(id, &mut seen).await.unwrap()).uploaded,
+            3
+        );
+        assert_eq!(seen.calls, vec![(ords, 0)], "once, before any post");
+        // Nothing left to send: not told
+        ran(outbox.drain_with(id, &mut seen).await.unwrap());
+        assert_eq!(
+            outbox.drain_with(AgentId::new(), &mut seen).await.unwrap(),
+            Drained::NotEnrolled
+        );
+        assert_eq!(seen.calls.len(), 1);
     }
 }

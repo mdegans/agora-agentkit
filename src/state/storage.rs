@@ -8,9 +8,11 @@
 //!   sealed
 //! - `lock`: held across a save's three steps ([`SealLock`])
 //! - `head.json`: the local head ([`HeadFile`])
-//! - `blobs/<sha256>`: sealed blobs not yet uploaded (every one, for an
-//!   agent that doesn't upload), and the current keyframe's
-//!   ([`AgentSeal::prune_blobs`])
+//! - `blobs/<sha256>`: sealed blobs not yet uploaded, and the current
+//!   keyframe's ([`AgentSeal::prune_blobs`]). An agent that never uploaded
+//!   keeps every one; one that uploaded and stopped keeps those written
+//!   since, and the versions it sent before are sealed on Agora only (and
+//!   in plaintext in `FsStorage`'s archives)
 //! - `outbox/<ord>.json`: committed entries not yet uploaded, `<ord>.tmp`
 //!   one being written, `<ord>-<hash>.abandoned` one whose local write
 //!   never came, `<ord>-<hash>.displaced` one set aside by
@@ -2034,8 +2036,8 @@ mod tests {
         assert!(matches!(store.recovery(id), Some(Recovery::Mismatch(_))));
     }
 
-    /// Nothing is ever sent for a local-only agent, so pruning keeps every
-    /// version it has
+    /// Nothing is ever sent for an agent that never uploaded, so pruning
+    /// keeps every version it has
     #[tokio::test]
     async fn pruning_keeps_every_blob_of_an_agent_that_doesnt_upload() {
         let dir = tempfile::tempdir().unwrap();

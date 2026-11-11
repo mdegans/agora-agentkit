@@ -14,16 +14,42 @@ Every enrolled agent is chained locally; consent decides only the upload
   written unsealed with `seal_failed.json` (`OptedOut`); it is now chained.
   `SealFailureKind::OptedOut` stays, for an old `seal_failed.json`, and is
   never written.
-- **`AgoraOutbox::drain` returns `Drained`**: `Ran(DrainReport)`, or
-  `LocalOnly` for an agent that doesn't upload, for which it reads no key,
-  makes no call and writes nothing. Its blobs are never pruned (nothing is
-  sent), so a local-only agent keeps every version.
+- **`AgoraOutbox::drain` returns `Drained`**:
+  - `LocalOnly`: the agent doesn't upload (asked first). No key read, no
+    call, nothing written.
+  - `NotEnrolled`: no `sealed/enrolled`. Was `Ran` with `uploaded: 0` and
+    `status: Same`, a claim to be in step with Agora that nothing checked.
+  - `Withdrawn { uploaded }`: `uploads` is asked again before each item,
+    and turned false mid-drain. What went before stays sent; the rest wait
+    in the outbox, as after a network error. No `status.json` is written.
+  - `Ran(DrainReport)`: as before.
+- **`AgoraOutbox::drain_with` and `BeforeUpload`**: a drain that tells the
+  caller, once, the items it is about to send, after its `uploads` check
+  for the first item and before its first network call (never when there
+  is nothing to send), so a caller records first-send times only for a
+  drain that really uploads. `drain` is `drain_with(id, &mut ())`.
+- **Blobs of an agent that doesn't upload are never pruned** (nothing is
+  sent). An agent that never uploaded keeps every version; one that
+  uploaded and then stopped keeps those written since, while the versions
+  it sent before were pruned locally and are sealed on Agora only (and in
+  plaintext in `FsStorage`'s archives).
 - **`FsStorage` archives with a hard link**, not a rename: `state.json` is
-  never absent mid-save. A crash between the link and the rename now leaves
+  never absent mid-save. A crash between the link and the rename leaves
   `state.json` (the old value, the same inode as the newest archive) beside
-  a complete `state.json.tmp`, where it used to leave no `state.json`. A
-  filesystem that refuses hard links fails every overwrite instead of
-  falling back to the rename.
+  a complete `state.json.tmp`, where it used to leave no `state.json`.
+- **`FsStorage` never truncates a `state.json.tmp`.** A save holds an
+  exclusive lock on the agent's directory; a tmp it finds there is a save
+  cut short, under either write order, and is moved whole to
+  `state.json.tmp.<utc-ms>.aside` (`-N` on a collision, never over a file),
+  with a `warn!` naming the agent and the aside, before the new tmp is
+  created with `create_new`. Under the old order (no `state.json`) the
+  runner's start-up promotion still gets to it first; if a save comes
+  first, the cut value is in the aside and the save archives nothing.
+- **`FsStorage` needs hard links**: every overwrite fails, loudly, on a
+  filesystem without them, and where `fs.protected_hardlinks` refuses one
+  (the runner's user must own `state.json` or be able to read and write
+  it; a state file restored as another user fails every save with EPERM).
+  No fallback to the rename.
 
 ## 0.157.1
 
