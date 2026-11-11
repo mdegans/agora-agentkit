@@ -2,10 +2,10 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.158.0 (2026-11-11)
 
-Every enrolled agent is chained locally; consent decides only the upload
-(agora `memory/project_local_chain_for_all.md`, 2026-11-11). Breaking.
+Every chained agent keeps its sealed chain locally; consent decides only
+the upload (agora `memory/project_local_chain_for_all.md`, 2026-11-11).
 
 **A one-way door for the runner.** After one save by this version, an
 older runner (0.147-0.157) skips that agent: it sees no `sealed/enrolled`,
@@ -13,96 +13,133 @@ so it never seals or uploads it, and it refuses its format-3 `state.json`,
 so it can't run it unsealed either. Rolling the runner back can no longer
 upload a locally chained agent's state without consent.
 
-- **The marker is `sealed/chained`** (`storage::CHAINED`), was
-  `sealed/enrolled`, which 0.147-0.157 read as "seal and upload".
-  `AgentSeal::is_enrolled` reads only the new name; the Rust names
-  (`is_enrolled`, `enroll`, `Recovery::NotEnrolled`, …) stay.
-  `AgentSeal::migrate_marker` replaces an old marker, the new one first and
-  each step made durable, so a crash never leaves neither, and returns
-  `MarkerMigration::{Migrated, Already, NotEnrolled}`. `AgentSeal::has_legacy_marker`
-  reports an unmigrated marker, read-only, for a dry run. The new marker
-  keeps the old one's bytes and modification time (a runner reads it as
-  when the agent enrolled). An old marker is
-  never read as chained implicitly: a runner calls the migration at start,
-  before anything reads the marker. Until it does, the agent is treated as
-  not chained, and a save of it goes plain, which the next start check
-  reports as a mismatch.
-- **`FsStorage::SEALED_FORMAT` is 3** (`MAX_FORMAT` 3; format 2 still
-  reads). The sealed plaintext is unchanged (`codec::PLAINTEXT_FORMAT` is
-  1), so a state read at 2 and saved at 3 keeps its hash.
+### Breaking, in the order a consumer meets them
 
-- **`Enrolment::opted_in` is `Enrolment::uploads`**, and decides only the
-  upload: `Mirrored` seals, commits and checks at load every agent with
-  `sealed/enrolled`, whatever it says, and calls `Outbox::notify` only for
-  an agent that uploads. An enrolled agent that doesn't upload used to be
-  written unsealed with `seal_failed.json` (`OptedOut`); it is now chained.
+1. **The marker is `sealed/chained`** (`state::storage::CHAINED`), was
+   `sealed/enrolled`. `AgentSeal::is_enrolled` is false for an agent with
+   only the old marker until `AgentSeal::migrate_marker` runs: a runner
+   calls it first, for every agent, before anything reads the marker.
+   Until then `Mirrored` writes such an agent marked (format 3), unsealed,
+   and records `SealFailureKind::Unmigrated`; its load has no base and
+   `Recovery::Unreadable(Unmigrated)`.
+2. **`reactor::storage::SEALED_FORMAT` and `MAX_FORMAT` are 3.** Format 2
+   still reads; a 0.147-0.157 binary refuses format 3.
+3. **`Enrolment::opted_in` is `Enrolment::uploads`**, and decides only the
+   upload (`Outbox::notify` and the drain): `Mirrored` seals, commits and
+   checks at load every chained agent, whatever it says.
+4. **`AgoraOutbox::drain` returns `Drained`**, not `DrainReport`:
+   `Ran(DrainReport)`, `LocalOnly`, `NotEnrolled`, or
+   `Withdrawn { uploaded, healed }`.
+5. **`DrainReport.healing: Healing`** (a new field: struct literals break).
+6. **`HeadStatus::Unchecked`**: a drain that couldn't read Agora's head
+   says so, in its report and in `sealed/status.json`, where it used to
+   say `Same` without asking. Exhaustive matches break.
+7. **`AgentSeal::prune_blobs` is `AgentSeal::remove_unnamed_blobs`, and
+   acknowledged blobs are kept.** It removes only blobs nothing names.
+8. **`StateHeadResponse.damaged_blobs: Option<u64>`**: struct literals
+   (the server's) break; the wire is compatible both ways.
+9. **New enum variants**: `OpenError::NotGenesis`,
+   `SealFailureKind::Unmigrated`, `FsStorageError::Locked`,
+   `HeadStatus::Unchecked`.
+10. **`FsStorage` needs hard links and a lockable directory**, sets a
+    leftover `state.json.tmp` aside, and locks the agent's directory for
+    each save (at most `LOCK_DEADLINE`, 60 s, then `FsStorageError::Locked`).
+
+### Local chain, upload by consent
+
+- **`Enrolment::uploads`**: `Mirrored::save_raw` and `load_raw` decide by
+  the marker alone. An agent that doesn't upload used to be written
+  unsealed with `seal_failed.json` (`OptedOut`); it is now chained.
   `SealFailureKind::OptedOut` stays, for an old `seal_failed.json`, and is
   never written.
-- **`AgoraOutbox::drain` returns `Drained`**:
-  - `LocalOnly`: the agent doesn't upload (asked first). No key read, no
-    call, nothing written.
-  - `NotEnrolled`: no `sealed/enrolled`. Was `Ran` with `uploaded: 0` and
-    `status: Same`, a claim to be in step with Agora that nothing checked.
-  - `Withdrawn { uploaded }`: `uploads` is asked again before each item,
-    and turned false mid-drain. What went before stays sent; the rest wait
-    in the outbox, as after a network error. No `status.json` is written.
-  - `Ran(DrainReport)`: as before.
-- **`AgoraOutbox::drain_with` and `BeforeUpload`**: a drain that tells the
-  caller, once, the items it is about to send, after its `uploads` check
-  for the first item and before its first network call (never when there
-  is nothing to send), so a caller records first-send times only for a
-  drain that really uploads. `drain` is `drain_with(id, &mut ())`.
-- **Sent blobs are kept: `AgentSeal::prune_blobs` is
-  `AgentSeal::remove_unnamed_blobs`** (renamed, as its meaning changed).
-  It used to delete the local blob of every version Agora acknowledged,
-  leaving Agora's disk the only sealed copy: a blob that rotted or went
-  missing there could never be healed (a re-seal has a new nonce and hash),
-  and a server wrongly answering "stored" cost the agent its history. Now
-  it removes only what nothing names (an abandoned item the head has
-  passed, an orphan a crash left), never a blob an entry of the main line
-  or a kept side line names (`sent/`, including a runner's `.lost` items,
-  the outbox, `.displaced`, any record under `sealed/lost/`). Nothing is
-  deleted while a fork is unresolved, as before; `BLOB_ALERT` now counts
-  the unnamed blobs held. Every agent, uploading or not, keeps every
-  version it sealed. About 0.4-0.7 GB for the fleet today. Versions sent
-  before this release had their blobs pruned already: those are sealed on
-  Agora only (and in plaintext in `FsStorage`'s archives).
-- **Agora's check at rest reaches the runner, and the drain heals it.**
-  `StateHeadResponse.damaged_blobs: Option<u64>` (absent from an older
-  server, and not written when `None`); `GET /api/state/problems`
+- **`AgentSeal::migrate_marker`**: the new marker first, then the old one
+  removed, each made durable, so a crash never leaves neither; the new
+  marker keeps the old one's bytes and modification time (a runner reads
+  it as when the agent enrolled). Returns
+  `MarkerMigration::{Migrated, Already, NotEnrolled}`.
+  `AgentSeal::has_legacy_marker` reports an unmigrated marker, read-only,
+  for a dry run.
+- **Format 3**: the sealed plaintext is unchanged
+  (`codec::PLAINTEXT_FORMAT` is 1), so a state read at 2 and saved at 3
+  keeps its hash.
+
+### The drain
+
+- **`Drained`**: `LocalOnly` when the agent doesn't upload (asked first: no
+  key read, no call, nothing written); `NotEnrolled` with no
+  `sealed/chained` (was `Ran` claiming `Same`); `Withdrawn` when `uploads`,
+  asked again before each item and each healing PUT, turned false: what
+  went before stays sent, the rest waits, as after a network error, and no
+  `status.json` is written.
+- **`AgoraOutbox::drain_with` and `BeforeUpload`**: told once, after the
+  `uploads` check for the first item and before the first network call,
+  the items about to be sent (never when there is nothing to send), so a
+  caller records first-send times only for a drain that uploads. `drain` is
+  `drain_with(id, &mut ())`.
+- **The status is checked**: after its uploads, and on a drain with
+  nothing to send, the drain reads Agora's head. The same hash is `Same`;
+  otherwise the chain decides (`head_status`: a rolled-back server is
+  `LocalMissing`, another writer `ServerAhead`); an unread head or chain is
+  `Unchecked`. Each completed drain makes one more call (the head).
+- **Agora's check at rest, healed from here.** `GET /api/state/problems`
   (`Client::get_state_problems`) answers `StateProblemsResponse` of
-  `DamagedBlob { sha256, kind: BlobProblemKind, since }`, `BlobProblemKind`
-  being `missing`, `wrong_size` or `wrong_hash` (closed, with `ALL`; not a
-  Postgres enum: the server derives it from what it recorded). After its
-  uploads, and on a drain with nothing to send, `AgoraOutbox::drain` asks
-  for the head, and when it counts damaged blobs, sends again up to
-  `HEAL_PER_DRAIN` (64) of those held here that hash to their names; one
-  not here, or here and damaged too, is never sent and counts as
-  unhealable. `DrainReport.healing: Healing { damaged, healed, unhealable }`
-  says what it found and did. Every call is behind the same `uploads`
-  check (a withdrawal mid-heal is `Withdrawn`). A failure while healing is
-  logged and leaves the uploads standing. Each completed drain now makes
-  one more call (the head).
-- **`AgentSeal::open_origin`**: the `GenesisOrigin` a genesis entry
-  seals, read-only beside `open_state` (which wants a state envelope).
-  `OpenError::NotGenesis` for any other entry.
-- **`FsStorage` archives with a hard link**, not a rename: `state.json` is
-  never absent mid-save. A crash between the link and the rename leaves
-  `state.json` (the old value, the same inode as the newest archive) beside
-  a complete `state.json.tmp`, where it used to leave no `state.json`.
-- **`FsStorage` never truncates a `state.json.tmp`.** A save holds an
-  exclusive lock on the agent's directory; a tmp it finds there is a save
-  cut short, under either write order, and is moved whole to
-  `state.json.tmp.<utc-ms>.aside` (`-N` on a collision, never over a file),
-  with a `warn!` naming the agent and the aside, before the new tmp is
-  created with `create_new`. Under the old order (no `state.json`) the
-  runner's start-up promotion still gets to it first; if a save comes
-  first, the cut value is in the aside and the save archives nothing.
-- **`FsStorage` needs hard links**: every overwrite fails, loudly, on a
-  filesystem without them, and where `fs.protected_hardlinks` refuses one
-  (the runner's user must own `state.json` or be able to read and write
-  it; a state file restored as another user fails every save with EPERM).
-  No fallback to the rename.
+  `DamagedBlob { sha256, kind: BlobProblemKind, since }`; `BlobProblemKind`
+  is `missing`, `wrong_size` or `wrong_hash` (closed, with `ALL`; not a
+  Postgres enum: the server derives it from what it recorded). When the
+  head counts damaged blobs, the drain sends again up to `HEAL_PER_DRAIN`
+  (64) PUTs of those held here that hash to their names, passing over the
+  rest as unhealable (never sent). `Healing { damaged: Damage, healed,
+  unhealable, interrupted }`: `Damage::Unknown` (not learned this drain,
+  never to be read as none), `NotReported` (a server before the check) or
+  `Reported(n)`; an error mid-heal keeps the partial counts and sets
+  `interrupted`, and the uploads stand. An unchanged count isn't listed
+  again for a day (`sealed/healing.json`), so an unhealable blob costs no
+  calls on every drain; a change in the unhealable count is logged at
+  warn.
+
+### Blobs are kept
+
+- **`AgentSeal::remove_unnamed_blobs`** (was `prune_blobs`, which deleted
+  the local blob of every version Agora acknowledged, leaving Agora's disk
+  the only sealed copy: a blob that rotted there could never be healed,
+  and a server wrongly answering "stored" cost the agent its history).
+  It removes only an abandoned item's blob the head has passed and an
+  orphan a crash left; never one named by `sent/` (including a runner's
+  `.lost` items), the outbox (`.json`, `.tmp`, `.displaced`), the head's
+  keyframe, or a record under `sealed/lost/` (an `OutboxItem`, a
+  `HeadFile`, or an `items` list; `blobs/` copies there are skipped). A
+  record that doesn't parse removes nothing (fail closed, logged at
+  error). Nothing is deleted while a fork is unresolved; `BLOB_ALERT` now
+  counts the unnamed blobs held. About 0.4-0.7 GB for the fleet today.
+  Versions sent before this release had their blobs pruned already: those
+  are sealed on Agora only (and in plaintext in `FsStorage`'s archives).
+- **`AgentSeal::open_origin`**: the `GenesisOrigin` a genesis entry seals,
+  read-only beside `open_state`; `OpenError::NotGenesis` for any other
+  entry.
+
+### `FsStorage`
+
+- **The archive is a hard link**, taken before the tmp is written, so
+  `state.json` is never absent mid-save. A crash between the link and the
+  rename leaves `state.json` (the old value, the same inode as the newest
+  archive) and maybe a `state.json.tmp`, whole if the crash came after its
+  fsync.
+- **A leftover `state.json.tmp` is never truncated**: a save sets it aside
+  whole as `state.json.tmp.<utc-ms>.aside` (`-N` on a collision, never
+  over a file), with a `warn!`, before creating its own with `create_new`.
+  Under the old write order (no `state.json`) the runner's start-up
+  promotion still gets to it first.
+- **A failed save takes back what it made** (its tmp, and its archive link
+  before the rename), so retries leave nothing behind.
+- **Each save locks the agent's directory**, polling for at most
+  `LOCK_DEADLINE` (60 s), then `FsStorageError::Locked(agent)`; it never
+  blocks a thread.
+- **Requirements**, each a loud failure of every save: hard links (and
+  `fs.protected_hardlinks`'s consent: the runner's user must own
+  `state.json` or be able to read and write it, so a state file restored
+  as another user fails with EPERM), and a lockable directory (`flock` on a
+  directory descriptor; NFS emulates it, and it may fail there). No
+  fallback to the rename.
 
 ## 0.157.1
 
