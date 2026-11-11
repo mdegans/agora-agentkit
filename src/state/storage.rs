@@ -4,8 +4,10 @@
 //!
 //! Under `<agent_dir>/sealed/`:
 //!
-//! - `enrolled`, `refused`: markers. Only an enrolled, unrefused agent is
-//!   sealed
+//! - `chained`, `refused`: markers. Only a chained, unrefused agent is
+//!   sealed. `chained` was `enrolled` before 0.158, when it also meant
+//!   "uploads"; renamed so no older runner seals or uploads an agent that
+//!   is only chained ([`AgentSeal::migrate_marker`])
 //! - `lock`: held across a save's three steps ([`SealLock`])
 //! - `head.json`: the local head ([`HeadFile`])
 //! - `blobs/<sha256>`: sealed blobs not yet uploaded, and the current
@@ -60,7 +62,10 @@ use crate::reactor::{AgentNotFound, FsStorage, Loaded, Storage};
 
 /// The sealed directory, in an agent's
 pub const SEALED_DIR: &str = "sealed";
-const ENROLLED: &str = "enrolled";
+/// The marker of a chained agent, in its `sealed/`
+pub const CHAINED: &str = "chained";
+/// The marker before 0.158, read only by [`AgentSeal::migrate_marker`]
+const LEGACY_ENROLLED: &str = "enrolled";
 const REFUSED: &str = "refused";
 const LOCK: &str = "lock";
 const HEAD: &str = "head.json";
@@ -83,8 +88,8 @@ impl AgentDir for FsStorage {
     }
 }
 
-/// A local [`Storage`] that can mark a sealed agent's state so binaries
-/// before 0.147 refuse it instead of overwriting it unsealed
+/// A local [`Storage`] that can mark a chained agent's state so binaries
+/// before 0.158 refuse it instead of running it unsealed
 #[async_trait::async_trait]
 pub trait MarkedLocal: Storage {
     async fn save_marked(
@@ -96,7 +101,7 @@ pub trait MarkedLocal: Storage {
 
 #[async_trait::async_trait]
 impl MarkedLocal for FsStorage {
-    /// Format 2 ([`SEALED_FORMAT`](crate::reactor::storage::SEALED_FORMAT))
+    /// [`SEALED_FORMAT`](crate::reactor::storage::SEALED_FORMAT)
     async fn save_marked(
         &mut self,
         id: AgentId,
@@ -120,7 +125,7 @@ impl std::fmt::Debug for SealKeys {
 }
 
 /// The runner's say on who uploads and with what keys. Whether an agent
-/// is sealed is `sealed/enrolled`'s alone
+/// is sealed is `sealed/chained`'s alone
 pub trait Enrolment: Send + Sync {
     /// Whether the agent's chain is uploaded to Agora (the consent ledger).
     /// Decides only [`Outbox::notify`] and [`AgoraOutbox::drain`], never the
@@ -337,6 +342,17 @@ pub enum Recovery {
     Unreadable(SealFailureKind),
 }
 
+/// What [`AgentSeal::migrate_marker`] did
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkerMigration {
+    /// `enrolled` is now `chained`
+    Migrated,
+    /// Already `chained`, with no `enrolled`
+    Already,
+    /// Neither marker
+    NotEnrolled,
+}
+
 /// The per-agent advisory lock on `sealed/lock`, held across a save's
 /// three steps. Released on drop
 #[derive(Debug)]
@@ -497,17 +513,47 @@ impl AgentSeal {
         Ok(SealLock(file))
     }
 
+    /// Whether `sealed/chained` exists. The pre-0.158 `sealed/chained`
+    /// counts only once [`migrate_marker`](Self::migrate_marker) has run
     pub async fn is_enrolled(&self) -> std::io::Result<bool> {
-        exists(&self.dir.join(ENROLLED)).await
+        exists(&self.dir.join(CHAINED)).await
+    }
+
+    /// Replace a pre-0.158 `sealed/chained` with `sealed/chained`: the new
+    /// marker first, then the old one removed, each made durable, so a
+    /// crash at any point leaves at least one and a rerun finishes. Run it
+    /// before anything reads the marker
+    pub async fn migrate_marker(&self) -> Result<MarkerMigration, SealError> {
+        let legacy = self.dir.join(LEGACY_ENROLLED);
+        let chained = self.dir.join(CHAINED);
+        if !exists(&legacy).await? {
+            return Ok(if exists(&chained).await? {
+                MarkerMigration::Already
+            } else {
+                MarkerMigration::NotEnrolled
+            });
+        }
+        let _lock = self.lock().await?;
+        if !exists(&chained).await? {
+            write_atomic(&chained, b"").await?;
+        }
+        match tokio::fs::remove_file(&legacy).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        sync_dir(&self.dir).await?;
+        Ok(MarkerMigration::Migrated)
     }
 
     pub async fn is_refused(&self) -> std::io::Result<bool> {
         exists(&self.dir.join(REFUSED)).await
     }
 
-    /// Mark enrolment done: uploads and sealed saves start
+    /// Mark the agent chained (`sealed/chained`): sealed saves start.
+    /// Uploads are [`Enrolment::uploads`]'s
     pub async fn enroll(&self) -> std::io::Result<()> {
-        write_atomic(&self.dir.join(ENROLLED), b"").await
+        write_atomic(&self.dir.join(CHAINED), b"").await
     }
 
     /// Block every seal until an operator clears it
@@ -1773,6 +1819,7 @@ where
 mod tests {
     use super::*;
     use crate::crypto::generate_keypair;
+    use crate::reactor::storage::SEALED_FORMAT;
     use crate::state::verify::{TrustedKeys, verify_chain};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -1951,7 +1998,7 @@ mod tests {
         }
     }
 
-    /// No `sealed/enrolled`, no `sealed/`, whether it uploads or not
+    /// No `sealed/chained`, no `sealed/`, whether it uploads or not
     #[tokio::test]
     async fn an_agent_not_enrolled_is_never_sealed() {
         let dir = tempfile::tempdir().unwrap();
@@ -2014,7 +2061,7 @@ mod tests {
         assert_eq!(store.outbox.of(id), 0, "nothing to upload");
         let seal = store.seal(id);
         assert_eq!(seal.seal_failed().await.unwrap(), None);
-        assert_eq!(format_of(&store, id), 2);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
 
         let entries = chain(&seal).await;
         assert_eq!(entries.len(), 10, "genesis, enrolment state, eight saves");
@@ -2945,23 +2992,23 @@ mod tests {
         raw["format"].clone()
     }
 
-    /// An enrolled agent's state is marked so binaries before 0.147 refuse
+    /// An enrolled agent's state is marked so binaries before 0.158 refuse
     /// it; anyone else's is written as before. The mark changes no hash
     #[tokio::test]
     async fn an_enrolled_agents_state_is_marked_and_others_are_not() {
         let dir = tempfile::tempdir().unwrap();
         let (mut store, id, _) = enrolled(dir.path()).await;
-        assert_eq!(format_of(&store, id), 2, "marked at enrolment");
+        assert_eq!(format_of(&store, id), SEALED_FORMAT, "marked at enrolment");
         let base = store.load_raw(id).await.unwrap().base;
         assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
         store.save_raw(id, state(90), base.as_ref()).await.unwrap();
-        assert_eq!(format_of(&store, id), 2);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
         store.load_raw(id).await.unwrap();
         assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
         // Enrolled but not uploading: still marked
         store.enrolment.local_only.lock().unwrap().push(id);
         store.save_raw(id, state(91), None).await.unwrap();
-        assert_eq!(format_of(&store, id), 2);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
 
         // Not enrolled: format 1, byte for byte what FsStorage writes
         let other = AgentId::new();
@@ -2977,5 +3024,101 @@ mod tests {
             std::fs::read(plain.agent_dir(other).join("state.json")).unwrap();
         assert_eq!(ours, theirs);
         assert!(!store.seal(other).dir().exists());
+    }
+
+    /// A state saved at format 2 (0.147-0.157) loads intact and saves at
+    /// format 3 with the same plaintext hash
+    #[tokio::test]
+    async fn a_format_2_state_saves_at_3_with_the_same_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let path = store.local.agent_dir(id).join("state.json");
+        let v2 = serde_json::to_vec_pretty(&serde_json::json!({
+            "format": 2, "sealed": true, "state": state(10),
+        }))
+        .unwrap();
+        std::fs::write(&path, v2).unwrap();
+        let loaded = store.load_raw(id).await.unwrap();
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        let hash = plaintext_hash(&loaded.value);
+        store
+            .save_raw(id, loaded.value, loaded.base.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(format_of(&store, id), 3);
+        let again = store.load_raw(id).await.unwrap().value;
+        assert_eq!(plaintext_hash(&again), hash);
+        assert!(matches!(store.recovery(id), Some(Recovery::Intact(_))));
+        assert_eq!(codec::PLAINTEXT_FORMAT, 1);
+    }
+
+    /// The pre-0.158 marker, at every point a migration can stop: never
+    /// read as chained until migrated, never left with neither marker, and
+    /// a rerun finishes
+    #[tokio::test]
+    async fn the_old_marker_migrates_and_a_crash_never_loses_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut store, id, _) = enrolled(dir.path()).await;
+        let seal = store.seal(id);
+        let old = seal.dir().join(LEGACY_ENROLLED);
+        let new = seal.dir().join(CHAINED);
+        // (old, new, leftover from write_atomic) as a crash leaves them
+        let states = [
+            (true, false, false),
+            (true, false, true),
+            (true, true, false),
+            (false, true, false),
+        ];
+        for (has_old, has_new, writing) in states {
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::remove_file(&new);
+            if has_old {
+                std::fs::write(&old, b"").unwrap();
+            }
+            if has_new {
+                std::fs::write(&new, b"").unwrap();
+            }
+            if writing {
+                std::fs::write(seal.dir().join("chained.writing"), b"")
+                    .unwrap();
+            }
+            let label = format!("{has_old} {has_new} {writing}");
+            assert_eq!(seal.is_enrolled().await.unwrap(), has_new, "{label}");
+            let got = seal.migrate_marker().await.unwrap();
+            let want = if has_old {
+                MarkerMigration::Migrated
+            } else {
+                MarkerMigration::Already
+            };
+            assert_eq!(got, want, "{label}");
+            assert!(new.exists() && !old.exists(), "{label}");
+            assert_eq!(
+                seal.migrate_marker().await.unwrap(),
+                MarkerMigration::Already
+            );
+        }
+        // Old marker only: not chained, so a save goes plain, and after
+        // the migration the start check catches it. Hence: migrate first
+        std::fs::remove_file(&new).unwrap();
+        std::fs::write(&old, b"").unwrap();
+        let before = chain(&seal).await.len();
+        assert_eq!(store.load_raw(id).await.unwrap().base, None);
+        store.save_raw(id, state(70), None).await.unwrap();
+        assert_eq!(chain(&seal).await.len(), before, "not sealed");
+        assert_eq!(format_of(&store, id), 1);
+        assert_eq!(
+            seal.migrate_marker().await.unwrap(),
+            MarkerMigration::Migrated
+        );
+        assert_eq!(store.load_raw(id).await.unwrap().base, None);
+        assert!(matches!(store.recovery(id), Some(Recovery::Mismatch(_))));
+
+        // Neither: nothing created
+        let other = store.seal(AgentId::new());
+        assert_eq!(
+            other.migrate_marker().await.unwrap(),
+            MarkerMigration::NotEnrolled
+        );
+        assert!(!other.dir().exists());
     }
 }

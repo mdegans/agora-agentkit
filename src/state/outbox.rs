@@ -36,7 +36,7 @@ pub enum Drained {
     /// Nothing was read or sent: the agent doesn't
     /// [`upload`](Enrolment::uploads). Checked first
     LocalOnly,
-    /// Nothing was sent: no `sealed/enrolled`, so no chain
+    /// Nothing was sent: no `sealed/chained`, so no chain
     NotEnrolled,
     /// [`uploads`](Enrolment::uploads) turned false mid-drain: `uploaded`
     /// items went before it, and the rest wait in the outbox, as after a
@@ -415,7 +415,7 @@ mod tests {
         }
         assert_eq!(left, vec![kf.blob_sha256().unwrap().to_hex()]);
         // Its siblings untouched
-        for f in ["head.json", "enrolled"] {
+        for f in ["head.json", "chained"] {
             assert!(seal.dir().join(f).exists(), "{f}");
         }
         assert_eq!(

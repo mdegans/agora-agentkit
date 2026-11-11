@@ -7,6 +7,27 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 Every enrolled agent is chained locally; consent decides only the upload
 (agora `memory/project_local_chain_for_all.md`, 2026-11-11). Breaking.
 
+**A one-way door for the runner.** After one save by this version, an
+older runner (0.147-0.157) skips that agent: it sees no `sealed/enrolled`,
+so it never seals or uploads it, and it refuses its format-3 `state.json`,
+so it can't run it unsealed either. Rolling the runner back can no longer
+upload a locally chained agent's state without consent.
+
+- **The marker is `sealed/chained`** (`storage::CHAINED`), was
+  `sealed/enrolled`, which 0.147-0.157 read as "seal and upload".
+  `AgentSeal::is_enrolled` reads only the new name; the Rust names
+  (`is_enrolled`, `enroll`, `Recovery::NotEnrolled`, …) stay.
+  `AgentSeal::migrate_marker` replaces an old marker, the new one first and
+  each step made durable, so a crash never leaves neither, and returns
+  `MarkerMigration::{Migrated, Already, NotEnrolled}`. An old marker is
+  never read as chained implicitly: a runner calls the migration at start,
+  before anything reads the marker. Until it does, the agent is treated as
+  not chained, and a save of it goes plain, which the next start check
+  reports as a mismatch.
+- **`FsStorage::SEALED_FORMAT` is 3** (`MAX_FORMAT` 3; format 2 still
+  reads). The sealed plaintext is unchanged (`codec::PLAINTEXT_FORMAT` is
+  1), so a state read at 2 and saved at 3 keeps its hash.
+
 - **`Enrolment::opted_in` is `Enrolment::uploads`**, and decides only the
   upload: `Mirrored` seals, commits and checks at load every agent with
   `sealed/enrolled`, whatever it says, and calls `Outbox::notify` only for

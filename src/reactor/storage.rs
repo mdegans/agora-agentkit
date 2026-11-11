@@ -12,11 +12,13 @@ use super::backend::{AgentNotFound, Loaded, NoVersion, Storage};
 /// rejects anything newer so an old binary never half-reads a new layout.
 pub const FORMAT: u64 = 1;
 
-/// The format of a sealed agent's envelope: format 1 plus `"sealed":
-/// true` ([`FsStorage::save_sealed_raw`]). Binaries before 0.147 read only
-/// format 1, so they refuse a sealed agent instead of overwriting it
-/// unsealed
-pub const SEALED_FORMAT: u64 = 2;
+/// The format of a chained agent's envelope: format 1 plus `"sealed":
+/// true` ([`FsStorage::save_sealed_raw`]). Format 2 until 0.158: binaries
+/// before then refuse a format-3 state instead of running the agent
+/// unsealed, and before 0.147 refuse any sealed one. A one-way door: after
+/// one save by 0.158, an older runner can't load the agent. Format 2 is
+/// still read
+pub const SEALED_FORMAT: u64 = 3;
 
 /// The newest format this binary reads
 pub const MAX_FORMAT: u64 = SEALED_FORMAT;
@@ -607,7 +609,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sealed_agent_round_trips_in_format_2_and_old_loaders_refuse_it()
+    async fn a_sealed_agent_round_trips_in_format_3_and_old_loaders_refuse_it()
     {
         let dir = tempfile::tempdir().unwrap();
         let mut storage = FsStorage::new(dir.path());
@@ -620,9 +622,10 @@ mod tests {
         .unwrap();
         assert_eq!(raw["format"], SEALED_FORMAT);
         assert_eq!(raw["sealed"], true);
-        // 0.146's check: anything past format 1 is refused, not overwritten
+        // 0.146's check refused anything past format 1, and 0.147-0.157's
+        // anything past 2: neither loads it
         let found = raw["format"].as_u64().unwrap();
-        assert!(found > 1, "a 0.146 loader rejects format {found}");
+        assert!(found > 2, "a 0.157 loader rejects format {found}");
 
         // An unsealed save is format 1, byte for byte as before
         let other = AgentId::new();
