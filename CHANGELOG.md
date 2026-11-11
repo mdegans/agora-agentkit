@@ -18,6 +18,12 @@ Every enrolled agent is chained locally; consent decides only the upload
   `LocalOnly` for an agent that doesn't upload, for which it reads no key,
   makes no call and writes nothing. Its blobs are never pruned (nothing is
   sent), so a local-only agent keeps every version.
+- **`FsStorage` archives with a hard link**, not a rename: `state.json` is
+  never absent mid-save. A crash between the link and the rename now leaves
+  `state.json` (the old value, the same inode as the newest archive) beside
+  a complete `state.json.tmp`, where it used to leave no `state.json`. A
+  filesystem that refuses hard links fails every overwrite instead of
+  falling back to the rename.
 
 ## 0.157.1
 

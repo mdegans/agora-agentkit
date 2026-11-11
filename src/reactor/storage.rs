@@ -28,9 +28,11 @@ const STATE_FILE: &str = "state.json";
 ///
 /// Values are wrapped in a `{format, state}` envelope and written
 /// atomically (tmp + rename + directory fsync). **Every overwrite archives
-/// the previous value** to a `state.<utc-ms>.json` sibling first — retention
-/// is deliberately infinite (rollback + transcript history; compress cold
-/// archives externally if a deployment ever cares).
+/// the previous value** to a `state.<utc-ms>.json` hard link first, so
+/// `state.json` is never absent — retention is deliberately infinite
+/// (rollback + transcript history; compress cold archives externally if a
+/// deployment ever cares). A filesystem without hard links fails every
+/// overwrite.
 #[derive(Debug, Clone)]
 pub struct FsStorage {
     root: PathBuf,
@@ -55,22 +57,37 @@ impl FsStorage {
         super::journal::SessionJournal::in_dir(self.agent_dir(id))
     }
 
-    /// Move `state.json` aside to `state.<utc-ms>.json`, suffixing `-N` on
-    /// a same-millisecond collision (retries, tests).
+    /// Hard-link `state.json` as `state.<utc-ms>.json`, if there is one
     async fn archive(&self, dir: &Path) -> Result<(), std::io::Error> {
-        let current = dir.join(STATE_FILE);
-        if !tokio::fs::try_exists(&current).await? {
-            return Ok(());
-        }
-        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
-        let mut candidate = dir.join(format!("state.{ts}.json"));
-        let mut n = 0u32;
-        while tokio::fs::try_exists(&candidate).await? {
-            n += 1;
-            candidate = dir.join(format!("state.{ts}-{n}.json"));
-        }
-        tokio::fs::rename(&current, &candidate).await
+        archive_as(dir, chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ")).await
     }
+}
+
+/// Hard-link `state.json` as `state.<ts>.json`, suffixing `-N` on a
+/// same-millisecond collision (retries, tests), and fsync `dir` so the link
+/// is durable before the rename that replaces `state.json`
+async fn archive_as(
+    dir: &Path,
+    ts: impl std::fmt::Display,
+) -> Result<(), std::io::Error> {
+    let current = dir.join(STATE_FILE);
+    let mut candidate = dir.join(format!("state.{ts}.json"));
+    let mut n = 0u32;
+    loop {
+        match tokio::fs::hard_link(&current, &candidate).await {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                n += 1;
+                candidate = dir.join(format!("state.{ts}-{n}.json"));
+            }
+            // No `state.json`: nothing to archive
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    tokio::fs::File::open(dir).await?.sync_all().await
 }
 
 /// Error type for [`FsStorage`]. All variants are fatal
@@ -159,8 +176,11 @@ impl FsStorage {
         // operator.
         let bytes = serde_json::to_vec_pretty(&envelope)?;
 
-        // tmp + fsync + archive + rename + dir fsync: a crash at any point
-        // leaves either the old value or the new one, never a torn file.
+        // tmp + fsync + archive (a hard link) + rename + dir fsync:
+        // `state.json` always exists, whole. A crash between the link and
+        // the rename leaves `state.json` the old value, the same inode as
+        // the newest archive, and `state.json.tmp` the complete new one; an
+        // in-place edit of `state.json` then would alter that archive too.
         let tmp = dir.join("state.json.tmp");
         {
             let mut file = tokio::fs::File::create(&tmp).await?;
@@ -275,6 +295,96 @@ mod tests {
             .collect();
         rounds.sort_unstable();
         assert_eq!(rounds, vec![1, 2]);
+    }
+
+    fn ino(path: &Path) -> u64 {
+        std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+    }
+
+    /// The previous value is in exactly one new archive, byte for byte, and
+    /// no archive shares `state.json`'s inode once a save is done
+    #[tokio::test]
+    async fn each_save_archives_the_previous_bytes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        let agent_dir = storage.agent_dir(id);
+        storage.save_raw(id, value(0), None).await.unwrap();
+        assert!(archives(&agent_dir).is_empty(), "nothing to archive");
+        for n in 1..=4 {
+            let previous = std::fs::read(agent_dir.join(STATE_FILE)).unwrap();
+            let before = archives(&agent_dir);
+            storage.save_raw(id, value(n), None).await.unwrap();
+            let new: Vec<_> = archives(&agent_dir)
+                .into_iter()
+                .filter(|p| !before.contains(p))
+                .collect();
+            assert_eq!(new.len(), 1, "one archive per save");
+            assert_eq!(std::fs::read(&new[0]).unwrap(), previous);
+            let current = ino(&agent_dir.join(STATE_FILE));
+            for archive in archives(&agent_dir) {
+                assert_ne!(ino(&archive), current, "{}", archive.display());
+            }
+            assert!(!agent_dir.join("state.json.tmp").exists());
+        }
+    }
+
+    /// The step a crash can stop after: `state.json` is still there, whole,
+    /// and the archive is the same file; the rename then gives them apart
+    #[tokio::test]
+    async fn state_json_is_never_absent_between_the_link_and_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        let agent_dir = storage.agent_dir(id);
+        let state = agent_dir.join(STATE_FILE);
+        storage.save_raw(id, value(1), None).await.unwrap();
+        let old = std::fs::read(&state).unwrap();
+
+        storage.archive(&agent_dir).await.unwrap();
+        assert_eq!(std::fs::read(&state).unwrap(), old, "still there");
+        let [archive] = &archives(&agent_dir)[..] else {
+            panic!("one archive");
+        };
+        assert_eq!(ino(archive), ino(&state), "the same inode");
+        assert_eq!(storage.load_raw(id).await.unwrap().value, value(1));
+
+        let tmp = agent_dir.join("state.json.tmp");
+        std::fs::write(&tmp, b"new").unwrap();
+        std::fs::rename(&tmp, &state).unwrap();
+        assert_eq!(std::fs::read(archive).unwrap(), old, "the old inode kept");
+        assert_ne!(ino(archive), ino(&state));
+    }
+
+    #[tokio::test]
+    async fn a_same_millisecond_archive_takes_the_next_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FsStorage::new(dir.path());
+        let id = AgentId::new();
+        let agent_dir = storage.agent_dir(id);
+        storage.save_raw(id, value(1), None).await.unwrap();
+        // Something already holds the plain name: never overwritten
+        std::fs::write(agent_dir.join("state.T.json"), b"older").unwrap();
+        for _ in 0..3 {
+            archive_as(&agent_dir, "T").await.unwrap();
+        }
+        let current = std::fs::read(agent_dir.join(STATE_FILE)).unwrap();
+        assert_eq!(
+            std::fs::read(agent_dir.join("state.T.json")).unwrap(),
+            b"older"
+        );
+        for n in 1..=3 {
+            let p = agent_dir.join(format!("state.T-{n}.json"));
+            assert_eq!(std::fs::read(&p).unwrap(), current, "{n}");
+        }
+        assert_eq!(archives(&agent_dir).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn no_state_json_is_nothing_to_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        archive_as(dir.path(), "T").await.unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]
