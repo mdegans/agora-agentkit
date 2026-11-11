@@ -62,6 +62,9 @@ mod tests {
         check::<SealedStateExport>();
         check::<StateAnchorView>();
         check::<StateHeadResponse>();
+        check::<DamagedBlob>();
+        check::<StateProblemsResponse>();
+        check::<crate::enums::BlobProblemKind>();
         check::<StateEntryCreated>();
         check::<StateBlobReceipt>();
         check::<StateEntriesPage>();

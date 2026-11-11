@@ -13,6 +13,7 @@ use crate::requests::{
 use crate::responses::{
     KeyRotated, StateAnchorResponse, StateBlobReceipt, StateEntriesPage,
     StateEntryCreated, StateHeadResponse, StateKeysResponse,
+    StateProblemsResponse,
 };
 use crate::signing::{SignedAction, signed_get};
 use crate::state::{
@@ -152,6 +153,19 @@ impl Client {
         auth: StateAuth<'_>,
     ) -> Result<StateHeadResponse, Error> {
         let url = self.url("api/state/head")?;
+        let resp = self
+            .send_signed(reqwest::Method::GET, url, auth, None)
+            .await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
+    /// `GET /api/state/problems`: the signer's blobs Agora's check at rest
+    /// found missing or damaged (0.158)
+    pub async fn get_state_problems(
+        &self,
+        auth: StateAuth<'_>,
+    ) -> Result<StateProblemsResponse, Error> {
+        let url = self.url("api/state/problems")?;
         let resp = self
             .send_signed(reqwest::Method::GET, url, auth, None)
             .await?;

@@ -67,6 +67,22 @@ upload a locally chained agent's state without consent.
   version it sealed. About 0.4-0.7 GB for the fleet today. Versions sent
   before this release had their blobs pruned already: those are sealed on
   Agora only (and in plaintext in `FsStorage`'s archives).
+- **Agora's check at rest reaches the runner, and the drain heals it.**
+  `StateHeadResponse.damaged_blobs: Option<u64>` (absent from an older
+  server, and not written when `None`); `GET /api/state/problems`
+  (`Client::get_state_problems`) answers `StateProblemsResponse` of
+  `DamagedBlob { sha256, kind: BlobProblemKind, since }`, `BlobProblemKind`
+  being `missing`, `wrong_size` or `wrong_hash` (closed, with `ALL`; not a
+  Postgres enum: the server derives it from what it recorded). After its
+  uploads, and on a drain with nothing to send, `AgoraOutbox::drain` asks
+  for the head, and when it counts damaged blobs, sends again up to
+  `HEAL_PER_DRAIN` (64) of those held here that hash to their names; one
+  not here, or here and damaged too, is never sent and counts as
+  unhealable. `DrainReport.healing: Healing { damaged, healed, unhealable }`
+  says what it found and did. Every call is behind the same `uploads`
+  check (a withdrawal mid-heal is `Withdrawn`). A failure while healing is
+  logged and leaves the uploads standing. Each completed drain now makes
+  one more call (the head).
 - **`AgentSeal::open_origin`**: the `GenesisOrigin` a genesis entry
   seals, read-only beside `open_state` (which wants a state envelope).
   `OpenError::NotGenesis` for any other entry.
