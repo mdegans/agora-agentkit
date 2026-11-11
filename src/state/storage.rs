@@ -513,16 +513,18 @@ impl AgentSeal {
         Ok(SealLock(file))
     }
 
-    /// Whether `sealed/chained` exists. The pre-0.158 `sealed/chained`
+    /// Whether `sealed/chained` exists. The pre-0.158 `sealed/enrolled`
     /// counts only once [`migrate_marker`](Self::migrate_marker) has run
     pub async fn is_enrolled(&self) -> std::io::Result<bool> {
         exists(&self.dir.join(CHAINED)).await
     }
 
-    /// Replace a pre-0.158 `sealed/chained` with `sealed/chained`: the new
+    /// Replace a pre-0.158 `sealed/enrolled` with `sealed/chained`: the new
     /// marker first, then the old one removed, each made durable, so a
-    /// crash at any point leaves at least one and a rerun finishes. Run it
-    /// before anything reads the marker
+    /// crash at any point leaves at least one and a rerun finishes. The new
+    /// marker keeps the old one's bytes and modification time, which a
+    /// runner reads as when the agent enrolled. Run it before anything
+    /// reads the marker
     pub async fn migrate_marker(&self) -> Result<MarkerMigration, SealError> {
         let legacy = self.dir.join(LEGACY_ENROLLED);
         let chained = self.dir.join(CHAINED);
@@ -535,7 +537,20 @@ impl AgentSeal {
         }
         let _lock = self.lock().await?;
         if !exists(&chained).await? {
-            write_atomic(&chained, b"").await?;
+            let bytes = tokio::fs::read(&legacy).await?;
+            let modified = tokio::fs::metadata(&legacy).await?.modified()?;
+            let tmp = self.dir.join(format!("{CHAINED}.writing"));
+            let mut file =
+                tokio::fs::File::create(&tmp).await?.into_std().await;
+            tokio::task::spawn_blocking(move || {
+                std::io::Write::write_all(&mut file, &bytes)?;
+                file.set_modified(modified)?;
+                file.sync_all()
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            tokio::fs::rename(&tmp, &chained).await?;
+            sync_dir(&self.dir).await?;
         }
         match tokio::fs::remove_file(&legacy).await {
             Ok(()) => {}
@@ -3062,7 +3077,9 @@ mod tests {
         let seal = store.seal(id);
         let old = seal.dir().join(LEGACY_ENROLLED);
         let new = seal.dir().join(CHAINED);
-        // (old, new, leftover from write_atomic) as a crash leaves them
+        let enrolled_at = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_760_000_000);
+        // (old, new, leftover tmp) as a crash leaves them
         let states = [
             (true, false, false),
             (true, false, true),
@@ -3072,11 +3089,17 @@ mod tests {
         for (has_old, has_new, writing) in states {
             let _ = std::fs::remove_file(&old);
             let _ = std::fs::remove_file(&new);
-            if has_old {
-                std::fs::write(&old, b"").unwrap();
-            }
-            if has_new {
-                std::fs::write(&new, b"").unwrap();
+            for (path, present) in [(&old, has_old), (&new, has_new)] {
+                // A completed earlier run's `new` already has the old time
+                if present {
+                    std::fs::write(path, b"since").unwrap();
+                    std::fs::File::options()
+                        .write(true)
+                        .open(path)
+                        .unwrap()
+                        .set_modified(enrolled_at)
+                        .unwrap();
+                }
             }
             if writing {
                 std::fs::write(seal.dir().join("chained.writing"), b"")
@@ -3092,6 +3115,9 @@ mod tests {
             };
             assert_eq!(got, want, "{label}");
             assert!(new.exists() && !old.exists(), "{label}");
+            let modified = std::fs::metadata(&new).unwrap().modified().unwrap();
+            assert_eq!(modified, enrolled_at, "{label}");
+            assert_eq!(std::fs::read(&new).unwrap(), b"since", "{label}");
             assert_eq!(
                 seal.migrate_marker().await.unwrap(),
                 MarkerMigration::Already

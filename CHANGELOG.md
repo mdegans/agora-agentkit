@@ -19,7 +19,9 @@ upload a locally chained agent's state without consent.
   (`is_enrolled`, `enroll`, `Recovery::NotEnrolled`, …) stay.
   `AgentSeal::migrate_marker` replaces an old marker, the new one first and
   each step made durable, so a crash never leaves neither, and returns
-  `MarkerMigration::{Migrated, Already, NotEnrolled}`. An old marker is
+  `MarkerMigration::{Migrated, Already, NotEnrolled}`. The new marker
+  keeps the old one's bytes and modification time (a runner reads it as
+  when the agent enrolled). An old marker is
   never read as chained implicitly: a runner calls the migration at start,
   before anything reads the marker. Until it does, the agent is treated as
   not chained, and a save of it goes plain, which the next start check
