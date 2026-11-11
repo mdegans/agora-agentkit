@@ -568,6 +568,12 @@ impl AgentSeal {
         exists(&self.dir.join(CHAINED)).await
     }
 
+    /// Whether the pre-0.158 `sealed/enrolled` is still here, for a dry
+    /// run of [`migrate_marker`](Self::migrate_marker). Read-only
+    pub async fn has_legacy_marker(&self) -> std::io::Result<bool> {
+        exists(&self.dir.join(LEGACY_ENROLLED)).await
+    }
+
     /// Replace a pre-0.158 `sealed/enrolled` with `sealed/chained`: the new
     /// marker first, then the old one removed, each made durable, so a
     /// crash at any point leaves at least one and a rerun finishes. The new
@@ -3279,6 +3285,7 @@ mod tests {
                     .unwrap();
             }
             let label = format!("{has_old} {has_new} {writing}");
+            assert_eq!(seal.has_legacy_marker().await.unwrap(), has_old);
             assert_eq!(seal.is_enrolled().await.unwrap(), has_new, "{label}");
             let got = seal.migrate_marker().await.unwrap();
             let want = if has_old {
@@ -3288,6 +3295,7 @@ mod tests {
             };
             assert_eq!(got, want, "{label}");
             assert!(new.exists() && !old.exists(), "{label}");
+            assert!(!seal.has_legacy_marker().await.unwrap());
             let modified = std::fs::metadata(&new).unwrap().modified().unwrap();
             assert_eq!(modified, enrolled_at, "{label}");
             assert_eq!(std::fs::read(&new).unwrap(), b"since", "{label}");
