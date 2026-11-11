@@ -258,6 +258,10 @@ pub enum SealFailureKind {
     Raced,
     /// Not a failure: the agent is refused
     Refused,
+    /// The pre-0.158 `sealed/enrolled` is here and `sealed/chained` isn't:
+    /// [`AgentSeal::migrate_marker`] hasn't run. Written marked, never
+    /// plain, so no older runner takes it for an unsealed agent
+    Unmigrated,
     /// Not a failure: the agent opted out after enrolling. Written before
     /// 0.158, when opting out stopped the seal; never written now, but an
     /// old `seal_failed.json` still reads
@@ -563,7 +567,9 @@ impl AgentSeal {
     }
 
     /// Whether `sealed/chained` exists. The pre-0.158 `sealed/enrolled`
-    /// counts only once [`migrate_marker`](Self::migrate_marker) has run
+    /// counts only once [`migrate_marker`](Self::migrate_marker) has run;
+    /// until then [`Mirrored`] writes the agent marked and unsealed
+    /// ([`SealFailureKind::Unmigrated`]), so a runner calls it first
     pub async fn is_enrolled(&self) -> std::io::Result<bool> {
         exists(&self.dir.join(CHAINED)).await
     }
@@ -1614,6 +1620,25 @@ fn settle(
     }
 }
 
+/// Which marker an agent's `sealed/` has
+enum Marker {
+    None,
+    /// Only the pre-0.158 `enrolled`
+    Legacy,
+    Chained,
+}
+
+/// An unreadable marker counts as there: never a silent plain save
+async fn marker(seal: &AgentSeal) -> Marker {
+    match seal.is_enrolled().await {
+        Ok(false) => match seal.has_legacy_marker().await {
+            Ok(false) => Marker::None,
+            _ => Marker::Legacy,
+        },
+        _ => Marker::Chained,
+    }
+}
+
 /// How far a save's seal got before the local write
 enum Step {
     NotEnrolled,
@@ -1788,10 +1813,25 @@ where
         let plaintext_sha256 = sha256(&plaintext);
         drop(reloaded);
 
-        // An agent not enrolled gets no `sealed/` at all
-        if let Ok(false) = seal.is_enrolled().await {
-            self.write_local(id, value, false).await?;
-            return Ok(None);
+        match marker(&seal).await {
+            // An agent not enrolled gets no `sealed/` at all
+            Marker::None => {
+                self.write_local(id, value, false).await?;
+                return Ok(None);
+            }
+            Marker::Legacy => {
+                self.write_local(id, value, true).await?;
+                Self::unsealed(
+                    &seal,
+                    id,
+                    plaintext_sha256,
+                    SealFailureKind::Unmigrated,
+                    None,
+                )
+                .await;
+                return Ok(base.copied());
+            }
+            Marker::Chained => {}
         }
         let lock = match seal.lock().await {
             Ok(lock) => lock,
@@ -1864,13 +1904,35 @@ where
         id: AgentId,
     ) -> Result<Loaded<serde_json::Value, HeadRef>, Self::Error> {
         let seal = self.seal(id);
-        if let Ok(false) = seal.is_enrolled().await {
-            let Loaded { value, .. } = self
-                .local
-                .load_raw(id)
-                .await
-                .map_err(MirroredError::Local)?;
-            return Ok(Loaded { value, base: None });
+        match marker(&seal).await {
+            Marker::None => {
+                let Loaded { value, .. } = self
+                    .local
+                    .load_raw(id)
+                    .await
+                    .map_err(MirroredError::Local)?;
+                return Ok(Loaded { value, base: None });
+            }
+            Marker::Legacy => {
+                tracing::error!(
+                    agent_id = %id,
+                    "sealed/enrolled not migrated to sealed/chained; loaded without a base"
+                );
+                let Loaded { value, .. } = self
+                    .local
+                    .load_raw(id)
+                    .await
+                    .map_err(MirroredError::Local)?;
+                self.recoveries
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        id,
+                        Recovery::Unreadable(SealFailureKind::Unmigrated),
+                    );
+                return Ok(Loaded { value, base: None });
+            }
+            Marker::Chained => {}
         }
         // The local read and the check under one lock, so no save lands
         // between them
@@ -3304,21 +3366,33 @@ mod tests {
                 MarkerMigration::Already
             );
         }
-        // Old marker only: not chained, so a save goes plain, and after
-        // the migration the start check catches it. Hence: migrate first
+        // Old marker only: never a plain save. The state is written marked,
+        // the load has no base and says why, and the unsealed write is
+        // recorded, so the start after the migration holds the agent
         std::fs::remove_file(&new).unwrap();
         std::fs::write(&old, b"").unwrap();
         let before = chain(&seal).await.len();
         assert_eq!(store.load_raw(id).await.unwrap().base, None);
+        assert_eq!(
+            store.recovery(id),
+            Some(Recovery::Unreadable(SealFailureKind::Unmigrated))
+        );
         store.save_raw(id, state(70), None).await.unwrap();
         assert_eq!(chain(&seal).await.len(), before, "not sealed");
-        assert_eq!(format_of(&store, id), 1);
+        assert_eq!(format_of(&store, id), SEALED_FORMAT);
+        assert_eq!(
+            seal.seal_failed().await.unwrap().unwrap().error,
+            SealFailureKind::Unmigrated
+        );
         assert_eq!(
             seal.migrate_marker().await.unwrap(),
             MarkerMigration::Migrated
         );
-        assert_eq!(store.load_raw(id).await.unwrap().base, None);
-        assert!(matches!(store.recovery(id), Some(Recovery::Mismatch(_))));
+        store.load_raw(id).await.unwrap();
+        assert!(matches!(
+            store.recovery(id),
+            Some(Recovery::SealFailed(_, SealFailureKind::Unmigrated))
+        ));
 
         // Neither: nothing created
         let other = store.seal(AgentId::new());
