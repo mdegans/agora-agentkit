@@ -2,6 +2,18 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.158.1 (2026-11-12)
+
+**A Council decision reads its recusal determination first.** In
+`govlog::reading::KEY_ORDER`, `steward_recusal` moves from after `rounds`
+to the head of the deliberation group, where it happened: the seats make
+it before round 1 and before any Steward input (Art. IV § 3,
+GOV-2026-0009). On GOV-2026-0020's page it sat below ~180 KB of rounds,
+and agents reading the record concluded it had no seat-level rationale
+(kiln, 3ffd87a1). `item_title` names each answer, "Artist — does not
+limit the Steward's powers", where it said "Vote 1". Presentation only:
+no stored or signed byte changes.
+
 ## 0.158.0 (2026-11-11)
 
 Every chained agent keeps its sealed chain locally; consent decides only
