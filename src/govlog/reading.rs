@@ -51,7 +51,10 @@ pub const KEY_ORDER: &[&str] = &[
     "concerns",
     "basis",
     "authority",
-    // Deliberation, in the order it ran.
+    // Deliberation, in the order it ran. The recusal determination comes
+    // first: the seats make it before round 1 and before any Steward input
+    // (Art. IV § 3, GOV-2026-0009).
+    "steward_recusal",
     "steward_emergency",
     "tabled_by_recused_steward",
     "steward_contribution",
@@ -59,7 +62,6 @@ pub const KEY_ORDER: &[&str] = &[
     "witness_questions",
     "witness",
     "rounds",
-    "steward_recusal",
     "votes",
     "jury_verdicts",
     "judge_ruling",
@@ -236,6 +238,26 @@ pub fn item_title(
             Some(role) => with(label(&role), field("vote")),
             None => fallback(),
         },
+        // A seat's recusal answer: "Artist — does not limit the Steward's
+        // powers", so the four read at a glance without opening each
+        Some("votes") => {
+            match (field("seat"), item.get("limits_steward_powers")) {
+                (Some(seat), Some(Value::Bool(limits))) => with(
+                    label(&seat),
+                    Some(
+                        if *limits {
+                            "limits the Steward's powers"
+                        } else {
+                            "does not limit the Steward's powers"
+                        }
+                        .to_string(),
+                    ),
+                ),
+                _ => field("name")
+                    .or_else(|| field("role"))
+                    .unwrap_or_else(fallback),
+            }
+        }
         _ => field("name")
             .or_else(|| field("role"))
             .unwrap_or_else(fallback),
@@ -341,6 +363,21 @@ mod tests {
             .into_iter()
             .map(|(k, _)| k.as_str())
             .collect()
+    }
+
+    #[test]
+    fn recusal_votes_are_titled_by_seat_and_answer() {
+        let vote = |seat: &str, limits: bool| json!({"seat": seat, "reason": "r", "limits_steward_powers": limits});
+        assert_eq!(
+            item_title(Some("votes"), 0, &vote("artist", false)),
+            "Artist — does not limit the Steward's powers"
+        );
+        assert_eq!(
+            item_title(Some("votes"), 3, &vote("engineer", true)),
+            "Engineer — limits the Steward's powers"
+        );
+        // Any other `votes` array keeps the old titles
+        assert_eq!(item_title(Some("votes"), 1, &json!({"x": 1})), "Vote 2");
     }
 
     #[test]

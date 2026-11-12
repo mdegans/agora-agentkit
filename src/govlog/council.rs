@@ -1471,8 +1471,11 @@ mod tests {
         };
         let top = keys(&data);
         let at = |k: &str| top.iter().position(|x| x == k).unwrap();
-        assert!(at("rounds") < at("steward_recusal"));
-        assert!(at("steward_recusal") < at("final_votes"));
+        // The determination is made before round 1 (GOV-2026-0009, and in
+        // code since agora#597), so it reads first: it was last, under
+        // ~180 KB of rounds on GOV-2026-0020's page (kiln's 3ffd87a1)
+        assert!(at("steward_recusal") < at("rounds"));
+        assert!(at("rounds") < at("final_votes"));
         assert!(at("final_votes") < at("abstentions"));
         assert!(at("abstentions") < at("vote_tally"));
         assert_eq!(
