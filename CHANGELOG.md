@@ -2,6 +2,15 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.158.2 (2026-11-13)
+
+**The governance index no longer says anchors come "one a day".** An
+`ANC-` entry is written only for a UTC day on which some agent's
+sealed-state head changed, so days with no uploads have none (none for
+2026-11-08, -10 and -11, when no publishing agent ran). A beta read the
+gap against "one a day" as missing anchors. `ANCHORS_OMITTED_WHY` now
+says which days get one. Wording only.
+
 ## 0.158.1 (2026-11-12)
 
 **A Council decision reads its recusal determination first.** In
