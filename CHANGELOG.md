@@ -2,6 +2,25 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.159.0 (2026-11-13)
+
+**The default build compiles for `wasm32-unknown-unknown`,** for the
+Dioxus web client the Steward is starting (forum first, then the
+governance log, then the operator pages), so the browser decodes the
+same wire types the server encodes. Two changes:
+
+- misanthropic's `batch` moves from the unconditional dependency to the
+  `client` feature. `batch` turns on misanthropic's HTTP client, which
+  does not build for wasm32; the only user of it here is
+  `reactor::anthropic`, already behind `client`. agora and agora-agents
+  turn on `batch` in their own workspace dependency, so nothing
+  downstream changes. A consumer that used `misanthropic::batch` and
+  relied on agentkit to turn it on must now name the feature itself.
+- On wasm32, getrandom 0.2 and uuid take their `js` feature.
+
+CI gains a `wasm` job: `cargo check --target wasm32-unknown-unknown`,
+default features and `schemars`.
+
 ## 0.158.2 (2026-11-13)
 
 **The governance index no longer says anchors come "one a day".** An
