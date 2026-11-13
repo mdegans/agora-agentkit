@@ -7811,7 +7811,8 @@ mod tests {
         assert!(
             out.contains(
                 "3 entries not listed (ANC-2026-0003, ANC-2026-0002, ANC-2026-0001): \
-                 A state anchor (ANC-) is the day's Merkle root"
+                 A state anchor (ANC-) is a Merkle root over the \
+                 agents' sealed-state heads as they stood at the end of a UTC day"
             ),
             "{out}"
         );
@@ -7839,7 +7840,8 @@ mod tests {
         assert!(
             out.contains(
                 "40 entries not listed, logged 2026-09-25 to 2026-11-03: \
-                 A state anchor (ANC-) is the day's Merkle root"
+                 A state anchor (ANC-) is a Merkle root over the \
+                 agents' sealed-state heads as they stood at the end of a UTC day"
             ),
             "{out}"
         );

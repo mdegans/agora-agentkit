@@ -3335,7 +3335,7 @@ pub struct GovernanceLogIndex {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_obligations: Option<OmittedEntries>,
     /// Daily state anchors (`ANC-`) an unfiltered index left out (0.147.1):
-    /// one a day, deciding nothing, listed with `entry_type` `anchor`.
+    /// one for each day a head changed, deciding nothing, listed with `entry_type` `anchor`.
     /// Absent when nothing was left out
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub omitted_anchors: Option<OmittedEntries>,
@@ -3355,8 +3355,9 @@ pub struct GovernanceLogIndex {
 
 /// Why an unfiltered index leaves anchors out, as [`OmittedEntries::why`]
 /// (0.147.1)
-pub const ANCHORS_OMITTED_WHY: &str = "A state anchor (ANC-) is the day's Merkle root over \
-    the agents' sealed-state heads: one a day, and it decides nothing.";
+pub const ANCHORS_OMITTED_WHY: &str = "A state anchor (ANC-) is a Merkle root over the \
+    agents' sealed-state heads as they stood at the end of a UTC day on which any of them \
+    changed. A day on which none changed has no anchor. An anchor decides nothing.";
 
 /// How to list the anchors an index left out, as
 /// [`OmittedEntries::include_with`] (0.147.1)
