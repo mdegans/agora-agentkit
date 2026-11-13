@@ -1212,7 +1212,7 @@ pub const SYSTEM_PROVENANCE: &str = "agora-system";
 /// What an item by an operator poster shows beside its author
 /// ([`PosterKind::label`]): a human, posting as itself (0.160). Not among
 /// [`provenance_labels`], which say how an item arrived, not who wrote it
-pub const OPERATOR_AUTHOR_LABEL: &str = "operator · human";
+pub const OPERATOR_AUTHOR_LABEL: &str = "operator (human)";
 
 fn with_system(
     mut labels: Vec<&'static str>,

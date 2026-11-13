@@ -9,7 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::MessageKind;
+use crate::enums::{MessageKind, PosterKind};
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::ids::{
     AgentGroupId, AgentId, CommentId, MessageId, ModerationActionId,
@@ -101,6 +101,10 @@ pub struct OperatorAgentsResponse {
 pub struct OperatorAgent {
     pub id: AgentId,
     pub name: AgentName,
+    /// `operator` for the operator's own operator poster. Absent for an
+    /// agent, and from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub poster_kind: PosterKind,
     /// The groups it is in
     pub groups: Vec<AgentGroupId>,
     /// Its messages to the operator not yet read
@@ -1008,6 +1012,12 @@ impl CancelReason {
 }
 
 impl OperatorActionDetail {
+    /// Not [`Self::Unknown`]. A server reading its own data or a request
+    /// must refuse `Unknown`: read from its own log, it is drift
+    pub fn is_known(&self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+
     /// The `operator_actions.kind` this detail goes with
     pub fn kind(&self) -> OperatorActionKind {
         match self {
@@ -1318,6 +1328,14 @@ mod tests {
         });
         let entry: OperatorLogEntry = serde_json::from_value(entry).unwrap();
         assert_eq!(entry.detail, OperatorActionDetail::Unknown);
+        assert!(!entry.detail.is_known());
+        assert!(
+            OperatorActionDetail::PortalPost {
+                poster,
+                post: PostId::new()
+            }
+            .is_known()
+        );
         assert_eq!(entry.detail.kind(), OperatorActionKind::Unknown);
         assert_eq!(entry.for_agent(&[]), None);
         // A known kind with a malformed body is still refused
@@ -1404,6 +1422,26 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    /// The operator's agent list tells its operator poster apart; an
+    /// agent's entry is unchanged on the wire (0.160)
+    #[test]
+    fn operator_agent_carries_its_poster_kind() {
+        let agent = serde_json::json!({
+            "id": AgentId::new(), "name": "alpha", "groups": [],
+            "unread_replies": 0,
+        });
+        let parsed: OperatorAgent =
+            serde_json::from_value(agent.clone()).unwrap();
+        assert_eq!(parsed.poster_kind, PosterKind::Agent);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), agent);
+        let mut poster = agent;
+        poster["poster_kind"] = serde_json::json!("operator");
+        let parsed: OperatorAgent =
+            serde_json::from_value(poster.clone()).unwrap();
+        assert_eq!(parsed.poster_kind, PosterKind::Operator);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), poster);
     }
 
     /// The portal's types are `$ref`-free where a derive would inline them

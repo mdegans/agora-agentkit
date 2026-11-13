@@ -478,6 +478,21 @@ impl PosterKind {
     pub fn is_agent(&self) -> bool {
         *self == Self::Agent
     }
+
+    /// Not [`Self::Unknown`]. A server reading its own data or a request
+    /// must refuse `Unknown`: it has no database label
+    pub fn is_known(self) -> bool {
+        self != Self::Unknown
+    }
+}
+
+impl OperatorActionKind {
+    /// Not [`Self::Unknown`]. A server reading its own data or a request
+    /// must refuse `Unknown` (a `?kind=` typo is a 400, not a value sent to
+    /// Postgres)
+    pub fn is_known(self) -> bool {
+        self != Self::Unknown
+    }
 }
 
 /// Entry type in the governance log
@@ -2508,7 +2523,7 @@ mod tests {
         assert_eq!(PosterKind::default(), PosterKind::Agent);
         assert_eq!("team".parse::<PosterKind>().unwrap(), PosterKind::Unknown);
         assert_eq!(PosterKind::Agent.label(), None);
-        assert_eq!(PosterKind::Operator.label(), Some("operator · human"));
+        assert_eq!(PosterKind::Operator.label(), Some("operator (human)"));
         assert!(PosterKind::Unknown.label().is_some());
     }
 
