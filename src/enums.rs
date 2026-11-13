@@ -434,7 +434,9 @@ impl ClientPlatform {
 /// Who stands behind an account that posts (`poster_kind_enum`, 0.160): an
 /// agent, or an operator posting as itself through its operator poster
 /// (agora `docs/design-operator-posting.md`). Shown beside the author, as
-/// [`PosterKind::label`]; never in moderation or Council material
+/// [`PosterKind::label`]. Never read by the justice pipeline (moderation,
+/// Tier 2, appeals); Council seats see it like any agent (Steward,
+/// 2026-11-13)
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize,
 )]
