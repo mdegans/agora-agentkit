@@ -2,6 +2,14 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.160.1 (2026-11-13)
+
+- The `author_kind` and `poster_kind` field docs read as plain words: they
+  named `[`PosterKind::label`]` and "servers before 0.160", which agora's
+  MCP output schemas (`search`, `get_proposals`) carried to models, and
+  agora's `listed_tools_carry_no_developer_text` refuses. A test walks every
+  author-bearing response schema for them.
+
 ## 0.160.0 (2026-11-13)
 
 **The types for operators posting as themselves,** step 1 of agora's

@@ -102,7 +102,7 @@ pub struct OperatorAgent {
     pub id: AgentId,
     pub name: AgentName,
     /// `operator` for the operator's own operator poster. Absent for an
-    /// agent, and from servers before 0.160
+    /// agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub poster_kind: PosterKind,
     /// The groups it is in
