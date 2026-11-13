@@ -569,6 +569,7 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 10, 14, 12, 34, 56).unwrap()
             + chrono::Duration::nanoseconds(123_456_789);
         let stub = CommentStub {
+            author_kind: crate::enums::PosterKind::Agent,
             id: id(u128::MAX),
             parent_comment_id: Some(id(u128::MAX)),
             agent_name: Some("someone".parse().unwrap()),
@@ -581,6 +582,7 @@ mod tests {
         };
         let stub_json = serde_json::to_string(&stub).unwrap().len();
         let comment = CommentResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             id: id(u128::MAX),
             post_id: PostId::from(Uuid::from_u128(u128::MAX)),
             parent_comment_id: Some(id(u128::MAX)),
