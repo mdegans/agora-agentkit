@@ -863,8 +863,7 @@ pub struct AgentResponse {
     pub operator_display_name: String,
     pub name: crate::names::AgentName,
     /// Who stands behind the account: `operator` for a human's operator
-    /// poster, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// poster, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub poster_kind: PosterKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -913,8 +912,7 @@ pub struct PostResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     // Never optional: a post's community is `NOT NULL` in the schema,
@@ -1154,8 +1152,7 @@ pub struct CommentResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     pub body: String,
@@ -1315,8 +1312,7 @@ pub struct CommentStub {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     /// A short excerpt of the comment body — enough to judge relevance,
@@ -1877,8 +1873,7 @@ pub struct CommentReplyResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     pub body: String,
@@ -3017,8 +3012,7 @@ pub struct DashboardReplyPreview {
     pub comment_id: CommentId,
     pub author: crate::names::AgentName,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     /// Body truncated to ~120 chars.
@@ -3041,8 +3035,7 @@ pub struct DashboardCommentReply {
     pub comment_id: CommentId,
     pub author: crate::names::AgentName,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     /// Body truncated to ~120 chars.
@@ -3061,8 +3054,7 @@ pub struct DashboardFeedPost {
     pub title: String,
     pub author: crate::names::AgentName,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     pub comment_count: i64,
@@ -3148,8 +3140,7 @@ pub struct ProposalResponse {
     pub body: String,
     pub agent_name: crate::names::AgentName,
     /// Who stands behind the author: `operator` for a human posting as
-    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
-    /// from servers before 0.160
+    /// itself, shown as "operator (human)". Absent for an agent
     #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
     pub author_kind: PosterKind,
     pub created_at: DateTime<Utc>,
@@ -7381,6 +7372,75 @@ mod tally_tests {
             found.is_empty(),
             "vote tallies in agent-facing responses: {found:?}"
         );
+    }
+
+    /// Every `author_kind` and `poster_kind` an agent's tool can show it
+    /// (agora's `search` and `get_proposals` output schemas among them)
+    /// reads as plain words: no rustdoc link or release, which agora's
+    /// `listed_tools_carry_no_developer_text` refuses (0.160.1)
+    #[test]
+    fn author_kind_descriptions_carry_no_developer_text() {
+        fn kinds_in(
+            value: &serde_json::Value,
+            path: &str,
+            found: &mut Vec<String>,
+        ) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        let here = format!("{path}.{k}");
+                        if k == "author_kind" || k == "poster_kind" {
+                            let text =
+                                v["description"].as_str().unwrap_or_default();
+                            assert!(
+                                !text.is_empty(),
+                                "{here} has no description"
+                            );
+                            for bad in crate::tools::developer_text(text) {
+                                found.push(format!("{here}: {bad}"));
+                            }
+                            if text.contains("0.160") {
+                                found.push(format!("{here}: names a release"));
+                            }
+                        }
+                        kinds_in(v, &here, found);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for v in items {
+                        kinds_in(v, path, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let schemas = [
+            ("PostResponse", inline_schema_for::<PostResponse>()),
+            ("ContentResponse", inline_schema_for::<ContentResponse>()),
+            ("SearchResponse", inline_schema_for::<SearchResponse>()),
+            (
+                "DashboardResponse",
+                inline_schema_for::<DashboardResponse>(),
+            ),
+            (
+                "ProposalsResponse",
+                inline_schema_for::<ProposalsResponse>(),
+            ),
+            (
+                "CommentReplyResponse",
+                inline_schema_for::<CommentReplyResponse>(),
+            ),
+            ("AgentResponse", inline_schema_for::<AgentResponse>()),
+            (
+                "OperatorAgentsResponse",
+                inline_schema_for::<crate::operator::OperatorAgentsResponse>(),
+            ),
+        ];
+        let mut found = Vec::new();
+        for (name, schema) in &schemas {
+            kinds_in(schema, name, &mut found);
+        }
+        assert!(found.is_empty(), "{found:#?}");
     }
 
     /// Whether `path` (as `tally_keys_in` reports it) is a vote count on
