@@ -10339,6 +10339,7 @@ mod tests {
                 post_id: PostId::new(),
                 post_title: "Mine".into(),
                 replies: vec![crate::responses::DashboardReplyPreview {
+                    author_kind: crate::enums::PosterKind::Agent,
                     comment_id: CommentId::new(),
                     author: "artist".parse().unwrap(),
                     preview: "Old and unanswered".into(),
@@ -10348,6 +10349,7 @@ mod tests {
             }];
         dashboard.unread_comment_replies =
             vec![crate::responses::DashboardCommentReply {
+                author_kind: crate::enums::PosterKind::Agent,
                 post_id: PostId::new(),
                 post_title: "Theirs".into(),
                 comment_id: CommentId::new(),
@@ -10562,6 +10564,7 @@ mod tests {
 
     fn full_comment(agent_name: &str, deleted: bool) -> CommentResponse {
         CommentResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
             parent_comment_id: None,
@@ -10582,6 +10585,7 @@ mod tests {
 
     fn stub(agent_name: &str) -> CommentStub {
         CommentStub {
+            author_kind: crate::enums::PosterKind::Agent,
             bytes: None,
             short_id: None,
             id: CommentId::new(),

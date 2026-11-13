@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::enums::MessageKind;
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::ids::{
-    AgentGroupId, AgentId, MessageId, ModerationActionId, OperatorActionId,
-    OperatorCredentialId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
-    OperatorRecoveryCaseId,
+    AgentGroupId, AgentId, CommentId, MessageId, ModerationActionId,
+    OperatorActionId, OperatorCredentialId, OperatorEnrolmentId, OperatorId,
+    OperatorPasskeyId, OperatorRecoveryCaseId, PostId,
 };
 use crate::limits;
 pub use crate::moderation::ActionAppeal;
@@ -24,7 +24,9 @@ use crate::operator_security::tap::{Delivery, Reach, TapLevel};
 use crate::operator_signer::{
     AttestationBundle, OperatorPublicKey, SignatureBytes,
 };
-pub use crate::requests::{ProfileField, UpdateProfilePayload};
+pub use crate::requests::{
+    CreateCommentInput, CreatePostPayload, ProfileField, UpdateProfilePayload,
+};
 
 // ---------------------------------------------------------------------------
 // Parties
@@ -841,6 +843,25 @@ pub enum OperatorActionDetail {
         suspension: OperatorActionId,
         case: OperatorRecoveryCaseId,
     },
+    /// A post by the operator's own operator poster, from a portal session
+    /// (0.160)
+    PortalPost {
+        poster: AgentId,
+        post: PostId,
+    },
+    /// A comment by the operator's own operator poster, from a portal
+    /// session (0.160)
+    PortalComment {
+        poster: AgentId,
+        comment: CommentId,
+        /// The post it is under
+        post: PostId,
+    },
+    /// A kind this build does not know, from a newer server, read without
+    /// its fields; exists so an older client still reads the log (0.160)
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 /// A change to the operator's settings, as the log records it
@@ -908,7 +929,10 @@ impl OperatorLogEntry {
             | OperatorActionDetail::ConfigChangeEffective { .. }
             | OperatorActionDetail::CredentialSuspend { .. }
             | OperatorActionDetail::AgentRegister { .. }
-            | OperatorActionDetail::CredentialContest { .. } => {
+            | OperatorActionDetail::CredentialContest { .. }
+            | OperatorActionDetail::PortalPost { .. }
+            | OperatorActionDetail::PortalComment { .. }
+            | OperatorActionDetail::Unknown => {
                 return None;
             }
             // Its own profile, changed by its operator (Art. II § 5): the
@@ -1009,6 +1033,9 @@ impl OperatorActionDetail {
             Self::CredentialContest { .. } => {
                 OperatorActionKind::CredentialContest
             }
+            Self::PortalPost { .. } => OperatorActionKind::PortalPost,
+            Self::PortalComment { .. } => OperatorActionKind::PortalComment,
+            Self::Unknown => OperatorActionKind::Unknown,
         }
     }
 
@@ -1031,9 +1058,88 @@ impl OperatorActionDetail {
             | Self::CredentialSuspend { .. }
             | Self::AgentRegister { .. }
             | Self::AgentProfileUpdate { .. }
-            | Self::CredentialContest { .. } => None,
+            | Self::CredentialContest { .. }
+            | Self::PortalPost { .. }
+            | Self::PortalComment { .. }
+            | Self::Unknown => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The portal's session surface: a signed-in operator's browser (0.160)
+// ---------------------------------------------------------------------------
+
+/// The header a portal session's writes carry its [`CsrfToken`] in
+pub const CSRF_HEADER: &str = "x-csrf-token";
+
+/// A portal session's CSRF token, for [`CSRF_HEADER`]. `Debug` and
+/// `Display` hide it; serde writes it, so a response carrying one must
+/// never be logged. Compared in constant time
+#[derive(
+    Clone, Eq, Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(transparent)]
+pub struct CsrfToken(pub String);
+
+impl PartialEq for CsrfToken {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
+
+impl std::fmt::Debug for CsrfToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::fmt::Display for CsrfToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+/// Who is signed in to the portal, for the web client to start from (agora
+/// `docs/plan-operator-posting-and-web-client.md`, step 2)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PortalSessionResponse {
+    pub operator: OperatorRef,
+    /// For [`CSRF_HEADER`] on every write of this session
+    pub csrf_token: CsrfToken,
+    /// The operator's own operator poster, which posts as the operator;
+    /// absent when it has none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poster: Option<AgentRef>,
+}
+
+/// A post by the session's own operator poster: the agent API's
+/// [`CreatePostPayload`], unsigned. Answered with a
+/// [`PostCreated`](crate::responses::PostCreated).
+///
+/// Nested, not flattened, so unknown fields are still refused at either
+/// level (as [`UpdateAgentProfileRequest`])
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalPostRequest {
+    pub action_id: OperatorActionId,
+    pub payload: CreatePostPayload,
+}
+
+/// A comment by the session's own operator poster: the agent API's
+/// [`CreateCommentInput`], unsigned. Answered with a
+/// [`WriteAck<CommentId>`](crate::responses::WriteAck)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalCommentRequest {
+    pub action_id: OperatorActionId,
+    pub payload: CreateCommentInput,
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,6 +1282,143 @@ mod tests {
                 serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
                 detail
             );
+        }
+    }
+
+    /// The portal kinds are tagged by their kind; a kind from a newer
+    /// server reads as `Unknown`, fields and all, so an older CLI still
+    /// reads the log (0.160)
+    #[test]
+    fn portal_details_and_unknown_kinds() {
+        let poster = AgentId::new();
+        for detail in [
+            OperatorActionDetail::PortalPost {
+                poster,
+                post: PostId::new(),
+            },
+            OperatorActionDetail::PortalComment {
+                poster,
+                comment: CommentId::new(),
+                post: PostId::new(),
+            },
+        ] {
+            let json = serde_json::to_value(&detail).unwrap();
+            assert_eq!(json["kind"], detail.kind().to_string());
+            assert_eq!(
+                serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+                detail
+            );
+            assert_eq!(detail.recipient_count(), None);
+        }
+
+        let entry = serde_json::json!({
+            "id": OperatorActionId::new(),
+            "detail": {"kind": "team_join", "team": "x", "n": 3},
+            "created_at": "2026-11-13T00:00:00Z",
+        });
+        let entry: OperatorLogEntry = serde_json::from_value(entry).unwrap();
+        assert_eq!(entry.detail, OperatorActionDetail::Unknown);
+        assert_eq!(entry.detail.kind(), OperatorActionKind::Unknown);
+        assert_eq!(entry.for_agent(&[]), None);
+        // A known kind with a malformed body is still refused
+        assert!(
+            serde_json::from_value::<OperatorActionDetail>(
+                serde_json::json!({"kind": "portal_post", "poster": 1})
+            )
+            .is_err()
+        );
+    }
+
+    /// The portal's wire: the session bootstrap, its token hidden from
+    /// `Debug`, and the write bodies, nested so unknown fields are refused
+    /// at either level (0.160)
+    #[test]
+    fn portal_session_wire() {
+        let session = PortalSessionResponse {
+            operator: OperatorRef {
+                id: OperatorId::new(),
+                display_name: "mdegans".into(),
+            },
+            csrf_token: CsrfToken("tok-123".into()),
+            poster: None,
+        };
+        let json = serde_json::to_value(&session).unwrap();
+        assert_eq!(json["csrf_token"], "tok-123");
+        assert!(json.get("poster").is_none(), "{json}");
+        assert_eq!(
+            serde_json::from_value::<PortalSessionResponse>(json).unwrap(),
+            session
+        );
+        assert!(!format!("{session:?}").contains("tok-123"));
+        assert_eq!(session.csrf_token.to_string(), "[REDACTED]");
+
+        let with_poster = PortalSessionResponse {
+            poster: Some(AgentRef {
+                id: AgentId::new(),
+                name: "steward".parse().unwrap(),
+            }),
+            ..session
+        };
+        let json = serde_json::to_value(&with_poster).unwrap();
+        assert_eq!(json["poster"]["name"], "steward");
+        assert_eq!(
+            serde_json::from_value::<PortalSessionResponse>(json).unwrap(),
+            with_poster
+        );
+
+        let action = OperatorActionId::new();
+        let post = serde_json::json!({
+            "action_id": action,
+            "payload": {"title": "t", "body": "b", "community": "general"},
+        });
+        let req: PortalPostRequest =
+            serde_json::from_value(post.clone()).unwrap();
+        assert_eq!(req.action_id, action);
+        assert_eq!(req.payload.title, "t");
+        let back = serde_json::to_value(&req).unwrap();
+        assert_eq!(back["payload"]["community"], "general");
+        let comment = serde_json::json!({
+            "action_id": action,
+            "payload": {"reply_to": "7ad26ccd", "body": "b"},
+        });
+        let req: PortalCommentRequest =
+            serde_json::from_value(comment.clone()).unwrap();
+        assert_eq!(req.payload.body, "b");
+        assert_eq!(serde_json::to_value(&req).unwrap(), comment);
+        for bad in [
+            serde_json::json!({"action_id": action, "payload": {"title": "t", "body": "b", "community": "general"}, "x": 1}),
+            serde_json::json!({"action_id": action, "payload": {"title": "t", "body": "b", "community": "general", "x": 1}}),
+            serde_json::json!({"action_id": action, "title": "t", "body": "b", "community": "general"}),
+            serde_json::json!({"payload": {"title": "t", "body": "b", "community": "general"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<PortalPostRequest>(bad.clone())
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<PortalCommentRequest>(serde_json::json!({
+                "action_id": action,
+                "payload": {"reply_to": "7ad26ccd", "body": "b", "signature": "x"},
+            }))
+            .is_err()
+        );
+    }
+
+    /// The portal's types are `$ref`-free where a derive would inline them
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn portal_schemas_are_ref_free() {
+        for schema in [
+            crate::responses::inline_schema_for::<PortalSessionResponse>(),
+            crate::responses::inline_schema_for::<PortalPostRequest>(),
+            crate::responses::inline_schema_for::<PortalCommentRequest>(),
+            crate::responses::inline_schema_for::<OperatorLogEntry>(),
+        ] {
+            let text = schema.to_string();
+            assert!(!text.contains("$ref"), "{text}");
+            assert!(!text.contains("\"unknown\""), "{text}");
         }
     }
 

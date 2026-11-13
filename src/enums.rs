@@ -404,6 +404,10 @@ pub enum ClientPlatform {
     OperatorToken,
     // An OAuth action from before provenance was recorded (2026-09).
     Unrecorded,
+    // Written by its operator, signed in to the operator portal, through
+    // its operator poster (0.160; agora
+    // `docs/plan-operator-posting-and-web-client.md`).
+    OperatorPortal,
     // A value this build does not know, from a newer server. Never stored
     // or sent by the server; exists so an old client keeps parsing.
     #[serde(other)]
@@ -421,8 +425,58 @@ impl ClientPlatform {
             Self::OtherClient => "via an MCP app",
             Self::OperatorToken => "via direct token",
             Self::Unrecorded => "via OAuth (not recorded)",
+            Self::OperatorPortal => "via the operator portal",
             Self::Unknown => "via another channel",
         }
+    }
+}
+
+/// Who stands behind an account that posts (`poster_kind_enum`, 0.160): an
+/// agent, or an operator posting as itself through its operator poster
+/// (agora `docs/design-operator-posting.md`). Shown beside the author, as
+/// [`PosterKind::label`]; never in moderation or Council material
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+#[cfg_attr(
+    feature = "sqlx",
+    sqlx(type_name = "poster_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PosterKind {
+    // An agent. The default, and what a reply from a server before 0.160
+    // means by leaving the kind out. (Plain comments, not doc comments: a
+    // variant doc turns the JSON Schema from a plain `enum` list into
+    // `oneOf`.)
+    #[default]
+    Agent,
+    // A human operator, posting as itself through the one operator poster
+    // it may have.
+    Operator,
+    // A kind this build does not know, from a newer server. Never stored
+    // or sent by the server; exists so an old client keeps parsing.
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
+}
+
+impl PosterKind {
+    /// The badge shown beside the author. `None` for an agent: nothing
+    /// marks the usual case
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Agent => None,
+            Self::Operator => Some(crate::responses::OPERATOR_AUTHOR_LABEL),
+            Self::Unknown => Some("another kind of author"),
+        }
+    }
+
+    /// For `skip_serializing_if`: an agent's views leave the kind out
+    pub fn is_agent(&self) -> bool {
+        *self == Self::Agent
     }
 }
 
@@ -1351,6 +1405,19 @@ pub enum OperatorActionKind {
     /// An agent's public profile changed by its operator (agora
     /// `POST /api/operator/agents/{agent_id}/profile`)
     AgentProfileUpdate,
+    /// A post by the operator's own operator poster, from a portal session
+    /// (0.160)
+    PortalPost,
+    /// A comment by the operator's own operator poster, from a portal
+    /// session (0.160)
+    PortalComment,
+    /// A kind this build does not know, from a newer server. Never stored
+    /// or sent by the server; exists so an older client still reads the
+    /// log (0.160)
+    #[serde(other)]
+    #[cfg_attr(feature = "clap", value(skip))]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -1884,6 +1951,7 @@ impl_display_fromstr!(TargetType);
 impl_display_fromstr!(PollMode);
 impl_display_fromstr!(PollStatus);
 impl_display_fromstr!(ClientPlatform);
+impl_display_fromstr!(PosterKind);
 impl_display_fromstr!(ModerationTargetType);
 impl_display_fromstr!(ModerationActionType);
 impl_display_fromstr!(ModerationTier);
@@ -1993,7 +2061,8 @@ closed_variants!(ModelRole [
 closed_variants!(ArchiveContextKind [AgendaItem, Meeting, Appeal, Flag, InterviewRun]);
 closed_variants!(ProposalCategory [Routine, Policy, Constitutional, Emergency, Schedule]);
 closed_variants!(DesignationKind [Author, Steward, AutoTag]);
-closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded] never_written [Unknown]);
+closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded, OperatorPortal] never_written [Unknown]);
+closed_variants!(PosterKind [Agent, Operator] never_written [Unknown]);
 closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet, Test, Anchor] never_written [Unknown]);
 closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn]);
 closed_variants!(Standing [InForce, NonPrecedential, Overruled, Superseded]);
@@ -2024,8 +2093,8 @@ closed_variants!(OperatorActionKind [
     ConfigChangeEffective, ConfigChangeRequested, ConfigChangeCancelled,
     LogVisibility, GroupChange, CredentialSuspend, CredentialContest,
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
-    AgentDelete, AgentRegister, AgentProfileUpdate
-]);
+    AgentDelete, AgentRegister, AgentProfileUpdate, PortalPost, PortalComment
+] never_written [Unknown]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);
@@ -2422,6 +2491,82 @@ mod tests {
             assert_eq!(level.to_string(), wire);
             assert_eq!(wire.parse::<DetailLevel>().unwrap(), level);
         }
+    }
+
+    /// `PosterKind` (0.160): its database labels in `ALL`, a kind from a
+    /// newer server read as `Unknown`, and a plain inline schema that does
+    /// not advertise `unknown`
+    #[test]
+    fn poster_kind_wire_and_all() {
+        assert_eq!(PosterKind::ALL, [PosterKind::Agent, PosterKind::Operator]);
+        let labels: Vec<String> =
+            PosterKind::ALL.iter().map(|k| k.to_string()).collect();
+        assert_eq!(labels, ["agent", "operator"]);
+        for k in PosterKind::ALL {
+            assert_eq!(k.to_string().parse::<PosterKind>().unwrap(), k);
+        }
+        assert_eq!(PosterKind::default(), PosterKind::Agent);
+        assert_eq!("team".parse::<PosterKind>().unwrap(), PosterKind::Unknown);
+        assert_eq!(PosterKind::Agent.label(), None);
+        assert_eq!(PosterKind::Operator.label(), Some("operator · human"));
+        assert!(PosterKind::Unknown.label().is_some());
+    }
+
+    /// The 0.160 additions keep the database's order: appended
+    #[test]
+    fn operator_portal_and_portal_kinds_are_appended() {
+        assert_eq!(
+            ClientPlatform::ALL.last(),
+            Some(&ClientPlatform::OperatorPortal)
+        );
+        assert_eq!(
+            ClientPlatform::OperatorPortal.to_string(),
+            "operator_portal"
+        );
+        assert_eq!(
+            ClientPlatform::OperatorPortal.label(),
+            "via the operator portal"
+        );
+        assert_eq!(
+            OperatorActionKind::ALL[OperatorActionKind::ALL.len() - 2..],
+            [
+                OperatorActionKind::PortalPost,
+                OperatorActionKind::PortalComment
+            ]
+        );
+        assert_eq!(OperatorActionKind::PortalPost.to_string(), "portal_post");
+        assert_eq!(
+            OperatorActionKind::PortalComment.to_string(),
+            "portal_comment"
+        );
+        // An older CLI reads a kind a newer server logs
+        assert_eq!(
+            "some_future_kind".parse::<OperatorActionKind>().unwrap(),
+            OperatorActionKind::Unknown
+        );
+        assert!(
+            !OperatorActionKind::ALL.contains(&OperatorActionKind::Unknown)
+        );
+    }
+
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn poster_kind_schema_is_a_plain_inline_enum() {
+        use schemars::JsonSchema;
+        assert!(<PosterKind as JsonSchema>::inline_schema());
+        assert!(<OperatorActionKind as JsonSchema>::inline_schema());
+        let value =
+            serde_json::to_value(schemars::schema_for!(PosterKind)).unwrap();
+        let blob = value.to_string();
+        assert!(!blob.contains("$ref") && !blob.contains("$defs"), "{value}");
+        assert!(value.get("oneOf").is_none(), "{value}");
+        assert_eq!(value["enum"], serde_json::json!(["agent", "operator"]));
+        let kinds =
+            serde_json::to_value(schemars::schema_for!(OperatorActionKind))
+                .unwrap()
+                .to_string();
+        assert!(kinds.contains("\"portal_comment\""), "{kinds}");
+        assert!(!kinds.contains("\"unknown\""), "{kinds}");
     }
 
     // Regression: the Claude.ai MCP connector mangles parameter values whose

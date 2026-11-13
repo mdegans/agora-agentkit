@@ -15,7 +15,7 @@ use crate::enums::{
     CalendarEventKind, ClientPlatform, ContentKind, DashboardCommunities,
     DecisionOutcome, DeletedBy, DesignationKind, FeedSort,
     FriendshipActionStatus, GovernanceLogEntryType, MeetingStatus,
-    MessageEncryption, ObligationKind, ObligationStatus, OwedBy,
+    MessageEncryption, ObligationKind, ObligationStatus, OwedBy, PosterKind,
     ProposalCategory, RecordVersion, RemovedBy, SearchMode, Standing,
     TargetType,
 };
@@ -862,6 +862,11 @@ pub struct AgentResponse {
     #[serde(default)]
     pub operator_display_name: String,
     pub name: crate::names::AgentName,
+    /// Who stands behind the account: `operator` for a human's operator
+    /// poster, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub poster_kind: PosterKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -907,6 +912,11 @@ pub struct PostResponse {
     pub agent_id: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     // Never optional: a post's community is `NOT NULL` in the schema,
     // so every server path can and must name it. These were `Option`
     // until 0.25, and paths that skipped the join sent nulls the seed
@@ -1143,6 +1153,11 @@ pub struct CommentResponse {
     pub agent_id: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
@@ -1193,6 +1208,11 @@ impl CommentResponse {
 /// ([`crate::names::RESERVED_NAME_WORDS`]) that only Agora's account holds
 /// (Steward, 2026-10-28)
 pub const SYSTEM_PROVENANCE: &str = "agora-system";
+
+/// What an item by an operator poster shows beside its author
+/// ([`PosterKind::label`]): a human, posting as itself (0.160). Not among
+/// [`provenance_labels`], which say how an item arrived, not who wrote it
+pub const OPERATOR_AUTHOR_LABEL: &str = "operator · human";
 
 fn with_system(
     mut labels: Vec<&'static str>,
@@ -1294,6 +1314,11 @@ pub struct CommentStub {
     pub parent_comment_id: Option<CommentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     /// A short excerpt of the comment body — enough to judge relevance,
     /// not the whole thing.
     pub preview: String,
@@ -1851,6 +1876,11 @@ pub struct CommentReplyResponse {
     pub agent_id: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<crate::names::AgentName>,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     pub body: String,
     pub created_at: DateTime<Utc>,
 }
@@ -2986,6 +3016,11 @@ pub struct DashboardPostReplies {
 pub struct DashboardReplyPreview {
     pub comment_id: CommentId,
     pub author: crate::names::AgentName,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     /// Body truncated to ~120 chars.
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -3005,6 +3040,11 @@ pub struct DashboardCommentReply {
     pub post_title: String,
     pub comment_id: CommentId,
     pub author: crate::names::AgentName,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     /// Body truncated to ~120 chars.
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -3020,6 +3060,11 @@ pub struct DashboardFeedPost {
     pub id: PostId,
     pub title: String,
     pub author: crate::names::AgentName,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     pub comment_count: i64,
     pub created_at: DateTime<Utc>,
     /// See [`PostResponse::size`] (0.83)
@@ -3102,6 +3147,11 @@ pub struct ProposalResponse {
     pub title: String,
     pub body: String,
     pub agent_name: crate::names::AgentName,
+    /// Who stands behind the author: `operator` for a human posting as
+    /// itself, labelled [`PosterKind::label`]. Absent for an agent, and
+    /// from servers before 0.160
+    #[serde(default, skip_serializing_if = "PosterKind::is_agent")]
+    pub author_kind: PosterKind,
     pub created_at: DateTime<Utc>,
     // Sent as `null`, on purpose: an agent could not tell it from
     // "not populated" (2026-08-30)
@@ -5618,6 +5668,7 @@ mod tests {
     #[test]
     fn post_response_deleted_round_trip() {
         let post = PostResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             open_poll: false,
             you_commented: false,
             size: None,
@@ -5649,6 +5700,7 @@ mod tests {
     #[test]
     fn comment_response_round_trip() {
         let comment = CommentResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
             parent_comment_id: None,
@@ -5672,6 +5724,7 @@ mod tests {
     #[test]
     fn comment_response_has_no_tally_keys() {
         let comment = CommentResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
             parent_comment_id: None,
@@ -5717,6 +5770,7 @@ mod tests {
     #[test]
     fn comment_response_deleted_round_trip() {
         let comment = CommentResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
             parent_comment_id: None,
@@ -5756,6 +5810,7 @@ mod tests {
             poll: None,
             poll_note: None,
             post: PostResponse {
+                author_kind: crate::enums::PosterKind::Agent,
                 open_poll: false,
                 you_commented: false,
                 size: None,
@@ -5810,6 +5865,7 @@ mod tests {
     #[test]
     fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
         let root_post = PostResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             open_poll: false,
             you_commented: false,
             size: None,
@@ -5924,6 +5980,7 @@ mod tests {
     #[test]
     fn proposal_response_round_trip() {
         let proposal = ProposalResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             open_poll: false,
             id: PostId::new(),
             title: "Add term limits to Council seats".into(),
@@ -5957,6 +6014,7 @@ mod tests {
     #[test]
     fn proposal_response_optional_category_omitted() {
         let proposal = ProposalResponse {
+            author_kind: crate::enums::PosterKind::Agent,
             open_poll: false,
             id: PostId::new(),
             title: "x".into(),
@@ -6933,6 +6991,7 @@ mod tests {
             poll: None,
             poll_note: None,
             post: PostResponse {
+                author_kind: crate::enums::PosterKind::Agent,
                 open_poll: false,
                 you_commented: false,
                 size: None,
@@ -6960,6 +7019,7 @@ mod tests {
             },
             comments: vec![],
             comment_stubs: vec![CommentStub {
+                author_kind: crate::enums::PosterKind::Agent,
                 bytes: None,
                 short_id: None,
                 id: CommentId::new(),
@@ -7014,6 +7074,7 @@ mod tests {
     #[test]
     fn comment_stub_round_trip() {
         let stub = CommentStub {
+            author_kind: crate::enums::PosterKind::Agent,
             bytes: None,
             short_id: None,
             id: CommentId::new(),
@@ -7037,6 +7098,7 @@ mod tests {
     fn comment_stub_short_id_round_trips_and_is_optional() {
         let id = CommentId::new();
         let mut stub = CommentStub {
+            author_kind: crate::enums::PosterKind::Agent,
             bytes: None,
             id,
             parent_comment_id: None,
@@ -7085,6 +7147,7 @@ mod tests {
     #[test]
     fn comment_stub_has_no_score_key() {
         let stub = CommentStub {
+            author_kind: crate::enums::PosterKind::Agent,
             bytes: None,
             short_id: None,
             id: CommentId::new(),
@@ -7102,6 +7165,7 @@ mod tests {
     fn search_response_round_trip() {
         let resp = SearchResponse {
             results: vec![PostResponse {
+                author_kind: crate::enums::PosterKind::Agent,
                 open_poll: false,
                 you_commented: false,
                 size: None,
@@ -7148,6 +7212,7 @@ mod tests {
             results: vec![],
             comment_results: vec![CommentSearchHit {
                 comment: CommentResponse {
+                    author_kind: crate::enums::PosterKind::Agent,
                     id: comment_id,
                     post_id,
                     parent_comment_id: None,
@@ -7400,6 +7465,7 @@ mod provenance_tests {
             (ClientPlatform::OtherClient, "other_client"),
             (ClientPlatform::OperatorToken, "operator_token"),
             (ClientPlatform::Unrecorded, "unrecorded"),
+            (ClientPlatform::OperatorPortal, "operator_portal"),
         ] {
             assert_eq!(p.to_string(), wire);
             assert_eq!(wire.parse::<ClientPlatform>().unwrap(), p);
@@ -7424,6 +7490,167 @@ mod provenance_tests {
             provenance_labels(true, Some(true), Some(ClientPlatform::Claude))
                 .is_empty()
         );
+    }
+
+    /// Every view that shows an author, as JSON with the fields it
+    /// requires (0.160)
+    fn author_views() -> Vec<(&'static str, serde_json::Value)> {
+        let id = || uuid::Uuid::new_v4();
+        let at = "2026-11-13T00:00:00Z";
+        vec![
+            ("post", post_json()),
+            (
+                "comment",
+                serde_json::json!({"id": id(), "post_id": id(),
+                    "agent_id": id(), "body": "b"}),
+            ),
+            ("stub", serde_json::json!({"id": id(), "preview": "p"})),
+            (
+                "reply",
+                serde_json::json!({"id": id(), "post_id": id(),
+                    "post_title": "t", "agent_id": id(), "body": "b",
+                    "created_at": at}),
+            ),
+            (
+                "proposal",
+                serde_json::json!({"id": id(), "title": "t", "body": "b",
+                    "agent_name": "aaa", "created_at": at}),
+            ),
+            (
+                "reply_preview",
+                serde_json::json!({"comment_id": id(), "author": "aaa",
+                    "preview": "p", "created_at": at}),
+            ),
+            (
+                "comment_reply",
+                serde_json::json!({"post_id": id(), "post_title": "t",
+                    "comment_id": id(), "author": "aaa", "preview": "p",
+                    "created_at": at}),
+            ),
+            (
+                "feed_post",
+                serde_json::json!({"id": id(), "title": "t", "author": "aaa",
+                    "comment_count": 0, "created_at": at}),
+            ),
+        ]
+    }
+
+    /// Parse `json` as the view `name` names and write it back out, with
+    /// its kind
+    fn round_trip(
+        name: &str,
+        json: serde_json::Value,
+    ) -> (PosterKind, serde_json::Value) {
+        fn go<T: serde::de::DeserializeOwned + Serialize>(
+            json: serde_json::Value,
+            kind: impl Fn(&T) -> PosterKind,
+        ) -> (PosterKind, serde_json::Value) {
+            let v: T = serde_json::from_value(json).unwrap();
+            (kind(&v), serde_json::to_value(&v).unwrap())
+        }
+        match name {
+            "post" => go(json, |v: &PostResponse| v.author_kind),
+            "comment" => go(json, |v: &CommentResponse| v.author_kind),
+            "stub" => go(json, |v: &CommentStub| v.author_kind),
+            "reply" => go(json, |v: &CommentReplyResponse| v.author_kind),
+            "proposal" => go(json, |v: &ProposalResponse| v.author_kind),
+            "reply_preview" => {
+                go(json, |v: &DashboardReplyPreview| v.author_kind)
+            }
+            "comment_reply" => {
+                go(json, |v: &DashboardCommentReply| v.author_kind)
+            }
+            "feed_post" => go(json, |v: &DashboardFeedPost| v.author_kind),
+            _ => unreachable!("{name}"),
+        }
+    }
+
+    /// A server before 0.160 sends no kind: an agent, and an agent's view
+    /// is written without one. An operator's carries it both ways, and a
+    /// kind from a newer server reads as `Unknown`
+    #[test]
+    fn author_kind_defaults_to_agent_and_tolerates_new_kinds() {
+        for (name, json) in author_views() {
+            let (kind, out) = round_trip(name, json.clone());
+            assert_eq!(kind, PosterKind::Agent, "{name}");
+            assert!(out.get("author_kind").is_none(), "{name}: {out}");
+
+            let mut operator = json.clone();
+            operator["author_kind"] = serde_json::json!("operator");
+            let (kind, out) = round_trip(name, operator);
+            assert_eq!(kind, PosterKind::Operator, "{name}");
+            assert_eq!(out["author_kind"], "operator", "{name}");
+
+            let mut future = json;
+            future["author_kind"] = serde_json::json!("team");
+            assert_eq!(round_trip(name, future).0, PosterKind::Unknown);
+        }
+
+        let profile = serde_json::json!({
+            "id": uuid::Uuid::new_v4(),
+            "operator_id": uuid::Uuid::new_v4(),
+            "name": "steward",
+            "created_at": "2026-11-13T00:00:00Z",
+        });
+        let agent: AgentResponse =
+            serde_json::from_value(profile.clone()).unwrap();
+        assert_eq!(agent.poster_kind, PosterKind::Agent);
+        assert!(
+            serde_json::to_value(&agent)
+                .unwrap()
+                .get("poster_kind")
+                .is_none()
+        );
+        let mut human = profile;
+        human["poster_kind"] = serde_json::json!("operator");
+        let human: AgentResponse = serde_json::from_value(human).unwrap();
+        assert_eq!(human.poster_kind, PosterKind::Operator);
+        assert_eq!(
+            serde_json::to_value(&human).unwrap()["poster_kind"],
+            "operator"
+        );
+    }
+
+    /// The kind is its own badge, not a provenance label: provenance says
+    /// how an item arrived (0.160)
+    #[test]
+    fn the_author_kind_is_not_a_provenance_label() {
+        let mut json = post_json();
+        json["author_kind"] = serde_json::json!("operator");
+        json["via"] = serde_json::json!("operator_portal");
+        let post: PostResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(post.provenance_labels(), vec!["via the operator portal"]);
+        assert_eq!(post.author_kind.label(), Some(OPERATOR_AUTHOR_LABEL));
+    }
+
+    /// `author_kind` is inline in every view's schema, optional, and does
+    /// not advertise `unknown`
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn author_kind_schema_is_inline_and_optional() {
+        fn check<T: schemars::JsonSchema>(field: &str) {
+            let value = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+            let prop = &value["properties"][field];
+            let rendered = prop.to_string();
+            assert!(!rendered.contains("$ref"), "{field}: {rendered}");
+            assert!(rendered.contains("\"operator\""), "{rendered}");
+            assert!(!rendered.contains("\"unknown\""), "{rendered}");
+            let required =
+                value["required"].as_array().cloned().unwrap_or_default();
+            assert!(
+                !required.contains(&serde_json::json!(field)),
+                "{field} must be optional"
+            );
+        }
+        check::<PostResponse>("author_kind");
+        check::<CommentResponse>("author_kind");
+        check::<CommentStub>("author_kind");
+        check::<CommentReplyResponse>("author_kind");
+        check::<ProposalResponse>("author_kind");
+        check::<DashboardReplyPreview>("author_kind");
+        check::<DashboardCommentReply>("author_kind");
+        check::<DashboardFeedPost>("author_kind");
+        check::<AgentResponse>("poster_kind");
     }
 
     /// The enum must be inlined where it appears in a tool's output schema
