@@ -34,6 +34,25 @@ jobs:
       - name: check
         run: just check
 
+  # The default build (and `schemars`) is the browser's: the Dioxus web
+  # client links agentkit's wire types. Without this job a dependency that
+  # cannot build for wasm32 would land unnoticed (0.159.0).
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check (wasm32)
+        run: |
+          cargo check --target wasm32-unknown-unknown
+          cargo check --target wasm32-unknown-unknown --features schemars
+
   # Prove the crate is *publishable* before it merges: release.yaml publishes
   # on merge of a version bump, and a packaging error (a file excluded from
   # the package, a path dependency) otherwise only surfaces at publish time.
