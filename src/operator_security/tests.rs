@@ -298,7 +298,8 @@ fn request<'a>(
     }
 }
 
-/// Decision 9's worked example: 400 held to tomorrow, then chats
+/// Decision 9's worked example: 400 held to tomorrow, then chats. A held send
+/// isn't cover until it is released (Steward, 2026-11-14)
 #[test]
 fn decision_9_worked_example() {
     let tomorrow = t0() + Duration::hours(24);
@@ -308,42 +309,144 @@ fn decision_9_worked_example() {
             .unwrap();
     assert_eq!(held.delivery, Delivery::Held);
     assert_eq!(held.reach.reach, 400);
-    let window: Vec<WindowMessage> = fleet
-        .iter()
-        .map(|a| WindowMessage {
-            recipient: *a,
-            deliver_at: tomorrow,
-            immediate: false,
-        })
-        .collect();
-    // A chat with one of the 400: reach 1, no tap, after dm_hold
+    let window = |released| -> Vec<WindowMessage> {
+        fleet
+            .iter()
+            .map(|a| WindowMessage {
+                recipient: *a,
+                deliver_at: tomorrow,
+                immediate: false,
+                released,
+            })
+            .collect()
+    };
+    let (unreleased, released) = (window(false), window(true));
+    // A chat with one of the 400 before they have it: reach 400, a passkey
+    // tap; immediate reach 1, so it may go now
     let one = agents(7, 1);
-    let chat =
-        plan_send(&request(&one, When::Default, TapLevel::None, &window))
-            .unwrap();
-    assert_eq!(chat.reach.reach, 1);
-    assert_eq!(chat.deliver_at, t0() + Duration::minutes(1));
-    // Outside the 400: reach 401, a passkey tap; immediate reach 1, so now
-    let outside = agents(1000, 1);
     assert_eq!(
-        plan_send(&request(&outside, When::Default, TapLevel::None, &window)),
+        plan_send(&request(&one, When::Default, TapLevel::None, &unreleased)),
         Err(SendRefusal::NeedsTap {
             required: TapLevel::Unattended,
             reach: Reach {
-                reach: 401,
+                reach: 400,
                 immediate_reach: 1
             }
         })
     );
     let tapped =
-        plan_send(&request(&outside, When::Now, TapLevel::Tap, &window))
+        plan_send(&request(&one, When::Now, TapLevel::Tap, &unreleased))
             .unwrap();
     assert_eq!(tapped.delivery, Delivery::Immediate);
-    assert_eq!(tapped.reach.reach, 401);
-    // The same 400 again: reach 400, another tap
-    let again =
-        plan_send(&request(&fleet, When::Default, TapLevel::None, &window));
-    assert!(matches!(again, Err(SendRefusal::NeedsTap { .. })));
+    // Once released: reach 1, no tap, after dm_hold
+    let chat =
+        plan_send(&request(&one, When::Default, TapLevel::None, &released))
+            .unwrap();
+    assert_eq!(chat.reach.reach, 1);
+    assert_eq!(chat.deliver_at, t0() + Duration::minutes(1));
+    // Outside the 400: reach 401, a passkey tap; immediate reach 1, so now
+    let outside = agents(1000, 1);
+    for window in [&unreleased, &released] {
+        assert_eq!(
+            plan_send(&request(
+                &outside,
+                When::Default,
+                TapLevel::None,
+                window
+            )),
+            Err(SendRefusal::NeedsTap {
+                required: TapLevel::Unattended,
+                reach: Reach {
+                    reach: 401,
+                    immediate_reach: 1
+                }
+            })
+        );
+        let tapped =
+            plan_send(&request(&outside, When::Now, TapLevel::Tap, window))
+                .unwrap();
+        assert_eq!(tapped.delivery, Delivery::Immediate);
+        assert_eq!(tapped.reach.reach, 401);
+        // The same 400 again: reach 400, another tap
+        let again =
+            plan_send(&request(&fleet, When::Default, TapLevel::None, window));
+        assert!(matches!(again, Err(SendRefusal::NeedsTap { .. })));
+    }
+}
+
+/// A held send never released doesn't excuse a later session send to its
+/// agents; released, it does, as an immediate send does
+#[test]
+fn a_held_send_is_cover_only_once_released() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let fleet = agents(0, 6);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: fleet.clone(),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    let held = &w.s.sends[&send_id(0)];
+    assert_eq!(held.delivery, Delivery::Held);
+    let release_at = held.deliver_at;
+    let chat = |i: u8| Event::SendAdmit {
+        send: send_id(i),
+        recipients: agents(0, 5),
+        when: When::Default,
+    };
+    // Unreleased: a session chat with 5 of the 6 is a fresh reach of 6
+    assert!(matches!(
+        w.try_do(chat(1), Authority::Session(sess(0))),
+        Err(Refusal::Send(SendRefusal::NeedsTap {
+            reach: Reach { reach: 6, .. },
+            ..
+        }))
+    ));
+    // Still unreleased at its time (the platform hasn't delivered it)
+    w.wait(release_at - w.now);
+    assert!(w.try_do(chat(1), Authority::Session(sess(0))).is_err());
+    // Released: reach 5, untapped
+    w.ok(Event::SendDeliver { send: send_id(0) }, Authority::Platform);
+    w.ok(chat(1), Authority::Session(sess(0)));
+    assert_eq!(w.s.sends[&send_id(1)].reach.reach, 5);
+    // Retracted, it reached them all the same
+    w.ok(
+        Event::Retract { send: send_id(0) },
+        Authority::Session(sess(0)),
+    );
+    w.ok(chat(2), Authority::Session(sess(0)));
+    assert_eq!(w.s.sends[&send_id(2)].reach.reach, 5);
+}
+
+/// Cancelled before release, a held send never covers (nor counts)
+#[test]
+fn a_cancelled_held_send_never_covers() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 6),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    w.ok(
+        Event::SendCancel { send: send_id(0) },
+        Authority::Session(sess(0)),
+    );
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(1),
+            recipients: agents(0, 5),
+            when: When::Default,
+        },
+        Authority::Session(sess(0)),
+    );
+    assert_eq!(w.s.sends[&send_id(1)].reach.reach, 5);
 }
 
 #[test]
@@ -430,6 +533,7 @@ fn window_is_on_deliver_at() {
             recipient: a,
             deliver_at: at,
             immediate: false,
+            released: false,
         })
         .collect();
     let one = agents(100, 1);
@@ -3302,7 +3406,20 @@ fn no_fleet_goes_unheld(
             .collect()
     };
     let (free, unexcused) = (of(true), of(false));
-    let widest = widest_day(&unexcused, &free);
+    // What else went out covers too: a send stored immediate, or a held one
+    // released (the oracle can't tell when, so it allows any time)
+    let went_out = s.sends.iter().filter(|(id, m)| {
+        m.state != SendState::Cancelled
+            && !unheld.iter().any(|(u, _)| u == id)
+            && (m.delivery == Delivery::Immediate
+                || m.state != SendState::Scheduled)
+    });
+    let cover: Vec<_> = free
+        .iter()
+        .copied()
+        .chain(went_out.map(|(_, m)| m))
+        .collect();
+    let widest = widest_day(&unexcused, &cover);
     prop_assert!(widest <= 5, "{} agents unheld in a day", widest);
     if s.new_account(now) {
         let every: Vec<_> = unheld.iter().map(|(_, m)| *m).collect();
@@ -5059,14 +5176,15 @@ fn a_new_account_holds_sends_above_5() {
         ),
         Err(Refusal::Send(SendRefusal::NewAccount { .. }))
     ));
-    // 5 or fewer are untouched
+    // 5 or fewer are untouched. Send 1, still held, doesn't cover its agents,
+    // so the reach is 6 and takes a tap
     w.ok(
         Event::SendAdmit {
             send: send_id(3),
             recipients: agents(1000, 5),
             when: When::Now,
         },
-        Authority::Session(sess(0)),
+        tap(0, TapKind::Send),
     );
     assert_eq!(w.s.sends[&send_id(3)].delivery, Delivery::Immediate);
     // It can't be brought forward in that time, or only past it
@@ -5278,14 +5396,15 @@ fn a_new_key_cant_bring_a_send_forward_above_5() {
         },
         tap(0, TapKind::EnrolmentApproval),
     );
-    // Five agents forward from a new key: fine, nothing above 5 goes now
+    // Five agents forward from a new key: fine, nothing above 5 goes now. Send
+    // 0, still held, doesn't cover them, so admitting it takes a tap
     w.ok(
         Event::SendAdmit {
             send: send_id(1),
             recipients: agents(0, 5),
             when: When::At(w.now + Duration::hours(5)),
         },
-        Authority::Session(sess(0)),
+        tap(0, TapKind::Send),
     );
     w.ok(
         Event::SendForward {

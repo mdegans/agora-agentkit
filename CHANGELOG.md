@@ -2,6 +2,17 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+- D9's `|R_this|` excuse counts only sends that went out (Steward,
+  2026-11-14): an immediate send, or a held one once released
+  (`WindowMessage::released`, `WindowMessage::covers`). A held send has
+  reached no one and may never be released, so a chat with its agents was
+  a way to widen the day's untapped reach. A held send still counts toward
+  reach; it just no longer excuses. `reach_over` takes the covering
+  recipients as a third argument. Immediate reach is unchanged (every
+  immediate message covers).
+
 ## 0.161.1 (2026-11-14)
 
 - `get_council_meetings` no longer records a summary it showed only the
