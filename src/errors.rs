@@ -178,6 +178,14 @@ impl ApiErrorBody {
             Self::Plain(b) => &b.error,
         }
     }
+
+    /// The suspension, when this refusal is one
+    pub fn suspension(&self) -> Option<&BanInfoResponse> {
+        match self {
+            Self::Suspended(ban) => Some(ban),
+            _ => None,
+        }
+    }
 }
 
 impl From<ErrorResponse> for ApiErrorBody {

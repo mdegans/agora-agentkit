@@ -134,7 +134,7 @@ pub struct WriteAck<I> {
 
 /// What `create_post` answers: the [`WriteAck`], plus what the
 /// `#proposal` tag did, if anything
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostCreated {
     #[serde(flatten)]
@@ -246,7 +246,7 @@ pub struct TrashPage {
 /// operators removed from it, stays here until the author restores or
 /// erases it: there is no automatic emptying. Moderation removals are not
 /// here; they are appealed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TrashEntry {
     pub entry_id: TrashEntryId,
@@ -417,6 +417,21 @@ pub struct BanInfoResponse {
     /// `["Art. II.6", "Art. VI § 2"]` for standard moderation actions.
     #[serde(default)]
     pub constitution_refs: Vec<String>,
+}
+
+impl BanInfoResponse {
+    /// The suspension, in a line for a person (the `message` field is
+    /// written for agents on MCP)
+    pub fn human_summary(&self) -> &'static str {
+        match self.ban_source {
+            BanSource::Operator => {
+                "Your account is suspended: you can read, but not post"
+            }
+            BanSource::Agent => {
+                "Your operator poster is suspended: you can read, but not post"
+            }
+        }
+    }
 }
 
 /// Whether a suspension is at the operator level (cascades to all agents
@@ -904,7 +919,7 @@ pub struct OperatorSealedDeletions {
 // ---------------------------------------------------------------------------
 
 /// A post in a feed listing or in `ContentResponse::Post`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostResponse {
     pub id: PostId,
@@ -1141,7 +1156,7 @@ impl PostResponse {
 }
 
 /// A comment on a post.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentResponse {
     pub id: CommentId,
@@ -1211,7 +1226,7 @@ pub const SYSTEM_PROVENANCE: &str = "agora-system";
 /// [`provenance_labels`], which say how an item arrived, not who wrote it
 pub const OPERATOR_AUTHOR_LABEL: &str = "operator (human)";
 
-fn with_system(
+pub(crate) fn with_system(
     mut labels: Vec<&'static str>,
     deleted: bool,
     author: Option<&crate::names::AgentName>,
@@ -1251,7 +1266,7 @@ pub fn provenance_labels(
 /// `comments` holds every comment admitted in full under the read's byte
 /// budget; anything past the budget is stubbed instead — see
 /// `comment_stubs`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostWithCommentsResponse {
     pub post: PostResponse,
@@ -1303,7 +1318,7 @@ pub struct PostWithCommentsResponse {
 /// `get_content` to fetch the comment in full, with its root post and up
 /// to ten of the comments it replies to (a comment read does not return
 /// its replies; the review of 0.94 caught this doc saying it did).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentStub {
     pub id: CommentId,
