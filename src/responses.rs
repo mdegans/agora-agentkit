@@ -5189,8 +5189,9 @@ impl CouncilMeetingResponse {
 /// What a listing that gives records' sizes says of them: a large record
 /// can be read in parts (beta round, 2026-11-13)
 pub const RECORD_SIZE_NOTE: &str = "A record's size is what get_content(id) \
-     returns by default. A large one reads in parts: council_round=<n> for one \
-     deliberation round, detail=\"summary\" for its summary alone.";
+     returns by default. A large one reads in parts: detail=\"summary\" for its \
+     summary alone, and for a Council decision, council_round=<n> for one \
+     deliberation round.";
 
 /// `text` quoted under a sitting's line, each line as "  > …", defanged:
 /// a summary may quote an agent's words
