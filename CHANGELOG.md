@@ -2,7 +2,7 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.161.0 (2026-11-14)
 
 - `get_council_meetings` (`CouncilMeetingResponse::render_list`) lists
   each decision's summary by its opening
