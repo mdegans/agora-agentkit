@@ -208,17 +208,17 @@ pub struct WindowMessage {
     pub deliver_at: DateTime<Utc>,
     /// Stored at admission: whether its send went now
     pub immediate: bool,
-    /// A held send's copy that has been delivered
-    pub released: bool,
+    /// Its send has been delivered (it may since have been read or retracted)
+    pub delivered: bool,
 }
 
 impl WindowMessage {
-    /// Whether it went out (it goes now, or was released): only such a
-    /// message excuses a later send to its agent by D9's `|R_this|` term. A
-    /// held one has reached no one and may never be released (Steward,
+    /// Whether it went out: only a delivered message excuses a later send to
+    /// its agent by D9's `|R_this|` term. One still scheduled has reached no
+    /// one, however soon it is due, and may yet be cancelled or moved (Steward,
     /// 2026-11-14)
     pub const fn covers(&self) -> bool {
-        self.immediate || self.released
+        self.delivered
     }
 }
 
@@ -265,19 +265,16 @@ pub fn reach(
     };
     let window: Vec<&WindowMessage> =
         messages.iter().filter(in_window).collect();
-    let immediate = || window.iter().filter(|m| m.immediate);
+    let over = |messages: Vec<&&WindowMessage>| {
+        reach_over(
+            recipients,
+            messages.iter().map(|m| &m.recipient),
+            messages.iter().filter(|m| m.covers()).map(|m| &m.recipient),
+        )
+    };
     Reach {
-        reach: reach_over(
-            recipients,
-            window.iter().map(|m| &m.recipient),
-            window.iter().filter(|m| m.covers()).map(|m| &m.recipient),
-        ),
-        // Every immediate message covers, so this is as it was
-        immediate_reach: reach_over(
-            recipients,
-            immediate().map(|m| &m.recipient),
-            immediate().map(|m| &m.recipient),
-        ),
+        reach: over(window.iter().collect()),
+        immediate_reach: over(window.iter().filter(|m| m.immediate).collect()),
     }
 }
 

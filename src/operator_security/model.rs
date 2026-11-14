@@ -984,8 +984,7 @@ impl AccountState {
                     recipient: *recipient,
                     deliver_at: s.deliver_at,
                     immediate: s.delivery == Delivery::Immediate,
-                    released: s.delivery == Delivery::Held
-                        && s.state != SendState::Scheduled,
+                    delivered: s.state != SendState::Scheduled,
                 })
             })
             .collect()

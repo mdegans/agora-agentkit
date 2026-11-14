@@ -4,14 +4,18 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## Unreleased
 
-- D9's `|R_this|` excuse counts only sends that went out (Steward,
-  2026-11-14): an immediate send, or a held one once released
-  (`WindowMessage::released`, `WindowMessage::covers`). A held send has
-  reached no one and may never be released, so a chat with its agents was
-  a way to widen the day's untapped reach. A held send still counts toward
-  reach; it just no longer excuses. `reach_over` takes the covering
-  recipients as a third argument. Immediate reach is unchanged (every
-  immediate message covers).
+- D9's `|R_this|` excuse counts only messages that went out (Steward,
+  2026-11-14): a copy already delivered (since read or retracted
+  included) when the send is counted. A held send, and a send stored
+  immediate but still scheduled, has reached no one and may yet be
+  cancelled or moved. Such a send used to excuse a chat with its agents,
+  which let one session gather a fleet untapped (a near 5-agent send,
+  cancelled after use, covering the same 5 a day later). Both still count
+  toward the union. `WindowMessage::delivered` and `WindowMessage::covers`
+  are new, and `reach_over` takes the covering recipients as a third
+  argument. Immediate reach follows the same rule.
+- **SendLater** refuses a time before now. It was counted from the send's
+  admission, so a past time landed a send at once without its hold.
 
 ## 0.161.1 (2026-11-14)
 

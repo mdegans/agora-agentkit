@@ -316,7 +316,7 @@ fn decision_9_worked_example() {
                 recipient: *a,
                 deliver_at: tomorrow,
                 immediate: false,
-                released,
+                delivered: released,
             })
             .collect()
     };
@@ -375,7 +375,7 @@ fn decision_9_worked_example() {
 }
 
 /// A held send never released doesn't excuse a later session send to its
-/// agents; released, it does, as an immediate send does
+/// agents; released (delivered), it does
 #[test]
 fn a_held_send_is_cover_only_once_released() {
     let mut w = registered(DEVICE);
@@ -419,6 +419,108 @@ fn a_held_send_is_cover_only_once_released() {
     );
     w.ok(chat(2), Authority::Session(sess(0)));
     assert_eq!(w.s.sends[&send_id(2)].reach.reach, 5);
+}
+
+/// A send stored immediate covers only once delivered: still scheduled, it
+/// reached no one and can be cancelled after use (review of #309, probe A)
+#[test]
+fn a_scheduled_immediate_send_isnt_cover() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    w.s.settings.bulk_hold = Duration::hours(48);
+    let s = Authority::Session(sess(0));
+    let admit = |i: u8, start: u32, at| Event::SendAdmit {
+        send: send_id(i),
+        recipients: agents(start, 5),
+        when: When::At(at),
+    };
+    let real_at = w.now + Duration::minutes(1);
+    // A real send to 5 agents
+    w.ok(admit(0, 100, w.now), s);
+    // A phantom 24 h past the next: outside the first's window, stored
+    // immediate under the 48 h hold, unannounced
+    w.ok(admit(1, 0, real_at + Duration::hours(24)), s);
+    assert_eq!(w.s.sends[&send_id(1)].delivery, Delivery::Immediate);
+    assert!(!w.s.sends[&send_id(1)].announced);
+    // The phantom's agents beside the real send: 10 agents, not 5
+    assert!(matches!(
+        w.try_do(admit(2, 0, real_at), s),
+        Err(Refusal::Send(SendRefusal::NeedsTap {
+            reach: Reach { reach: 10, .. },
+            ..
+        }))
+    ));
+}
+
+/// A phantom near send can't hide a far one: 20 rounds of "5 agents in 59
+/// minutes, cancelled; the same 5 a day later" (review of #309, probe C)
+#[test]
+fn phantom_cover_cant_gather_a_fleet() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let base = w.now;
+    let mut admitted = 0;
+    for k in 0..20u32 {
+        let group = agents(k * 10, 5);
+        let p_at = base + Duration::minutes(59 - i64::from(k));
+        let (p, r) = (send_id((2 * k) as u8), send_id((2 * k + 1) as u8));
+        w.ok(
+            Event::SendAdmit {
+                send: p,
+                recipients: group.clone(),
+                when: When::At(p_at),
+            },
+            s,
+        );
+        let real = w.try_do(
+            Event::SendAdmit {
+                send: r,
+                recipients: group,
+                when: When::At(p_at + Duration::hours(24)),
+            },
+            s,
+        );
+        admitted += usize::from(real.is_ok());
+        w.ok(Event::SendCancel { send: p }, s);
+    }
+    // The first is 5 agents; every later one would widen the day
+    assert_eq!(admitted, 1);
+}
+
+/// **SendLater** can't land a send in the past: counted from its admission,
+/// it would go now unheld
+#[test]
+fn a_later_move_cant_land_in_the_past() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    w.ok(
+        Event::SendAdmit {
+            send: send_id(0),
+            recipients: agents(0, 5),
+            when: When::At(w.now + Duration::minutes(10)),
+        },
+        s,
+    );
+    w.wait(Duration::hours(2));
+    assert_eq!(
+        w.try_do(
+            Event::SendLater {
+                send: send_id(0),
+                deliver_at: w.now - Duration::minutes(30),
+            },
+            s,
+        ),
+        Err(Refusal::WrongState)
+    );
+    w.ok(
+        Event::SendLater {
+            send: send_id(0),
+            deliver_at: w.now,
+        },
+        s,
+    );
 }
 
 /// Cancelled before release, a held send never covers (nor counts)
@@ -533,7 +635,7 @@ fn window_is_on_deliver_at() {
             recipient: a,
             deliver_at: at,
             immediate: false,
-            released: false,
+            delivered: false,
         })
         .collect();
     let one = agents(100, 1);
@@ -1268,6 +1370,8 @@ fn when() -> impl Strategy<Value = When> {
         Just(When::Default),
         Just(When::Now),
         (0i64..60).prop_map(|h| When::At(t0() + Duration::hours(h))),
+        // Off the hour, out to a week
+        (0i64..7 * 24 * 60).prop_map(|m| When::At(t0() + Duration::minutes(m))),
     ]
 }
 
@@ -1275,6 +1379,8 @@ fn setting() -> impl Strategy<Value = SettingChange> {
     prop_oneof![
         (0i64..3).prop_map(|m| SettingChange::DmHold(Duration::minutes(m))),
         (0i64..3).prop_map(|h| SettingChange::BulkHold(Duration::hours(h))),
+        (3i64..7 * 24)
+            .prop_map(|h| SettingChange::BulkHold(Duration::hours(h))),
         (0u32..100).prop_map(SettingChange::AgentReplyDailyCap),
         Just(SettingChange::EmergencyContact(None)),
         (
@@ -2348,6 +2454,10 @@ struct History {
     free_sends: BTreeSet<OperatorActionId>,
     /// When each factor last became suspended, seen by the harness
     suspended_at: BTreeMap<FactorId, DateTime<Utc>>,
+    /// When each send was last counted: admitted, or moved
+    counted_at: BTreeMap<OperatorActionId, DateTime<Utc>>,
+    /// When each delivered send was delivered
+    delivered_at: BTreeMap<OperatorActionId, DateTime<Utc>>,
 }
 
 impl History {
@@ -2357,6 +2467,24 @@ impl History {
             if !was && after.state.suspension().is_some() {
                 self.suspended_at.insert(id, a.now);
             }
+        }
+        match a.event {
+            Event::SendAdmit { send, .. }
+            | Event::SendForward { send, .. }
+            | Event::SendLater { send, .. }
+                if a.post.sends.get(send) != a.pre.sends.get(send) =>
+            {
+                self.counted_at.insert(*send, a.now);
+            }
+            Event::SendDeliver { send }
+                if a.post
+                    .sends
+                    .get(send)
+                    .is_some_and(|m| m.state == SendState::Delivered) =>
+            {
+                self.delivered_at.insert(*send, a.now);
+            }
+            _ => {}
         }
         let touched = match a.event {
             Event::SendAdmit { send, .. } | Event::SendForward { send, .. } => {
@@ -3329,42 +3457,29 @@ fn i41_a_new_key_is_held(a: &Applied) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-/// For each 24 h span of `sends`, its members and their distinct recipients. A
-/// send whose recipients are all in others of its ±24 h window outside the span,
-/// or in `excused` sends anywhere in that window, doesn't count: D9's `|R_this|`
-/// term, by which a chat with an agent already in the window never escalates, is
-/// the rule's and not a bypass (at worst 10 agents in a day, one side of the
-/// window and the other). An excused send's agents were reached already, so a
-/// chat with them reaches no one new
+/// A send, with its id
+type Sent<'a> = (OperatorActionId, &'a super::Send);
+
+/// For each 24 h span of `sends`, its members and the distinct recipients of
+/// those not `excused`
 fn days<'a>(
-    sends: &[&'a super::Send],
-    excused: &[&super::Send],
-) -> Vec<(usize, Vec<&'a super::Send>)> {
+    sends: &[Sent<'a>],
+    excused: impl Fn(OperatorActionId) -> bool,
+) -> Vec<(usize, Vec<Sent<'a>>)> {
     let day = Duration::hours(24);
     sends
         .iter()
-        .map(|first| {
+        .map(|(_, first)| {
             let span = first.deliver_at..=first.deliver_at + day;
-            let members: Vec<&super::Send> = sends
+            let members: Vec<Sent<'a>> = sends
                 .iter()
                 .copied()
-                .filter(|m| span.contains(&m.deliver_at))
+                .filter(|(_, m)| span.contains(&m.deliver_at))
                 .collect();
-            let counted = members.iter().filter(|m| {
-                let near = |o: &&&super::Send| {
-                    (o.deliver_at - m.deliver_at).abs() <= day
-                };
-                let elsewhere: BTreeSet<_> = sends
-                    .iter()
-                    .filter(|o| !span.contains(&o.deliver_at))
-                    .chain(excused)
-                    .filter(near)
-                    .flat_map(|o| o.recipients.iter())
-                    .collect();
-                !m.recipients.iter().all(|r| elsewhere.contains(r))
-            });
-            let reach = counted
-                .flat_map(|m| m.recipients.iter())
+            let reach = members
+                .iter()
+                .filter(|(id, _)| !excused(*id))
+                .flat_map(|(_, m)| m.recipients.iter())
                 .collect::<BTreeSet<_>>()
                 .len();
             (reach, members)
@@ -3373,7 +3488,10 @@ fn days<'a>(
 }
 
 /// The most agents `sends` reach in any day, `excused` aside
-fn widest_day(sends: &[&super::Send], excused: &[&super::Send]) -> usize {
+fn widest_day(
+    sends: &[Sent<'_>],
+    excused: impl Fn(OperatorActionId) -> bool,
+) -> usize {
     days(sends, excused)
         .iter()
         .map(|(n, _)| *n)
@@ -3381,66 +3499,77 @@ fn widest_day(sends: &[&super::Send], excused: &[&super::Send]) -> usize {
         .unwrap_or(0)
 }
 
+/// D9's `|R_this|` term, restated: a send whose every recipient had already
+/// been delivered to, within 24 h of its `deliver_at`, when it was last
+/// counted, reaches no one new (Steward, 2026-11-14: only what went out
+/// counts). The time is the harness's, not the state's
+fn reached_already(
+    s: &AccountState,
+    h: &History,
+    send: OperatorActionId,
+) -> bool {
+    let (Some(m), Some(counted)) =
+        (s.sends.get(&send), h.counted_at.get(&send))
+    else {
+        return false;
+    };
+    let reached: BTreeSet<&AgentId> = h
+        .delivered_at
+        .iter()
+        .filter(|(o, at)| **o != send && *at <= counted)
+        .filter_map(|(o, _)| s.sends.get(o))
+        .filter(|o| (o.deliver_at - m.deliver_at).abs() <= Duration::hours(24))
+        .flat_map(|o| o.recipients.iter())
+        .collect();
+    m.recipients.iter().all(|r| reached.contains(r))
+}
+
 /// Across sends, on any event: what lands without having waited a hold reaches at
-/// most 5 agents in a day, unless a YubiKey tap free to send now did it, and
-/// never above 5 on a new account. Judged from the times, not the stored flag.
-/// The shortest hold, since a send's own depends on what the window was
+/// most 5 agents in a day, unless a YubiKey tap free to send now did it or they
+/// were [reached already](reached_already), and never above 5 on a new account.
+/// Judged from the times, not the stored flag. The shortest hold, since a send's
+/// own depends on what the window was
 fn no_fleet_goes_unheld(
     s: &AccountState,
     h: &History,
     now: DateTime<Utc>,
 ) -> Result<(), TestCaseError> {
-    let unheld: Vec<_> = s
+    let unheld: Vec<Sent<'_>> = s
         .sends
         .iter()
         .filter(|(_, m)| {
             m.state != SendState::Cancelled
                 && m.deliver_at < m.admitted_at + bulk_hold_floor()
         })
+        .map(|(id, m)| (*id, m))
         .collect();
-    let of = |free: bool| -> Vec<_> {
-        unheld
-            .iter()
-            .filter(|(id, _)| h.free_sends.contains(id) == free)
-            .map(|(_, m)| *m)
-            .collect()
-    };
-    let (free, unexcused) = (of(true), of(false));
-    // What else went out covers too: a send stored immediate, or a held one
-    // released (the oracle can't tell when, so it allows any time)
-    let went_out = s.sends.iter().filter(|(id, m)| {
-        m.state != SendState::Cancelled
-            && !unheld.iter().any(|(u, _)| u == id)
-            && (m.delivery == Delivery::Immediate
-                || m.state != SendState::Scheduled)
+    let widest = widest_day(&unheld, |id| {
+        h.free_sends.contains(&id) || reached_already(s, h, id)
     });
-    let cover: Vec<_> = free
-        .iter()
-        .copied()
-        .chain(went_out.map(|(_, m)| m))
-        .collect();
-    let widest = widest_day(&unexcused, &cover);
     prop_assert!(widest <= 5, "{} agents unheld in a day", widest);
     if s.new_account(now) {
-        let every: Vec<_> = unheld.iter().map(|(_, m)| *m).collect();
-        let all = widest_day(&every, &[]);
+        let all = widest_day(&unheld, |_| false);
         prop_assert!(all <= 5, "{} agents unheld on a new account", all);
     }
     Ok(())
 }
 
-/// Across sends, on any event: wherever a day's sends reach more than 5 agents,
-/// one of them was announced, with its cancel link if none of them can go now
-fn no_fleet_gathers_unannounced(s: &AccountState) -> Result<(), TestCaseError> {
-    let live: Vec<_> = s
+/// Across sends, on any event: wherever a day's sends reach more than 5 agents
+/// not [reached already](reached_already), one of them was announced
+fn no_fleet_gathers_unannounced(
+    s: &AccountState,
+    h: &History,
+) -> Result<(), TestCaseError> {
+    let live: Vec<Sent<'_>> = s
         .sends
-        .values()
-        .filter(|m| m.state != SendState::Cancelled)
+        .iter()
+        .filter(|(_, m)| m.state != SendState::Cancelled)
+        .map(|(id, m)| (*id, m))
         .collect();
-    for (reach, members) in days(&live, &[]) {
+    for (reach, members) in days(&live, |id| reached_already(s, h, id)) {
         if reach > 5 {
             prop_assert!(
-                members.iter().any(|m| m.announced),
+                members.iter().any(|(_, m)| m.announced),
                 "{} agents in a day, none announced",
                 reach
             );
@@ -3507,7 +3636,7 @@ fn check(a: &Applied, h: &mut History) -> Result<(), TestCaseError> {
     i42_no_suspend_strands(a)?;
     i43_a_new_account_sends_nothing_now(a)?;
     no_fleet_goes_unheld(a.post, h, a.now)?;
-    no_fleet_gathers_unannounced(a.post)?;
+    no_fleet_gathers_unannounced(a.post, h)?;
     prop_assert!(
         a.post.counted_passkeys() <= MAX_PASSKEYS + 1,
         "the cap: {} live",
@@ -6027,6 +6156,7 @@ fn a_later_move_into_immediate_reach_is_refused_on_a_new_account() {
 fn a_later_move_into_immediate_reach_is_refused_for_a_new_key() {
     let mut w = registered(DEVICE);
     w.contact(0);
+    w.s.settings.bulk_hold = Duration::hours(48);
     w.ok(pk_add(1, YUBIKEY), tap(0, TapKind::PasskeyAdd));
     w.ok(
         Event::SendAdmit {
@@ -6036,20 +6166,22 @@ fn a_later_move_into_immediate_reach_is_refused_for_a_new_key() {
         },
         tap(1, TapKind::Send),
     );
-    w.wait(Duration::hours(24) + Duration::minutes(51));
+    // Send 1 lands outside send 0's window, both immediate under a 48 h hold;
+    // the move brings send 0 beside it, still in the future
     w.ok(
         Event::SendAdmit {
             send: send_id(1),
             recipients: agents(100, 5),
-            when: When::Now,
+            when: When::At(t0() + Duration::hours(47)),
         },
         Authority::Session(sess(0)),
     );
+    assert_eq!(w.s.sends[&send_id(1)].delivery, Delivery::Immediate);
     assert!(matches!(
         w.try_do(
             Event::SendLater {
                 send: send_id(0),
-                deliver_at: t0() + Duration::minutes(55),
+                deliver_at: t0() + Duration::hours(24),
             },
             tap(1, TapKind::MoveSend),
         ),
@@ -6268,6 +6400,7 @@ fn a_new_key_cant_forward_a_large_send_even_to_a_held_time() {
 fn a_new_key_cant_move_an_older_keys_send_later_into_immediate_reach() {
     let mut w = registered(YUBIKEY);
     w.contact(0);
+    w.s.settings.bulk_hold = Duration::hours(48);
     w.ok(pk_add(1, DEVICE), tap(0, TapKind::PasskeyAdd));
     w.ok(pk_add(2, YUBIKEY), tap(1, TapKind::PasskeyAdd));
     w.ok(
@@ -6278,18 +6411,20 @@ fn a_new_key_cant_move_an_older_keys_send_later_into_immediate_reach() {
         },
         tap(0, TapKind::Send),
     );
-    w.wait(Duration::hours(24) + Duration::minutes(51));
+    // Send 1 lands outside send 0's window, both immediate under a 48 h hold;
+    // the move brings send 0 beside it, still in the future
     w.ok(
         Event::SendAdmit {
             send: send_id(1),
             recipients: agents(100, 5),
-            when: When::Now,
+            when: When::At(t0() + Duration::hours(47)),
         },
         Authority::Session(sess(0)),
     );
+    assert_eq!(w.s.sends[&send_id(1)].delivery, Delivery::Immediate);
     let later = Event::SendLater {
         send: send_id(0),
-        deliver_at: t0() + Duration::minutes(55),
+        deliver_at: t0() + Duration::hours(24),
     };
     assert!(matches!(
         w.try_do(later.clone(), tap(2, TapKind::MoveSend)),
