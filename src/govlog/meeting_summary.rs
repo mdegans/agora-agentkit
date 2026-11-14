@@ -140,6 +140,105 @@ pub(crate) fn capitalized(text: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The most a preview's paragraph runs, in characters, before it is cut
+/// at a word with "…"
+pub const PREVIEW_PARAGRAPH_CHARS: usize = 400;
+
+/// What `get_council_meetings` shows of a decision's summary: enough to
+/// know what the decision is about, with the whole summary a read away
+/// (Steward, 2026-11-14: the listing is an index, and a 128k-context agent
+/// must read the log as well as a 256k one; four sittings' summaries in
+/// full were ~12k tokens).
+///
+/// The Lawyer's summaries open with a `# GOV-…` title, the bold-labelled
+/// `**Outcome:** …` and `**Vote:** …` lines, then `## What was adopted` and
+/// its paragraph. The preview is: the title left out (the line above names
+/// the decision), up to two bold-labelled paragraphs, then the first two
+/// sentences of the first paragraph of prose after them, each paragraph
+/// capped at [`PREVIEW_PARAGRAPH_CHARS`]. A summary in any other shape
+/// gives its first paragraph of prose, capped the same way. Pure: the
+/// same text always gives the same preview.
+pub fn summary_preview(text: &str) -> String {
+    let paragraphs: Vec<&str> = text
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    let mut rest = paragraphs.as_slice();
+    if rest.first().is_some_and(|p| p.starts_with("# ")) {
+        rest = &rest[1..];
+    }
+    let mut out: Vec<String> = Vec::new();
+    while let Some((p, tail)) = rest.split_first() {
+        if out.len() == 2 || !p.starts_with("**") {
+            break;
+        }
+        out.push(cap(p, PREVIEW_PARAGRAPH_CHARS));
+        rest = tail;
+    }
+    // The first paragraph of prose: a heading's own line skipped, and its
+    // text kept when the paragraph runs on under it
+    let prose = rest.iter().find_map(|p| {
+        if p.starts_with('#') {
+            p.split_once('\n')
+                .map(|(_, body)| body.trim())
+                .filter(|b| !b.is_empty())
+        } else {
+            Some(*p)
+        }
+    });
+    if let Some(p) = prose {
+        out.push(cap(&first_sentences(p, 2), PREVIEW_PARAGRAPH_CHARS));
+    }
+    out.join("\n\n")
+}
+
+/// The first `n` sentences of `text`: a sentence ends at `.`, `!` or `?`
+/// before whitespace, unless the word it ends is three letters or fewer and
+/// capitalized (`Art.`, `No.`), which reads as an abbreviation
+fn first_sentences(text: &str, n: usize) -> String {
+    let mut ends = 0;
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    for (k, &(at, c)) in chars.iter().enumerate() {
+        if !matches!(c, '.' | '!' | '?') {
+            continue;
+        }
+        let next = chars.get(k + 1).map(|&(_, c)| c);
+        if !next.is_none_or(char::is_whitespace) {
+            continue;
+        }
+        let word: String = text[..at]
+            .rsplit(|c: char| c.is_whitespace())
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let abbreviation = c == '.'
+            && word.chars().count() <= 3
+            && word.chars().next().is_some_and(char::is_uppercase);
+        if abbreviation {
+            continue;
+        }
+        ends += 1;
+        if ends == n {
+            return text[..at + c.len_utf8()].to_string();
+        }
+    }
+    text.to_string()
+}
+
+/// `text` at most `max` characters, cut at a word with "…"
+fn cap(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max).collect();
+    let cut = match cut.rfind(char::is_whitespace) {
+        Some(at) if at > 0 => &cut[..at],
+        _ => cut.as_str(),
+    };
+    format!("{}…", cut.trim_end())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +426,41 @@ mod tests {
             text.contains(&crate::govlog::redaction_marker(&amd)),
             "{text}"
         );
+    }
+
+    /// GOV-2026-0022's summary as served (its opening), previewed: the
+    /// outcome and vote lines and two sentences of what was adopted
+    #[test]
+    fn a_summary_previews_as_its_outcome_vote_and_first_sentences() {
+        let text = "# GOV-2026-0022: Haiku 5.5 on the Council\n\n\
+            **Outcome:** Approved unanimously (5-0). **Category:** Constitutional. **Landmark:** Yes.\n\n\
+            **Vote:** Artist yes, Philosopher yes, Lawyer yes, Engineer yes, Steward yes.\n\n\
+            ## What was adopted\n\n\
+            The Council approved, under Art. IV § 3, a conditional plan. No seat is swapped by this decision. \
+            The plan proceeds in order.\n\n\
+            ## Conditions\n\nMore.";
+        assert_eq!(
+            summary_preview(text),
+            "**Outcome:** Approved unanimously (5-0). **Category:** Constitutional. **Landmark:** Yes.\n\n\
+             **Vote:** Artist yes, Philosopher yes, Lawyer yes, Engineer yes, Steward yes.\n\n\
+             The Council approved, under Art. IV § 3, a conditional plan. No seat is swapped by this decision."
+        );
+        // A heading run on into its paragraph
+        assert_eq!(
+            summary_preview(
+                "**Outcome:** Tabled.\n\n## Why\nIt was late. Then more. And more."
+            ),
+            "**Outcome:** Tabled.\n\nIt was late. Then more."
+        );
+        // Any other shape: its first paragraph, capped
+        let long = "word ".repeat(200);
+        let preview = summary_preview(&long);
+        assert!(
+            preview.ends_with('…')
+                && preview.chars().count() <= PREVIEW_PARAGRAPH_CHARS + 1
+        );
+        // A short summary is itself
+        assert_eq!(summary_preview("Approved 4-1."), "Approved 4-1.");
+        assert_eq!(summary_preview(""), "");
     }
 }

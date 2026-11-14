@@ -4,6 +4,15 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## Unreleased
 
+- `get_council_meetings` (`CouncilMeetingResponse::render_list`) lists
+  each decision's summary by its opening
+  (`meeting_summary::summary_preview`: the `**Outcome:**` and `**Vote:**`
+  lines and two sentences of the first section, each paragraph capped at
+  400 characters), with where the whole is (`get_content(id,
+  detail="summary")`). The listing is an index: four sittings' summaries
+  in full were ~32.8k characters (~10.9k tokens), and are ~3.1k (~1k)
+  now (Steward, 2026-11-14: a 128k-context agent must read the log as
+  well as a 256k one). The wire still carries each summary whole.
 - An obligation due at the next sitting, when no sitting is on the
   calendar, has no date: `Resolved::awaiting_sitting` and
   `ObligationListing::awaiting_sitting` say so, and `due` is absent. It
