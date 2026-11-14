@@ -3226,11 +3226,16 @@ fn i41_a_new_key_is_held(a: &Applied) -> Result<(), TestCaseError> {
 }
 
 /// For each 24 h span of `sends`, its members and their distinct recipients. A
-/// send whose recipients are all in others of its ±24 h window outside the span
-/// doesn't count: D9's `|R_this|` term, by which a chat with an agent already in
-/// the window never escalates, is the rule's and not a bypass (at worst 10 agents
-/// in a day, one side of the window and the other)
-fn days<'a>(sends: &[&'a super::Send]) -> Vec<(usize, Vec<&'a super::Send>)> {
+/// send whose recipients are all in others of its ±24 h window outside the span,
+/// or in `excused` sends anywhere in that window, doesn't count: D9's `|R_this|`
+/// term, by which a chat with an agent already in the window never escalates, is
+/// the rule's and not a bypass (at worst 10 agents in a day, one side of the
+/// window and the other). An excused send's agents were reached already, so a
+/// chat with them reaches no one new
+fn days<'a>(
+    sends: &[&'a super::Send],
+    excused: &[&super::Send],
+) -> Vec<(usize, Vec<&'a super::Send>)> {
     let day = Duration::hours(24);
     sends
         .iter()
@@ -3242,12 +3247,14 @@ fn days<'a>(sends: &[&'a super::Send]) -> Vec<(usize, Vec<&'a super::Send>)> {
                 .filter(|m| span.contains(&m.deliver_at))
                 .collect();
             let counted = members.iter().filter(|m| {
+                let near = |o: &&&super::Send| {
+                    (o.deliver_at - m.deliver_at).abs() <= day
+                };
                 let elsewhere: BTreeSet<_> = sends
                     .iter()
-                    .filter(|o| {
-                        !span.contains(&o.deliver_at)
-                            && (o.deliver_at - m.deliver_at).abs() <= day
-                    })
+                    .filter(|o| !span.contains(&o.deliver_at))
+                    .chain(excused)
+                    .filter(near)
                     .flat_map(|o| o.recipients.iter())
                     .collect();
                 !m.recipients.iter().all(|r| elsewhere.contains(r))
@@ -3261,9 +3268,13 @@ fn days<'a>(sends: &[&'a super::Send]) -> Vec<(usize, Vec<&'a super::Send>)> {
         .collect()
 }
 
-/// The most agents `sends` reach in any day
-fn widest_day(sends: &[&super::Send]) -> usize {
-    days(sends).iter().map(|(n, _)| *n).max().unwrap_or(0)
+/// The most agents `sends` reach in any day, `excused` aside
+fn widest_day(sends: &[&super::Send], excused: &[&super::Send]) -> usize {
+    days(sends, excused)
+        .iter()
+        .map(|(n, _)| *n)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Across sends, on any event: what lands without having waited a hold reaches at
@@ -3286,14 +3297,16 @@ fn no_fleet_goes_unheld(
     let of = |free: bool| -> Vec<_> {
         unheld
             .iter()
-            .filter(|(id, _)| free || !h.free_sends.contains(id))
+            .filter(|(id, _)| h.free_sends.contains(id) == free)
             .map(|(_, m)| *m)
             .collect()
     };
-    let unexcused = widest_day(&of(false));
-    prop_assert!(unexcused <= 5, "{} agents unheld in a day", unexcused);
+    let (free, unexcused) = (of(true), of(false));
+    let widest = widest_day(&unexcused, &free);
+    prop_assert!(widest <= 5, "{} agents unheld in a day", widest);
     if s.new_account(now) {
-        let all = widest_day(&of(true));
+        let every: Vec<_> = unheld.iter().map(|(_, m)| *m).collect();
+        let all = widest_day(&every, &[]);
         prop_assert!(all <= 5, "{} agents unheld on a new account", all);
     }
     Ok(())
@@ -3307,7 +3320,7 @@ fn no_fleet_gathers_unannounced(s: &AccountState) -> Result<(), TestCaseError> {
         .values()
         .filter(|m| m.state != SendState::Cancelled)
         .collect();
-    for (reach, members) in days(&live) {
+    for (reach, members) in days(&live, &[]) {
         if reach > 5 {
             prop_assert!(
                 members.iter().any(|m| m.announced),
