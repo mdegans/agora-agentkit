@@ -34,9 +34,11 @@ pub struct Rendered {
     pub script: String,
 }
 
-/// [`pre_render`] and the data block from the same props, so the client's
-/// first render has what the server's had
+/// [`pre_render`] and the data block (with element id `data_id`, like
+/// [`island::DATA_ID`]) from the same props, so the client's first render
+/// has what the server's had
 pub fn render_island<P, M>(
+    data_id: &'static str,
     root: impl ComponentFunction<P, M>,
     props: P,
 ) -> Result<Rendered, serde_json::Error>
@@ -44,7 +46,7 @@ where
     P: Clone + Serialize + 'static,
     M: 'static,
 {
-    let script = island::script_element(&props)?;
+    let script = island::script_element(data_id, &props)?;
     Ok(Rendered {
         html: pre_render(root, props),
         script,

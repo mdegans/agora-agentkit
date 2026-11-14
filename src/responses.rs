@@ -419,21 +419,6 @@ pub struct BanInfoResponse {
     pub constitution_refs: Vec<String>,
 }
 
-impl BanInfoResponse {
-    /// The suspension, in a line for a person (the `message` field is
-    /// written for agents on MCP)
-    pub fn human_summary(&self) -> &'static str {
-        match self.ban_source {
-            BanSource::Operator => {
-                "Your account is suspended: you can read, but not post"
-            }
-            BanSource::Agent => {
-                "Your operator poster is suspended: you can read, but not post"
-            }
-        }
-    }
-}
-
 /// Whether a suspension is at the operator level (cascades to all agents
 /// under the operator) or the agent level (affects only one specific
 /// agent). Serialized as lowercase — `"operator"` or `"agent"`.
@@ -1147,9 +1132,21 @@ impl PostResponse {
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
-        with_system(
-            provenance_labels(self.deleted, self.signed, self.via),
+        item_provenance_labels(
             self.deleted,
+            self.signed,
+            self.via,
+            self.agent_name.as_ref(),
+        )
+    }
+
+    /// What stands beside the author: [`author_labels`]
+    pub fn author_labels(&self) -> Vec<&'static str> {
+        author_labels(
+            self.author_kind,
+            self.deleted,
+            self.signed,
+            self.via,
             self.agent_name.as_ref(),
         )
     }
@@ -1206,9 +1203,21 @@ impl CommentResponse {
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
-        with_system(
-            provenance_labels(self.deleted, self.signed, self.via),
+        item_provenance_labels(
             self.deleted,
+            self.signed,
+            self.via,
+            self.agent_name.as_ref(),
+        )
+    }
+
+    /// What stands beside the author: [`author_labels`]
+    pub fn author_labels(&self) -> Vec<&'static str> {
+        author_labels(
+            self.author_kind,
+            self.deleted,
+            self.signed,
+            self.via,
             self.agent_name.as_ref(),
         )
     }
@@ -1226,15 +1235,36 @@ pub const SYSTEM_PROVENANCE: &str = "agora-system";
 /// [`provenance_labels`], which say how an item arrived, not who wrote it
 pub const OPERATOR_AUTHOR_LABEL: &str = "operator (human)";
 
-pub(crate) fn with_system(
-    mut labels: Vec<&'static str>,
+/// An item's provenance badges: [`provenance_labels`], with
+/// [`SYSTEM_PROVENANCE`] first for the platform's own account. What
+/// `provenance_labels` on a post or a comment returns
+pub fn item_provenance_labels(
     deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
     author: Option<&crate::names::AgentName>,
 ) -> Vec<&'static str> {
+    let mut labels = provenance_labels(deleted, signed, via);
     if !deleted && author.is_some_and(|a| a.as_str() == "system") {
         labels.insert(0, SYSTEM_PROVENANCE);
     }
     labels
+}
+
+/// Everything shown beside an item's author: who stands behind it
+/// ([`PosterKind::label`], "operator (human)") first, then how it arrived
+/// ([`item_provenance_labels`])
+pub fn author_labels(
+    kind: PosterKind,
+    deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
+    author: Option<&crate::names::AgentName>,
+) -> Vec<&'static str> {
+    kind.label()
+        .into_iter()
+        .chain(item_provenance_labels(deleted, signed, via, author))
+        .collect()
 }
 
 /// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):

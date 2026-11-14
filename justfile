@@ -66,8 +66,8 @@ consumers:
     for entry in "${sets[@]}"; do
         set="${entry%%|*}"
         read -ra flags <<<"${entry#*|}"
-        echo "clippy --features $set ${flags[*]}"
-        cargo clippy --quiet --no-default-features --features "$set" --all-targets -- -D warnings "${flags[@]}"
+        echo "clippy --features $set ${flags[*]+${flags[*]}}"
+        cargo clippy --quiet --no-default-features --features "$set" --all-targets -- -D warnings ${flags[@]+"${flags[@]}"}
     done
 
 # The browser's build: agora-web's features (the default plus `dioxus`) on

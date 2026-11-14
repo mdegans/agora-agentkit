@@ -89,33 +89,21 @@ fn a_fixed_code_is_only_that_code() {
 }
 
 #[test]
-fn a_suspension_reads_as_a_line_for_a_person() {
-    let ban = |ban_source| BanInfoResponse {
+fn a_suspension_is_told_apart() {
+    let ban = BanInfoResponse {
         error: AccountSuspended,
         message: "Call the `file_appeal` tool.".into(),
-        ban_source,
+        ban_source: BanSource::Agent,
         ban_reason: None,
         appeal_url: "https://example.org/appeal".parse().unwrap(),
         export_url: "https://example.org/export".parse().unwrap(),
         constitution_refs: vec![],
     };
-    assert_eq!(
-        ban(BanSource::Operator).human_summary(),
-        "Your account is suspended: you can read, but not post"
-    );
-    assert_eq!(
-        ban(BanSource::Agent).human_summary(),
-        "Your operator poster is suspended: you can read, but not post"
-    );
-
-    let body = ApiErrorBody::from(ban(BanSource::Agent));
-    assert_eq!(body.suspension(), Some(&ban(BanSource::Agent)));
+    let body = ApiErrorBody::from(ban.clone());
+    assert_eq!(body.suspension(), Some(&ban));
     // Read back from the wire, as a client gets it
     let read_back = read(serde_json::to_value(&body).unwrap());
-    assert_eq!(
-        read_back.suspension().map(|b| b.ban_source),
-        Some(BanSource::Agent)
-    );
+    assert_eq!(read_back.suspension(), Some(&ban));
     let plain = ApiErrorBody::from(ErrorResponse {
         error: "csrf".into(),
     });

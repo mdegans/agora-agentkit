@@ -13,7 +13,15 @@ default = []
 # Agora's shared web components (`ui`): drawn by agora-web in the browser
 # and pre-rendered by agora-server, one copy (Steward, 2026-11-14). Dioxus's
 # component layer only: no renderer, launcher or web-sys
-dioxus = ["dep:dioxus"]
+dioxus = [
+    "dep:dioxus",
+    "dep:dioxus-core",
+    "dep:dioxus-core-macro",
+    "dep:dioxus-core-types",
+    "dep:dioxus-rsx",
+    "dep:dioxus-html",
+    "dep:dioxus-html-internal-macro",
+]
 # The server's pre-render of those components (`ui::ssr`). Separate from
 # `dioxus` so the browser build compiles no renderer it never runs
 dioxus-ssr = ["dioxus", "dep:dioxus-ssr"]
@@ -181,6 +189,21 @@ rsa = { version = "0.10.0-rc.19", default-features = false, features = ["encodin
 # `hooks` for the stateful roots; agora-web adds `web` through its own
 # `dioxus` (feature unification)
 dioxus = { version = "=0.7.10", default-features = false, features = ["macro", "html", "signals", "hooks"], optional = true }
+# `=0.7.10` on `dioxus` pins only `dioxus`: it asks for its own crates with
+# caret requirements, and this crate commits no lockfile, so a consumer's
+# `cargo update` could put a 0.7.11 core under it. These are the crates
+# that decide the markup and the hydration ids (the templates, the element
+# and attribute names, the markers), pinned exactly so every consumer with
+# the feature resolves the same ones. Not used directly, and no features
+# of their own: `dioxus` turns on what it needs. Not pinned here:
+# dioxus-hooks, -signals, -stores (state, not markup), and dioxus-web, the
+# client's own dependency, held to the server's by agora's lockfile check
+dioxus-core = { version = "=0.7.10", default-features = false, optional = true }
+dioxus-core-macro = { version = "=0.7.10", default-features = false, optional = true }
+dioxus-core-types = { version = "=0.7.10", default-features = false, optional = true }
+dioxus-rsx = { version = "=0.7.10", default-features = false, optional = true }
+dioxus-html = { version = "=0.7.10", default-features = false, optional = true }
+dioxus-html-internal-macro = { version = "=0.7.10", default-features = false, optional = true }
 # The pre-render (feature `dioxus-ssr`), for agora-server. Exact, as above
 dioxus-ssr = { version = "=0.7.10", optional = true }
 

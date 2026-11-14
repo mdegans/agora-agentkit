@@ -12,7 +12,7 @@ use crate::{
     links::AgoraLink,
     names::{AgentName, CommunityName},
     requests::{GetFeedInput, GetProfileInput},
-    responses::{PostResponse, TestItem, provenance_labels, with_system},
+    responses::{PostResponse, TestItem, author_labels},
 };
 
 /// What a post card draws, and nothing else: no body (on the feed page the
@@ -45,18 +45,15 @@ pub struct PostCardView {
 }
 
 impl PostCardView {
-    /// What stands beside the author: who stands behind it ("operator
-    /// (human)"), then how it posted, as [`PostResponse::provenance_labels`]
+    /// What stands beside the author, as [`PostResponse::author_labels`]
     pub fn labels(&self) -> Vec<&'static str> {
-        self.author_kind
-            .label()
-            .into_iter()
-            .chain(with_system(
-                provenance_labels(self.deleted, self.signed, self.via),
-                self.deleted,
-                self.agent_name.as_ref(),
-            ))
-            .collect()
+        author_labels(
+            self.author_kind,
+            self.deleted,
+            self.signed,
+            self.via,
+            self.agent_name.as_ref(),
+        )
     }
 
     /// The author's name, or its id for a server that sent none
@@ -176,11 +173,14 @@ pub fn PostCard(post: PostCardView) -> Element {
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 pub enum FeedLoad {
     /// Not loaded yet: only a client without the server's data starts here
-    /// (a fresh mount); a server never draws it
+    /// (the dev build's fresh mount); a server never draws it
     Pending,
     /// A page of posts, newest first
     Loaded(Vec<PostCardView>),
-    /// Why they couldn't be loaded, in words for the page
+    /// Why they couldn't be loaded. Published as is in the page's public
+    /// HTML and data block, to every reader, crawlers included: words for
+    /// the public ("Agora couldn't be reached"), never an internal error,
+    /// a path or anything about the request
     Failed(String),
 }
 
@@ -245,8 +245,9 @@ pub fn RecentPosts(
                             if refreshing { "Refreshing…" } else { "Refresh" }
                         }
                     }
-                    for post in list {
-                        PostCard { key: "{post.id}", post }
+                    // Once each: the id is the key, and keys must be unique
+                    for post in unique(&list) {
+                        PostCard { key: "{post.id}", post: post.clone() }
                     }
                     p { style: "margin-top: 1rem;",
                         a { href: "{all_posts}", "All posts →" }
@@ -255,6 +256,15 @@ pub fn RecentPosts(
             }
         }
     }
+}
+
+/// `posts` without the repeats of an id, first one kept, in order. A page
+/// that lists a post twice (a feed that moved under its cursor) must not
+/// give Dioxus two children with one key: its keyed diff asserts they are
+/// unique
+fn unique(posts: &[PostCardView]) -> impl Iterator<Item = &PostCardView> {
+    let mut seen = std::collections::HashSet::new();
+    posts.iter().filter(move |post| seen.insert(post.id))
 }
 
 /// The feed island's data: its root's props, and what the server embeds

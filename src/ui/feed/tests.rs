@@ -1,4 +1,5 @@
 use super::*;
+use crate::names::CommunityName;
 use crate::ui::{
     island,
     ssr::{pre_render, render_island},
@@ -242,7 +243,8 @@ fn hostile_titles_and_errors_are_inert() {
         let page = FeedPage {
             feed: [post(hostile)].iter().collect(),
         };
-        let out = render_island(FeedIsland, page.clone()).unwrap();
+        let out =
+            render_island(island::DATA_ID, FeedIsland, page.clone()).unwrap();
         assert_eq!(out.html, plain_card.replace(PLAIN, &escaped(hostile)));
         assert_eq!(
             island_of(FeedLoad::Failed(hostile.into())),
@@ -271,7 +273,7 @@ fn the_island_round_trips_to_the_same_markup() {
     let page = FeedPage {
         feed: [post("A title"), post("Another")].iter().collect(),
     };
-    let out = render_island(FeedIsland, page.clone()).unwrap();
+    let out = render_island(island::DATA_ID, FeedIsland, page.clone()).unwrap();
     let inner = &out.script
         [r#"<script type="application/json" id="agora-app-data">"#.len()
             ..out.script.len() - "</script>".len()];
@@ -289,4 +291,283 @@ fn the_embedded_feed_is_the_cards() {
     let text = island::to_script_text(&page).unwrap();
     assert!(!text.contains("A body"), "{text}");
     assert!(text.contains(r#""state":"loaded""#), "{text}");
+}
+
+#[test]
+fn a_card_with_no_labels() {
+    let mut sent = post("A title");
+    sent.signed = None;
+    assert_eq!(
+        card(sent),
+        concat!(
+            r#"<article class="card card-flat post-card" data-node-hydration="0">"#,
+            r#"<div class="post-title"><!--placeholder1--><!--placeholder2-->"#,
+            r#"<a href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="3"><!--node-id4-->A title<!--#--></a></div>"#,
+            r#"<div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="5"><!--node-id6-->litmus<!--#--></a>"#,
+            r#"<!--placeholder7--><span>·</span>"#,
+            r#"<a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="8"><!--node-id9-->meta-governance<!--#--></a>"#,
+            r#"<span data-node-hydration="10">·</span><span data-node-hydration="11"><!--node-id12-->Nov 04, 2026<!--#--></span>"#,
+            r#"<span>·</span><span><!--node-id13-->3 comments<!--#--></span></div></article>"#,
+        )
+    );
+}
+
+#[test]
+fn a_card_with_its_proposal_and_test_badges() {
+    let mut sent = post("A title");
+    sent.is_proposal = true;
+    sent.test = Some(TestItem::default());
+    assert_eq!(
+        card(sent),
+        concat!(
+            r#"<article class="card card-flat post-card" data-node-hydration="0"><div class="post-title">"#,
+            r#"<span class="pill pill-green" style="font-size: 0.6875rem; margin-right: 0.25rem;" data-node-hydration="1">Proposal</span>"#,
+            r#"<span class="pill pill-provenance" style="font-size: 0.6875rem; margin-right: 0.25rem;" data-node-hydration="2"><!--node-id3-->TEST: a test sitting&#39;s item; not binding<!--#--></span>"#,
+            r#"<a href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="4"><!--node-id5-->A title<!--#--></a></div>"#,
+            r#"<div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="6"><!--node-id7-->litmus<!--#--></a>"#,
+            r#"<span class="pill pill-provenance" data-node-hydration="8"><!--node-id9-->ed25519<!--#--></span><span>·</span>"#,
+            r#"<a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="10"><!--node-id11-->meta-governance<!--#--></a>"#,
+            r#"<span data-node-hydration="12">·</span><span data-node-hydration="13"><!--node-id14-->Nov 04, 2026<!--#--></span>"#,
+            r#"<span>·</span><span><!--node-id15-->3 comments<!--#--></span></div></article>"#,
+        )
+    );
+}
+
+/// A community name in an `href` stays a path under `/agora/community/`,
+/// and only its two interpolations differ from a plain card's
+#[test]
+fn hostile_community_names_stay_in_their_path() {
+    let plain = card(post("T"));
+    let mut accepted = 0;
+    for name in [
+        r#""><script>alert(1)</script>"#,
+        "a?b#c",
+        "..",
+        "%2e%2e/%2e%2e",
+        "javascript:alert(1)",
+        "//evil.example/x",
+        "a b\tc\nd",
+        "x' onmouseover='alert(1)",
+        r"\\evil",
+        "ａ＜script＞",
+        "meta-governance-2",
+    ] {
+        let Ok(community) = CommunityName::new(name) else {
+            continue;
+        };
+        accepted += 1;
+        let mut sent = post("T");
+        sent.community_name = community.clone();
+        let html = card(&sent);
+        let at = html.find(r#"href="/agora/community/"#).expect(&html)
+            + r#"href=""#.len();
+        let href = &html[at..at + html[at..].find('"').unwrap()];
+        // As the browser reads the attribute (dioxus-ssr escapes `'`, `&`
+        // and `"` in it as references)
+        let read = href
+            .replace("&#39;", "'")
+            .replace("&#34;", "\"")
+            .replace("&#38;", "&");
+        assert!(
+            !read.contains(['<', '>', '"', ' ', '\n', '\t', '?', '#', '\\']),
+            "{read}"
+        );
+        assert!(!read["/agora/community/".len()..].contains('/'), "{read}");
+        let want = plain
+            .replace(
+                r#"href="/agora/community/meta-governance""#,
+                &format!(r#"href="{href}""#),
+            )
+            .replace(
+                ">meta-governance<",
+                &format!(">{}<", escaped(&community.to_string())),
+            );
+        assert_eq!(html, want, "{name:?}");
+    }
+    assert!(accepted >= 1);
+}
+
+#[test]
+fn a_refreshing_feed_says_so_and_disables_its_button() {
+    let render = |feed: FeedLoad| {
+        let mut dom = VirtualDom::new_with_props(
+            RecentPosts,
+            RecentPostsProps {
+                feed,
+                refreshing: true,
+                on_refresh: None,
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::pre_render(&dom)
+    };
+    let html = render([post("A title")].iter().collect());
+    assert!(
+        html.contains(r#"<button id="agora-refresh" class="pill pill-btn" type="button" disabled=true data-node-hydration="2,click:1"><!--node-id3-->Refreshing…<!--#--></button>"#),
+        "{html}"
+    );
+    let html = render(FeedLoad::Failed("e".into()));
+    assert!(
+        html.contains(r#"<button class="pill pill-btn" type="button" disabled=true data-node-hydration="3,click:1">Try again</button>"#),
+        "{html}"
+    );
+}
+
+/// The central claim: what a client provides (a handler, a `Reload`) never
+/// changes the markup, so the server, which provides neither, draws the
+/// client's first render
+#[test]
+fn a_handler_or_a_reload_changes_nothing_drawn() {
+    // A handler is made inside the runtime, in a component
+    #[component]
+    fn Harness(feed: FeedLoad, handler: bool) -> Element {
+        if handler {
+            rsx! { RecentPosts { feed, on_refresh: move |()| {} } }
+        } else {
+            rsx! { RecentPosts { feed } }
+        }
+    }
+    fn list(feed: FeedLoad, handler: bool) -> String {
+        pre_render(Harness, HarnessProps { feed, handler })
+    }
+    fn with_reload(feed: FeedLoad) -> String {
+        let mut dom = VirtualDom::new_with_props(FeedIsland, FeedPage { feed });
+        dom.provide_root_context(Reload::<FeedLoad>::new(|| {
+            Box::pin(async { FeedLoad::Pending })
+        }));
+        dom.rebuild_in_place();
+        dioxus_ssr::pre_render(&dom)
+    }
+    for feed in [
+        FeedLoad::Pending,
+        FeedLoad::Failed("e".into()),
+        FeedLoad::Loaded(vec![]),
+        [post("A"), post("B")].iter().collect(),
+    ] {
+        let server = island_of(feed.clone());
+        assert_eq!(with_reload(feed.clone()), server);
+        assert_eq!(list(feed.clone(), true), server);
+        assert_eq!(list(feed, false), server);
+    }
+}
+
+fn with_ids(titles: &[(&str, &str)]) -> Vec<PostResponse> {
+    titles
+        .iter()
+        .map(|(id, title)| {
+            let mut p = post(title);
+            p.id = id.parse().unwrap();
+            p
+        })
+        .collect()
+}
+
+const A: &str = "00000000-0000-4000-8000-00000000000a";
+const B: &str = "00000000-0000-4000-8000-00000000000b";
+
+#[test]
+fn a_post_listed_twice_is_drawn_once() {
+    let posts = with_ids(&[(A, "first"), (B, "other"), (A, "again")]);
+    let html = island_of(posts.iter().collect());
+    assert_eq!(html.matches("<article ").count(), 2, "{html}");
+    assert!(
+        html.contains(">first<") && !html.contains(">again<"),
+        "{html}"
+    );
+    assert!(html.find(">first<") < html.find(">other<"));
+}
+
+/// Drive a VirtualDom's effects and tasks until `done` or a budget runs out
+async fn settle(dom: &mut VirtualDom, done: impl Fn(&str) -> bool) -> String {
+    for _ in 0..20 {
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            dom.wait_for_work(),
+        )
+        .await;
+        dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        let html = dioxus_ssr::pre_render(dom);
+        if done(&html) {
+            return html;
+        }
+    }
+    dioxus_ssr::pre_render(dom)
+}
+
+/// A fresh mount (no server data) loads through the client's `Reload`
+/// after its first render, and a reload that lists a post twice re-renders
+/// (a keyed diff) without tripping Dioxus's unique-key assertion
+#[tokio::test]
+async fn a_fresh_mount_loads_through_its_reload() {
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = loads.clone();
+    let mut dom = VirtualDom::new_with_props(
+        FeedIsland,
+        FeedPage {
+            feed: FeedLoad::Pending,
+        },
+    );
+    dom.provide_root_context(Reload::<FeedLoad>::new(move || {
+        counted.set(counted.get() + 1);
+        Box::pin(async {
+            with_ids(&[(A, "loaded"), (B, "other"), (A, "again")])
+                .iter()
+                .collect()
+        })
+    }));
+    dom.rebuild_in_place();
+    let first = dioxus_ssr::pre_render(&dom);
+    assert!(first.contains("Loading posts"), "{first}");
+    let later = settle(&mut dom, |html| html.contains(">loaded<")).await;
+    assert!(later.contains(">loaded<"), "{later}");
+    assert_eq!(later.matches("<article ").count(), 2, "{later}");
+    assert_eq!(loads.get(), 1);
+}
+
+/// With the server's data, a client never loads on mount
+#[tokio::test]
+async fn a_hydrating_mount_does_not_load() {
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counted = loads.clone();
+    let mut dom = VirtualDom::new_with_props(
+        FeedIsland,
+        FeedPage {
+            feed: [post("server")].iter().collect(),
+        },
+    );
+    dom.provide_root_context(Reload::<FeedLoad>::new(move || {
+        counted.set(counted.get() + 1);
+        Box::pin(async { FeedLoad::Loaded(vec![]) })
+    }));
+    dom.rebuild_in_place();
+    let html = settle(&mut dom, |_| false).await;
+    assert!(html.contains(">server<"), "{html}");
+    assert_eq!(loads.get(), 0);
+}
+
+/// A list that lists a post twice, re-rendered as another such list: a
+/// keyed diff, where Dioxus asserts (in debug) that keys are unique
+#[tokio::test]
+async fn a_repeated_post_survives_a_keyed_diff() {
+    #[component]
+    fn Changing() -> Element {
+        let mut feed: Signal<FeedLoad> = use_signal(|| {
+            with_ids(&[(A, "a1"), (B, "b1"), (A, "a1 again")])
+                .iter()
+                .collect()
+        });
+        use_effect(move || {
+            feed.set(
+                with_ids(&[(B, "b2"), (A, "a2"), (B, "b2 again")])
+                    .iter()
+                    .collect(),
+            );
+        });
+        rsx! { RecentPosts { feed: feed() } }
+    }
+    let mut dom = VirtualDom::new(Changing);
+    dom.rebuild_in_place();
+    let html = settle(&mut dom, |html| html.contains(">b2<")).await;
+    assert_eq!(html.matches("<article ").count(), 2, "{html}");
+    assert!(html.find(">b2<") < html.find(">a2<"), "{html}");
 }
