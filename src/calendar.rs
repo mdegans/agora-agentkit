@@ -76,6 +76,9 @@ pub struct Resolved {
     /// does not: the obligation is due when the sitting sits, and sittings
     /// slip (migration 073). A date, or a sitting that is over, does.
     pub date_binds: bool,
+    /// Due at the next sitting, and none is on the calendar yet: there is
+    /// no date to give (`due` is `None`) until one is scheduled
+    pub awaiting_sitting: bool,
 }
 
 /// Every stored event and what pending means today
@@ -134,7 +137,9 @@ impl Calendar {
     ///
     /// - a date is itself;
     /// - `next_sitting` is the next sitting's date, and with none on the
-    ///   calendar, today: it is due as soon as one is held;
+    ///   calendar, undated and [`awaiting_sitting`](Resolved::awaiting_sitting):
+    ///   it is due as soon as one is held. (Before 0.161 it was today,
+    ///   which served "due around <today>", a date that moved every day.)
     /// - `sitting` is that event's date as it now stands; if the sitting
     ///   was called off, the obligation carries forward to the next one,
     ///   like `next_sitting`;
@@ -152,12 +157,11 @@ impl Calendar {
                 approximate: true,
                 sitting: Some(e.id),
                 date_binds: false,
+                awaiting_sitting: false,
             },
             None => Resolved {
-                due: Some(self.today),
-                approximate: true,
-                sitting: None,
-                date_binds: false,
+                awaiting_sitting: true,
+                ..Resolved::default()
             },
         };
         match until {
@@ -167,6 +171,7 @@ impl Calendar {
                 approximate: false,
                 sitting: None,
                 date_binds: true,
+                awaiting_sitting: false,
             },
             Some(Until::NextSitting) => next(),
             Some(Until::Sitting { event }) => match self.event(*event) {
@@ -176,6 +181,7 @@ impl Calendar {
                     approximate: true,
                     sitting: Some(e.id),
                     date_binds: !self.pending(e),
+                    awaiting_sitting: false,
                 },
                 None => Resolved::default(),
             },
@@ -327,6 +333,13 @@ impl ResolvedObligation {
         }
     }
 
+    /// Undated, for the due order: no date, and not merely waiting for a
+    /// sitting to be scheduled (that one is due as soon as one sits, so it
+    /// sorts ahead of every date, where "today" used to put it)
+    fn undated(&self) -> bool {
+        self.resolved.due.is_none() && !self.resolved.awaiting_sitting
+    }
+
     /// Discharged or withdrawn
     fn closed(&self) -> bool {
         !matches!(
@@ -347,14 +360,14 @@ impl ObligationSort {
             Self::Due => rows.sort_by(|a, b| {
                 (
                     a.closed(),
-                    a.resolved.due.is_none(),
+                    a.undated(),
                     a.resolved.due,
                     a.obligation.created_at,
                     &a.obligation.id,
                 )
                     .cmp(&(
                         b.closed(),
-                        b.resolved.due.is_none(),
+                        b.undated(),
                         b.resolved.due,
                         b.obligation.created_at,
                         &b.obligation.id,
@@ -393,6 +406,7 @@ impl From<ResolvedObligation> for ObligationListing {
             until: state.until,
             due: resolved.due,
             due_approximate: resolved.approximate,
+            awaiting_sitting: resolved.awaiting_sitting,
             overdue,
             lapsed_at: state.lapsed_at,
             plan: state.plan,
