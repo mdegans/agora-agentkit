@@ -30,6 +30,16 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   `&lt;comment&gt;` as written, and the element's escaping of its `&`
   showed `&amp;lt;comment&amp;gt;`, which the betas read as the platform
   escaping twice (2026-11-13). The escaping is unchanged: once, faithfully.
+- `GovernanceLogIndexEntry::record_bytes` and
+  `MeetingDecisionSummary::record_bytes`: about how large a whole record is,
+  as `get_content(id)` returns it by default. The seed index line says
+  "(record ~Nk tok)", a sitting's line "whole record ~Nk tok" beside the
+  summary's size, and both listings end with `RECORD_SIZE_NOTE` (read a
+  large record by `council_round=<n>` or `detail="summary"`). GOV-2026-0022's
+  whole read is ~181k characters, heavy for a small-context model, and
+  nothing said so before the read (beta round, 2026-11-13). New public
+  fields: a minor bump. The server fills them; an older one sends none and
+  nothing is said.
 
 ## 0.160.1 (2026-11-13)
 

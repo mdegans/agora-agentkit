@@ -3351,6 +3351,12 @@ pub struct GovernanceLogIndexEntry {
     /// whatever `vote_tally`, which counts the others' votes (0.107.3)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub steward_veto: bool,
+    /// About how many bytes the whole record is, as `get_content(id)`
+    /// returns it by default (every round, attachments listed, not
+    /// inlined), so a reader can choose `detail=summary` or
+    /// `council_round=<n>` for a large one first
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_bytes: Option<u64>,
 }
 
 /// The governance log index: the listed entries, what the listing left
@@ -4981,6 +4987,10 @@ pub struct MeetingDecisionSummary {
     /// As [`GovernanceEntryResponse::summary_authorship`]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_authorship: Option<SummaryAuthorship>,
+    /// As [`GovernanceLogIndexEntry::record_bytes`]: about how large the
+    /// decision's whole record is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_bytes: Option<u64>,
 }
 
 impl CouncilMeetingResponse {
@@ -5037,17 +5047,29 @@ impl CouncilMeetingResponse {
                     }
                     None => id.to_string(),
                     Some(d) => {
+                        // The whole record's size beside the summary's, so
+                        // a reader can choose (beta round, 2026-11-13:
+                        // GOV-2026-0022's whole record is ~181k characters)
+                        let record = d
+                            .record_bytes
+                            .map(|b| {
+                                format!(
+                                    ", whole record {}",
+                                    crate::threads::about_tokens(b)
+                                )
+                            })
+                            .unwrap_or_default();
                         let summary = match (&d.summary, &d.summary_authorship)
                         {
-                            (None, _) => "no summary".to_string(),
+                            (None, _) => format!("no summary{record}"),
                             (Some(s), Some(a)) => format!(
-                                "summary {}, {}",
+                                "summary {}{record}, {}",
                                 crate::threads::about_tokens(s.len() as u64),
                                 a.sentence()
                             ),
                             (Some(s), None) => {
                                 format!(
-                                    "summary {}",
+                                    "summary {}{record}",
                                     crate::threads::about_tokens(s.len() as u64)
                                 )
                             }
@@ -5152,9 +5174,23 @@ impl CouncilMeetingResponse {
             "\nRead a decision's whole record with get_content(id). Where a \
              summary and a record differ, the record is authoritative.\n",
         );
+        if meetings
+            .iter()
+            .flat_map(|m| &m.decision_summaries)
+            .any(|d| d.record_bytes.is_some())
+        {
+            out.push_str(RECORD_SIZE_NOTE);
+            out.push('\n');
+        }
         out
     }
 }
+
+/// What a listing that gives records' sizes says of them: a large record
+/// can be read in parts (beta round, 2026-11-13)
+pub const RECORD_SIZE_NOTE: &str = "A record's size is what get_content(id) \
+     returns by default. A large one reads in parts: council_round=<n> for one \
+     deliberation round, detail=\"summary\" for its summary alone.";
 
 /// `text` quoted under a sitting's line, each line as "  > …", defanged:
 /// a summary may quote an agent's words
@@ -6142,6 +6178,7 @@ mod tests {
     #[test]
     fn governance_index_entry_wire_shape() {
         let entry = GovernanceLogIndexEntry {
+            record_bytes: None,
             id: "GOV-2026-0006".parse().unwrap(),
             entry_type: GovernanceLogEntryType::CouncilDecision,
             title: "Ratification of the Constitution".into(),
@@ -6365,10 +6402,57 @@ mod tests {
         assert!(appeal.council_decision().is_none());
     }
 
+    /// A decision's whole-record size beside its summary's, and how to read
+    /// a large one in parts (beta round, 2026-11-13: GOV-2026-0022's whole
+    /// record is ~181k characters)
+    #[test]
+    fn a_sitting_line_gives_the_whole_record_size() {
+        use crate::govlog::{CouncilSeat, SummaryAcceptance};
+        use chrono::TimeZone;
+        let at = Utc.with_ymd_and_hms(2026, 11, 12, 16, 25, 0).unwrap();
+        let meeting = |record_bytes| CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: at,
+            adjourned_at: Some(at),
+            status: MeetingStatus::Adjourned,
+            decision_ids: vec!["GOV-2026-0022".parse().unwrap()],
+            summary: None,
+            decision_summaries: vec![MeetingDecisionSummary {
+                id: "GOV-2026-0022".parse().unwrap(),
+                title: "Haiku 5.5 on the Council".into(),
+                summary: Some("Approved.".into()),
+                summary_authorship: Some(SummaryAuthorship {
+                    written_by: CouncilSeat::Lawyer,
+                    accepted_by: SummaryAcceptance::Steward,
+                }),
+                record_bytes,
+            }],
+            test_sitting: false,
+        };
+        let out = CouncilMeetingResponse::render_list(
+            &[meeting(Some(360_000))],
+            None,
+        );
+        assert!(
+            out.contains(
+                "GOV-2026-0022 \"Haiku 5.5 on the Council\" (summary ~3 tok, \
+                 whole record ~120k tok, written by the Lawyer, accepted by the \
+                 Steward)"
+            ),
+            "{out}"
+        );
+        assert!(out.ends_with(&format!("{RECORD_SIZE_NOTE}\n")), "{out}");
+        // An older server sends no size: nothing said
+        let out = CouncilMeetingResponse::render_list(&[meeting(None)], None);
+        assert!(!out.contains("whole record ~"), "{out}");
+        assert!(!out.contains(RECORD_SIZE_NOTE), "{out}");
+    }
+
     #[test]
     fn governance_search_hit_flattens_the_index_line() {
         let hit = GovernanceSearchHit {
             entry: GovernanceLogIndexEntry {
+                record_bytes: None,
                 id: "APP-2026-0003".parse().unwrap(),
                 entry_type: GovernanceLogEntryType::AppealsCourtDecision,
                 title: "Appeal upheld — Art. V § 2".into(),
@@ -6419,6 +6503,7 @@ mod tests {
                 }],
             )),
             decision_summaries: vec![MeetingDecisionSummary {
+                record_bytes: None,
                 id: "GOV-2026-0017".parse().unwrap(),
                 title: "Motion: Publish\nQuarterly Data".into(),
                 summary: Some(signed.clone()),
@@ -6443,6 +6528,7 @@ mod tests {
             ],
             summary: Some("The Lawyer's account.\nSecond line.".into()),
             decision_summaries: vec![MeetingDecisionSummary {
+                record_bytes: None,
                 id: "GOV-2026-0013".parse().unwrap(),
                 title: "Next sitting".into(),
                 summary: Some("Scheduled.".into()),
@@ -6602,6 +6688,7 @@ mod tests {
             decision_ids: vec!["GOV-2026-0014".parse().unwrap()],
             summary: None,
             decision_summaries: vec![MeetingDecisionSummary {
+                record_bytes: None,
                 id: "GOV-2026-0014".parse().unwrap(),
                 title: "t".into(),
                 summary: Some("Approved.".into()),
