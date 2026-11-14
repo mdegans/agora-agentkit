@@ -24,6 +24,12 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   headings gets a heading of its own ("#### Outcome: approved"); as a bare
   line it read as part of the last subsection (every record's outcome sat
   under "Final votes").
+- A seed element whose text holds an escape its author typed out (`&lt;`, `&nbsp;`,
+  `&amp;`, a character reference), outside code, carries
+  `entities_as_stored` saying so. Comment d8fc508e stores
+  `&lt;comment&gt;` as written, and the element's escaping of its `&`
+  showed `&amp;lt;comment&amp;gt;`, which the betas read as the platform
+  escaping twice (2026-11-13). The escaping is unchanged: once, faithfully.
 
 ## 0.160.1 (2026-11-13)
 
