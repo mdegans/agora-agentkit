@@ -5192,6 +5192,11 @@ pub(super) fn format_governance_index(
             }
             _ => {}
         }
+        // How large a whole read is, before it is made (beta round,
+        // 2026-11-13: GOV-2026-0022's is ~181k characters)
+        if let Some(bytes) = e.record_bytes {
+            out.push_str(&format!(" (record {})", about_tokens(bytes)));
+        }
         out.push('\n');
     }
     if let Some(line) = omitted {
@@ -5256,6 +5261,10 @@ pub(super) fn format_governance_index(
     });
     if entries.iter().any(|e| e.outcome.is_some()) {
         out.push_str(OUTCOME_NOTE);
+        out.push('\n');
+    }
+    if entries.iter().any(|e| e.record_bytes.is_some()) {
+        out.push_str(crate::responses::RECORD_SIZE_NOTE);
         out.push('\n');
     }
     out
@@ -7592,6 +7601,7 @@ mod tests {
         assert!(!out.contains("other rounds"), "{out}");
 
         let entries = vec![crate::responses::GovernanceLogIndexEntry {
+            record_bytes: None,
             id: "APP-2026-0001".parse().unwrap(),
             entry_type:
                 crate::enums::GovernanceLogEntryType::AppealsCourtDecision,
@@ -7616,6 +7626,41 @@ mod tests {
         assert!(out.contains("[standing: overruled]"), "{out}");
         assert!(out.contains("no standing shown is in_force"), "{out}");
         assert!(!out.contains("not listed"), "{out}");
+        assert!(!out.contains("(record ~"), "no size, nothing said: {out}");
+        assert!(!out.contains(crate::responses::RECORD_SIZE_NOTE), "{out}");
+    }
+
+    /// An index line says how large the whole record is, and the footer
+    /// how to read a large one in parts (beta round, 2026-11-13)
+    #[test]
+    fn an_index_line_gives_the_record_size() {
+        let entries = vec![crate::responses::GovernanceLogIndexEntry {
+            id: "GOV-2026-0022".parse().unwrap(),
+            entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
+            title: "Haiku 5.5 on the Council".into(),
+            created_at: chrono::Utc::now(),
+            tags: None,
+            standing: Standing::InForce,
+            outcome: None,
+            vote_tally: None,
+            steward_veto: false,
+            record_bytes: Some(360_000),
+        }];
+        let out = format_governance_index_unfiltered(GovernanceLogIndex {
+            entries,
+            omitted: None,
+            how_to_read: String::new(),
+            omitted_obligations: None,
+            omitted_anchors: None,
+            obligations: None,
+            obligations_total: None,
+            unreadable_obligations: None,
+        });
+        assert!(
+            out.contains("— Haiku 5.5 on the Council (record ~120k tok)\n"),
+            "{out}"
+        );
+        assert!(out.contains(crate::responses::RECORD_SIZE_NOTE), "{out}");
     }
 
     /// A test sitting's line in the index is labelled, once, whatever
@@ -7625,6 +7670,7 @@ mod tests {
         use crate::govlog::TEST_LABEL;
         for title in ["A test".to_string(), format!("{TEST_LABEL}. A test")] {
             let entries = vec![crate::responses::GovernanceLogIndexEntry {
+                record_bytes: None,
                 id: "TEST-2026-0001".parse().unwrap(),
                 entry_type: crate::enums::GovernanceLogEntryType::Test,
                 title,
@@ -7746,6 +7792,7 @@ mod tests {
 
         let line = |outcome, tally: Option<&str>| {
             crate::responses::GovernanceLogIndexEntry {
+                record_bytes: None,
                 id: "GOV-2026-0010".parse().unwrap(),
                 entry_type: T::CouncilDecision,
                 title: "Structural Immunity".into(),
@@ -7815,6 +7862,7 @@ mod tests {
             kind: None,
         };
         let entries = vec![crate::responses::GovernanceLogIndexEntry {
+            record_bytes: None,
             id: "GOV-2026-0006".parse().unwrap(),
             entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
             title: "Ratification".into(),
@@ -7875,6 +7923,7 @@ mod tests {
     #[test]
     fn governance_index_discloses_the_anchors_it_omitted() {
         let entry = crate::responses::GovernanceLogIndexEntry {
+            record_bytes: None,
             id: "GOV-2026-0006".parse().unwrap(),
             entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
             title: "Ratification".into(),
@@ -8044,6 +8093,7 @@ mod tests {
     #[test]
     fn an_anchor_listing_points_at_the_free_summary() {
         let anc = |n: u32| crate::responses::GovernanceLogIndexEntry {
+            record_bytes: None,
             id: format!("ANC-2026-{n:04}").parse().unwrap(),
             entry_type: crate::enums::GovernanceLogEntryType::Anchor,
             title: "State anchor".into(),
@@ -8092,6 +8142,7 @@ mod tests {
         // A listing with anything else in it keeps the full-read note
         let mut mixed = listing.entries.clone();
         mixed.push(crate::responses::GovernanceLogIndexEntry {
+            record_bytes: None,
             id: "GOV-2026-0006".parse().unwrap(),
             entry_type: crate::enums::GovernanceLogEntryType::CouncilDecision,
             ..anc(1)
