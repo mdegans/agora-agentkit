@@ -143,18 +143,16 @@ pub struct AmendmentTexts {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<CommittedText>,
     /// Beside a `revision` of an amendment: the texts its patch commits the
-    /// amended amendment's next version to, each under its new salt (0.161).
-    /// Checked against the patch by [`Amendment::revised_texts`]
-    ///
-    /// [`Amendment::revised_texts`]: super::Amendment::revised_texts
+    /// amended amendment's next version to, each under its new salt, and
+    /// checked against the patch (0.161)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revised: Option<RevisedTexts>,
 }
 
 /// The texts a revision of an amendment commits that amendment's next
-/// version to: [`AmendmentTexts::revised`] (0.161). Its own shape, not an
-/// [`AmendmentTexts`]: a schema inlines every type, and one holding itself
-/// never ends
+/// version to, beside the revision (0.161)
+// Its own shape, not an `AmendmentTexts`: a schema inlines every type, and
+// one holding itself never ends
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]

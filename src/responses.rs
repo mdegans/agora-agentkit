@@ -3635,15 +3635,13 @@ impl OmittedKind {
     }
 }
 
-/// A Council decision's recusal determination in brief:
-/// [`GovernanceEntryResponse::recusal`] (0.161)
+/// A Council decision's recusal determination in brief (0.161)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 pub struct RecusalBrief {
     /// "Recusal: 0 of 4 seats found that the item limits the Steward's
-    /// powers; 3 needed; the Steward sat." See
-    /// [`StewardRecusal::result_line`](crate::govlog::StewardRecusal::result_line)
+    /// powers; 3 needed; the Steward sat."
     pub result: String,
     /// The determination's size in bytes, as JSON: what a
     /// `council_round=0` read adds to a context that holds the rest of the
@@ -3724,7 +3722,8 @@ pub struct GovernanceEntryResponse {
     /// A Council decision's recusal determination in brief: its result in a
     /// line, and its sizes. A `council_round=<n>` read (n ≥ 1) carries this
     /// line in place of the determination, which `council_round=0` reads
-    /// (0.161). Absent for a record without rounds, and from older servers
+    /// (0.161). Absent for an entry that is not a Council decision, and
+    /// from older servers
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recusal: Option<RecusalBrief>,
     /// The record, absent at `detail=summary` and narrowed when `round`
@@ -3783,7 +3782,7 @@ pub struct GovernanceEntryResponse {
     pub steward_veto: bool,
     /// Later entries that name this one. The entry itself is never edited
     /// — except its `data`, under a `redaction`. Each in a line (its note's
-    /// first sentence, [`AmendmentNotice::abridged`]) on every read but
+    /// first sentence, `abridged`) on every read but
     /// `detail=full_with_attachments`; its own read has the whole (0.161)
     #[serde(default)]
     pub amendments: Vec<AmendmentNotice>,
