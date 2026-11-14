@@ -136,10 +136,13 @@ pub(super) const AS_STORED_QUOTES: &str = "each backslash-n and backslash-quote 
 /// keeps a body from opening or closing an element is loosened. This says
 /// so. In words, not the characters themselves, which an attribute
 /// escapes too
-pub(super) const ENTITIES_AS_STORED: &str = "its author typed out each      ampersand escape in it (an ampersand, a name or number, a semicolon);      the platform escaped each ampersand once, as it does every ampersand,      so read each as the characters its author stored";
+pub(super) const ENTITIES_AS_STORED: &str = "its author typed out each \
+     ampersand escape in it (an ampersand, a name or number, a semicolon); \
+     the platform escaped each ampersand once, as it does every ampersand, \
+     so read each as the characters its author stored";
 
 /// Whether `body`'s text outside code holds an XML or HTML escape typed
-/// out: one of the five named ones, or a character reference
+/// out: a named one (XML's five, or HTML's), or a character reference
 fn holds_entities(body: &str) -> bool {
     let prose = outside_code(body);
     prose.match_indices('&').any(|(at, _)| {
@@ -148,7 +151,11 @@ fn holds_entities(body: &str) -> bool {
             return false;
         };
         let name = &rest[..end];
-        matches!(name, "lt" | "gt" | "amp" | "quot" | "apos")
+        // A named one, of XML's five or HTML's (`&nbsp;`, `&mdash;`): two
+        // or more letters and digits starting with a letter (`AT&T;` is not)
+        (name.len() >= 2
+            && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && name.chars().all(|c| c.is_ascii_alphanumeric()))
             || name
                 .strip_prefix("#x")
                 .or_else(|| name.strip_prefix("#X"))
@@ -317,9 +324,21 @@ mod tests {
             )
         );
         assert!(!ENTITIES_AS_STORED.contains('&'));
+        assert!(
+            !ENTITIES_AS_STORED.contains("  "),
+            "one space between words"
+        );
         // Still nothing in it can close the element
         assert_eq!(out.matches("</comment>").count(), 1, "{out}");
-        for typed in ["&#60;", "&#x3C;", "a &amp; b", "&quot;hi&quot;"] {
+        for typed in [
+            "&#60;",
+            "&#x3C;",
+            "a &amp; b",
+            "&quot;hi&quot;",
+            "&LT;",
+            "&mdash;",
+            "&nbsp;",
+        ] {
             let el = El {
                 body: Some(typed),
                 ..El::default()
@@ -333,7 +352,6 @@ mod tests {
         for plain in [
             "salt & pepper",
             "AT&T; and R&D",
-            "&nbsp; is HTML's, not one of these",
             "`&lt;b&gt;` in code",
             "```\n&amp;\n```",
         ] {
