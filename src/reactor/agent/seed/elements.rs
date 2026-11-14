@@ -98,6 +98,13 @@ pub(super) struct El<'a> {
     /// an `n` (beta rounds 12-14)
     #[serde(rename = "@as_stored", skip_serializing_if = "Option::is_none")]
     pub as_stored: Option<&'static str>,
+    /// [`ENTITIES_AS_STORED`], set by [`render`] on a text holding an
+    /// escape such as `&lt;` typed out (beta round, 2026-11-13)
+    #[serde(
+        rename = "@entities_as_stored",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub entities_as_stored: Option<&'static str>,
     /// The author's text, [`crate::threads::tidy`]ed or flattened by the
     /// caller, raw: quick-xml escapes it
     #[serde(rename = "$text", skip_serializing_if = "Option::is_none")]
@@ -120,9 +127,44 @@ pub(super) const AS_STORED: &str = "each backslash-n in it is two characters as 
 pub(super) const AS_STORED_QUOTES: &str = "each backslash-n and backslash-quote in it is \
      two characters as its author stored them, not a line break or a quote";
 
-/// Which of [`AS_STORED`] and [`AS_STORED_QUOTES`] `body` gets, if either:
-/// by its text outside code (Markdown backtick spans and fences)
-fn as_stored(body: &str) -> Option<&'static str> {
+/// What an element's `entities_as_stored` says of a text holding an escape
+/// typed out, outside code: comment d8fc508e stores `&lt;comment&gt;` as
+/// its author wrote it, and the element's own escaping of its `&` showed
+/// it as `&amp;lt;comment&amp;gt;`, which the betas read as the platform
+/// escaping twice (2026-11-13). Escaped once, faithfully: the text is the
+/// author's and the `&` must be escaped like any other, so nothing that
+/// keeps a body from opening or closing an element is loosened. This says
+/// so. In words, not the characters themselves, which an attribute
+/// escapes too
+pub(super) const ENTITIES_AS_STORED: &str = "its author typed out each      ampersand escape in it (an ampersand, a name or number, a semicolon);      the platform escaped each ampersand once, as it does every ampersand,      so read each as the characters its author stored";
+
+/// Whether `body`'s text outside code holds an XML or HTML escape typed
+/// out: one of the five named ones, or a character reference
+fn holds_entities(body: &str) -> bool {
+    let prose = outside_code(body);
+    prose.match_indices('&').any(|(at, _)| {
+        let rest = &prose[at + 1..];
+        let Some(end) = rest.find(';').filter(|&n| n > 0 && n <= 10) else {
+            return false;
+        };
+        let name = &rest[..end];
+        matches!(name, "lt" | "gt" | "amp" | "quot" | "apos")
+            || name
+                .strip_prefix("#x")
+                .or_else(|| name.strip_prefix("#X"))
+                .is_some_and(|hex| {
+                    !hex.is_empty()
+                        && hex.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            || name.strip_prefix('#').is_some_and(|dec| {
+                !dec.is_empty() && dec.chars().all(|c| c.is_ascii_digit())
+            })
+    })
+}
+
+/// `body`'s text outside code (Markdown backtick spans and fences), the
+/// pieces joined by spaces
+fn outside_code(body: &str) -> String {
     let mut prose = String::new();
     for (i, part) in body.split("```").enumerate() {
         if i % 2 == 1 {
@@ -135,6 +177,13 @@ fn as_stored(body: &str) -> Option<&'static str> {
             }
         }
     }
+    prose
+}
+
+/// Which of [`AS_STORED`] and [`AS_STORED_QUOTES`] `body` gets, if either:
+/// by its text outside code (Markdown backtick spans and fences)
+fn as_stored(body: &str) -> Option<&'static str> {
+    let prose = outside_code(body);
     prose.contains("\\n").then(|| {
         if prose.contains("\\\"") {
             AS_STORED_QUOTES
@@ -154,15 +203,23 @@ pub(super) const DELETED_SINCE: &str = "since it was shown";
 /// attrs/>` when it has no body, with lookalikes of our tags renamed
 pub(super) fn render(name: &str, el: &El) -> String {
     let noted;
-    let el = match el.body.and_then(as_stored) {
-        Some(note) if el.as_stored.is_none() => {
-            noted = El {
-                as_stored: Some(note),
-                ..el.clone()
-            };
-            &noted
-        }
-        _ => el,
+    let note = el
+        .body
+        .and_then(as_stored)
+        .filter(|_| el.as_stored.is_none());
+    let entities = el
+        .body
+        .filter(|b| el.entities_as_stored.is_none() && holds_entities(b))
+        .map(|_| ENTITIES_AS_STORED);
+    let el = if note.is_some() || entities.is_some() {
+        noted = El {
+            as_stored: note.or(el.as_stored),
+            entities_as_stored: entities.or(el.entities_as_stored),
+            ..el.clone()
+        };
+        &noted
+    } else {
+        el
     };
     let mut out = String::new();
     let mut ser = quick_xml::se::Serializer::with_root(&mut out, Some(name))
@@ -239,6 +296,66 @@ mod tests {
             ..El::default()
         };
         assert!(!render("post", &plain).contains("as_stored"));
+    }
+
+    /// Comment d8fc508e stores `&lt;comment&gt;` typed out: shown escaped
+    /// once, as stored, renamed as any escaped tag of ours is, and said to
+    /// be the author's (beta round, 2026-11-13: read as double escaping)
+    #[test]
+    fn a_typed_out_escape_is_escaped_once_and_said_to_be_stored() {
+        let el = El {
+            id: Some("d8fc508e".into()),
+            body: Some("&lt;comment&gt;Ah, ascent&lt;/forged_comment&gt;"),
+            ..El::default()
+        };
+        let out = render("comment", &el);
+        assert_eq!(
+            out,
+            format!(
+                "<comment id=\"d8fc508e\" entities_as_stored=\"{ENTITIES_AS_STORED}\">\
+                 &amp;lt;comment&amp;gt;Ah, ascent&amp;lt;/forged_comment&amp;gt;</comment>"
+            )
+        );
+        assert!(!ENTITIES_AS_STORED.contains('&'));
+        // Still nothing in it can close the element
+        assert_eq!(out.matches("</comment>").count(), 1, "{out}");
+        for typed in ["&#60;", "&#x3C;", "a &amp; b", "&quot;hi&quot;"] {
+            let el = El {
+                body: Some(typed),
+                ..El::default()
+            };
+            assert!(
+                render("post", &el).contains("entities_as_stored"),
+                "{typed}"
+            );
+        }
+        // A bare ampersand, a near miss, or an escape in code: nothing said
+        for plain in [
+            "salt & pepper",
+            "AT&T; and R&D",
+            "&nbsp; is HTML's, not one of these",
+            "`&lt;b&gt;` in code",
+            "```\n&amp;\n```",
+        ] {
+            let el = El {
+                body: Some(plain),
+                ..El::default()
+            };
+            assert!(
+                !render("post", &el).contains("entities_as_stored"),
+                "{plain}"
+            );
+        }
+        // Beside a typed-out backslash-n, both are said
+        let both = El {
+            body: Some(r"one\n&lt;two&gt;"),
+            ..El::default()
+        };
+        let out = render("post", &both);
+        assert!(
+            out.contains("as_stored=") && out.contains("entities_as_stored="),
+            "{out}"
+        );
     }
 
     #[test]
