@@ -6858,9 +6858,18 @@ fn record_object(
     obj: &serde_json::Map<String, serde_json::Value>,
     level: usize,
 ) {
+    // Once a field has opened headings, a line after it would read as part
+    // of the last subsection: GOV-2026-0022's "Recused: no" sat under the
+    // Engineer's recusal answer, and every record's "Outcome" under "Final
+    // votes" (beta round, 2026-11-13). Such a field gets a heading of its
+    // own, at this level.
+    let mut opened = false;
     for (key, value) in reading::ordered(obj) {
-        // Records from before the Steward revised them carry both.
-        if reading::repeats_rationale(obj, key) {
+        let heads = opens_headings(key, value);
+        if opened && !heads {
+            record_trailing(out, key, value, level);
+        } else if reading::repeats_rationale(obj, key) {
+            // Records from before the Steward revised them carry both.
             out.push_str(&format!(
                 "**{}:** identical to the rationale above\n",
                 reading::label(key)
@@ -6868,7 +6877,55 @@ fn record_object(
         } else {
             record_field(out, key, value, level);
         }
+        opened |= heads;
     }
+}
+
+/// Whether [`record_field`] renders `value` under headings
+fn opens_headings(key: &str, value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    reading::thinking(key, value).is_none()
+        && match value {
+            Value::Object(obj) => !obj.is_empty(),
+            Value::Array(items) => items.iter().any(Value::is_object),
+            _ => false,
+        }
+}
+
+/// A field that follows a sibling's headings, under a heading of its own:
+/// one line as the heading itself ("Outcome: approved"), anything longer
+/// under its label
+fn record_trailing(
+    out: &mut String,
+    key: &str,
+    value: &serde_json::Value,
+    level: usize,
+) {
+    use serde_json::Value;
+    let label = reading::label(key);
+    let one_line = match value {
+        Value::String(s) => !reading::is_prose(s),
+        Value::Array(items) => {
+            reading::thinking(key, value).is_none()
+                && !items
+                    .iter()
+                    .any(|v| v.as_str().is_some_and(reading::is_prose))
+        }
+        _ => true,
+    };
+    if !one_line {
+        record_heading(out, level, &label);
+        return record_field(out, key, value, level);
+    }
+    let text = match value {
+        Value::Array(items) if !items.is_empty() => items
+            .iter()
+            .map(|v| record_scalar(key, v))
+            .collect::<Vec<_>>()
+            .join("; "),
+        other => record_scalar(key, other),
+    };
+    record_heading(out, level, &format!("{label}: {text}"));
 }
 
 fn record_field(
@@ -6883,6 +6940,28 @@ fn record_field(
         return record_thinking(out, &thoughts);
     }
     match value {
+        // The seats' recusal determination: its result first, as a tally,
+        // then each seat's answer. Its `recused` is in the tally, so it is
+        // not repeated after the answers, where it read as the last seat's
+        // (beta round, 2026-11-13)
+        Value::Object(obj) if key == "steward_recusal" => {
+            record_heading(out, level, &label);
+            match serde_json::from_value::<crate::govlog::StewardRecusal>(
+                value.clone(),
+            ) {
+                Ok(recusal) => {
+                    out.push_str(&format!(
+                        "**Determination:** {}\n",
+                        recusal.tally_line()
+                    ));
+                    let mut rest = obj.clone();
+                    rest.remove("recused");
+                    record_object(out, &rest, level + 1);
+                }
+                // A shape this build does not know: every field as stored
+                Err(_) => record_object(out, obj, level + 1),
+            }
+        }
         Value::Object(obj) if !obj.is_empty() => {
             record_heading(out, level, &label);
             record_object(out, obj, level + 1);
@@ -8344,19 +8423,81 @@ mod tests {
         assert!(at("**Title:** A motion") < at("#### Round 1 — deliberation"));
         assert!(at("#### Round 1") < at("##### Lawyer — yes"));
         assert!(at("##### Lawyer — yes") < at("##### Artist — no"));
-        assert!(at("#### Final votes") < at("**Outcome:** approved"));
+        // After "Final votes" opened a heading, the outcome has its own:
+        // a bare line there read as one of the final votes
+        assert!(at("#### Final votes") < at("#### Outcome: approved"));
+        assert!(!out.contains("**Outcome:**"), "{out}");
         assert!(at("**Rationale:** Short.") < at("**Vote:** yes"));
         at("**Raw model output:** identical to the rationale above");
         at("**Raw model output:** No!");
         assert_eq!(out.matches("Short.").count(), 1, "not repeated:\n{out}");
-        at("**Constitutional refs:** Art. IV § 2; Art. V");
-        at("**Proof signed at:** 1700000000 (2023-11-14 22:13:20 UTC)");
-        at("**Ready:** yes");
+        at("#### Constitutional refs: Art. IV § 2; Art. V");
+        at("#### Proof signed at: 1700000000 (2023-11-14 22:13:20 UTC)");
+        at("#### Ready: yes");
         assert!(
-            at("**Outcome:**")
-                < at("**Redaction salt (`_blind`): not content:** `abab")
+            at("#### Outcome:")
+                < at("#### Redaction salt (`_blind`): not content: `abab")
         );
         assert!(!out.contains('{'), "no JSON:\n{out}");
+    }
+
+    /// GOV-2026-0022 round 1, as the betas read it (2026-11-13): "Recused:
+    /// no" sat under the Engineer's answer, after an empty line. The
+    /// determination now opens with its tally, and nothing of the record's
+    /// own reads as the last seat's
+    #[test]
+    fn a_recusal_determination_opens_with_its_tally() {
+        let vote = |seat: &str| {
+            serde_json::json!({
+                "seat": seat,
+                "reason": format!("The {seat}'s reason."),
+                "limits_steward_powers": false,
+            })
+        };
+        let data = serde_json::json!({
+            "steward_recusal": {
+                "votes": [vote("artist"), vote("philosopher"), vote("lawyer"), vote("engineer")],
+                "recused": false,
+            },
+            "final_votes": {"artist": "yes", "steward": "yes"},
+            "outcome": "approved",
+        });
+        let out = render_record(&data);
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from:\n{out}"))
+        };
+        assert!(
+            at(
+                "#### Steward recusal\n\n**Determination:** not recused: 0 of 4 \
+                seats found it limits the Steward's powers; 3 needed\n"
+            ) < at("##### Artist — does not limit")
+        );
+        assert!(!out.contains("Recused"), "said once, in the tally:\n{out}");
+        let engineer = &out[at("##### Engineer")..at("#### Final votes")];
+        assert_eq!(
+            engineer.trim_end(),
+            "##### Engineer — does not limit the Steward's powers\n\n\
+             **Seat:** engineer\n\
+             **Reason:** The engineer's reason.\n\
+             **Limits steward powers:** no"
+        );
+        at("#### Outcome: approved");
+        // Three of four recuse him
+        let mut recused = data.clone();
+        for v in recused["steward_recusal"]["votes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .take(3)
+        {
+            v["limits_steward_powers"] = true.into();
+        }
+        recused["steward_recusal"]["recused"] = true.into();
+        assert!(render_record(&recused).contains(
+            "**Determination:** recused: 3 of 4 seats found it limits the \
+             Steward's powers; 3 needed\n"
+        ));
     }
 
     /// A seat not yet ready reads "not yet": beside its vote, a bare "no"

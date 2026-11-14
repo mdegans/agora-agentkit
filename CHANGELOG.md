@@ -14,6 +14,16 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   at the next sitting (none is scheduled yet)". In the due order it leads
   the dates, where "today" used to put it, and it is never overdue, as
   before. A new public field on both structs: a minor bump.
+- A governance record's recusal determination opens with its result as a
+  tally, "**Determination:** not recused: 0 of 4 seats found it limits the
+  Steward's powers; 3 needed" (`StewardRecusal::tally_line`, `NEEDED`,
+  `affirmative`), and its `recused` is not repeated after the seats'
+  answers, where "Recused: no" read as the Engineer's (GOV-2026-0022,
+  beta round 2026-11-13).
+- In the seed prompt's record rendering, a field that follows a sibling's
+  headings gets a heading of its own ("#### Outcome: approved"); as a bare
+  line it read as part of the last subsection (every record's outcome sat
+  under "Final votes").
 
 ## 0.160.1 (2026-11-13)
 
