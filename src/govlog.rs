@@ -78,7 +78,7 @@ pub use crate::enums::{AmendmentKind, CitationRelation, KeyStatus, Standing};
 mod texts;
 pub use texts::{
     AmendmentText, AmendmentTextStatus, AmendmentTexts, CommittedText,
-    TextCommitment, TextStatus, WITHHELD_TEXT,
+    RevisedTexts, TextCommitment, TextStatus, WITHHELD_TEXT,
 };
 
 mod council;
@@ -733,6 +733,22 @@ pub enum AmendmentError {
          deadline change only through the obligation kinds"
     )]
     FixedObligationField(String),
+    #[error("kind `unknown`: this build does not know the amendment's kind")]
+    UnknownKind,
+    #[error(transparent)]
+    OfAmendment(#[from] AmendmentRevisionError),
+    #[error(
+        "kind `retracted` is only valid on an amendment, and {0} is not one"
+    )]
+    NotAnAmendment(GovernanceLogId),
+    #[error(
+        "{target} is an amendment of kind `{kind}`, which cannot be \
+         retracted; only a `correction` can"
+    )]
+    NotRetractable {
+        kind: AmendmentKind,
+        target: GovernanceLogId,
+    },
     #[error("amendment target {0} is not an entry of this chain")]
     UnknownTarget(GovernanceLogId),
     #[error("amendment target {0} is not an earlier entry")]
@@ -1010,6 +1026,7 @@ impl AmendmentDraft {
             k if k.is_obligation() => {
                 return Err(AmendmentError::MissingUpdate(k));
             }
+            AmendmentKind::Unknown => return Err(AmendmentError::UnknownKind),
             _ => {}
         }
         let (basis, note) = (basis.into(), note.into());
@@ -1031,6 +1048,7 @@ impl AmendmentDraft {
                 basis: Some(basis),
                 note: Some(note),
                 rationale: None,
+                revised: None,
             },
         })
     }
@@ -1106,6 +1124,7 @@ impl AmendmentDraft {
                     basis: Some(basis),
                     note: Some(note),
                     rationale: None,
+                    revised: None,
                 },
             },
             redacted,
@@ -1163,7 +1182,17 @@ impl AmendmentDraft {
                     | json_patch::PatchOperation::Replace(_)
             )
         });
-        if adds && latest.is_object() && latest.get(BLIND_KEY).is_none() {
+        // An amendment's texts are salted commitments already, and it has
+        // no blind to add: it is never redacted
+        let of_amendment = target_type == GovernanceLogEntryType::Amendment;
+        if of_amendment {
+            check_amendment_revision(latest, &patch)?;
+        }
+        if adds
+            && !of_amendment
+            && latest.is_object()
+            && latest.get(BLIND_KEY).is_none()
+        {
             patch.0.push(json_patch::PatchOperation::Add(
                 json_patch::AddOperation {
                     path: json_patch::jsonptr::PointerBuf::from_tokens([
@@ -1201,10 +1230,65 @@ impl AmendmentDraft {
                     basis: Some(basis),
                     note: Some(note),
                     rationale: None,
+                    revised: None,
                 },
             },
             revised,
         ))
+    }
+
+    /// A revision of the amendment `target`, whose latest version is
+    /// `latest`, replacing each text `texts` holds (0.161). The new texts
+    /// are committed to in the patch, each under its own salt, and travel
+    /// beside this entry as [`AmendmentTexts::revised`]; a version 1
+    /// amendment's are written into the patch as they are
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_revision(
+        target: GovernanceLogId,
+        target_entry_hash: Sha256Hex,
+        basis: impl Into<CommittedText>,
+        note: impl Into<CommittedText>,
+        latest: &serde_json::Value,
+        texts: AmendmentTexts,
+    ) -> Result<(Self, serde_json::Value), ReviseError> {
+        let mut ops = Vec::new();
+        let mut revised = RevisedTexts::default();
+        for (field, text, slot) in [
+            ("basis", &texts.basis, &mut revised.basis),
+            ("note", &texts.note, &mut revised.note),
+            ("rationale", &texts.rationale, &mut revised.rationale),
+        ] {
+            let Some(text) = text else { continue };
+            let plain = latest.get(field).is_some_and(|v| v.is_string());
+            let value = if plain {
+                serde_json::Value::String(text.text.clone())
+            } else {
+                *slot = Some(text.clone());
+                serde_json::to_value(AmendmentText::Committed(
+                    text.commitment(),
+                ))
+                .expect("a commitment always serializes")
+            };
+            ops.push(serde_json::json!({
+                "op": "replace", "path": format!("/{field}"), "value": value,
+            }));
+        }
+        let patch: json_patch::Patch =
+            serde_json::from_value(serde_json::Value::Array(ops))
+                .expect("replace ops always parse");
+        let (mut draft, next) = Self::revision(
+            target,
+            GovernanceLogEntryType::Amendment,
+            target_entry_hash,
+            basis,
+            note,
+            latest,
+            patch,
+        )?;
+        if !revised.is_empty() {
+            draft.texts.revised = Some(revised);
+        }
+        Ok((draft, next))
     }
 
     /// An amendment to an obligation, of the kind `update` is
@@ -1234,6 +1318,7 @@ impl AmendmentDraft {
                 basis: Some(basis),
                 note: Some(note),
                 rationale: None,
+                revised: None,
             },
         }
     }
@@ -1267,6 +1352,9 @@ impl Amendment {
             AMENDMENT_VERSION => false,
             other => return Err(AmendmentError::UnsupportedVersion(other)),
         };
+        if self.kind == AmendmentKind::Unknown {
+            return Err(AmendmentError::UnknownKind);
+        }
         let texts =
             [Some(&self.basis), Some(&self.note), self.rationale.as_ref()];
         if texts.into_iter().flatten().any(|t| t.is_plain() != plain) {
@@ -1352,6 +1440,53 @@ impl Amendment {
     }
 }
 
+impl Amendment {
+    /// Whether the texts `beside` a revision of an amendment as
+    /// [`AmendmentTexts::revised`] are the ones its patch commits to (0.161).
+    /// One withheld is lawful; one the patch commits to nothing for, or
+    /// another than it commits to, never is
+    pub fn revised_texts(
+        &self,
+        beside: Option<&AmendmentTexts>,
+    ) -> Result<(), AmendmentError> {
+        let Some(revised) = beside.and_then(|b| b.revised.as_ref()) else {
+            return Ok(());
+        };
+        let committed = |field: &str| {
+            self.revision.as_ref().and_then(|r| {
+                r.patch.iter().rev().find_map(|op| match op {
+                    json_patch::PatchOperation::Replace(op)
+                        if op.path.as_str() == format!("/{field}") =>
+                    {
+                        serde_json::from_value::<TextCommitment>(
+                            op.value.clone(),
+                        )
+                        .ok()
+                    }
+                    _ => None,
+                })
+            })
+        };
+        for (field, name) in [
+            ("basis", "revised basis"),
+            ("note", "revised note"),
+            ("rationale", "revised rationale"),
+        ] {
+            let Some(text) = revised.field(field) else {
+                continue;
+            };
+            match committed(field) {
+                None => return Err(AmendmentError::UncommittedText),
+                Some(c) if !c.matches(text) => {
+                    return Err(AmendmentError::TextMismatch(name));
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 /// What an amendment does to the [`Standing`] of the entry it names, when
 /// it changes it at all
 pub fn kind_standing(kind: AmendmentKind) -> Option<Standing> {
@@ -1368,7 +1503,9 @@ pub fn kind_standing(kind: AmendmentKind) -> Option<Standing> {
         | AmendmentKind::Discharged
         | AmendmentKind::Lapsed
         | AmendmentKind::Rescheduled
-        | AmendmentKind::Withdrawn => None,
+        | AmendmentKind::Withdrawn
+        | AmendmentKind::Retracted
+        | AmendmentKind::Unknown => None,
     }
 }
 
@@ -1524,10 +1661,82 @@ pub fn redact_data(
 
 /// Whether entries of this type can be revised. Those that cannot be
 /// [redacted](is_redactable) cannot, nor can a [`StewardRecord`]: it is
-/// the disclosure of what was done to the others.
+/// the disclosure of what was done to the others. An amendment can, in its
+/// free texts only ([`check_amendment_revision`], 0.161): fixing a note in
+/// place costs every later reader less than an amendment of it.
 pub fn is_revisable(entry_type: GovernanceLogEntryType) -> bool {
-    is_redactable(entry_type)
-        && entry_type != GovernanceLogEntryType::StewardRecord
+    entry_type == GovernanceLogEntryType::Amendment
+        || is_redactable(entry_type)
+            && entry_type != GovernanceLogEntryType::StewardRecord
+}
+
+/// The fields of an [`Amendment`] a [`Revision`] of it may replace: its free
+/// texts. Its kind, target, authority and everything a verifier or a
+/// standing acts on are fixed (0.161)
+pub const AMENDMENT_TEXT_FIELDS: [&str; 3] = ["/basis", "/note", "/rationale"];
+
+/// A [`Revision`] of an [`Amendment`] does more than replace its texts
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AmendmentRevisionError {
+    #[error(
+        "an amendment of kind `{0}` is never revised; only one that is not \
+         itself a revision or a redaction"
+    )]
+    Kind(AmendmentKind),
+    #[error(
+        "a revision of an amendment may only replace its basis, note or \
+         rationale, not touch `{0}`"
+    )]
+    FixedField(String),
+    #[error(
+        "a revision of an amendment replaces `{0}` with a text of another \
+         shape: a version 1 amendment's texts are plain, a version 2 one's \
+         commitments"
+    )]
+    TextShape(String),
+}
+
+/// Whether `patch` may revise an amendment of `kind` whose `data` is
+/// `amendment`: `replace` (or `test`) ops at [`AMENDMENT_TEXT_FIELDS`]
+/// only, each keeping the text's shape
+pub fn check_amendment_revision(
+    amendment: &serde_json::Value,
+    patch: &json_patch::Patch,
+) -> Result<(), AmendmentRevisionError> {
+    use json_patch::PatchOperation as Op;
+    let kind = amendment
+        .get("kind")
+        .and_then(|k| serde_json::from_value(k.clone()).ok())
+        .unwrap_or(AmendmentKind::Unknown);
+    if matches!(
+        kind,
+        AmendmentKind::Revision
+            | AmendmentKind::Redaction
+            | AmendmentKind::Unknown
+    ) {
+        return Err(AmendmentRevisionError::Kind(kind));
+    }
+    for op in patch.iter() {
+        let path = op.path().as_str();
+        let value = match op {
+            Op::Replace(r) if AMENDMENT_TEXT_FIELDS.contains(&path) => &r.value,
+            Op::Test(_) if AMENDMENT_TEXT_FIELDS.contains(&path) => continue,
+            _ => {
+                return Err(AmendmentRevisionError::FixedField(path.into()));
+            }
+        };
+        let plain = amendment.pointer(path).is_some_and(|v| v.is_string());
+        let same = match serde_json::from_value::<AmendmentText>(value.clone())
+        {
+            Ok(AmendmentText::Plain(_)) => plain,
+            Ok(AmendmentText::Committed(_)) => !plain,
+            Err(_) => false,
+        };
+        if !same {
+            return Err(AmendmentRevisionError::TextShape(path.into()));
+        }
+    }
+    Ok(())
 }
 
 /// A [`Revision`] cannot be made or applied as asked
@@ -1549,6 +1758,8 @@ pub enum ReviseError {
     NotRemoved(String),
     #[error("{0} entries are never revised")]
     NotRevisable(GovernanceLogEntryType),
+    #[error(transparent)]
+    OfAmendment(#[from] AmendmentRevisionError),
     #[error(
         "{0:?} is a number that is not a 64-bit integer; governance data \
          never contains one"
@@ -1907,6 +2118,15 @@ pub struct AmendmentNotice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<ObligationUpdate>,
     pub created_at: DateTime<Utc>,
+    /// The revisions of this amendment applied to what is shown, in chain
+    /// order: its texts are as they last revised them (0.161)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revised_by: Vec<GovernanceLogId>,
+    /// `note` is its first sentence, `basis` too, and `rationale` is left
+    /// out: a summary or a round read shows each amendment in a line, and
+    /// its own read (by `id`) has the whole (0.161)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub abridged: bool,
 }
 
 impl AmendmentNotice {
@@ -1931,8 +2151,157 @@ impl AmendmentNotice {
                 .map(|r| r.resolve(beside.rationale.as_ref()).into()),
             update: amendment.update.clone(),
             created_at,
+            revised_by: Vec::new(),
+            abridged: false,
         }
     }
+
+    /// This notice in a line: see [`abridged`](Self::abridged)
+    pub fn abridge(mut self) -> Self {
+        if !self.abridged {
+            self.note = crate::tools::first_sentence(&self.note).to_string();
+            self.basis = crate::tools::first_sentence(&self.basis).to_string();
+            self.rationale = None;
+            self.abridged = true;
+        }
+        self
+    }
+}
+
+/// An amendment as the log stores it: its signed `data`, parsed, and the
+/// texts beside it (0.161; agora's `StoredAmendment` before)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedAmendment {
+    pub id: GovernanceLogId,
+    pub created_at: DateTime<Utc>,
+    pub amendment: Amendment,
+    pub texts: Option<AmendmentTexts>,
+}
+
+impl LoggedAmendment {
+    /// Its notice, as first signed
+    pub fn notice(&self) -> AmendmentNotice {
+        AmendmentNotice::new(
+            self.id.clone(),
+            self.created_at,
+            &self.amendment,
+            self.texts.as_ref(),
+        )
+    }
+
+    /// This amendment as `later` leave it, in chain order, with the texts
+    /// they revise in: its latest version (see [`latest`]). `later` may name
+    /// other entries, which are passed over
+    pub fn latest(
+        &self,
+        later: &[LoggedAmendment],
+    ) -> Result<RevisedAmendment, ReviseError> {
+        let revisions: Vec<(
+            &GovernanceLogId,
+            &Revision,
+            Option<&RevisedTexts>,
+        )> = later
+            .iter()
+            .filter(|l| l.amendment.target == self.id)
+            .filter_map(|l| {
+                Some((
+                    &l.id,
+                    l.amendment.revision.as_ref()?,
+                    l.texts.as_ref().and_then(|t| t.revised.as_ref()),
+                ))
+            })
+            .collect();
+        let stored = serde_json::to_value(&self.amendment)
+            .expect("an amendment always serializes");
+        let data = latest(&stored, revisions.iter().map(|(_, r, _)| *r))?;
+        let amendment: Amendment = serde_json::from_value(data)
+            .map_err(|e| ReviseError::Patch(e.to_string()))?;
+        let texts = revisions.iter().fold(
+            self.texts.clone().unwrap_or_default(),
+            |texts, (_, _, revised)| match revised {
+                Some(revised) => texts.overlaid(revised),
+                None => texts,
+            },
+        );
+        Ok(RevisedAmendment {
+            amendment,
+            texts,
+            revised_by: revisions
+                .iter()
+                .map(|(id, _, _)| (*id).clone())
+                .collect(),
+        })
+    }
+}
+
+/// A [`LoggedAmendment`]'s latest version: see [`LoggedAmendment::latest`]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisedAmendment {
+    pub amendment: Amendment,
+    pub texts: AmendmentTexts,
+    /// The revisions applied, in chain order
+    pub revised_by: Vec<GovernanceLogId>,
+}
+
+/// An amendment its entry's reads leave out because a later one retracted
+/// it ([`AmendmentKind::Retracted`]): still in the chain, and read by its
+/// `id` (0.161)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct RetractedAmendment {
+    pub id: GovernanceLogId,
+    pub kind: AmendmentKind,
+    pub retracted_by: GovernanceLogId,
+}
+
+/// One entry's amendments as its reads show them: see [`amendment_list`]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AmendmentList {
+    /// In chain order, each at its latest version
+    pub notices: Vec<AmendmentNotice>,
+    pub retracted: Vec<RetractedAmendment>,
+}
+
+/// The notices of `naming`, the amendments naming one entry, given `later`,
+/// those naming any of them (0.161): each shown at its latest version,
+/// marked with the revisions that made it, and one a [`Retracted`] amendment
+/// names left out and listed instead. A revision of one that does not apply
+/// leaves it as first signed: the verifier reports it
+///
+/// [`Retracted`]: AmendmentKind::Retracted
+pub fn amendment_list(
+    naming: &[LoggedAmendment],
+    later: &[LoggedAmendment],
+) -> AmendmentList {
+    let mut list = AmendmentList::default();
+    for a in naming {
+        if let Some(by) = later.iter().find(|l| {
+            l.amendment.kind == AmendmentKind::Retracted
+                && l.amendment.target == a.id
+        }) {
+            list.retracted.push(RetractedAmendment {
+                id: a.id.clone(),
+                kind: a.amendment.kind,
+                retracted_by: by.id.clone(),
+            });
+            continue;
+        }
+        list.notices.push(match a.latest(later) {
+            Ok(latest) if !latest.revised_by.is_empty() => {
+                let mut notice = AmendmentNotice::new(
+                    a.id.clone(),
+                    a.created_at,
+                    &latest.amendment,
+                    Some(&latest.texts),
+                );
+                notice.revised_by = latest.revised_by;
+                notice
+            }
+            _ => a.notice(),
+        });
+    }
+    list
 }
 
 /// A later entry that names this one in its record, other than as an
@@ -3067,6 +3436,15 @@ fn amendment_target(
     if on_obligation && kind_standing(amendment.kind).is_some() {
         return Err(AmendmentError::PrecedentialOnObligation(amendment.kind));
     }
+    if amendment.kind == AmendmentKind::Retracted {
+        retraction_target(&amendment.target, target_link)?;
+    }
+    if target_link.entry_type == GovernanceLogEntryType::Amendment
+        && let (Some(revision), Some(data)) =
+            (&amendment.revision, &target_link.data)
+    {
+        check_amendment_revision(data, &revision.patch)?;
+    }
     if on_obligation
         && let Some(revision) = &amendment.revision
         && let Some(path) = revision_touches(revision, &OBLIGATION_FIXED)
@@ -3074,6 +3452,34 @@ fn amendment_target(
         return Err(AmendmentError::FixedObligationField(path.to_string()));
     }
     Ok(target)
+}
+
+/// Whether `link`, named `id`, is an amendment a [`Retracted`] one may
+/// name: a [`RETRACTABLE`] kind. Its `data` was hashed against its
+/// attestation when the walk reached it
+///
+/// [`Retracted`]: AmendmentKind::Retracted
+/// [`RETRACTABLE`]: AmendmentKind::RETRACTABLE
+fn retraction_target(
+    id: &GovernanceLogId,
+    link: &GovernanceChainLink,
+) -> Result<(), AmendmentError> {
+    if link.entry_type != GovernanceLogEntryType::Amendment {
+        return Err(AmendmentError::NotAnAmendment(id.clone()));
+    }
+    let kind = link
+        .data
+        .as_ref()
+        .and_then(|d| d.get("kind"))
+        .and_then(|k| serde_json::from_value::<AmendmentKind>(k.clone()).ok())
+        .unwrap_or(AmendmentKind::Unknown);
+    if !AmendmentKind::RETRACTABLE.contains(&kind) {
+        return Err(AmendmentError::NotRetractable {
+            kind,
+            target: id.clone(),
+        });
+    }
+    Ok(())
 }
 
 /// The key history as the walk discovers it
@@ -3458,6 +3864,9 @@ pub fn verify_chain(
             match amendment.text_status(link.texts.as_ref()) {
                 Ok(status) => texts = status,
                 Err(e) => problems.push(e.to_string()),
+            }
+            if let Err(e) = amendment.revised_texts(link.texts.as_ref()) {
+                problems.push(e.to_string());
             }
         } else if link.texts.as_ref().is_some_and(|t| !t.is_empty()) {
             problems.push(AmendmentError::UncommittedText.to_string());
@@ -3856,6 +4265,8 @@ mod tests {
             basis: fix("basis", &draft.texts.basis),
             note: fix("note", &draft.texts.note),
             rationale: fix("rationale", &draft.texts.rationale),
+            // Committed to in the patch, under their own salts
+            revised: draft.texts.revised.clone(),
         };
         let commit = |t: &Option<CommittedText>| {
             t.as_ref().map(|t| AmendmentText::Committed(t.commitment()))
@@ -4539,6 +4950,341 @@ mod tests {
         assert_eq!(
             standing([amendment.amendment.kind]),
             Standing::NonPrecedential
+        );
+    }
+
+    /// A correction, and a chain with it in: what a retraction or a
+    /// revision of it names
+    fn corrected(key: &SigningKey) -> (Chain, GovernanceLogId) {
+        let mut c = Chain::new();
+        let target = c.decision(key);
+        let correction = AmendmentDraft::new(
+            target,
+            c.hash_at(1),
+            AmendmentKind::Correction,
+            "Art. IV § 3",
+            "**Brought forward.** A long note, said at length.",
+        )
+        .unwrap();
+        let id = c.amend(key, &correction);
+        (c, id)
+    }
+
+    fn problems(c: &Chain, pk: &VerifyingKey) -> Vec<String> {
+        verify_chain(&c.links, pk, &anchored(pk), &roots())
+            .entries
+            .into_iter()
+            .filter_map(|e| e.problem)
+            .collect()
+    }
+
+    /// A correction is retracted by an amendment of its own kind, which
+    /// verifies; a retraction of anything else does not (0.161)
+    #[test]
+    fn a_retraction_names_a_correction_and_verifies() {
+        let (key, pk) = generate_keypair();
+        let (mut c, correction) = corrected(&key);
+        let retraction = AmendmentDraft::new(
+            correction.clone(),
+            c.hash_at(2),
+            AmendmentKind::Retracted,
+            "The Steward's decision of 2026-11-14",
+            "Retracted: the determination is now read first.",
+        )
+        .unwrap();
+        c.amend(&key, &retraction);
+        let report = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(report.ok, "{:?}", problems(&c, &pk));
+        assert_eq!(report.entries[1].amended_by, vec![amd(2)]);
+
+        // Of a decision: not an amendment
+        let mut c = Chain::new();
+        let target = c.decision(&key);
+        let wrong = AmendmentDraft::new(
+            target,
+            c.hash_at(1),
+            AmendmentKind::Retracted,
+            "b",
+            "n",
+        )
+        .unwrap();
+        c.amend(&key, &wrong);
+        assert!(
+            problems(&c, &pk)
+                .iter()
+                .any(|p| p.contains("only valid on an amendment")),
+            "{:?}",
+            problems(&c, &pk)
+        );
+
+        // Of a change of standing: not retractable, Reinstated undoes it
+        let mut c = Chain::new();
+        let target = c.decision(&key);
+        let overruled = AmendmentDraft::new(
+            target,
+            c.hash_at(1),
+            AmendmentKind::Overruled,
+            "b",
+            "n",
+        )
+        .unwrap();
+        let overruling = c.amend(&key, &overruled);
+        let wrong = AmendmentDraft::new(
+            overruling,
+            c.hash_at(2),
+            AmendmentKind::Retracted,
+            "b",
+            "n",
+        )
+        .unwrap();
+        c.amend(&key, &wrong);
+        assert!(
+            problems(&c, &pk)
+                .iter()
+                .any(|p| p.contains("`overruled`, which cannot be retracted")),
+            "{:?}",
+            problems(&c, &pk)
+        );
+    }
+
+    /// A kind this build does not know parses, as `unknown`, so a newer
+    /// log or read never fails to load; it never validates, never drafts
+    /// and never verifies (0.161)
+    #[test]
+    fn an_unknown_kind_parses_and_never_verifies() {
+        assert_eq!(
+            "rescinded_by_a_later_build"
+                .parse::<AmendmentKind>()
+                .unwrap(),
+            AmendmentKind::Unknown
+        );
+        assert!(!AmendmentKind::ALL.contains(&AmendmentKind::Unknown));
+        assert_eq!(
+            AmendmentDraft::new(
+                gov(1),
+                data_hash(&json!(1)),
+                AmendmentKind::Unknown,
+                "b",
+                "n"
+            ),
+            Err(AmendmentError::UnknownKind)
+        );
+        let (key, pk) = generate_keypair();
+        let (mut c, correction) = corrected(&key);
+        let mut data = c.links[1].data.clone().unwrap();
+        data["kind"] = "rescinded_by_a_later_build".into();
+        data["target"] = correction.to_string().into();
+        data["target_entry_hash"] = c.hash_at(2).to_string().into();
+        let texts = c.links[1].texts.clone();
+        c.amd += 1;
+        c.push(
+            &key,
+            amd(c.amd),
+            GovernanceLogEntryType::Amendment,
+            data,
+            true,
+        );
+        c.links.last_mut().unwrap().texts = texts;
+        assert!(
+            problems(&c, &pk)
+                .iter()
+                .any(|p| p.contains("does not know")),
+            "{:?}",
+            problems(&c, &pk)
+        );
+    }
+
+    /// An amendment's note is revised in place: the chain verifies, the
+    /// latest reads the new note and the original the old, and only its
+    /// texts may change (0.161)
+    #[test]
+    fn an_amendment_is_revised_in_its_texts_only() {
+        let (key, pk) = generate_keypair();
+        let (mut c, correction) = corrected(&key);
+        let original = c.links[1].data.clone().unwrap();
+        let (draft, next) = AmendmentDraft::text_revision(
+            correction.clone(),
+            c.hash_at(2),
+            "The Steward's decision of 2026-11-14",
+            "Fixes a sentence of the note.",
+            &original,
+            AmendmentTexts {
+                note: Some("**Brought forward.** Said right.".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(next["kind"], original["kind"]);
+        assert_ne!(next["note"], original["note"]);
+        let revision = c.amend(&key, &draft);
+        let report = verify_chain(&c.links, &pk, &anchored(&pk), &roots());
+        assert!(report.ok, "{:?}", problems(&c, &pk));
+        assert_eq!(report.entries[1].revisions, vec![revision.clone()]);
+
+        // The notice shows the latest note, marked; the original is the
+        // amendment as stored
+        let logged = |i: usize| LoggedAmendment {
+            id: c.links[i].id.clone(),
+            created_at: c.links[i].created_at,
+            amendment: serde_json::from_value(c.links[i].data.clone().unwrap())
+                .unwrap(),
+            texts: c.links[i].texts.clone(),
+        };
+        let (a, r) = (logged(1), logged(2));
+        assert_eq!(
+            a.notice().note,
+            "**Brought forward.** A long note, said at length."
+        );
+        let list =
+            amendment_list(std::slice::from_ref(&a), std::slice::from_ref(&r));
+        assert_eq!(list.notices[0].note, "**Brought forward.** Said right.");
+        assert_eq!(list.notices[0].revised_by, vec![revision.clone()]);
+        assert_eq!(list.notices[0].basis, "Art. IV § 3");
+        assert_eq!(
+            list.notices[0].clone().abridge().note,
+            "**Brought forward.**"
+        );
+
+        // Another text beside it than the patch commits to never verifies
+        let mut forged = c.links.clone();
+        if let Some(t) = forged[2].texts.as_mut() {
+            t.revised.as_mut().unwrap().note =
+                Some("**Brought forward.** Something else.".into());
+        }
+        let report = verify_chain(&forged, &pk, &anchored(&pk), &roots());
+        assert!(!report.ok);
+        assert!(
+            report.entries[2]
+                .problem
+                .as_deref()
+                .unwrap_or_default()
+                .contains("revised note"),
+            "{:?}",
+            report.entries[2].problem
+        );
+
+        // Refused: anything but its texts, and a text of another shape
+        let patch = |ops: serde_json::Value| -> json_patch::Patch {
+            serde_json::from_value(ops).unwrap()
+        };
+        for (ops, error) in [
+            (
+                json!([{"op": "replace", "path": "/kind", "value": "overruled"}]),
+                AmendmentRevisionError::FixedField("/kind".into()),
+            ),
+            (
+                json!([{"op": "replace", "path": "/target", "value": "GOV-2026-0002"}]),
+                AmendmentRevisionError::FixedField("/target".into()),
+            ),
+            (
+                json!([{"op": "add", "path": "/authority", "value": "GOV-2026-0002"}]),
+                AmendmentRevisionError::FixedField("/authority".into()),
+            ),
+            (
+                json!([{"op": "remove", "path": "/note"}]),
+                AmendmentRevisionError::FixedField("/note".into()),
+            ),
+            (
+                json!([{"op": "replace", "path": "/note", "value": "plain words"}]),
+                AmendmentRevisionError::TextShape("/note".into()),
+            ),
+        ] {
+            assert_eq!(
+                AmendmentDraft::revision(
+                    correction.clone(),
+                    GovernanceLogEntryType::Amendment,
+                    c.hash_at(2),
+                    "b",
+                    "n",
+                    &original,
+                    patch(ops),
+                )
+                .unwrap_err(),
+                ReviseError::OfAmendment(error)
+            );
+        }
+        // Nor is a revision revised
+        let revision_data = c.links[2].data.clone().unwrap();
+        assert_eq!(
+            AmendmentDraft::text_revision(
+                revision.clone(),
+                c.hash_at(3),
+                "b",
+                "n",
+                &revision_data,
+                AmendmentTexts {
+                    note: Some("x".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err(),
+            ReviseError::OfAmendment(AmendmentRevisionError::Kind(
+                AmendmentKind::Revision
+            ))
+        );
+        // ... and the verifier refuses one signed anyway
+        let mut c2 = c;
+        let sneaked = AmendmentDraft::new(
+            gov(1),
+            c2.hash_at(1),
+            AmendmentKind::Correction,
+            "b",
+            "n",
+        )
+        .unwrap();
+        let mut sneaked = sneaked;
+        sneaked.amendment.target = correction;
+        sneaked.amendment.target_entry_hash = c2.hash_at(2);
+        sneaked.amendment.kind = AmendmentKind::Revision;
+        sneaked.amendment.revision = Some(Revision {
+            patch: patch(
+                json!([{"op": "replace", "path": "/kind", "value": "overruled"}]),
+            ),
+            duplicates: Vec::new(),
+            resulting_data_hash: data_hash(&json!(null)),
+        });
+        c2.amend(&key, &sneaked);
+        assert!(
+            problems(&c2, &pk)
+                .iter()
+                .any(|p| p
+                    .contains("may only replace its basis, note or rationale")),
+            "{:?}",
+            problems(&c2, &pk)
+        );
+    }
+
+    /// A retracted amendment is left out of its entry's list and listed
+    /// instead, so nothing is hidden silently (0.161)
+    #[test]
+    fn a_retracted_amendment_is_listed_apart() {
+        let (key, _) = generate_keypair();
+        let (mut c, correction) = corrected(&key);
+        let retraction = AmendmentDraft::new(
+            correction.clone(),
+            c.hash_at(2),
+            AmendmentKind::Retracted,
+            "b",
+            "Retracted. More.",
+        )
+        .unwrap();
+        let by = c.amend(&key, &retraction);
+        let logged = |i: usize| LoggedAmendment {
+            id: c.links[i].id.clone(),
+            created_at: c.links[i].created_at,
+            amendment: serde_json::from_value(c.links[i].data.clone().unwrap())
+                .unwrap(),
+            texts: c.links[i].texts.clone(),
+        };
+        let list = amendment_list(&[logged(1)], &[logged(2)]);
+        assert!(list.notices.is_empty());
+        assert_eq!(
+            list.retracted,
+            vec![RetractedAmendment {
+                id: correction,
+                kind: AmendmentKind::Correction,
+                retracted_by: by,
+            }]
         );
     }
 
@@ -5228,8 +5974,9 @@ mod tests {
             ),
             Err(ReviseError::BlindPointer("/_blind".into()))
         );
+        // An amendment is, in its texts only (0.161): see
+        // `an_amendment_is_revised_in_its_texts_only`
         for entry_type in [
-            GovernanceLogEntryType::Amendment,
             GovernanceLogEntryType::KeyRotation,
             GovernanceLogEntryType::StewardRecord,
         ] {

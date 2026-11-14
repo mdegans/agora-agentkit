@@ -3635,6 +3635,27 @@ impl OmittedKind {
     }
 }
 
+/// A Council decision's recusal determination in brief:
+/// [`GovernanceEntryResponse::recusal`] (0.161)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct RecusalBrief {
+    /// "Recusal: 0 of 4 seats found that the item limits the Steward's
+    /// powers; 3 needed; the Steward sat." See
+    /// [`StewardRecusal::result_line`](crate::govlog::StewardRecusal::result_line)
+    pub result: String,
+    /// The determination's size in bytes, as JSON: what a
+    /// `council_round=0` read adds to a context that holds the rest of the
+    /// record. Absent when the record holds none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// What a `council_round=0` read holds, in bytes: the record with the
+    /// determination and no rounds. Absent when the record holds none
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_bytes: Option<u64>,
+}
+
 /// One of a governance entry's attachments, without its content
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -3700,6 +3721,12 @@ pub struct GovernanceEntryResponse {
     /// Empty from a server older than this field
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub round_read_bytes: Vec<u64>,
+    /// A Council decision's recusal determination in brief: its result in a
+    /// line, and its sizes. A `council_round=<n>` read (n ≥ 1) carries this
+    /// line in place of the determination, which `council_round=0` reads
+    /// (0.161). Absent for a record without rounds, and from older servers
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recusal: Option<RecusalBrief>,
     /// The record, absent at `detail=summary` and narrowed when `round`
     /// or `attachment` was given. The default read leaves the attachments'
     /// text out; only `detail=full_with_attachments` is verbatim (see
@@ -3755,9 +3782,15 @@ pub struct GovernanceEntryResponse {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub steward_veto: bool,
     /// Later entries that name this one. The entry itself is never edited
-    /// — except its `data`, under a `redaction`.
+    /// — except its `data`, under a `redaction`. Each in a line (its note's
+    /// first sentence, [`AmendmentNotice::abridged`]) on every read but
+    /// `detail=full_with_attachments`; its own read has the whole (0.161)
     #[serde(default)]
     pub amendments: Vec<AmendmentNotice>,
+    /// Amendments of this entry a later one retracted, left out of
+    /// `amendments`: each still in the chain and read by its id (0.161)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retracted_amendments: Vec<crate::govlog::RetractedAmendment>,
     /// Later entries whose records name this one other than as an
     /// amendment's target — a Steward's record about it, an amendment made
     /// under its authority — in chain order. (0.68)
@@ -3817,7 +3850,14 @@ impl GovernanceEntryResponse {
         }
         let rest = reads[0].checked_sub(rounds[0])?;
         let commas = rounds.len() as u64 - 1;
-        Some(rest + rounds.iter().sum::<u64>() + commas)
+        // A round read leaves the determination out (0.161): the whole
+        // record has it, its key and a comma
+        let recusal = self
+            .recusal
+            .as_ref()
+            .and_then(|r| r.bytes)
+            .map_or(0, |b| b + r#","steward_recusal":"#.len() as u64);
+        Some(rest + rounds.iter().sum::<u64>() + commas + recusal)
     }
 
     /// `original` or `latest`, for a revised record: which of its two
@@ -3851,6 +3891,21 @@ impl GovernanceEntryResponse {
         by_link: bool,
     ) -> Option<String> {
         let entry = self;
+        // The recusal determination, made before round 1 (0.161)
+        if round == Some(0) {
+            return match (entry.total_rounds, &entry.recusal) {
+                (None, _) => Some(format!(
+                    "council_round=0: {} has no deliberation rounds, nor a \
+                     recusal determination.",
+                    entry.id
+                )),
+                (Some(_), Some(r)) if r.bytes.is_none() => Some(format!(
+                    "council_round=0: {} holds no recusal determination.",
+                    entry.id
+                )),
+                _ => None,
+            };
+        }
         if let Some(n) = round {
             match entry.total_rounds {
                 Some(total) if (1..=total).contains(&n) => {}
@@ -5983,6 +6038,8 @@ mod tests {
             total_rounds: Some(3),
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -6230,6 +6287,8 @@ mod tests {
             total_rounds: Some(3),
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -6385,6 +6444,8 @@ mod tests {
             total_rounds: Some(3),
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: Some(data.clone()),
             round: None,
             attachments: Vec::new(),

@@ -142,11 +142,69 @@ pub struct AmendmentTexts {
     pub note: Option<CommittedText>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rationale: Option<CommittedText>,
+    /// Beside a `revision` of an amendment: the texts its patch commits the
+    /// amended amendment's next version to, each under its new salt (0.161).
+    /// Checked against the patch by [`Amendment::revised_texts`]
+    ///
+    /// [`Amendment::revised_texts`]: super::Amendment::revised_texts
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revised: Option<RevisedTexts>,
+}
+
+/// The texts a revision of an amendment commits that amendment's next
+/// version to: [`AmendmentTexts::revised`] (0.161). Its own shape, not an
+/// [`AmendmentTexts`]: a schema inlines every type, and one holding itself
+/// never ends
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct RevisedTexts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<CommittedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<CommittedText>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<CommittedText>,
+}
+
+impl RevisedTexts {
+    pub fn is_empty(&self) -> bool {
+        self.basis.is_none() && self.note.is_none() && self.rationale.is_none()
+    }
+
+    /// The text named by an amendment's top-level field
+    pub fn field(&self, name: &str) -> Option<&CommittedText> {
+        match name {
+            "basis" => self.basis.as_ref(),
+            "note" => self.note.as_ref(),
+            "rationale" => self.rationale.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 impl AmendmentTexts {
     pub fn is_empty(&self) -> bool {
-        self.basis.is_none() && self.note.is_none() && self.rationale.is_none()
+        self.basis.is_none()
+            && self.note.is_none()
+            && self.rationale.is_none()
+            && self.revised.is_none()
+    }
+
+    /// These texts with each one `later` holds in place of its own: an
+    /// amendment's texts after a revision of it
+    pub fn overlaid(mut self, later: &RevisedTexts) -> Self {
+        for (mine, theirs) in [
+            (&mut self.basis, &later.basis),
+            (&mut self.note, &later.note),
+            (&mut self.rationale, &later.rationale),
+        ] {
+            if theirs.is_some() {
+                mine.clone_from(theirs);
+            }
+        }
+        self
     }
 }
 

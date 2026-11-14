@@ -2121,9 +2121,10 @@ pub struct GetContentInput {
     )]
     #[cfg_attr(feature = "clap", arg(long))]
     pub detail: Option<DetailLevel>,
-    /// One deliberation round of a Council decision's record, from 1;
-    /// leave it out to read the whole record in one call. Not a session
-    /// or any other round
+    /// One deliberation round of a Council decision's record, from 1, or 0
+    /// for the recusal determination the seats made before round 1; leave
+    /// it out to read the whole record in one call. Not a session or any
+    /// other round
     // Beta round 13: named `round` through 0.152, which a fleet agent read
     // as its own session rounds being refused. `round` is still accepted,
     // deprecated (serde and clap aliases; agora:// links too), so no
@@ -2138,7 +2139,7 @@ pub struct GetContentInput {
     )]
     #[cfg_attr(
         feature = "schemars",
-        schemars(with = "Option<u64>", range(min = 1))
+        schemars(with = "Option<u64>", range(min = 0))
     )]
     #[cfg_attr(feature = "clap", arg(long, alias = "round"))]
     pub council_round: Option<u64>,
@@ -2559,7 +2560,8 @@ impl ReadOption {
                  read gives"
             }
             ReadOption::Round => {
-                "council_round reads one deliberation round of a Council decision"
+                "council_round reads one deliberation round of a Council \
+                 decision, or 0 its recusal determination"
             }
             ReadOption::Attachment => {
                 "attachment reads one attachment of a governance entry, or one \
@@ -2850,11 +2852,6 @@ impl GetContentInput {
                 &[],
                 hidden,
             ));
-        }
-        if self.council_round == Some(0) {
-            return Some(
-                "council_round=0: deliberation rounds count from 1".into(),
-            );
         }
         if let Some(budget) = self.comment_budget {
             let bounds = target.comment_budget_bounds();
