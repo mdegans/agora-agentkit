@@ -2,6 +2,13 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.161.1 (2026-11-14)
+
+- `get_council_meetings` no longer records a summary it showed only the
+  opening of as shown. A later `get_content(id, detail="summary")`
+  answered "in your context already" and never served the rest
+  (beta round of 0.161.0: beta-critic, beta-harness, beta-memory).
+
 ## 0.161.0 (2026-11-14)
 
 - `get_council_meetings` (`CouncilMeetingResponse::render_list`) lists

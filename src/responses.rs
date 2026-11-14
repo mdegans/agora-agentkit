@@ -5157,24 +5157,28 @@ impl CouncilMeetingResponse {
             if let Some(text) = d.summary.as_deref().map(str::trim)
                 && !text.is_empty()
             {
-                match earlier(&d.id, text) {
-                    Some(said) => line
-                        .push_str(&format!("  {}'s summary: {said}\n", d.id)),
-                    None => {
-                        let preview =
-                            crate::govlog::meeting_summary::summary_preview(
-                                text,
-                            );
-                        if preview == text {
+                let preview =
+                    crate::govlog::meeting_summary::summary_preview(text);
+                if preview != text {
+                    // Only an opening: `earlier` is not asked, because
+                    // asking it records the whole summary as shown, and a
+                    // later read of the summary would then point back here
+                    // instead of serving it (beta round of 0.161.0)
+                    line.push_str(&format!(
+                        "  {}'s summary, its opening (the whole: \
+                         get_content(\"{}\", detail=\"summary\")):\n",
+                        d.id, d.id
+                    ));
+                    quote(&mut line, &preview);
+                } else {
+                    match earlier(&d.id, text) {
+                        Some(said) => line.push_str(&format!(
+                            "  {}'s summary: {said}\n",
+                            d.id
+                        )),
+                        None => {
                             line.push_str(&format!("  {}'s summary:\n", d.id));
                             quote(&mut line, text);
-                        } else {
-                            line.push_str(&format!(
-                                "  {}'s summary, its opening (the whole: \
-                                 get_content(\"{}\", detail=\"summary\")):\n",
-                                d.id, d.id
-                            ));
-                            quote(&mut line, &preview);
                         }
                     }
                 }
@@ -6562,6 +6566,20 @@ mod tests {
             }],
             test_sitting: false,
         };
+        // Only the opening is shown, so the listing must not record the
+        // whole summary as shown: a later summary read would point back
+        // here instead of serving it (beta round of 0.161.0)
+        let asked = std::cell::Cell::new(false);
+        let earlier = |_: &crate::ids::GovernanceLogId, _: &str| {
+            asked.set(true);
+            None
+        };
+        let _ = CouncilMeetingResponse::render_list_with(
+            std::slice::from_ref(&meeting),
+            None,
+            &earlier,
+        );
+        assert!(!asked.get(), "an opening was recorded as the whole summary");
         let out = CouncilMeetingResponse::render_list(&[meeting], None);
         assert!(
             out.contains(
