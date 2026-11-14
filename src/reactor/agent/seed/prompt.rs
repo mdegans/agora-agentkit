@@ -6866,14 +6866,22 @@ fn record_object(
     let mut opened = false;
     for (key, value) in reading::ordered(obj) {
         let heads = opens_headings(key, value);
-        if opened && !heads {
-            record_trailing(out, key, value, level);
-        } else if reading::repeats_rationale(obj, key) {
+        if reading::repeats_rationale(obj, key) {
             // Records from before the Steward revised them carry both.
-            out.push_str(&format!(
-                "**{}:** identical to the rationale above\n",
-                reading::label(key)
-            ));
+            let label = reading::label(key);
+            if opened {
+                record_heading(
+                    out,
+                    level,
+                    &format!("{label}: identical to the rationale above"),
+                );
+            } else {
+                out.push_str(&format!(
+                    "**{label}:** identical to the rationale above\n"
+                ));
+            }
+        } else if opened && !heads {
+            record_trailing(out, key, value, level);
         } else {
             record_field(out, key, value, level);
         }
@@ -6914,8 +6922,20 @@ fn record_trailing(
         _ => true,
     };
     if !one_line {
+        // The heading is the label: the body follows bare, not under a
+        // second "**Label:**"
         record_heading(out, level, &label);
-        return record_field(out, key, value, level);
+        match value {
+            Value::String(s) => out.push_str(&format!("{}\n\n", s.trim_end())),
+            Value::Array(items) if reading::thinking(key, value).is_none() => {
+                for item in items {
+                    out.push_str(&format!("- {}\n", record_scalar(key, item)));
+                }
+                out.push('\n');
+            }
+            _ => record_field(out, key, value, level),
+        }
+        return;
     }
     let text = match value {
         Value::Array(items) if !items.is_empty() => items
@@ -8498,6 +8518,47 @@ mod tests {
             "**Determination:** recused: 3 of 4 seats found it limits the \
              Steward's powers; 3 needed\n"
         ));
+    }
+
+    /// Review of the trailing headings: a prose field after headings reads
+    /// under its own heading with its label once, a raw_text that repeats
+    /// the rationale still says so, and a determination with a refused
+    /// turn says how many answered
+    #[test]
+    fn trailing_fields_read_once_under_their_own_heading() {
+        let data = serde_json::json!({
+            "final_votes": {"artist": "yes"},
+            "remarks": "A long note.\nIt has two lines and runs well past any token's shape.",
+        });
+        let out = render_record(&data);
+        assert!(
+            out.contains("#### Remarks\n\nA long note.\nIt has two lines"),
+            "{out}"
+        );
+        assert_eq!(out.matches("Remarks").count(), 1, "label once:\n{out}");
+        let seat = serde_json::json!({"rounds": [{"number": 1, "responses": [{
+            "role": "lawyer", "rationale": "Same.",
+            "questions": [{"for": "steward", "question": "Why?"}],
+            "raw_text": "Same.",
+        }]}]});
+        let out = render_record(&seat);
+        assert!(out.contains("identical to the rationale above"), "{out}");
+        assert_eq!(out.matches("Same.").count(), 1, "{out}");
+        let recusal: crate::govlog::StewardRecusal =
+            serde_json::from_value(serde_json::json!({
+                "votes": [
+                    {"seat": "artist", "reason": "r", "limits_steward_powers": false},
+                    {"seat": "lawyer", "reason": "r", "limits_steward_powers": false},
+                    {"seat": "engineer", "reason": "r", "limits_steward_powers": true},
+                ],
+                "recused": false,
+            }))
+            .unwrap();
+        assert_eq!(
+            recusal.tally_line(),
+            "not recused: 1 of 4 seats found it limits the Steward's powers \
+             (3 answered); 3 needed"
+        );
     }
 
     /// A seat not yet ready reads "not yet": beside its vote, a bare "no"

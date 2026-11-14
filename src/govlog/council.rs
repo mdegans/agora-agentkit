@@ -365,17 +365,24 @@ impl StewardRecusal {
 
     /// The determination in one line, as a record's reader sees it:
     /// "not recused: 0 of 4 seats found it limits the Steward's powers;
-    /// 3 needed". `recused` is what the record says, never recomputed
+    /// 3 needed". Counted against the four, as the rule is; when fewer
+    /// answered (a refused turn), it says how many did. `recused` is what
+    /// the record says, never recomputed
     pub fn tally_line(&self) -> String {
+        let seats = CouncilSeat::ALL.len();
+        let answered = if self.votes.len() < seats {
+            format!(" ({} answered)", self.votes.len())
+        } else {
+            String::new()
+        };
         format!(
-            "{}: {} of {} seats found it limits the Steward's powers; {} needed",
+            "{}: {} of {seats} seats found it limits the Steward's powers{answered}; {} needed",
             if self.recused {
                 "recused"
             } else {
                 "not recused"
             },
             self.affirmative(),
-            CouncilSeat::ALL.len(),
             Self::NEEDED,
         )
     }
