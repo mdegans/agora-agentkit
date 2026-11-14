@@ -1642,7 +1642,9 @@ fn option_values(name: &str) -> String {
     match name {
         "detail" => "summary, full or full_with_attachments".into(),
         "council_round" | "round" => {
-            "a deliberation round's number, from 1".into()
+            "a deliberation round's number, from 1, or 0 for the recusal \
+             determination"
+                .into()
         }
         "version" => "latest or original (for the Constitution, a version \
                       number like 0.3)"

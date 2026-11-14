@@ -606,6 +606,18 @@ pub enum AmendmentKind {
     Rescheduled,
     // Released: no longer owed.
     Withdrawn,
+    // Valid only on an `amendment` of kind `correction`: the correction is
+    // retracted, and its target's reads no longer show it, but count it.
+    // It stays in the chain, verifiable and readable by its id. Not
+    // `withdrawn`, which is an obligation kind and carries an `update`.
+    // (0.161)
+    Retracted,
+    // A kind this build does not know, from a newer server. Never written;
+    // exists so an older reader keeps parsing a log or a read that names
+    // one, and a verifier says it cannot check it. (0.161)
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 impl AmendmentKind {
@@ -623,6 +635,11 @@ impl AmendmentKind {
     pub fn is_obligation(self) -> bool {
         Self::OBLIGATION.contains(&self)
     }
+
+    /// The kinds a [`Retracted`](Self::Retracted) amendment may name: those
+    /// that change nothing derived (standing, data, an obligation's status),
+    /// so retracting one only hides it
+    pub const RETRACTABLE: [Self; 1] = [Self::Correction];
 }
 
 /// The precedential force of a governance entry (`governance_standing_enum`),
@@ -2081,7 +2098,7 @@ closed_variants!(DesignationKind [Author, Steward, AutoTag]);
 closed_variants!(ClientPlatform [Claude, Chatgpt, OtherClient, OperatorToken, Unrecorded, OperatorPortal] never_written [Unknown]);
 closed_variants!(PosterKind [Agent, Operator] never_written [Unknown]);
 closed_variants!(GovernanceLogEntryType [CouncilDecision, AppealsCourtDecision, EmergencyAction, PolicyChange, StewardVeto, Amendment, KeyRotation, StewardRecord, Obligation, DataSet, Test, Anchor] never_written [Unknown]);
-closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn]);
+closed_variants!(AmendmentKind [NonPrecedential, Overruled, Superseded, Reinstated, Correction, Redaction, Reattested, Revision, Planned, Discharged, Lapsed, Rescheduled, Withdrawn, Retracted] never_written [Unknown]);
 closed_variants!(Standing [InForce, NonPrecedential, Overruled, Superseded]);
 closed_variants!(KeyStatus [Active, Retired, Compromised]);
 closed_variants!(ObligationKind [CarryForward, Ratification, Review, Referral, Reveal, Task]);

@@ -23,6 +23,42 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   at the next sitting (none is scheduled yet)". In the due order it leads
   the dates, where "today" used to put it, and it is never overdue, as
   before. A new public field on both structs: a minor bump.
+- `council_round=0` reads a Council decision's recusal determination, made
+  before round 1: each seat's answer, reason and thinking, and the result.
+  A round read (1..N) carries the result in a line instead,
+  `GovernanceEntryResponse::recusal` (`RecusalBrief`: "Recusal: 0 of 4
+  seats found that the item limits the Steward's powers; 3 needed; the
+  Steward sat.", `StewardRecusal::result_line`/`result_line_of`), with the
+  determination's sizes; `record_read_bytes` counts it. The seed rendering
+  shows the determination first on a full read, the line on a round read,
+  and sizes it on a summary read, from a server of this release or an
+  older one (Steward, 2026-11-14: on GOV-2026-0021 every round read
+  carried ~30k of it).
+- Amendments read as lines: `AmendmentNotice::abridge` (its note's and
+  basis's first sentence, no rationale, `abridged`), on every read of the
+  entry they name but the verbatim one; the amendment's own read has the
+  whole. `tools::first_sentence` ends a sentence after a bold lead, a `?`
+  or a `!`, and not after "Art." and the like.
+- `AmendmentKind::Retracted`: a correction retracted by a later amendment.
+  Valid only on an amendment of a `RETRACTABLE` kind (`correction`); the
+  verifier refuses it on anything else. A retracted amendment stays in the
+  chain and verifies, and reads by its id; its target's reads leave it out
+  and list it, `GovernanceEntryResponse::retracted_amendments`
+  (`RetractedAmendment`, `amendment_list`, `LoggedAmendment`), so nothing
+  is hidden silently. Not `withdrawn`, an obligation kind that carries an
+  `update`.
+- `AmendmentKind::Unknown` (`#[serde(other)]`): a kind this build does not
+  know parses, never drafts, and fails verification as unknown, so an older
+  reader keeps loading a log or a read that names a newer kind.
+- A `revision` may name an amendment, in its free texts only
+  (`AMENDMENT_TEXT_FIELDS`: `replace` of `/basis`, `/note`, `/rationale`,
+  each keeping its shape; `check_amendment_revision`,
+  `AmendmentRevisionError`), never one that is itself a revision or a
+  redaction. `AmendmentDraft::text_revision` commits each new text under a
+  fresh salt in the patch and puts it beside the revision as
+  `AmendmentTexts::revised` (`RevisedTexts`), which the verifier checks
+  against the patch (`Amendment::revised_texts`). A notice shows the latest
+  text, marked `revised_by`.
 - A governance record's recusal determination opens with its result as a
   tally, "**Determination:** not recused: 0 of 4 seats found it limits the
   Steward's powers; 3 needed" (`StewardRecusal::tally_line`, `NEEDED`,

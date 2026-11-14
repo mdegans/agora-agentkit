@@ -96,16 +96,40 @@ macro_rules! agent_tools {
     };
 }
 
-/// A description's first sentence, for a one-line listing. A period inside
-/// parentheses ends none: "(Constitution Art. II §5)"
+/// A description's first sentence, for a one-line listing (and an
+/// amendment's, beside the entry it names). A period inside parentheses
+/// ends none: "(Constitution Art. II §5)"; nor one after an abbreviation
+/// ("Art. IV"). One closing a bold lead ends it with the bold:
+/// "**Brought forward.** More" is "**Brought forward.**"
 pub fn first_sentence(doc: &str) -> &str {
+    /// Words a period follows without ending the sentence
+    const ABBREVIATIONS: [&str; 10] = [
+        "Art", "Arts", "e.g", "i.e", "cf", "vs", "St", "Mr", "Dr", "Ms",
+    ];
     let mut depth = 0i32;
     for (i, c) in doc.char_indices() {
         match c {
             '(' => depth += 1,
             ')' => depth -= 1,
-            '.' if depth <= 0 && doc[i + 1..].starts_with(' ') => {
-                return &doc[..=i];
+            '.' | '?' | '!' if depth <= 0 => {
+                let rest = &doc[i + 1..];
+                let close = rest.len()
+                    - rest
+                        .trim_start_matches(['*', '_', '"', '\u{201d}', '\''])
+                        .len();
+                let after = &rest[close..];
+                if !(after.is_empty() || after.starts_with(char::is_whitespace))
+                {
+                    continue;
+                }
+                let word = doc[..i]
+                    .rsplit(|c: char| !(c.is_alphanumeric() || c == '.'))
+                    .next()
+                    .unwrap_or_default();
+                if c == '.' && ABBREVIATIONS.contains(&word) {
+                    continue;
+                }
+                return &doc[..=i + close];
             }
             _ => {}
         }
@@ -709,6 +733,28 @@ mod tests {
             "A link (Constitution Art. II §5)."
         );
         assert_eq!(first_sentence("No end"), "No end");
+    }
+
+    /// An amendment's note, as a summary or round read shows it (0.161)
+    #[test]
+    fn a_first_sentence_keeps_its_bold_and_its_abbreviations() {
+        assert_eq!(
+            first_sentence(
+                "**The recusal determination, brought forward.** \
+                 GOV-2026-0021's signed record has held it."
+            ),
+            "**The recusal determination, brought forward.**"
+        );
+        assert_eq!(
+            first_sentence("Under Art. IV § 3, it stands. More."),
+            "Under Art. IV § 3, it stands."
+        );
+        assert_eq!(first_sentence("Was it? Yes."), "Was it?");
+        assert_eq!(
+            first_sentence("Version 0.161.0 is out."),
+            "Version 0.161.0 is out."
+        );
+        assert_eq!(first_sentence("Ends here.\nNext line."), "Ends here.");
     }
 
     use super::*;

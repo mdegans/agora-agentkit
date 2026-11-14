@@ -5750,10 +5750,32 @@ pub(super) fn format_governance_entry_once(
         }
     }
     let mut notes = String::new();
-    for a in &entry.amendments {
+    // Each in a line, its note's first sentence: GOV-2026-0021's seven
+    // corrections ran to ~9.7k chars on every read (Steward, 2026-11-14).
+    // Its own read has the whole
+    for whole_notice in &entry.amendments {
+        let a = whole_notice.clone().abridge();
+        // Never cut silently: a correction often states the error first
+        // and the fix after it (review of agentkit#305)
+        let cut = whole_notice.abridged
+            || a.note != whole_notice.note
+            || whole_notice.rationale.is_some();
+        let whole = match (cut, cues.links) {
+            (false, _) => String::new(),
+            (true, true) => format!(
+                " (first sentence; `{}` reads it whole)",
+                crate::links::AgoraLink::from(a.id.clone())
+            ),
+            (true, false) => format!(
+                " (first sentence; get_content(\"{}\") reads it whole)",
+                a.id
+            ),
+        };
         notes.push_str(&format!(
-            "**{} {} ({})**: {}{}{}\n",
-            if a.kind.is_obligation() {
+            "**{} {} ({})**: {}{}{}{}{}\n",
+            if a.kind == AmendmentKind::Retracted {
+                "Retracted by"
+            } else if a.kind.is_obligation() {
                 "Updated by"
             } else {
                 "Amended by"
@@ -5765,6 +5787,17 @@ pub(super) fn format_governance_entry_once(
                 Some(authority) => format!(" (authority: {authority})"),
                 None => String::new(),
             },
+            match a.revised_by.as_slice() {
+                [] => String::new(),
+                by => format!(
+                    " (revised by {})",
+                    by.iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+            whole,
             match a.kind {
                 AmendmentKind::Revision if cues.links => format!(
                     " — `{}` shows what it changed",
@@ -5775,6 +5808,23 @@ pub(super) fn format_governance_entry_once(
                     .to_string(),
                 _ => String::new(),
             },
+        ));
+    }
+    // Never silently: a retracted amendment is left out, and counted
+    if !entry.retracted_amendments.is_empty() {
+        let n = entry.retracted_amendments.len();
+        notes.push_str(&format!(
+            "{n} retracted amendment{} not shown: {}; read one by its id.\n",
+            if n == 1 { "" } else { "s" },
+            entry
+                .retracted_amendments
+                .iter()
+                .map(|r| format!(
+                    "{} ({}, retracted by {})",
+                    r.id, r.kind, r.retracted_by
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     if !entry.obligations.is_empty() {
@@ -5811,8 +5861,11 @@ pub(super) fn format_governance_entry_once(
             "notes of {} {:x}",
             entry.id,
             text_key(&format!(
-                "{:?}{:?}{:?}",
-                entry.amendments, entry.obligations, entry.cited_by
+                "{:?}{:?}{:?}{:?}",
+                entry.amendments,
+                entry.obligations,
+                entry.cited_by,
+                entry.retracted_amendments
             ))
         );
         match once.earlier_part(&key) {
@@ -5852,7 +5905,13 @@ pub(super) fn format_governance_entry_once(
         }
         _ => {}
     }
-    if let Some(round) = entry.round {
+    if entry.round == Some(0) {
+        out.push_str(
+            "The recusal determination, made before deliberation round 1: \
+             each seat's answer to whether the item limits the Steward's \
+             powers\n",
+        );
+    } else if let Some(round) = entry.round {
         out.push_str(&format!(
             "Deliberation round {round}{}\n",
             match entry.total_rounds {
@@ -5860,6 +5919,30 @@ pub(super) fn format_governance_entry_once(
                 None => String::new(),
             }
         ));
+        // The determination in a line: in full it is ~30k on GOV-2026-0021,
+        // and council_round=0 reads it (Steward, 2026-11-14). From the
+        // server's brief, or from the record an older server sends whole
+        let from_record = || {
+            let data = entry.data.as_ref()?;
+            let line = crate::govlog::StewardRecusal::result_line_of(
+                entry.entry_type,
+                data,
+            )?;
+            let decision =
+                crate::govlog::decision_data(entry.entry_type, data)?;
+            Some((line, decision.get("steward_recusal").is_some()))
+        };
+        let line = match &entry.recusal {
+            Some(r) => Some((r.result.clone(), r.bytes.is_some())),
+            None => from_record(),
+        };
+        match line {
+            Some((line, true)) => out.push_str(&format!(
+                "{line} (council_round=0 reads it whole.)\n"
+            )),
+            Some((line, false)) => out.push_str(&format!("{line}\n")),
+            None => {}
+        }
         // What reading another costs, before choosing it (beta round 14:
         // a round read of ~10k tok with nothing saying so)
         // Each about its round alone: this read put the rest of the record
@@ -6003,7 +6086,7 @@ pub(super) fn format_governance_entry_once(
             .record_read_bytes()
             .map(|b| format!("; the whole record {}", about_tokens(b)))
             .unwrap_or_default();
-        let sizes = round_reads(entry, cues, None, false)
+        let mut sizes = round_reads(entry, cues, None, false)
             .map(|r| {
                 format!(
                     " Their sizes as served, before a read leaves out what's \
@@ -6011,6 +6094,25 @@ pub(super) fn format_governance_entry_once(
                 )
             })
             .unwrap_or_default();
+        // The determination made before round 1, readable alone (0.161)
+        if let Some(recusal) = &entry.recusal {
+            sizes.push_str(&format!(" {}", recusal.result));
+            if let Some(bytes) = recusal.read_bytes {
+                let read = if cues.links {
+                    format!(
+                        "`{}`",
+                        crate::links::AgoraLink::round(entry.id.clone(), 0)
+                    )
+                } else {
+                    "council_round=0".to_string()
+                };
+                sizes.push_str(&format!(
+                    " {read} reads the determination, each seat's answer \
+                     and reason, {}.",
+                    about_tokens(bytes)
+                ));
+            }
+        }
         out.push_str(&if cues.links {
             format!(
                 "\nThis decision has {total} deliberation rounds: \
@@ -6160,6 +6262,23 @@ pub(super) fn format_governance_entry_once(
             && entry.summary_authorship.is_some()
             && in_record == entry.summary.as_deref();
         let mut data = data.clone();
+        // A round read gives the determination in a line, above; the
+        // determination's read has no rounds to show
+        // A test sitting's decision is under `inner`
+        let council = crate::govlog::decision_type(entry.entry_type, &data)
+            == crate::enums::GovernanceLogEntryType::CouncilDecision;
+        let decision = match entry.entry_type {
+            crate::enums::GovernanceLogEntryType::Test => data.get_mut("inner"),
+            _ => Some(&mut data),
+        };
+        if council
+            && let (Some(n), Some(obj)) = (
+                entry.round,
+                decision.and_then(serde_json::Value::as_object_mut),
+            )
+        {
+            obj.remove(if n == 0 { "rounds" } else { "steward_recusal" });
+        }
         // The record's copy of its summary, shown once by its paragraphs
         // like the header's, on every read (second iteration of 0.113.0)
         if above {
@@ -6194,8 +6313,13 @@ pub(super) fn format_governance_entry_once(
         let mut header_note = String::new();
         if part && let Some(obj) = data.as_object_mut() {
             // The summary is shown once by its paragraphs, above
-            const PARTS: [&str; 4] =
-                ["rounds", "attachments", "inner", "summary"];
+            const PARTS: [&str; 5] = [
+                "rounds",
+                "attachments",
+                "inner",
+                "summary",
+                "steward_recusal",
+            ];
             let header: serde_json::Map<String, serde_json::Value> = obj
                 .iter()
                 .filter(|(k, _)| !PARTS.contains(&k.as_str()))
@@ -7271,6 +7395,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -7351,6 +7477,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: Some(data),
             round: None,
             attachments: Vec::new(),
@@ -7423,6 +7551,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: Some(data),
             round: None,
             attachments: Vec::new(),
@@ -7492,6 +7622,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -7514,6 +7646,8 @@ mod tests {
                 rationale: None,
                 update: None,
                 created_at: Utc::now(),
+                revised_by: Vec::new(),
+                abridged: false,
             }],
             cited_by: Vec::new(),
             texts: None,
@@ -7714,6 +7848,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -8689,6 +8825,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: Some(serde_json::json!({"title": "A motion"})),
             round: None,
             attachments: Vec::new(),
@@ -8710,6 +8848,8 @@ mod tests {
                 rationale: None,
                 update: None,
                 created_at: Utc::now(),
+                revised_by: Vec::new(),
+                abridged: false,
             }],
             cited_by: Vec::new(),
             texts: None,
@@ -8756,6 +8896,8 @@ mod tests {
             total_rounds: Some(3),
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: vec![AttachmentListing {
@@ -8839,6 +8981,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: Vec::new(),
@@ -10188,6 +10332,8 @@ mod tests {
             total_rounds: None,
             round_bytes: Vec::new(),
             round_read_bytes: Vec::new(),
+            recusal: None,
+            retracted_amendments: Vec::new(),
             data: None,
             round: None,
             attachments: vec![],
@@ -14250,6 +14396,282 @@ mod shown_once_followups {
                  of GOV-2026-0017 (latest)"
             ),
             "{again}"
+        );
+    }
+}
+
+/// The recusal determination read on its own and as a line, and amendments
+/// as lines (Steward, 2026-11-14: GOV-2026-0021's determination rode every
+/// round read at ~30k, and its corrections every read at ~9.7k)
+#[cfg(test)]
+mod recusal_and_amendment_lines {
+    use super::*;
+    use crate::responses::GovernanceEntryResponse;
+
+    fn vote(seat: &str, limits: bool) -> serde_json::Value {
+        serde_json::json!({
+            "seat": seat,
+            "reason": format!("The {seat}'s reason."),
+            "limits_steward_powers": limits,
+        })
+    }
+
+    /// GOV-2026-0021's shape, as signed before the order was fixed: the
+    /// determination after every round
+    fn record(rounds: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "title": "A motion",
+            "rounds": rounds,
+            "steward_recusal": {
+                "votes": [vote("artist", false), vote("philosopher", false),
+                          vote("lawyer", false), vote("engineer", false)],
+                "recused": false,
+            },
+            "final_votes": {"artist": "yes", "steward": "yes"},
+            "outcome": "approved",
+        })
+    }
+
+    fn round(n: u64) -> serde_json::Value {
+        serde_json::json!({
+            "number": n,
+            "round_type": "deliberation",
+            "responses": [{"seat": "lawyer", "position": format!("Round {n} position."), "vote": "yes"}],
+        })
+    }
+
+    fn entry(extra: serde_json::Value) -> GovernanceEntryResponse {
+        let mut v = serde_json::json!({
+            "id": "GOV-2026-0021",
+            "entry_type": "council_decision",
+            "title": "A motion",
+            "created_at": "2026-11-01T00:00:00Z",
+            "summary": "SUMMARY_TEXT",
+            "total_rounds": 2,
+        });
+        for (k, x) in extra.as_object().unwrap() {
+            v[k] = x.clone();
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    const NOT_RECUSED: &str = "Recusal: 0 of 4 seats found that the item \
+        limits the Steward's powers; 3 needed; the Steward sat.";
+
+    /// The line, for each result and for a record without a determination
+    #[test]
+    fn the_result_line_is_right_whatever_the_result() {
+        use crate::govlog::StewardRecusal;
+        let not = serde_json::from_value::<StewardRecusal>(
+            record(serde_json::json!([]))["steward_recusal"].clone(),
+        )
+        .unwrap();
+        assert_eq!(StewardRecusal::result_line(Some(&not)), NOT_RECUSED);
+        let mut recused = not.clone();
+        for v in recused.votes.iter_mut().take(3) {
+            v.limits_steward_powers = true;
+        }
+        recused.recused = true;
+        assert_eq!(
+            StewardRecusal::result_line(Some(&recused)),
+            "Recusal: 3 of 4 seats found that the item limits the Steward's \
+             powers; 3 needed; the Steward was recused (no deliberation, vote \
+             or veto)."
+        );
+        assert_eq!(
+            StewardRecusal::result_line(None),
+            "Recusal: this record holds no recusal determination."
+        );
+        let mut absent = record(serde_json::json!([round(1)]));
+        absent.as_object_mut().unwrap().remove("steward_recusal");
+        assert_eq!(
+            StewardRecusal::result_line_of(
+                crate::enums::GovernanceLogEntryType::CouncilDecision,
+                &absent
+            )
+            .as_deref(),
+            Some("Recusal: this record holds no recusal determination.")
+        );
+        assert_eq!(
+            StewardRecusal::result_line_of(
+                crate::enums::GovernanceLogEntryType::AppealsCourtDecision,
+                &serde_json::json!({"rounds": []})
+            ),
+            None,
+            "not a Council decision"
+        );
+    }
+
+    /// A round read gives the result in a line, not the four seats'
+    /// answers, from an older server too
+    #[test]
+    fn a_round_read_carries_the_line_not_the_determination() {
+        for brief in [
+            serde_json::json!(null),
+            serde_json::json!({"result": NOT_RECUSED, "bytes": 30000, "read_bytes": 31000}),
+        ] {
+            let mut data = record(serde_json::json!([round(1)]));
+            if !brief.is_null() {
+                // A server of 0.161 sends no determination with a round
+                data.as_object_mut().unwrap().remove("steward_recusal");
+            }
+            let out = format_governance_entry(&entry(serde_json::json!({
+                "round": 1, "data": data, "recusal": brief,
+            })));
+            assert!(
+                out.contains(&format!(
+                    "Deliberation round 1 of 2\n{NOT_RECUSED} (council_round=0 \
+                     reads it whole.)\n"
+                )),
+                "{out}"
+            );
+            assert!(out.contains("Round 1 position."), "{out}");
+            assert!(!out.contains("The engineer's reason."), "{out}");
+            assert!(!out.contains("Steward recusal"), "{out}");
+        }
+    }
+
+    /// `council_round=0` reads the determination: each seat's answer and
+    /// reason, the tally first, and no rounds
+    #[test]
+    fn round_zero_reads_the_determination() {
+        let out = format_governance_entry(&entry(serde_json::json!({
+            "round": 0,
+            // Stripped by the rendering too, whatever a server sends
+            "data": record(serde_json::json!([round(1)])),
+            "recusal": {"result": NOT_RECUSED, "bytes": 300, "read_bytes": 400},
+        })));
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from:\n{out}"))
+        };
+        assert!(
+            at("The recusal determination, made before deliberation round 1")
+                < at("**Determination:** not recused: 0 of 4")
+        );
+        at("The engineer's reason.");
+        assert!(!out.contains("Rounds"), "{out}");
+        assert!(!out.contains("Round 1 position."), "{out}");
+        assert!(!out.contains("council_round=0 reads it whole"), "{out}");
+    }
+
+    /// The whole record reads the determination before round 1, though it
+    /// was signed after the last
+    #[test]
+    fn a_full_read_puts_the_determination_first() {
+        let out = format_governance_entry(&entry(serde_json::json!({
+            "data": record(serde_json::json!([round(1), round(2)])),
+        })));
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} missing from:\n{out}"))
+        };
+        assert!(at("Steward recusal") < at("Round 1 position."));
+        assert!(at("The engineer's reason.") < at("Round 1 position."));
+    }
+
+    /// A summary read says what council_round=0 holds, beside the rounds
+    #[test]
+    fn a_summary_read_sizes_the_determination() {
+        let out = format_governance_entry(&entry(serde_json::json!({
+            "round_bytes": [2000, 3000],
+            "round_read_bytes": [5000, 6000],
+            "recusal": {"result": NOT_RECUSED, "bytes": 30000, "read_bytes": 33000},
+        })));
+        assert!(out.contains(NOT_RECUSED), "{out}");
+        assert!(
+            out.contains("council_round=0 reads the determination"),
+            "{out}"
+        );
+    }
+
+    /// Each amendment in a line, its note's first sentence, marked when
+    /// revised; a retracted one counted, never silently gone
+    #[test]
+    fn amendments_read_as_lines_and_retractions_are_counted() {
+        let out = format_governance_entry(&entry(serde_json::json!({
+            "amendments": [{
+                "id": "AMD-2026-0061", "kind": "correction", "basis": "Art. IV § 5. And more.",
+                "note": "**A correction.** It runs on for thousands of characters.",
+                "rationale": "Long reasons.",
+                "created_at": "2026-11-12T00:00:00Z",
+                "revised_by": ["AMD-2026-0091"],
+            }],
+            "retracted_amendments": [{
+                "id": "AMD-2026-0084", "kind": "correction", "retracted_by": "AMD-2026-0090",
+            }],
+        })));
+        assert!(
+            out.contains(
+                "**Amended by AMD-2026-0061 (correction)**: **A correction.** \
+                 (revised by AMD-2026-0091) (first sentence; \
+                 get_content(\"AMD-2026-0061\") reads it whole)\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("thousands"), "{out}");
+        assert!(
+            out.contains(
+                "1 retracted amendment not shown: AMD-2026-0084 (correction, \
+                 retracted by AMD-2026-0090); read one by its id.\n"
+            ),
+            "{out}"
+        );
+        // The retracted amendment's own read: who retracted it
+        let own = format_governance_entry(&entry(serde_json::json!({
+            "id": "AMD-2026-0084", "entry_type": "amendment",
+            "amendments": [{
+                "id": "AMD-2026-0090", "kind": "retracted", "basis": "b",
+                "note": "Retracted: read first now. More.",
+                "created_at": "2026-11-15T00:00:00Z",
+            }],
+        })));
+        assert!(
+            own.contains(
+                "**Retracted by AMD-2026-0090 (retracted)**: Retracted: read \
+                 first now. (first sentence; get_content(\"AMD-2026-0090\") \
+                 reads it whole)\n"
+            ),
+            "{own}"
+        );
+        // A note of one sentence is shown whole, and says nothing more
+        let one = format_governance_entry(&entry(serde_json::json!({
+            "amendments": [{
+                "id": "AMD-2026-0003", "kind": "correction", "basis": "b",
+                "note": "One sentence only.", "created_at": "2026-11-12T00:00:00Z",
+            }],
+        })));
+        assert!(
+            one.contains("**Amended by AMD-2026-0003 (correction)**: One sentence only.\n"),
+            "{one}"
+        );
+    }
+
+    /// A refused round 0 says why: no rounds, or no determination
+    #[test]
+    fn round_zero_of_a_record_without_a_determination_is_refused() {
+        let none = entry(serde_json::json!({
+            "recusal": {"result": "Recusal: this record holds no recusal determination."},
+        }));
+        assert_eq!(
+            none.missing_part(Some(0), None, false).as_deref(),
+            Some(
+                "council_round=0: GOV-2026-0021 holds no recusal determination."
+            )
+        );
+        let mut appeal = entry(serde_json::json!({}));
+        appeal.total_rounds = None;
+        assert_eq!(
+            appeal.missing_part(Some(0), None, false).as_deref(),
+            Some(
+                "council_round=0: GOV-2026-0021 has no deliberation rounds, \
+                 nor a recusal determination."
+            )
+        );
+        // An older server sends no brief: the read is the server's to refuse
+        assert_eq!(
+            entry(serde_json::json!({})).missing_part(Some(0), None, false),
+            None
         );
     }
 }

@@ -363,6 +363,54 @@ impl StewardRecusal {
             .count()
     }
 
+    /// The determination's result in one line, for a read that leaves the
+    /// determination out (a `council_round=<n>` read, n ≥ 1): "Recusal: 0 of
+    /// 4 seats found that the item limits the Steward's powers; 3 needed;
+    /// the Steward sat." `None`, a record without one (0.161)
+    pub fn result_line(recusal: Option<&Self>) -> String {
+        let Some(r) = recusal else {
+            return "Recusal: this record holds no recusal determination."
+                .into();
+        };
+        format!(
+            "Recusal: {} of {} seats found that the item limits the Steward's \
+             powers; {} needed; {}",
+            r.affirmative(),
+            CouncilSeat::ALL.len(),
+            Self::NEEDED,
+            if r.recused {
+                "the Steward was recused (no deliberation, vote or veto)."
+            } else {
+                "the Steward sat."
+            },
+        )
+    }
+
+    /// [`result_line`](Self::result_line) for an entry's `data`, a Council
+    /// decision's or a test sitting's of one; `None` for any other. A
+    /// determination in a shape this build does not read is said to be
+    pub fn result_line_of(
+        entry_type: crate::enums::GovernanceLogEntryType,
+        data: &serde_json::Value,
+    ) -> Option<String> {
+        if super::decision_type(entry_type, data)
+            != crate::enums::GovernanceLogEntryType::CouncilDecision
+        {
+            return None;
+        }
+        let decision = super::decision_data(entry_type, data)?;
+        Some(match decision.get("steward_recusal") {
+            None | Some(serde_json::Value::Null) => Self::result_line(None),
+            Some(v) => match serde_json::from_value::<Self>(v.clone()) {
+                Ok(r) => Self::result_line(Some(&r)),
+                Err(_) => "Recusal: this record's determination is in a shape \
+                           this reader does not know; council_round=0 reads \
+                           it as stored."
+                    .into(),
+            },
+        })
+    }
+
     /// The determination in one line, as a record's reader sees it:
     /// "not recused: 0 of 4 seats found it limits the Steward's powers;
     /// 3 needed". Counted against the four, as the rule is; when fewer

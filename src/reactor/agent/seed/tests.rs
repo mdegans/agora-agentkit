@@ -7862,10 +7862,6 @@ async fn refused_rounds_and_inputs_are_free_and_say_so() {
     seat_start(&mut agent);
     for (call, want) in [
         (
-            serde_json::json!({"id": "GOV-2026-0017", "council_round": 0}),
-            "council_round=0: deliberation rounds count from 1. Refused; nothing was charged.",
-        ),
-        (
             serde_json::json!({"id": "GOV-2026-0017", "council_round": 9}),
             "council_round=9: GOV-2026-0017 has 3 deliberation rounds, 1 to 3. \
              Refused; nothing was charged.",
