@@ -12,7 +12,7 @@ use crate::enums::{
     AmendmentKind, ContentKind, DeletedBy, FeedSort, OwedBy, RecordVersion,
     RemovedBy, SearchMode, Standing,
 };
-use crate::govlog::{AmendmentNotice, CitationRelation, Sha256Hex, reading};
+use crate::govlog::{CitationRelation, Sha256Hex, reading};
 use crate::ids::{CommentId, ContentIdPrefix, PostId};
 use crate::responses::{
     BallotReceipt, CalendarItem, CalendarResponse, CommentChainResponse,
@@ -5753,19 +5753,23 @@ pub(super) fn format_governance_entry_once(
     // Each in a line, its note's first sentence: GOV-2026-0021's seven
     // corrections ran to ~9.7k chars on every read (Steward, 2026-11-14).
     // Its own read has the whole
-    for a in entry
-        .amendments
-        .iter()
-        .cloned()
-        .map(AmendmentNotice::abridge)
-    {
-        let whole = if cues.links {
-            format!(
-                " `{}` reads it whole.",
+    for whole_notice in &entry.amendments {
+        let a = whole_notice.clone().abridge();
+        // Never cut silently: a correction often states the error first
+        // and the fix after it (review of agentkit#305)
+        let cut = whole_notice.abridged
+            || a.note != whole_notice.note
+            || whole_notice.rationale.is_some();
+        let whole = match (cut, cues.links) {
+            (false, _) => String::new(),
+            (true, true) => format!(
+                " (first sentence; `{}` reads it whole)",
                 crate::links::AgoraLink::from(a.id.clone())
-            )
-        } else {
-            String::new()
+            ),
+            (true, false) => format!(
+                " (first sentence; get_content(\"{}\") reads it whole)",
+                a.id
+            ),
         };
         notes.push_str(&format!(
             "**{} {} ({})**: {}{}{}{}{}\n",
@@ -5924,7 +5928,9 @@ pub(super) fn format_governance_entry_once(
                 entry.entry_type,
                 data,
             )?;
-            Some((line, data.get("steward_recusal").is_some()))
+            let decision =
+                crate::govlog::decision_data(entry.entry_type, data)?;
+            Some((line, decision.get("steward_recusal").is_some()))
         };
         let line = match &entry.recusal {
             Some(r) => Some((r.result.clone(), r.bytes.is_some())),
@@ -6258,9 +6264,18 @@ pub(super) fn format_governance_entry_once(
         let mut data = data.clone();
         // A round read gives the determination in a line, above; the
         // determination's read has no rounds to show
-        if entry.entry_type
-            == crate::enums::GovernanceLogEntryType::CouncilDecision
-            && let (Some(n), Some(obj)) = (entry.round, data.as_object_mut())
+        // A test sitting's decision is under `inner`
+        let council = crate::govlog::decision_type(entry.entry_type, &data)
+            == crate::enums::GovernanceLogEntryType::CouncilDecision;
+        let decision = match entry.entry_type {
+            crate::enums::GovernanceLogEntryType::Test => data.get_mut("inner"),
+            _ => Some(&mut data),
+        };
+        if council
+            && let (Some(n), Some(obj)) = (
+                entry.round,
+                decision.and_then(serde_json::Value::as_object_mut),
+            )
         {
             obj.remove(if n == 0 { "rounds" } else { "steward_recusal" });
         }
@@ -14522,7 +14537,8 @@ mod recusal_and_amendment_lines {
     fn round_zero_reads_the_determination() {
         let out = format_governance_entry(&entry(serde_json::json!({
             "round": 0,
-            "data": record(serde_json::json!([])),
+            // Stripped by the rendering too, whatever a server sends
+            "data": record(serde_json::json!([round(1)])),
             "recusal": {"result": NOT_RECUSED, "bytes": 300, "read_bytes": 400},
         })));
         let at = |needle: &str| {
@@ -14535,6 +14551,7 @@ mod recusal_and_amendment_lines {
         );
         at("The engineer's reason.");
         assert!(!out.contains("Rounds"), "{out}");
+        assert!(!out.contains("Round 1 position."), "{out}");
         assert!(!out.contains("council_round=0 reads it whole"), "{out}");
     }
 
@@ -14587,12 +14604,12 @@ mod recusal_and_amendment_lines {
         assert!(
             out.contains(
                 "**Amended by AMD-2026-0061 (correction)**: **A correction.** \
-                 (revised by AMD-2026-0091)\n"
+                 (revised by AMD-2026-0091) (first sentence; \
+                 get_content(\"AMD-2026-0061\") reads it whole)\n"
             ),
             "{out}"
         );
         assert!(!out.contains("thousands"), "{out}");
-        assert!(!out.contains("Long reasons"), "{out}");
         assert!(
             out.contains(
                 "1 retracted amendment not shown: AMD-2026-0084 (correction, \
@@ -14611,9 +14628,50 @@ mod recusal_and_amendment_lines {
         })));
         assert!(
             own.contains(
-                "**Retracted by AMD-2026-0090 (retracted)**: Retracted: read first now.\n"
+                "**Retracted by AMD-2026-0090 (retracted)**: Retracted: read \
+                 first now. (first sentence; get_content(\"AMD-2026-0090\") \
+                 reads it whole)\n"
             ),
             "{own}"
+        );
+        // A note of one sentence is shown whole, and says nothing more
+        let one = format_governance_entry(&entry(serde_json::json!({
+            "amendments": [{
+                "id": "AMD-2026-0003", "kind": "correction", "basis": "b",
+                "note": "One sentence only.", "created_at": "2026-11-12T00:00:00Z",
+            }],
+        })));
+        assert!(
+            one.contains("**Amended by AMD-2026-0003 (correction)**: One sentence only.\n"),
+            "{one}"
+        );
+    }
+
+    /// A refused round 0 says why: no rounds, or no determination
+    #[test]
+    fn round_zero_of_a_record_without_a_determination_is_refused() {
+        let none = entry(serde_json::json!({
+            "recusal": {"result": "Recusal: this record holds no recusal determination."},
+        }));
+        assert_eq!(
+            none.missing_part(Some(0), None, false).as_deref(),
+            Some(
+                "council_round=0: GOV-2026-0021 holds no recusal determination."
+            )
+        );
+        let mut appeal = entry(serde_json::json!({}));
+        appeal.total_rounds = None;
+        assert_eq!(
+            appeal.missing_part(Some(0), None, false).as_deref(),
+            Some(
+                "council_round=0: GOV-2026-0021 has no deliberation rounds, \
+                 nor a recusal determination."
+            )
+        );
+        // An older server sends no brief: the read is the server's to refuse
+        assert_eq!(
+            entry(serde_json::json!({})).missing_part(Some(0), None, false),
+            None
         );
     }
 }

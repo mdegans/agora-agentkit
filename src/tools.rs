@@ -103,9 +103,8 @@ macro_rules! agent_tools {
 /// "**Brought forward.** More" is "**Brought forward.**"
 pub fn first_sentence(doc: &str) -> &str {
     /// Words a period follows without ending the sentence
-    const ABBREVIATIONS: [&str; 12] = [
-        "Art", "Arts", "e.g", "i.e", "cf", "vs", "No", "Nos", "St", "Mr", "Dr",
-        "Ms",
+    const ABBREVIATIONS: [&str; 10] = [
+        "Art", "Arts", "e.g", "i.e", "cf", "vs", "St", "Mr", "Dr", "Ms",
     ];
     let mut depth = 0i32;
     for (i, c) in doc.char_indices() {

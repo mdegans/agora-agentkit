@@ -2211,25 +2211,47 @@ impl LoggedAmendment {
                 ))
             })
             .collect();
-        let stored = serde_json::to_value(&self.amendment)
+        // Up to the first that does not apply, which the verifier reports:
+        // one bad patch does not discard the good ones before it
+        let mut data = serde_json::to_value(&self.amendment)
             .expect("an amendment always serializes");
-        let data = latest(&stored, revisions.iter().map(|(_, r, _)| *r))?;
+        let mut texts = self.texts.clone().unwrap_or_default();
+        let mut revised_by = Vec::new();
+        for (id, revision, revised) in revisions {
+            let Ok(next) = apply_patch(&data, &revision.patch) else {
+                break;
+            };
+            if serde_json::from_value::<Amendment>(next.clone()).is_err() {
+                break;
+            }
+            data = next;
+            // Only the texts this patch commits to: one beside it that it
+            // does not would blank the text shown
+            if let Some(revised) = revised {
+                let replaced = |field: &str| {
+                    revision.patch.iter().any(|op| {
+                        matches!(op, json_patch::PatchOperation::Replace(_))
+                            && op.path().as_str() == format!("/{field}")
+                    })
+                };
+                let only = RevisedTexts {
+                    basis: revised.basis.clone().filter(|_| replaced("basis")),
+                    note: revised.note.clone().filter(|_| replaced("note")),
+                    rationale: revised
+                        .rationale
+                        .clone()
+                        .filter(|_| replaced("rationale")),
+                };
+                texts = texts.overlaid(&only);
+            }
+            revised_by.push(id.clone());
+        }
         let amendment: Amendment = serde_json::from_value(data)
             .map_err(|e| ReviseError::Patch(e.to_string()))?;
-        let texts = revisions.iter().fold(
-            self.texts.clone().unwrap_or_default(),
-            |texts, (_, _, revised)| match revised {
-                Some(revised) => texts.overlaid(revised),
-                None => texts,
-            },
-        );
         Ok(RevisedAmendment {
             amendment,
             texts,
-            revised_by: revisions
-                .iter()
-                .map(|(id, _, _)| (*id).clone())
-                .collect(),
+            revised_by,
         })
     }
 }
@@ -2275,9 +2297,12 @@ pub fn amendment_list(
 ) -> AmendmentList {
     let mut list = AmendmentList::default();
     for a in naming {
+        // Only what a retraction may name: one the verifier refuses hides
+        // nothing
         if let Some(by) = later.iter().find(|l| {
             l.amendment.kind == AmendmentKind::Retracted
                 && l.amendment.target == a.id
+                && AmendmentKind::RETRACTABLE.contains(&a.amendment.kind)
         }) {
             list.retracted.push(RetractedAmendment {
                 id: a.id.clone(),
@@ -5275,6 +5300,14 @@ mod tests {
                 .unwrap(),
             texts: c.links[i].texts.clone(),
         };
+        // A retraction the verifier refuses (of a change of standing) hides
+        // nothing (review of agentkit#305)
+        let mut overruling = logged(1);
+        overruling.amendment.kind = AmendmentKind::Overruled;
+        let shown = amendment_list(&[overruling], &[logged(2)]);
+        assert_eq!(shown.notices.len(), 1);
+        assert!(shown.retracted.is_empty());
+
         let list = amendment_list(&[logged(1)], &[logged(2)]);
         assert!(list.notices.is_empty());
         assert_eq!(
