@@ -697,6 +697,9 @@ pub(super) fn format_obligation(o: &ObligationListing) -> String {
     match (o.due, o.due_approximate) {
         (Some(due), true) => line.push_str(&format!(", due around {due}")),
         (Some(due), false) => line.push_str(&format!(", due {due}")),
+        (None, _) if o.awaiting_sitting => {
+            line.push_str(", due at the next sitting (none is scheduled yet)")
+        }
         (None, _) if o.until.is_none() => line.push_str(", standing duty"),
         (None, _) => line.push_str(", due after a decision not yet taken"),
     }
@@ -9616,11 +9619,30 @@ mod tests {
             }),
             due: NaiveDate::from_ymd_opt(2026, 10, 1),
             due_approximate: false,
+            awaiting_sitting: false,
             overdue: true,
             lapsed_at: None,
             plan: None,
             created_at: Utc.with_ymd_and_hms(2026, 9, 20, 0, 0, 0).unwrap(),
         }
+    }
+
+    /// Due at the next sitting with none scheduled: said so, never
+    /// "due around <today>" (beta round, 2026-11-13: OBL-2026-0018/0030)
+    #[test]
+    fn an_obligation_awaiting_a_sitting_has_no_date() {
+        let mut o = obligation_listing(18);
+        o.until = Some(crate::govlog::Until::NextSitting);
+        o.due = None;
+        o.overdue = false;
+        o.awaiting_sitting = true;
+        let line = format_obligation(&o);
+        assert!(
+            line.contains(", due at the next sitting (none is scheduled yet)"),
+            "{line}"
+        );
+        assert!(!line.contains("due around"), "{line}");
+        assert!(!line.contains("after a decision"), "{line}");
     }
 
     /// The dashboard's two obligation surfaces, as the Steward reviews

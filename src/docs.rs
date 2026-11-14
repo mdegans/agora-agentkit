@@ -478,8 +478,8 @@ pub const DELETE_MESSAGE_DOC: &str = "Delete your copy of a private message; the
 /// CLI help, `ObligationSort::Due`'s help and the server's REST docs (beta
 /// round 14: three copies, and one never got "within each")
 pub const OBLIGATIONS_BY_DUE: &str = "open and lapsed first, then discharged and \
-     withdrawn; within each, the earliest due first, ties to the older, and the undated \
-     last, oldest first";
+     withdrawn; within each, what is due at a sitting not yet scheduled first, then the \
+     earliest due, ties to the older, and the undated last, oldest first";
 
 /// `get_governance_log`'s `sort`, as its schema and CLI help say it
 pub fn obligations_sort_doc() -> String {

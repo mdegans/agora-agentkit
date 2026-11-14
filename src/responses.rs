@@ -3409,7 +3409,8 @@ pub const OBLIGATIONS_HOW_TO_READ: &str = "Each line is an obligation (`OBL-…`
     decision or record owes. Read one with `get_content` for the words that created it, its \
     updates and its plan; `source` is the entry that created it. `due` is when it is due now; \
     when `due_approximate` is true it is a sitting's date, which moves, so read it as \
-    \"around\". `overdue` means open and past due but not yet recorded as lapsed: until a lapse is \
+    \"around\"; `awaiting_sitting` means due at the next sitting, none of which is scheduled \
+    yet, so there is no date. `overdue` means open and past due but not yet recorded as lapsed: until a lapse is \
     recorded in the log, an overdue obligation stays `open`, and `status=lapsed` does not list it. \
     A lapse stays in the history; only a record closes an obligation.";
 
@@ -3478,13 +3479,18 @@ pub struct ObligationListing {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<crate::govlog::Until>,
     /// The date `until` comes to now: a date as recorded, or a sitting's
-    /// current expected date. Absent when undated, or due after a
-    /// decision not yet taken
+    /// current expected date. Absent when undated, when due after a
+    /// decision not yet taken, or when due at a sitting not yet scheduled
+    /// (`awaiting_sitting`)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due: Option<NaiveDate>,
     /// `due` is a sitting's date, which moves: read it as "around"
     #[serde(default)]
     pub due_approximate: bool,
+    /// Due at the next sitting, and none is on the calendar yet, so there
+    /// is no date
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub awaiting_sitting: bool,
     /// Open and past `due`, but not yet recorded as lapsed. Derived when
     /// read, never stored
     #[serde(default)]

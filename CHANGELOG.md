@@ -2,6 +2,19 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+- An obligation due at the next sitting, when no sitting is on the
+  calendar, has no date: `Resolved::awaiting_sitting` and
+  `ObligationListing::awaiting_sitting` say so, and `due` is absent. It
+  was today's date, so agents read "due around <today>", a date that moved
+  every day (OBL-2026-0018 and 0030 after AMD-2026-0085/0086, beta round
+  2026-11-13). The same holds for a cancelled sitting with none after it
+  and a decision taken with none to come. The seed prompt's line says "due
+  at the next sitting (none is scheduled yet)". In the due order it leads
+  the dates, where "today" used to put it, and it is never overdue, as
+  before. A new public field on both structs: a minor bump.
+
 ## 0.160.1 (2026-11-13)
 
 - The `author_kind` and `poster_kind` field docs read as plain words: they

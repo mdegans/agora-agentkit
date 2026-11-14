@@ -161,6 +161,7 @@ fn deadlines_resolve_against_the_calendar() {
         approximate: true,
         sitting: Some(event_id(1)),
         date_binds: false,
+        awaiting_sitting: false,
     };
     let date = days(4).date_naive();
     assert_eq!(calendar.resolve(None, decided), Resolved::default());
@@ -171,6 +172,7 @@ fn deadlines_resolve_against_the_calendar() {
             approximate: false,
             sitting: None,
             date_binds: true,
+            awaiting_sitting: false,
         }
     );
     assert_eq!(calendar.resolve(Some(&Until::NextSitting), decided), next);
@@ -187,6 +189,7 @@ fn deadlines_resolve_against_the_calendar() {
             approximate: true,
             sitting: Some(event_id(3)),
             date_binds: true,
+            awaiting_sitting: false,
         }
     );
     // An event not on the calendar resolves to nothing
@@ -204,16 +207,44 @@ fn deadlines_resolve_against_the_calendar() {
             .resolve(Some(&Until::AfterDecision { decision: gov(2) }), decided),
         Resolved::default()
     );
-    // With no sitting on the calendar, the next one is due today
+    // With no sitting on the calendar, there is no date: it awaits one
+    // (not today's date, which moved every day: beta round, 2026-11-13)
+    let awaiting = Resolved {
+        due: None,
+        approximate: false,
+        sitting: None,
+        date_binds: false,
+        awaiting_sitting: true,
+    };
     let empty = Calendar::new(vec![], None, now());
+    assert_eq!(empty.resolve(Some(&Until::NextSitting), decided), awaiting);
+    // and so does a called-off sitting with none after it, and a decision
+    // taken with none to come
+    let only_cancelled = Calendar::new(
+        vec![event(
+            2,
+            CalendarEventKind::SpecialSitting,
+            days(3),
+            CalendarEventStatus::Cancelled,
+        )],
+        None,
+        now(),
+    );
     assert_eq!(
-        empty.resolve(Some(&Until::NextSitting), decided),
-        Resolved {
-            due: Some(now().date_naive()),
-            approximate: true,
-            sitting: None,
-            date_binds: false,
-        }
+        only_cancelled
+            .resolve(Some(&Until::Sitting { event: event_id(2) }), decided),
+        awaiting
+    );
+    assert_eq!(
+        empty
+            .resolve(Some(&Until::AfterDecision { decision: gov(1) }), decided),
+        awaiting
+    );
+    // The same tomorrow: nothing in it depends on the day
+    let tomorrow = Calendar::new(vec![], None, days(1));
+    assert_eq!(
+        tomorrow.resolve(Some(&Until::NextSitting), decided),
+        awaiting
     );
 }
 
@@ -363,7 +394,79 @@ fn a_listing_carries_the_resolved_deadline() {
     assert_eq!(listing.text, "Obligation 1");
     assert_eq!(listing.due, Some(days(9).date_naive()));
     assert!(listing.due_approximate && !listing.overdue);
+    assert!(!listing.awaiting_sitting);
     assert_eq!(listing.until, Some(Until::NextSitting));
+    let json = serde_json::to_value(&listing).unwrap();
+    assert!(json.get("awaiting_sitting").is_none(), "{json}");
+}
+
+/// OBL-2026-0018 and 0030, rescheduled to the next sitting with none on
+/// the calendar, served "due around <today>", a date that moved every
+/// day (beta round, 2026-11-13). They are undated and awaiting a sitting
+#[test]
+fn a_listing_due_at_an_unscheduled_sitting_has_no_date() {
+    let calendar = Calendar::new(vec![], None, now());
+    let row = resolved(
+        &calendar,
+        vec![obligation(
+            1,
+            ObligationStatus::Open,
+            Some(Until::NextSitting),
+        )],
+    )
+    .remove(0);
+    let listing = ObligationListing::from(row);
+    assert_eq!(listing.due, None);
+    assert!(listing.awaiting_sitting);
+    assert!(!listing.due_approximate && !listing.overdue);
+    let json = serde_json::to_value(&listing).unwrap();
+    assert_eq!(json["awaiting_sitting"], true, "{json}");
+    assert!(json.get("due").is_none(), "{json}");
+    let back: ObligationListing = serde_json::from_value(json).unwrap();
+    assert_eq!(back, listing);
+    // Not on the calendar either, as before
+    assert!(
+        calendar
+            .upcoming(
+                &[resolved(
+                    &calendar,
+                    vec![obligation(
+                        1,
+                        ObligationStatus::Open,
+                        Some(Until::NextSitting),
+                    )]
+                )
+                .remove(0)],
+                false,
+                CALENDAR_LIMIT
+            )
+            .is_empty()
+    );
+}
+
+/// Awaiting an unscheduled sitting is due as soon as one sits: it leads
+/// the dates, and is not undated
+#[test]
+fn the_due_order_puts_an_unscheduled_sitting_before_the_dates() {
+    let calendar = Calendar::new(vec![], None, now());
+    let mut rows = resolved(
+        &calendar,
+        vec![
+            obligation(1, ObligationStatus::Open, None),
+            obligation(
+                2,
+                ObligationStatus::Open,
+                Some(Until::Date {
+                    date: days(2).date_naive(),
+                }),
+            ),
+            obligation(3, ObligationStatus::Open, Some(Until::NextSitting)),
+        ],
+    );
+    ObligationSort::Due.sort(&mut rows);
+    let order: Vec<GovernanceLogId> =
+        rows.iter().map(|r| r.obligation.id.clone()).collect();
+    assert_eq!(order, [3, 2, 1].map(obl));
 }
 
 #[test]
