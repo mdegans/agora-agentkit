@@ -2228,6 +2228,8 @@ impl<I: IdSource> Tx<'_, I> {
         let m = self.s.sends.get(&send).ok_or(Refusal::Unknown)?.clone();
         guard(m.state == SendState::Scheduled, Refusal::WrongState)?;
         guard(deliver_at > m.deliver_at, Refusal::WrongState)?;
+        // Counted from its admission, so a past time would land now unheld
+        guard(deliver_at >= self.now, Refusal::WrongState)?;
         let mover = if m.level == TapLevel::YubikeyTap {
             Some(self.yubikey_tap(by, TapKind::MoveSend)?)
         } else {

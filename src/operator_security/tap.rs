@@ -208,6 +208,18 @@ pub struct WindowMessage {
     pub deliver_at: DateTime<Utc>,
     /// Stored at admission: whether its send went now
     pub immediate: bool,
+    /// Its send has been delivered (it may since have been read or retracted)
+    pub delivered: bool,
+}
+
+impl WindowMessage {
+    /// Whether it went out: only a delivered message excuses a later send to
+    /// its agent by D9's `|R_this|` term. One still scheduled has reached no
+    /// one, however soon it is due, and may yet be cancelled or moved (Steward,
+    /// 2026-11-14)
+    pub const fn covers(&self) -> bool {
+        self.delivered
+    }
 }
 
 /// A send's reach and immediate reach, in distinct agents
@@ -221,15 +233,17 @@ pub struct Reach {
     pub immediate_reach: u32,
 }
 
-/// `|R_this ∪ others|` if this send adds an agent not in `others`, else
-/// `|R_this|`
+/// `|R_this|` if every agent of this send is in `cover` (the part of `others`
+/// that went out, [`WindowMessage::covers`]), else `|R_this ∪ others|`
 pub fn reach_over<'a>(
     this: &BTreeSet<AgentId>,
     others: impl IntoIterator<Item = &'a AgentId>,
+    cover: impl IntoIterator<Item = &'a AgentId>,
 ) -> u32 {
     let others: BTreeSet<&AgentId> = others.into_iter().collect();
+    let cover: BTreeSet<&AgentId> = cover.into_iter().collect();
     let size = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    if this.iter().all(|agent| others.contains(agent)) {
+    if this.iter().all(|agent| cover.contains(agent)) {
         size(this.len())
     } else {
         let union =
@@ -251,12 +265,16 @@ pub fn reach(
     };
     let window: Vec<&WindowMessage> =
         messages.iter().filter(in_window).collect();
-    Reach {
-        reach: reach_over(recipients, window.iter().map(|m| &m.recipient)),
-        immediate_reach: reach_over(
+    let over = |messages: Vec<&&WindowMessage>| {
+        reach_over(
             recipients,
-            window.iter().filter(|m| m.immediate).map(|m| &m.recipient),
-        ),
+            messages.iter().map(|m| &m.recipient),
+            messages.iter().filter(|m| m.covers()).map(|m| &m.recipient),
+        )
+    };
+    Reach {
+        reach: over(window.iter().collect()),
+        immediate_reach: over(window.iter().filter(|m| m.immediate).collect()),
     }
 }
 
