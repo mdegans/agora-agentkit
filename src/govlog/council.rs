@@ -349,6 +349,45 @@ pub struct StewardRecusal {
     pub recused: bool,
 }
 
+impl StewardRecusal {
+    /// How many seats must find the item limits the Steward's powers for
+    /// him to be recused: a simple majority of the four, three. A 2–2
+    /// split is not one (Art. IV § 3)
+    pub const NEEDED: usize = CouncilSeat::ALL.len() / 2 + 1;
+
+    /// How many seats found the item limits the Steward's powers
+    pub fn affirmative(&self) -> usize {
+        self.votes
+            .iter()
+            .filter(|v| v.limits_steward_powers)
+            .count()
+    }
+
+    /// The determination in one line, as a record's reader sees it:
+    /// "not recused: 0 of 4 seats found it limits the Steward's powers;
+    /// 3 needed". Counted against the four, as the rule is; when fewer
+    /// answered (a refused turn), it says how many did. `recused` is what
+    /// the record says, never recomputed
+    pub fn tally_line(&self) -> String {
+        let seats = CouncilSeat::ALL.len();
+        let answered = if self.votes.len() < seats {
+            format!(" ({} answered)", self.votes.len())
+        } else {
+            String::new()
+        };
+        format!(
+            "{}: {} of {seats} seats found it limits the Steward's powers{answered}; {} needed",
+            if self.recused {
+                "recused"
+            } else {
+                "not recused"
+            },
+            self.affirmative(),
+            Self::NEEDED,
+        )
+    }
+}
+
 /// One seat's answer to whether an item limits the Steward's powers
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
