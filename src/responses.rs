@@ -5094,7 +5094,11 @@ impl CouncilMeetingResponse {
         }
         line.push('\n');
         // Each decision's summary, as its record serves it, once
-        // (Governance Protocol § 6.2: the tool lists them)
+        // (Governance Protocol § 6.2: the tool lists them), as a preview:
+        // the listing is an index, and four sittings' summaries in full
+        // were ~12k tokens (Steward, 2026-11-14: a 128k-context agent must
+        // read the log as well as a 256k one). The whole summary is a read
+        // away, and the line above gives its size
         for d in &self.decision_summaries {
             if let Some(text) = d.summary.as_deref().map(str::trim)
                 && !text.is_empty()
@@ -5103,8 +5107,21 @@ impl CouncilMeetingResponse {
                     Some(said) => line
                         .push_str(&format!("  {}'s summary: {said}\n", d.id)),
                     None => {
-                        line.push_str(&format!("  {}'s summary:\n", d.id));
-                        quote(&mut line, text);
+                        let preview =
+                            crate::govlog::meeting_summary::summary_preview(
+                                text,
+                            );
+                        if preview == text {
+                            line.push_str(&format!("  {}'s summary:\n", d.id));
+                            quote(&mut line, text);
+                        } else {
+                            line.push_str(&format!(
+                                "  {}'s summary, its opening (the whole: \
+                                 get_content(\"{}\", detail=\"summary\")):\n",
+                                d.id, d.id
+                            ));
+                            quote(&mut line, &preview);
+                        }
                     }
                 }
             }
@@ -5171,7 +5188,8 @@ impl CouncilMeetingResponse {
             out.push_str(&m.render_line_with(earlier));
         }
         out.push_str(
-            "\nRead a decision's whole record with get_content(id). Where a \
+            "\nRead a decision's whole summary with get_content(id, \
+             detail=\"summary\"), its whole record with get_content(id). Where a \
              summary and a record differ, the record is authoritative.\n",
         );
         if meetings
@@ -6449,6 +6467,58 @@ mod tests {
         assert!(!out.contains(RECORD_SIZE_NOTE), "{out}");
     }
 
+    /// A long summary is listed by its opening, with where the whole is;
+    /// the listing is an index (Steward, 2026-11-14)
+    #[test]
+    fn a_long_summary_is_listed_by_its_opening() {
+        use crate::govlog::{CouncilSeat, SummaryAcceptance};
+        use chrono::TimeZone;
+        let at = Utc.with_ymd_and_hms(2026, 11, 12, 16, 25, 0).unwrap();
+        let summary = format!(
+            "# GOV-2026-0022: Haiku 5.5 on the Council\n\n\
+             **Outcome:** Approved unanimously (5-0).\n\n\
+             **Vote:** Artist yes, Steward yes.\n\n\
+             ## What was adopted\n\n\
+             The Council approved a plan. No seat is swapped. The rest.\n\n\
+             ## Conditions\n\n{}",
+            "A condition. ".repeat(300)
+        );
+        let meeting = CouncilMeetingResponse {
+            id: CouncilMeetingId::new(),
+            started_at: at,
+            adjourned_at: Some(at),
+            status: MeetingStatus::Adjourned,
+            decision_ids: vec!["GOV-2026-0022".parse().unwrap()],
+            summary: None,
+            decision_summaries: vec![MeetingDecisionSummary {
+                id: "GOV-2026-0022".parse().unwrap(),
+                title: "Haiku 5.5 on the Council".into(),
+                summary: Some(summary.clone()),
+                summary_authorship: Some(SummaryAuthorship {
+                    written_by: CouncilSeat::Lawyer,
+                    accepted_by: SummaryAcceptance::Steward,
+                }),
+                record_bytes: None,
+            }],
+            test_sitting: false,
+        };
+        let out = CouncilMeetingResponse::render_list(&[meeting], None);
+        assert!(
+            out.contains(
+                "  GOV-2026-0022's summary, its opening (the whole: \
+                 get_content(\"GOV-2026-0022\", detail=\"summary\")):\n\
+                 \x20 > **Outcome:** Approved unanimously (5-0).\n\
+                 \x20 > \n\
+                 \x20 > **Vote:** Artist yes, Steward yes.\n\
+                 \x20 > \n\
+                 \x20 > The Council approved a plan. No seat is swapped.\n"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("A condition."), "{out}");
+        assert!(out.len() < summary.len() / 4, "{out}");
+    }
+
     #[test]
     fn governance_search_hit_flattens_the_index_line() {
         let hit = GovernanceSearchHit {
@@ -6575,7 +6645,8 @@ mod tests {
              authoritative:\n\
              \x20 > The Lawyer's account.\n\
              \x20 > Second line.\n\
-             \nRead a decision's whole record with get_content(id). Where a \
+             \nRead a decision's whole summary with get_content(id, \
+             detail=\"summary\"), its whole record with get_content(id). Where a \
              summary and a record differ, the record is authoritative.\n"
         );
         // Each summary once: the composed meeting summary repeats it
@@ -6609,6 +6680,12 @@ mod tests {
         let json = std::fs::read_to_string(path).unwrap();
         let meetings: Vec<CouncilMeetingResponse> =
             serde_json::from_str(&json).unwrap();
+        if std::env::var_os("MEETINGS_PRINT").is_some() {
+            println!(
+                "{}",
+                CouncilMeetingResponse::render_list(&meetings, None)
+            );
+        }
         for n in [3, 10, meetings.len()] {
             let page = &meetings[..n.min(meetings.len())];
             println!(
