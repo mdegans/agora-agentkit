@@ -73,6 +73,8 @@ pub mod state;
 pub mod text;
 pub mod threads;
 pub mod tools;
+#[cfg(feature = "dioxus")]
+pub mod ui;
 
 // Gated on `misanthropic` rather than `retry`: the `reactor` module is
 // itself `misanthropic`-gated and needs `client_error_recoverable` for its
