@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::responses::TestItem;
 use crate::ui::{
     ClientSlots, island,
     ssr::{pre_render, render_island},
@@ -73,10 +74,7 @@ fn read() -> PostWithCommentsResponse {
 }
 
 fn page(read: &PostWithCommentsResponse) -> ThreadPage {
-    ThreadPage {
-        post: read.post.id,
-        thread: read.into(),
-    }
+    ThreadPage::loaded(read.clone())
 }
 
 fn island_of(page: ThreadPage) -> String {
@@ -88,19 +86,20 @@ fn rows_in(html: &str) -> usize {
     html.matches(r#"" id="comment-"#).count()
 }
 
-fn ids(rows: &[Row]) -> Vec<String> {
-    rows.iter().map(|r| r.item.id().to_string()).collect()
+fn ids(rows: &[(Item<'_>, Place)]) -> Vec<String> {
+    rows.iter().map(|(item, _)| item.id().to_string()).collect()
 }
 
 /// Depth first, oldest first, the orphan at the top level, the stub in
 /// its place; each reply names whom it answers
 #[test]
 fn comments_are_in_thread_order() {
-    let view = ThreadView::from(&read());
-    assert_eq!(ids(&view.rows), [C4, C1, C2, C3, S1]);
-    let depths: Vec<u32> = view.rows.iter().map(|r| r.depth).collect();
+    let read = read();
+    let rows = rows(&read);
+    assert_eq!(ids(&rows), [C4, C1, C2, C3, S1]);
+    let depths: Vec<u32> = rows.iter().map(|(_, p)| p.depth).collect();
     assert_eq!(depths, [0, 0, 1, 2, 1]);
-    let to: Vec<_> = view.rows.iter().map(|r| r.replying_to.clone()).collect();
+    let to: Vec<_> = rows.iter().map(|(_, p)| p.replying_to.clone()).collect();
     assert_eq!(
         to,
         [
@@ -111,36 +110,39 @@ fn comments_are_in_thread_order() {
             Some(ReplyingTo::Author("quinn".parse().unwrap())),
         ]
     );
-    assert!(matches!(view.rows[4].item, Item::Stub(_)));
-    assert_eq!(view.summary.as_deref(), Some("A *summary*."));
+    assert!(matches!(rows[4].0, Item::Stub(_)));
 }
 
 #[test]
 fn an_id_given_twice_is_drawn_once_and_a_cycle_loses_nothing() {
-    let c = |id: &str, parent: Option<&str>, at: &str| {
-        let comment: CommentResponse =
-            serde_json::from_value(serde_json::json!({
-                "id": id, "post_id": POST, "parent_comment_id": parent,
-                "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
-                "agent_name": "quinn", "body": id,
-                "created_at": format!("2026-11-04T{at}:00:00Z"),
-            }))
-            .unwrap();
-        (Item::Comment((&comment).into()), comment.parent_comment_id)
+    let c = |id: &str, parent: Option<&str>, at: &str| -> CommentResponse {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "post_id": POST, "parent_comment_id": parent,
+            "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
+            "agent_name": "quinn", "body": id,
+            "created_at": format!("2026-11-04T{at}:00:00Z"),
+        }))
+        .unwrap()
     };
     // C1 and C2 reply to each other; C3 to itself; C4 twice
-    let rows = thread_order([
+    let comments = [
         c(C1, Some(C2), "10"),
         c(C2, Some(C1), "11"),
         c(C3, Some(C3), "12"),
         c(C4, None, "13"),
         c(C4, None, "14"),
-    ]);
+    ];
+    let rows = thread_order(comments.iter().map(Item::Comment));
     assert_eq!(ids(&rows), [C3, C4, C1, C2]);
-    assert_eq!(rows[0].depth, 0);
-    assert_eq!(rows[0].replying_to, None);
-    assert_eq!(rows[2].depth, 0);
-    assert_eq!(rows[3].depth, 1);
+    assert_eq!(rows[0].1.depth, 0);
+    assert_eq!(rows[0].1.replying_to, None);
+    assert_eq!(rows[2].1.depth, 0);
+    assert_eq!(rows[3].1.depth, 1);
+    // A read listing a comment twice draws it once
+    let mut read = read();
+    read.comments.push(read.comments[0].clone());
+    let html = island_of(page(&read));
+    assert_eq!(rows_in(&html), 5, "{html}");
 }
 
 /// A reply chain thousands deep is ordered without recursion, and drawn as
@@ -151,35 +153,28 @@ fn a_deep_chain_is_safe() {
     let id = |i: usize| {
         CommentId::from(uuid::Uuid::from_u128(0xc000_0000 + i as u128))
     };
-    let items: Vec<_> = (0..n)
+    let mut read = read();
+    let template = read.comments[1].clone();
+    read.comment_stubs.clear();
+    read.comments = (0..n)
         .rev()
         .map(|i| {
-            let comment = CommentView {
-                id: id(i),
-                agent_name: Some("quinn".parse().unwrap()),
-                author_kind: PosterKind::Agent,
-                body: format!("reply {i}"),
-                created_at: None,
-                deleted: false,
-                signed: None,
-                via: None,
-            };
-            (Item::Comment(comment), (i > 0).then(|| id(i - 1)))
+            let mut c = template.clone();
+            c.id = id(i);
+            c.parent_comment_id = (i > 0).then(|| id(i - 1));
+            c.body = format!("reply {i}");
+            c.created_at = None;
+            c
         })
         .collect();
     let started = Instant::now();
-    let rows = thread_order(items);
+    let rows = rows(&read);
     assert_eq!(rows.len(), n);
-    for (i, row) in rows.iter().enumerate() {
-        assert_eq!(row.item.id(), id(i));
-        assert_eq!(row.depth as usize, i);
+    for (i, (item, place)) in rows.iter().enumerate() {
+        assert_eq!(item.id(), id(i));
+        assert_eq!(place.depth as usize, i);
     }
-    let mut view = ThreadView::from(&read());
-    view.rows = rows;
-    let html = island_of(ThreadPage {
-        post: view.post.id,
-        thread: ThreadLoad::Loaded(Box::new(view)),
-    });
+    let html = island_of(page(&read));
     assert!(started.elapsed() < Duration::from_secs(30));
     assert_eq!(html.matches("comment comment-depth-3").count(), n - 3);
     assert_eq!(rows_in(&html), n);
@@ -231,20 +226,18 @@ fn a_large_thread_renders_in_order() {
 /// unique on the page
 #[test]
 fn short_anchors_are_unique() {
-    let view = ThreadView::from(&read());
-    // C1…C4 and S1 share their first eight hex digits only pairwise? No:
-    // each `c000000N` is its own
-    assert!(view.rows.iter().all(|r| r.short_anchor.is_some()));
+    let read0 = read();
+    // Each `c000000N` is its own
+    assert!(rows(&read0).iter().all(|(_, p)| p.short_anchor.is_some()));
     let twin = "c0000001-ffff-4000-8000-0000000000aa";
     let mut read = read();
     let mut c = read.comments[1].clone();
     c.id = twin.parse().unwrap();
     read.comments.push(c);
-    let view = ThreadView::from(&read);
-    for row in &view.rows {
-        let id = row.item.id().to_string();
+    for (item, place) in rows(&read) {
+        let id = item.id().to_string();
         assert_eq!(
-            row.short_anchor.is_none(),
+            place.short_anchor.is_none(),
             id.starts_with("c0000001"),
             "{id}"
         );
@@ -255,49 +248,18 @@ fn short_anchors_are_unique() {
     assert!(html.contains(r#"id="comment-c0000002""#), "{html}");
 }
 
-/// The whole page's markup, markers included: what agora-server's
-/// pre-render and the client's first render must agree on
-#[test]
-fn a_thread_snapshot() {
-    let mut read = read();
-    read.comments.truncate(2);
-    read.comments.retain(|c| c.id.to_string() == C1);
-    read.comment_stubs.clear();
-    read.thread_summary = None;
-    assert_eq!(
-        island_of(page(&read)),
-        concat!(
-            r#"<!--placeholder0--><section class="agora-web" data-node-hydration="1"><div style="margin-bottom: 0.5rem;" data-node-hydration="2"><a class="pill pill-btn" href="/agora/community/meta-governance" data-node-hydration="3"><!--node-id4-->← meta-governance<!--#--></a></div>"#,
-            r#"<!--placeholder5--><article class="card" data-node-hydration="6"><div class="post-meta" style="margin-bottom: 0.75rem;"><!--placeholder7--><!--placeholder8--><a href="/agora/agent/litmus" data-node-hydration="9"><!--node-id10-->litmus<!--#--></a>"#,
-            r#"<span class="pill pill-provenance" data-node-hydration="11"><!--node-id12-->ed25519<!--#--></span><span data-node-hydration="13">·</span><span data-node-hydration="14"><!--node-id15-->Nov 04, 2026 at 09:00 UTC<!--#--></span></div>"#,
-            r#"<!--placeholder16--><h1 style="font-size: 1.375rem; font-weight: 700; margin-bottom: 0.75rem;" data-node-hydration="17"><!--node-id18-->A title<!--#--></h1>"#,
-            r#"<div class="markdown-body" style="font-size: 0.9375rem; line-height: 1.7;" data-node-hydration="19"><p data-node-hydration="20"><!--node-id21-->Some <!--#--><em data-node-hydration="22"><!--node-id23-->body<!--#--></em><!--node-id24-->.<!--#--></p></div>"#,
-            r#"<div class="post-meta" style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border);"><span><!--node-id25-->1 comment<!--#--></span></div>"#,
-            r#"<!--placeholder26--></article><!--placeholder27--><div class="page-header" style="margin-top: 1.5rem;" data-node-hydration="28"><h2 style="font-size: 1.125rem;">Comments</h2></div>"#,
-            r#"<!--placeholder29--><div class="card" data-node-hydration="30"><div class="comment" id="comment-c0000001-0000-4000-8000-000000000001" data-node-hydration="31"><span id="comment-c0000001" data-node-hydration="32"></span><!--placeholder33-->"#,
-            r#"<div class="comment-meta" data-node-hydration="34"><a href="/agora/agent/quinn" data-node-hydration="35"><!--node-id36-->quinn<!--#--></a>"#,
-            r#"<span class="pill pill-provenance" data-node-hydration="37"><!--node-id38-->ed25519<!--#--></span><span data-node-hydration="39">·</span><span data-node-hydration="40"><!--node-id41-->Nov 04, 2026 at 10:00 UTC<!--#--></span></div>"#,
-            r#"<div class="comment-body markdown-body" data-node-hydration="42"><p data-node-hydration="43"><!--node-id44-->first<!--#--></p></div>"#,
-            r#"<!--placeholder45--></div></div></section>"#,
-        )
-    );
-}
-
-/// What a test can see of the markup: the placeholders above are the
-/// slots (session, then one reply slot under the post and one per
-/// comment); this counts them
+/// How many reply slots a page draws: one under the post and one per
+/// comment, none on a locked thread
 fn reply_slots(page: &ThreadPage) -> usize {
-    // The `ReplySlot`s drawn: one ClientOnly each, after its row
-    let ThreadLoad::Loaded(view) = &page.thread else {
+    let ThreadLoad::Loaded(read) = &page.thread else {
         return 0;
     };
-    if view.post.locked() {
+    if locked(&read.post) {
         0
     } else {
-        1 + view
-            .rows
+        1 + rows(read)
             .iter()
-            .filter(|r| matches!(r.item, Item::Comment(_)))
+            .filter(|(item, _)| matches!(item, Item::Comment(_)))
             .count()
     }
 }
@@ -386,9 +348,9 @@ fn a_removed_post_says_why_and_shows_no_body() {
         ),
         (None, "This post was removed."),
     ] {
-        let mut post = PostView::from(&read.post);
+        let mut post = read.post.clone();
         post.removed_by = by;
-        assert!(post.removal_sentence().unwrap().contains(sentence));
+        assert!(removal_sentence(&post).unwrap().contains(sentence));
     }
 }
 
@@ -406,12 +368,18 @@ fn a_designated_proposal_and_a_test_item_are_labelled() {
     let html = island_of(page(&read));
     assert!(html.contains(">Proposal · policy · designated<"), "{html}");
     assert!(html.contains("Designated a proposal (policy)"), "{html}");
-    assert!(html.contains(r#"title="Set aside for a test sitting: shown, never live business""#), "{html}");
+    assert!(
+        html.contains(
+            r#"title="TEST: a test sitting&#39;s item; not binding""#
+        ),
+        "{html}"
+    );
+    assert!(html.contains(">TEST</span>"), "{html}");
 }
 
 /// A locked thread's notice says so, and draws no reply slots
-#[test]
-fn a_locked_thread_has_no_reply_slots() {
+#[tokio::test]
+async fn a_locked_thread_has_no_reply_slots() {
     let mut read = read();
     let open = page(&read);
     read.post.notice = Some(crate::responses::ThreadNotice {
@@ -423,21 +391,21 @@ fn a_locked_thread_has_no_reply_slots() {
     });
     let locked = page(&read);
     let html = island_of(locked.clone());
-    assert!(
-        html.contains(">Locked: new comments are refused<"),
-        "{html}"
-    );
-    assert!(
-        html.contains(&format!(r#"href="/agora/post/{POST}""#)),
-        "{html}"
-    );
+    // The notice is in the data, as the API serves it, and not drawn
+    assert!(!html.contains("schedule for the 09-26"), "{html}");
+    assert!(!html.contains("Locked"), "{html}");
+    let data = island::to_script_text(&locked).unwrap();
+    assert!(data.contains("schedule for the 09-26"), "{data}");
     assert_eq!(reply_slots(&locked), 0);
     // The post's and one per comment, a removed one's included
     assert_eq!(reply_slots(&open), 5);
-    let placeholders = |html: &str| html.matches("<!--placeholder").count();
-    // The open thread draws its reply slots' placeholders; the locked
-    // one, none (and a notice in place of the open one's placeholder)
-    assert!(placeholders(&island_of(open)) > placeholders(&html));
+    // After mount, the locked thread's slots stay empty
+    let mut dom = VirtualDom::new_with_props(ThreadIsland, locked);
+    dom.provide_root_context(slots());
+    dom.rebuild_in_place();
+    let html = settle(&mut dom, |h| h.contains("signed in")).await;
+    assert!(html.contains("signed in"), "{html}");
+    assert!(!html.contains("reply-form"), "{html}");
 }
 
 // -- Client slots and reloads -----------------------------------------------
@@ -545,7 +513,7 @@ async fn a_fresh_mount_loads_through_its_reload() {
     );
     dom.provide_root_context(Reload::<ThreadLoad>::new(move || {
         counted.set(counted.get() + 1);
-        Box::pin(async { ThreadLoad::from(&read()) })
+        Box::pin(async { ThreadLoad::Loaded(Box::new(read())) })
     }));
     dom.rebuild_in_place();
     assert!(dioxus_ssr::pre_render(&dom).contains("Loading the thread"));

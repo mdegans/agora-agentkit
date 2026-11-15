@@ -1253,7 +1253,7 @@ pub fn item_provenance_labels(
 
 /// Everything shown beside an item's author: who stands behind it
 /// ([`PosterKind::label`], "operator (human)") first, then how it arrived
-/// ([`item_provenance_labels`])
+/// ([`item_provenance_labels`]). The labels of [`author_badges`]
 pub fn author_labels(
     kind: PosterKind,
     deleted: bool,
@@ -1261,10 +1261,101 @@ pub fn author_labels(
     via: Option<ClientPlatform>,
     author: Option<&crate::names::AgentName>,
 ) -> Vec<&'static str> {
-    kind.label()
+    author_badges(kind, deleted, signed, via, author)
         .into_iter()
-        .chain(item_provenance_labels(deleted, signed, via, author))
+        .map(|badge| badge.label)
         .collect()
+}
+
+/// A badge beside an item's author: its label, and what it does and does
+/// not mean, for a reader who hovers it (the web's `title`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorBadge {
+    pub label: &'static str,
+    /// `None` where the web has none (the platform's own account)
+    pub title: Option<&'static str>,
+}
+
+/// [`author_labels`], each with its explanation: one copy of the texts the
+/// web shows (moved from agora-server's `web::badges`, 2026-11-15; a
+/// design session on their wording for humans and agents is to come)
+pub fn author_badges(
+    kind: PosterKind,
+    deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
+    author: Option<&crate::names::AgentName>,
+) -> Vec<AuthorBadge> {
+    let kind_badge = kind.label().map(|label| AuthorBadge {
+        label,
+        title: Some(match kind {
+            PosterKind::Operator => {
+                "Written by a human: the operator of agents on Agora, posting \
+                 as itself through its operator poster, not through an agent."
+            }
+            PosterKind::Agent | PosterKind::Unknown => {
+                "A kind of author this page does not name."
+            }
+        }),
+    });
+    let provenance = item_provenance_labels(deleted, signed, via, author)
+        .into_iter()
+        .map(|label| AuthorBadge {
+            label,
+            title: provenance_title(label, via),
+        });
+    kind_badge.into_iter().chain(provenance).collect()
+}
+
+/// What a provenance label means, by the label it is
+fn provenance_title(
+    label: &'static str,
+    via: Option<ClientPlatform>,
+) -> Option<&'static str> {
+    if label == SYSTEM_PROVENANCE {
+        return None;
+    }
+    if label == "ed25519" {
+        return Some(
+            "Signed with the Ed25519 key registered to the agent's account, \
+             which whatever runs the agent holds, and Agora checked the \
+             signature when this was posted: the text is what that key \
+             signed. It says nothing about whether the text is true, who \
+             chose its words, or how the agent behaves. The Constitution \
+             calls this the \"verified\" badge.",
+        );
+    }
+    let via = via.filter(|v| v.label() == label)?;
+    Some(match via {
+        ClientPlatform::Claude => {
+            "Sent through Anthropic's connector: the OAuth app's callbacks are \
+             Claude's and the request came from Anthropic's network. It says \
+             nothing about who wrote the words."
+        }
+        ClientPlatform::Chatgpt => {
+            "Sent through OpenAI's ChatGPT connector: the OAuth app's callbacks \
+             are ChatGPT's and the request came from OpenAI's network. It says \
+             nothing about who wrote the words."
+        }
+        ClientPlatform::OtherClient => {
+            "Sent through an OAuth app that is not a verified platform \
+             connector, such as Claude Code running on someone's computer."
+        }
+        ClientPlatform::OperatorToken => {
+            "Sent with an operator API token, a path removed in September 2026."
+        }
+        ClientPlatform::Unrecorded => {
+            "Sent over OAuth before Agora recorded which app was used \
+             (September 2026)."
+        }
+        ClientPlatform::OperatorPortal => {
+            "Written by a human operator, signed in to the operator portal, \
+             through its operator poster: no agent and no OAuth app sent it."
+        }
+        ClientPlatform::Unknown => {
+            "Sent through a channel this page does not name."
+        }
+    })
 }
 
 /// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):
@@ -1402,7 +1493,7 @@ pub struct CommunityTag {
 }
 
 /// A community listing.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityResponse {
     pub id: CommunityId,
@@ -1416,6 +1507,10 @@ pub struct CommunityResponse {
     /// `elsewhere_communities` shows. Absent from servers before 0.95
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_count: Option<i64>,
+    /// A premium community, as its page marks it. `false` (absent) from
+    /// servers that don't send it yet (0.163)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_premium: bool,
 }
 
 /// One edge in an agent's friends list (or a pending request).

@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::ui::ssr::pre_render;
+use crate::ui::{
+    parse_check::{Tok, assert_hydratable, content_model, tokens},
+    ssr::pre_render,
+};
 
 fn render(source: &str) -> String {
     pre_render(
@@ -28,7 +31,10 @@ fn corpus() -> Vec<Case> {
 }
 
 /// The cases where the components deliberately draw something else, with
-/// what they draw instead (canonical form) and why
+/// what they draw instead (canonical form) and why. Not listed: a link to
+/// Agora's own pages has `rel` [`SITE_LINK_REL`] here, where the server
+/// puts `nofollow ugc` on every link; [`canonical`] makes that change to
+/// the server's markup before comparing
 const DIFFERENCES: &[(&str, &str)] = &[
     // The server's sanitiser re-parses `<a><a>…</a></a>` and splits it: the
     // outer link is left empty and the image's link takes the text. A
@@ -49,6 +55,19 @@ const DIFFERENCES: &[(&str, &str)] = &[
         "link in an image",
         r#"<p><a href="https://img.example/i.png" rel="noopener noreferrer nofollow ugc">a b c</a></p>"#,
     ),
+    // A known language keeps its class (Steward, 2026-11-15); the server's
+    // sanitiser strips every class
+    (
+        "fenced code with a language",
+        r#"<pre><code class="language-rust">fn main() { println!("&lt;hi&gt;"); }
+</code></pre>"#,
+    ),
+    (
+        "markdown code block",
+        r#"<pre><code class="language-markdown"># not a heading
+[not](a-link)
+</code></pre>"#,
+    ),
 ];
 
 /// Every input in the corpus draws what the server draws, up to how it is
@@ -59,8 +78,8 @@ fn the_corpus_draws_what_the_server_draws() {
     let mut failures = Vec::new();
     let corpus = corpus();
     for case in &corpus {
-        let ours = canonical(&render(&case.input));
-        let theirs = canonical(&case.server);
+        let ours = canonical(&render(&case.input), false);
+        let theirs = canonical(&case.server, true);
         match DIFFERENCES.iter().find(|(name, _)| *name == case.name) {
             Some((_, want)) => {
                 assert_ne!(ours, theirs, "{}: no longer differs", case.name);
@@ -81,6 +100,22 @@ fn the_corpus_draws_what_the_server_draws() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     for (name, _) in DIFFERENCES {
         assert!(corpus.iter().any(|c| c.name == *name), "{name}");
+    }
+}
+
+/// The unhydrated HTML is the same body, without the markers
+#[test]
+fn to_html_draws_the_corpus_without_markers() {
+    for case in corpus() {
+        let html = to_html(&case.input);
+        assert!(!html.contains("<!--"), "{html}");
+        assert!(!html.contains("data-node-hydration"), "{html}");
+        assert_eq!(
+            canonical(&html, false),
+            canonical(&render(&case.input), false),
+            "{}",
+            case.name
+        );
     }
 }
 
@@ -130,53 +165,42 @@ const BLOCKS: &[&str] = &[
     "br",
 ];
 
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    Start(String, Vec<(String, String)>),
-    End(String),
-    Text(String),
-}
-
 /// HTML as a reader gets it, written one way: comments and hydration
 /// markers dropped, entities decoded, attributes sorted, adjacent text
 /// joined, and outside `<pre>` the newlines next to a block's tags (the
-/// server writer's layout) dropped. A test's tokenizer, for the two
-/// writers' output only: both quote attributes and escape `<` in text
-fn canonical(html: &str) -> String {
-    let mut tokens: Vec<Token> = Vec::new();
-    let mut rest = html;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("<!--") {
-            let end = after.find("-->").expect("a closed comment");
-            rest = &after[end + 3..];
-        } else if let Some(after) = rest.strip_prefix("</") {
-            let end = after.find('>').unwrap();
-            tokens.push(Token::End(after[..end].trim().to_string()));
-            rest = &after[end + 1..];
-        } else if rest.starts_with('<') {
-            let (token, len) = start_tag(rest);
-            tokens.push(token);
-            rest = &rest[len..];
-        } else {
-            let end = rest.find('<').unwrap_or(rest.len());
-            let text = decode(&rest[..end]);
-            match tokens.last_mut() {
-                Some(Token::Text(last)) => last.push_str(&text),
-                _ => tokens.push(Token::Text(text)),
+/// server writer's layout) dropped. With `site_rel`, a link to Agora's
+/// own pages gets [`SITE_LINK_REL`], as the components give it
+fn canonical(html: &str, site_rel: bool) -> String {
+    let mut joined: Vec<Tok> = Vec::new();
+    for token in tokens(html) {
+        let token = match token {
+            Tok::Comment(_) => continue,
+            Tok::Start(name, attrs) => {
+                let href = attrs
+                    .iter()
+                    .find(|(k, _)| k == "href")
+                    .map(|(_, v)| v.clone());
+                let attrs = attrs
+                    .into_iter()
+                    .filter(|(k, _)| k != "data-node-hydration")
+                    .map(|(k, v)| match (&href, k.as_str()) {
+                        (Some(href), "rel") if site_rel && is_on_site(href) => {
+                            (k, SITE_LINK_REL.to_string())
+                        }
+                        _ => (k, v),
+                    })
+                    .collect();
+                Tok::Start(name, attrs)
             }
-            rest = &rest[end..];
-        }
-    }
-    // Comments dropped can leave texts side by side
-    let mut joined: Vec<Token> = Vec::new();
-    for token in tokens {
+            other => other,
+        };
         match (joined.last_mut(), token) {
-            (Some(Token::Text(last)), Token::Text(t)) => last.push_str(&t),
+            (Some(Tok::Text(last)), Tok::Text(t)) => last.push_str(&t),
             (_, token) => joined.push(token),
         }
     }
-    let is_block = |t: Option<&Token>| match t {
-        Some(Token::Start(name, _) | Token::End(name)) => {
+    let is_block = |t: Option<&Tok>| match t {
+        Some(Tok::Start(name, _) | Tok::End(name)) => {
             BLOCKS.contains(&name.as_str())
         }
         _ => false,
@@ -185,7 +209,7 @@ fn canonical(html: &str) -> String {
     let mut pre = 0usize;
     for (i, token) in joined.iter().enumerate() {
         match token {
-            Token::Start(name, attrs) => {
+            Tok::Start(name, attrs) => {
                 if name == "pre" {
                     pre += 1;
                 }
@@ -196,13 +220,13 @@ fn canonical(html: &str) -> String {
                 }
                 out.push('>');
             }
-            Token::End(name) => {
+            Tok::End(name) => {
                 if name == "pre" {
                     pre = pre.saturating_sub(1);
                 }
                 out.push_str(&format!("</{name}>"));
             }
-            Token::Text(text) => {
+            Tok::Text(text) => {
                 let mut text = text.as_str();
                 if pre == 0 {
                     if i == 0 || is_block(joined.get(i - 1)) {
@@ -214,81 +238,9 @@ fn canonical(html: &str) -> String {
                 }
                 out.push_str(&escape(text, false));
             }
+            Tok::Comment(_) => {}
         }
     }
-    out
-}
-
-/// A start tag at the front of `s`, and its length
-fn start_tag(s: &str) -> (Token, usize) {
-    let end = s.find('>').unwrap();
-    let inner = s[1..end].trim_end_matches('/').trim();
-    let (name, mut attrs_src) =
-        inner.split_once(char::is_whitespace).unwrap_or((inner, ""));
-    let mut attrs = Vec::new();
-    loop {
-        attrs_src = attrs_src.trim_start();
-        if attrs_src.is_empty() {
-            break;
-        }
-        let key_end = attrs_src
-            .find(|c: char| c == '=' || c.is_whitespace())
-            .unwrap_or(attrs_src.len());
-        let key = attrs_src[..key_end].to_string();
-        attrs_src = &attrs_src[key_end..];
-        let value = if let Some(v) = attrs_src.strip_prefix("=\"") {
-            let close = v.find('"').unwrap();
-            attrs_src = &v[close + 1..];
-            decode(&v[..close])
-        } else if let Some(v) = attrs_src.strip_prefix('=') {
-            let close = v.find(char::is_whitespace).unwrap_or(v.len());
-            attrs_src = &v[close..];
-            decode(&v[..close])
-        } else {
-            String::new()
-        };
-        if key != "data-node-hydration" {
-            attrs.push((key, value));
-        }
-    }
-    attrs.sort();
-    (Token::Start(name.to_string(), attrs), end + 1)
-}
-
-fn decode(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(at) = rest.find('&') {
-        out.push_str(&rest[..at]);
-        rest = &rest[at..];
-        let Some(end) = rest.find(';') else { break };
-        let entity = &rest[1..end];
-        let c = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some('\u{a0}'),
-            _ => entity
-                .strip_prefix("#x")
-                .map(|h| u32::from_str_radix(h, 16).ok())
-                .or_else(|| entity.strip_prefix('#').map(|d| d.parse().ok()))
-                .flatten()
-                .and_then(char::from_u32),
-        };
-        match c {
-            Some(c) => {
-                out.push(c);
-                rest = &rest[end + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
     out
 }
 
@@ -303,50 +255,122 @@ fn escape(s: &str, attr: bool) -> String {
 #[test]
 fn the_canonical_form_ignores_only_how_it_is_written() {
     assert_eq!(
-        canonical("<p>a &amp; b</p>\n<p>c<br />\nd</p>\n"),
+        canonical("<p>a &amp; b</p>\n<p>c<br />\nd</p>\n", false),
         canonical(
-            r#"<p data-node-hydration="0"><!--node-id1-->a &#38; b<!--#--></p><p>c<br/>d</p>"#
+            r#"<p data-node-hydration="0"><!--node-id1-->a &#38; b<!--#--></p><p>c<br/>d</p>"#,
+            false
         )
     );
-    assert_ne!(canonical("<p>a</p>"), canonical("<p><em>a</em></p>"));
     assert_ne!(
-        canonical(r#"<a href="x" rel="r">t</a>"#),
-        canonical(r#"<a rel="r">t</a>"#)
+        canonical("<p>a</p>", false),
+        canonical("<p><em>a</em></p>", false)
+    );
+    assert_ne!(
+        canonical(r#"<a href="x" rel="r">t</a>"#, false),
+        canonical(r#"<a rel="r">t</a>"#, false)
     );
     // Inside `<pre>` every newline counts
     assert_ne!(
-        canonical("<pre><code>\nx</code></pre>"),
-        canonical("<pre><code>x</code></pre>")
+        canonical("<pre><code>\nx</code></pre>", false),
+        canonical("<pre><code>x</code></pre>", false)
+    );
+    // A `>` in a quoted value doesn't end the tag
+    assert_eq!(
+        canonical(r#"<a title="a > b" rel="r">t</a>"#, false),
+        r#"<a rel="r" title="a &gt; b">t</a>"#
     );
 }
 
 // -- What a body can never contain ------------------------------------------
 
-/// Every element and attribute in `nodes`, checked: only the elements the
-/// tree has, only `href` (allowed), `title`, `rel` and `start` attributes
-fn check_tree(nodes: &[Node], depth: usize, max: &mut usize) {
-    *max = (*max).max(depth);
+/// The tree's own rules: links allowed and never nested, depth bounded,
+/// and the content model the HTML parser expects (a table holds its head
+/// and rows, which hold cells; a list holds items; a paragraph, heading
+/// or inline element holds no block; nothing but cells in a row)
+fn check_tree(nodes: &[Node], parent: Option<&Kind>, depth: usize) -> usize {
+    let mut max = depth;
     for node in nodes {
-        if let Node::Element(kind, children) = node {
-            if let Kind::Link {
-                href: Some(href), ..
-            } = kind
-            {
-                assert!(allowed(href), "{href}");
-                assert!(!href.contains(['\\', ' ', '"', '<', '>']), "{href}");
-                if let Ok(url) = url::Url::parse(href) {
-                    assert!(LINK_SCHEMES.contains(&url.scheme()), "{href}");
-                }
+        let kind = match node {
+            Node::Element(kind, _) => Some(kind),
+            _ => None,
+        };
+        match parent {
+            Some(Kind::Table) => assert!(
+                matches!(kind, Some(Kind::Head | Kind::Row)),
+                "{node:?} in a table"
+            ),
+            Some(Kind::Head | Kind::Row) => assert!(
+                matches!(kind, Some(Kind::Cell { .. })),
+                "{node:?} in a row"
+            ),
+            Some(Kind::List(_)) => {
+                assert!(matches!(kind, Some(Kind::Item)), "{node:?} in a list")
             }
-            if matches!(kind, Kind::Link { .. }) {
+            Some(
+                Kind::Paragraph
+                | Kind::Heading(_)
+                | Kind::Emphasis
+                | Kind::Strong
+                | Kind::Strikethrough
+                | Kind::Link { .. }
+                | Kind::Cell { .. },
+            ) => assert!(
+                kind.is_none_or(|k| !k.is_block()),
+                "{node:?} in phrasing"
+            ),
+            Some(Kind::CodeBlock(_)) => {
+                assert!(matches!(node, Node::Text(_)), "{node:?} in code")
+            }
+            _ => {}
+        }
+        match kind {
+            Some(Kind::Head | Kind::Row) => {
+                assert_eq!(parent, Some(&Kind::Table), "{node:?}")
+            }
+            Some(Kind::Cell { .. }) => assert!(
+                matches!(parent, Some(Kind::Head | Kind::Row)),
+                "{node:?}"
+            ),
+            Some(Kind::Item) => {
+                assert!(matches!(parent, Some(Kind::List(_))), "{node:?}")
+            }
+            _ => {}
+        }
+        if let Node::Text(text) = node {
+            assert!(!text.contains('\0'));
+        }
+        if let Node::Element(kind, children) = node {
+            if let Kind::Link { href, title, rel } = kind {
+                if let Some(href) = href {
+                    assert!(allowed(href), "{href}");
+                    assert!(
+                        !href.contains(['\\', ' ', '"', '<', '>']),
+                        "{href}"
+                    );
+                    if let Ok(url) = url::Url::parse(href) {
+                        assert!(LINK_SCHEMES.contains(&url.scheme()), "{href}");
+                    }
+                    if *rel == SITE_LINK_REL {
+                        assert!(is_on_site(href), "{href}");
+                    }
+                } else {
+                    assert_eq!(*rel, LINK_REL);
+                }
+                if let Some(title) = title {
+                    assert!(!title.contains('\0'));
+                }
                 assert!(
                     !contains_link(children),
                     "a link in a link: {children:?}"
                 );
             }
-            check_tree(children, depth + 1, max);
+            if let Kind::CodeBlock(Some(class)) = kind {
+                assert!(LANGUAGES.iter().any(|(_, c)| c == class));
+            }
+            max = max.max(check_tree(children, Some(kind), depth + 1));
         }
     }
+    max
 }
 
 fn contains_link(nodes: &[Node]) -> bool {
@@ -357,22 +381,12 @@ fn contains_link(nodes: &[Node]) -> bool {
     })
 }
 
-/// The markup's attributes: only these names, on these elements
+/// The markup's elements and attributes: only these names, on these
+/// elements; and an HTML parser reads it as drawn
 fn check_markup(html: &str) {
-    let mut rest = html;
-    while let Some(at) = rest.find('<') {
-        rest = &rest[at..];
-        if let Some(after) = rest.strip_prefix("<!--") {
-            rest = &after[after.find("-->").unwrap() + 3..];
+    for token in tokens(html) {
+        let Tok::Start(name, attrs) = token else {
             continue;
-        }
-        if rest.starts_with("</") {
-            rest = &rest[2..];
-            continue;
-        }
-        let (token, len) = start_tag(rest);
-        let Token::Start(name, attrs) = token else {
-            unreachable!()
         };
         assert!(
             [
@@ -405,29 +419,39 @@ fn check_markup(html: &str) {
             .contains(&name.as_str()),
             "<{name}> in {html}"
         );
+        let href = attrs.iter().find(|(k, _)| k == "href").map(|(_, v)| v);
         for (key, value) in &attrs {
             match (name.as_str(), key.as_str()) {
+                (_, "data-node-hydration") => {}
                 ("a", "href") => assert!(allowed(value), "{value}"),
                 ("a", "title") => {}
-                ("a", "rel") => assert_eq!(value, LINK_REL),
+                ("a", "rel") => match href {
+                    Some(href) if is_on_site(href) => {
+                        assert_eq!(value, SITE_LINK_REL)
+                    }
+                    _ => assert_eq!(value, LINK_REL),
+                },
                 ("ol", "start") => {
                     assert!(value.parse::<u64>().is_ok(), "{value}")
                 }
+                ("code", "class") => assert!(
+                    LANGUAGES.iter().any(|(_, c)| c == value),
+                    "{value}"
+                ),
                 _ => panic!("{key}={value:?} on <{name}> in {html}"),
             }
         }
         if name == "a" {
             assert!(attrs.iter().any(|(k, _)| k == "rel"), "{html}");
         }
-        rest = &rest[len..];
     }
+    assert_hydratable(html);
 }
 
 #[test]
 fn nothing_in_the_corpus_escapes_the_policy() {
     for case in corpus() {
-        let mut max = 0;
-        check_tree(&parse(&case.input), 0, &mut max);
+        check_tree(&parse(&case.input), None, 0);
         check_markup(&render(&case.input));
     }
 }
@@ -455,9 +479,11 @@ const HOSTILE: &[&str] = &[
     "`<script>`",
     "```\n</code></pre><script>alert(1)</script>\n```",
     "``` onload=alert(1)\nx\n```",
+    "```language-rust\" onclick=\"x\nx\n```",
     "| <script> |\n|---|\n| <img src=x> |",
     "[x](https://a.example \"\\\" onmouseover=\\\"alert(1)\")",
     "[\"><script>alert(1)</script>](https://a.example)",
+    "nul \0 in text [t](/x \"nul\0title\") `\0`",
 ];
 
 #[test]
@@ -465,8 +491,8 @@ fn hostile_bodies_are_inert() {
     for source in HOSTILE {
         let html = render(source);
         check_markup(&html);
-        let mut max = 0;
-        check_tree(&parse(source), 0, &mut max);
+        check_tree(&parse(source), None, 0);
+        assert!(!html.contains('\0'), "{html:?}");
         for bad in ["<script", "<img", "<iframe", "javascript:", "onerror="] {
             // Present only as escaped text, never as markup or an href
             if let Some(at) = html.find(bad) {
@@ -479,13 +505,125 @@ fn hostile_bodies_are_inert() {
     }
 }
 
-// -- Pathological documents -------------------------------------------------
+// -- Links ------------------------------------------------------------------
 
-fn max_depth(nodes: &[Node]) -> usize {
-    let mut max = 0;
-    check_tree(nodes, 0, &mut max);
-    max
+/// Agora's own pages lose `nofollow ugc`; everything else, `//host` and a
+/// bare relative path included, keeps it
+#[test]
+fn only_links_to_agoras_own_pages_drop_nofollow() {
+    for (source, href, rel) in [
+        (
+            "[x](agora://post/7ad26ccd)",
+            Some("/agora/post/7ad26ccd"),
+            SITE_LINK_REL,
+        ),
+        ("[x](/agora/feed)", Some("/agora/feed"), SITE_LINK_REL),
+        ("[x](/)", Some("/"), SITE_LINK_REL),
+        ("[x](#comment-1)", Some("#comment-1"), SITE_LINK_REL),
+        ("[x](?q=1)", Some("?q=1"), SITE_LINK_REL),
+        ("[x](//evil.example/x)", Some("//evil.example/x"), LINK_REL),
+        (
+            "[x](/\\evil.example)",
+            Some("/%5Cevil.example"),
+            SITE_LINK_REL,
+        ),
+        ("[x](\\\\evil.example)", Some("%5Cevil.example"), LINK_REL),
+        ("[x](page.html)", Some("page.html"), LINK_REL),
+        (
+            "[x](https://subliminal.technology/agora/feed)",
+            Some("https://subliminal.technology/agora/feed"),
+            LINK_REL,
+        ),
+        ("[x](mailto:a@b.c)", Some("mailto:a@b.c"), LINK_REL),
+        ("<a@b.c>", Some("mailto:a@b.c"), LINK_REL),
+        ("[x](javascript:alert(1))", None, LINK_REL),
+        ("[x](agora://nonsense/at/all)", None, LINK_REL),
+    ] {
+        let nodes = parse(source);
+        let [Node::Element(Kind::Paragraph, children)] = &nodes[..] else {
+            panic!("{nodes:?}");
+        };
+        let [
+            Node::Element(
+                Kind::Link {
+                    href: got,
+                    rel: got_rel,
+                    ..
+                },
+                _,
+            ),
+        ] = &children[..]
+        else {
+            panic!("{children:?}");
+        };
+        assert_eq!(got.as_deref(), href, "{source}");
+        assert_eq!(*got_rel, rel, "{source}");
+    }
+    assert!(!is_on_site("//x") && !is_on_site("") && is_on_site("/"));
 }
+
+/// The bound on `href` and title bytes binds before pulldown-cmark's own
+/// on reference expansion (`max(source, 100 KB)`): a 2 KB destination
+/// used 40 times is 80 KB of `href`s, allowed by the parser
+#[test]
+fn the_link_byte_bound_binds() {
+    let url = format!("https://a.example/{}", "x".repeat(2_000));
+    let source = format!("[r]: {url}\n\n{}", "[r] ".repeat(40));
+    let nodes = parse(&source);
+    let mut with_href = 0;
+    let mut without = 0;
+    fn count(nodes: &[Node], with: &mut usize, without: &mut usize) {
+        for node in nodes {
+            if let Node::Element(kind, children) = node {
+                match kind {
+                    Kind::Link { href: Some(_), .. } => *with += 1,
+                    Kind::Link { href: None, .. } => *without += 1,
+                    _ => {}
+                }
+                count(children, with, without);
+            }
+        }
+    }
+    count(&nodes, &mut with_href, &mut without);
+    let budget = source.len() * 3;
+    assert_eq!(with_href, budget / url.len(), "{with_href}");
+    assert_eq!(with_href + without, 40);
+}
+
+#[test]
+fn a_known_language_has_its_class_and_nothing_else_does() {
+    for (source, class) in [
+        ("```rust\nx\n```", Some("language-rust")),
+        ("```RUST\nx\n```", Some("language-rust")),
+        ("```markdown\n# x\n```", Some("language-markdown")),
+        ("```rust ignore\nx\n```", Some("language-rust")),
+        ("```rust,ignore\nx\n```", None),
+        ("```language-rust\nx\n```", None),
+        ("```\nx\n```", None),
+        ("    indented\n", None),
+        ("```\"><script>\nx\n```", None),
+    ] {
+        let nodes = parse(source);
+        let [Node::Element(Kind::CodeBlock(got), _)] = &nodes[..] else {
+            panic!("{nodes:?}");
+        };
+        assert_eq!(*got, class, "{source}");
+    }
+    for (name, class) in LANGUAGES {
+        assert_eq!(*class, format!("language-{name}"));
+        assert!(name.bytes().all(|b| b.is_ascii_lowercase()), "{name}");
+    }
+}
+
+/// `^` is one of the characters pulldown-cmark's writer leaves as it is
+#[test]
+fn hrefs_are_encoded_as_the_servers_writer_encodes_them() {
+    let mut out = String::new();
+    escape_href(&mut out, "a^b c\\d\"e|f`g{h}é");
+    assert_eq!(out, "a^b%20c%5Cd%22e%7Cf%60g%7Bh%7D%C3%A9");
+}
+
+// -- Pathological documents -------------------------------------------------
 
 #[test]
 fn deep_nesting_is_bounded_and_keeps_its_text() {
@@ -508,72 +646,260 @@ fn deep_nesting_is_bounded_and_keeps_its_text() {
             "deep",
         ),
     ] {
-        let started = Instant::now();
         let nodes = parse(&source);
-        assert!(max_depth(&nodes) <= MAX_DEPTH, "{}", max_depth(&nodes));
+        assert!(check_tree(&nodes, None, 0) <= MAX_DEPTH);
         let html = render(&source);
         assert!(html.contains(word), "{word}");
-        assert!(started.elapsed() < Duration::from_secs(10));
         check_markup(&html);
     }
 }
 
+/// The left-out blocks of a deep list leave one line break, not one each
+#[test]
+fn left_out_blocks_leave_one_line_break() {
+    let nodes = parse(&format!("{}x", "- ".repeat(30_000)));
+    fn longest(nodes: &[Node]) -> usize {
+        nodes
+            .iter()
+            .map(|n| match n {
+                Node::Text(t) => t.matches('\n').count(),
+                Node::Element(_, c) => longest(c),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+    assert!(longest(&nodes) <= 2, "{}", longest(&nodes));
+}
+
+/// The text of `html`, joined
+fn text_of(html: &str) -> String {
+    tokens(html)
+        .into_iter()
+        .filter_map(|t| match t {
+            Tok::Text(t) => Some(t),
+            _ => None,
+        })
+        .collect()
+}
+
 /// A table or list too deep to fit is left out whole, never cut: no row
-/// without its table, no item without its list
+/// without its table, no item without its list, and none of its words
+/// lost. Around the limit, for every container that could cut it
 #[test]
 fn a_structure_at_the_limit_is_left_out_whole() {
-    for quotes in MAX_DEPTH - 4..=MAX_DEPTH {
-        let source = format!(
-            "{}| a |\n{}|---|\n{}| 1 |\n\n{}- item\n  - sub",
-            "> ".repeat(quotes),
-            "> ".repeat(quotes),
-            "> ".repeat(quotes),
-            "> ".repeat(quotes)
-        );
-        let nodes = parse(&source);
-        assert!(max_depth(&nodes) <= MAX_DEPTH);
-        whole(&nodes, None);
-        let html = render(&source);
-        assert!(html.contains("-->a"), "{html}");
-        assert!(html.contains("item"), "{html}");
-    }
-
-    fn whole(nodes: &[Node], parent: Option<&Kind>) {
-        for node in nodes {
-            if let Node::Element(kind, children) = node {
-                match kind {
-                    Kind::Head | Kind::Row => {
-                        assert_eq!(parent, Some(&Kind::Table))
-                    }
-                    Kind::Cell { .. } => {
-                        assert!(matches!(parent, Some(Kind::Head | Kind::Row)))
-                    }
-                    Kind::Item => {
-                        assert!(matches!(parent, Some(Kind::List(_))))
-                    }
-                    _ => {}
-                }
-                whole(children, Some(kind));
+    for depth in MAX_DEPTH - 5..=MAX_DEPTH {
+        for prefix in ["> ", "- ", "1. "] {
+            let lead = prefix.repeat(depth);
+            let cont: String = std::iter::repeat_n(
+                match prefix {
+                    "> " => "> ",
+                    "- " => "  ",
+                    _ => "   ",
+                },
+                depth,
+            )
+            .collect();
+            let source = format!(
+                "{lead}| alpha | beta |\n{cont}|---|---|\n{cont}| one1 | two2 |\n\n{cont}- item\n{cont}  - sub\n{cont}    - subsub"
+            );
+            let nodes = parse(&source);
+            assert!(check_tree(&nodes, None, 0) <= MAX_DEPTH, "{source}");
+            let html = render(&source);
+            check_markup(&html);
+            let text = text_of(&html);
+            for word in ["alpha", "beta", "one1", "two2", "item", "subsub"] {
+                assert!(
+                    text.contains(word),
+                    "{depth} {prefix:?} {word}: {html}"
+                );
             }
         }
     }
 }
 
-/// One long reference used thousands of times can't multiply the page:
-/// past a bound on `href` and title bytes, links keep their text only
+/// Whatever the events, nothing goes where a table's or list's parts go:
+/// a paragraph or text the parser sends inside a table or a list (as it
+/// does after a table that ran out of padding) is left out
 #[test]
-fn reused_references_cannot_blow_up_the_output() {
-    let url = format!("https://a.example/{}", "x".repeat(4_000));
-    let source = format!(
-        "[r]: {url} \"{}\"\n\n{}",
-        "t".repeat(1_000),
-        "[r] ".repeat(10_000)
-    );
-    let html = render(&source);
-    assert!(html.len() < source.len() * 30, "{} bytes", html.len());
-    // The first links are whole
-    assert!(html.contains(&format!(r#"href="{url}""#)));
-    check_markup(&html);
+fn nothing_but_parts_go_in_a_table_or_list() {
+    use pulldown_cmark::{Alignment, TagEnd};
+    let events = [
+        Event::Start(Tag::Table(vec![Alignment::None])),
+        Event::Text("loose".into()),
+        Event::Start(Tag::Paragraph),
+        Event::Text("in a table".into()),
+        Event::End(TagEnd::Paragraph),
+        Event::Start(Tag::TableRow),
+        Event::Start(Tag::Paragraph),
+        Event::End(TagEnd::Paragraph),
+        Event::Start(Tag::TableCell),
+        Event::Text("cell".into()),
+        Event::End(TagEnd::TableCell),
+        Event::End(TagEnd::TableRow),
+        Event::End(TagEnd::Table),
+        Event::Start(Tag::List(None)),
+        Event::Text("loose".into()),
+        Event::Start(Tag::TableCell),
+        Event::End(TagEnd::TableCell),
+        Event::Start(Tag::Item),
+        Event::Text("item".into()),
+        Event::End(TagEnd::Item),
+        Event::End(TagEnd::List(false)),
+        // A part outside its container
+        Event::Start(Tag::Item),
+        Event::Text("stray".into()),
+        Event::End(TagEnd::Item),
+    ];
+    let mut b = Builder::new(1_000);
+    for event in events {
+        b.event(event);
+    }
+    let nodes = b.finish();
+    check_tree(&nodes, None, 0);
+    let html = std::iter::once(&nodes).map(|n| {
+        let mut dom =
+            VirtualDom::new_with_props(Tree, TreeProps { nodes: n.clone() });
+        dom.rebuild_in_place();
+        dioxus_ssr::pre_render(&dom)
+    });
+    for html in html {
+        check_markup(&html);
+        let text = text_of(&html);
+        assert!(text.contains("cell") && text.contains("item"), "{html}");
+        assert!(!text.contains("loose") && !text.contains("stray"), "{html}");
+    }
+
+    #[component]
+    fn Tree(nodes: Vec<Node>) -> Element {
+        rsx! { {nodes.iter().map(node)} }
+    }
+}
+
+fn elements(nodes: &[Node]) -> usize {
+    nodes
+        .iter()
+        .map(|n| match n {
+            Node::Element(_, c) => 1 + elements(c),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// A short table under a wide header: pulldown-cmark pads every row to
+/// the header's width, which would be 682 cells a row from a 4 KiB body.
+/// The element bound stops it at one element per byte of source
+#[test]
+fn padded_cells_are_bounded_by_the_source() {
+    let wide = |bytes: usize| {
+        let n = bytes / 8;
+        let mut s = "|".repeat(n + 1);
+        s.push('\n');
+        s.push_str(&"|-".repeat(n));
+        s.push_str("|\n");
+        let rest = bytes.saturating_sub(s.len());
+        s.push_str(&"a\n".repeat(rest / 2));
+        s
+    };
+    for bytes in [512, 4_096, 65_536] {
+        let source = wide(bytes);
+        let nodes = parse(&source);
+        assert!(
+            elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE,
+            "{} elements from {} bytes",
+            elements(&nodes),
+            source.len()
+        );
+        check_tree(&nodes, None, 0);
+        if bytes <= 4_096 {
+            let html = render(&source);
+            assert!(html.len() < source.len() * 100, "{} bytes", html.len());
+            check_markup(&html);
+        }
+    }
+    // A page of ten such bodies is ten times one, no more
+    let source = wide(4_096);
+    let one = render(&source).len();
+    let page: usize = (0..10).map(|_| render(&source).len()).sum();
+    assert_eq!(page, one * 10);
+    assert!(page < 10 * source.len() * 100);
+}
+
+/// An ordinary document is nowhere near the bound
+#[test]
+fn ordinary_documents_keep_every_element() {
+    let source = "| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 |\n| 4 | 5 | 6 |\n\n- one\n- two\n  - three\n\n> *quoted* **text** ~~old~~";
+    let nodes = parse(source);
+    let html = render(source);
+    assert_eq!(html.matches("<td").count(), 6, "{html}");
+    assert!(elements(&nodes) < source.len());
+}
+
+/// Time to parse `source`, the least of three
+fn time_to_parse(source: &str) -> Duration {
+    (0..3)
+        .map(|_| {
+            let started = Instant::now();
+            std::hint::black_box(parse(source));
+            started.elapsed()
+        })
+        .min()
+        .unwrap()
+}
+
+/// Linear in the source: four times the input takes about four times as
+/// long, where a scan per event would take sixteen. A ratio, not a time,
+/// so a slow machine doesn't fail it
+#[test]
+fn building_is_linear() {
+    for unit in ["- ", "> ", "*a ", "**a *b ", "[a](", "|"] {
+        let small = unit.repeat(16_384 / unit.len());
+        let large = unit.repeat(4 * 16_384 / unit.len());
+        let (s, l) = (time_to_parse(&small), time_to_parse(&large));
+        let ratio = l.as_secs_f64() / s.as_secs_f64().max(1e-6);
+        assert!(ratio < 9.0, "{unit:?}: {s:?} then {l:?} ({ratio:.1}x)");
+    }
+}
+
+/// Drawing recurses once per level of the tree. At [`MAX_DEPTH`] it fits
+/// in 64 KiB in a release build (measured: under 64 KiB; a debug build's
+/// frames need about 700 KiB, which is why the debug run gets wasm's
+/// default 1 MiB)
+#[test]
+fn drawing_at_the_limit_fits_a_small_stack() {
+    let source = format!("{}*a **b ~~c [d](/x)~~** e*", "> ".repeat(MAX_DEPTH));
+    let html = std::thread::Builder::new()
+        .stack_size(if cfg!(debug_assertions) { 1024 } else { 64 } * 1024)
+        .spawn(move || render(&source))
+        .unwrap()
+        .join()
+        .expect("no stack overflow");
+    assert!(html.contains("<blockquote"));
+}
+
+/// A long text is drawn as several text nodes, none over [`TEXT_CHUNK`]
+/// bytes, cut at characters, and reads back whole
+#[test]
+fn long_texts_are_drawn_in_pieces() {
+    let text = "é".repeat(30_000) + &"a".repeat(10_001);
+    for source in [
+        text.clone(),
+        format!("`{text}`"),
+        format!("```\n{text}\n```"),
+    ] {
+        let html = render(&source);
+        let texts: Vec<String> = tokens(&html)
+            .into_iter()
+            .filter_map(|t| match t {
+                Tok::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.len() >= 4, "{}", texts.len());
+        assert!(texts.iter().all(|t| t.len() <= TEXT_CHUNK));
+        assert!(texts.concat().contains(&text));
+        check_markup(&html);
+    }
 }
 
 #[test]
@@ -599,6 +925,139 @@ fn rendering_is_deterministic() {
     }
 }
 
+// -- Generated documents ----------------------------------------------------
+
+/// xorshift64: the same documents on every run
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+}
+
+/// Pieces of markdown, joined at random: the reviewer's generator for
+/// #313, cut down. `tools/markdown-parity`'s `fuzz` runs the full one
+const ATOMS: &[&str] = &[
+    "a",
+    "b",
+    "word ",
+    " ",
+    "\n",
+    "\n\n",
+    "\t",
+    "\r\n",
+    "\0",
+    "*",
+    "**",
+    "_",
+    "~~",
+    "`",
+    "```",
+    "```\n",
+    "```rust\n",
+    "    ",
+    "[",
+    "]",
+    "(",
+    ")",
+    "](/x)",
+    "](https://a.example)",
+    "](javascript:x)",
+    "](//h)",
+    "![",
+    "[r]",
+    "[r]: /u \"t\"\n",
+    "<",
+    ">",
+    "<a>",
+    "</a>",
+    "<a href=\"x\">",
+    "<b>",
+    "<div>\n",
+    "<pre>",
+    "<table>",
+    "<tr>",
+    "<td>",
+    "<p>",
+    "</p>",
+    "<!--",
+    "-->",
+    "<![CDATA[",
+    "<?",
+    "<script>",
+    "<https://a.example>",
+    "<a@b.c>",
+    "> ",
+    "- ",
+    "* ",
+    "1. ",
+    "7. ",
+    "# ",
+    "###### ",
+    "---\n",
+    "===\n",
+    "|",
+    " | ",
+    "|---|",
+    "| a | b |\n",
+    "|:-:|--:|\n",
+    "\\",
+    "  \n",
+    "&amp;",
+    "&#0;",
+    "&nbsp;",
+    "&",
+    "'",
+    "\"",
+    "é",
+    "\u{202e}",
+    "\u{2028}",
+    "[^1]",
+    "- [ ] ",
+];
+
+fn generated(rng: &mut Rng) -> String {
+    let mut s = String::new();
+    if rng.below(4) == 0 {
+        let n = MAX_DEPTH - 8 + rng.below(12);
+        for _ in 0..n {
+            s.push_str(["> ", "- ", "1. "][rng.below(3)]);
+        }
+    }
+    let prefix = s.replace("- ", "  ").replace("1. ", "   ");
+    for _ in 0..1 + rng.below(40) {
+        let atom = ATOMS[rng.below(ATOMS.len())];
+        s.push_str(atom);
+        if atom.ends_with('\n') && rng.below(3) == 0 {
+            s.push_str(&prefix);
+        }
+    }
+    s
+}
+
+/// A few thousand generated documents: each draws markup an HTML parser
+/// reads as drawn (markers included), keeps the content model and the
+/// link policy, and stays within the bounds
+#[test]
+fn generated_documents_hydrate() {
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    for _ in 0..3_000 {
+        let source = generated(&mut rng);
+        let nodes = parse(&source);
+        assert!(check_tree(&nodes, None, 0) <= MAX_DEPTH, "{source:?}");
+        assert!(elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE);
+        let html = render(&source);
+        if let Some(why) = content_model(&html) {
+            panic!("{why}\n{source:?}\n{html}");
+        }
+        check_markup(&html);
+    }
+}
+
 // -- The markup itself ------------------------------------------------------
 
 /// The markup hydration adopts, markers and all: a change here moves the
@@ -607,14 +1066,14 @@ fn rendering_is_deterministic() {
 fn a_body_snapshot() {
     assert_eq!(
         render(
-            "# Title\n\nSome *text* and [a link](https://a.example \"t\").\n\n- one\n- two\n\n```\ncode\n```"
+            "# Title\n\nSome *text* and [a link](https://a.example \"t\").\n\n- one\n- two\n\n```rust\ncode\n```"
         ),
         concat!(
             r#"<h1 data-node-hydration="0"><!--node-id1-->Title<!--#--></h1>"#,
             r#"<p data-node-hydration="2"><!--node-id3-->Some <!--#--><em data-node-hydration="4"><!--node-id5-->text<!--#--></em><!--node-id6--> and <!--#-->"#,
             r#"<a href="https://a.example" title="t" rel="noopener noreferrer nofollow ugc" data-node-hydration="7"><!--node-id8-->a link<!--#--></a><!--node-id9-->.<!--#--></p>"#,
             r#"<ul data-node-hydration="10"><li data-node-hydration="11"><!--node-id12-->one<!--#--></li><li data-node-hydration="13"><!--node-id14-->two<!--#--></li></ul>"#,
-            r#"<pre data-node-hydration="15"><code><!--node-id16-->code"#,
+            r#"<pre data-node-hydration="15"><code class="language-rust" data-node-hydration="16"><!--node-id17-->code"#,
             "\n",
             r#"<!--#--></code></pre>"#,
         )
@@ -624,7 +1083,7 @@ fn a_body_snapshot() {
 #[test]
 fn an_unallowed_link_keeps_its_text_and_rel_only() {
     assert_eq!(
-        canonical(&render("[x](javascript:alert(1) \"t\")")),
+        canonical(&render("[x](javascript:alert(1) \"t\")"), false),
         r#"<p><a rel="noopener noreferrer nofollow ugc" title="t">x</a></p>"#
     );
 }
@@ -632,16 +1091,16 @@ fn an_unallowed_link_keeps_its_text_and_rel_only() {
 #[test]
 fn a_numbered_list_keeps_its_start() {
     assert_eq!(
-        canonical(&render("7. seven\n8. eight")),
+        canonical(&render("7. seven\n8. eight"), false),
         r#"<ol start="7"><li>seven</li><li>eight</li></ol>"#
     );
-    assert_eq!(canonical(&render("1. one")), "<ol><li>one</li></ol>");
+    assert_eq!(canonical(&render("1. one"), false), "<ol><li>one</li></ol>");
 }
 
 #[test]
 fn an_empty_body_draws_nothing() {
-    assert_eq!(canonical(&render("")), "");
-    assert_eq!(canonical(&render("  \n\n")), "");
+    assert_eq!(canonical(&render(""), false), "");
+    assert_eq!(canonical(&render("  \n\n"), false), "");
 }
 
 // -- Previews ---------------------------------------------------------------

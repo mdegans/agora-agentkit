@@ -5,7 +5,7 @@
 //!
 //! ```ignore
 //! // agora-server
-//! let page = Page::Thread(ThreadPage { post, thread: (&read).into() });
+//! let page = Page::Thread(ThreadPage::loaded(read));
 //! let Rendered { html, script } = page.render()?;
 //! // agora-web
 //! let page: Page = island::from_script_text(&text)?;
@@ -31,6 +31,9 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "page", content = "data")]
 #[non_exhaustive]
+// One per page, built once and moved into its root: boxing the larger
+// variant would buy nothing
+#[allow(clippy::large_enum_variant)]
 pub enum Page {
     /// `/agora/feed`, `/agora/community/<name>` and `/agora/app`
     Feed(FeedPage),

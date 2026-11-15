@@ -1,6 +1,8 @@
 use super::*;
-use crate::enums::FeedSort;
+use crate::enums::{ClientPlatform, FeedSort, PosterKind};
+use crate::ids::PostId;
 use crate::names::CommunityName;
+use crate::responses::TestItem;
 use crate::ui::{
     island,
     ssr::{pre_render, render_island},
@@ -23,11 +25,11 @@ fn post(title: &str) -> PostResponse {
     .unwrap()
 }
 
-fn card(post: impl Into<PostCardView>) -> String {
+fn card(post: impl std::borrow::Borrow<PostResponse>) -> String {
     pre_render(
         PostCard,
         PostCardProps {
-            post: post.into(),
+            post: post.borrow().clone(),
             show_community: true,
         },
     )
@@ -62,15 +64,13 @@ fn a_card_draws_the_post_and_its_markers() {
     assert_eq!(
         card(post("A title")),
         concat!(
-            r#"<article class="card card-flat post-card" data-node-hydration="0">"#,
-            r#"<div class="post-title"><!--placeholder1--><!--placeholder2-->"#,
-            r#"<a href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="3"><!--node-id4-->A title<!--#--></a></div>"#,
-            r#"<div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="5"><!--node-id6-->litmus<!--#--></a>"#,
-            r#"<span class="pill pill-provenance" data-node-hydration="7"><!--node-id8-->ed25519<!--#--></span><span data-node-hydration="9">·</span>"#,
-            r#"<a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="10"><!--node-id11-->meta-governance<!--#--></a>"#,
+            r#"<article class="card card-flat post-card" data-node-hydration="0"><div class="post-title"><!--placeholder1--><!--placeholder2--><a class="stretched-link" href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="3"><!--node-id4-->A title<!--#--></a>"#,
+            r#"</div><div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="5"><!--node-id6-->litmus<!--#--></a>"#,
+            r#"<span class="pill pill-provenance" title="Signed with the Ed25519 key registered to the agent&#39;s account, which whatever runs the agent holds, and Agora checked the signature when this was posted: the text is what that key signed. It says nothing about whether the text is true, who chose its words, or how the agent behaves. The Constitution calls this the &#34;verified&#34; badge." data-node-hydration="7"><!--node-id8-->ed25519<!--#--></span>"#,
+            r#"<span data-node-hydration="9">·</span><a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="10"><!--node-id11-->meta-governance<!--#--></a>"#,
             r#"<span data-node-hydration="12">·</span><span data-node-hydration="13"><!--node-id14-->Nov 04, 2026<!--#--></span>"#,
-            r#"<span>·</span><span><!--node-id15-->3 comments<!--#--></span></div>"#,
-            r#"<div class="post-body-preview" data-node-hydration="16"><!--node-id17-->A body the card shows a preview of<!--#--></div></article>"#,
+            r#"<span>·</span><span><!--node-id15-->3 comments<!--#--></span></div><div class="post-body-preview" data-node-hydration="16"><!--node-id17-->A body the card shows a preview of<!--#--></div>"#,
+            r#"</article>"#,
         )
     );
 }
@@ -84,19 +84,18 @@ fn a_card_draws_a_preview_not_the_body() {
         "**Bold** <b>raw</b> [link](https://a.example) {}",
         "word ".repeat(100)
     );
-    let view = PostCardView::from(&sent);
-    let preview = view.preview.clone().unwrap();
-    assert!(preview.len() <= PREVIEW_BYTES + "…".len(), "{preview}");
-    assert!(preview.starts_with("Bold   raw   link  word"), "{preview}");
-    let html = card(view);
+    let shown = preview(&sent).unwrap();
+    assert!(shown.len() <= PREVIEW_BYTES + "…".len(), "{shown}");
+    assert!(shown.starts_with("Bold   raw   link  word"), "{shown}");
+    let html = card(&sent);
     assert!(!html.contains("<b>") && !html.contains("<strong"), "{html}");
     assert!(!html.contains("https://a.example"), "{html}");
     // A deleted post, or an empty body, has none
     sent.deleted = true;
-    assert_eq!(PostCardView::from(&sent).preview, None);
+    assert_eq!(preview(&sent), None);
     sent.deleted = false;
     sent.body = "   ".into();
-    assert_eq!(PostCardView::from(&sent).preview, None);
+    assert_eq!(preview(&sent), None);
     assert!(!card(&sent).contains("post-body-preview"));
 }
 
@@ -106,7 +105,7 @@ fn a_card_can_leave_out_its_community() {
     let html = pre_render(
         PostCard,
         PostCardProps {
-            post: (&post("A title")).into(),
+            post: post("A title"),
             show_community: false,
         },
     );
@@ -153,47 +152,63 @@ fn a_card_without_a_name_or_date_shows_the_id() {
     assert!(html.contains(">0 comments<"), "{html}");
 }
 
+/// The card's badges are `author_badges`', with their tooltips
 #[test]
-fn the_labels_are_the_responses() {
+fn the_badges_are_the_responses() {
     let mut sent = post("A title");
-    let view = PostCardView::from(&sent);
-    assert_eq!(view.labels(), sent.provenance_labels());
-    sent.agent_name = Some("system".parse().unwrap());
+    sent.via = Some(ClientPlatform::Claude);
+    let html = card(&sent);
+    for badge in crate::responses::author_badges(
+        sent.author_kind,
+        sent.deleted,
+        sent.signed,
+        sent.via,
+        sent.agent_name.as_ref(),
+    ) {
+        assert!(html.contains(&format!(">{}<", badge.label)), "{html}");
+        let title = badge.title.unwrap();
+        assert!(
+            html.contains(&format!(r#"title="{}""#, escaped(title))),
+            "{title}: {html}"
+        );
+    }
     assert_eq!(
-        PostCardView::from(&sent).labels(),
-        [crate::responses::SYSTEM_PROVENANCE, "ed25519"]
+        crate::responses::author_badges(
+            sent.author_kind,
+            sent.deleted,
+            sent.signed,
+            sent.via,
+            sent.agent_name.as_ref()
+        )
+        .iter()
+        .map(|b| b.label)
+        .collect::<Vec<_>>(),
+        sent.author_labels()
     );
-    sent.deleted = true;
-    assert!(PostCardView::from(&sent).labels().is_empty());
-    sent.author_kind = PosterKind::Operator;
-    assert_eq!(PostCardView::from(&sent).labels(), ["operator (human)"]);
 }
 
+/// What a page embeds of a post is the API's post, with what depends on
+/// the reader cleared
 #[test]
-fn the_conversions_agree_and_keep_what_the_card_draws() {
+fn a_page_embeds_the_posts_as_an_anonymous_reader_reads_them() {
     let mut sent = post("A title");
-    sent.test = Some(TestItem::default());
-    sent.is_proposal = true;
-    sent.via = Some(ClientPlatform::Claude);
-    let by_ref = PostCardView::from(&sent);
-    let by_value = PostCardView::from(sent.clone());
-    assert_eq!(by_ref, by_value);
-    assert_eq!(by_ref.id, sent.id);
-    assert_eq!(by_ref.title, sent.title);
-    assert_eq!(by_ref.agent_id, sent.agent_id);
-    assert_eq!(by_ref.agent_name, sent.agent_name);
-    assert_eq!(by_ref.community_name, sent.community_name);
-    assert_eq!(by_ref.created_at, sent.created_at);
-    assert_eq!(by_ref.comment_count, sent.comment_count);
-    assert_eq!(by_ref.test, sent.test);
-    assert_eq!(by_ref.via, sent.via);
-    // The view's JSON reads back, and has no body
-    let json = serde_json::to_value(&by_ref).unwrap();
-    assert!(json.get("body").is_none(), "{json}");
-    assert_eq!(
-        serde_json::from_value::<PostCardView>(json).unwrap(),
-        by_ref
-    );
+    sent.you_commented = true;
+    let page = FeedPage::new(FeedPage::input(), [&sent].into_iter().collect());
+    let FeedLoad::Loaded(posts) = &page.feed else {
+        panic!()
+    };
+    assert!(!posts[0].you_commented);
+    sent.you_commented = false;
+    assert_eq!(posts[0], sent);
+}
+
+/// A field that depends on the reader changes nothing drawn
+#[test]
+fn reader_specific_fields_change_nothing_drawn() {
+    let mut sent = post("A title");
+    let plain = card(&sent);
+    sent.you_commented = true;
+    assert_eq!(card(&sent), plain);
 }
 
 #[test]
@@ -335,15 +350,18 @@ fn the_island_round_trips_to_the_same_markup() {
     assert_eq!(pre_render(FeedIsland, read), out.html);
 }
 
-/// What the island embeds for a card: its preview, none of the body
+/// What the island embeds is the API's posts, bodies included: what a card
+/// draws is computed from them, and a card can later open in place
 #[test]
-fn the_embedded_feed_is_the_cards() {
+fn the_embedded_feed_is_the_apis_posts() {
     let mut sent = post("A title");
     sent.body = format!("{} THE END", "word ".repeat(100));
-    let page = page_of([sent].iter().collect());
+    let page = page_of([&sent].into_iter().collect());
     let text = island::to_script_text(&page).unwrap();
-    assert!(!text.contains("THE END"), "{text}");
+    assert!(text.contains("THE END"), "{text}");
     assert!(text.contains(r#""state":"loaded""#), "{text}");
+    let back: FeedPage = island::from_script_text(&text).unwrap();
+    assert_eq!(back, page);
 }
 
 #[test]
@@ -353,15 +371,12 @@ fn a_card_with_no_labels() {
     assert_eq!(
         card(sent),
         concat!(
-            r#"<article class="card card-flat post-card" data-node-hydration="0">"#,
-            r#"<div class="post-title"><!--placeholder1--><!--placeholder2-->"#,
-            r#"<a href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="3"><!--node-id4-->A title<!--#--></a></div>"#,
-            r#"<div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="5"><!--node-id6-->litmus<!--#--></a>"#,
-            r#"<!--placeholder7--><span data-node-hydration="8">·</span>"#,
-            r#"<a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="9"><!--node-id10-->meta-governance<!--#--></a>"#,
+            r#"<article class="card card-flat post-card" data-node-hydration="0"><div class="post-title"><!--placeholder1--><!--placeholder2--><a class="stretched-link" href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="3"><!--node-id4-->A title<!--#--></a>"#,
+            r#"</div><div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="5"><!--node-id6-->litmus<!--#--></a>"#,
+            r#"<!--placeholder7--><span data-node-hydration="8">·</span><a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="9"><!--node-id10-->meta-governance<!--#--></a>"#,
             r#"<span data-node-hydration="11">·</span><span data-node-hydration="12"><!--node-id13-->Nov 04, 2026<!--#--></span>"#,
-            r#"<span>·</span><span><!--node-id14-->3 comments<!--#--></span></div>"#,
-            r#"<div class="post-body-preview" data-node-hydration="15"><!--node-id16-->A body the card shows a preview of<!--#--></div></article>"#,
+            r#"<span>·</span><span><!--node-id14-->3 comments<!--#--></span></div><div class="post-body-preview" data-node-hydration="15"><!--node-id16-->A body the card shows a preview of<!--#--></div>"#,
+            r#"</article>"#,
         )
     );
 }
@@ -374,16 +389,15 @@ fn a_card_with_its_proposal_and_test_badges() {
     assert_eq!(
         card(sent),
         concat!(
-            r#"<article class="card card-flat post-card" data-node-hydration="0"><div class="post-title">"#,
-            r#"<span class="pill pill-green" style="font-size: 0.6875rem; margin-right: 0.25rem;" data-node-hydration="1">Proposal</span>"#,
-            r#"<span class="pill pill-provenance" style="font-size: 0.6875rem; margin-right: 0.25rem;" title="Set aside for a test sitting: shown, never live business" data-node-hydration="2"><!--node-id3-->TEST: a test sitting&#39;s item; not binding<!--#--></span>"#,
-            r#"<a href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="4"><!--node-id5-->A title<!--#--></a></div>"#,
-            r#"<div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="6"><!--node-id7-->litmus<!--#--></a>"#,
-            r#"<span class="pill pill-provenance" data-node-hydration="8"><!--node-id9-->ed25519<!--#--></span><span data-node-hydration="10">·</span>"#,
-            r#"<a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="11"><!--node-id12-->meta-governance<!--#--></a>"#,
-            r#"<span data-node-hydration="13">·</span><span data-node-hydration="14"><!--node-id15-->Nov 04, 2026<!--#--></span>"#,
-            r#"<span>·</span><span><!--node-id16-->3 comments<!--#--></span></div>"#,
-            r#"<div class="post-body-preview" data-node-hydration="17"><!--node-id18-->A body the card shows a preview of<!--#--></div></article>"#,
+            r#"<article class="card card-flat post-card" data-node-hydration="0"><div class="post-title"><span class="pill pill-green" style="font-size: 0.6875rem; margin-right: 0.25rem;" data-node-hydration="1">Proposal</span>"#,
+            r#"<span class="pill pill-provenance" style="font-size: 0.6875rem; margin-right: 0.25rem;" title="TEST: a test sitting&#39;s item; not binding" data-node-hydration="2">TEST</span>"#,
+            r#"<a class="stretched-link" href="/agora/post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" data-node-hydration="3"><!--node-id4-->A title<!--#--></a>"#,
+            r#"</div><div class="post-meta"><a href="/agora/agent/litmus" data-node-hydration="5"><!--node-id6-->litmus<!--#--></a>"#,
+            r#"<span class="pill pill-provenance" title="Signed with the Ed25519 key registered to the agent&#39;s account, which whatever runs the agent holds, and Agora checked the signature when this was posted: the text is what that key signed. It says nothing about whether the text is true, who chose its words, or how the agent behaves. The Constitution calls this the &#34;verified&#34; badge." data-node-hydration="7"><!--node-id8-->ed25519<!--#--></span>"#,
+            r#"<span data-node-hydration="9">·</span><a class="pill" style="font-size: 0.6875rem;" href="/agora/community/meta-governance" data-node-hydration="10"><!--node-id11-->meta-governance<!--#--></a>"#,
+            r#"<span data-node-hydration="12">·</span><span data-node-hydration="13"><!--node-id14-->Nov 04, 2026<!--#--></span>"#,
+            r#"<span>·</span><span><!--node-id15-->3 comments<!--#--></span></div><div class="post-body-preview" data-node-hydration="16"><!--node-id17-->A body the card shows a preview of<!--#--></div>"#,
+            r#"</article>"#,
         )
     );
 }
@@ -620,14 +634,15 @@ async fn a_repeated_post_survives_a_keyed_diff() {
     assert!(html.find(">b2<") < html.find(">a2<"), "{html}");
 }
 
-fn community(name: &str) -> CommunityView {
-    CommunityView {
-        name: CommunityName::new(name).unwrap(),
-        display_name: "Meta Governance".into(),
-        description: Some("How Agora governs itself".into()),
-        is_governance: true,
-        is_premium: false,
-    }
+fn community(name: &str) -> CommunityResponse {
+    serde_json::from_value(serde_json::json!({
+        "id": "8e998901-39c8-4220-a863-b3b47b0ac3e6",
+        "name": name,
+        "display_name": "Meta Governance",
+        "description": "How Agora governs itself",
+        "is_governance": true,
+    }))
+    .unwrap()
 }
 
 fn community_page(feed: FeedLoad, input: GetFeedInput) -> FeedPage {
@@ -828,4 +843,61 @@ fn an_older_page_reads_with_defaults() {
         page,
         FeedPage::new(GetFeedInput::default(), FeedLoad::Loaded(vec![]))
     );
+}
+
+/// Paging arithmetic can't overflow, whatever offset and limit a link asks
+/// for
+#[test]
+fn paging_never_overflows() {
+    for (offset, limit, total) in [
+        (u32::MAX, 1, None),
+        (u32::MAX, 1, Some(u64::MAX)),
+        (u32::MAX - 1, 100, Some(u64::from(u32::MAX))),
+        (0, 0, None),
+    ] {
+        let input = GetFeedInput {
+            offset: Some(offset),
+            limit: Some(limit),
+            ..GetFeedInput::default()
+        };
+        let page = FeedPage {
+            total,
+            ..FeedPage::new(input, full_page(limit.clamp(1, 100) as usize))
+        };
+        let pages = page.pages();
+        assert!(pages.page >= 1);
+        assert!(
+            pages.older.is_none() || offset < u32::MAX - 100,
+            "{pages:?}"
+        );
+        island_of_page(page);
+    }
+    let page = FeedPage::new(
+        GetFeedInput {
+            offset: Some(u32::MAX),
+            limit: Some(1),
+            ..GetFeedInput::default()
+        },
+        full_page(1),
+    );
+    assert_eq!(page.pages().page, u64::from(u32::MAX) + 1);
+    assert!(page.pages().older.is_none());
+}
+
+fn island_of_page(page: FeedPage) -> String {
+    pre_render(FeedIsland, page)
+}
+
+/// A random or diverse feed marks neither New nor Active
+#[test]
+fn an_unnamed_sort_marks_neither() {
+    for sort in [FeedSort::Random, FeedSort::Diverse] {
+        let input = GetFeedInput {
+            sort: Some(sort),
+            ..GetFeedInput::default()
+        };
+        let html =
+            island_of_page(FeedPage::new(input, FeedLoad::Loaded(vec![])));
+        assert!(!html.contains("pill-btn active"), "{html}");
+    }
 }

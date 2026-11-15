@@ -83,7 +83,19 @@ wasm:
 # (`tools/markdown-parity`). After adding a case, or when the server's
 # renderer changes (copy it into the tool first); the test reads the file.
 markdown-corpus:
-    cargo run --quiet --manifest-path tools/markdown-parity/Cargo.toml -- src/ui/markdown/corpus.json
+    cargo run --quiet --locked --manifest-path tools/markdown-parity/Cargo.toml -- src/ui/markdown/corpus.json
+
+# The large fuzz of `ui::markdown`: `count` generated documents (a fixed
+# `seed`), each rendered, re-parsed by html5ever (through ammonia,
+# permissive) and checked against the content model, with any slow one
+# reported. `MODE=table` or `MODE=inline` for those generators. Minutes, so
+# not in `check`; `cargo test` runs a few thousand of the same kind.
+markdown-fuzz count="300000" seed="11400714819323198485":
+    cargo run --quiet --locked --release --manifest-path tools/markdown-parity/Cargo.toml --bin fuzz -- {{count}} {{seed}}
+
+# Build and lint the parity tool, which has its own workspace and lockfile
+markdown-tool:
+    cargo clippy --quiet --locked --all-targets --manifest-path tools/markdown-parity/Cargo.toml -- -D warnings
 
 # The published-key parity check: the live chain must verify under the
 # genesis key and the ROOT keys compiled into this crate, and the key the

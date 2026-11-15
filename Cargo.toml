@@ -231,6 +231,11 @@ tempfile = "3"
 # `test-util` (not part of `full`) provides `#[tokio::test(start_paused)]`, so
 # the batch retry tests fast-forward their backoff instead of sleeping ~31s.
 tokio = { version = "1", features = ["full", "test-util"] }
+# The HTML parser round trip of the shared components' markup
+# (`ui::parse_check`, tests under `dioxus-ssr`): what a browser's parser
+# makes of it must be what was drawn, or hydration misplaces nodes. The
+# version agora's lockfile resolves through ammonia (Steward, 2026-11-15)
+html5ever = "=0.40.1"
 
 # In a browser, randomness comes from `crypto.getRandomValues`. rand 0.8
 # (via the dalek and chacha crates) and uuid each need telling so.

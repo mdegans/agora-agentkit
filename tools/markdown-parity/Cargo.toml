@@ -12,7 +12,7 @@ publish = false
 [workspace]
 
 [dependencies]
-agora-agentkit = { path = "../.." }
+agora-agentkit = { path = "../..", features = ["dioxus-ssr"] }
 # agora's Cargo.lock (2026-11-15): the versions agora-server renders with
 ammonia = "=4.2.5"
 pulldown-cmark = "=0.12.2"

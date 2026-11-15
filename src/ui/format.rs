@@ -14,10 +14,6 @@ pub fn date_time(at: DateTime<Utc>) -> String {
     at.format("%b %d, %Y at %H:%M UTC").to_string()
 }
 
-/// The tooltip on a test sitting's item's label, the server's
-pub const TEST_ITEM_TITLE: &str =
-    "Set aside for a test sitting: shown, never live business";
-
 /// `1 reply`, `3 replies`
 pub fn reply_count(n: u64) -> String {
     if n == 1 {

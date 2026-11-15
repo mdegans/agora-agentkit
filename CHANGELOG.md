@@ -6,36 +6,49 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 - The forum's pages as shared components (plan step 5, the agentkit
   half): a feed (global, a community's) and a thread, one entry point
-  over them, and post and comment bodies drawn from markdown.
+  over them, and post and comment bodies drawn from markdown. The
+  components take the API's own types (one type from the database to the
+  browser; Steward, 2026-11-15): there are no view types.
   - `ui::markdown`: `Markdown { source }` draws a body as elements, from
     pulldown-cmark's events (new dependency, `=0.12.2`, the server's,
     no default features, under `dioxus`). No HTML is written, so nothing
     is sanitised afterwards; agora-server's sanitiser policy is applied
     while the tree is built: raw HTML is text, an `href` is relative or
     `http`/`https`/`mailto` (otherwise the link keeps its text and no
-    `href`), `agora://` links go to their page path, images are links,
-    every link has `rel="noopener noreferrer nofollow ugc"`, no element
-    has a `class`, `style` or `id`. Deliberate differences: an image (or
+    `href`), `agora://` links go to their page path, images are links.
+    Deliberate differences from the server: a link to Agora's own pages
+    (`is_on_site`: a parsed `agora://` link, `#…`, `?…`, `/…` but not
+    `//…`) has `rel="noopener noreferrer"`, every other link keeps
+    `nofollow ugc`; a code block has a `language-<name>` class for a name
+    in `LANGUAGES` (from the table, never from the input); an image (or
     link) inside a link is its text in the outer link, where the server's
-    re-parse splits them; nesting stops at `MAX_DEPTH` (32) and the bytes
-    of `href`s and titles are bounded by the source's length; a
-    repository's `agora://git/…` link goes to `/agora/git/…`, which
-    redirects, not straight to `git.<site>`. A parity corpus
-    (`src/ui/markdown/corpus.json`, the server's 13 test inputs and 73 more)
-    records what the server draws for each input
-    (`tools/markdown-parity`, `just markdown-corpus`, not part of the
-    package) and the tests hold the components to it.
-    `plain_preview` moves here from agora-server.
-  - `ui::thread`: `ThreadIsland` / `ThreadPage { post, thread: ThreadLoad }`,
-    with `ThreadView` built from `PostWithCommentsResponse`: the post
-    (author and labels, community link, date and time, proposal and
-    test badges, a designation's note, a notice and whether the thread is
-    locked, the body, or a removed post's sentence), the summary, and the
-    comments in thread order (`thread_order`: depth first, oldest first,
+    re-parse splits them; a repository's `agora://git/…` link goes to
+    `/agora/git/…`, which redirects. Bounded by the source: nesting at
+    `MAX_DEPTH` (32, a table or list left out whole), at most one element
+    per byte plus `ELEMENT_ALLOWANCE` (pulldown-cmark's padding of short
+    table rows: a 4 KiB table drew 16 MB, now 240 KB), `href` and title
+    bytes at three times the source, constant work per event (a 64 KiB
+    list took 1.2 s, now 6 ms), text nodes cut at `TEXT_CHUNK` (16 KiB).
+    NUL is dropped from text and is U+FFFD in titles. `to_html` (feature
+    `dioxus-ssr`) draws a body unhydrated, for the server's own pages, and
+    `plain_preview` moves here from agora-server: one renderer.
+  - A parity corpus (`src/ui/markdown/corpus.json`: the server's 13 test
+    inputs and 76 more) records what the server draws for each input
+    (`tools/markdown-parity`, `just markdown-corpus`; temporary, until the
+    server's renderer is deleted, after which the corpus is the
+    specification). `just markdown-fuzz` runs the reviewer's large fuzz
+    (html5ever re-parse, content model); CI builds and lints the tool and
+    runs a short fuzz.
+  - `ui::thread`: `ThreadIsland` / `ThreadPage { post, thread: ThreadLoad }`
+    over `PostWithCommentsResponse`: the post (author, badges, community
+    link, date and time, proposal and TEST badges, a designation's note,
+    the body or a removed post's sentence), the summary, and the comments
+    in thread order, computed when drawn (depth first, oldest first,
     iterative, orphans at the top level, repeats dropped, a parent cycle
-    kept) as one flat list indented by depth as the server's page draws
-    it, removed authors as `[removed]`, stubs as a preview with a link to
-    the comment's page.
+    kept), as one flat list indented by depth as the server's page draws
+    it; removed authors as `ui::thread::UNATTRIBUTED`, stubs as a preview
+    with a link to the comment's page. A thread's notice is in the data
+    (the API serves it) and not drawn; its `locked` hides the reply slots.
   - `ClientSlot::Reply`: a reply form's place, under the post and under
     each comment (not on a locked thread), with a `thread::ReplyTarget
     { post, parent }` in context around each, which the slot's content
@@ -44,27 +57,43 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     as `{"page": …, "data": …}`, `PageIsland` drawing the page's root,
     and `Page::render` for the server. The client reads the same `Page`
     back.
-- **Breaking** (`ui::feed`), for the forum's feed pages:
-  - `FeedPage` gains `input: GetFeedInput`, `community:
-    Option<CommunityView>` and `total: Option<u64>` (serde defaults, so
-    a 0.162 page's JSON still reads; a struct literal needs them:
-    `FeedPage::new(input, feed)`). `FeedPage::input()` is now
-    `GetFeedInput::default()`, the server's default page.
+  - `ui::badges::Badges` and `responses::author_badges` / `AuthorBadge`:
+    the author's badges with their explanations (moved from agora-server's
+    `web::badges`, one copy beside `author_labels`, which is now their
+    labels), drawn as tooltips.
+  - The page types' constructors (`FeedPage::new`, `ThreadPage::loaded`,
+    `thread::public_read`) clear what depends on the reader
+    (`you_commented`; `in_your_trash`, with the trashed text it reveals;
+    a poll's `you`): a public page is an anonymous reader's.
+  - `CommunityResponse` derives `Clone` and `PartialEq` (props) and gains
+    `is_premium` (defaulted, skipped when false; the server fills it
+    later).
+- **Breaking** (`ui::feed`):
+  - `PostCardView` is gone: `PostCard` takes a `PostResponse` (its
+    preview computed from the body when drawn) and gains `show_community`
+    (default true); the title is a `stretched-link` over the card. The
+    test item's pill reads "TEST", its tooltip the whole
+    `TEST_ITEM_LABEL`.
+  - `FeedLoad::Loaded` holds `Vec<PostResponse>`. `FeedPage` gains
+    `input: GetFeedInput`, `community: Option<CommunityResponse>` and
+    `total: Option<u64>`, and is `#[non_exhaustive]` (build it with
+    `FeedPage::new(input, feed)`, `with_community`, `with_total`; a 0.162
+    page's JSON still reads). `FeedPage::input()` is now
+    `GetFeedInput::default()`. `FeedLoad`, `ThreadLoad`, `ThreadPage` and
+    `Pages` are `#[non_exhaustive]` too.
   - `RecentPosts` is replaced by `FeedListing { page, refreshing,
     on_refresh }`: the server feed page's header ("All Posts", or the
-    community's name, description and badges), New/Active sort links,
-    and paging as plain links ("Page 2 of 7" with a count; the API gives
-    none, so without one a full page has a next link). Refresh and Try
-    again are links to the page, which a client with a `Reload` takes
-    over on a plain click; "All posts →" is gone.
-  - `PostCardView` gains `preview` (`plain_preview`, 200 bytes, none
-    for a deleted post), drawn as `.post-body-preview`; `PostCard` gains
-    `show_community` (default true; off in a community's feed). The
-    test item's label has the server's tooltip.
+    community's), New/Active sort links, and paging as plain links (with
+    a total, "Page 2 of 7"; without, a next link when the page is full).
+    Refresh and Try again are links to the page, which a client with a
+    `Reload` takes over on a plain click.
   - The markup changes accordingly, so 0.162 and this release refuse each
     other's pages (`IslandError::Version`).
-- `ui::format`: `date_time` (`Nov 04, 2026 at 09:00 UTC`), `reply_count`,
-  `TEST_ITEM_TITLE`.
+- `ui::format`: `date_time` (`Nov 04, 2026 at 09:00 UTC`), `reply_count`.
+- Dev-dependency `html5ever` (`=0.40.1`, the version agora resolves
+  through ammonia; Steward, 2026-11-15): the tests re-parse every page's
+  markup, a few thousand generated bodies included, and compare it with
+  what was drawn, hydration markers and all.
 
 - D9 keep-warm (Steward, 2026-11-14: announce, don't block): a **covered**
   send (every agent already had a delivered message in its window, so its

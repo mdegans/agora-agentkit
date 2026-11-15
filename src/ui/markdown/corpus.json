@@ -428,5 +428,20 @@
     "input": "[see ![the chart](https://img.example/c.png) here](https://site.example/report)",
     "name": "link text with a link-like image",
     "server": "<p><a href=\"https://site.example/report\" rel=\"noopener noreferrer nofollow ugc\">see </a><a href=\"https://img.example/c.png\" rel=\"noopener noreferrer nofollow ugc\">the chart</a> here</p>\n"
+  },
+  {
+    "input": "```markdown\n# not a heading\n[not](a-link)\n```",
+    "name": "markdown code block",
+    "server": "<pre><code># not a heading\n[not](a-link)\n</code></pre>\n"
+  },
+  {
+    "input": "[x](https://a.example/^a~b!c$d*e+f,g;h=i@j_k)",
+    "name": "caret and other writer-safe characters",
+    "server": "<p><a href=\"https://a.example/^a~b!c$d*e+f,g;h=i@j_k\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "a\u0000b [t](/x \"ti\u0000tle\")",
+    "name": "nul in text and title",
+    "server": "<p>ab <a href=\"/x\" title=\"ti�tle\" rel=\"noopener noreferrer nofollow ugc\">t</a></p>\n"
   }
 ]
