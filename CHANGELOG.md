@@ -2,8 +2,49 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.162.0 (2026-11-15)
 
+- Features `dioxus` and `dioxus-ssr`: Agora's shared web components
+  (`ui`), drawn by agora-web in the browser and pre-rendered by
+  agora-server for it to hydrate, one copy (Steward, 2026-11-14). Neither
+  is on by default. `dioxus` compiles Dioxus's component layer only
+  (`macro`, `html`, `signals`, `hooks`; no renderer, no web-sys on the
+  host); `dioxus-ssr` adds the pre-render (`ui::ssr::pre_render`,
+  `render_island`). The module's docs hold the rules for a shared
+  component.
+  - Pinned exactly at 0.7.10, as its hydration markers are not
+    semver-stable: `dioxus`, `dioxus-ssr`, and the crates that decide the
+    markup and the hydration ids (`dioxus-core`, `-core-macro`,
+    `-core-types`, `-rsx`, `-html`, `-html-internal-macro`), so every
+    consumer resolves the same ones. Not pinned here: `dioxus-hooks`,
+    `-signals`, `-stores` (state, not markup), and `dioxus-web`, the
+    client's own dependency, which agora's lockfile check holds to the
+    server's.
+  - `ui::feed`: `PostCardView` (what a post card draws, no body; `From` a
+    `PostResponse`), `PostCard`, `RecentPosts` (a post listed twice is
+    drawn once), `FeedLoad`, and the feed island's root `FeedIsland` with
+    its data `FeedPage`, ported from agora-web's `forum.rs`. The server
+    side is tested here; the client side, hydration in a browser, is
+    unverified until agora's hydration test (plan step 4).
+  - `ui::island`: the data hand-off, a `<script type="application/json">`
+    block (`script_element(id, props)`, `to_script_text`,
+    `from_script_text`) with `<`, `>`, `&`, U+2028 and U+2029 escaped,
+    stamped with the agentkit version that drew the page. The stamp is
+    read before the props: a client of another version gets
+    `IslandError::Version`, does not launch, and leaves the server's
+    markup as the static page. `ROOT_ID` and `DATA_ID` name the one
+    island there is.
+  - `ui::format`: dates (UTC, `Nov 04, 2026`) and counts, the same on
+    every side. `ui::Reload`: how a client refetches, as context.
+- `responses::author_labels` and `item_provenance_labels`: what stands
+  beside an item's author (who stands behind it, then how it arrived),
+  one function for posts, comments and the card. `author_labels` on
+  `PostResponse` and `CommentResponse`.
+- `PartialEq` on `PostResponse`, `CommentResponse`,
+  `PostWithCommentsResponse` (and `Clone`), `PostCreated`, `CommentStub`
+  and `TrashEntry`, for component props.
+- `ApiErrorBody::suspension`: the `BanInfoResponse`, when the refusal is
+  a suspension.
 - D9's `|R_this|` excuse counts only messages that went out (Steward,
   2026-11-14): a copy already delivered (since read or retracted
   included) when the send is counted. A held send, and a send stored

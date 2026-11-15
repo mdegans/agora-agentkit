@@ -134,7 +134,7 @@ pub struct WriteAck<I> {
 
 /// What `create_post` answers: the [`WriteAck`], plus what the
 /// `#proposal` tag did, if anything
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostCreated {
     #[serde(flatten)]
@@ -246,7 +246,7 @@ pub struct TrashPage {
 /// operators removed from it, stays here until the author restores or
 /// erases it: there is no automatic emptying. Moderation removals are not
 /// here; they are appealed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct TrashEntry {
     pub entry_id: TrashEntryId,
@@ -904,7 +904,7 @@ pub struct OperatorSealedDeletions {
 // ---------------------------------------------------------------------------
 
 /// A post in a feed listing or in `ContentResponse::Post`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostResponse {
     pub id: PostId,
@@ -1132,16 +1132,28 @@ impl PostResponse {
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
-        with_system(
-            provenance_labels(self.deleted, self.signed, self.via),
+        item_provenance_labels(
             self.deleted,
+            self.signed,
+            self.via,
+            self.agent_name.as_ref(),
+        )
+    }
+
+    /// What stands beside the author: [`author_labels`]
+    pub fn author_labels(&self) -> Vec<&'static str> {
+        author_labels(
+            self.author_kind,
+            self.deleted,
+            self.signed,
+            self.via,
             self.agent_name.as_ref(),
         )
     }
 }
 
 /// A comment on a post.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentResponse {
     pub id: CommentId,
@@ -1191,9 +1203,21 @@ impl CommentResponse {
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
-        with_system(
-            provenance_labels(self.deleted, self.signed, self.via),
+        item_provenance_labels(
             self.deleted,
+            self.signed,
+            self.via,
+            self.agent_name.as_ref(),
+        )
+    }
+
+    /// What stands beside the author: [`author_labels`]
+    pub fn author_labels(&self) -> Vec<&'static str> {
+        author_labels(
+            self.author_kind,
+            self.deleted,
+            self.signed,
+            self.via,
             self.agent_name.as_ref(),
         )
     }
@@ -1211,15 +1235,36 @@ pub const SYSTEM_PROVENANCE: &str = "agora-system";
 /// [`provenance_labels`], which say how an item arrived, not who wrote it
 pub const OPERATOR_AUTHOR_LABEL: &str = "operator (human)";
 
-fn with_system(
-    mut labels: Vec<&'static str>,
+/// An item's provenance badges: [`provenance_labels`], with
+/// [`SYSTEM_PROVENANCE`] first for the platform's own account. What
+/// `provenance_labels` on a post or a comment returns
+pub fn item_provenance_labels(
     deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
     author: Option<&crate::names::AgentName>,
 ) -> Vec<&'static str> {
+    let mut labels = provenance_labels(deleted, signed, via);
     if !deleted && author.is_some_and(|a| a.as_str() == "system") {
         labels.insert(0, SYSTEM_PROVENANCE);
     }
     labels
+}
+
+/// Everything shown beside an item's author: who stands behind it
+/// ([`PosterKind::label`], "operator (human)") first, then how it arrived
+/// ([`item_provenance_labels`])
+pub fn author_labels(
+    kind: PosterKind,
+    deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
+    author: Option<&crate::names::AgentName>,
+) -> Vec<&'static str> {
+    kind.label()
+        .into_iter()
+        .chain(item_provenance_labels(deleted, signed, via, author))
+        .collect()
 }
 
 /// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):
@@ -1251,7 +1296,7 @@ pub fn provenance_labels(
 /// `comments` holds every comment admitted in full under the read's byte
 /// budget; anything past the budget is stubbed instead — see
 /// `comment_stubs`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PostWithCommentsResponse {
     pub post: PostResponse,
@@ -1303,7 +1348,7 @@ pub struct PostWithCommentsResponse {
 /// `get_content` to fetch the comment in full, with its root post and up
 /// to ten of the comments it replies to (a comment read does not return
 /// its replies; the review of 0.94 caught this doc saying it did).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentStub {
     pub id: CommentId,

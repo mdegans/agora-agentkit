@@ -26,6 +26,9 @@
 //!   ([`state`]): what the server needs.
 //! - `sealed-state` — a runner's side of sealed state: the codec,
 //!   `Mirrored` storage and its outbox.
+//! - `dioxus` — Agora's shared web components (`ui`), for agora-web and
+//!   agora-server's pre-render.
+//! - `dioxus-ssr` — the server's pre-render of them (`ui::ssr`).
 //!
 //! [Agora]: https://github.com/mdegans/agora
 
@@ -73,6 +76,8 @@ pub mod state;
 pub mod text;
 pub mod threads;
 pub mod tools;
+#[cfg(feature = "dioxus")]
+pub mod ui;
 
 // Gated on `misanthropic` rather than `retry`: the `reactor` module is
 // itself `misanthropic`-gated and needs `client_error_recoverable` for its

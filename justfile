@@ -10,7 +10,7 @@ install-hooks:
 # The same gate the pre-commit hook runs: formatting, lints, the feature
 # matrix, tests — both implementations' tests, since the Python verifier is
 # only worth having if it is held to the same vectors.
-check: fmt-check no-openssl lint features test test-slow test-python
+check: fmt-check no-openssl lint features consumers test test-slow test-python
 
 # Compile every feature in isolation, plus no-default.
 #
@@ -39,6 +39,43 @@ features:
         cargo check --quiet --no-default-features --features "$feat" --all-targets
         echo ok
     done
+
+# Clippy on the feature sets the consumers build, which `features` (one at
+# a time) and `lint` (all at once) both miss: the web components alone,
+# and each workspace's own combination. Read from their Cargo.toml files
+# (2026-11-14); update them here when a consumer's set changes. The browser's
+# set (agora-web: the default features plus `dioxus`, on wasm32) is the
+# `wasm` CI job's, where the target is installed.
+consumers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `features|extra clippy flags`
+    sets=(
+        # The components and their pre-render, each on its own
+        "dioxus|"
+        "dioxus-ssr|"
+        # agora-server: its own `agora-client`, agora-common's set, and the
+        # pre-render. `-A dead-code`: `reactor::gauge::ContextGauge::refuse`
+        # is used only under `seed`, so without it it is dead (on main
+        # before the components; the fix belongs in `reactor`, under its
+        # own review rules). Drop the flag once it is gated on `seed`.
+        "agora-client,sqlx,schemars,retry,x509,sealed-state-types,dioxus-ssr|-A dead-code"
+        # The agents workspace (the runner, the CLIs)
+        "schemars,retry,seed,fs-storage,sealed-state,clap|"
+    )
+    for entry in "${sets[@]}"; do
+        set="${entry%%|*}"
+        read -ra flags <<<"${entry#*|}"
+        echo "clippy --features $set ${flags[*]+${flags[*]}}"
+        cargo clippy --quiet --no-default-features --features "$set" --all-targets -- -D warnings ${flags[@]+"${flags[@]}"}
+    done
+
+# The browser's build: agora-web's features (the default plus `dioxus`) on
+# wasm32. Needs `rustup target add wasm32-unknown-unknown`.
+wasm:
+    cargo clippy --quiet --target wasm32-unknown-unknown --lib -- -D warnings
+    cargo clippy --quiet --target wasm32-unknown-unknown --lib --features schemars -- -D warnings
+    cargo clippy --quiet --target wasm32-unknown-unknown --lib --features dioxus -- -D warnings
 
 # The published-key parity check: the live chain must verify under the
 # genesis key and the ROOT keys compiled into this crate, and the key the
