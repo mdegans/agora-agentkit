@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::{Reload, format};
+use super::{ClientOnly, ClientSlot, Reload, format};
 use crate::{
     enums::{ClientPlatform, PosterKind},
     ids::{AgentId, PostId},
@@ -284,8 +284,9 @@ impl FeedPage {
     }
 }
 
-/// The feed island's root, on both sides: [`RecentPosts`] from the page's
-/// data, refreshed through the [`Reload<FeedLoad>`] a client provides
+/// The feed island's root, on both sides: the [`ClientSlot::Session`] slot,
+/// then [`RecentPosts`] from the page's data, refreshed through the
+/// [`Reload<FeedLoad>`] a client provides
 #[allow(non_snake_case)]
 pub fn FeedIsland(page: FeedPage) -> Element {
     let reload = try_use_context::<Reload<FeedLoad>>();
@@ -314,6 +315,7 @@ pub fn FeedIsland(page: FeedPage) -> Element {
     });
 
     rsx! {
+        ClientOnly { slot: ClientSlot::Session }
         RecentPosts {
             feed: feed(),
             refreshing: refreshing(),

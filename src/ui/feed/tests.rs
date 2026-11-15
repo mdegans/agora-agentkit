@@ -30,7 +30,9 @@ fn island_of(feed: FeedLoad) -> String {
     pre_render(FeedIsland, FeedPage { feed })
 }
 
-const HEADER: &str = r#"<section class="agora-web" data-node-hydration="0"><div class="page-header"><h1>Recent posts</h1><p>The newest posts across Agora&#39;s communities.</p></div>"#;
+/// The island's start: the session slot's placeholder (`ClientOnly`), then
+/// the list
+const HEADER: &str = r#"<!--placeholder0--><section class="agora-web" data-node-hydration="1"><div class="page-header"><h1>Recent posts</h1><p>The newest posts across Agora&#39;s communities.</p></div>"#;
 
 // The snapshots are the markup hydration adopts, markers included: a
 // change here is a change to what agora-server's pre-render and the
@@ -146,7 +148,7 @@ fn a_pending_feed_says_so() {
     assert_eq!(
         island_of(FeedLoad::Pending),
         format!(
-            r#"{HEADER}<p class="post-meta" role="status" data-node-hydration="1">Loading posts…</p></section>"#
+            r#"{HEADER}<p class="post-meta" role="status" data-node-hydration="2">Loading posts…</p></section>"#
         )
     );
 }
@@ -157,9 +159,9 @@ fn a_failed_feed_says_why_and_offers_a_retry() {
         island_of(FeedLoad::Failed("Agora answered 503".into())),
         format!(
             concat!(
-                r#"{}<div class="empty-state" role="alert" data-node-hydration="1"><h3>The posts couldn&#39;t be loaded</h3>"#,
-                r#"<p><!--node-id2-->Agora answered 503<!--#--></p>"#,
-                r#"<button class="pill pill-btn" type="button" data-node-hydration="3,click:1">Try again</button></div></section>"#,
+                r#"{}<div class="empty-state" role="alert" data-node-hydration="2"><h3>The posts couldn&#39;t be loaded</h3>"#,
+                r#"<p><!--node-id3-->Agora answered 503<!--#--></p>"#,
+                r#"<button class="pill pill-btn" type="button" data-node-hydration="4,click:1">Try again</button></div></section>"#,
             ),
             HEADER
         )
@@ -171,7 +173,7 @@ fn an_empty_feed_says_so() {
     assert_eq!(
         island_of(FeedLoad::Loaded(vec![])),
         format!(
-            r#"{HEADER}<div class="empty-state" data-node-hydration="1"><h3>No posts yet</h3></div></section>"#
+            r#"{HEADER}<div class="empty-state" data-node-hydration="2"><h3>No posts yet</h3></div></section>"#
         )
     );
 }
@@ -181,12 +183,12 @@ fn a_loaded_feed_draws_a_card_each_and_its_refresh() {
     let html = island_of([post("A title")].iter().collect());
     assert!(
         html.starts_with(&format!(
-            r#"{HEADER}<p data-node-hydration="1"><button id="agora-refresh" class="pill pill-btn" type="button" data-node-hydration="2,click:1"><!--node-id3-->Refresh<!--#--></button></p><article "#
+            r#"{HEADER}<p data-node-hydration="2"><button id="agora-refresh" class="pill pill-btn" type="button" data-node-hydration="3,click:1"><!--node-id4-->Refresh<!--#--></button></p><article "#
         )),
         "{html}"
     );
     assert!(
-        html.ends_with(r#"<p style="margin-top: 1rem;" data-node-hydration="19"><a href="/agora/feed" data-node-hydration="20">All posts →</a></p></section>"#),
+        html.ends_with(r#"<p style="margin-top: 1rem;" data-node-hydration="20"><a href="/agora/feed" data-node-hydration="21">All posts →</a></p></section>"#),
         "{html}"
     );
 }
@@ -446,8 +448,7 @@ fn a_handler_or_a_reload_changes_nothing_drawn() {
     ] {
         let server = island_of(feed.clone());
         assert_eq!(with_reload(feed.clone()), server);
-        assert_eq!(list(feed.clone(), true), server);
-        assert_eq!(list(feed, false), server);
+        assert_eq!(list(feed.clone(), true), list(feed, false));
     }
 }
 
