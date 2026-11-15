@@ -21,7 +21,7 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     of `href`s and titles are bounded by the source's length; a
     repository's `agora://git/…` link goes to `/agora/git/…`, which
     redirects, not straight to `git.<site>`. A parity corpus
-    (`src/ui/markdown/corpus.json`, the server's tests and 80 more)
+    (`src/ui/markdown/corpus.json`, the server's 13 test inputs and 73 more)
     records what the server draws for each input
     (`tools/markdown-parity`, `just markdown-corpus`, not part of the
     package) and the tests hold the components to it.
