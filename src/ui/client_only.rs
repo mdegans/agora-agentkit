@@ -16,9 +16,16 @@
 //!     .with_root_context(ClientSlots::new().with(ClientSlot::Session, SessionStatus));
 //! ```
 //!
-//! A slot's content may provide context of its own (a session provider),
-//! for its own children only: it is not an ancestor of the rest of the
-//! island.
+//! A slot's content gets its data and shares state through context:
+//!
+//! - State shared between slots, or between a slot and the rest of the
+//!   island (a session the island's own components also read), goes in
+//!   root context beside the [`ClientSlots`]: the root is every slot's
+//!   ancestor and the island's.
+//! - Page data reaches a slot's content through context the shared root
+//!   provides from its props, so the content needs no props of its own.
+//! - Context a slot's content provides (a session provider) reaches its
+//!   own children only: it is not an ancestor of the rest of the island.
 
 use std::fmt;
 
@@ -56,7 +63,7 @@ impl ClientSlots {
     }
 
     /// What `slot` draws, if the client gave it anything
-    pub fn get(&self, slot: ClientSlot) -> Option<fn() -> Element> {
+    pub(crate) fn get(&self, slot: ClientSlot) -> Option<fn() -> Element> {
         self.0.iter().find(|(s, _)| *s == slot).map(|(_, c)| *c)
     }
 }
@@ -75,6 +82,11 @@ impl fmt::Debug for ClientSlots {
 pub fn ClientOnly(slot: ClientSlot) -> Element {
     let content =
         try_use_context::<ClientSlots>().and_then(|slots| slots.get(slot));
+    // The first render draws the placeholder whatever the context holds,
+    // because no effect runs before hydration ends: dioxus-web 0.7.10
+    // calls `rebuild` and then `rehydrate` synchronously, with no poll
+    // between them (`src/lib.rs`, lines 146 and 150), and effects run only
+    // in its work loop after that (line 169 on). Recheck on a Dioxus bump.
     let mut mounted = use_signal(|| false);
     use_effect(move || mounted.set(true));
 

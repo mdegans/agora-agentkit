@@ -16,7 +16,11 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   props and `FeedPage`'s shape are unchanged, but its markup gains the
   placeholder, which moves every hydration id after it by one: a client
   of 0.162.0 reading a page from 0.162.1 refuses it
-  (`IslandError::Version`), as for any other version.
+  (`IslandError::Version`), as for any other version, and the page stays
+  static: agora and agora-web take 0.162.1 together.
+- After mount, the session line appears above the feed: a one-time
+  layout shift, which the client should reserve space for (a fixed-height
+  slot in its stylesheet).
 
 ## 0.162.0 (2026-11-15)
 

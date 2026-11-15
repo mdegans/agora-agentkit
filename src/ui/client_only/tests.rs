@@ -133,3 +133,44 @@ fn a_slot_given_twice_draws_the_last() {
     assert_eq!(format!("{slots:?}"), "[Session]");
     assert!(ClientSlots::new().get(ClientSlot::Session).is_none());
 }
+
+/// The swap after mount replaces the placeholder hydration adopted (by its
+/// id), with one node, and touches nothing else
+#[tokio::test]
+async fn the_swap_replaces_the_hydrated_placeholder() {
+    use dioxus::dioxus_core::Mutation;
+
+    let mut dom = VirtualDom::new_with_props(
+        ClientOnly,
+        ClientOnlyProps {
+            slot: ClientSlot::Session,
+        },
+    );
+    dom.provide_root_context(session());
+    let first = dom.rebuild_to_vec();
+    let placeholders: Vec<_> = first
+        .edits
+        .iter()
+        .filter_map(|edit| match edit {
+            Mutation::CreatePlaceholder { id } => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let [placeholder] = placeholders[..] else {
+        panic!("{:?}", first.edits);
+    };
+    let _ =
+        tokio::time::timeout(Duration::from_millis(20), dom.wait_for_work())
+            .await;
+    let after = dom.render_immediate_to_vec();
+    let replaced: Vec<_> = after
+        .edits
+        .iter()
+        .filter(|edit| matches!(edit, Mutation::ReplaceWith { .. }))
+        .collect();
+    assert!(
+        matches!(replaced[..], [Mutation::ReplaceWith { id, m: 1 }] if *id == placeholder),
+        "{:?}",
+        after.edits
+    );
+}
