@@ -1,0 +1,432 @@
+[
+  {
+    "input": "[x](javascript:alert(1))",
+    "name": "server: javascript link",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](data:text/html,x)",
+    "name": "server: data link",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](vbscript:x)",
+    "name": "server: vbscript link",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](https://example.com) [m](mailto:a@b.c)",
+    "name": "server: https and mailto",
+    "server": "<p><a href=\"https://example.com\" rel=\"noopener noreferrer nofollow ugc\">x</a> <a href=\"mailto:a@b.c\" rel=\"noopener noreferrer nofollow ugc\">m</a></p>\n"
+  },
+  {
+    "input": "[here](agora://constitution?version=0.1) and [readme](agora://gov/DATA-2026-0025/README.md) and <agora://post/7ad26ccd>",
+    "name": "server: agora links",
+    "server": "<p><a href=\"/agora/constitution?version=0.1\" rel=\"noopener noreferrer nofollow ugc\">here</a> and <a href=\"/agora/gov/DATA-2026-0025/README.md\" rel=\"noopener noreferrer nofollow ugc\">readme</a> and <a href=\"/agora/post/7ad26ccd\" rel=\"noopener noreferrer nofollow ugc\">agora://post/7ad26ccd</a></p>\n"
+  },
+  {
+    "input": "[x](agora://nonsense/at/all)",
+    "name": "server: agora link that doesn't parse",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "before <a href=\"https://evil.example\">click</a> after",
+    "name": "server: inline anchor",
+    "server": "<p>before &lt;a href=\"https://evil.example\"&gt;click&lt;/a&gt; after</p>\n"
+  },
+  {
+    "input": "x <img src=\"https://tracker.example/p.gif\"> y",
+    "name": "server: img tag",
+    "server": "<p>x &lt;img src=\"https://tracker.example/p.gif\"&gt; y</p>\n"
+  },
+  {
+    "input": "<script>alert(1)</script>",
+    "name": "server: script",
+    "server": "&lt;script&gt;alert(1)&lt;/script&gt;"
+  },
+  {
+    "input": "<div onclick=\"x()\">block</div>",
+    "name": "server: html block",
+    "server": "&lt;div onclick=\"x()\"&gt;block&lt;/div&gt;"
+  },
+  {
+    "input": "![diagram](https://example.com/d.png)",
+    "name": "server: markdown image",
+    "server": "<p><a href=\"https://example.com/d.png\" rel=\"noopener noreferrer nofollow ugc\">diagram</a></p>\n"
+  },
+  {
+    "input": "**bold** and [a link](https://example.com/x)",
+    "name": "server: ordinary",
+    "server": "<p><strong>bold</strong> and <a href=\"https://example.com/x\" rel=\"noopener noreferrer nofollow ugc\">a link</a></p>\n"
+  },
+  {
+    "input": "| a | b |\n|---|---|\n| 1 | 2 |\n\n~~gone~~",
+    "name": "server: table and strikethrough",
+    "server": "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n<tr><td>1</td><td>2</td></tr>\n</tbody></table>\n<p><del>gone</del></p>\n"
+  },
+  {
+    "input": "# One\n## Two\n### Three\n#### Four\n##### Five\n###### Six\n####### Seven",
+    "name": "headings",
+    "server": "<h1>One</h1>\n<h2>Two</h2>\n<h3>Three</h3>\n<h4>Four</h4>\n<h5>Five</h5>\n<h6>Six</h6>\n<p>####### Seven</p>\n"
+  },
+  {
+    "input": "One\n===\n\nTwo\n---",
+    "name": "setext headings",
+    "server": "<h1>One</h1>\n<h2>Two</h2>\n"
+  },
+  {
+    "input": "# Title {#custom-id .cls onclick=alert(1)}",
+    "name": "heading attributes are text",
+    "server": "<h1>Title {#custom-id .cls onclick=alert(1)}</h1>\n"
+  },
+  {
+    "input": "> quoted\n>\n> > nested *em*\n\nafter",
+    "name": "blockquotes",
+    "server": "<blockquote>\n<p>quoted</p>\n<blockquote>\n<p>nested <em>em</em></p>\n</blockquote>\n</blockquote>\n<p>after</p>\n"
+  },
+  {
+    "input": "> [!NOTE]\n> careful",
+    "name": "gfm alert is a plain quote",
+    "server": "<blockquote>\n<p>[!NOTE]\ncareful</p>\n</blockquote>\n"
+  },
+  {
+    "input": "```rust\nfn main() { println!(\"<hi>\"); }\n```",
+    "name": "fenced code with a language",
+    "server": "<pre><code>fn main() { println!(\"&lt;hi&gt;\"); }\n</code></pre>\n"
+  },
+  {
+    "input": "```\"><script>alert(1)</script> x\ncode\n```",
+    "name": "hostile code language",
+    "server": "<pre><code>code\n</code></pre>\n"
+  },
+  {
+    "input": "```language-x onclick=alert(1)\ncode\n```",
+    "name": "code language as a class",
+    "server": "<pre><code>code\n</code></pre>\n"
+  },
+  {
+    "input": "    let x = 1;\n    <b>not bold</b>",
+    "name": "indented code",
+    "server": "<pre><code>let x = 1;\n&lt;b&gt;not bold&lt;/b&gt;</code></pre>\n"
+  },
+  {
+    "input": "```\n\nafter a blank line\n```",
+    "name": "code block starting with an empty line",
+    "server": "<pre><code>\nafter a blank line\n</code></pre>\n"
+  },
+  {
+    "input": "```\nnever closed\n<script>",
+    "name": "unclosed fence",
+    "server": "<pre><code>never closed\n&lt;script&gt;</code></pre>\n"
+  },
+  {
+    "input": "use `<b>` and `` a ` b ``",
+    "name": "inline code",
+    "server": "<p>use <code>&lt;b&gt;</code> and <code>a ` b</code></p>\n"
+  },
+  {
+    "input": "- one\n- two\n  - nested\n    1. deep\n\n3. three\n4. four\n\n0. zero\n\n1. one",
+    "name": "lists",
+    "server": "<ul>\n<li>one</li>\n<li>two\n<ul>\n<li>nested\n<ol>\n<li>deep</li>\n</ol>\n</li>\n</ul>\n</li>\n</ul>\n<ol start=\"3\">\n<li>\n<p>three</p>\n</li>\n<li>\n<p>four</p>\n</li>\n<li>\n<p>zero</p>\n</li>\n<li>\n<p>one</p>\n</li>\n</ol>\n"
+  },
+  {
+    "input": "- a\n\n- b\n\n  para in b",
+    "name": "loose list",
+    "server": "<ul>\n<li>\n<p>a</p>\n</li>\n<li>\n<p>b</p>\n<p>para in b</p>\n</li>\n</ul>\n"
+  },
+  {
+    "input": "- [ ] todo\n- [x] done",
+    "name": "task list is text",
+    "server": "<ul>\n<li>[ ] todo</li>\n<li>[x] done</li>\n</ul>\n"
+  },
+  {
+    "input": "x[^1]\n\n[^1]: a note",
+    "name": "footnotes are off",
+    "server": "<p>x[^1]</p>\n<p>[^1]: a note</p>\n"
+  },
+  {
+    "input": "~~two~~ ~one~ ~~~three~~~",
+    "name": "strikethrough",
+    "server": "<p><del>two</del> <del>one</del> ~~~three~~~</p>\n"
+  },
+  {
+    "input": "| left | center | right |\n|:-----|:------:|------:|\n| 1 | 2 | 3 |",
+    "name": "table with alignment",
+    "server": "<table><thead><tr><th>left</th><th>center</th><th>right</th></tr></thead><tbody>\n<tr><td>1</td><td>2</td><td>3</td></tr>\n</tbody></table>\n"
+  },
+  {
+    "input": "| a | b |\n|---|---|",
+    "name": "table with only a header",
+    "server": "<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody>\n</tbody></table>\n"
+  },
+  {
+    "input": "| *a* | [l](https://x.y) | `c` |\n|---|---|---|\n| <b>raw</b> | ![i](https://img.example/i.png) | ~~d~~ |",
+    "name": "table with inline content",
+    "server": "<table><thead><tr><th><em>a</em></th><th><a href=\"https://x.y\" rel=\"noopener noreferrer nofollow ugc\">l</a></th><th><code>c</code></th></tr></thead><tbody>\n<tr><td>&lt;b&gt;raw&lt;/b&gt;</td><td><a href=\"https://img.example/i.png\" rel=\"noopener noreferrer nofollow ugc\">i</a></td><td><del>d</del></td></tr>\n</tbody></table>\n"
+  },
+  {
+    "input": "a\n\n---\n\nb\n\n***",
+    "name": "rule",
+    "server": "<p>a</p>\n<hr>\n<p>b</p>\n<hr>\n"
+  },
+  {
+    "input": "soft\nbreak\n\nhard  \nbreak\n\nbackslash\\\nbreak",
+    "name": "hard and soft breaks",
+    "server": "<p>soft\nbreak</p>\n<p>hard<br>\nbreak</p>\n<p>backslash<br>\nbreak</p>\n"
+  },
+  {
+    "input": "&amp; &lt;script&gt; &copy; &#x6A;avascript &#0; &nbsp;x",
+    "name": "entities",
+    "server": "<p>&amp; &lt;script&gt; © javascript � &nbsp;x</p>\n"
+  },
+  {
+    "input": "***both*** **bold *and em* bold** _under_",
+    "name": "nested emphasis",
+    "server": "<p><em><strong>both</strong></em> <strong>bold <em>and em</em> bold</strong> <em>under</em></p>\n"
+  },
+  {
+    "input": "",
+    "name": "empty",
+    "server": ""
+  },
+  {
+    "input": "   \n\n  \t\n",
+    "name": "whitespace",
+    "server": ""
+  },
+  {
+    "input": "a <!-- hidden --> b\n\n<!-- block comment -->",
+    "name": "html comment",
+    "server": "<p>a &lt;!-- hidden --&gt; b</p>\n&lt;!-- block comment --&gt;"
+  },
+  {
+    "input": "<?php echo 1; ?>\n\n<![CDATA[ x ]]>\n\n<!DOCTYPE html>",
+    "name": "processing instruction and cdata",
+    "server": "&lt;?php echo 1; ?&gt;\n&lt;![CDATA[ x ]]&gt;\n&lt;!DOCTYPE html&gt;"
+  },
+  {
+    "input": "</p></div><p>x",
+    "name": "closing tags",
+    "server": "&lt;/p&gt;&lt;/div&gt;&lt;p&gt;x"
+  },
+  {
+    "input": "<style>body{display:none}</style>",
+    "name": "style block",
+    "server": "&lt;style&gt;body{display:none}&lt;/style&gt;"
+  },
+  {
+    "input": "<iframe src=\"https://evil.example\"></iframe>\n\n<form action=\"https://evil.example\"><input name=p></form>",
+    "name": "iframe and form",
+    "server": "&lt;iframe src=\"https://evil.example\"&gt;&lt;/iframe&gt;\n&lt;form action=\"https://evil.example\"&gt;&lt;input name=p&gt;&lt;/form&gt;"
+  },
+  {
+    "input": "- <b>x</b>\n- <script>y</script>",
+    "name": "raw html in a list",
+    "server": "<ul>\n<li>&lt;b&gt;x&lt;/b&gt;</li>\n<li>&lt;script&gt;y&lt;/script&gt;</li>\n</ul>\n"
+  },
+  {
+    "input": "<svg onload=alert(1)><a xlink:href=\"javascript:alert(1)\">x</a></svg>",
+    "name": "svg",
+    "server": "<p>&lt;svg onload=alert(1)&gt;&lt;a xlink:href=\"javascript:alert(1)\"&gt;x&lt;/a&gt;&lt;/svg&gt;</p>\n"
+  },
+  {
+    "input": "<a href=\"&#106;avascript:alert(1)\">x</a>",
+    "name": "html entity in raw html",
+    "server": "<p>&lt;a href=\"&amp;#106;avascript:alert(1)\"&gt;x&lt;/a&gt;</p>\n"
+  },
+  {
+    "input": "[x](JaVaScRiPt:alert(1))",
+    "name": "mixed-case javascript",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](java&#x09;script:alert(1))",
+    "name": "javascript with an entity tab",
+    "server": "<p><a href=\"java%09script:alert(1)\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](javascript&#58;alert(1))",
+    "name": "javascript with an entity colon",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](<java script:alert(1)>)",
+    "name": "javascript in angle brackets with a space",
+    "server": "<p><a href=\"java%20script:alert(1)\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](&#10;javascript:alert(1))",
+    "name": "javascript after a newline entity",
+    "server": "<p><a href=\"%0Ajavascript:alert(1)\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](java&#0;script:alert(1))",
+    "name": "javascript with a null",
+    "server": "<p><a href=\"java%EF%BF%BDscript:alert(1)\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "<javascript:alert(1)>",
+    "name": "javascript autolink",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">javascript:alert(1)</a></p>\n"
+  },
+  {
+    "input": "<vbscript:x> <data:text/html,x>",
+    "name": "vbscript and data autolinks",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">vbscript:x</a> <a rel=\"noopener noreferrer nofollow ugc\">data:text/html,x</a></p>\n"
+  },
+  {
+    "input": "[f](file:///etc/passwd) [g](ftp://example.com/x) [t](tel:+15550100)",
+    "name": "file, ftp and tel",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">f</a> <a rel=\"noopener noreferrer nofollow ugc\">g</a> <a rel=\"noopener noreferrer nofollow ugc\">t</a></p>\n"
+  },
+  {
+    "input": "[x](data:image/png;base64,AAAA)",
+    "name": "data image",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](\\\\evil.example/x) [y](/\\evil.example)",
+    "name": "backslashes",
+    "server": "<p><a href=\"%5Cevil.example/x\" rel=\"noopener noreferrer nofollow ugc\">x</a> <a href=\"/%5Cevil.example\" rel=\"noopener noreferrer nofollow ugc\">y</a></p>\n"
+  },
+  {
+    "input": "[x](//evil.example/x)",
+    "name": "protocol-relative",
+    "server": "<p><a href=\"//evil.example/x\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[a](/agora/post/7ad26ccd) [b](#comment-1) [c](?q=1) [d](page.html) [e]()",
+    "name": "relative",
+    "server": "<p><a href=\"/agora/post/7ad26ccd\" rel=\"noopener noreferrer nofollow ugc\">a</a> <a href=\"#comment-1\" rel=\"noopener noreferrer nofollow ugc\">b</a> <a href=\"?q=1\" rel=\"noopener noreferrer nofollow ugc\">c</a> <a href=\"page.html\" rel=\"noopener noreferrer nofollow ugc\">d</a> <a href=\"\" rel=\"noopener noreferrer nofollow ugc\">e</a></p>\n"
+  },
+  {
+    "input": "[x](https://a.example/\"onmouseover=alert(1)) [y](https://a.example/'x')",
+    "name": "quotes in a destination",
+    "server": "<p><a href=\"https://a.example/%22onmouseover=alert(1)\" rel=\"noopener noreferrer nofollow ugc\">x</a> <a href=\"https://a.example/'x'\" rel=\"noopener noreferrer nofollow ugc\">y</a></p>\n"
+  },
+  {
+    "input": "[x](https://a.example/?a=1&b=2&amp;c=3)",
+    "name": "ampersands in a destination",
+    "server": "<p><a href=\"https://a.example/?a=1&amp;b=2&amp;c=3\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](https://例え.jp/パス?q=ü)",
+    "name": "non-ascii destination",
+    "server": "<p><a href=\"https://%E4%BE%8B%E3%81%88.jp/%E3%83%91%E3%82%B9?q=%C3%BC\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](<https://a.example/a b>)",
+    "name": "spaces in a destination",
+    "server": "<p><a href=\"https://a.example/a%20b\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x](HTTPS://EXAMPLE.COM/X) [m](MAILTO:a@b.c)",
+    "name": "uppercase scheme",
+    "server": "<p><a href=\"HTTPS://EXAMPLE.COM/X\" rel=\"noopener noreferrer nofollow ugc\">x</a> <a href=\"MAILTO:a@b.c\" rel=\"noopener noreferrer nofollow ugc\">m</a></p>\n"
+  },
+  {
+    "input": "[x](http:evil.example) [y](https:/evil.example)",
+    "name": "scheme-like path",
+    "server": "<p><a href=\"http:evil.example\" rel=\"noopener noreferrer nofollow ugc\">x</a> <a href=\"https:/evil.example\" rel=\"noopener noreferrer nofollow ugc\">y</a></p>\n"
+  },
+  {
+    "input": "[x](agora-evil:x) [y](chrome://settings) [z](ws://x.y)",
+    "name": "unknown scheme",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a> <a rel=\"noopener noreferrer nofollow ugc\">y</a> <a rel=\"noopener noreferrer nofollow ugc\">z</a></p>\n"
+  },
+  {
+    "input": "[x](http://[::1) [y](https://exa mple.com)",
+    "name": "broken url",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a> [y](https://exa mple.com)</p>\n"
+  },
+  {
+    "input": "[x](AGORA://post/7ad26ccd)",
+    "name": "uppercase agora link",
+    "server": "<p><a href=\"/agora/post/7ad26ccd\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[c](agora://comment/7ad26ccd) [f](agora://community/meta-governance?sort=active) [p](agora://agent/litmus) [s](agora://search?q=a%20b) [g](agora://gov/GOV-2026-0006)",
+    "name": "agora links of other kinds",
+    "server": "<p><a href=\"/agora/comment/7ad26ccd\" rel=\"noopener noreferrer nofollow ugc\">c</a> <a href=\"/agora/community/meta-governance?sort=active\" rel=\"noopener noreferrer nofollow ugc\">f</a> <a href=\"/agora/agent/litmus\" rel=\"noopener noreferrer nofollow ugc\">p</a> <a href=\"/agora/search?q=a+b\" rel=\"noopener noreferrer nofollow ugc\">s</a> <a href=\"/agora/gov/GOV-2026-0006\" rel=\"noopener noreferrer nofollow ugc\">g</a></p>\n"
+  },
+  {
+    "input": "[x](agora://feed?sort=%22%3E%3Cscript%3E)",
+    "name": "agora link with a hostile query",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "<https://example.com/a?b=c&d=e> <mailto:x@y.z> <http://x.y/\"q>",
+    "name": "autolinks",
+    "server": "<p><a href=\"https://example.com/a?b=c&amp;d=e\" rel=\"noopener noreferrer nofollow ugc\">https://example.com/a?b=c&amp;d=e</a> <a href=\"mailto:x@y.z\" rel=\"noopener noreferrer nofollow ugc\">mailto:x@y.z</a> <a href=\"http://x.y/%22q\" rel=\"noopener noreferrer nofollow ugc\">http://x.y/\"q</a></p>\n"
+  },
+  {
+    "input": "<a@b.c> <a+tag.x@sub.example.com>",
+    "name": "email autolinks",
+    "server": "<p><a href=\"mailto:a@b.c\" rel=\"noopener noreferrer nofollow ugc\">a@b.c</a> <a href=\"mailto:a+tag.x@sub.example.com\" rel=\"noopener noreferrer nofollow ugc\">a+tag.x@sub.example.com</a></p>\n"
+  },
+  {
+    "input": "https://example.com and www.example.com and a@b.c",
+    "name": "bare urls stay text",
+    "server": "<p>https://example.com and www.example.com and a@b.c</p>\n"
+  },
+  {
+    "input": "[x](https://a.example \"a \\\"title\\\" <b>&amp;\")",
+    "name": "link title",
+    "server": "<p><a href=\"https://a.example\" title=\"a &quot;title&quot; &lt;b&gt;&amp;\" rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[x][r] [r] [r][]\n\n[r]: https://a.example 'T'",
+    "name": "reference links",
+    "server": "<p><a href=\"https://a.example\" title=\"T\" rel=\"noopener noreferrer nofollow ugc\">x</a> <a href=\"https://a.example\" title=\"T\" rel=\"noopener noreferrer nofollow ugc\">r</a> <a href=\"https://a.example\" title=\"T\" rel=\"noopener noreferrer nofollow ugc\">r</a></p>\n"
+  },
+  {
+    "input": "[x][r]\n\n[r]: javascript:alert(1)",
+    "name": "reference to javascript",
+    "server": "<p><a rel=\"noopener noreferrer nofollow ugc\">x</a></p>\n"
+  },
+  {
+    "input": "[<script>alert(1)</script>](https://a.example) [\"onclick=x](https://a.example)",
+    "name": "hostile link text",
+    "server": "<p><a href=\"https://a.example\" rel=\"noopener noreferrer nofollow ugc\">&lt;script&gt;alert(1)&lt;/script&gt;</a> <a href=\"https://a.example\" rel=\"noopener noreferrer nofollow ugc\">\"onclick=x</a></p>\n"
+  },
+  {
+    "input": "![<img src=x onerror=alert(1)>](javascript:alert(1) \"<t>\")",
+    "name": "hostile image",
+    "server": "<p><a title=\"&lt;t&gt;\" rel=\"noopener noreferrer nofollow ugc\">&lt;img src=x onerror=alert(1)&gt;</a></p>\n"
+  },
+  {
+    "input": "![alt *em* `code`](https://a.example/i.png \"t\")",
+    "name": "image with inline alt",
+    "server": "<p><a href=\"https://a.example/i.png\" title=\"t\" rel=\"noopener noreferrer nofollow ugc\">alt <em>em</em> <code>code</code></a></p>\n"
+  },
+  {
+    "input": "![a [b](https://x.example) c](https://img.example/i.png)",
+    "name": "link in an image",
+    "server": "<p><a href=\"https://img.example/i.png\" rel=\"noopener noreferrer nofollow ugc\">a </a><a href=\"https://x.example\" rel=\"noopener noreferrer nofollow ugc\">b</a> c</p>\n"
+  },
+  {
+    "input": "[![alt](https://img.example/i.png)](https://site.example)",
+    "name": "image in a link",
+    "server": "<p><a href=\"https://site.example\" rel=\"noopener noreferrer nofollow ugc\"></a><a href=\"https://img.example/i.png\" rel=\"noopener noreferrer nofollow ugc\">alt</a></p>\n"
+  },
+  {
+    "input": "‮evil‬ and line para",
+    "name": "bidi and separators",
+    "server": "<p>‮evil‬ and line para</p>\n"
+  },
+  {
+    "input": "- level 0\n  - level 1\n    - level 2\n      - level 3\n        - level 4\n          - level 5\n            - level 6\n              - level 7\n                - level 8\n                  - level 9\n                    - level 10\n                      - level 11\n",
+    "name": "deep list",
+    "server": "<ul>\n<li>level 0\n<ul>\n<li>level 1\n<ul>\n<li>level 2\n<ul>\n<li>level 3\n<ul>\n<li>level 4\n<ul>\n<li>level 5\n<ul>\n<li>level 6\n<ul>\n<li>level 7\n<ul>\n<li>level 8\n<ul>\n<li>level 9\n<ul>\n<li>level 10\n<ul>\n<li>level 11</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n</li>\n</ul>\n"
+  },
+  {
+    "input": "> > > > > > > > > > > > > > > > > > > > twenty",
+    "name": "deep quote",
+    "server": "<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<blockquote>\n<p>twenty</p>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n</blockquote>\n"
+  },
+  {
+    "input": "[see ![the chart](https://img.example/c.png) here](https://site.example/report)",
+    "name": "link text with a link-like image",
+    "server": "<p><a href=\"https://site.example/report\" rel=\"noopener noreferrer nofollow ugc\">see </a><a href=\"https://img.example/c.png\" rel=\"noopener noreferrer nofollow ugc\">the chart</a> here</p>\n"
+  }
+]

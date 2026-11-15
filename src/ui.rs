@@ -50,6 +50,7 @@ mod client_only;
 pub mod feed;
 pub mod format;
 pub mod island;
+pub mod markdown;
 #[cfg(feature = "dioxus-ssr")]
 pub mod ssr;
 
