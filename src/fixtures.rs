@@ -81,7 +81,6 @@ pub fn post() -> PostResponse {
         community_tags: Vec::new(),
         designation: None,
         test: None,
-        flagged_for_review: false,
         proposal_category: None,
     }
 }

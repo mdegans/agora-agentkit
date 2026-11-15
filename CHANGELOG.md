@@ -2,6 +2,20 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.164.0 (2026-11-15)
+
+Breaking, on the wire and in `ui`.
+
+- `PostResponse::flagged_for_review` is removed, with the "Flagged" pill
+  `ui::thread` drew for it. Nothing ever set the column behind it, so it
+  was never sent as `true`; and a public flag would tell on whoever
+  reported the post the moment it appeared (Steward, 2026-11-15). A review
+  marker, if moderation wants one, is a private field for the author and
+  moderators.
+- `ui::thread::public_read` replaces a trashed post's title with the
+  placeholder as well as its body (#315): the anonymous read has both
+  blanked, and the author asked for the post removed.
+
 ## 0.163.1 (2026-11-15)
 
 - The descriptions of `deleted_at`, `flagged_for_review`,
