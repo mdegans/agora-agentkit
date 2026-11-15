@@ -2,7 +2,7 @@
 //! [`plan_send`], which the server enforces and the CLI and the portal
 //! preview (agora `docs/design-operator-api.md`, decision 9)
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,13 @@ pub fn window_half_width() -> Duration {
     Duration::hours(24)
 }
 
+/// The span over which covered sends' agents are counted together: above
+/// [`UNTAPPED_REACH`] distinct agents in one span, a covered send is
+/// announced ([`covered_reach`])
+pub fn covered_span() -> Duration {
+    Duration::hours(24)
+}
+
 /// The shortest bulk hold (*Also in v1*)
 pub fn bulk_hold_floor() -> Duration {
     Duration::hours(1)
@@ -210,6 +217,22 @@ pub struct WindowMessage {
     pub immediate: bool,
     /// Its send has been delivered (it may since have been read or retracted)
     pub delivered: bool,
+    /// Its send was [covered] when last counted, at admission or at a move
+    /// ([`SendPlan::covered`]): it counts toward a later covered send's
+    /// [`covered_reach`]. Rows from before this field read `false` (see
+    /// [`covered_reach`] on what that undercounts)
+    pub covered: bool,
+    /// The [`covered_reach`] the notices about its send reported, when they
+    /// did ([`SendPlan::covered_told`], at admission or at a move): the
+    /// baseline a later covered send must double to be announced again
+    /// ([`covered_baseline`]). Rows from before this field read `None`
+    pub covered_told: Option<u32>,
+    /// The level of what admitted its send, or last brought it forward: the
+    /// request's level at admission, a YubiKey tap after a **SendForward**,
+    /// and unchanged by a **SendLater** (whoever moves it, a move later
+    /// never changes who sent it). Only a count told on a send at
+    /// [`TapLevel::None`] [feeds the baseline](feeds_baseline)
+    pub level: TapLevel,
 }
 
 impl WindowMessage {
@@ -240,16 +263,191 @@ pub fn reach_over<'a>(
     others: impl IntoIterator<Item = &'a AgentId>,
     cover: impl IntoIterator<Item = &'a AgentId>,
 ) -> u32 {
-    let others: BTreeSet<&AgentId> = others.into_iter().collect();
-    let cover: BTreeSet<&AgentId> = cover.into_iter().collect();
-    let size = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    if this.iter().all(|agent| cover.contains(agent)) {
+    if all_in(this, cover) {
         size(this.len())
     } else {
+        let others: BTreeSet<&AgentId> = others.into_iter().collect();
         let union =
             others.len() + this.iter().filter(|a| !others.contains(a)).count();
         size(union)
     }
+}
+
+fn size(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// Whether every agent of `this` is in `cover`: D9's `|R_this|` term applies
+fn all_in<'a>(
+    this: &BTreeSet<AgentId>,
+    cover: impl IntoIterator<Item = &'a AgentId>,
+) -> bool {
+    let cover: BTreeSet<&AgentId> = cover.into_iter().collect();
+    this.iter().all(|agent| cover.contains(agent))
+}
+
+/// The messages of decision 9's window for a send at `deliver_at`
+fn window_of(
+    deliver_at: DateTime<Utc>,
+    messages: &[WindowMessage],
+) -> impl Iterator<Item = &WindowMessage> {
+    // SPEC: decision 9, "within 24 h either side": both ends included
+    messages.iter().filter(move |m| {
+        (m.deliver_at - deliver_at).abs() <= window_half_width()
+    })
+}
+
+/// Whether a send to `recipients` at `deliver_at` is **covered**: every one
+/// of its agents had a message in its window that went out, so its
+/// [reach](Reach::reach) is `|R_this|` (decision 9, *Why |R_this| counts*)
+pub fn covered(
+    recipients: &BTreeSet<AgentId>,
+    deliver_at: DateTime<Utc>,
+    messages: &[WindowMessage],
+) -> bool {
+    all_in(
+        recipients,
+        window_of(deliver_at, messages)
+            .filter(|m| m.covers())
+            .map(|m| &m.recipient),
+    )
+}
+
+/// How much a covered send's [`covered_reach`] must exceed the count already
+/// told in its window ([`covered_baseline`]) to be announced again: more than
+/// twice it
+pub const COVERED_GROWTH: u32 = 2;
+
+/// For a covered send to `recipients` at `deliver_at`: the most distinct
+/// agents that it and the [covered](WindowMessage::covered) messages reach
+/// in any closed [`covered_span`] (24 h, both ends included) containing its
+/// `deliver_at`. Above [`UNTAPPED_REACH`], and above [`COVERED_GROWTH`] times
+/// its [`covered_baseline`], the send is announced
+/// ([`SendPlan::announced_covered`]).
+///
+/// SPEC: decision 9, keep-warm (Steward, 2026-11-14: announce, don't block).
+/// `|R_this|` lets each covered send pass on its own size, so a session that
+/// keeps agents warm with daily chats of 5 could later reach all of them in
+/// one burst of small covered sends, untapped and unannounced. This counts
+/// covered sends together. It never refuses a send and never asks for a
+/// tap: [`required_tap`] doesn't see it. What stays quiet in a 24 h span is
+/// 5 agents by fresh sends (the union) plus 5 by covered ones, and a covered
+/// count up to twice what was last told within 24 h on an untapped send.
+///
+/// **Why on `deliver_at`, in a 24 h span.** What is counted is what lands.
+/// Choosing `deliver_at` can't dodge it: a covered send's cover had been
+/// delivered when the send was counted (at admission, or at a move) and lies
+/// within 24 h of its `deliver_at`, so a covered send lands within 24 h of
+/// being counted. A burst admitted together therefore lands within one 24 h
+/// span, whatever times it asks for; to stay quiet, landings must keep to 5
+/// covered agents in every 24 h, the untapped rate, and that is no burst.
+/// Counting on admission instead would miss sends admitted apart that land
+/// together, or one moved beside the others (a move is counted again, under
+/// the rule for a new send). The span is 24 h rather than the window's
+/// ±24 h so that ordinary conversation costs at most about one notice a day.
+///
+/// **Migration.** Rows stored before [`WindowMessage::covered`] existed
+/// read `false`, so for the first 24 h after the server starts storing it,
+/// covered sends from before are not counted and the count is low; after
+/// that every message in a window has its flag.
+///
+/// **Cost.** One sort and one sweep: O(m log m) in the m covered messages
+/// within 24 h either side, each start time once and each message added and
+/// removed once. A 5000-agent fleet sent three times counts in milliseconds
+/// (`covered_reach_is_fast_on_a_fleet`); it runs under the operator's lock.
+pub fn covered_reach(
+    recipients: &BTreeSet<AgentId>,
+    deliver_at: DateTime<Utc>,
+    messages: &[WindowMessage],
+) -> u32 {
+    let span = covered_span();
+    // This send's own agents are in every span; count only the others
+    let mut others: Vec<(DateTime<Utc>, &AgentId)> = messages
+        .iter()
+        .filter(|m| {
+            m.covered
+                && (m.deliver_at - deliver_at).abs() <= span
+                && !recipients.contains(&m.recipient)
+        })
+        .map(|m| (m.deliver_at, &m.recipient))
+        .collect();
+    others.sort_unstable_by_key(|(at, _)| *at);
+    // The busiest span containing `deliver_at` can be slid later, losing
+    // nothing, until it starts at a message's time or at `deliver_at`
+    let mut starts: Vec<DateTime<Utc>> = others
+        .iter()
+        .map(|(at, _)| *at)
+        .filter(|at| *at <= deliver_at)
+        .collect();
+    starts.push(deliver_at);
+    starts.dedup();
+    let mut counts: BTreeMap<&AgentId, u32> = BTreeMap::new();
+    let (mut first, mut next, mut best) = (0, 0, 0);
+    for start in starts {
+        let end = start
+            .checked_add_signed(span)
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
+        while let Some(&(_, agent)) =
+            others.get(next).filter(|(at, _)| *at <= end)
+        {
+            *counts.entry(agent).or_default() += 1;
+            next += 1;
+        }
+        while let Some(&(_, agent)) =
+            others.get(first).filter(|(at, _)| *at < start)
+        {
+            if let Some(n) = counts.get_mut(agent) {
+                *n -= 1;
+                if *n == 0 {
+                    counts.remove(agent);
+                }
+            }
+            first += 1;
+        }
+        best = best.max(counts.len());
+    }
+    size(recipients.len() + best)
+}
+
+/// The most a notice has told of covered sends on untapped sends within 24 h
+/// either side of `deliver_at` (the spans [`covered_reach`] counts over): the
+/// largest
+/// [`WindowMessage::covered_told`] there that [feeds the
+/// baseline](feeds_baseline), or 0.
+///
+/// A steady conversation with more than 5 agents is then told about once a
+/// day, while a growing gather is told each time it doubles. Taking away
+/// can't lift it: a retracted send still counts, as it does for reach, and
+/// a cancelled one leaves the window, which lowers the baseline and only
+/// brings the next notice sooner
+pub fn covered_baseline(
+    deliver_at: DateTime<Utc>,
+    messages: &[WindowMessage],
+) -> u32 {
+    messages
+        .iter()
+        .filter(|m| (m.deliver_at - deliver_at).abs() <= covered_span())
+        .filter_map(feeds_baseline)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Which told counts feed [`covered_baseline`]: only a count told on a send
+/// made without a tap ([`WindowMessage::level`] is [`TapLevel::None`]: a
+/// portal session or a `software_key`).
+///
+/// SPEC: Steward, 2026-11-15: a told count excuses later sends only if it
+/// was told on an untapped send, so a stolen session can't ride the owner's
+/// tapped or held sends. Counted against everything, a broadcast the owner
+/// tapped to 100 agents would let a session reach 200 of them in small
+/// covered sends without a notice (review of #311, R1). A session's own
+/// counts still feed it, so its steady conversation is told about once a
+/// day, and a session send brought forward by a YubiKey tap stops feeding it
+/// (the safe direction: fewer excuses, never more)
+pub fn feeds_baseline(message: &WindowMessage) -> Option<u32> {
+    message
+        .covered_told
+        .filter(|_| message.level == TapLevel::None)
 }
 
 /// [`Reach`] for a send to `recipients` delivered at `deliver_at`, over
@@ -259,12 +457,7 @@ pub fn reach(
     deliver_at: DateTime<Utc>,
     messages: &[WindowMessage],
 ) -> Reach {
-    // SPEC: decision 9, "within 24 h either side": both ends included
-    let in_window = |m: &&WindowMessage| {
-        (m.deliver_at - deliver_at).abs() <= window_half_width()
-    };
-    let window: Vec<&WindowMessage> =
-        messages.iter().filter(in_window).collect();
+    let window: Vec<&WindowMessage> = window_of(deliver_at, messages).collect();
     let over = |messages: Vec<&&WindowMessage>| {
         reach_over(
             recipients,
@@ -340,6 +533,15 @@ pub struct SendPlan {
     pub reach: Reach,
     /// What [`required_tap`] asked for
     pub required: TapLevel,
+    /// Every agent of it had a message in its window that went out
+    /// ([`covered`]), so its reach is `|R_this|`. The server stores it on the
+    /// send's messages ([`WindowMessage::covered`]), and again at a move
+    pub covered: bool,
+    /// When [`covered`](Self::covered), its [`covered_reach`]; else 0
+    pub covered_reach: u32,
+    /// When [`covered`](Self::covered), its [`covered_baseline`]: the most
+    /// already told of covered sends near it; else 0
+    pub covered_baseline: u32,
 }
 
 impl SendPlan {
@@ -363,9 +565,42 @@ impl SendPlan {
         self.required >= TapLevel::Tap
     }
 
+    /// Covered, with covered sends reaching more than 5 agents in a 24 h
+    /// span ([`covered_reach`]), and more than [`COVERED_GROWTH`] times what
+    /// was already told near it ([`covered_baseline`]): announced like a held
+    /// send above 5, the operator with a cancel link, the contact with a
+    /// freeze link, both with the count ([`covered_told`](Self::covered_told)).
+    /// Only announced: it needs no tap and is never refused for it (decision
+    /// 9, keep-warm). This is the case the other three miss: a burst of
+    /// small sends to agents kept covered
+    pub fn announced_covered(&self) -> bool {
+        self.covered
+            && self.covered_reach > UNTAPPED_REACH
+            && self.covered_reach
+                > self.covered_baseline.saturating_mul(COVERED_GROWTH)
+    }
+
+    /// The count a notice about this send reports, and the server stores on
+    /// its messages ([`WindowMessage::covered_told`]): its
+    /// [`covered_reach`] when that is above 5 and the send is
+    /// [announced](Self::announced) by any rule, so the operator and the
+    /// contact can tell 6 from 500. Else `None`
+    pub fn covered_told(&self) -> Option<u32> {
+        self.covered_count().filter(|_| self.announced())
+    }
+
+    /// Its [`covered_reach`] when covered and above 5, announced or not
+    pub fn covered_count(&self) -> Option<u32> {
+        (self.covered && self.covered_reach > UNTAPPED_REACH)
+            .then_some(self.covered_reach)
+    }
+
     /// Whether the send is announced at all
     pub fn announced(&self) -> bool {
-        self.announced_held() || self.announced_now() || self.announced_tapped()
+        self.announced_held()
+            || self.announced_now()
+            || self.announced_tapped()
+            || self.announced_covered()
     }
 
     /// Above 500: the contact also gets the count and the first names
@@ -425,11 +660,23 @@ pub fn plan_send(request: &SendRequest<'_>) -> Result<SendPlan, SendRefusal> {
         if now_above_5 && !request.sends_now {
             return Err(SendRefusal::NewKey { reach });
         }
+        let covered = covered(request.recipients, deliver_at, request.window);
+        let (covered_reach, covered_baseline) = if covered {
+            (
+                covered_reach(request.recipients, deliver_at, request.window),
+                covered_baseline(deliver_at, request.window),
+            )
+        } else {
+            (0, 0)
+        };
         Ok(SendPlan {
             deliver_at,
             delivery,
             reach,
             required,
+            covered,
+            covered_reach,
+            covered_baseline,
         })
     };
     let planned = match request.when {

@@ -533,6 +533,13 @@ pub struct Send {
     /// A notice to the primary carried a cancel link for it, which stays good
     /// wherever it is moved
     pub cancel_link: bool,
+    /// It was covered when last counted ([`SendPlan::covered`](super::SendPlan::covered))
+    pub covered: bool,
+    /// The covered count its notices reported, at admission or its last move
+    /// ([`SendPlan::covered_told`](super::SendPlan::covered_told)). It stays
+    /// once retracted; cancelled, the send leaves the window and takes it
+    /// along
+    pub covered_told: Option<u32>,
 }
 
 /// The device flow's states (§3)
@@ -985,6 +992,9 @@ impl AccountState {
                     deliver_at: s.deliver_at,
                     immediate: s.delivery == Delivery::Immediate,
                     delivered: s.state != SendState::Scheduled,
+                    covered: s.covered,
+                    covered_told: s.covered_told,
+                    level: s.level,
                 })
             })
             .collect()
