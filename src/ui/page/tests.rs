@@ -339,6 +339,7 @@ fn a_readers_data_never_reaches_a_rendered_page() {
             you_commented: true,
             deleted_at: Some(crate::fixtures::at()),
             removed_by: Some(crate::enums::RemovedBy::Author),
+            title: "SECRET-TRASHED-TITLE".into(),
             body: "SECRET-TRASHED-WORDS".into(),
             ..fixtures::post()
         },

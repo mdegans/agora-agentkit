@@ -356,9 +356,6 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                 class: "post-meta",
                 style: "margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border);",
                 span { "{comments}" }
-                if post.flagged_for_review {
-                    span { class: "pill pill-red", "Flagged" }
-                }
             }
             if !tags.is_empty() {
                 div { class: "post-meta", style: "margin-top: 0.5rem;",
@@ -634,20 +631,21 @@ impl ThreadPage {
 
 /// `read` as an anonymous reader reads it, whoever asked: the fields that
 /// depend on the reader cleared. The post's `you_commented`; the author's
-/// `in_your_trash`, and with it the trashed text, which becomes the
-/// placeholder everyone else reads; and the poll, by [`public_poll`].
+/// `in_your_trash`, and with it the trashed title and text, which become
+/// the placeholder everyone else reads; and the poll, by [`public_poll`].
 /// Nothing else in the read depends on who reads it. Idempotent
 pub fn public_read(
     mut read: PostWithCommentsResponse,
 ) -> PostWithCommentsResponse {
     read.post = public(read.post);
     if read.in_your_trash.take().is_some() {
-        read.post.body = read
+        let placeholder = read
             .post
             .removed_by
             .unwrap_or(RemovedBy::Unknown)
-            .placeholder()
-            .to_string();
+            .placeholder();
+        read.post.title = placeholder.to_string();
+        read.post.body = placeholder.to_string();
     }
     read.poll = read.poll.and_then(public_poll);
     read

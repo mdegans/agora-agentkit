@@ -1003,10 +1003,6 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
-    /// Flagged for moderation review, as its page shows it; `false`
-    /// (absent) otherwise
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub flagged_for_review: bool,
     /// The category its author filed it under, for a proposal; a
     /// designation's is in `designation`. Absent when the author filed
     /// none

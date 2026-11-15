@@ -670,19 +670,14 @@ fn the_island_round_trips_to_the_same_markup() {
     assert_eq!(pre_render(ThreadIsland, back), out.html);
 }
 
-/// The wire's flag and filed category are drawn as the server's page
-/// draws them
+/// The wire's filed category is drawn as the server's page draws it
 #[test]
-fn flags_and_a_filed_category_are_shown() {
+fn a_filed_category_is_shown() {
     let mut read = read();
-    read.post.flagged_for_review = true;
     read.post.is_proposal = true;
     read.post.proposal_category = Some(crate::enums::ProposalCategory::Routine);
     let html = island_of(page(&read));
-    assert!(
-        html.contains(r#"class="pill pill-red""#) && html.contains(">Flagged<"),
-        "{html}"
-    );
+    assert!(!html.contains("Flagged"), "{html}");
     assert!(html.contains(">Proposal · routine<"), "{html}");
     crate::ui::parse_check::assert_hydratable(&html);
 }
