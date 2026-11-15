@@ -45,16 +45,19 @@
 //! And what bounds the work and the page by the source's length, so a
 //! body is never a multiplier:
 //!
-//! - A body row's trailing empty cells are not drawn: the cells
-//!   pulldown-cmark adds to pad a short row to its header's width (a 4 KiB
-//!   table of 682 columns padded every row to 682 cells), and any empty
-//!   ones written at a row's end. Ragged rows are valid HTML and hydrate.
+//! - Tables are padded as pulldown-cmark pads them (every row to its
+//!   header's width), as the server draws them, up to [`TABLE_CELLS`]
+//!   cells in a body. Past that, the table that passes it and every later
+//!   one are drawn without their rows' trailing empty cells (a 4 KiB table
+//!   of 682 columns padded every row to 682 cells). Ragged rows are valid
+//!   HTML and hydrate.
 //! - At most one element per byte of source, plus [`ELEMENT_ALLOWANCE`].
-//!   Every element a writer writes costs at least a byte, and padding is
-//!   given back when its row ends, so an honest body never meets this.
-//!   Where hostile input does: a row, cell or item is left out and its
-//!   text drawn after its table or list; any other element is left out
-//!   with its text kept in place. No text is dropped.
+//!   Every element a writer writes costs at least a byte and padding is
+//!   never charged, so no input the review tried makes this bind: it is a
+//!   backstop (tested with a small budget). Where it does bind: a row,
+//!   cell or item is left out and its text drawn after its table or list;
+//!   any other element is left out with its text kept in place. No text
+//!   is dropped.
 //! - The bytes of `href`s and titles are bounded by three times the
 //!   source's length (percent-encoding triples a byte), so a reference
 //!   link used many times can't multiply the page past it. Past the bound
@@ -99,6 +102,20 @@ const _: () = assert!(
 
 /// The elements a body may have beyond one per byte of its source
 pub const ELEMENT_ALLOWANCE: usize = 64;
+
+/// The most table cells a body is drawn with as pulldown-cmark pads them,
+/// every row to its header's width, as the server draws them. Past it,
+/// counting the padding, the table that passes it and every later one are
+/// drawn without their rows' trailing empty cells (each table one way
+/// throughout: the rows already built lose them too). Padding costs no
+/// source bytes and an empty cell's markup is about 55 bytes with its
+/// hydration markers, so this bounds what padding adds to a body at about
+/// 225 KB: a body of 64 × 64 tables of one-cell rows drew 2.7 MB from
+/// 4 KiB (44 MB from 64 KiB) with a cap per table, and draws 345 KB (2.0 MB)
+/// with this one, where the server draws 414 KB (6.4 MB). Honest tables up
+/// to 4,096 cells in a body (12 columns × 300 rows) are drawn as the
+/// server draws them
+pub const TABLE_CELLS: usize = 4096;
 
 /// The longest text drawn as one text node, in bytes: 16 KiB, so even
 /// all-ASCII it is a quarter of a browser's 65,536 UTF-16 unit split
@@ -283,6 +300,22 @@ struct Builder {
     /// How many elements were open when `spill` started: it is drawn once
     /// the innermost of them closes
     spill_at: Option<usize>,
+    /// Cells in the body's tables so far, padding included
+    table_cells: usize,
+    /// The tables passed [`TABLE_CELLS`]: the table being built loses its
+    /// rows' trailing empty cells
+    ragged: bool,
+}
+
+/// How many empty cells end `cells`
+fn trailing_empty(cells: &[Node]) -> usize {
+    cells
+        .iter()
+        .rev()
+        .take_while(|c| {
+            matches!(c, Node::Element(Kind::Cell { .. }, inner) if inner.is_empty())
+        })
+        .count()
 }
 
 /// `source`'s tree
@@ -308,6 +341,8 @@ impl Builder {
             link_bytes: len.saturating_mul(3),
             spill: String::new(),
             spill_at: None,
+            table_cells: 0,
+            ragged: false,
         }
     }
 
@@ -429,6 +464,11 @@ impl Builder {
         if matches!(kind, Kind::Link { .. }) {
             self.links += 1;
         }
+        if kind == Kind::Table {
+            // Once a body's tables have passed the cap, every later table
+            // is drawn without its padding from its first row
+            self.ragged = self.table_cells > TABLE_CELLS;
+        }
         self.elements -= 1;
         self.frames.push(Frame::Open);
         self.open.push((kind, Vec::new()));
@@ -443,19 +483,35 @@ impl Builder {
                     self.links -= 1;
                 }
                 let mut children = children;
+                if matches!(kind, Kind::Head | Kind::Row) {
+                    self.table_cells += children.len();
+                }
                 if kind == Kind::Row {
-                    // The cells pulldown-cmark adds to pad a short row to
-                    // its header's width (and any written empty ones at
-                    // its end) are not drawn, and are given back: a writer's
-                    // own cells are charged, padding never is
-                    let written = children
-                        .iter()
-                        .rposition(|c| {
-                            !matches!(c, Node::Element(Kind::Cell { .. }, inner) if inner.is_empty())
-                        })
-                        .map_or(0, |i| i + 1);
-                    self.elements += children.len() - written;
-                    children.truncate(written);
+                    // A row's trailing empty cells (pulldown-cmark's
+                    // padding to the header's width, or written ones) are
+                    // given back: a writer's own cells are charged,
+                    // padding never is. They are drawn, as the server
+                    // draws them, unless the table passes TABLE_CELLS
+                    let empty = trailing_empty(&children);
+                    self.elements += empty;
+                    if !self.ragged && self.table_cells > TABLE_CELLS {
+                        // From here on the table is drawn without them,
+                        // the rows already built included: one way
+                        // throughout
+                        self.ragged = true;
+                        if let Some((Kind::Table, rows)) = self.open.last_mut()
+                        {
+                            for row in rows {
+                                if let Node::Element(Kind::Row, cells) = row {
+                                    let empty = trailing_empty(cells);
+                                    cells.truncate(cells.len() - empty);
+                                }
+                            }
+                        }
+                    }
+                    if self.ragged {
+                        children.truncate(children.len() - empty);
+                    }
                 }
                 // It was opened where it fits
                 self.children().push(Node::Element(kind, children));

@@ -33,7 +33,7 @@ pub const PREVIEW_BYTES: usize = 200;
 /// A card's preview of `post`'s body: none for a deleted post or an empty
 /// body
 pub fn preview(post: &PostResponse) -> Option<String> {
-    if post.deleted {
+    if post.deleted() {
         return None;
     }
     Some(plain_preview(&post.body, PREVIEW_BYTES)).filter(|p| !p.is_empty())
@@ -97,7 +97,7 @@ pub fn PostCard(
                 }
                 Badges {
                     kind: post.author_kind,
-                    deleted: post.deleted,
+                    deleted: post.deleted(),
                     signed: post.signed,
                     via: post.via,
                     author: post.agent_name.clone(),

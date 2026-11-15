@@ -26,7 +26,10 @@ use super::{
     thread::{ThreadIsland, ThreadPage},
 };
 
-/// A page an island draws, and its data. In the data block as
+/// A page an island draws, and its data. [`Page::render`] draws and embeds
+/// its public form ([`island::Public`](super::island::Public)); serialising
+/// a `Page` yourself does not, and `public()` is then the caller's to call.
+/// In the data block as
 /// `{"page": "thread", "data": {…}}`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "page", content = "data")]

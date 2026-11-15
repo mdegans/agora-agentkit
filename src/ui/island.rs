@@ -71,7 +71,9 @@ pub enum IslandError {
 /// [`script_element`] and the pre-render embed or draw. A page's data is
 /// that reader's view, enforced where it is rendered: whatever the server
 /// built a page from (a signed read, its own rows), the reader-specific
-/// fields never reach a public page
+/// fields never reach a public page. Only these render paths enforce it:
+/// serialising a page type yourself (`serde_json::to_string(&page)`) does
+/// not, and calling `public()` first is then the caller's responsibility
 pub trait Public {
     /// `self`, with everything that depends on who reads it cleared.
     /// Idempotent

@@ -56,7 +56,7 @@ pub const UNATTRIBUTED: &str = "[removed]";
 
 /// What a removed post's page says in its place, or `None` for a live one
 pub fn removal_sentence(post: &PostResponse) -> Option<&'static str> {
-    post.deleted.then_some(match post.removed_by {
+    post.deleted().then_some(match post.removed_by {
         Some(RemovedBy::Author) => "This post was deleted by its author.",
         Some(RemovedBy::Operator) => {
             "This post was removed by the platform's operators in a cleanup. \
@@ -258,7 +258,10 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
     let author = post_author(&post);
     let date = post.created_at.map(format::date_time);
     let removal = removal_sentence(&post);
-    let designation = post.designation.as_ref().filter(|_| !post.deleted);
+    let gone = post
+        .deleted_at
+        .map(|at| format::deletion(post.removed_by, at));
+    let designation = post.designation.as_ref().filter(|_| !post.deleted());
     // The designation's category, or the one its author filed it under
     let category = designation.map(|d| d.category).or(post.proposal_category);
     let proposal = post.is_proposal.then(|| {
@@ -273,7 +276,7 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
     });
     let comments = format::comment_count(comment_count as i64);
     let mut seen = HashSet::new();
-    let tags: Vec<_> = if post.deleted {
+    let tags: Vec<_> = if post.deleted() {
         Vec::new()
     } else {
         post.community_tags
@@ -308,7 +311,7 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                 }
                 Badges {
                     kind: post.author_kind,
-                    deleted: post.deleted,
+                    deleted: post.deleted(),
                     signed: post.signed,
                     via: post.via,
                     author: post.agent_name.clone(),
@@ -316,6 +319,10 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                 if let Some(date) = date {
                     span { "·" }
                     span { "{date}" }
+                }
+                if let Some(gone) = gone {
+                    span { "·" }
+                    span { "{gone}" }
                 }
             }
             if let Some(d) = designation {
@@ -429,6 +436,9 @@ fn CommentRow(
         .as_ref()
         .map_or_else(|| UNATTRIBUTED.to_string(), ToString::to_string);
     let date = comment.created_at.map(format::date_time);
+    let gone = comment
+        .deleted_at
+        .map(|at| format::deletion(comment.removed_by, at));
     let target = ReplyTarget {
         post,
         parent: Some(comment.id),
@@ -442,7 +452,7 @@ fn CommentRow(
                 }
                 Badges {
                     kind: comment.author_kind,
-                    deleted: comment.deleted,
+                    deleted: comment.deleted(),
                     signed: comment.signed,
                     via: comment.via,
                     author: comment.agent_name.clone(),
@@ -451,8 +461,12 @@ fn CommentRow(
                     span { "·" }
                     span { "{date}" }
                 }
+                if let Some(gone) = gone {
+                    span { "·" }
+                    span { "{gone}" }
+                }
             }
-            if comment.deleted {
+            if comment.deleted() {
                 div {
                     class: "comment-body comment-removed",
                     style: "font-style: italic; color: var(--text-muted);",
@@ -521,7 +535,10 @@ pub fn ThreadComments(read: PostWithCommentsResponse) -> Element {
     let locked = locked(&read.post);
     let rows = rows(&read);
     // A removed post's summary is not shown, as on the server's page
-    let summary = read.thread_summary.as_ref().filter(|_| !read.post.deleted);
+    let summary = read
+        .thread_summary
+        .as_ref()
+        .filter(|_| !read.post.deleted());
     rsx! {
         if let Some(summary) = summary {
             div { class: "card thread-summary", style: "margin-top: 1.5rem;",
@@ -618,11 +635,8 @@ impl ThreadPage {
 /// `read` as an anonymous reader reads it, whoever asked: the fields that
 /// depend on the reader cleared. The post's `you_commented`; the author's
 /// `in_your_trash`, and with it the trashed text, which becomes the
-/// placeholder everyone else reads; and the poll, whole: its options are
-/// in the reader's own order and numbering (`PollView::options`,
-/// `numbering`), which an anonymous view can't be rebuilt from, and no
-/// component draws a poll yet. Nothing else in the read depends on who
-/// reads it. Idempotent
+/// placeholder everyone else reads; and the poll, by [`public_poll`].
+/// Nothing else in the read depends on who reads it. Idempotent
 pub fn public_read(
     mut read: PostWithCommentsResponse,
 ) -> PostWithCommentsResponse {
@@ -635,8 +649,27 @@ pub fn public_read(
             .placeholder()
             .to_string();
     }
-    read.poll = None;
+    read.poll = read.poll.and_then(public_poll);
     read
+}
+
+/// A poll on a public page (Steward, 2026-11-15): shown to everyone once it
+/// is closed, its results public and its order no longer mattering; not
+/// while it is scheduled or open (a signed-in reader gets their own view
+/// later, client-side). And never a reader's own view: a signed read
+/// numbers the options and orders them for that reader (`numbering`,
+/// each option's `number`) and says what they may do (`you`), and the
+/// author's order can't be had back from it, so a closed poll read that
+/// way is dropped too. What is kept is the anonymous read of a closed
+/// poll: the author's order, unnumbered, with its results
+pub fn public_poll(
+    poll: crate::polls::PollView,
+) -> Option<crate::polls::PollView> {
+    let anonymous = poll.numbering.is_none()
+        && poll.you.is_none()
+        && poll.options.iter().all(|o| o.number.is_none());
+    (poll.status == crate::enums::PollStatus::Closed && anonymous)
+        .then_some(poll)
 }
 
 impl super::island::Public for ThreadPage {

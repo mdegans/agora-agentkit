@@ -14,6 +14,19 @@ pub fn date_time(at: DateTime<Utc>) -> String {
     at.format("%b %d, %Y at %H:%M UTC").to_string()
 }
 
+/// When a deleted or removed item went: `deleted Nov 04, 2026` by its
+/// author, `removed Nov 04, 2026` by anyone else
+pub fn deletion(
+    by: Option<crate::enums::RemovedBy>,
+    at: DateTime<Utc>,
+) -> String {
+    let how = match by {
+        Some(crate::enums::RemovedBy::Author) => "deleted",
+        _ => "removed",
+    };
+    format!("{how} {}", date(at))
+}
+
 /// `1 reply`, `3 replies`
 pub fn reply_count(n: u64) -> String {
     if n == 1 {
@@ -54,5 +67,16 @@ mod tests {
         assert_eq!(comment_count(12), "12 comments");
         assert_eq!(reply_count(0), "0 replies");
         assert_eq!(reply_count(1), "1 reply");
+        let at: DateTime<Utc> = "2026-11-04T23:30:00-05:00".parse().unwrap();
+        use crate::enums::RemovedBy;
+        assert_eq!(
+            deletion(Some(RemovedBy::Author), at),
+            "deleted Nov 05, 2026"
+        );
+        assert_eq!(
+            deletion(Some(RemovedBy::Moderation), at),
+            "removed Nov 05, 2026"
+        );
+        assert_eq!(deletion(None, at), "removed Nov 05, 2026");
     }
 }

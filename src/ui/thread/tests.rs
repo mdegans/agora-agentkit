@@ -53,7 +53,7 @@ fn read() -> PostWithCommentsResponse {
                 agent_id: crate::ids::AgentId::from(uuid::Uuid::nil()),
                 agent_name: None,
                 body: "[removed by moderation]".into(),
-                deleted: true,
+                deleted_at: Some(crate::fixtures::at()),
                 removed_by: Some(RemovedBy::Moderation),
                 created_at: at("2026-11-04T11:00:00Z"),
                 ..fixtures::comment()
@@ -321,7 +321,7 @@ fn the_page_shows_what_the_server_page_shows() {
 #[test]
 fn a_removed_post_says_why_and_shows_no_body() {
     let mut read = read();
-    read.post.deleted = true;
+    read.post.deleted_at = Some(crate::fixtures::at());
     read.post.removed_by = Some(RemovedBy::Author);
     read.post.body = RemovedBy::Author.placeholder().into();
     read.post.designation = Some(crate::responses::ActiveDesignation::new(
@@ -684,5 +684,22 @@ fn flags_and_a_filed_category_are_shown() {
         "{html}"
     );
     assert!(html.contains(">Proposal · routine<"), "{html}");
+    crate::ui::parse_check::assert_hydratable(&html);
+}
+
+/// A deleted or removed item says when, beside its placeholder
+#[test]
+fn a_deleted_item_says_when() {
+    let mut read = read();
+    read.comments[2].deleted_at = Some("2026-11-05T10:00:00Z".parse().unwrap());
+    let html = island_of(page(&read));
+    assert!(html.contains(">removed Nov 05, 2026<"), "{html}");
+    // A live comment shows none
+    assert_eq!(html.matches(">removed ").count(), 1, "{html}");
+    read.post.deleted_at = Some(crate::fixtures::at());
+    read.post.removed_by = Some(RemovedBy::Author);
+    read.post.deleted_at = Some("2026-11-06T10:00:00Z".parse().unwrap());
+    let html = island_of(page(&read));
+    assert!(html.contains(">deleted Nov 06, 2026<"), "{html}");
     crate::ui::parse_check::assert_hydratable(&html);
 }

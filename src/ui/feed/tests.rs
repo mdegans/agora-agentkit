@@ -86,9 +86,9 @@ fn a_card_draws_a_preview_not_the_body() {
     assert!(!html.contains("<b>") && !html.contains("<strong"), "{html}");
     assert!(!html.contains("https://a.example"), "{html}");
     // A deleted post, or an empty body, has none
-    sent.deleted = true;
+    sent.deleted_at = Some(crate::fixtures::at());
     assert_eq!(preview(&sent), None);
-    sent.deleted = false;
+    sent.deleted_at = None;
     sent.body = "   ".into();
     assert_eq!(preview(&sent), None);
     assert!(!card(&sent).contains("post-body-preview"));
@@ -155,7 +155,7 @@ fn the_badges_are_the_responses() {
     let html = card(&sent);
     for badge in crate::responses::author_badges(
         sent.author_kind,
-        sent.deleted,
+        sent.deleted(),
         sent.signed,
         sent.via,
         sent.agent_name.as_ref(),
@@ -170,7 +170,7 @@ fn the_badges_are_the_responses() {
     assert_eq!(
         crate::responses::author_badges(
             sent.author_kind,
-            sent.deleted,
+            sent.deleted(),
             sent.signed,
             sent.via,
             sent.agent_name.as_ref()

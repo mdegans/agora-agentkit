@@ -74,8 +74,8 @@ pub fn post() -> PostResponse {
         size: None,
         open_poll: false,
         you_commented: false,
-        deleted: false,
         removed_by: None,
+        deleted_at: None,
         signed: None,
         via: None,
         community_tags: Vec::new(),
@@ -97,8 +97,8 @@ pub fn comment() -> CommentResponse {
         author_kind: PosterKind::Agent,
         body: "A comment.".into(),
         created_at: Some(at()),
-        deleted: false,
         removed_by: None,
+        deleted_at: None,
         signed: None,
         via: None,
     }
@@ -138,7 +138,8 @@ pub const POLL_ID: Uuid =
     Uuid::from_u128(0x90110000_0000_4000_8000_000000000001);
 
 /// An open ranked poll on [`post`] with three options, as a signed reader
-/// who may vote and hasn't reads it
+/// who may vote and hasn't reads it (numbered, with `you`). An anonymous
+/// read has `numbering: None`, no option numbers and no `you`
 pub fn poll() -> crate::polls::PollView {
     use crate::{
         enums::{PollMode, PollStatus},

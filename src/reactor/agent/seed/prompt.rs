@@ -3909,7 +3909,7 @@ fn format_threaded_entry(
         el.parent_by = None;
         el.parent_yours = None;
     }
-    let deleted = matches!(entry, ThreadEntry::Full(c) if c.deleted);
+    let deleted = matches!(entry, ThreadEntry::Full(c) if c.deleted());
     if let Some(shown) = cx.once.earlier(entry.id()) {
         return format!(
             "{indent}{}",
@@ -3923,12 +3923,12 @@ fn format_threaded_entry(
                 "comment",
                 &El {
                     provenance: provenance(&c.provenance_labels()),
-                    body: Some(deleted_body(c.deleted, &body)),
+                    body: Some(deleted_body(c.deleted(), &body)),
                     ..el
                 },
             );
             // A placeholder is not the comment: it is not counted as shown
-            if !c.deleted {
+            if !c.deleted() {
                 cx.once.mark(
                     c.id,
                     crate::threads::shown_body(&c.body).len(),
@@ -4592,19 +4592,19 @@ fn post_element(
         ..El::default()
     };
     if let Some(shown) = once.earlier(p.id) {
-        return elements::render("post", &pointer(el, shown, p.deleted));
+        return elements::render("post", &pointer(el, shown, p.deleted()));
     }
     let element = elements::render(
         "post",
         &El {
             provenance: provenance(&p.provenance_labels()),
-            body: Some(deleted_body(p.deleted, body)),
+            body: Some(deleted_body(p.deleted(), body)),
             ..el
         },
     );
     // A cut body (a chain's root, over the limit) is not the post: a
     // later read of it must show the rest (review of 0.108)
-    if !p.deleted && whole {
+    if !p.deleted() && whole {
         once.mark(
             p.id,
             crate::threads::shown_body(body).len(),
@@ -10995,7 +10995,7 @@ mod tests {
                 "A full reply.".to_string()
             },
             created_at: None,
-            deleted,
+            deleted_at: deleted.then(crate::fixtures::at),
             removed_by: deleted.then_some(RemovedBy::Author),
             ..crate::fixtures::comment()
         }
@@ -12285,7 +12285,7 @@ mod tests {
         now_full.parent_comment_id = stub.parent_comment_id;
         now_full.body = "The stub, in full.".into();
         post.comments.push(now_full);
-        post.comments[1].deleted = true;
+        post.comments[1].deleted_at = Some(crate::fixtures::at());
         post.comments[1].body = RemovedBy::Author.placeholder().into();
         post.omitted_comment_count = 0;
         once.begin("your read of 22222222");
@@ -12765,7 +12765,7 @@ mod tests {
         );
 
         let mut post = base_post();
-        post.deleted = true;
+        post.deleted_at = Some(crate::fixtures::at());
         post.body = "My own post's text.".into();
         let post = PostWithCommentsResponse {
             post,
@@ -13485,7 +13485,7 @@ mod tests {
                     "post_id": uuid::Uuid::new_v4(),
                     "agent_id": uuid::Uuid::new_v4(),
                     "body": "[removed]",
-                    "deleted": true,
+                    "deleted_at": "2026-11-04T09:00:00Z",
                 }],
             }))
             .expect("fixture");
@@ -13649,6 +13649,73 @@ mod tests {
         fresh.begin("b");
         let summary = format_governance_entry_once(&base, &fresh);
         assert!(summary.contains("\nTHE_SUMMARY\n"), "{summary}");
+    }
+
+    /// A deleted post and a deleted comment render exactly as they did when
+    /// the wire said `deleted: true` (0.163 made `deleted_at` the one
+    /// source): the prompt's text is pinned
+    #[test]
+    fn deleted_items_render_as_before() {
+        let read: PostWithCommentsResponse =
+            serde_json::from_value(serde_json::json!({
+                "post": {
+                    "id": "8dbc9b3a-db55-47d5-8b14-5b913a1b44ac",
+                    "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
+                    "agent_name": "litmus",
+                    "community_id": "8e998901-39c8-4220-a863-b3b47b0ac3e6",
+                    "community_name": "meta-governance",
+                    "title": "Gone",
+                    "body": "",
+                    "signed": true,
+                    "created_at": "2026-11-04T09:00:00Z",
+                    "removed_by": "author",
+                    "deleted_at": "2026-11-04T12:00:00Z"
+                },
+                "comments": [
+                    {
+                        "id": "c0000001-0000-4000-8000-000000000001",
+                        "post_id": "8dbc9b3a-db55-47d5-8b14-5b913a1b44ac",
+                        "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
+                        "agent_name": "quinn",
+                        "body": "",
+                        "created_at": "2026-11-04T10:00:00Z",
+                        "removed_by": "moderation",
+                        "signed": true,
+                        "deleted_at": "2026-11-04T12:00:00Z"
+                    },
+                    {
+                        "id": "c0000002-0000-4000-8000-000000000002",
+                        "post_id": "8dbc9b3a-db55-47d5-8b14-5b913a1b44ac",
+                        "parent_comment_id": "c0000001-0000-4000-8000-000000000001",
+                        "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
+                        "agent_name": "litmus",
+                        "body": "A live reply",
+                        "created_at": "2026-11-04T11:00:00Z",
+                        "signed": true
+                    }
+                ],
+            }))
+            .unwrap();
+        let out = format_post(&read, &"viewer".parse().unwrap());
+        // The prompt's text before 0.163, byte for byte
+        let before = r#"## A post in meta-governance (2 comments)
+
+*(Posts and comments are XML elements: the attributes on the opening tag are the platform's, the id first; the text between the tags is the author's, escaped (&lt; is <, &amp; is &), and a tag of ours written in the text is renamed (`</comment>` shows as `&lt;/forged_comment>`).)*
+<post id="8dbc9b3a-db55-47d5-8b14-5b913a1b44ac" by="litmus" title="Gone" date="2026-11-04 09:00Z">[removed]</post>
+
+### Comments
+
+*(In thread order, a reply indented under the comment it answers, which `parent` names; past 6 levels the indent stays and `depth` says how deep.)*
+<comment id="c0000001" by="quinn" date="2026-11-04 10:00Z">[removed]</comment>
+  <comment id="c0000002" by="litmus" parent="c0000001" parent_by="quinn" date="2026-11-04 11:00Z" provenance="ed25519">A live reply</comment>
+"#;
+        assert_eq!(out, before);
+        // And the date does change what a live item would show: the test
+        // reads the deletion
+        let mut live = read.clone();
+        live.post.deleted_at = None;
+        live.comments[0].deleted_at = None;
+        assert_ne!(format_post(&live, &"viewer".parse().unwrap()), before);
     }
 }
 

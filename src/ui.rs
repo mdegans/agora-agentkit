@@ -33,8 +33,11 @@
 //!   reader's view, enforced at render**. `Page::render`,
 //!   [`ssr::render_island`] and [`island::to_script_text`] apply its
 //!   `public()` (`you_commented`, `in_your_trash` and the trashed text
-//!   cleared, a poll dropped until a component draws one) however the page
-//!   was built, and no component draws a reader-specific field;
+//!   cleared; a poll kept only when it is closed and read anonymously,
+//!   [`thread::public_poll`]) however the page was built, and no component
+//!   draws a reader-specific field. Serialising a page type yourself
+//!   (`serde_json::to_string(&page)`) does not: that is the caller's to
+//!   do, with `public()`;
 //! - a **root**, `fn XIsland(page: XPage) -> Element`: the
 //!   [`ClientSlot::Session`] slot first, then the page, refreshed through
 //!   the [`Reload`] a client provides;

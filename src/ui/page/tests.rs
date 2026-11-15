@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::island::Public as _;
 use crate::{
     responses::PostWithCommentsResponse,
     ui::{
@@ -151,7 +152,7 @@ fn big_thread(n: usize) -> PostWithCommentsResponse {
                 "parent_comment_id": (i % 3 != 0 && i > 0).then(|| id(i - 1)),
                 "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
                 "agent_name": if i == 4 { serde_json::Value::Null } else { "quinn".into() },
-                "deleted": i == 4,
+                "deleted_at": (i == 4).then_some("2026-11-04T10:00:00Z"),
                 "body": if i == 4 { "[removed by moderation]".to_string() } else { format!("Comment {i}: {}", "a reply with *some* words. ".repeat(10)) },
                 "created_at": format!("2026-11-04T10:{:02}:{:02}Z", (i / 60) % 60, i % 60),
                 "signed": i % 2 == 0,
@@ -196,7 +197,7 @@ fn every_page_reparses_as_drawn() {
         ..GetFeedInput::default()
     };
     let mut removed = big_thread(5);
-    removed.post.deleted = true;
+    removed.post.deleted_at = Some(crate::fixtures::at());
     removed.post.removed_by = Some(crate::enums::RemovedBy::Author);
     let mut locked = big_thread(5);
     locked.post.notice = Some(crate::responses::ThreadNotice {
@@ -275,7 +276,7 @@ fn reader_specific_fields_are_cleared_and_never_drawn() {
     // The author's own read of a trashed post: its text is replaced by the
     // placeholder everyone else reads
     let mut trashed = read.clone();
-    trashed.post.deleted = true;
+    trashed.post.deleted_at = Some(crate::fixtures::at());
     trashed.post.removed_by = Some(crate::enums::RemovedBy::Author);
     trashed.post.body = "the author's own trashed words".into();
     trashed.in_your_trash = Some(
@@ -336,7 +337,7 @@ fn a_readers_data_never_reaches_a_rendered_page() {
     let mut read = PostWithCommentsResponse {
         post: PostResponse {
             you_commented: true,
-            deleted: true,
+            deleted_at: Some(crate::fixtures::at()),
             removed_by: Some(crate::enums::RemovedBy::Author),
             body: "SECRET-TRASHED-WORDS".into(),
             ..fixtures::post()
@@ -410,4 +411,67 @@ fn a_readers_data_never_reaches_a_rendered_page() {
     })
     .unwrap();
     assert!(!text.contains("tie_break_seed"), "{text}");
+}
+
+/// Polls on a public page: a closed poll read anonymously is kept, results
+/// and all; an open one is dropped; a signed reader's view never is kept,
+/// closed or not
+#[test]
+fn only_a_closed_anonymous_poll_is_public() {
+    use crate::{enums::PollStatus, fixtures, polls::PollView};
+    let anonymous = |status| PollView {
+        status,
+        numbering: None,
+        you: None,
+        options: fixtures::poll()
+            .options
+            .into_iter()
+            .map(|mut o| {
+                o.number = None;
+                o
+            })
+            .collect(),
+        ..fixtures::poll()
+    };
+    let embedded = |poll: PollView| {
+        let page = Page::Thread(ThreadPage {
+            post: fixtures::post().id,
+            thread: ThreadLoad::Loaded(Box::new(PostWithCommentsResponse {
+                poll: Some(poll),
+                ..fixtures::post_with_comments()
+            })),
+        });
+        let rendered = page.clone().render().unwrap();
+        let text = rendered.script;
+        let ThreadLoad::Loaded(read) = (match page.public() {
+            Page::Thread(t) => t.thread,
+            _ => unreachable!(),
+        }) else {
+            unreachable!()
+        };
+        (read.poll, text)
+    };
+    let (kept, text) = embedded(anonymous(PollStatus::Closed));
+    assert_eq!(kept, Some(anonymous(PollStatus::Closed)));
+    assert!(text.contains("tie_break_seed"), "{text}");
+    for status in [PollStatus::Open, PollStatus::Scheduled, PollStatus::Unknown]
+    {
+        let (kept, text) = embedded(anonymous(status));
+        assert_eq!(kept, None, "{status:?}");
+        assert!(!text.contains("tie_break_seed"), "{text}");
+    }
+    // A signed reader's view: numbered, with `you`
+    for status in [PollStatus::Open, PollStatus::Closed] {
+        let signed = PollView {
+            status,
+            ..fixtures::poll()
+        };
+        let (kept, text) = embedded(signed);
+        assert_eq!(kept, None, "{status:?}");
+        assert!(!text.contains(crate::polls::NUMBERING_NOTE), "{text}");
+    }
+    // Any one sign of a reader's view is enough
+    let mut numbered = anonymous(PollStatus::Closed);
+    numbered.options[0].number = Some(crate::ids::PollOptionNumber::from(1));
+    assert_eq!(embedded(numbered).0, None);
 }

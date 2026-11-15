@@ -62,13 +62,6 @@ const DIFFERENCES: &[(&str, &str)] = &[
         r#"<pre><code class="language-rust">fn main() { println!("&lt;hi&gt;"); }
 </code></pre>"#,
     ),
-    // A body row's trailing empty cells (pulldown-cmark's padding, and any
-    // written empty ones at the end) aren't drawn, so padding can't
-    // multiply a page; ragged rows are valid HTML. The server draws them
-    (
-        "short rows and empty trailing cells",
-        "<table><thead><tr><th>a</th><th>b</th><th>c</th></tr></thead><tbody><tr><td>1</td></tr><tr><td>2</td></tr><tr><td></td><td>3</td></tr></tbody></table>",
-    ),
     (
         "markdown code block",
         r#"<pre><code class="language-markdown"># not a heading
@@ -87,6 +80,18 @@ fn the_corpus_draws_what_the_server_draws() {
     for case in &corpus {
         let ours = canonical(&render(&case.input), false);
         let theirs = canonical(&case.server, true);
+        // Past TABLE_CELLS, rows are drawn without their trailing empty
+        // cells, where the server draws them all
+        let theirs = if case.name.starts_with("above the table cap") {
+            let mut t = theirs;
+            while t.contains("<td></td></tr>") {
+                t = t.replace("<td></td></tr>", "</tr>");
+            }
+            assert_ne!(t, canonical(&case.server, true), "{}", case.name);
+            t
+        } else {
+            theirs
+        };
         match DIFFERENCES.iter().find(|(name, _)| *name == case.name) {
             Some((_, want)) => {
                 assert_ne!(ours, theirs, "{}: no longer differs", case.name);
@@ -817,7 +822,7 @@ fn padded_cells_are_bounded_by_the_source() {
         let source = wide(bytes);
         let nodes = parse(&source);
         assert!(
-            elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE,
+            elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE + TABLE_CELLS,
             "{} elements from {} bytes",
             elements(&nodes),
             source.len()
@@ -1071,7 +1076,9 @@ fn generated_documents_hydrate() {
         let source = generated(&mut rng);
         let nodes = parse(&source);
         assert!(check_tree(&nodes, None, 0) <= MAX_DEPTH, "{source:?}");
-        assert!(elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE);
+        assert!(
+            elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE + TABLE_CELLS
+        );
         let html = render(&source);
         if let Some(why) = content_model(&html) {
             panic!("{why}\n{source:?}\n{html}");
@@ -1143,8 +1150,8 @@ fn a_preview_is_the_text_cut_at_a_word() {
 }
 
 /// A short table under a wide header, written honestly, then more: every
-/// row is drawn, and so is everything after it. The padding pulldown-cmark
-/// adds to each short row isn't drawn and costs nothing
+/// row is drawn padded, as the server draws it, and so is everything after
+/// it. The padding costs nothing
 #[test]
 fn an_honest_ragged_table_keeps_every_row_and_what_follows() {
     let mut source =
@@ -1159,7 +1166,8 @@ fn an_honest_ragged_table_keeps_every_row_and_what_follows() {
     for i in 0..60 {
         assert!(html.contains(&format!(">row{i}<")), "row{i}: {html}");
     }
-    assert_eq!(html.matches("<td").count(), 60 + 2, "{html}");
+    // Padded as the server pads it: twelve cells a row
+    assert_eq!(html.matches("<td").count(), 12 * 60 + 2, "{html}");
     for want in [
         "<em",
         "<a href=\"https://a.example\"",
@@ -1185,7 +1193,7 @@ fn where_the_budget_binds_the_words_survive() {
     }
     source.push_str("\n| x | y |\n|---|---|\n| second | table |\n");
     let nodes = parse(&source);
-    assert!(elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE);
+    assert!(elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE + TABLE_CELLS);
     let html = render(&source);
     check_markup(&html);
     let text = text_of(&html);
@@ -1194,4 +1202,53 @@ fn where_the_budget_binds_the_words_survive() {
     }
     assert!(text.contains("second") && text.contains("table"), "{html}");
     assert!(html.len() < source.len() * 100, "{} bytes", html.len());
+}
+
+/// The element budget is a backstop no honest input meets; driven here
+/// with a small one: every word survives, the structure stays valid, and
+/// no more elements are drawn than allowed (padding aside)
+#[test]
+fn a_small_element_budget_keeps_every_word() {
+    let source = "# Title\n\nSome *emphasis* and [a link](/x).\n\n- one\n- two\n  - three\n\n| a | b |\n|---|---|\n| c | d |\n| e | f |\n\n> quoted **text**\n\nlast words";
+    for budget in [0, 1, 2, 3, 5, 8, 13] {
+        let mut b = Builder::new(source.len());
+        b.elements = budget;
+        for event in Parser::new_ext(source, options()) {
+            b.event(event);
+        }
+        let nodes = b.finish();
+        check_tree(&nodes, None, 0);
+        assert!(elements(&nodes) <= budget, "{budget}: {}", elements(&nodes));
+        let html = {
+            let mut dom = VirtualDom::new_with_props(Tree, TreeProps { nodes });
+            dom.rebuild_in_place();
+            dioxus_ssr::pre_render(&dom)
+        };
+        check_markup(&html);
+        let text = text_of(&html);
+        for word in [
+            "Title",
+            "emphasis",
+            "a link",
+            "one",
+            "two",
+            "three",
+            "a",
+            "b",
+            "c",
+            "d",
+            "e",
+            "f",
+            "quoted",
+            "text",
+            "last words",
+        ] {
+            assert!(text.contains(word), "{budget}: {word}: {html}");
+        }
+    }
+
+    #[component]
+    fn Tree(nodes: Vec<Node>) -> Element {
+        rsx! { {nodes.iter().map(node)} }
+    }
 }

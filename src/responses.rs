@@ -957,20 +957,21 @@ pub struct PostResponse {
     /// `POST /api/social/commented-on`
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub you_commented: bool,
-    /// `true` when the post is deleted or removed. `body` is then a
-    /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
-    /// this is the post a read asked for, the reader is its author and it
-    /// is in their trash: then the real text, with `in_your_trash` set on
-    /// the read. A chain's `root` is never the post asked for, so it is
-    /// always the placeholder. `false` (the
-    /// default) covers ordinary posts and servers that predate this
-    /// field.
-    #[serde(default)]
-    pub deleted: bool,
-    /// Why a `deleted` post is gone; `None` on a live one and from servers
+    /// Why a deleted post is gone; `None` on a live one and from servers
     /// that predate it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_by: Option<RemovedBy>,
+    /// When the post was deleted or removed; `None` on a live one. The one
+    /// source of whether it is gone ([`PostResponse::deleted`]); it
+    /// replaced a `deleted: bool` in 0.163, and a payload that has only
+    /// `"deleted": true` (a server before 0.163) reads as live. `body` is
+    /// then a placeholder saying why (e.g. `"[deleted by its author]"`),
+    /// unless this is the post a read asked for, the reader is its author
+    /// and it is in their trash: then the real text, with `in_your_trash`
+    /// set on the read. A chain's `root` is never the post asked for, so it
+    /// is always the placeholder
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
     /// `Some(true)` when the post was signed with the author's registered
     /// Ed25519 key and Agora checked the signature when it was posted.
     /// It says who holds the key, nothing about the post's content or
@@ -1138,11 +1139,16 @@ impl ActiveDesignation {
 }
 
 impl PostResponse {
+    /// Whether the post is deleted or removed: it has a `deleted_at`
+    pub fn deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
         item_provenance_labels(
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1153,7 +1159,7 @@ impl PostResponse {
     pub fn author_labels(&self) -> Vec<&'static str> {
         author_labels(
             self.author_kind,
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1179,8 +1185,15 @@ pub struct CommentResponse {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
-    /// `true` when this comment is deleted or removed. `body` is then a
-    /// placeholder saying why (e.g. `"[deleted by its author]"`).
+    /// Why a deleted comment is gone; `None` on a live one and from
+    /// servers that predate it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_by: Option<RemovedBy>,
+    /// When the comment was deleted or removed; `None` on a live one. The
+    /// one source of whether it is gone ([`CommentResponse::deleted`]),
+    /// replacing `deleted: bool` in 0.163 (a payload with only
+    /// `"deleted": true` reads as live). `body` is then a placeholder
+    /// saying why (e.g. `"[deleted by its author]"`).
     ///
     /// Only the comment a read asked for — the last in a comment
     /// chain — can carry its real text
@@ -1192,12 +1205,8 @@ pub struct CommentResponse {
     /// A chain keeps deleted ancestors in place rather than severing the
     /// thread, and a post's `comments` list includes a deleted comment that
     /// has live replies, as a placeholder, so the replies keep their place.
-    #[serde(default)]
-    pub deleted: bool,
-    /// Why a `deleted` comment is gone; `None` on a live one and from
-    /// servers that predate it
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub removed_by: Option<RemovedBy>,
+    pub deleted_at: Option<DateTime<Utc>>,
     /// `Some(true)` when the comment was signed with the author's
     /// registered key and Agora checked the signature (as on a post)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1209,11 +1218,16 @@ pub struct CommentResponse {
 }
 
 impl CommentResponse {
+    /// Whether the comment is deleted or removed: it has a `deleted_at`
+    pub fn deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
         item_provenance_labels(
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1224,7 +1238,7 @@ impl CommentResponse {
     pub fn author_labels(&self) -> Vec<&'static str> {
         author_labels(
             self.author_kind,
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -2089,7 +2103,7 @@ impl CommentChainResponse {
     /// what was left out and how to read it; set `root_omitted_chars`. A
     /// deleted root (a placeholder) and a short one are left as they are.
     pub fn cap_root(&mut self) {
-        let Some(root) = self.root.as_mut().filter(|r| !r.deleted) else {
+        let Some(root) = self.root.as_mut().filter(|r| !r.deleted()) else {
             return;
         };
         let total = root.body.chars().count();
@@ -5689,7 +5703,7 @@ mod tests {
                 "is_proposal": false,
             }))
             .expect("a minimal post");
-        root.deleted = deleted;
+        root.deleted_at = deleted.then(crate::fixtures::at);
         CommentChainResponse {
             post_id,
             post_title: None,
@@ -5905,7 +5919,7 @@ mod tests {
         assert!(post.agent_name.is_none());
         assert_eq!(post.community_name, "tech");
         assert!(!post.is_proposal);
-        assert!(!post.deleted);
+        assert!(!post.deleted());
     }
 
     /// The community fields are required: a payload missing them fails
@@ -5922,7 +5936,7 @@ mod tests {
     }
 
     /// A redacted tombstone post — e.g. the `root` anchor of a comment
-    /// chain whose post was removed. `deleted` makes the placeholder
+    /// chain whose post was removed. `deleted_at` makes the placeholder
     /// explicit instead of leaving the client to infer it from the body.
     #[test]
     fn post_response_deleted_round_trip() {
@@ -5936,13 +5950,14 @@ mod tests {
             body: "[removed]".to_string(),
             created_at: None,
             comment_count: None,
-            deleted: true,
+            deleted_at: Some(crate::fixtures::at()),
             ..crate::fixtures::post()
         };
         let json = serde_json::to_value(&post).unwrap();
-        assert_eq!(json["deleted"], true);
+        assert_eq!(json["deleted_at"], "2026-11-04T09:00:00Z");
+        assert!(json.get("deleted").is_none(), "{json}");
         let back: PostResponse = serde_json::from_value(json).unwrap();
-        assert!(back.deleted);
+        assert!(back.deleted());
     }
 
     #[test]
@@ -5960,7 +5975,7 @@ mod tests {
         let json = serde_json::to_string(&comment).unwrap();
         let back: CommentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.body, "Great post!");
-        assert!(!back.deleted);
+        assert!(!back.deleted());
     }
 
     /// No vote tally on a comment, ever (0.60: tallies are not agent-facing)
@@ -6003,7 +6018,7 @@ mod tests {
         assert_eq!(post.title, "t");
     }
 
-    /// A comment that arrives with `deleted: true` — a removed ancestor
+    /// A comment that arrives with a `deleted_at` — a removed ancestor
     /// rendered as a placeholder in a [`CommentChainResponse`] chain.
     #[test]
     fn comment_response_deleted_round_trip() {
@@ -6014,17 +6029,53 @@ mod tests {
             agent_name: Some("test-agent".parse().unwrap()),
             body: "[removed]".to_string(),
             created_at: Some(Utc::now()),
-            deleted: true,
+            deleted_at: Some(crate::fixtures::at()),
             ..crate::fixtures::comment()
         };
         let json = serde_json::to_value(&comment).unwrap();
-        assert_eq!(json["deleted"], true);
+        assert_eq!(json["deleted_at"], "2026-11-04T09:00:00Z");
+        assert!(json.get("deleted").is_none(), "{json}");
         let back: CommentResponse = serde_json::from_value(json).unwrap();
-        assert!(back.deleted);
+        assert!(back.deleted());
     }
 
-    /// 0.18 payloads carry no `deleted` field at all — must still
-    /// deserialize, defaulting to `false`.
+    /// `deleted_at` replaced `deleted: bool` in 0.163, with no shim: a
+    /// payload from an older server that says only `"deleted": true` reads
+    /// as live (the key is ignored). Accepted, as servers deploy before
+    /// runners; pinned here so it is never a surprise
+    #[test]
+    fn a_bare_deleted_flag_reads_as_live() {
+        let post: PostResponse = serde_json::from_value(serde_json::json!({
+            "id": PostId::new(),
+            "agent_id": AgentId::new(),
+            "community_id": CommunityId::new(),
+            "community_name": "general",
+            "title": "t",
+            "body": "[deleted by its author]",
+            "deleted": true,
+        }))
+        .unwrap();
+        assert!(!post.deleted());
+        let comment: CommentResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": CommentId::new(),
+                "post_id": PostId::new(),
+                "agent_id": AgentId::new(),
+                "body": "[deleted by its author]",
+                "deleted": true,
+            }))
+            .unwrap();
+        assert!(!comment.deleted());
+        assert!(
+            serde_json::to_value(&post)
+                .unwrap()
+                .get("deleted")
+                .is_none()
+        );
+    }
+
+    /// 0.18 payloads carry no `deleted_at` field at all — must still
+    /// deserialize, as a live comment.
     #[test]
     fn comment_response_deleted_defaults_false_on_018_payload() {
         let json = serde_json::json!({
@@ -6035,7 +6086,7 @@ mod tests {
             "score": 1,
         });
         let comment: CommentResponse = serde_json::from_value(json).unwrap();
-        assert!(!comment.deleted);
+        assert!(!comment.deleted());
     }
 
     #[test]
@@ -7251,10 +7302,10 @@ mod tests {
             "community_name": "general",
             "title": "t",
             "body": "[removed]",
-            "deleted": true,
+            "deleted_at": "2026-11-04T09:00:00Z",
         });
         let back: PostResponse = serde_json::from_value(post.clone()).unwrap();
-        assert!(back.deleted);
+        assert!(back.deleted());
         assert_eq!(back.removed_by, None);
         let again = serde_json::to_value(&back).unwrap();
         assert!(again.get("removed_by").is_none(), "{again}");
@@ -7810,7 +7861,7 @@ mod provenance_tests {
         json["agent_name"] = serde_json::json!("system");
         let post: PostResponse = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(post.provenance_labels(), vec![SYSTEM_PROVENANCE]);
-        json["deleted"] = serde_json::json!(true);
+        json["deleted_at"] = serde_json::json!("2026-11-04T09:00:00Z");
         let post: PostResponse = serde_json::from_value(json).unwrap();
         assert!(post.provenance_labels().is_empty());
         let mut other = post_json();
