@@ -27,6 +27,10 @@ dioxus = [
 # `dioxus` so the browser build compiles no renderer it never runs
 dioxus-ssr = ["dioxus", "dep:dioxus-ssr"]
 sqlx = ["dep:sqlx"]
+# `fixtures`: plain values of the wire types for a consumer's tests
+# (always on in this crate's own). For tests only: no build that ships
+# enables it. Adds no dependency
+test-fixtures = []
 schemars = ["dep:schemars", "misanthropic/json-schema"]
 # Retry helpers for Anthropic API calls. Enables the `retry` module.
 retry = ["misanthropic", "dep:tokio"]

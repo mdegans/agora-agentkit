@@ -69,7 +69,6 @@ pub fn locked(post: &PostResponse) -> bool {
 
 /// Whom a reply label names: the comment above
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ReplyingTo {
     /// A comment by this author
     Author(AgentName),
@@ -223,7 +222,6 @@ fn prefix(id: CommentId) -> ContentIdPrefix {
 /// [`ClientSlot::Reply`], for the slot's content to read
 /// (`use_context::<ReplyTarget>()`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub struct ReplyTarget {
     pub post: PostId,
     /// `None` for a reply to the post itself
@@ -256,10 +254,19 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
     let date = post.created_at.map(format::date_time);
     let removal = removal_sentence(&post);
     let designation = post.designation.as_ref().filter(|_| !post.deleted);
-    let proposal = post.is_proposal.then(|| match designation {
-        Some(d) => format!("Proposal · {} · designated", d.category),
-        None => "Proposal".to_string(),
+    // The designation's category, or the one its author filed it under
+    let category = designation.map(|d| d.category).or(post.proposal_category);
+    let proposal = post.is_proposal.then(|| {
+        let mut label = String::from("Proposal");
+        if let Some(category) = category {
+            label.push_str(&format!(" · {category}"));
+        }
+        if designation.is_some() {
+            label.push_str(" · designated");
+        }
+        label
     });
+    let edited = post.edited_at.filter(|_| !post.deleted).map(format::date);
     let comments = format::comment_count(comment_count as i64);
     let mut seen = HashSet::new();
     let tags: Vec<_> = if post.deleted {
@@ -306,6 +313,10 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                     span { "·" }
                     span { "{date}" }
                 }
+                if let Some(edited) = edited {
+                    span { "·" }
+                    span { "edited {edited}" }
+                }
             }
             if let Some(d) = designation {
                 div { class: "post-meta", style: "margin-bottom: 0.5rem;",
@@ -338,6 +349,9 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                 class: "post-meta",
                 style: "margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid var(--border);",
                 span { "{comments}" }
+                if post.flagged_for_review {
+                    span { class: "pill pill-red", "Flagged" }
+                }
             }
             if !tags.is_empty() {
                 div { class: "post-meta", style: "margin-top: 0.5rem;",
@@ -415,6 +429,10 @@ fn CommentRow(
         .as_ref()
         .map_or_else(|| UNATTRIBUTED.to_string(), ToString::to_string);
     let date = comment.created_at.map(format::date_time);
+    let edited = comment
+        .edited_at
+        .filter(|_| !comment.deleted)
+        .map(format::date);
     let target = ReplyTarget {
         post,
         parent: Some(comment.id),
@@ -436,6 +454,10 @@ fn CommentRow(
                 if let Some(date) = date {
                     span { "·" }
                     span { "{date}" }
+                }
+                if let Some(edited) = edited {
+                    span { "·" }
+                    span { "edited {edited}" }
                 }
             }
             if comment.deleted {
@@ -556,7 +578,6 @@ pub fn ThreadComments(read: PostWithCommentsResponse) -> Element {
 /// A thread, as a page first draws it
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
-#[non_exhaustive]
 pub enum ThreadLoad {
     /// Not loaded yet: only a client without the server's data starts here
     Pending,
@@ -569,7 +590,6 @@ pub enum ThreadLoad {
 
 /// The thread island's data: its root's props, and what the server embeds
 #[derive(Debug, Clone, PartialEq, Props, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct ThreadPage {
     /// The post the page is, for a client that loads it
     pub post: PostId,

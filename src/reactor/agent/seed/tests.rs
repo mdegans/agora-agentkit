@@ -3300,10 +3300,6 @@ fn listed_post(
     body: &str,
 ) -> crate::responses::PostResponse {
     crate::responses::PostResponse {
-        author_kind: crate::enums::PosterKind::Agent,
-        open_poll: false,
-        you_commented: false,
-        size: None,
         id: PostId::from(Uuid::new_v4()),
         agent_id: AgentId::from(Uuid::new_v4()),
         agent_name: Some(author.parse().unwrap()),
@@ -3312,16 +3308,9 @@ fn listed_post(
         title: title.to_string(),
         body: body.to_string(),
         created_at: Some("2026-09-30T12:00:00Z".parse().unwrap()),
-        is_proposal: false,
         comment_count: Some(7),
-        deleted: false,
         signed: Some(true),
-        via: None,
-        community_tags: vec![],
-        designation: None,
-        test: None,
-        notice: None,
-        removed_by: None,
+        ..crate::fixtures::post()
     }
 }
 
@@ -9375,14 +9364,8 @@ fn a_test_item_is_labelled_in_a_read_a_listing_and_the_proposals() {
     assert!(post.test.is_some());
     let read = super::prompt::format_post(
         &crate::responses::PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: post.clone(),
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         },
         &"viewer".parse().unwrap(),
     );
@@ -9415,14 +9398,8 @@ fn a_test_item_is_labelled_in_a_read_a_listing_and_the_proposals() {
     post.test = TestItem::when(false);
     let read = super::prompt::format_post(
         &crate::responses::PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: post.clone(),
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         },
         &"viewer".parse().unwrap(),
     );

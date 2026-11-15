@@ -35,7 +35,6 @@ use dioxus::prelude::*;
 /// with the components that place them, so the server and the client agree
 /// on what each slot is
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum ClientSlot {
     /// Who is signed in, and how to sign in or out
     Session,

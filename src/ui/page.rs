@@ -30,7 +30,6 @@ use super::{
 /// `{"page": "thread", "data": {…}}`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "page", content = "data")]
-#[non_exhaustive]
 // One per page, built once and moved into its root: boxing the larger
 // variant would buy nothing
 #[allow(clippy::large_enum_variant)]

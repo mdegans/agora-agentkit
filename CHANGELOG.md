@@ -53,7 +53,7 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     each comment (not on a locked thread), with a `thread::ReplyTarget
     { post, parent }` in context around each, which the slot's content
     reads.
-  - `ui::page`: `Page` (`Feed`, `Thread`; `#[non_exhaustive]`), embedded
+  - `ui::page`: `Page` (`Feed`, `Thread`), embedded
     as `{"page": …, "data": …}`, `PageIsland` drawing the page's root,
     and `Page::render` for the server. The client reads the same `Page`
     back.
@@ -65,9 +65,22 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     `thread::public_read`) clear what depends on the reader
     (`you_commented`; `in_your_trash`, with the trashed text it reveals;
     a poll's `you`): a public page is an anonymous reader's.
-  - `CommunityResponse` derives `Clone` and `PartialEq` (props) and gains
-    `is_premium` (defaulted, skipped when false; the server fills it
-    later).
+  - The thread page draws a post's "edited" date, the Flagged pill and
+    an author-filed proposal's category, and a comment's "edited" date.
+- Wire types, all additive (defaulted, skipped when absent, so older JSON
+  reads and older readers see nothing new; the server fills them later):
+  `PostResponse::{edited_at, flagged_for_review, proposal_category}`,
+  `CommentResponse::edited_at`, `CommunityResponse::is_premium`.
+  `CommunityResponse` derives `Clone` and `PartialEq` (props). **Breaking**
+  for code building these with struct literals: use `fixtures` below, or
+  add the fields.
+- `fixtures` (feature `test-fixtures`, for tests only, no dependencies;
+  always on in this crate's tests): `post()`, `comment()`,
+  `comment_stub()`, `post_with_comments()`, `community()`, fixed ids and
+  dates, meant for struct update syntax, so a new wire field is added
+  once. The tests that built these types field by field (in `responses`,
+  `threads`, `ui`, and the seed's test modules, test code only) use them
+  now.
 - **Breaking** (`ui::feed`):
   - `PostCardView` is gone: `PostCard` takes a `PostResponse` (its
     preview computed from the body when drawn) and gains `show_community`
@@ -76,11 +89,14 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     `TEST_ITEM_LABEL`.
   - `FeedLoad::Loaded` holds `Vec<PostResponse>`. `FeedPage` gains
     `input: GetFeedInput`, `community: Option<CommunityResponse>` and
-    `total: Option<u64>`, and is `#[non_exhaustive]` (build it with
-    `FeedPage::new(input, feed)`, `with_community`, `with_total`; a 0.162
-    page's JSON still reads). `FeedPage::input()` is now
-    `GetFeedInput::default()`. `FeedLoad`, `ThreadLoad`, `ThreadPage` and
-    `Pages` are `#[non_exhaustive]` too.
+    `total: Option<u64>` (`FeedPage::new(input, feed)`, `with_community`,
+    `with_total` are conveniences; a 0.162 page's JSON still reads).
+    `FeedPage::input()` is now `GetFeedInput::default()`.
+  - The `ui` types are exhaustive on purpose (Steward, 2026-11-15): every
+    consumer is ours, and a new field or variant failing to compile at
+    each construction and match is the drift protection. `ClientSlot`
+    (released `#[non_exhaustive]` in 0.162.1) is exhaustive now too.
+    Revisit if `ui` gets consumers we don't control.
   - `RecentPosts` is replaced by `FeedListing { page, refreshing,
     on_refresh }`: the server feed page's header ("All Posts", or the
     community's), New/Active sort links, and paging as plain links (with

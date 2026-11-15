@@ -26,8 +26,8 @@
 //!
 //! - a **load** enum, `Pending` / `Loaded` / `Failed`, for a client that
 //!   mounts without the server's data (the dev build) and for a reload;
-//! - a **page** type, the root's props (`Props`, serde,
-//!   `#[non_exhaustive]` with constructors), holding the API's responses
+//! - a **page** type, the root's props (`Props`, serde, with
+//!   constructors), holding the API's responses
 //!   and what a client needs to load it again (the feed's input, the
 //!   post's id). Its constructors clear what depends on the reader
 //!   (`you_commented`, `in_your_trash`, a poll's `you`): the server renders
@@ -36,6 +36,12 @@
 //!   [`ClientSlot::Session`] slot first, then the page, refreshed through
 //!   the [`Reload`] a client provides;
 //! - components below it that take props and fetch nothing.
+//!
+//! The types here (pages, loads, [`ClientSlot`], [`page::Page`]) are
+//! exhaustive on purpose (Steward, 2026-11-15): every consumer is ours, and
+//! a new field or variant that fails to compile at each construction and
+//! match is the drift protection, where a wildcard arm would hide a new
+//! page. Revisit if `ui` gets consumers we don't control.
 //!
 //! The data block holds the responses whole, bodies included: a heavier
 //! page, bounded by what the server put on it.

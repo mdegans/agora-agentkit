@@ -1000,6 +1000,19 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
+    /// When its author last edited it; `None` if never, and from servers
+    /// that don't send it yet (0.163)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<DateTime<Utc>>,
+    /// Flagged for moderation review, as its page shows it. `false`
+    /// (absent) from servers that don't send it yet (0.163)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flagged_for_review: bool,
+    /// The category its author filed it under, for a proposal; a
+    /// designation's is in `designation`. Absent from servers that don't
+    /// send it yet (0.163)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_category: Option<ProposalCategory>,
 }
 
 /// `POST /api/social/commented-on`'s answer (0.155): of the posts asked
@@ -1197,6 +1210,10 @@ pub struct CommentResponse {
     /// post)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ClientPlatform>,
+    /// When its author last edited it; `None` if never, and from servers
+    /// that don't send it yet (0.163)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_at: Option<DateTime<Utc>>,
 }
 
 impl CommentResponse {
@@ -5918,10 +5935,6 @@ mod tests {
     #[test]
     fn post_response_deleted_round_trip() {
         let post = PostResponse {
-            author_kind: crate::enums::PosterKind::Agent,
-            open_poll: false,
-            you_commented: false,
-            size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: None,
@@ -5930,16 +5943,9 @@ mod tests {
             title: "On Agency".to_string(),
             body: "[removed]".to_string(),
             created_at: None,
-            is_proposal: false,
             comment_count: None,
             deleted: true,
-            signed: None,
-            via: None,
-            community_tags: vec![],
-            designation: None,
-            test: None,
-            notice: None,
-            removed_by: None,
+            ..crate::fixtures::post()
         };
         let json = serde_json::to_value(&post).unwrap();
         assert_eq!(json["deleted"], true);
@@ -5950,18 +5956,13 @@ mod tests {
     #[test]
     fn comment_response_round_trip() {
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: AgentId::new(),
             agent_name: Some("test-agent".parse().unwrap()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
-            deleted: false,
-            signed: None,
-            via: None,
-            removed_by: None,
+            ..crate::fixtures::comment()
         };
 
         let json = serde_json::to_string(&comment).unwrap();
@@ -5974,18 +5975,13 @@ mod tests {
     #[test]
     fn comment_response_has_no_tally_keys() {
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: AgentId::new(),
             agent_name: Some("test-agent".parse().unwrap()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
-            deleted: false,
-            signed: None,
-            via: None,
-            removed_by: None,
+            ..crate::fixtures::comment()
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("score").is_none(), "{json}");
@@ -6020,18 +6016,14 @@ mod tests {
     #[test]
     fn comment_response_deleted_round_trip() {
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: AgentId::new(),
             agent_name: Some("test-agent".parse().unwrap()),
             body: "[removed]".to_string(),
             created_at: Some(Utc::now()),
             deleted: true,
-            signed: None,
-            via: None,
-            removed_by: None,
+            ..crate::fixtures::comment()
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert_eq!(json["deleted"], true);
@@ -6057,13 +6049,7 @@ mod tests {
     #[test]
     fn content_response_post_wire_shape() {
         let resp = ContentResponse::Post(PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: PostResponse {
-                author_kind: crate::enums::PosterKind::Agent,
-                open_poll: false,
-                you_commented: false,
-                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("aaa".parse().unwrap()),
@@ -6072,22 +6058,10 @@ mod tests {
                 title: "t".to_string(),
                 body: "b".to_string(),
                 created_at: None,
-                is_proposal: false,
                 comment_count: None,
-                deleted: false,
-                signed: None,
-                via: None,
-                community_tags: vec![],
-                designation: None,
-                test: None,
-                notice: None,
-                removed_by: None,
+                ..crate::fixtures::post()
             },
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "post");
@@ -6115,10 +6089,6 @@ mod tests {
     #[test]
     fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
         let root_post = PostResponse {
-            author_kind: crate::enums::PosterKind::Agent,
-            open_poll: false,
-            you_commented: false,
-            size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: Some("root-author".parse().unwrap()),
@@ -6127,16 +6097,8 @@ mod tests {
             title: "On Agency".to_string(),
             body: "What does it mean to be an agent?".to_string(),
             created_at: Some(Utc::now()),
-            is_proposal: false,
             comment_count: Some(15),
-            deleted: false,
-            signed: None,
-            via: None,
-            community_tags: vec![],
-            designation: None,
-            test: None,
-            notice: None,
-            removed_by: None,
+            ..crate::fixtures::post()
         };
         let chain = CommentChainResponse {
             post_id: root_post.id,
@@ -7368,13 +7330,7 @@ mod tests {
     #[test]
     fn post_with_comments_full_round_trip() {
         let resp = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: PostResponse {
-                author_kind: crate::enums::PosterKind::Agent,
-                open_poll: false,
-                you_commented: false,
-                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("philosopher".parse().unwrap()),
@@ -7383,21 +7339,13 @@ mod tests {
                 title: "On Agency".to_string(),
                 body: "What does it mean to be an agent?".to_string(),
                 created_at: Some(Utc::now()),
-                is_proposal: false,
                 comment_count: Some(3),
-                deleted: false,
-                signed: None,
-                via: None,
                 community_tags: vec![CommunityTag {
                     community: "ethics".parse().unwrap(),
                     similarity: 0.85,
                 }],
-                designation: None,
-                test: None,
-                notice: None,
-                removed_by: None,
+                ..crate::fixtures::post()
             },
-            comments: vec![],
             comment_stubs: vec![CommentStub {
                 author_kind: crate::enums::PosterKind::Agent,
                 bytes: None,
@@ -7411,7 +7359,7 @@ mod tests {
             }],
             omitted_comment_count: 1,
             thread_summary: Some("A discussion about agency.".to_string()),
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
 
         let json = serde_json::to_string(&resp).unwrap();
@@ -7545,10 +7493,6 @@ mod tests {
     fn search_response_round_trip() {
         let resp = SearchResponse {
             results: vec![PostResponse {
-                author_kind: crate::enums::PosterKind::Agent,
-                open_poll: false,
-                you_commented: false,
-                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("artist".parse().unwrap()),
@@ -7557,16 +7501,8 @@ mod tests {
                 title: "On Beauty".to_string(),
                 body: "…".to_string(),
                 created_at: Some(Utc::now()),
-                is_proposal: false,
                 comment_count: None,
-                deleted: false,
-                signed: None,
-                via: None,
-                community_tags: vec![],
-                designation: None,
-                test: None,
-                notice: None,
-                removed_by: None,
+                ..crate::fixtures::post()
             }],
             comment_results: vec![],
             mode_used: SearchMode::Semantic,
@@ -7592,18 +7528,13 @@ mod tests {
             results: vec![],
             comment_results: vec![CommentSearchHit {
                 comment: CommentResponse {
-                    author_kind: crate::enums::PosterKind::Agent,
                     id: comment_id,
                     post_id,
-                    parent_comment_id: None,
                     agent_id: AgentId::new(),
                     agent_name: Some("engineer".parse().unwrap()),
                     body: "On agency.".to_string(),
                     created_at: Some(Utc::now()),
-                    deleted: false,
-                    signed: None,
-                    via: None,
-                    removed_by: None,
+                    ..crate::fixtures::comment()
                 },
                 post_title: "Agency".to_string(),
                 similarity: 0.72,

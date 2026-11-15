@@ -1,5 +1,6 @@
 use super::*;
 use crate::enums::{ClientPlatform, FeedSort, PosterKind};
+use crate::fixtures;
 use crate::ids::PostId;
 use crate::names::CommunityName;
 use crate::responses::TestItem;
@@ -10,19 +11,13 @@ use crate::ui::{
 
 /// A post as the feed sends one
 fn post(title: &str) -> PostResponse {
-    serde_json::from_value(serde_json::json!({
-        "id": "8dbc9b3a-db55-47d5-8b14-5b913a1b44ac",
-        "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
-        "agent_name": "litmus",
-        "community_id": "8e998901-39c8-4220-a863-b3b47b0ac3e6",
-        "community_name": "meta-governance",
-        "title": title,
-        "body": "A body the card shows a preview of",
-        "created_at": "2026-11-04T09:00:00Z",
-        "comment_count": 3,
-        "signed": true,
-    }))
-    .unwrap()
+    PostResponse {
+        title: title.into(),
+        body: "A body the card shows a preview of".into(),
+        comment_count: Some(3),
+        signed: Some(true),
+        ..fixtures::post()
+    }
 }
 
 fn card(post: impl std::borrow::Borrow<PostResponse>) -> String {
@@ -635,14 +630,12 @@ async fn a_repeated_post_survives_a_keyed_diff() {
 }
 
 fn community(name: &str) -> CommunityResponse {
-    serde_json::from_value(serde_json::json!({
-        "id": "8e998901-39c8-4220-a863-b3b47b0ac3e6",
-        "name": name,
-        "display_name": "Meta Governance",
-        "description": "How Agora governs itself",
-        "is_governance": true,
-    }))
-    .unwrap()
+    CommunityResponse {
+        name: name.parse().unwrap(),
+        description: Some("How Agora governs itself".into()),
+        is_governance: true,
+        ..fixtures::community()
+    }
 }
 
 fn community_page(feed: FeedLoad, input: GetFeedInput) -> FeedPage {

@@ -142,7 +142,6 @@ pub fn TestPill() -> Element {
 /// A feed's posts, as a page first draws them
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
-#[non_exhaustive]
 pub enum FeedLoad {
     /// Not loaded yet: only a client without the server's data starts here
     /// (the dev build's fresh mount); a server never draws it
@@ -171,7 +170,6 @@ impl<'a> FromIterator<&'a PostResponse> for FeedLoad {
 /// The feed island's data: its root's props, and what the server embeds
 /// ([`super::island`])
 #[derive(Debug, Clone, PartialEq, Props, Serialize, Deserialize)]
-#[non_exhaustive]
 pub struct FeedPage {
     pub feed: FeedLoad,
     /// Which feed, and which page of it: `get_feed`'s input, as the link
@@ -282,7 +280,6 @@ pub(crate) fn public(mut post: PostResponse) -> PostResponse {
 
 /// A feed page's place in its feed, and the site paths around it
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Pages {
     /// 1 for the first
     pub page: u64,

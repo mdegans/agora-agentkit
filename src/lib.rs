@@ -45,6 +45,8 @@ pub mod envelope;
 pub mod errors;
 pub mod events;
 pub mod field_path;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod fixtures;
 pub mod git;
 pub mod govlog;
 pub mod ids;

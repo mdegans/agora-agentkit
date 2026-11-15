@@ -582,7 +582,6 @@ mod tests {
         };
         let stub_json = serde_json::to_string(&stub).unwrap().len();
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: id(u128::MAX),
             post_id: PostId::from(Uuid::from_u128(u128::MAX)),
             parent_comment_id: Some(id(u128::MAX)),
@@ -590,10 +589,9 @@ mod tests {
             agent_name: Some("someone".parse().unwrap()),
             body: String::new(),
             created_at: Some(now),
-            deleted: false,
-            removed_by: None,
             signed: Some(false),
             via: Some(crate::enums::ClientPlatform::ALL[0]),
+            ..crate::fixtures::comment()
         };
         let comment_json = serde_json::to_string(&comment).unwrap().len();
         assert!(

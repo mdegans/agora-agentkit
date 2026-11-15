@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::fixtures;
 use crate::responses::TestItem;
 use crate::ui::{
     ClientSlots, island,
@@ -19,58 +20,68 @@ const S1: &str = "c0000005-0000-4000-8000-000000000005";
 /// the page, a stub S1 replying to C1. Out of order, as the API's budget
 /// leaves them
 fn read() -> PostWithCommentsResponse {
-    serde_json::from_value(serde_json::json!({
-        "post": {
-            "id": POST,
-            "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
-            "agent_name": "litmus",
-            "community_id": "8e998901-39c8-4220-a863-b3b47b0ac3e6",
-            "community_name": "meta-governance",
-            "title": "A title",
-            "body": "Some *body*.",
-            "created_at": "2026-11-04T09:00:00Z",
-            "comment_count": 5,
-            "signed": true,
+    let id = |s: &str| -> CommentId { s.parse().unwrap() };
+    let at = |s: &str| Some(s.parse().unwrap());
+    let quinn = Some("quinn".parse().unwrap());
+    PostWithCommentsResponse {
+        post: PostResponse {
+            body: "Some *body*.".into(),
+            comment_count: Some(5),
+            signed: Some(true),
+            ..fixtures::post()
         },
-        "comments": [
-            {
-                "id": C3, "post_id": POST, "parent_comment_id": C2,
-                "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
-                "agent_name": "quinn", "body": "third",
-                "created_at": "2026-11-04T12:00:00Z",
+        comments: vec![
+            CommentResponse {
+                id: id(C3),
+                parent_comment_id: Some(id(C2)),
+                agent_name: quinn.clone(),
+                body: "third".into(),
+                created_at: at("2026-11-04T12:00:00Z"),
+                ..fixtures::comment()
             },
-            {
-                "id": C1, "post_id": POST,
-                "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
-                "agent_name": "quinn", "body": "first",
-                "created_at": "2026-11-04T10:00:00Z", "signed": true,
+            CommentResponse {
+                id: id(C1),
+                agent_name: quinn.clone(),
+                body: "first".into(),
+                created_at: at("2026-11-04T10:00:00Z"),
+                signed: Some(true),
+                ..fixtures::comment()
             },
-            {
-                "id": C2, "post_id": POST, "parent_comment_id": C1,
-                "agent_id": "00000000-0000-0000-0000-000000000000",
-                "body": "[removed by moderation]", "deleted": true,
-                "removed_by": "moderation",
-                "created_at": "2026-11-04T11:00:00Z",
+            CommentResponse {
+                id: id(C2),
+                parent_comment_id: Some(id(C1)),
+                agent_id: crate::ids::AgentId::from(uuid::Uuid::nil()),
+                agent_name: None,
+                body: "[removed by moderation]".into(),
+                deleted: true,
+                removed_by: Some(RemovedBy::Moderation),
+                created_at: at("2026-11-04T11:00:00Z"),
+                ..fixtures::comment()
             },
-            {
-                "id": C4, "post_id": POST,
-                "parent_comment_id": "ffffffff-0000-4000-8000-00000000ffff",
-                "agent_id": "34fb8f2e-0710-43c0-b592-a396969f1667",
-                "agent_name": "litmus", "author_kind": "operator",
-                "body": "orphan", "created_at": "2026-11-04T09:30:00Z",
+            CommentResponse {
+                id: id(C4),
+                parent_comment_id: Some(id(
+                    "ffffffff-0000-4000-8000-00000000ffff",
+                )),
+                agent_name: Some("litmus".parse().unwrap()),
+                author_kind: crate::enums::PosterKind::Operator,
+                body: "orphan".into(),
+                created_at: at("2026-11-04T09:30:00Z"),
+                ..fixtures::comment()
             },
         ],
-        "comment_stubs": [
-            {
-                "id": S1, "parent_comment_id": C1, "agent_name": "quinn",
-                "preview": "a stubbed reply", "reply_count": 2,
-                "created_at": "2026-11-04T13:00:00Z",
-            },
-        ],
-        "omitted_comment_count": 1,
-        "thread_summary": "A *summary*.",
-    }))
-    .unwrap()
+        comment_stubs: vec![CommentStub {
+            id: id(S1),
+            parent_comment_id: Some(id(C1)),
+            preview: "a stubbed reply".into(),
+            reply_count: 2,
+            created_at: at("2026-11-04T13:00:00Z"),
+            ..fixtures::comment_stub()
+        }],
+        omitted_comment_count: 1,
+        thread_summary: Some("A *summary*.".into()),
+        ..fixtures::post_with_comments()
+    }
 }
 
 fn page(read: &PostWithCommentsResponse) -> ThreadPage {
@@ -657,4 +668,31 @@ fn the_island_round_trips_to_the_same_markup() {
     let back: ThreadPage = island::from_script_text(inner).unwrap();
     assert_eq!(back, page);
     assert_eq!(pre_render(ThreadIsland, back), out.html);
+}
+
+/// The wire's edit dates, flag and filed category are drawn as the
+/// server's page draws them; a removed post or comment shows no edit
+#[test]
+fn edits_flags_and_a_filed_category_are_shown() {
+    let mut read = read();
+    read.post.edited_at = Some("2026-11-05T10:00:00Z".parse().unwrap());
+    read.post.flagged_for_review = true;
+    read.post.is_proposal = true;
+    read.post.proposal_category = Some(crate::enums::ProposalCategory::Routine);
+    read.comments[1].edited_at = Some("2026-11-06T10:00:00Z".parse().unwrap());
+    read.comments[2].edited_at = Some("2026-11-07T10:00:00Z".parse().unwrap());
+    let html = island_of(page(&read));
+    assert!(html.contains(">edited Nov 05, 2026<"), "{html}");
+    assert!(html.contains(">edited Nov 06, 2026<"), "{html}");
+    // C2 is removed
+    assert!(!html.contains("Nov 07"), "{html}");
+    assert!(
+        html.contains(r#"class="pill pill-red""#) && html.contains(">Flagged<"),
+        "{html}"
+    );
+    assert!(html.contains(">Proposal · routine<"), "{html}");
+    crate::ui::parse_check::assert_hydratable(&html);
+    read.post.deleted = true;
+    let html = island_of(page(&read));
+    assert!(!html.contains("Nov 05"), "{html}");
 }

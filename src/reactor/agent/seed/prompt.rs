@@ -10985,10 +10985,8 @@ mod tests {
 
     fn full_comment(agent_name: &str, deleted: bool) -> CommentResponse {
         CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: uuid::Uuid::new_v4().into(),
             agent_name: Some(agent_name.parse().unwrap()),
             body: if deleted {
@@ -10998,9 +10996,8 @@ mod tests {
             },
             created_at: None,
             deleted,
-            signed: None,
-            via: None,
             removed_by: deleted.then_some(RemovedBy::Author),
+            ..crate::fixtures::comment()
         }
     }
 
@@ -11147,14 +11144,9 @@ mod tests {
         let mut removed = full_comment("lawyer", true);
         removed.signed = Some(true);
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post,
             comments: vec![comment, removed],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(
@@ -11188,14 +11180,8 @@ mod tests {
             at: chrono::Utc::now(),
         });
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post,
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         let notice = out
@@ -11225,14 +11211,8 @@ mod tests {
             at: chrono::Utc::now(),
         });
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post,
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("new comments on it are refused"), "{out}");
@@ -11244,14 +11224,8 @@ mod tests {
     #[test]
     fn format_post_without_provenance_renders_no_badge() {
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(
@@ -11282,14 +11256,10 @@ mod tests {
         stubbed.created_at =
             Some(Utc.with_ymd_and_hms(2026, 4, 3, 9, 0, 0).unwrap());
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
             comments: vec![top, detached.clone(), under.clone()],
             comment_stubs: vec![stubbed.clone()],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         let short = |id: CommentId| {
@@ -11380,14 +11350,10 @@ mod tests {
         st.reply_count = 2;
         st.bytes = Some(5_880);
         let thread = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
-            comments: vec![],
             comment_stubs: vec![st],
             omitted_comment_count: 1,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&thread, &"viewer".parse().unwrap());
         assert!(out.contains("(2 replies; ~2k tok)"), "{out}");
@@ -11400,14 +11366,9 @@ mod tests {
         let mut long = full_comment("engineer", false);
         long.body = format!("{} the end.", "word ".repeat(400));
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
             comments: vec![long.clone()],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains(&long.body), "{out}");
@@ -11416,14 +11377,11 @@ mod tests {
     #[test]
     fn format_post_counts_stubs_toward_the_comment_total() {
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
             comments: vec![full_comment("engineer", false)],
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("(2 comments)"), "{out}");
@@ -11432,14 +11390,10 @@ mod tests {
     #[test]
     fn format_post_renders_a_stub_line_and_omission_note() {
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
-            comments: vec![],
             comment_stubs: vec![stub("lawyer")],
             omitted_comment_count: 1,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains('⋯'), "stub marker: {out}");
@@ -11473,14 +11427,10 @@ mod tests {
         collided.short_id =
             Some(crate::ids::ContentId::from(collided.id).into());
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
-            comments: vec![],
             comment_stubs: vec![short.clone(), collided.clone()],
             omitted_comment_count: 2,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         let line = out
@@ -11543,14 +11493,11 @@ mod tests {
             })
             .collect();
         PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: p,
             comments: vec![first, second],
             comment_stubs,
             omitted_comment_count: stubs as u64,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         }
     }
 
@@ -11688,14 +11635,11 @@ mod tests {
         let mut big = stub("critic");
         big.bytes = Some(6_000);
         let mut read = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: p,
             comments: vec![parent],
             comment_stubs: vec![small, big],
             omitted_comment_count: 2,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&read, &"viewer".parse().unwrap());
         assert!(out.contains("(2 replies; ~100 tok)"), "{out}");
@@ -11721,14 +11665,9 @@ mod tests {
     #[test]
     fn format_post_omits_the_disclosure_line_when_nothing_was_stubbed() {
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: base_post(),
             comments: vec![full_comment("engineer", false)],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(!out.contains("shown as a stub"), "{out}");
@@ -11744,14 +11683,9 @@ mod tests {
         let mut p = base_post();
         p.comment_count = Some(482);
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: p,
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
             thread_summary: Some("Agents argued over the agenda.".into()),
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(!out.contains("(0 comments)"), "{out}");
@@ -11769,14 +11703,8 @@ mod tests {
         let mut p = base_post();
         p.comment_count = None;
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: p,
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(!out.contains("comments)"), "{out}");
@@ -11788,14 +11716,8 @@ mod tests {
         let mut p = base_post();
         p.comment_count = Some(0);
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: p,
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         assert!(out.contains("(0 comments)"), "{out}");
@@ -12442,14 +12364,9 @@ mod tests {
         });
         let size = p.size.unwrap();
         let read = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: p,
             comments,
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         // The first read, and the second, where the notes are not shown
         // again and the post and comments are pointers: the estimate tracks
@@ -12851,17 +12768,12 @@ mod tests {
         post.deleted = true;
         post.body = "My own post's text.".into();
         let post = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post,
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
             in_your_trash: Some(trash_entry(
                 ContentKind::Post,
                 DeletedBy::Author,
             )),
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&post, &"viewer".parse().unwrap());
         let banner = out.find("**In your trash** (deleted 2026-03-12 by you)");
@@ -13150,14 +13062,9 @@ mod tests {
         let mut c = full_comment("engineer", false);
         c.body = messy.into();
         let read = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: post.clone(),
             comments: vec![c.clone()],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
         let out = format_post(&read, &"viewer".parse().unwrap());
         assert!(
