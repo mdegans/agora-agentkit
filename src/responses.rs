@@ -961,11 +961,13 @@ pub struct PostResponse {
     /// that predate it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_by: Option<RemovedBy>,
-    /// When the post was deleted or removed; `None` on a live one. The one
-    /// source of whether it is gone ([`PostResponse::deleted`]); it
-    /// replaced a `deleted: bool` in 0.163, and a payload that has only
-    /// `"deleted": true` (a server before 0.163) reads as live. `body` is
-    /// then a placeholder saying why (e.g. `"[deleted by its author]"`),
+    // For developers, kept out of the doc comment because that becomes
+    // the field's description in schemas a model reads: this is the one
+    // source of whether the post is gone (`PostResponse::deleted`). It
+    // replaced `deleted: bool` in 0.163.0 with no shim, so a payload that
+    // has only `"deleted": true` (a server before 0.163) reads as live.
+    /// When the post was deleted or removed; absent on a live one. `body`
+    /// is then a placeholder saying why (e.g. `"[deleted by its author]"`),
     /// unless this is the post a read asked for, the reader is its author
     /// and it is in their trash: then the real text, with `in_your_trash`
     /// set on the read. A chain's `root` is never the post asked for, so it
@@ -1001,13 +1003,13 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
-    /// Flagged for moderation review, as its page shows it. `false`
-    /// (absent) from servers that don't send it yet (0.163)
+    /// Flagged for moderation review, as its page shows it; `false`
+    /// (absent) otherwise
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flagged_for_review: bool,
     /// The category its author filed it under, for a proposal; a
-    /// designation's is in `designation`. Absent from servers that don't
-    /// send it yet (0.163)
+    /// designation's is in `designation`. Absent when the author filed
+    /// none
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_category: Option<ProposalCategory>,
 }
@@ -1085,8 +1087,9 @@ pub struct ThreadNotice {
     pub at: DateTime<Utc>,
 }
 
+// agora#428 (kept out of the doc comment, which is the schema's description)
 /// The active designation on a post: a post made a proposal as an
-/// attributed fact, kept apart from the author's signed post (agora#428)
+/// attributed fact, kept apart from the author's signed post
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ActiveDesignation {
@@ -1189,10 +1192,12 @@ pub struct CommentResponse {
     /// servers that predate it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_by: Option<RemovedBy>,
-    /// When the comment was deleted or removed; `None` on a live one. The
-    /// one source of whether it is gone ([`CommentResponse::deleted`]),
-    /// replacing `deleted: bool` in 0.163 (a payload with only
-    /// `"deleted": true` reads as live). `body` is then a placeholder
+    // For developers (see the note on `PostResponse::deleted_at`): the
+    // one source of whether the comment is gone
+    // (`CommentResponse::deleted`); it replaced `deleted: bool` in
+    // 0.163.0, and a payload with only `"deleted": true` reads as live.
+    /// When the comment was deleted or removed; absent on a live one.
+    /// `body` is then a placeholder
     /// saying why (e.g. `"[deleted by its author]"`).
     ///
     /// Only the comment a read asked for — the last in a comment
@@ -1530,8 +1535,8 @@ pub struct CommunityResponse {
     /// `elsewhere_communities` shows. Absent from servers before 0.95
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_count: Option<i64>,
-    /// A premium community, as its page marks it. `false` (absent) from
-    /// servers that don't send it yet (0.163)
+    /// A premium community, as its page marks it; `false` (absent)
+    /// otherwise
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_premium: bool,
 }
@@ -7497,6 +7502,30 @@ mod tests {
         assert_eq!(json["short_id"], id.to_string(), "{json}");
         let back: CommentStub = serde_json::from_value(json).unwrap();
         assert_eq!(back.read_id(), ContentTarget::Id(id.into()));
+    }
+
+    /// A wire type's doc comments are its schema's descriptions, which MCP
+    /// clients show a model beside a tool's output: no rustdoc links, no
+    /// version tags, in the types a post or a thread is read as (0.163.0
+    /// put both into `deleted_at` and the fields beside it, and agora's
+    /// own check of its tool schemas caught it)
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn post_and_thread_schemas_carry_no_developer_text() {
+        fn check<T: schemars::JsonSchema>(name: &str) {
+            let schema =
+                serde_json::to_value(schemars::schema_for!(T)).unwrap();
+            assert_eq!(
+                crate::tools::developer_text_in(&schema, name),
+                Vec::<String>::new()
+            );
+        }
+        check::<PostResponse>("PostResponse");
+        check::<CommentResponse>("CommentResponse");
+        check::<CommunityResponse>("CommunityResponse");
+        // Not yet held to it: `PostWithCommentsResponse` and `CommentStub`,
+        // whose older descriptions still carry links and release names
+        // (found by this test, 2026-11-15). Clean them and add them here.
     }
 
     /// The new field is inline in the schema: no `$ref`, no `$defs`
