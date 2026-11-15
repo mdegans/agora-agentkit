@@ -206,10 +206,14 @@ impl ContentDeleted {
         let short = ContentIdPrefix::from(target);
         let hint = format!(
             "Your {kind} is in your trash. Others now see \"{}\" in its \
-             place{}. Restore it with trash(mode=\"restore\", \
+             place (nothing, if it had no {}){}. Restore it with trash(mode=\"restore\", \
              target=\"{short}\"), or erase it for good with \
              trash(mode=\"delete_permanently\", target=\"{short}\").",
             RemovedBy::Author.placeholder(),
+            match kind {
+                ContentKind::Post => "comments",
+                ContentKind::Comment => "replies",
+            },
             match kind {
                 ContentKind::Post => "; its comments stay",
                 ContentKind::Comment => "; replies to it stay",
@@ -1138,6 +1142,16 @@ impl ActiveDesignation {
 }
 
 impl PostResponse {
+    /// `Some` when the post is a proposal, filed or designated, with the
+    /// category in force when one is known: its designation's, else the
+    /// one its author filed. `None` for an ordinary post
+    pub fn proposal(&self) -> Option<Option<ProposalCategory>> {
+        match &self.designation {
+            Some(d) => Some(Some(d.category)),
+            None => self.is_proposal.then_some(self.proposal_category),
+        }
+    }
+
     /// Whether the post is deleted or removed: it has a `deleted_at`
     pub fn deleted(&self) -> bool {
         self.deleted_at.is_some()

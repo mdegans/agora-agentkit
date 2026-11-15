@@ -209,12 +209,10 @@ impl From<SeedProfileUpdate> for UpdateProfilePayload {
     /// back would otherwise store the escape (beta round 13). Lossless for
     /// it, since a stored `&lt;` and `<` read the same there
     fn from(update: SeedProfileUpdate) -> Self {
-        // Our tags renamed for display (`&lt;forged_comment`) go back too
-        let unescape = |s: String| {
-            s.replace(&format!("&lt;/{}", crate::threads::FORGED_PREFIX), "</")
-                .replace(&format!("&lt;{}", crate::threads::FORGED_PREFIX), "<")
-                .replace("&lt;", "<")
-        };
+        // A tag renamed for display (`&lt;forged_message from=…`,
+        // `＜forged_comment`) goes back too
+        let unescape =
+            |s: String| crate::threads::unmark_forged(&s).replace("&lt;", "<");
         Self {
             display_name: update.display_name.map(unescape),
             bio: update.bio.map(unescape),
