@@ -317,6 +317,9 @@ fn decision_9_worked_example() {
                 deliver_at: tomorrow,
                 immediate: false,
                 delivered: released,
+                covered: false,
+                covered_told: None,
+                level: TapLevel::None,
             })
             .collect()
     };
@@ -636,6 +639,9 @@ fn window_is_on_deliver_at() {
             deliver_at: at,
             immediate: false,
             delivered: false,
+            covered: false,
+            covered_told: None,
+            level: TapLevel::None,
         })
         .collect();
     let one = agents(100, 1);
@@ -647,6 +653,897 @@ fn window_is_on_deliver_at() {
         &window,
     );
     assert_eq!(r.reach, 1);
+}
+
+/// Covered messages to `to` at `at`, delivered
+fn covered_at(to: &BTreeSet<AgentId>, at: DateTime<Utc>) -> Vec<WindowMessage> {
+    to.iter()
+        .map(|a| WindowMessage {
+            recipient: *a,
+            deliver_at: at,
+            immediate: true,
+            delivered: true,
+            covered: true,
+            covered_told: None,
+            level: TapLevel::None,
+        })
+        .collect()
+}
+
+/// Covered sends are counted together over a closed 24 h span containing the
+/// send: not the window's ±24 h, and only covered messages
+#[test]
+fn covered_reach_is_over_a_24_hour_span() {
+    let d = t0() + Duration::days(3);
+    let one = agents(100, 1);
+    let day = Duration::hours(24);
+    let sec = Duration::seconds(1);
+    // Both ends included, either side
+    assert_eq!(
+        covered_reach(&one, d, &covered_at(&agents(0, 5), d - day)),
+        6
+    );
+    assert_eq!(
+        covered_reach(&one, d, &covered_at(&agents(0, 5), d + day)),
+        6
+    );
+    assert_eq!(
+        covered_reach(&one, d, &covered_at(&agents(0, 5), d - day - sec)),
+        1
+    );
+    // 3 agents 12 h before and 3 others 13 h after are 25 h apart: no 24 h
+    // span holds both, though the ±24 h window would
+    let mut split = covered_at(&agents(0, 3), d - Duration::hours(12));
+    split.extend(covered_at(&agents(10, 3), d + Duration::hours(13)));
+    assert_eq!(covered_reach(&one, d, &split), 4);
+    // At 12 h after, one span holds all three parts
+    let mut close = covered_at(&agents(0, 3), d - Duration::hours(12));
+    close.extend(covered_at(&agents(10, 3), d + Duration::hours(12)));
+    assert_eq!(covered_reach(&one, d, &close), 7);
+    // The busiest span may start before the send and end after it
+    let mut around = covered_at(&agents(0, 2), d - Duration::hours(30));
+    around.extend(covered_at(&agents(10, 2), d - Duration::hours(6)));
+    around.extend(covered_at(&agents(20, 2), d + Duration::hours(6)));
+    around.extend(covered_at(&agents(30, 2), d + Duration::hours(30)));
+    assert_eq!(covered_reach(&one, d, &around), 5);
+    // Messages whose send wasn't covered don't count; repeats count once
+    let mut mixed = covered_at(&agents(0, 5), d);
+    mixed.iter_mut().for_each(|m| m.covered = false);
+    mixed.extend(covered_at(&agents(100, 1), d));
+    mixed.extend(covered_at(&agents(100, 1), d - Duration::hours(1)));
+    mixed.extend(covered_at(&agents(7, 1), d - Duration::hours(1)));
+    mixed.extend(covered_at(&agents(7, 1), d - Duration::hours(2)));
+    assert_eq!(covered_reach(&one, d, &mixed), 2);
+}
+
+/// The baseline is the most told within 24 h either side, retracted sends
+/// included (they are in the window); nothing told, 0
+#[test]
+fn covered_baseline_is_the_most_told_nearby() {
+    let d = t0() + Duration::days(3);
+    let day = Duration::hours(24);
+    let told = |at, n| {
+        let mut m = covered_at(&agents(0, 1), at);
+        m[0].covered_told = n;
+        m
+    };
+    assert_eq!(covered_baseline(d, &covered_at(&agents(0, 5), d)), 0);
+    let mut w = told(d - day, Some(6));
+    w.extend(told(d + Duration::hours(3), Some(12)));
+    w.extend(told(d + day + Duration::seconds(1), Some(400)));
+    w.extend(told(d, None));
+    assert_eq!(covered_baseline(d, &w), 12);
+}
+
+/// plan_send: a covered send past 5 agents in the span is announced with its
+/// count, and only announced: no tap is asked and nothing is refused. Once
+/// told, it is told again only past twice the count
+#[test]
+fn a_covered_send_past_5_in_a_day_is_announced_not_refused() {
+    let five = agents(0, 5);
+    let mut window = covered_at(&five, t0() - Duration::hours(2));
+    // A delivered, uncovered send that covers the next 5
+    let next = agents(10, 5);
+    window.extend(next.iter().map(|a| WindowMessage {
+        recipient: *a,
+        deliver_at: t0() - Duration::hours(1),
+        immediate: true,
+        delivered: true,
+        covered: false,
+        covered_told: None,
+        level: TapLevel::None,
+    }));
+    let plan =
+        plan_send(&request(&next, When::Default, TapLevel::None, &window))
+            .unwrap();
+    assert_eq!(plan.reach.reach, 5);
+    assert_eq!(plan.required, TapLevel::None);
+    assert!(plan.covered && plan.covered_reach == 10);
+    assert!(plan.announced_covered() && plan.announced());
+    assert_eq!(plan.covered_told(), Some(10));
+    assert!(
+        !plan.announced_held()
+            && !plan.announced_now()
+            && !plan.announced_tapped()
+    );
+    // The same 5 again: nobody new in the span, not announced
+    let plan =
+        plan_send(&request(&five, When::Default, TapLevel::None, &window))
+            .unwrap();
+    assert!(plan.covered && plan.covered_reach == 5 && !plan.announced());
+    assert_eq!(plan.covered_told(), None);
+    // Told 10 near it: 10 again, or 20, is quiet; 21 is told
+    let told = |n| {
+        let mut w = window.clone();
+        w[0].covered_told = Some(n);
+        w
+    };
+    let w10 = told(10);
+    let plan = plan_send(&request(&next, When::Default, TapLevel::None, &w10))
+        .unwrap();
+    assert_eq!((plan.covered_reach, plan.covered_baseline), (10, 10));
+    assert!(!plan.announced() && plan.covered_told().is_none());
+    assert_eq!(plan.covered_count(), Some(10));
+    let w5 = told(5);
+    let plan =
+        plan_send(&request(&next, When::Default, TapLevel::None, &w5)).unwrap();
+    assert!(!plan.announced(), "10 is not more than twice 5");
+    let w4 = told(4);
+    let plan =
+        plan_send(&request(&next, When::Default, TapLevel::None, &w4)).unwrap();
+    assert!(plan.announced_covered(), "10 is more than twice 4");
+    // An uncovered send is never counted this way
+    let fresh = agents(50, 1);
+    let plan = plan_send(&request(&fresh, When::Default, TapLevel::None, &[]))
+        .unwrap();
+    assert!(!plan.covered && plan.covered_reach == 0 && !plan.announced());
+}
+
+/// `covered_reach` is a sort and a sweep (review of #311: it was quadratic,
+/// 3.7 s for a 1556-agent fleet sent 6 times and 12.6 s for 5000 × 3, under
+/// the operator's lock). Measured after: about 30 ms for 5000 × 3 in a debug
+/// build. The bound is loose so a slow machine doesn't flake
+#[test]
+fn covered_reach_is_fast_on_a_fleet() {
+    let fleet = agents(0, 5000);
+    let mut window = Vec::new();
+    for r in 0..3 {
+        window.extend(covered_at(&fleet, t0() - Duration::hours(1 + r)));
+    }
+    let one = agents(9000, 1);
+    let started = std::time::Instant::now();
+    assert_eq!(covered_reach(&fleet, t0(), &window), 5000);
+    assert_eq!(covered_reach(&one, t0(), &window), 5001);
+    let took = started.elapsed();
+    eprintln!("covered_reach, 5000 x 3, twice: {took:?}");
+    assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+}
+
+/// Every scheduled send due by now, delivered
+fn deliver_due(w: &mut World) {
+    let due: Vec<OperatorActionId> =
+        w.s.sends
+            .iter()
+            .filter(|(_, m)| {
+                m.state == SendState::Scheduled && m.deliver_at <= w.now
+            })
+            .map(|(id, _)| *id)
+            .collect();
+    for send in due {
+        w.ok(Event::SendDeliver { send }, Authority::Platform);
+    }
+}
+
+/// Test send ids past the `u8` ones
+fn sid(n: u128) -> OperatorActionId {
+    uuid(12, n).into()
+}
+
+/// The covered notices of the last step, as (audience, count, cancel link,
+/// freeze link)
+fn covered_notices(
+    w: &World,
+    send: OperatorActionId,
+) -> Vec<(Audience, Option<u32>, bool, bool)> {
+    notices(w)
+        .into_iter()
+        .filter(|n| n.subject == NoticeSubject::SendCovered(send))
+        .map(|n| {
+            (
+                n.to,
+                n.count,
+                n.cancel_link == Some(send),
+                n.freeze_link.is_some(),
+            )
+        })
+        .collect()
+}
+
+/// The keep-warm gather (independent review, 2026-11-14): a session holds 5
+/// agents at a time to far-apart times, so each is a fresh reach of 5, keeps
+/// every delivered group warm with covered chats every 12 h, and then reaches
+/// all 40 in a burst of covered sends of 5. Each passes on `|R_this|`
+/// untapped. As the gather grows it is told each time it doubles, with its
+/// count, the operator with a cancel link and the contact with a freeze
+/// link; nothing is refused
+#[test]
+fn a_keep_warm_gather_is_told_at_each_doubling() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let mut n = 0u128;
+    let groups: Vec<BTreeSet<AgentId>> =
+        (0..8).map(|k| agents(k * 10, 5)).collect();
+    // Gather, 50 h apart: outside each other's windows, quiet
+    let mut firsts = Vec::new();
+    for (k, group) in groups.iter().enumerate() {
+        n += 1;
+        let at = w.now + Duration::hours(2 + 50 * k as i64);
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: group.clone(),
+                when: When::At(at),
+            },
+            s,
+        );
+        let m = &w.s.sends[&sid(n)];
+        assert_eq!((m.reach.reach, m.announced), (5, false));
+        firsts.push(sid(n));
+    }
+    let delivered = |w: &World, k: usize| {
+        w.s.sends[&firsts[k]].state != SendState::Scheduled
+    };
+    // Every count told, by when the send lands
+    let mut told: Vec<(DateTime<Utc>, u32)> = Vec::new();
+    // Admit a covered chat with `group`, checking it against the doubling rule
+    // restated over what was told
+    let mut chat = |w: &mut World, n: &mut u128, group: &BTreeSet<AgentId>| {
+        *n += 1;
+        let before = w.s.window_messages();
+        w.ok(
+            Event::SendAdmit {
+                send: sid(*n),
+                recipients: group.clone(),
+                when: When::Default,
+            },
+            s,
+        );
+        let m = w.s.sends[&sid(*n)].clone();
+        assert!(m.covered, "kept warm");
+        assert_eq!(m.reach.reach, 5);
+        assert_eq!(required_tap(m.reach, m.delivery), TapLevel::None);
+        let count = covered_reach(group, m.deliver_at, &before);
+        let near = told
+            .iter()
+            .filter(|(at, _)| (*at - m.deliver_at).abs() <= Duration::hours(24))
+            .map(|(_, c)| *c)
+            .max()
+            .unwrap_or(0);
+        let notices = covered_notices(w, sid(*n));
+        if count > 5 && count > 2 * near {
+            assert_eq!(m.covered_told, Some(count));
+            assert!(notices.contains(&(
+                Audience::Primary,
+                Some(count),
+                true,
+                false
+            )));
+            assert!(notices.contains(&(
+                Audience::Contact,
+                Some(count),
+                false,
+                true
+            )));
+            told.push((m.deliver_at, count));
+        } else {
+            assert!(notices.is_empty() && !m.announced, "{count} near {near}");
+        }
+        count
+    };
+    while !(0..groups.len()).all(|k| delivered(&w, k)) {
+        deliver_due(&mut w);
+        for (k, group) in groups.iter().enumerate() {
+            if delivered(&w, k) {
+                chat(&mut w, &mut n, group);
+            }
+        }
+        w.wait(Duration::hours(2));
+        deliver_due(&mut w);
+        w.wait(Duration::hours(10));
+    }
+    deliver_due(&mut w);
+    // The burst: 40 agents in 8 covered sends of 5, untapped
+    let mut widest = 0;
+    for group in &groups {
+        widest = widest.max(chat(&mut w, &mut n, group));
+    }
+    assert_eq!(widest, 40);
+    let counts: Vec<u32> = told.iter().map(|(_, c)| *c).collect();
+    eprintln!("keep-warm gather, counts told: {counts:?}");
+    // Told as it doubled: the 40 is within twice something told that day
+    assert!(counts.iter().any(|c| *c >= 20), "{counts:?}");
+    assert!(counts.contains(&10), "{counts:?}");
+}
+
+/// Ordinary conversation never announces: the same few agents, chatted with
+/// every few hours for ten days, in whole and in part
+#[test]
+fn ordinary_conversation_is_never_announced() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let mine = agents(0, 5);
+    let subsets: Vec<BTreeSet<AgentId>> = vec![
+        mine.clone(),
+        agents(0, 1),
+        agents(2, 2),
+        agents(4, 1),
+        agents(1, 3),
+    ];
+    for n in 0..80u128 {
+        let to = &subsets[(n % subsets.len() as u128) as usize];
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: to.clone(),
+                when: When::Default,
+            },
+            s,
+        );
+        let m = &w.s.sends[&sid(n)];
+        assert!(!m.announced, "chat {n} announced");
+        assert!(n == 0 || m.covered, "chat {n} covered");
+        w.wait(Duration::minutes(2));
+        deliver_due(&mut w);
+        w.wait(Duration::hours(3));
+    }
+}
+
+/// Ordinary conversation with 6 agents (review of #311, P1: 115 of 120 chats
+/// were announced, 230 notices): told at most once in any 24 h, each time
+/// with the count, 6
+#[test]
+fn ordinary_conversation_with_6_agents_is_told_once_a_day() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let mut n = 0u128;
+    // A tapped hello to all six, held and announced as before, delivered
+    n += 1;
+    w.ok(
+        Event::SendAdmit {
+            send: sid(n),
+            recipients: agents(0, 6),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    assert!(w.s.sends[&sid(n)].announced);
+    w.now = w.s.sends[&sid(n)].deliver_at;
+    deliver_due(&mut w);
+    w.wait(Duration::hours(1));
+    let (mut chats, mut all_notices) = (0, 0);
+    let mut told: Vec<DateTime<Utc>> = Vec::new();
+    for _day in 0..5 {
+        for _round in 0..4 {
+            for k in 0..6u32 {
+                n += 1;
+                w.ok(
+                    Event::SendAdmit {
+                        send: sid(n),
+                        recipients: agents(k, 1),
+                        when: When::Default,
+                    },
+                    s,
+                );
+                chats += 1;
+                let m = &w.s.sends[&sid(n)];
+                assert!(m.covered && m.reach.reach == 1);
+                assert_eq!(required_tap(m.reach, m.delivery), TapLevel::None);
+                let ns = notices(&w);
+                all_notices += ns.len();
+                if m.announced {
+                    assert_eq!(m.covered_told, Some(6));
+                    assert!(ns.iter().all(|x| x.count == Some(6)));
+                    told.push(m.deliver_at);
+                }
+                w.wait(Duration::minutes(2));
+                deliver_due(&mut w);
+                w.wait(Duration::minutes(8));
+            }
+            w.wait(Duration::hours(3));
+        }
+        w.wait(Duration::hours(8));
+    }
+    eprintln!(
+        "6-agent conversation: {chats} chats over 5 days, {} told, {all_notices} notices",
+        told.len()
+    );
+    for pair in told.windows(2) {
+        assert!(pair[1] - pair[0] > Duration::hours(24), "{told:?}");
+    }
+    assert!((1..=5).contains(&told.len()), "{told:?}");
+}
+
+/// A tapped covered send above 5 that goes now is told once, by its own rule,
+/// with the count folded in (review of #311, P4: three notices, two freeze
+/// links and a dead cancel link)
+#[test]
+fn a_tapped_covered_send_is_told_once() {
+    let mut w = registered(YUBIKEY);
+    w.contact(0);
+    let t = tap(0, TapKind::Send);
+    let shape = |w: &World| -> Vec<(Audience, NoticeSubject, bool, bool)> {
+        notices(w)
+            .iter()
+            .map(|x| {
+                (
+                    x.to,
+                    x.subject,
+                    x.cancel_link.is_some(),
+                    x.freeze_link.is_some(),
+                )
+            })
+            .collect()
+    };
+    w.ok(
+        Event::SendAdmit {
+            send: sid(1),
+            recipients: agents(0, 10),
+            when: When::Now,
+        },
+        t,
+    );
+    let first = shape(&w);
+    deliver_due(&mut w);
+    w.wait(Duration::hours(1));
+    w.ok(
+        Event::SendAdmit {
+            send: sid(2),
+            recipients: agents(0, 10),
+            when: When::Now,
+        },
+        t,
+    );
+    let second = shape(&w);
+    assert_eq!(second.len(), first.len(), "{first:?} / {second:?}");
+    assert!(second.iter().all(|(_, s, cancel, _)| *s
+        == NoticeSubject::SendNow(sid(2))
+        && !cancel));
+    assert!(notices(&w).iter().all(|x| x.count == Some(10)));
+    let m = &w.s.sends[&sid(2)];
+    assert!(m.covered && !m.cancel_link && m.covered_told == Some(10));
+}
+
+/// Taking away can't buy quiet: a retracted told send still sets the
+/// baseline (it reached its agents), and cancelling one lowers it, so the
+/// next count is told again
+#[test]
+fn taking_away_a_told_send_never_quiets_the_next() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let (g1, g2) = (agents(0, 5), agents(10, 5));
+    // Two fresh roots, outside each other's windows
+    let t = w.now + Duration::hours(2);
+    let t2 = t + Duration::hours(24) + Duration::seconds(1);
+    let admit = |w: &mut World, n: u128, to: &BTreeSet<AgentId>, when| {
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: to.clone(),
+                when,
+            },
+            s,
+        );
+    };
+    admit(&mut w, 1, &g1, When::At(t));
+    admit(&mut w, 2, &g2, When::At(t2));
+    w.now = t;
+    deliver_due(&mut w);
+    // g1 kept warm halfway
+    w.wait(Duration::hours(12));
+    admit(&mut w, 7, &g1, When::Default);
+    w.wait(Duration::minutes(2));
+    deliver_due(&mut w);
+    w.now = t2;
+    deliver_due(&mut w);
+    // Both groups warm, then together: told 10
+    admit(&mut w, 3, &g1, When::Default);
+    admit(&mut w, 4, &g2, When::Default);
+    assert_eq!(w.s.sends[&sid(4)].covered_told, Some(10));
+    // Cancelled before it lands: its count goes with it, so the same 10
+    // again is told again
+    w.ok(Event::SendCancel { send: sid(4) }, s);
+    admit(&mut w, 5, &g2, When::Default);
+    assert_eq!(w.s.sends[&sid(5)].covered_told, Some(10));
+    // Delivered and retracted, it still counts: the same 10 is quiet
+    w.wait(Duration::hours(2));
+    deliver_due(&mut w);
+    w.ok(Event::Retract { send: sid(5) }, s);
+    admit(&mut w, 6, &g2, When::Default);
+    let m = &w.s.sends[&sid(6)];
+    assert!(m.covered && !m.announced && m.covered_told.is_none());
+}
+
+/// Fifteen agents covered by one YubiKey send, then session chats with them
+/// 5 at a time: the second is told 10, the third is quiet at 15
+fn fifteen_warm() -> World {
+    let mut w = registered(YUBIKEY);
+    w.contact(0);
+    w.ok(
+        Event::SendAdmit {
+            send: sid(1),
+            recipients: agents(0, 15),
+            when: When::Now,
+        },
+        tap(0, TapKind::Send),
+    );
+    deliver_due(&mut w);
+    let s = Authority::Session(sess(0));
+    for (n, start) in [(2, 0), (3, 5), (4, 10)] {
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: agents(start, 5),
+                when: When::Default,
+            },
+            s,
+        );
+    }
+    assert_eq!(w.s.sends[&sid(3)].covered_told, Some(10));
+    let quiet = &w.s.sends[&sid(4)];
+    assert!(quiet.covered && !quiet.announced && quiet.covered_told.is_none());
+    w
+}
+
+/// A quiet move stores no count: nothing was told, so nothing may raise the
+/// baseline. Else each quiet move could lift it to what it counted, and the
+/// baseline grow by doubling with no notice (review of #311, N5)
+#[test]
+fn a_quiet_move_tells_and_stores_no_count() {
+    let mut w = fifteen_warm();
+    let at = w.now + Duration::hours(2);
+    w.ok(
+        Event::SendLater {
+            send: sid(4),
+            deliver_at: at,
+        },
+        Authority::Session(sess(0)),
+    );
+    let m = &w.s.sends[&sid(4)];
+    assert!(m.covered && !m.announced, "15 is not more than twice 10");
+    assert_eq!(m.covered_told, None);
+    assert!(notices(&w).is_empty());
+    // So 21 there is still told: the baseline is the 10, not 15
+    let more = agents(100, 6);
+    w.ok(
+        Event::SendAdmit {
+            send: sid(5),
+            recipients: more.clone(),
+            when: When::Now,
+        },
+        tap(0, TapKind::Send),
+    );
+    deliver_due(&mut w);
+    // Five of them beside it: 20, not more than twice 10
+    for (n, start, len) in [(6, 100, 5), (7, 105, 1)] {
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: agents(start, len),
+                when: When::At(at),
+            },
+            Authority::Session(sess(0)),
+        );
+    }
+    assert_eq!(w.s.sends[&sid(6)].covered_told, None);
+    // The sixth: 21
+    assert_eq!(w.s.sends[&sid(7)].covered_told, Some(21));
+}
+
+/// Only a count told on an untapped send feeds the baseline (Steward,
+/// 2026-11-15)
+#[test]
+fn only_untapped_counts_feed_the_baseline() {
+    let d = t0();
+    let told = |level| {
+        let mut m = covered_at(&agents(0, 1), d);
+        m[0].covered_told = Some(40);
+        m[0].level = level;
+        m
+    };
+    assert_eq!(covered_baseline(d, &told(TapLevel::None)), 40);
+    for level in [TapLevel::Unattended, TapLevel::Tap, TapLevel::YubikeyTap] {
+        assert_eq!(feeds_baseline(&told(level)[0]), None);
+        assert_eq!(covered_baseline(d, &told(level)), 0, "{level:?}");
+    }
+}
+
+/// A stolen session can't ride the owner's tapped counts: the owner taps a
+/// broadcast to `first` agents, then a covered one to `second` of them
+/// (told `second`); the session then reaches every one of the first, 5 at a
+/// time, untapped, and is told as it doubles (review of #311, Q2: it was
+/// quiet up to twice the owner's count). Returns the counts told
+fn session_after_the_owners_broadcast(first: u32, second: u32) -> Vec<u32> {
+    let mut w = registered(YUBIKEY);
+    w.contact(0);
+    let t = tap(0, TapKind::Send);
+    let s = Authority::Session(sess(0));
+    w.ok(
+        Event::SendAdmit {
+            send: sid(1),
+            recipients: agents(0, first),
+            when: When::Now,
+        },
+        t,
+    );
+    deliver_due(&mut w);
+    w.wait(Duration::hours(1));
+    if second > 0 {
+        w.ok(
+            Event::SendAdmit {
+                send: sid(2),
+                recipients: agents(0, second),
+                when: When::Now,
+            },
+            t,
+        );
+        assert_eq!(w.s.sends[&sid(2)].covered_told, Some(second));
+        deliver_due(&mut w);
+    }
+    w.wait(Duration::hours(1));
+    let mut told = Vec::new();
+    for k in 0..first / 5 {
+        let n = 100 + u128::from(k);
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: agents(k * 5, 5),
+                when: When::Default,
+            },
+            s,
+        );
+        let m = &w.s.sends[&sid(n)];
+        assert!(m.covered && m.reach.reach == 5);
+        assert_eq!(required_tap(m.reach, m.delivery), TapLevel::None);
+        if let Some(c) = m.covered_told {
+            assert!(notices(&w).iter().all(|x| x.count == Some(c)));
+            told.push(c);
+        }
+    }
+    told
+}
+
+#[test]
+fn a_session_cant_ride_the_owners_told_count() {
+    for (first, second) in [(100, 100), (200, 100), (100, 0)] {
+        let told = session_after_the_owners_broadcast(first, second);
+        eprintln!(
+            "owner {first}, then {second} told: the session told {told:?}"
+        );
+        // The burst is told: the whole of it within twice the last count
+        let last = *told.last().expect("told");
+        assert!(2 * last >= first, "{first}/{second}: {told:?}");
+    }
+}
+
+/// The owner's own session chats, one agent at a time, with the 100 agents
+/// of a broadcast it tapped that day: a handful of notices as the count
+/// doubles, each with its count
+#[test]
+fn the_owners_chats_after_a_tapped_broadcast_are_told_a_handful_of_times() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    w.ok(
+        Event::SendAdmit {
+            send: sid(1),
+            recipients: agents(0, 100),
+            when: When::Default,
+        },
+        tap(0, TapKind::Send),
+    );
+    w.now = w.s.sends[&sid(1)].deliver_at;
+    deliver_due(&mut w);
+    let mut told = Vec::new();
+    for k in 0..100u32 {
+        let n = 100 + u128::from(k);
+        w.ok(
+            Event::SendAdmit {
+                send: sid(n),
+                recipients: agents(k, 1),
+                when: When::Default,
+            },
+            s,
+        );
+        let m = &w.s.sends[&sid(n)];
+        if let Some(c) = m.covered_told {
+            assert!(notices(&w).iter().all(|x| x.count == Some(c)));
+            told.push(c);
+        }
+        w.wait(Duration::minutes(5));
+        deliver_due(&mut w);
+    }
+    eprintln!("the owner's 100 chats after a tapped broadcast: told {told:?}");
+    assert_eq!(told, vec![6, 13, 27, 55]);
+    // ceil(log2(100 / 5)) + 2
+    assert!(told.len() <= 7);
+}
+
+/// A told send moved where it counts 5 or fewer, or out of cover, keeps no
+/// count: its old one was told for where it was (review of #311, N13)
+#[test]
+fn a_told_send_moved_out_of_cover_keeps_no_count() {
+    let mut w = fifteen_warm();
+    // A day and an hour on: its cover is out of the window
+    let at = w.now + Duration::hours(25);
+    w.ok(
+        Event::SendLater {
+            send: sid(3),
+            deliver_at: at,
+        },
+        Authority::Session(sess(0)),
+    );
+    let m = &w.s.sends[&sid(3)];
+    assert!(!m.covered && m.announced, "announced before, so told again");
+    assert_eq!(m.covered_told, None);
+    let moved = notices(&w);
+    assert_eq!(moved.len(), 2);
+    assert!(moved.iter().all(|n| n.count.is_none()));
+}
+
+/// Admit a session send to `to` at `at`: (covered, announced)
+fn admit_at(
+    w: &mut World,
+    n: u128,
+    to: &BTreeSet<AgentId>,
+    at: DateTime<Utc>,
+) -> (bool, bool) {
+    w.ok(
+        Event::SendAdmit {
+            send: sid(n),
+            recipients: to.clone(),
+            when: When::At(at),
+        },
+        Authority::Session(sess(0)),
+    );
+    let m = &w.s.sends[&sid(n)];
+    (m.covered, m.announced)
+}
+
+/// A covered send moved later beside another group's covered send is told
+/// (review of #311, probe_move). Reachable when the moved send is overdue
+#[test]
+fn a_move_later_that_gathers_covered_sends_is_told() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let (g1, g2) = (agents(0, 5), agents(10, 5));
+    let t = w.now + Duration::hours(2);
+    let day = Duration::hours(24);
+    let sec = Duration::seconds(1);
+    assert_eq!(admit_at(&mut w, 1, &g1, t), (false, false));
+    assert_eq!(admit_at(&mut w, 2, &g2, t + day + sec), (false, false));
+    w.now = t;
+    w.ok(Event::SendDeliver { send: sid(1) }, Authority::Platform);
+    assert_eq!(admit_at(&mut w, 3, &g1, t + day), (true, false));
+    w.now = t + day;
+    w.ok(Event::SendDeliver { send: sid(3) }, Authority::Platform);
+    // g1's next piece, due in half a second
+    assert_eq!(
+        admit_at(&mut w, 5, &g1, t + day + Duration::milliseconds(500)),
+        (true, false)
+    );
+    w.now = t + day + sec;
+    // The worker hasn't got to #5 yet
+    w.ok(Event::SendDeliver { send: sid(2) }, Authority::Platform);
+    assert_eq!(admit_at(&mut w, 4, &g2, t + day + day + sec), (true, false));
+    w.ok(
+        Event::SendLater {
+            send: sid(5),
+            deliver_at: t + day + Duration::hours(1),
+        },
+        s,
+    );
+    let m = &w.s.sends[&sid(5)];
+    let moved: Vec<Notice> = notices(&w)
+        .into_iter()
+        .filter(|n| n.subject == NoticeSubject::SendMoved(sid(5)))
+        .collect();
+    assert!(m.covered && m.announced && m.covered_told == Some(10));
+    assert_eq!(moved.len(), 2);
+    assert!(moved.iter().all(|n| n.count == Some(10)));
+}
+
+/// Admitted uncovered (its cover not yet out), moved later once it is: the
+/// flag turns true, so the next group's covered send counts it (review of
+/// #311, probe_move)
+#[test]
+fn a_move_later_recomputes_the_flag() {
+    let mut w = registered(DEVICE);
+    w.contact(0);
+    let s = Authority::Session(sess(0));
+    let (g1, g2) = (agents(0, 5), agents(10, 5));
+    let t = w.now + Duration::hours(2);
+    let day = Duration::hours(24);
+    let sec = Duration::seconds(1);
+    assert_eq!(admit_at(&mut w, 1, &g1, t), (false, false));
+    // g1 again an hour on, admitted before the root is out: uncovered
+    assert_eq!(
+        admit_at(&mut w, 2, &g1, t + Duration::hours(1)),
+        (false, false)
+    );
+    // g2's root, outside both windows
+    assert_eq!(
+        admit_at(&mut w, 3, &g2, t + Duration::hours(25) + sec),
+        (false, false)
+    );
+    w.now = t;
+    w.ok(Event::SendDeliver { send: sid(1) }, Authority::Platform);
+    w.ok(
+        Event::SendLater {
+            send: sid(2),
+            deliver_at: t + day,
+        },
+        s,
+    );
+    assert!(w.s.sends[&sid(2)].covered, "covered at the new time");
+    w.now = t + day;
+    w.ok(Event::SendDeliver { send: sid(2) }, Authority::Platform);
+    w.now = t + Duration::hours(25) + sec;
+    w.ok(Event::SendDeliver { send: sid(3) }, Authority::Platform);
+    let (covered, announced) =
+        admit_at(&mut w, 4, &g2, t + Duration::hours(25) + sec + sec);
+    assert!(covered && announced, "10 covered agents within 61 minutes");
+    assert_eq!(w.s.sends[&sid(4)].covered_told, Some(10));
+}
+
+/// **SendForward** works the flag out again at the new time: a send admitted
+/// uncovered and brought forward once its cover is out counts toward the
+/// next covered send
+#[test]
+fn a_forward_recomputes_the_flag() {
+    let mut w = registered(YUBIKEY);
+    w.contact(0);
+    let (g1, g2) = (agents(0, 5), agents(10, 5));
+    // g2's root, then g1's outside its window
+    let r2 = w.now + Duration::hours(1);
+    let r1 = r2 + Duration::hours(24) + Duration::seconds(1);
+    assert_eq!(admit_at(&mut w, 1, &g2, r2), (false, false));
+    assert_eq!(admit_at(&mut w, 2, &g1, r1), (false, false));
+    // g1 again, before its root is out: uncovered, the union still 5
+    assert_eq!(
+        admit_at(&mut w, 3, &g1, r1 + Duration::hours(2)),
+        (false, false)
+    );
+    // g2 kept warm halfway
+    w.now = r2;
+    w.ok(Event::SendDeliver { send: sid(1) }, Authority::Platform);
+    assert_eq!(
+        admit_at(&mut w, 4, &g2, r2 + Duration::hours(12)),
+        (true, false)
+    );
+    w.now = r2 + Duration::hours(12);
+    w.ok(Event::SendDeliver { send: sid(4) }, Authority::Platform);
+    w.now = r1;
+    w.ok(Event::SendDeliver { send: sid(2) }, Authority::Platform);
+    let at = r1 + Duration::hours(1);
+    w.ok(
+        Event::SendForward {
+            send: sid(3),
+            deliver_at: at,
+        },
+        tap(0, TapKind::MoveSend),
+    );
+    let m = &w.s.sends[&sid(3)];
+    assert!(m.covered, "covered at the new time");
+    // Told with g2's warm chat 13 h before: 10
+    assert_eq!(m.covered_told, Some(10));
+    assert!(notices(&w).iter().all(|n| n.count == Some(10)));
+    // And a covered g2 chat beside it counts it
+    assert_eq!(covered_reach(&g2, at, &w.s.window_messages()), 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -1452,6 +2349,16 @@ enum EventGen {
     /// Two small quiet sends far apart, gathered by a later move: it must be
     /// announced
     GatherLater(u8, Pick, Pick),
+    /// Keep-warm: a fresh group of 5 sent now (by a YubiKey tap if there is
+    /// one, else a session), delivered, and chatted with again by a session:
+    /// a covered send. Several within a day are a burst that must be announced
+    KeepWarm(u8, Pick, Pick),
+    /// A session's covered chat with the agents of a delivered send of at most
+    /// 5
+    Rewarm(u8, Pick, Pick),
+    /// A session moving a small scheduled send later, covered ones first, by
+    /// one of a few offsets: into cover, out of it, beside other covered sends
+    MoveSmall(Pick, u8, Pick),
     /// [`replace_step`]: new passkey, its class, the old row, the tapper
     Replace(u8, PasskeyClass, Pick, Pick),
     /// A send, and a YubiKey's tap bringing it forward to now
@@ -1564,6 +2471,10 @@ fn gen_step() -> impl Strategy<Value = (Duration, EventGen, AuthGen)> {
             .prop_map(|(i, t, x)| (G::NudgeLater(i, t, x), AuthGen::Fixed(Authority::Platform))),
         2 => (0u8..10, pick(), pick())
             .prop_map(|(i, t, x)| (G::GatherLater(i, t, x), AuthGen::Fixed(Authority::Platform))),
+        2 => (0u8..12, pick(), pick())
+            .prop_map(|(i, t, x)| (G::KeepWarm(i, t, x), AuthGen::Fixed(Authority::Platform))),
+        1 => (0u8..30, pick(), pick())
+            .prop_map(|(i, p, x)| (G::Rewarm(i, p, x), AuthGen::Fixed(Authority::Platform))),
         3 => (60u8..66, passkey_class(), pick(), pick())
             .prop_map(|(i, c, o, t)| (G::Replace(i, c, o, t), AuthGen::Fixed(Authority::Platform))),
         // §6, a move
@@ -2011,6 +2922,7 @@ fn resolve(
     s: &AccountState,
     event: &EventGen,
     auth: &AuthGen,
+    now: DateTime<Utc>,
 ) -> Option<Vec<(Event, Authority)>> {
     use EventGen as G;
     match event {
@@ -2023,6 +2935,7 @@ fn resolve(
                     credential: cred(*i),
                 }),
                 auth,
+                now,
             )?;
             let start = (
                 Event::EnrolStart {
@@ -2093,6 +3006,174 @@ fn resolve(
                     Authority::Session(nth(&open, *x)?),
                 ),
             ]);
+        }
+        G::KeepWarm(i, t, x) => {
+            let yubikey = nth(
+                &s.factors
+                    .iter()
+                    .filter(|(_, f)| {
+                        f.state.is_active() && f.kind.is_yubikey_passkey()
+                    })
+                    .filter_map(|(id, _)| passkey_of(*id))
+                    .collect::<Vec<_>>(),
+                *t,
+            );
+            let open = ordered(&s.sessions, |_| true, |x| x.open);
+            let session = Authority::Session(nth(&open, *x)?);
+            // A YubiKey sends 30 now, in 6 groups of 5; a session 5
+            let groups: u8 = if yubikey.is_some() { 6 } else { 1 };
+            let id = |k: u8| -> OperatorActionId {
+                uuid(13, u128::from(*i) * 16 + u128::from(k)).into()
+            };
+            let base = 40_000 + 100 * u32::from(*i);
+            let group = |g: u8| agents(base + 5 * u32::from(g), 5);
+            let admit = |k: u8, to, when, by| {
+                (
+                    Event::SendAdmit {
+                        send: id(k),
+                        recipients: to,
+                        when,
+                    },
+                    by,
+                )
+            };
+            let later = |k: u8, by: Duration| {
+                (
+                    Event::SendLater {
+                        send: id(k),
+                        deliver_at: now + by,
+                    },
+                    session,
+                )
+            };
+            let mut steps = Vec::new();
+            // A session's piece before its cover is out: uncovered, moved
+            // into cover once it is
+            if yubikey.is_none() {
+                steps.push(admit(
+                    15,
+                    group(0),
+                    When::At(now + Duration::minutes(30)),
+                    session,
+                ));
+            }
+            let fresh_by = match yubikey {
+                Some(passkey) => Authority::PasskeyTap {
+                    passkey,
+                    kind: TapKind::Send,
+                },
+                None => session,
+            };
+            steps.push(admit(
+                0,
+                agents(base, 5 * u32::from(groups)),
+                When::Now,
+                fresh_by,
+            ));
+            steps.push((
+                Event::SendDeliver { send: id(0) },
+                Authority::Platform,
+            ));
+            // Covered chats with each group: told at 10 and 25 (doubling),
+            // quiet between. Odd ones spread their landings over hours, so
+            // spans are seen from either end
+            for g in 0..groups {
+                let when = if *i % 2 == 1 {
+                    When::At(now + Duration::hours(1 + i64::from(g)))
+                } else {
+                    When::Default
+                };
+                steps.push(admit(1 + g, group(g), when, session));
+            }
+            if yubikey.is_none() {
+                steps.push(later(15, Duration::minutes(90)));
+            }
+            // Moves of covered sends: a forward, a quiet move, a told one,
+            // and one out of cover (refused when the union is too wide)
+            if let (Some(passkey), 1) = (yubikey, *i % 2) {
+                steps.push((
+                    Event::SendForward {
+                        send: id(2),
+                        deliver_at: now + Duration::minutes(30),
+                    },
+                    Authority::PasskeyTap {
+                        passkey,
+                        kind: TapKind::MoveSend,
+                    },
+                ));
+            }
+            let quiet = [8, 12, 23][usize::from(*i % 3)];
+            steps.push(later(1, Duration::hours(quiet)));
+            steps.push(later(2, Duration::hours(9)));
+            steps.push(later(3, Duration::hours(25)));
+            return Some(steps);
+        }
+        G::Rewarm(i, p, x) => {
+            let open = ordered(&s.sessions, |_| true, |x| x.open);
+            let delivered: Vec<_> = s
+                .sends
+                .iter()
+                .filter(|(_, m)| {
+                    !matches!(
+                        m.state,
+                        SendState::Scheduled | SendState::Cancelled
+                    ) && m.recipients.len() <= 5
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            let earlier = nth(&delivered, *p)?;
+            // Landing at various times within the earlier send's day, so
+            // covered spans are seen from either end
+            let from = s.sends[&earlier].deliver_at;
+            let when = match *i % 4 {
+                0 => When::Default,
+                1 => When::At(from + Duration::hours(6)),
+                2 => When::At(from + Duration::hours(18)),
+                _ => When::At(from + Duration::hours(24)),
+            };
+            let mut steps = vec![(
+                Event::SendAdmit {
+                    send: send_id(200 + *i),
+                    recipients: s.sends[&earlier].recipients.clone(),
+                    when,
+                },
+                Authority::Session(nth(&open, *x)?),
+            )];
+            // Every other time, then move a small scheduled send later
+            if i % 2 == 0 {
+                let moved = G::MoveSmall(*p + 1, (*i / 2) % 6, *x);
+                steps.extend(resolve(s, &moved, auth, now).unwrap_or_default());
+            }
+            return Some(steps);
+        }
+        G::MoveSmall(p, k, x) => {
+            let open = ordered(&s.sessions, |_| true, |x| x.open);
+            let (mut ids, rest): (Vec<_>, Vec<_>) = s
+                .sends
+                .iter()
+                .filter(|(_, m)| {
+                    m.state == SendState::Scheduled && m.recipients.len() <= 5
+                })
+                .partition(|(_, m)| m.covered);
+            ids.extend(rest);
+            let ids: Vec<OperatorActionId> =
+                ids.into_iter().map(|(id, _)| *id).collect();
+            let send = nth(&ids, *p)?;
+            let by = [
+                Duration::seconds(1),
+                Duration::hours(1),
+                Duration::hours(12),
+                Duration::hours(23),
+                Duration::hours(24) + Duration::seconds(1),
+                Duration::hours(48),
+            ][usize::from(*k)];
+            return Some(vec![(
+                Event::SendLater {
+                    send,
+                    deliver_at: s.sends[&send].deliver_at + by,
+                },
+                Authority::Session(nth(&open, *x)?),
+            )]);
         }
         G::GatherLater(i, t, x) => {
             let active = ordered(
@@ -2191,6 +3272,9 @@ fn resolve(
         | G::AddChain(..)
         | G::NudgeLater(..)
         | G::GatherLater(..)
+        | G::KeepWarm(..)
+        | G::Rewarm(..)
+        | G::MoveSmall(..)
         | G::AdmitThenForward(..)
         | G::Smart(..)
         | G::Replace(..) => return None,
@@ -2458,10 +3542,69 @@ struct History {
     counted_at: BTreeMap<OperatorActionId, DateTime<Utc>>,
     /// When each delivered send was delivered
     delivered_at: BTreeMap<OperatorActionId, DateTime<Utc>>,
+    /// Events seen, in order
+    step: u64,
+    /// For each send, at each of its counts (admission or a move): the
+    /// step, where it then landed, and the covered count its notices told
+    /// (`None` if they told none, or there were none)
+    told: BTreeMap<OperatorActionId, Vec<Counted>>,
+    /// The step each send was cancelled at
+    cancelled_step: BTreeMap<OperatorActionId, u64>,
 }
+
+/// One count of a send: the step, where it then landed, the count told, and
+/// whether it was then sent untapped (at `TapLevel::None`)
+type Counted = (u64, DateTime<Utc>, Option<u32>, bool);
 
 impl History {
     fn record(&mut self, a: &Applied) {
+        self.step += 1;
+        if let Event::SendAdmit { send, .. }
+        | Event::SendForward { send, .. }
+        | Event::SendLater { send, .. } = a.event
+            && let Some(m) = a.post.sends.get(send)
+            && a.pre.sends.get(send) != Some(m)
+        {
+            let about = |n: &&Notice| {
+                matches!(
+                    n.subject,
+                    NoticeSubject::SendHeld(s)
+                        | NoticeSubject::SendNow(s)
+                        | NoticeSubject::SendTapped(s)
+                        | NoticeSubject::SendCovered(s)
+                        | NoticeSubject::SendMoved(s) if s == *send
+                )
+            };
+            let count = a.notices().filter(about).find_map(|n| n.count);
+            // Untapped: what admitted it, or the tap that last brought it
+            // forward, was a session or a software key; a move later keeps
+            // its sender
+            let untapped = match a.event {
+                Event::SendForward { .. } => false,
+                Event::SendAdmit { .. } => a.pre.level(a.by) == TapLevel::None,
+                _ => self
+                    .told
+                    .get(send)
+                    .and_then(|t| t.last())
+                    .is_some_and(|(.., u)| *u),
+            };
+            self.told.entry(*send).or_default().push((
+                self.step,
+                m.deliver_at,
+                count,
+                untapped,
+            ));
+        }
+        for (id, m) in &a.post.sends {
+            if m.state == SendState::Cancelled
+                && a.pre
+                    .sends
+                    .get(id)
+                    .is_some_and(|b| b.state != SendState::Cancelled)
+            {
+                self.cancelled_step.insert(*id, self.step);
+            }
+        }
         for (id, before, after) in a.changed() {
             let was = before.is_some_and(|b| b.state.suspension().is_some());
             if !was && after.state.suspension().is_some() {
@@ -3568,12 +4711,82 @@ fn no_fleet_gathers_unannounced(
         .collect();
     for (reach, members) in days(&live, |id| reached_already(s, h, id)) {
         if reach > 5 {
+            // Not a covered send's notice: that tells of other agents
             prop_assert!(
-                members.iter().any(|(_, m)| m.announced),
-                "{} agents in a day, none announced",
+                members
+                    .iter()
+                    .any(|(id, m)| m.announced && !reached_already(s, h, *id)),
+                "{} agents in a day, none of their sends announced",
                 reach
             );
         }
+    }
+    Ok(())
+}
+
+/// Keep-warm, across sends, on any event: wherever a day's sends that reached
+/// no one new ([reached already](reached_already)) reach more than 5 agents
+/// between them, the last of them to be counted was told at least that many,
+/// or, when it was counted, a count at least half that stood within 24 h of
+/// where it lands (Steward, 2026-11-14: announce, don't block; told again as
+/// it doubles). A count stands from the notice that told it until its send
+/// is counted again or cancelled. The other day rule excuses these sends;
+/// this one counts only them. Judged from the counts the harness saw on
+/// notices, not from the stored fields
+fn no_covered_burst_untold(
+    s: &AccountState,
+    h: &History,
+) -> Result<(), TestCaseError> {
+    let warm: Vec<Sent<'_>> = s
+        .sends
+        .iter()
+        .filter(|(id, m)| {
+            m.state != SendState::Cancelled && reached_already(s, h, **id)
+        })
+        .map(|(id, m)| (*id, m))
+        .collect();
+    let day = Duration::hours(24);
+    // A send's last count before `step`
+    let as_of = |id: &OperatorActionId, step: u64| {
+        h.told
+            .get(id)?
+            .iter()
+            .rev()
+            .find(|(at, ..)| *at < step)
+            .copied()
+    };
+    for (reach, members) in days(&warm, |_| false) {
+        if reach <= 5 {
+            continue;
+        }
+        let (last, m) = *members
+            .iter()
+            .max_by_key(|(id, _)| {
+                h.told.get(id).and_then(|t| t.last()).map(|t| t.0)
+            })
+            .expect("a member");
+        let counted = h.told[&last].last().expect("counted").0;
+        let own = as_of(&last, counted + 1).and_then(|(_, _, c, _)| c);
+        let standing = h
+            .told
+            .keys()
+            .filter(|id| **id != last)
+            .filter(|id| h.cancelled_step.get(id).is_none_or(|c| *c > counted))
+            .filter_map(|id| as_of(id, counted))
+            .filter(|(_, at, ..)| (*at - m.deliver_at).abs() <= day)
+            // Steward, 2026-11-15: only a count told on an untapped send
+            .filter(|(.., untapped)| *untapped)
+            .filter_map(|(_, _, c, _)| c)
+            .max()
+            .unwrap_or(0);
+        prop_assert!(
+            own.is_some_and(|c| c as usize >= reach)
+                || 2 * standing as usize >= reach,
+            "{} agents kept warm in a day: the last told {:?}, {} standing",
+            reach,
+            own,
+            standing
+        );
     }
     Ok(())
 }
@@ -3637,6 +4850,7 @@ fn check(a: &Applied, h: &mut History) -> Result<(), TestCaseError> {
     i43_a_new_account_sends_nothing_now(a)?;
     no_fleet_goes_unheld(a.post, h, a.now)?;
     no_fleet_gathers_unannounced(a.post, h)?;
+    no_covered_burst_untold(a.post, h)?;
     prop_assert!(
         a.post.counted_passkeys() <= MAX_PASSKEYS + 1,
         "the cap: {} live",
@@ -3667,7 +4881,7 @@ fn drive(
             }
             continue;
         }
-        for (event, by) in resolve(&s, event, auth).unwrap_or_default() {
+        for (event, by) in resolve(&s, event, auth, now).unwrap_or_default() {
             let Ok(t) = s.apply(&event, by, now, &mut ids) else {
                 break;
             };
@@ -3978,6 +5192,31 @@ fn the_generator_reaches_every_machine() {
                     })
                     .count()
             };
+            // Moves of covered sends: what the keep-warm rule recounts
+            if let Event::SendLater { send, .. } | Event::SendForward { send, .. } =
+                a.event
+            {
+                let (before, after) = (&a.pre.sends[send], &a.post.sends[send]);
+                if before.covered || after.covered {
+                    *seen.entry("covered move").or_default() += 1;
+                    if before.covered != after.covered {
+                        *seen.entry("covered flag changed").or_default() += 1;
+                    }
+                    if a.notices().any(|n| n.count.is_some()) {
+                        *seen.entry("covered move told").or_default() += 1;
+                    } else if !after.announced {
+                        *seen.entry("covered move quiet").or_default() += 1;
+                    }
+                    if matches!(a.event, Event::SendForward { .. }) {
+                        *seen.entry("covered forward").or_default() += 1;
+                    }
+                }
+            }
+            if let Event::SendAdmit { send, .. } = a.event
+                && a.post.sends[send].covered_told.is_some_and(|c| c > 20)
+            {
+                *seen.entry("covered told above 20").or_default() += 1;
+            }
             let decided_round =
                 |case: &OperatorRecoveryCaseId| match a.pre.cases[case].state {
                     CaseState::Open { round } => round,
@@ -4058,6 +5297,13 @@ fn the_generator_reaches_every_machine() {
                 {
                     "tapped now (I-40)"
                 }
+                Event::SendAdmit { send, .. }
+                    if a.notices().any(|n| {
+                        n.subject == NoticeSubject::SendCovered(*send)
+                    }) =>
+                {
+                    "covered burst"
+                }
                 Event::SendAdmit { recipients, .. } if recipients.len() > 5 => {
                     "send > 5"
                 }
@@ -4106,6 +5352,13 @@ fn the_generator_reaches_every_machine() {
         ("send > 5", 20),
         ("send > 500", 20),
         ("tapped now (I-40)", 20),
+        ("covered burst", 20),
+        ("covered move", 100),
+        ("covered flag changed", 30),
+        ("covered move told", 20),
+        ("covered move quiet", 50),
+        ("covered forward", 10),
+        ("covered told above 20", 20),
         ("cancel link", 20),
         ("retract", 20),
         ("deliver", 50),

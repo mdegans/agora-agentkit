@@ -11,8 +11,8 @@ use super::challenge::TapKind;
 use super::model::*;
 use super::tap::{
     Delivery, FactorKind, NAMED_REACH, PasskeyClass, SendRefusal, SendRequest,
-    TapLevel, UNTAPPED_REACH, When, bulk_hold_floor, plan_send, reach,
-    required_hold,
+    TapLevel, UNTAPPED_REACH, When, bulk_hold_floor, covered, covered_reach,
+    plan_send, reach, required_hold,
 };
 use crate::enums::OperatorActionKind;
 use crate::ids::{
@@ -227,6 +227,14 @@ pub enum NoticeSubject {
     /// Any other send that took a tap (now, reach 6–500, immediate reach
     /// ≤ 5)
     SendTapped(OperatorActionId),
+    /// Covered, with covered sends past 5 agents in a 24 h span and past
+    /// twice what was told near it (keep-warm,
+    /// [`SendPlan::announced_covered`](super::SendPlan::announced_covered)),
+    /// and announced by no other rule: told like a held send, with its count.
+    /// Without a qualifying contact it goes to the primary alone, as a held
+    /// send's would: intended, since a send that needs the contact (reach
+    /// above 5) is refused without one, and these are 5 or fewer each
+    SendCovered(OperatorActionId),
     /// Moved, and announced again with its new time
     SendMoved(OperatorActionId),
     /// Cancelled when its authority ended or its recheck failed
@@ -251,10 +259,15 @@ pub struct Notice {
     pub subject: NoticeSubject,
     /// On the contact's copy: a freeze link excluding this factor
     pub freeze_link: Option<(OperatorFreezeLinkId, FactorId)>,
-    /// On the primary's copy of a held send's notice
+    /// On the primary's copy of a send's notice that offers cancelling: a
+    /// held send above 5, a covered burst, or a move
     pub cancel_link: Option<OperatorActionId>,
     /// Above 500: the contact also gets the count and the first names
     pub names: bool,
+    /// For a covered send above 5: its covered count
+    /// ([`SendPlan::covered_told`](super::SendPlan::covered_told)), on every
+    /// copy, so 6 can be told from 500
+    pub count: Option<u32>,
 }
 
 /// An `operator_actions` entry
@@ -584,6 +597,7 @@ impl<I: IdSource> Tx<'_, I> {
             freeze_link,
             cancel_link: None,
             names: false,
+            count: None,
         }));
     }
 
@@ -2116,6 +2130,12 @@ impl<I: IdSource> Tx<'_, I> {
         };
         self.tier_one(by, class)?;
         self.mode(class)?;
+        // Told by the covered rule alone: one held-style notice. A send that
+        // another rule announces isn't told twice
+        let covered_only = plan.announced_covered()
+            && !plan.announced_held()
+            && !plan.announced_now()
+            && !plan.announced_tapped();
         self.s.sends.insert(
             send,
             Send {
@@ -2128,19 +2148,33 @@ impl<I: IdSource> Tx<'_, I> {
                 admitted_at: self.now,
                 level,
                 announced: plan.announced(),
-                cancel_link: plan.announced_held(),
+                cancel_link: plan.announced_held() || covered_only,
+                covered: plan.covered,
+                covered_told: plan.covered_told(),
             },
         );
         let flag = self.s.factor_behind(by);
-        if plan.announced_held() {
+        let first_notice = self.effects.len();
+        // SPEC: decision 9, keep-warm: a covered burst is told like a held
+        // send, a cancel link to the operator and a freeze link to the
+        // contact; a send another rule announces gets its count instead
+        let like_held = if plan.announced_held() {
+            Some(NoticeSubject::SendHeld(send))
+        } else if covered_only {
+            Some(NoticeSubject::SendCovered(send))
+        } else {
+            None
+        };
+        if let Some(subject) = like_held {
             self.effects.push(Effect::Notice(Notice {
                 to: Audience::Primary,
-                subject: NoticeSubject::SendHeld(send),
+                subject,
                 freeze_link: None,
                 cancel_link: Some(send),
                 names: false,
+                count: None,
             }));
-            self.notify(Audience::Contact, NoticeSubject::SendHeld(send), flag);
+            self.notify(Audience::Contact, subject, flag);
         }
         if plan.announced_now() {
             self.notify(Audience::Both, NoticeSubject::SendNow(send), flag);
@@ -2157,8 +2191,18 @@ impl<I: IdSource> Tx<'_, I> {
                 }
             }
         }
+        self.count_notices(first_notice, plan.covered_told());
         self.log(OperatorActionKind::DmSend, flag, None);
         Ok(())
+    }
+
+    /// Put a covered send's count on every notice pushed since `first`
+    fn count_notices(&mut self, first: usize, count: Option<u32>) {
+        for e in self.effects.iter_mut().skip(first) {
+            if let Effect::Notice(n) = e {
+                n.count = count;
+            }
+        }
     }
 
     /// **SendForward**: earlier, by a YubiKey tap, which becomes what admitted it
@@ -2204,15 +2248,27 @@ impl<I: IdSource> Tx<'_, I> {
         // What it now does, so it counts toward later sends' immediate reach
         moved.delivery = Delivery::of(deliver_at, now, hold);
         moved.reach = widest(m.reach, at_new);
+        // SPEC: decision 9, keep-warm: whether it is covered is worked out
+        // again at the new time, with `covered`, as SendLater's plan does, so
+        // later covered sends count it there; it is always announced, so its
+        // count is told whenever it is above 5
+        let is_covered = covered(&m.recipients, deliver_at, &window);
+        let count = is_covered
+            .then(|| covered_reach(&m.recipients, deliver_at, &window))
+            .filter(|n| *n > UNTAPPED_REACH);
+        moved.covered = is_covered;
+        moved.covered_told = count;
         moved.admitted_by = AdmittedBy::Factor(t);
         moved.level = TapLevel::YubikeyTap;
         moved.announced = true;
+        let first_notice = self.effects.len();
         self.notify(Audience::Both, NoticeSubject::SendMoved(send), Some(t));
         if at_new.reach > NAMED_REACH
             && let Some(Effect::Notice(n)) = self.effects.last_mut()
         {
             n.names = true;
         }
+        self.count_notices(first_notice, count);
         self.log(OperatorActionKind::DmSend, Some(t), None);
         Ok(())
     }
@@ -2273,9 +2329,14 @@ impl<I: IdSource> Tx<'_, I> {
         // really waited its hold
         moved.delivery = plan.delivery;
         moved.reach = widest(m.reach, plan.reach);
+        moved.covered = plan.covered;
         let announced = m.announced || plan.announced();
+        // Told again with the count at the new time, when the move is announced
+        let count = plan.covered_count().filter(|_| announced);
+        moved.covered_told = count;
         moved.announced = announced;
         moved.cancel_link |= announced;
+        let first_notice = self.effects.len();
         if announced {
             let flag = admitter.filter(|f| self.s.effective(*f));
             self.effects.push(Effect::Notice(Notice {
@@ -2284,6 +2345,7 @@ impl<I: IdSource> Tx<'_, I> {
                 freeze_link: None,
                 cancel_link: Some(send),
                 names: false,
+                count: None,
             }));
             self.notify(
                 Audience::Contact,
@@ -2296,6 +2358,7 @@ impl<I: IdSource> Tx<'_, I> {
                 n.names = true;
             }
         }
+        self.count_notices(first_notice, count);
         self.log(OperatorActionKind::DmSend, mover, None);
         Ok(())
     }

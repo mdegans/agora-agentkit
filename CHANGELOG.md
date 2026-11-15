@@ -2,6 +2,46 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+- D9 keep-warm (Steward, 2026-11-14: announce, don't block): a **covered**
+  send (every agent already had a delivered message in its window, so its
+  reach is `|R_this|`) is announced when covered sends reach more than 5
+  distinct agents within a closed 24 h span on `deliver_at` that contains
+  it, and more than twice the largest covered count already told within
+  24 h either side on an untapped send (Steward, 2026-11-15: a told count
+  excuses later sends only if it was told on an untapped send, so a stolen
+  session can't ride the owner's tapped or held sends). Each covered send passed on its own size, so a session
+  could keep agents warm with daily chats of 5 and then reach them all in
+  a burst of small sends, untapped and unannounced (an independent
+  review's probe gathered 40). Now a growing gather is told each time it
+  doubles, and a steady conversation with 6 or more agents about once a
+  day. What stays quiet in 24 h is 5 agents by fresh sends plus 5 by
+  covered ones, and up to twice a count already told. It is told like a
+  held send above 5, a cancel link to the operator and a freeze link to
+  the contact, both with the count. A send another rule already announces
+  carries the count on its own notice and isn't told twice. Without a
+  qualifying contact the notice reaches the primary only, as a held send's
+  would; that is intended. It needs no tap and refuses nothing.
+  `covered_reach` is a sort and a sweep (O(m log m)).
+  - **Breaking:** new public fields on `WindowMessage` (`covered`,
+    `covered_told`, `level`), `SendPlan` (`covered`, `covered_reach`,
+    `covered_baseline`), `Notice` (`count`) and the model's `Send`
+    (`covered`, `covered_told`), so struct literals must name them; and a
+    new `NoticeSubject::SendCovered` variant.
+  - New: `covered`, `covered_reach`, `covered_baseline`, `feeds_baseline`
+    (only counts told on sends at `TapLevel::None`), `covered_span`,
+    `COVERED_GROWTH`, `SendPlan::{announced_covered, covered_told,
+    covered_count}`. `SendPlan::announced` includes the new case.
+  - **Server:** store `SendPlan::covered` and `SendPlan::covered_told` on
+    a send's messages at admission, and again at each move (SendLater
+    from its plan; SendForward recomputes with `covered` and
+    `covered_reach` at the new time). `WindowMessage::level` is the send's
+    level: the request's at admission, a YubiKey tap after a SendForward,
+    unchanged by a SendLater. Rows from before read `covered = false` and
+    `covered_told = None`, so for 24 h after the migration covered sends
+    are undercounted.
+
 ## 0.162.1 (2026-11-15)
 
 - `ui::ClientOnly`, `ClientSlot` and `ClientSlots`: client-only content
