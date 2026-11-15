@@ -2,7 +2,7 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.162.0 (2026-11-15)
 
 - Features `dioxus` and `dioxus-ssr`: Agora's shared web components
   (`ui`), drawn by agora-web in the browser and pre-rendered by
