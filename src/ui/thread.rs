@@ -11,6 +11,11 @@
 //! thousand replies deep is a thousand rows, not a thousand nested
 //! elements.
 //!
+//! Posts and comments are immutable (the Steward: "probably forever"):
+//! there is no edit to show, and a body in a page's data stays true, so a
+//! client may cache it. Deletion and removal are the exception: a deleted
+//! or removed item's text must never be drawn from a stale copy.
+//!
 //! A thread's notice (`PostResponse::notice`) is in the page's data, as
 //! the API serves it to anyone, but not drawn: where a reader meets
 //! notices is a later design (a notifications area). Its `locked` is
@@ -266,7 +271,6 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
         }
         label
     });
-    let edited = post.edited_at.filter(|_| !post.deleted).map(format::date);
     let comments = format::comment_count(comment_count as i64);
     let mut seen = HashSet::new();
     let tags: Vec<_> = if post.deleted {
@@ -312,10 +316,6 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                 if let Some(date) = date {
                     span { "·" }
                     span { "{date}" }
-                }
-                if let Some(edited) = edited {
-                    span { "·" }
-                    span { "edited {edited}" }
                 }
             }
             if let Some(d) = designation {
@@ -429,10 +429,6 @@ fn CommentRow(
         .as_ref()
         .map_or_else(|| UNATTRIBUTED.to_string(), ToString::to_string);
     let date = comment.created_at.map(format::date_time);
-    let edited = comment
-        .edited_at
-        .filter(|_| !comment.deleted)
-        .map(format::date);
     let target = ReplyTarget {
         post,
         parent: Some(comment.id),
@@ -454,10 +450,6 @@ fn CommentRow(
                 if let Some(date) = date {
                     span { "·" }
                     span { "{date}" }
-                }
-                if let Some(edited) = edited {
-                    span { "·" }
-                    span { "edited {edited}" }
                 }
             }
             if comment.deleted {
@@ -626,8 +618,11 @@ impl ThreadPage {
 /// `read` as an anonymous reader reads it, whoever asked: the fields that
 /// depend on the reader cleared. The post's `you_commented`; the author's
 /// `in_your_trash`, and with it the trashed text, which becomes the
-/// placeholder everyone else reads; the poll's `you` (eligibility and
-/// ballot). Nothing else in the read depends on who reads it
+/// placeholder everyone else reads; and the poll, whole: its options are
+/// in the reader's own order and numbering (`PollView::options`,
+/// `numbering`), which an anonymous view can't be rebuilt from, and no
+/// component draws a poll yet. Nothing else in the read depends on who
+/// reads it. Idempotent
 pub fn public_read(
     mut read: PostWithCommentsResponse,
 ) -> PostWithCommentsResponse {
@@ -640,10 +635,17 @@ pub fn public_read(
             .placeholder()
             .to_string();
     }
-    if let Some(poll) = &mut read.poll {
-        poll.you = None;
-    }
+    read.poll = None;
     read
+}
+
+impl super::island::Public for ThreadPage {
+    fn public(mut self) -> Self {
+        if let ThreadLoad::Loaded(read) = self.thread {
+            self.thread = ThreadLoad::Loaded(Box::new(public_read(*read)));
+        }
+        self
+    }
 }
 
 /// The thread island's root, on both sides: the [`ClientSlot::Session`]

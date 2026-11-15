@@ -27,6 +27,8 @@
 //!   `class`, and none has a `style` or `id`.
 //! - NUL is dropped from text (as a browser's parser drops it) and is
 //!   U+FFFD in a title (as it reads an attribute's).
+//! - Text the parser puts where a table's or list's parts go (it does,
+//!   after a table that ran out of padding) is drawn after the container.
 //!
 //! What keeps the server's tree the browser's (hydration adopts nodes by
 //! position, so the HTML parser must not restructure what was drawn):
@@ -43,13 +45,16 @@
 //! And what bounds the work and the page by the source's length, so a
 //! body is never a multiplier:
 //!
+//! - A body row's trailing empty cells are not drawn: the cells
+//!   pulldown-cmark adds to pad a short row to its header's width (a 4 KiB
+//!   table of 682 columns padded every row to 682 cells), and any empty
+//!   ones written at a row's end. Ragged rows are valid HTML and hydrate.
 //! - At most one element per byte of source, plus [`ELEMENT_ALLOWANCE`].
-//!   Every element a writer writes costs at least a byte; the cells
-//!   pulldown-cmark adds to pad a short row to its header's width cost
-//!   none, and are what this stops (a 4 KiB table of 682 columns padded
-//!   every row to 682 cells). Once spent, a row, cell or item is left out
-//!   with its contents (ragged rows are valid HTML), and any other element
-//!   is left out with its contents kept.
+//!   Every element a writer writes costs at least a byte, and padding is
+//!   given back when its row ends, so an honest body never meets this.
+//!   Where hostile input does: a row, cell or item is left out and its
+//!   text drawn after its table or list; any other element is left out
+//!   with its text kept in place. No text is dropped.
 //! - The bytes of `href`s and titles are bounded by three times the
 //!   source's length (percent-encoding triples a byte), so a reference
 //!   link used many times can't multiply the page past it. Past the bound
@@ -272,6 +277,12 @@ struct Builder {
     elements: usize,
     /// Bytes of `href`s and titles still allowed
     link_bytes: usize,
+    /// Text that had nowhere to go (in a part left out, or loose where a
+    /// table's or list's parts go), kept to be drawn after the container
+    spill: String,
+    /// How many elements were open when `spill` started: it is drawn once
+    /// the innermost of them closes
+    spill_at: Option<usize>,
 }
 
 /// `source`'s tree
@@ -295,6 +306,8 @@ impl Builder {
             skipping: 0,
             elements: len.saturating_add(ELEMENT_ALLOWANCE),
             link_bytes: len.saturating_mul(3),
+            spill: String::new(),
+            spill_at: None,
         }
     }
 
@@ -304,6 +317,9 @@ impl Builder {
         while !self.frames.is_empty() {
             self.end();
         }
+        let spill = std::mem::take(&mut self.spill);
+        self.spill_at = None;
+        self.text(&spill);
         self.root
     }
 
@@ -388,10 +404,10 @@ impl Builder {
             });
             return;
         };
-        // A table's or list's parts left out keep nothing (their text would
-        // be loose in a `<tr>` or `<ul>`), and nothing else goes where the
-        // parts go (pulldown-cmark puts the lines after a table that ran
-        // out of padding in it)
+        // A table's or list's part left out can't keep its text in place
+        // (it would be loose in a `<tr>` or `<ul>`): it is drawn after the
+        // container. Nothing else goes where the parts go (pulldown-cmark
+        // puts the lines after a table that ran out of padding in it)
         if self.flattening == 0
             && ((self.elements == 0 && kind.is_part()) || !self.fits(&kind))
         {
@@ -426,8 +442,29 @@ impl Builder {
                 if matches!(kind, Kind::Link { .. }) {
                     self.links -= 1;
                 }
+                let mut children = children;
+                if kind == Kind::Row {
+                    // The cells pulldown-cmark adds to pad a short row to
+                    // its header's width (and any written empty ones at
+                    // its end) are not drawn, and are given back: a writer's
+                    // own cells are charged, padding never is
+                    let written = children
+                        .iter()
+                        .rposition(|c| {
+                            !matches!(c, Node::Element(Kind::Cell { .. }, inner) if inner.is_empty())
+                        })
+                        .map_or(0, |i| i + 1);
+                    self.elements += children.len() - written;
+                    children.truncate(written);
+                }
                 // It was opened where it fits
                 self.children().push(Node::Element(kind, children));
+                // Text that had nowhere to go inside it follows it
+                if self.spill_at.is_some_and(|at| self.open.len() < at) {
+                    let spill = std::mem::take(&mut self.spill);
+                    self.spill_at = None;
+                    self.text(&spill);
+                }
             }
             Some(Frame::LeftOut { block, deep }) => {
                 if deep {
@@ -437,7 +474,15 @@ impl Builder {
                     self.line_break();
                 }
             }
-            Some(Frame::Skipped) => self.skipping -= 1,
+            Some(Frame::Skipped) => {
+                self.skipping -= 1;
+                // The words of two parts left out don't run together
+                if !self.spill.is_empty()
+                    && !self.spill.ends_with(char::is_whitespace)
+                {
+                    self.spill.push(' ');
+                }
+            }
             None => {}
         }
     }
@@ -473,13 +518,29 @@ impl Builder {
     fn push(&mut self, node: Node) {
         if self.skipping == 0 && self.holds_text() {
             self.children().push(node);
+            return;
         }
+        match node {
+            Node::Code(code) => self.spill(&code),
+            Node::Break => self.spill(" "),
+            Node::Rule => self.spill("\n"),
+            Node::Text(text) => self.spill(&text),
+            Node::Element(..) => {}
+        }
+    }
+
+    /// Keep `text` to draw after the container it couldn't go in
+    fn spill(&mut self, text: &str) {
+        if self.spill_at.is_none() {
+            self.spill_at = Some(self.open.len());
+        }
+        self.spill.push_str(text);
     }
 
     /// Text, joined to the text before it: one text node, not one per
     /// event (the parser splits text at entities and brackets)
     fn text(&mut self, text: &str) {
-        if text.is_empty() || self.skipping > 0 || !self.holds_text() {
+        if text.is_empty() {
             return;
         }
         let text: CowStr<'_> = if text.contains('\0') {
@@ -487,6 +548,10 @@ impl Builder {
         } else {
             text.into()
         };
+        if self.skipping > 0 || !self.holds_text() {
+            self.spill(&text);
+            return;
+        }
         let children = self.children();
         match children.last_mut() {
             Some(Node::Text(last)) => last.push_str(&text),
@@ -498,6 +563,9 @@ impl Builder {
     /// were left out there in a row
     fn line_break(&mut self) {
         if self.skipping > 0 || !self.holds_text() {
+            if !self.spill.is_empty() && !self.spill.ends_with('\n') {
+                self.spill("\n");
+            }
             return;
         }
         match self.children().last() {

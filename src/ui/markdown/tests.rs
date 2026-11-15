@@ -62,6 +62,13 @@ const DIFFERENCES: &[(&str, &str)] = &[
         r#"<pre><code class="language-rust">fn main() { println!("&lt;hi&gt;"); }
 </code></pre>"#,
     ),
+    // A body row's trailing empty cells (pulldown-cmark's padding, and any
+    // written empty ones at the end) aren't drawn, so padding can't
+    // multiply a page; ragged rows are valid HTML. The server draws them
+    (
+        "short rows and empty trailing cells",
+        "<table><thead><tr><th>a</th><th>b</th><th>c</th></tr></thead><tbody><tr><td>1</td></tr><tr><td>2</td></tr><tr><td></td><td>3</td></tr></tbody></table>",
+    ),
     (
         "markdown code block",
         r#"<pre><code class="language-markdown"># not a heading
@@ -720,7 +727,7 @@ fn a_structure_at_the_limit_is_left_out_whole() {
 
 /// Whatever the events, nothing goes where a table's or list's parts go:
 /// a paragraph or text the parser sends inside a table or a list (as it
-/// does after a table that ran out of padding) is left out
+/// does after a table that ran out of padding) is drawn after it, as text
 #[test]
 fn nothing_but_parts_go_in_a_table_or_list() {
     use pulldown_cmark::{Alignment, TagEnd};
@@ -767,7 +774,12 @@ fn nothing_but_parts_go_in_a_table_or_list() {
         check_markup(&html);
         let text = text_of(&html);
         assert!(text.contains("cell") && text.contains("item"), "{html}");
-        assert!(!text.contains("loose") && !text.contains("stray"), "{html}");
+        // Nothing is lost: what had nowhere to go follows its container
+        for word in ["loose", "in a table", "stray"] {
+            assert!(text.contains(word), "{word}: {html}");
+        }
+        let table_end = html.find("</table>").unwrap();
+        assert!(html.find("in a table").unwrap() > table_end, "{html}");
     }
 
     #[component]
@@ -835,9 +847,9 @@ fn ordinary_documents_keep_every_element() {
     assert!(elements(&nodes) < source.len());
 }
 
-/// Time to parse `source`, the least of three
+/// Time to parse `source`, the least of five
 fn time_to_parse(source: &str) -> Duration {
-    (0..3)
+    (0..5)
         .map(|_| {
             let started = Instant::now();
             std::hint::black_box(parse(source));
@@ -847,18 +859,28 @@ fn time_to_parse(source: &str) -> Duration {
         .unwrap()
 }
 
-/// Linear in the source: four times the input takes about four times as
-/// long, where a scan per event would take sixteen. A ratio, not a time,
-/// so a slow machine doesn't fail it
+/// Linear in the source: sixteen times the input takes about sixteen
+/// times as long, where a scan per event would take 256. A ratio of the
+/// best of five, not a time, and a wide one (fails at 64): on a loaded,
+/// shared box a ratio of a few is noise, a factor of sixteen isn't. The
+/// builder has no loop over its stacks to count instead
 #[test]
 fn building_is_linear() {
     for unit in ["- ", "> ", "*a ", "**a *b ", "[a](", "|"] {
-        let small = unit.repeat(16_384 / unit.len());
-        let large = unit.repeat(4 * 16_384 / unit.len());
+        let small = unit.repeat(8_192 / unit.len());
+        let large = unit.repeat(16 * 8_192 / unit.len());
         let (s, l) = (time_to_parse(&small), time_to_parse(&large));
         let ratio = l.as_secs_f64() / s.as_secs_f64().max(1e-6);
-        assert!(ratio < 9.0, "{unit:?}: {s:?} then {l:?} ({ratio:.1}x)");
+        assert!(ratio < 64.0, "{unit:?}: {s:?} then {l:?} ({ratio:.1}x)");
     }
+}
+
+/// The documented limit, exactly: a larger one must be measured against
+/// the stack again (`drawing_at_the_limit_fits_a_small_stack`) and the
+/// docs changed with it
+#[test]
+fn the_depth_limit_is_the_documented_one() {
+    assert_eq!(MAX_DEPTH, 32);
 }
 
 /// Drawing recurses once per level of the tree. At [`MAX_DEPTH`] it fits
@@ -1118,4 +1140,58 @@ fn a_preview_is_the_text_cut_at_a_word() {
     assert_eq!(plain_preview("ééééé", 3), "é…");
     // Raw HTML is left out, the text between its tags kept
     assert_eq!(plain_preview("<b>raw</b> text", 200), "raw  text");
+}
+
+/// A short table under a wide header, written honestly, then more: every
+/// row is drawn, and so is everything after it. The padding pulldown-cmark
+/// adds to each short row isn't drawn and costs nothing
+#[test]
+fn an_honest_ragged_table_keeps_every_row_and_what_follows() {
+    let mut source =
+        format!("{}|\n{}|\n", "| h ".repeat(12), "|---".repeat(12));
+    for i in 0..60 {
+        source.push_str(&format!("| row{i} |\n"));
+    }
+    source.push_str("\nAfter *the* [table](https://a.example).\n\n- one\n- two\n\n| x | y |\n|---|---|\n| second | table |\n");
+    assert!(source.len() < 1_000, "{}", source.len());
+    let html = render(&source);
+    check_markup(&html);
+    for i in 0..60 {
+        assert!(html.contains(&format!(">row{i}<")), "row{i}: {html}");
+    }
+    assert_eq!(html.matches("<td").count(), 60 + 2, "{html}");
+    for want in [
+        "<em",
+        "<a href=\"https://a.example\"",
+        "<li",
+        ">second<",
+        ">table<",
+    ] {
+        assert!(html.contains(want), "{want}: {html}");
+    }
+}
+
+/// Where the budget binds on hostile input, no text is lost: rows that
+/// can't be drawn have their words drawn after the table
+#[test]
+fn where_the_budget_binds_the_words_survive() {
+    // 4 KiB of a 682-column header, then one-cell rows, then a second table
+    let n = 682;
+    let mut source = format!("{}|\n{}|\n", "|".repeat(n), "|-".repeat(n));
+    let mut i = 0;
+    while source.len() < 4_000 {
+        source.push_str(&format!("w{i}\n"));
+        i += 1;
+    }
+    source.push_str("\n| x | y |\n|---|---|\n| second | table |\n");
+    let nodes = parse(&source);
+    assert!(elements(&nodes) <= source.len() + ELEMENT_ALLOWANCE);
+    let html = render(&source);
+    check_markup(&html);
+    let text = text_of(&html);
+    for j in 0..i {
+        assert!(text.contains(&format!("w{j}")), "w{j}");
+    }
+    assert!(text.contains("second") && text.contains("table"), "{html}");
+    assert!(html.len() < source.len() * 100, "{} bytes", html.len());
 }

@@ -670,29 +670,19 @@ fn the_island_round_trips_to_the_same_markup() {
     assert_eq!(pre_render(ThreadIsland, back), out.html);
 }
 
-/// The wire's edit dates, flag and filed category are drawn as the
-/// server's page draws them; a removed post or comment shows no edit
+/// The wire's flag and filed category are drawn as the server's page
+/// draws them
 #[test]
-fn edits_flags_and_a_filed_category_are_shown() {
+fn flags_and_a_filed_category_are_shown() {
     let mut read = read();
-    read.post.edited_at = Some("2026-11-05T10:00:00Z".parse().unwrap());
     read.post.flagged_for_review = true;
     read.post.is_proposal = true;
     read.post.proposal_category = Some(crate::enums::ProposalCategory::Routine);
-    read.comments[1].edited_at = Some("2026-11-06T10:00:00Z".parse().unwrap());
-    read.comments[2].edited_at = Some("2026-11-07T10:00:00Z".parse().unwrap());
     let html = island_of(page(&read));
-    assert!(html.contains(">edited Nov 05, 2026<"), "{html}");
-    assert!(html.contains(">edited Nov 06, 2026<"), "{html}");
-    // C2 is removed
-    assert!(!html.contains("Nov 07"), "{html}");
     assert!(
         html.contains(r#"class="pill pill-red""#) && html.contains(">Flagged<"),
         "{html}"
     );
     assert!(html.contains(">Proposal · routine<"), "{html}");
     crate::ui::parse_check::assert_hydratable(&html);
-    read.post.deleted = true;
-    let html = island_of(page(&read));
-    assert!(!html.contains("Nov 05"), "{html}");
 }

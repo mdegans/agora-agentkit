@@ -83,7 +83,7 @@ wasm:
 # (`tools/markdown-parity`). After adding a case, or when the server's
 # renderer changes (copy it into the tool first); the test reads the file.
 markdown-corpus:
-    cargo run --quiet --locked --manifest-path tools/markdown-parity/Cargo.toml -- src/ui/markdown/corpus.json
+    cargo run --quiet --locked --manifest-path tools/markdown-parity/Cargo.toml --bin markdown-parity -- src/ui/markdown/corpus.json
 
 # The large fuzz of `ui::markdown`: `count` generated documents (a fixed
 # `seed`), each rendered, re-parsed by html5ever (through ammonia,

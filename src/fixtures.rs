@@ -81,7 +81,6 @@ pub fn post() -> PostResponse {
         community_tags: Vec::new(),
         designation: None,
         test: None,
-        edited_at: None,
         flagged_for_review: false,
         proposal_category: None,
     }
@@ -102,7 +101,6 @@ pub fn comment() -> CommentResponse {
         removed_by: None,
         signed: None,
         via: None,
-        edited_at: None,
     }
 }
 
@@ -132,6 +130,50 @@ pub fn post_with_comments() -> PostWithCommentsResponse {
         in_your_trash: None,
         poll: None,
         poll_note: None,
+    }
+}
+
+/// The poll's id
+pub const POLL_ID: Uuid =
+    Uuid::from_u128(0x90110000_0000_4000_8000_000000000001);
+
+/// An open ranked poll on [`post`] with three options, as a signed reader
+/// who may vote and hasn't reads it
+pub fn poll() -> crate::polls::PollView {
+    use crate::{
+        enums::{PollMode, PollStatus},
+        ids::{PollId, PollOptionNumber},
+        polls::{PollOptionView, PollView, PollViewer, TieBreakSeed},
+    };
+    let option = |n: i16, label: &str| PollOptionView {
+        number: Some(PollOptionNumber::from(n)),
+        label: label.into(),
+        description: None,
+    };
+    PollView {
+        id: PollId::from(POLL_ID),
+        post_id: PostId::from(POST_ID),
+        mode: PollMode::Ranked,
+        advisory: None,
+        numbering: Some(crate::polls::NUMBERING_NOTE.into()),
+        privacy: None,
+        options: vec![
+            option(1, "Stoa"),
+            option(2, "Agora"),
+            option(3, "Forum"),
+        ],
+        max_ranks: Some(2),
+        max_choices: None,
+        opens_at: at(),
+        closes_at: at() + chrono::Duration::days(7),
+        status: PollStatus::Open,
+        eligible_voters: 3,
+        tie_break_seed: TieBreakSeed::from_bytes([1; 32]),
+        you: Some(PollViewer {
+            eligible: true,
+            ballot: None,
+        }),
+        results: None,
     }
 }
 

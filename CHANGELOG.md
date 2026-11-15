@@ -24,9 +24,14 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     link) inside a link is its text in the outer link, where the server's
     re-parse splits them; a repository's `agora://git/…` link goes to
     `/agora/git/…`, which redirects. Bounded by the source: nesting at
-    `MAX_DEPTH` (32, a table or list left out whole), at most one element
-    per byte plus `ELEMENT_ALLOWANCE` (pulldown-cmark's padding of short
-    table rows: a 4 KiB table drew 16 MB, now 240 KB), `href` and title
+    `MAX_DEPTH` (32, a table or list left out whole); a body row's
+    trailing empty cells (pulldown-cmark's padding of a short row, or
+    written ones) not drawn and not charged, so a 4 KiB table of 682
+    columns draws 81 KB, not 16 MB, and an honest ragged table keeps every
+    row; at most one element per byte plus `ELEMENT_ALLOWANCE`, past which
+    a row, cell or item is left out and its text drawn after its table or
+    list (no text is dropped; the same for text the parser puts loose in
+    a table or list); `href` and title
     bytes at three times the source, constant work per event (a 64 KiB
     list took 1.2 s, now 6 ms), text nodes cut at `TEXT_CHUNK` (16 KiB).
     NUL is dropped from text and is U+FFFD in titles. `to_html` (feature
@@ -61,22 +66,28 @@ Releases before 0.72.0 are described in their commit messages and PRs.
     the author's badges with their explanations (moved from agora-server's
     `web::badges`, one copy beside `author_labels`, which is now their
     labels), drawn as tooltips.
-  - The page types' constructors (`FeedPage::new`, `ThreadPage::loaded`,
-    `thread::public_read`) clear what depends on the reader
-    (`you_commented`; `in_your_trash`, with the trashed text it reveals;
-    a poll's `you`): a public page is an anonymous reader's.
-  - The thread page draws a post's "edited" date, the Flagged pill and
-    an author-filed proposal's category, and a comment's "edited" date.
+  - A page's data is the anonymous reader's view, enforced at render:
+    `island::Public` (implemented by `Page`, `FeedPage`, `ThreadPage`),
+    applied by `Page::render`, `ssr::render_island`,
+    `island::to_script_text` and `script_element` whatever the page was
+    built from (and by the constructors). It clears `you_commented`,
+    `in_your_trash` with the trashed text it reveals (the placeholder
+    instead), and drops the poll, whose options are in the reader's own
+    order and numbering, until a component draws one
+    (`thread::public_read`). `island::to_script_text` and
+    `script_element` now require `Public + Clone`.
+  - The thread page draws the Flagged pill and an author-filed proposal's
+    category. Posts and comments are immutable, so there is no "edited".
 - Wire types, all additive (defaulted, skipped when absent, so older JSON
   reads and older readers see nothing new; the server fills them later):
-  `PostResponse::{edited_at, flagged_for_review, proposal_category}`,
-  `CommentResponse::edited_at`, `CommunityResponse::is_premium`.
+  `PostResponse::{flagged_for_review, proposal_category}`,
+  `CommunityResponse::is_premium`.
   `CommunityResponse` derives `Clone` and `PartialEq` (props). **Breaking**
   for code building these with struct literals: use `fixtures` below, or
   add the fields.
 - `fixtures` (feature `test-fixtures`, for tests only, no dependencies;
   always on in this crate's tests): `post()`, `comment()`,
-  `comment_stub()`, `post_with_comments()`, `community()`, fixed ids and
+  `comment_stub()`, `post_with_comments()`, `community()`, `poll()`, fixed ids and
   dates, meant for struct update syntax, so a new wire field is added
   once. The tests that built these types field by field (in `responses`,
   `threads`, `ui`, and the seed's test modules, test code only) use them

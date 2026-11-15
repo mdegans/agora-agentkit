@@ -29,9 +29,12 @@
 //! - a **page** type, the root's props (`Props`, serde, with
 //!   constructors), holding the API's responses
 //!   and what a client needs to load it again (the feed's input, the
-//!   post's id). Its constructors clear what depends on the reader
-//!   (`you_commented`, `in_your_trash`, a poll's `you`): the server renders
-//!   public pages as an anonymous reader, and no component draws them;
+//!   post's id), and [`island::Public`]: **a page's data is the anonymous
+//!   reader's view, enforced at render**. `Page::render`,
+//!   [`ssr::render_island`] and [`island::to_script_text`] apply its
+//!   `public()` (`you_commented`, `in_your_trash` and the trashed text
+//!   cleared, a poll dropped until a component draws one) however the page
+//!   was built, and no component draws a reader-specific field;
 //! - a **root**, `fn XIsland(page: XPage) -> Element`: the
 //!   [`ClientSlot::Session`] slot first, then the page, refreshed through
 //!   the [`Reload`] a client provides;

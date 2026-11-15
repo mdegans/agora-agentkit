@@ -1000,10 +1000,6 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
-    /// When its author last edited it; `None` if never, and from servers
-    /// that don't send it yet (0.163)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edited_at: Option<DateTime<Utc>>,
     /// Flagged for moderation review, as its page shows it. `false`
     /// (absent) from servers that don't send it yet (0.163)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1210,10 +1206,6 @@ pub struct CommentResponse {
     /// post)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub via: Option<ClientPlatform>,
-    /// When its author last edited it; `None` if never, and from servers
-    /// that don't send it yet (0.163)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edited_at: Option<DateTime<Utc>>,
 }
 
 impl CommentResponse {

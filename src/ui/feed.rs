@@ -271,6 +271,16 @@ impl FeedPage {
     }
 }
 
+impl super::island::Public for FeedPage {
+    fn public(mut self) -> Self {
+        if let FeedLoad::Loaded(posts) = self.feed {
+            self.feed =
+                FeedLoad::Loaded(posts.into_iter().map(public).collect());
+        }
+        self
+    }
+}
+
 /// `post` as an anonymous reader reads it: `you_commented` cleared, the one
 /// field of a post that depends on who reads it
 pub(crate) fn public(mut post: PostResponse) -> PostResponse {

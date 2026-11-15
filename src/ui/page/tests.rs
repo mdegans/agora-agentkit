@@ -326,3 +326,88 @@ fn the_data_block_is_the_responses() {
     assert!(feed_json.len() < posts_json.len() + 256);
     assert!(thread_json.len() < read_json.len() + 256);
 }
+
+/// A page built by struct literal from a signed reader's read (not through
+/// the constructors) still renders and embeds nothing of the reader's:
+/// the public form is applied where the page is rendered
+#[test]
+fn a_readers_data_never_reaches_a_rendered_page() {
+    use crate::fixtures;
+    let mut read = PostWithCommentsResponse {
+        post: PostResponse {
+            you_commented: true,
+            deleted: true,
+            removed_by: Some(crate::enums::RemovedBy::Author),
+            body: "SECRET-TRASHED-WORDS".into(),
+            ..fixtures::post()
+        },
+        poll: Some(crate::polls::PollView {
+            options: vec![crate::polls::PollOptionView {
+                number: Some(crate::ids::PollOptionNumber::from(1)),
+                label: "SECRET-OPTION-ORDER".into(),
+                description: None,
+            }],
+            ..fixtures::poll()
+        }),
+        ..fixtures::post_with_comments()
+    };
+    read.in_your_trash = Some(
+        serde_json::from_value(serde_json::json!({
+            "entry_id": uuid::Uuid::from_u128(1),
+            "id": read.post.id,
+            "kind": "post",
+            "post_id": read.post.id,
+            "created_at": "2026-11-04T08:00:00Z",
+            "deleted_at": "2026-11-04T09:00:00Z",
+            "deleted_by": "author",
+            "can_restore": true,
+            "can_delete_permanently": true,
+            "excerpt": "SECRET-EXCERPT",
+        }))
+        .unwrap(),
+    );
+    let thread = Page::Thread(ThreadPage {
+        post: read.post.id,
+        thread: ThreadLoad::Loaded(Box::new(read)),
+    });
+    let feed = Page::Feed(FeedPage {
+        feed: FeedLoad::Loaded(vec![PostResponse {
+            you_commented: true,
+            ..fixtures::post()
+        }]),
+        input: GetFeedInput::default(),
+        community: None,
+        total: None,
+    });
+    for page in [thread, feed] {
+        let rendered = page.render().unwrap();
+        for secret in [
+            "SECRET",
+            "you_commented",
+            "in_your_trash",
+            "\"poll\"",
+            "tie_break_seed",
+        ] {
+            assert!(
+                !rendered.html.contains(secret),
+                "{secret}: {}",
+                rendered.html
+            );
+            assert!(
+                !rendered.script.contains(secret),
+                "{secret}: {}",
+                rendered.script
+            );
+        }
+    }
+    // And the low-level hand-off applies it too
+    let text = island::to_script_text(&ThreadPage {
+        post: fixtures::post().id,
+        thread: ThreadLoad::Loaded(Box::new(PostWithCommentsResponse {
+            poll: Some(fixtures::poll()),
+            ..fixtures::post_with_comments()
+        })),
+    })
+    .unwrap();
+    assert!(!text.contains("tie_break_seed"), "{text}");
+}

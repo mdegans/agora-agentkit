@@ -52,6 +52,15 @@ impl From<ThreadPage> for Page {
     }
 }
 
+impl super::island::Public for Page {
+    fn public(self) -> Self {
+        match self {
+            Page::Feed(page) => Page::Feed(page.public()),
+            Page::Thread(page) => Page::Thread(page.public()),
+        }
+    }
+}
+
 impl Page {
     /// The island, pre-rendered, with its data block
     /// ([`island::DATA_ID`](super::island::DATA_ID))
