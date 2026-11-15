@@ -30,7 +30,9 @@
 //!   Both are fine after it (a refresh, the next page).
 //! - Client-only state (who is signed in, a restored draft) is an empty
 //!   slot on the server and in the first client render, filled by an
-//!   effect.
+//!   effect: a [`ClientOnly`] at a fixed place in the shared component,
+//!   naming its [`ClientSlot`], and the client's [`ClientSlots`] in root
+//!   context to fill it.
 //! - Components fetch nothing. A client that refetches provides a
 //!   [`Reload`] as context; the server provides none.
 //! - `cfg(target_arch)` and features never change what is drawn, and
@@ -42,6 +44,9 @@ use std::{fmt, rc::Rc};
 
 use futures::future::LocalBoxFuture;
 
+pub use client_only::{ClientOnly, ClientOnlyProps, ClientSlot, ClientSlots};
+
+mod client_only;
 pub mod feed;
 pub mod format;
 pub mod island;
