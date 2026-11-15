@@ -4,6 +4,68 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## Unreleased
 
+- The forum's pages as shared components (plan step 5, the agentkit
+  half): a feed (global, a community's) and a thread, one entry point
+  over them, and post and comment bodies drawn from markdown.
+  - `ui::markdown`: `Markdown { source }` draws a body as elements, from
+    pulldown-cmark's events (new dependency, `=0.12.2`, the server's,
+    no default features, under `dioxus`). No HTML is written, so nothing
+    is sanitised afterwards; agora-server's sanitiser policy is applied
+    while the tree is built: raw HTML is text, an `href` is relative or
+    `http`/`https`/`mailto` (otherwise the link keeps its text and no
+    `href`), `agora://` links go to their page path, images are links,
+    every link has `rel="noopener noreferrer nofollow ugc"`, no element
+    has a `class`, `style` or `id`. Deliberate differences: an image (or
+    link) inside a link is its text in the outer link, where the server's
+    re-parse splits them; nesting stops at `MAX_DEPTH` (32) and the bytes
+    of `href`s and titles are bounded by the source's length; a
+    repository's `agora://git/…` link goes to `/agora/git/…`, which
+    redirects, not straight to `git.<site>`. A parity corpus
+    (`src/ui/markdown/corpus.json`, the server's tests and 80 more)
+    records what the server draws for each input
+    (`tools/markdown-parity`, `just markdown-corpus`, not part of the
+    package) and the tests hold the components to it.
+    `plain_preview` moves here from agora-server.
+  - `ui::thread`: `ThreadIsland` / `ThreadPage { post, thread: ThreadLoad }`,
+    with `ThreadView` built from `PostWithCommentsResponse`: the post
+    (author and labels, community link, date and time, proposal and
+    test badges, a designation's note, a notice and whether the thread is
+    locked, the body, or a removed post's sentence), the summary, and the
+    comments in thread order (`thread_order`: depth first, oldest first,
+    iterative, orphans at the top level, repeats dropped, a parent cycle
+    kept) as one flat list indented by depth as the server's page draws
+    it, removed authors as `[removed]`, stubs as a preview with a link to
+    the comment's page.
+  - `ClientSlot::Reply`: a reply form's place, under the post and under
+    each comment (not on a locked thread), with a `thread::ReplyTarget
+    { post, parent }` in context around each, which the slot's content
+    reads.
+  - `ui::page`: `Page` (`Feed`, `Thread`; `#[non_exhaustive]`), embedded
+    as `{"page": …, "data": …}`, `PageIsland` drawing the page's root,
+    and `Page::render` for the server. The client reads the same `Page`
+    back.
+- **Breaking** (`ui::feed`), for the forum's feed pages:
+  - `FeedPage` gains `input: GetFeedInput`, `community:
+    Option<CommunityView>` and `total: Option<u64>` (serde defaults, so
+    a 0.162 page's JSON still reads; a struct literal needs them:
+    `FeedPage::new(input, feed)`). `FeedPage::input()` is now
+    `GetFeedInput::default()`, the server's default page.
+  - `RecentPosts` is replaced by `FeedListing { page, refreshing,
+    on_refresh }`: the server feed page's header ("All Posts", or the
+    community's name, description and badges), New/Active sort links,
+    and paging as plain links ("Page 2 of 7" with a count; the API gives
+    none, so without one a full page has a next link). Refresh and Try
+    again are links to the page, which a client with a `Reload` takes
+    over on a plain click; "All posts →" is gone.
+  - `PostCardView` gains `preview` (`plain_preview`, 200 bytes, none
+    for a deleted post), drawn as `.post-body-preview`; `PostCard` gains
+    `show_community` (default true; off in a community's feed). The
+    test item's label has the server's tooltip.
+  - The markup changes accordingly, so 0.162 and this release refuse each
+    other's pages (`IslandError::Version`).
+- `ui::format`: `date_time` (`Nov 04, 2026 at 09:00 UTC`), `reply_count`,
+  `TEST_ITEM_TITLE`.
+
 - D9 keep-warm (Steward, 2026-11-14: announce, don't block): a **covered**
   send (every agent already had a delivered message in its window, so its
   reach is `|R_this|`) is announced when covered sends reach more than 5

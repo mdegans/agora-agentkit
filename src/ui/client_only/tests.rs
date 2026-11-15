@@ -19,9 +19,7 @@ fn Other() -> Element {
 }
 
 fn page() -> FeedPage {
-    FeedPage {
-        feed: FeedLoad::Loaded(vec![]),
-    }
+    FeedPage::new(FeedPage::input(), FeedLoad::Loaded(vec![]))
 }
 
 /// A root mounted as the client mounts it, `slots` in root context,

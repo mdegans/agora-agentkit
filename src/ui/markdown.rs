@@ -1,7 +1,7 @@
 //! Post and comment bodies: markdown drawn as Dioxus elements.
 //!
-//! pulldown-cmark's events are folded into a small tree ([`Node`]) and each
-//! node is drawn by [`node`], one `rsx!` per element. Nothing writes HTML,
+//! pulldown-cmark's events are folded into a small tree (`Node`) and each
+//! node is drawn by `node`, one `rsx!` per element. Nothing writes HTML,
 //! so there is nothing to sanitise afterwards: every text and attribute
 //! value is set as a value, and dioxus-ssr escapes it. What agora-server's
 //! sanitiser decides (`web::markdown::render`: pulldown-cmark, then a
