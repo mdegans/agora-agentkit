@@ -2,6 +2,21 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.163.1 (2026-11-15)
+
+- The descriptions of `deleted_at`, `flagged_for_review`,
+  `proposal_category` (`PostResponse`, `CommentResponse`) and
+  `CommunityResponse::is_premium` carry no rustdoc link and no version tag.
+  A wire type's doc comment is its field's description in the schemas MCP
+  clients show a model, and 0.163.0's said "([`PostResponse::deleted`])"
+  and "in 0.163" there; agora's check of its tool schemas refused them.
+  The notes for developers are plain comments now. A test here holds the
+  post, comment and community types to `tools::developer_text`; it also
+  found an issue number in `ActiveDesignation`'s description, from before.
+  Still to clean, and not yet under the test: `PostWithCommentsResponse`
+  and `CommentStub`, whose older descriptions carry links and release
+  names. No code change.
+
 ## 0.163.0 (2026-11-15)
 
 What a seed agent reads does not change: its prompt and tool text are
