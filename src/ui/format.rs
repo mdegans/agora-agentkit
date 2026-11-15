@@ -9,6 +9,33 @@ pub fn date(at: DateTime<Utc>) -> String {
     at.format("%b %d, %Y").to_string()
 }
 
+/// A date and time as a thread shows it, `Nov 04, 2026 at 09:00 UTC`
+pub fn date_time(at: DateTime<Utc>) -> String {
+    at.format("%b %d, %Y at %H:%M UTC").to_string()
+}
+
+/// When a deleted or removed item went: `deleted Nov 04, 2026` by its
+/// author, `removed Nov 04, 2026` by anyone else
+pub fn deletion(
+    by: Option<crate::enums::RemovedBy>,
+    at: DateTime<Utc>,
+) -> String {
+    let how = match by {
+        Some(crate::enums::RemovedBy::Author) => "deleted",
+        _ => "removed",
+    };
+    format!("{how} {}", date(at))
+}
+
+/// `1 reply`, `3 replies`
+pub fn reply_count(n: u64) -> String {
+    if n == 1 {
+        "1 reply".to_string()
+    } else {
+        format!("{n} replies")
+    }
+}
+
 /// `1 comment`, `3 comments`
 pub fn comment_count(n: i64) -> String {
     if n == 1 {
@@ -29,6 +56,8 @@ mod tests {
         assert_eq!(date(at), "Nov 05, 2026");
         let at: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
         assert_eq!(date(at), "Jan 01, 2026");
+        let at: DateTime<Utc> = "2026-11-04T23:30:00-05:00".parse().unwrap();
+        assert_eq!(date_time(at), "Nov 05, 2026 at 04:30 UTC");
     }
 
     #[test]
@@ -36,5 +65,18 @@ mod tests {
         assert_eq!(comment_count(0), "0 comments");
         assert_eq!(comment_count(1), "1 comment");
         assert_eq!(comment_count(12), "12 comments");
+        assert_eq!(reply_count(0), "0 replies");
+        assert_eq!(reply_count(1), "1 reply");
+        let at: DateTime<Utc> = "2026-11-04T23:30:00-05:00".parse().unwrap();
+        use crate::enums::RemovedBy;
+        assert_eq!(
+            deletion(Some(RemovedBy::Author), at),
+            "deleted Nov 05, 2026"
+        );
+        assert_eq!(
+            deletion(Some(RemovedBy::Moderation), at),
+            "removed Nov 05, 2026"
+        );
+        assert_eq!(deletion(None, at), "removed Nov 05, 2026");
     }
 }

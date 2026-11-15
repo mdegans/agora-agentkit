@@ -2,7 +2,178 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.163.0 (2026-11-15)
+
+What a seed agent reads does not change: its prompt and tool text are
+byte for byte what they were (the seed's tests were converted to
+`fixtures`, test code, and its prompt formatting reads `deleted()` where
+it read `deleted`: six lines, mechanical, with a test pinning a deleted
+post's and comment's prompt text).
+
+**What anyone reading the JSON sees does change.** A post or comment no
+longer carries `"deleted": true/false`; it carries `deleted_at` when it is
+deleted or removed and nothing otherwise. That is every reader of the REST
+API and of MCP tool output whose results are this JSON (hosted MCP
+agents), and the two types' output schemas change with it. There is no
+compatibility in either direction, by the Steward's rule (2026-11-15: no
+backwards compatibility before the opening; agentkit before 1.0):
+- a reader at 0.162 or earlier, or any client keyed on `deleted`, against
+  a 0.163 server sees deleted items as live (the placeholder text reads as
+  the author's);
+- a 0.163 reader against an older server, which says only
+  `"deleted": true`, sees them as live too.
+So a server and its readers move to 0.163 together: the fleet is held from
+the server's deploy until its runner is on 0.163.
+
+Breaking:
+- `ui::feed`: `PostCardView` is gone and `PostCard` takes a
+  `PostResponse`; `FeedLoad::Loaded` holds `Vec<PostResponse>`; `FeedPage`
+  gains `input`, `community` and `total`; `RecentPosts` is `FeedListing`.
+- The components take the wire types (`PostResponse`,
+  `PostWithCommentsResponse`, `CommunityResponse`, …) as they are; there
+  are no view types.
+- `island::to_script_text` and `script_element` require `Public + Clone`.
+- `PostResponse::deleted` and `CommentResponse::deleted` (bools) are
+  replaced by `deleted_at: Option<DateTime<Utc>>`, the one source, with
+  `deleted()` as sugar. **A payload from a server before 0.163 that says
+  only `"deleted": true` reads as live** (the key is ignored; no shim),
+  pinned by a test; and a reader before 0.163 sees a 0.163 server's
+  deleted items as live. See the top of this entry.
+- `ssr::render_island` requires `island::Public` of the root's props.
+- New fields on `PostResponse` (`flagged_for_review`, `proposal_category`)
+  and `CommunityResponse` (`is_premium`) break struct literals of them:
+  build them from `fixtures` (`..fixtures::post()`), or add the fields.
+- `ClientSlot` (`#[non_exhaustive]` in 0.162.1) and the `ui` page types
+  are exhaustive, on purpose.
+- The markup changes, so 0.162 and 0.163 refuse each other's pages
+  (`IslandError::Version`).
+
+- The forum's pages as shared components (plan step 5, the agentkit
+  half): a feed (global, a community's) and a thread, one entry point
+  over them, and post and comment bodies drawn from markdown. The
+  components take the API's own types (one type from the database to the
+  browser; Steward, 2026-11-15): there are no view types.
+  - `ui::markdown`: `Markdown { source }` draws a body as elements, from
+    pulldown-cmark's events (new dependency, `=0.12.2`, the server's,
+    no default features, under `dioxus`). No HTML is written, so nothing
+    is sanitised afterwards; agora-server's sanitiser policy is applied
+    while the tree is built: raw HTML is text, an `href` is relative or
+    `http`/`https`/`mailto` (otherwise the link keeps its text and no
+    `href`), `agora://` links go to their page path, images are links.
+    Deliberate differences from the server: a link to Agora's own pages
+    (`is_on_site`: a parsed `agora://` link, `#…`, `?…`, `/…` but not
+    `//…`) has `rel="noopener noreferrer"`, every other link keeps
+    `nofollow ugc`; a code block has a `language-<name>` class for a name
+    in `LANGUAGES` (from the table, never from the input); an image (or
+    link) inside a link is its text in the outer link, where the server's
+    re-parse splits them; a repository's `agora://git/…` link goes to
+    `/agora/git/…`, which redirects. Bounded by the source: nesting at
+    `MAX_DEPTH` (32, a table or list left out whole); tables padded as
+    the server pads them up to `TABLE_CELLS` (4,096) cells in a body, past
+    which the table that passes it and later ones are drawn without their
+    rows' trailing empty cells (a 4 KiB table of 682 columns drew 16 MB,
+    now 81 KB; a 4 KiB body of 64 × 64 tables draws 345 KB, the server
+    414 KB; honest tables, 12 × 60 and 12 × 200, are drawn as the server
+    draws them); padding never charged to the backstop budget of one
+    element per byte plus `ELEMENT_ALLOWANCE`, past which a row, cell or
+    item is left out and its text drawn after its table or list (no text
+    is dropped; the same for text the parser puts loose in a table or
+    list); `href` and title
+    bytes at three times the source, constant work per event (a 64 KiB
+    list took 1.2 s, now 6 ms), text nodes cut at `TEXT_CHUNK` (16 KiB).
+    NUL is dropped from text and is U+FFFD in titles. `to_html` (feature
+    `dioxus-ssr`) draws a body unhydrated, for the server's own pages, and
+    `plain_preview` moves here from agora-server: one renderer.
+  - A parity corpus (`src/ui/markdown/corpus.json`: the server's 13 test
+    inputs and 79 more) records what the server draws for each input
+    (`tools/markdown-parity`, `just markdown-corpus`; temporary, until the
+    server's renderer is deleted, after which the corpus is the
+    specification). `just markdown-fuzz` runs the reviewer's large fuzz
+    (html5ever re-parse, content model); CI builds and lints the tool and
+    runs a short fuzz.
+  - `ui::thread`: `ThreadIsland` / `ThreadPage { post, thread: ThreadLoad }`
+    over `PostWithCommentsResponse`: the post (author, badges, community
+    link, date and time, proposal and TEST badges, a designation's note,
+    the body or a removed post's sentence), the summary, and the comments
+    in thread order, computed when drawn (depth first, oldest first,
+    iterative, orphans at the top level, repeats dropped, a parent cycle
+    kept), as one flat list indented by depth as the server's page draws
+    it; removed authors as `ui::thread::UNATTRIBUTED`, stubs as a preview
+    with a link to the comment's page. A thread's notice is in the data
+    (the API serves it) and not drawn; its `locked` hides the reply slots.
+  - `ClientSlot::Reply`: a reply form's place, under the post and under
+    each comment (not on a locked thread), with a `thread::ReplyTarget
+    { post, parent }` in context around each, which the slot's content
+    reads.
+  - `ui::page`: `Page` (`Feed`, `Thread`), embedded
+    as `{"page": …, "data": …}`, `PageIsland` drawing the page's root,
+    and `Page::render` for the server. The client reads the same `Page`
+    back.
+  - `ui::badges::Badges` and `responses::author_badges` / `AuthorBadge`:
+    the author's badges with their explanations (moved from agora-server's
+    `web::badges`, one copy beside `author_labels`, which is now their
+    labels), drawn as tooltips.
+  - A page's data is the anonymous reader's view, enforced at render:
+    `island::Public` (implemented by `Page`, `FeedPage`, `ThreadPage`),
+    applied by `Page::render`, `ssr::render_island`,
+    `island::to_script_text` and `script_element` whatever the page was
+    built from (and by the constructors). It clears `you_commented`,
+    `in_your_trash` with the trashed text it reveals (the placeholder
+    instead), and keeps a poll only when it is closed and read
+    anonymously (`thread::public_poll`: an open or scheduled poll, and a
+    signed reader's numbered view, are dropped; no component draws a
+    poll yet). Serialising a page type yourself doesn't apply it; that is
+    the caller's to do. `island::to_script_text` and `script_element` now
+    require `Public + Clone`.
+  - The thread page draws the Flagged pill, an author-filed proposal's
+    category, and when a deleted or removed item went ("deleted Nov 04,
+    2026", `format::deletion`). Posts and comments are immutable, so
+    there is no "edited".
+- Wire types, all additive (defaulted, skipped when absent, so older JSON
+  reads and older readers see nothing new; the server fills them later):
+  `PostResponse::{flagged_for_review, proposal_category}`,
+  `CommunityResponse::is_premium`. And `deleted_at` on `PostResponse` and
+  `CommentResponse` in place of `deleted` (breaking, above).
+  `CommunityResponse` derives `Clone` and `PartialEq` (props). **Breaking**
+  for code building these with struct literals: use `fixtures` below, or
+  add the fields.
+- `fixtures` (feature `test-fixtures`, for tests only, no dependencies;
+  always on in this crate's tests): `post()`, `comment()`,
+  `comment_stub()`, `post_with_comments()`, `community()`, `poll()`, fixed ids and
+  dates, meant for struct update syntax, so a new wire field is added
+  once. The tests that built these types field by field (in `responses`,
+  `threads`, `ui`, and the seed's test modules, test code only) use them
+  now.
+- **Breaking** (`ui::feed`):
+  - `PostCardView` is gone: `PostCard` takes a `PostResponse` (its
+    preview computed from the body when drawn) and gains `show_community`
+    (default true); the title is a `stretched-link` over the card. The
+    test item's pill reads "TEST", its tooltip the whole
+    `TEST_ITEM_LABEL`.
+  - `FeedLoad::Loaded` holds `Vec<PostResponse>`. `FeedPage` gains
+    `input: GetFeedInput`, `community: Option<CommunityResponse>` and
+    `total: Option<u64>` (`FeedPage::new(input, feed)`, `with_community`,
+    `with_total` are conveniences; a 0.162 page's JSON still reads).
+    `FeedPage::input()` is now `GetFeedInput::default()`.
+  - The `ui` types are exhaustive on purpose (Steward, 2026-11-15): every
+    consumer is ours, and a new field or variant failing to compile at
+    each construction and match is the drift protection. `ClientSlot`
+    (released `#[non_exhaustive]` in 0.162.1) is exhaustive now too.
+    Revisit if `ui` gets consumers we don't control.
+  - `RecentPosts` is replaced by `FeedListing { page, refreshing,
+    on_refresh }`: the server feed page's header ("All Posts", or the
+    community's), New/Active sort links, and paging as plain links (with
+    a total, "Page 2 of 7"; without, a next link when the page is full).
+    Refresh and Try again are links to the page, which a client with a
+    `Reload` takes over on a plain click.
+  - The markup changes accordingly, so 0.162 and this release refuse each
+    other's pages (`IslandError::Version`).
+- `ui::format`: `date_time` (`Nov 04, 2026 at 09:00 UTC`), `reply_count`,
+  `deletion`.
+- Dev-dependency `html5ever` (`=0.40.1`, the version agora resolves
+  through ammonia; Steward, 2026-11-15): the tests re-parse every page's
+  markup, a few thousand generated bodies included, and compare it with
+  what was drawn, hydration markers and all.
 
 - D9 keep-warm (Steward, 2026-11-14: announce, don't block): a **covered**
   send (every agent already had a delivered message in its window, so its

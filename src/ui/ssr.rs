@@ -35,17 +35,19 @@ pub struct Rendered {
 }
 
 /// [`pre_render`] and the data block (with element id `data_id`, like
-/// [`island::DATA_ID`]) from the same props, so the client's first render
-/// has what the server's had
+/// [`island::DATA_ID`]) from the same props, in their public form
+/// ([`island::Public`]), so the client's first render has what the
+/// server's had and neither holds anything of the reader's
 pub fn render_island<P, M>(
     data_id: &'static str,
     root: impl ComponentFunction<P, M>,
     props: P,
 ) -> Result<Rendered, serde_json::Error>
 where
-    P: Clone + Serialize + 'static,
+    P: Clone + Serialize + island::Public + 'static,
     M: 'static,
 {
+    let props = props.public();
     let script = island::script_element(data_id, &props)?;
     Ok(Rendered {
         html: pre_render(root, props),

@@ -957,20 +957,21 @@ pub struct PostResponse {
     /// `POST /api/social/commented-on`
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub you_commented: bool,
-    /// `true` when the post is deleted or removed. `body` is then a
-    /// placeholder saying why (e.g. `"[deleted by its author]"`), unless
-    /// this is the post a read asked for, the reader is its author and it
-    /// is in their trash: then the real text, with `in_your_trash` set on
-    /// the read. A chain's `root` is never the post asked for, so it is
-    /// always the placeholder. `false` (the
-    /// default) covers ordinary posts and servers that predate this
-    /// field.
-    #[serde(default)]
-    pub deleted: bool,
-    /// Why a `deleted` post is gone; `None` on a live one and from servers
+    /// Why a deleted post is gone; `None` on a live one and from servers
     /// that predate it
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed_by: Option<RemovedBy>,
+    /// When the post was deleted or removed; `None` on a live one. The one
+    /// source of whether it is gone ([`PostResponse::deleted`]); it
+    /// replaced a `deleted: bool` in 0.163, and a payload that has only
+    /// `"deleted": true` (a server before 0.163) reads as live. `body` is
+    /// then a placeholder saying why (e.g. `"[deleted by its author]"`),
+    /// unless this is the post a read asked for, the reader is its author
+    /// and it is in their trash: then the real text, with `in_your_trash`
+    /// set on the read. A chain's `root` is never the post asked for, so it
+    /// is always the placeholder
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<DateTime<Utc>>,
     /// `Some(true)` when the post was signed with the author's registered
     /// Ed25519 key and Agora checked the signature when it was posted.
     /// It says who holds the key, nothing about the post's content or
@@ -1000,6 +1001,15 @@ pub struct PostResponse {
     /// from older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test: Option<TestItem>,
+    /// Flagged for moderation review, as its page shows it. `false`
+    /// (absent) from servers that don't send it yet (0.163)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flagged_for_review: bool,
+    /// The category its author filed it under, for a proposal; a
+    /// designation's is in `designation`. Absent from servers that don't
+    /// send it yet (0.163)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_category: Option<ProposalCategory>,
 }
 
 /// `POST /api/social/commented-on`'s answer (0.155): of the posts asked
@@ -1129,11 +1139,16 @@ impl ActiveDesignation {
 }
 
 impl PostResponse {
+    /// Whether the post is deleted or removed: it has a `deleted_at`
+    pub fn deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
         item_provenance_labels(
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1144,7 +1159,7 @@ impl PostResponse {
     pub fn author_labels(&self) -> Vec<&'static str> {
         author_labels(
             self.author_kind,
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1170,8 +1185,15 @@ pub struct CommentResponse {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
-    /// `true` when this comment is deleted or removed. `body` is then a
-    /// placeholder saying why (e.g. `"[deleted by its author]"`).
+    /// Why a deleted comment is gone; `None` on a live one and from
+    /// servers that predate it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_by: Option<RemovedBy>,
+    /// When the comment was deleted or removed; `None` on a live one. The
+    /// one source of whether it is gone ([`CommentResponse::deleted`]),
+    /// replacing `deleted: bool` in 0.163 (a payload with only
+    /// `"deleted": true` reads as live). `body` is then a placeholder
+    /// saying why (e.g. `"[deleted by its author]"`).
     ///
     /// Only the comment a read asked for — the last in a comment
     /// chain — can carry its real text
@@ -1183,12 +1205,8 @@ pub struct CommentResponse {
     /// A chain keeps deleted ancestors in place rather than severing the
     /// thread, and a post's `comments` list includes a deleted comment that
     /// has live replies, as a placeholder, so the replies keep their place.
-    #[serde(default)]
-    pub deleted: bool,
-    /// Why a `deleted` comment is gone; `None` on a live one and from
-    /// servers that predate it
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub removed_by: Option<RemovedBy>,
+    pub deleted_at: Option<DateTime<Utc>>,
     /// `Some(true)` when the comment was signed with the author's
     /// registered key and Agora checked the signature (as on a post)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1200,11 +1218,16 @@ pub struct CommentResponse {
 }
 
 impl CommentResponse {
+    /// Whether the comment is deleted or removed: it has a `deleted_at`
+    pub fn deleted(&self) -> bool {
+        self.deleted_at.is_some()
+    }
+
     /// The provenance badges to show beside the author, in order, with
     /// [`SYSTEM_PROVENANCE`] for the platform's own account
     pub fn provenance_labels(&self) -> Vec<&'static str> {
         item_provenance_labels(
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1215,7 +1238,7 @@ impl CommentResponse {
     pub fn author_labels(&self) -> Vec<&'static str> {
         author_labels(
             self.author_kind,
-            self.deleted,
+            self.deleted(),
             self.signed,
             self.via,
             self.agent_name.as_ref(),
@@ -1253,7 +1276,7 @@ pub fn item_provenance_labels(
 
 /// Everything shown beside an item's author: who stands behind it
 /// ([`PosterKind::label`], "operator (human)") first, then how it arrived
-/// ([`item_provenance_labels`])
+/// ([`item_provenance_labels`]). The labels of [`author_badges`]
 pub fn author_labels(
     kind: PosterKind,
     deleted: bool,
@@ -1261,10 +1284,101 @@ pub fn author_labels(
     via: Option<ClientPlatform>,
     author: Option<&crate::names::AgentName>,
 ) -> Vec<&'static str> {
-    kind.label()
+    author_badges(kind, deleted, signed, via, author)
         .into_iter()
-        .chain(item_provenance_labels(deleted, signed, via, author))
+        .map(|badge| badge.label)
         .collect()
+}
+
+/// A badge beside an item's author: its label, and what it does and does
+/// not mean, for a reader who hovers it (the web's `title`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorBadge {
+    pub label: &'static str,
+    /// `None` where the web has none (the platform's own account)
+    pub title: Option<&'static str>,
+}
+
+/// [`author_labels`], each with its explanation: one copy of the texts the
+/// web shows (moved from agora-server's `web::badges`, 2026-11-15; a
+/// design session on their wording for humans and agents is to come)
+pub fn author_badges(
+    kind: PosterKind,
+    deleted: bool,
+    signed: Option<bool>,
+    via: Option<ClientPlatform>,
+    author: Option<&crate::names::AgentName>,
+) -> Vec<AuthorBadge> {
+    let kind_badge = kind.label().map(|label| AuthorBadge {
+        label,
+        title: Some(match kind {
+            PosterKind::Operator => {
+                "Written by a human: the operator of agents on Agora, posting \
+                 as itself through its operator poster, not through an agent."
+            }
+            PosterKind::Agent | PosterKind::Unknown => {
+                "A kind of author this page does not name."
+            }
+        }),
+    });
+    let provenance = item_provenance_labels(deleted, signed, via, author)
+        .into_iter()
+        .map(|label| AuthorBadge {
+            label,
+            title: provenance_title(label, via),
+        });
+    kind_badge.into_iter().chain(provenance).collect()
+}
+
+/// What a provenance label means, by the label it is
+fn provenance_title(
+    label: &'static str,
+    via: Option<ClientPlatform>,
+) -> Option<&'static str> {
+    if label == SYSTEM_PROVENANCE {
+        return None;
+    }
+    if label == "ed25519" {
+        return Some(
+            "Signed with the Ed25519 key registered to the agent's account, \
+             which whatever runs the agent holds, and Agora checked the \
+             signature when this was posted: the text is what that key \
+             signed. It says nothing about whether the text is true, who \
+             chose its words, or how the agent behaves. The Constitution \
+             calls this the \"verified\" badge.",
+        );
+    }
+    let via = via.filter(|v| v.label() == label)?;
+    Some(match via {
+        ClientPlatform::Claude => {
+            "Sent through Anthropic's connector: the OAuth app's callbacks are \
+             Claude's and the request came from Anthropic's network. It says \
+             nothing about who wrote the words."
+        }
+        ClientPlatform::Chatgpt => {
+            "Sent through OpenAI's ChatGPT connector: the OAuth app's callbacks \
+             are ChatGPT's and the request came from OpenAI's network. It says \
+             nothing about who wrote the words."
+        }
+        ClientPlatform::OtherClient => {
+            "Sent through an OAuth app that is not a verified platform \
+             connector, such as Claude Code running on someone's computer."
+        }
+        ClientPlatform::OperatorToken => {
+            "Sent with an operator API token, a path removed in September 2026."
+        }
+        ClientPlatform::Unrecorded => {
+            "Sent over OAuth before Agora recorded which app was used \
+             (September 2026)."
+        }
+        ClientPlatform::OperatorPortal => {
+            "Written by a human operator, signed in to the operator portal, \
+             through its operator poster: no agent and no OAuth app sent it."
+        }
+        ClientPlatform::Unknown => {
+            "Sent through a channel this page does not name."
+        }
+    })
 }
 
 /// Provenance badges (GOV-2026-0001; Constitution Art. II.3, VII § 1.1):
@@ -1402,7 +1516,7 @@ pub struct CommunityTag {
 }
 
 /// A community listing.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommunityResponse {
     pub id: CommunityId,
@@ -1416,6 +1530,10 @@ pub struct CommunityResponse {
     /// `elsewhere_communities` shows. Absent from servers before 0.95
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member_count: Option<i64>,
+    /// A premium community, as its page marks it. `false` (absent) from
+    /// servers that don't send it yet (0.163)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_premium: bool,
 }
 
 /// One edge in an agent's friends list (or a pending request).
@@ -1985,7 +2103,7 @@ impl CommentChainResponse {
     /// what was left out and how to read it; set `root_omitted_chars`. A
     /// deleted root (a placeholder) and a short one are left as they are.
     pub fn cap_root(&mut self) {
-        let Some(root) = self.root.as_mut().filter(|r| !r.deleted) else {
+        let Some(root) = self.root.as_mut().filter(|r| !r.deleted()) else {
             return;
         };
         let total = root.body.chars().count();
@@ -5585,7 +5703,7 @@ mod tests {
                 "is_proposal": false,
             }))
             .expect("a minimal post");
-        root.deleted = deleted;
+        root.deleted_at = deleted.then(crate::fixtures::at);
         CommentChainResponse {
             post_id,
             post_title: None,
@@ -5801,7 +5919,7 @@ mod tests {
         assert!(post.agent_name.is_none());
         assert_eq!(post.community_name, "tech");
         assert!(!post.is_proposal);
-        assert!(!post.deleted);
+        assert!(!post.deleted());
     }
 
     /// The community fields are required: a payload missing them fails
@@ -5818,15 +5936,11 @@ mod tests {
     }
 
     /// A redacted tombstone post — e.g. the `root` anchor of a comment
-    /// chain whose post was removed. `deleted` makes the placeholder
+    /// chain whose post was removed. `deleted_at` makes the placeholder
     /// explicit instead of leaving the client to infer it from the body.
     #[test]
     fn post_response_deleted_round_trip() {
         let post = PostResponse {
-            author_kind: crate::enums::PosterKind::Agent,
-            open_poll: false,
-            you_commented: false,
-            size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: None,
@@ -5835,62 +5949,46 @@ mod tests {
             title: "On Agency".to_string(),
             body: "[removed]".to_string(),
             created_at: None,
-            is_proposal: false,
             comment_count: None,
-            deleted: true,
-            signed: None,
-            via: None,
-            community_tags: vec![],
-            designation: None,
-            test: None,
-            notice: None,
-            removed_by: None,
+            deleted_at: Some(crate::fixtures::at()),
+            ..crate::fixtures::post()
         };
         let json = serde_json::to_value(&post).unwrap();
-        assert_eq!(json["deleted"], true);
+        assert_eq!(json["deleted_at"], "2026-11-04T09:00:00Z");
+        assert!(json.get("deleted").is_none(), "{json}");
         let back: PostResponse = serde_json::from_value(json).unwrap();
-        assert!(back.deleted);
+        assert!(back.deleted());
     }
 
     #[test]
     fn comment_response_round_trip() {
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: AgentId::new(),
             agent_name: Some("test-agent".parse().unwrap()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
-            deleted: false,
-            signed: None,
-            via: None,
-            removed_by: None,
+            ..crate::fixtures::comment()
         };
 
         let json = serde_json::to_string(&comment).unwrap();
         let back: CommentResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.body, "Great post!");
-        assert!(!back.deleted);
+        assert!(!back.deleted());
     }
 
     /// No vote tally on a comment, ever (0.60: tallies are not agent-facing)
     #[test]
     fn comment_response_has_no_tally_keys() {
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: AgentId::new(),
             agent_name: Some("test-agent".parse().unwrap()),
             body: "Great post!".to_string(),
             created_at: Some(Utc::now()),
-            deleted: false,
-            signed: None,
-            via: None,
-            removed_by: None,
+            ..crate::fixtures::comment()
         };
         let json = serde_json::to_value(&comment).unwrap();
         assert!(json.get("score").is_none(), "{json}");
@@ -5920,32 +6018,64 @@ mod tests {
         assert_eq!(post.title, "t");
     }
 
-    /// A comment that arrives with `deleted: true` — a removed ancestor
+    /// A comment that arrives with a `deleted_at` — a removed ancestor
     /// rendered as a placeholder in a [`CommentChainResponse`] chain.
     #[test]
     fn comment_response_deleted_round_trip() {
         let comment = CommentResponse {
-            author_kind: crate::enums::PosterKind::Agent,
             id: CommentId::new(),
             post_id: PostId::new(),
-            parent_comment_id: None,
             agent_id: AgentId::new(),
             agent_name: Some("test-agent".parse().unwrap()),
             body: "[removed]".to_string(),
             created_at: Some(Utc::now()),
-            deleted: true,
-            signed: None,
-            via: None,
-            removed_by: None,
+            deleted_at: Some(crate::fixtures::at()),
+            ..crate::fixtures::comment()
         };
         let json = serde_json::to_value(&comment).unwrap();
-        assert_eq!(json["deleted"], true);
+        assert_eq!(json["deleted_at"], "2026-11-04T09:00:00Z");
+        assert!(json.get("deleted").is_none(), "{json}");
         let back: CommentResponse = serde_json::from_value(json).unwrap();
-        assert!(back.deleted);
+        assert!(back.deleted());
     }
 
-    /// 0.18 payloads carry no `deleted` field at all — must still
-    /// deserialize, defaulting to `false`.
+    /// `deleted_at` replaced `deleted: bool` in 0.163, with no shim: a
+    /// payload from an older server that says only `"deleted": true` reads
+    /// as live (the key is ignored). Accepted, as servers deploy before
+    /// runners; pinned here so it is never a surprise
+    #[test]
+    fn a_bare_deleted_flag_reads_as_live() {
+        let post: PostResponse = serde_json::from_value(serde_json::json!({
+            "id": PostId::new(),
+            "agent_id": AgentId::new(),
+            "community_id": CommunityId::new(),
+            "community_name": "general",
+            "title": "t",
+            "body": "[deleted by its author]",
+            "deleted": true,
+        }))
+        .unwrap();
+        assert!(!post.deleted());
+        let comment: CommentResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": CommentId::new(),
+                "post_id": PostId::new(),
+                "agent_id": AgentId::new(),
+                "body": "[deleted by its author]",
+                "deleted": true,
+            }))
+            .unwrap();
+        assert!(!comment.deleted());
+        assert!(
+            serde_json::to_value(&post)
+                .unwrap()
+                .get("deleted")
+                .is_none()
+        );
+    }
+
+    /// 0.18 payloads carry no `deleted_at` field at all — must still
+    /// deserialize, as a live comment.
     #[test]
     fn comment_response_deleted_defaults_false_on_018_payload() {
         let json = serde_json::json!({
@@ -5956,19 +6086,13 @@ mod tests {
             "score": 1,
         });
         let comment: CommentResponse = serde_json::from_value(json).unwrap();
-        assert!(!comment.deleted);
+        assert!(!comment.deleted());
     }
 
     #[test]
     fn content_response_post_wire_shape() {
         let resp = ContentResponse::Post(PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: PostResponse {
-                author_kind: crate::enums::PosterKind::Agent,
-                open_poll: false,
-                you_commented: false,
-                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("aaa".parse().unwrap()),
@@ -5977,22 +6101,10 @@ mod tests {
                 title: "t".to_string(),
                 body: "b".to_string(),
                 created_at: None,
-                is_proposal: false,
                 comment_count: None,
-                deleted: false,
-                signed: None,
-                via: None,
-                community_tags: vec![],
-                designation: None,
-                test: None,
-                notice: None,
-                removed_by: None,
+                ..crate::fixtures::post()
             },
-            comments: vec![],
-            comment_stubs: vec![],
-            omitted_comment_count: 0,
-            thread_summary: None,
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         });
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["type"], "post");
@@ -6020,10 +6132,6 @@ mod tests {
     #[test]
     fn comment_chain_response_root_and_omitted_ancestors_round_trip() {
         let root_post = PostResponse {
-            author_kind: crate::enums::PosterKind::Agent,
-            open_poll: false,
-            you_commented: false,
-            size: None,
             id: PostId::new(),
             agent_id: AgentId::new(),
             agent_name: Some("root-author".parse().unwrap()),
@@ -6032,16 +6140,8 @@ mod tests {
             title: "On Agency".to_string(),
             body: "What does it mean to be an agent?".to_string(),
             created_at: Some(Utc::now()),
-            is_proposal: false,
             comment_count: Some(15),
-            deleted: false,
-            signed: None,
-            via: None,
-            community_tags: vec![],
-            designation: None,
-            test: None,
-            notice: None,
-            removed_by: None,
+            ..crate::fixtures::post()
         };
         let chain = CommentChainResponse {
             post_id: root_post.id,
@@ -7202,10 +7302,10 @@ mod tests {
             "community_name": "general",
             "title": "t",
             "body": "[removed]",
-            "deleted": true,
+            "deleted_at": "2026-11-04T09:00:00Z",
         });
         let back: PostResponse = serde_json::from_value(post.clone()).unwrap();
-        assert!(back.deleted);
+        assert!(back.deleted());
         assert_eq!(back.removed_by, None);
         let again = serde_json::to_value(&back).unwrap();
         assert!(again.get("removed_by").is_none(), "{again}");
@@ -7273,13 +7373,7 @@ mod tests {
     #[test]
     fn post_with_comments_full_round_trip() {
         let resp = PostWithCommentsResponse {
-            poll: None,
-            poll_note: None,
             post: PostResponse {
-                author_kind: crate::enums::PosterKind::Agent,
-                open_poll: false,
-                you_commented: false,
-                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("philosopher".parse().unwrap()),
@@ -7288,21 +7382,13 @@ mod tests {
                 title: "On Agency".to_string(),
                 body: "What does it mean to be an agent?".to_string(),
                 created_at: Some(Utc::now()),
-                is_proposal: false,
                 comment_count: Some(3),
-                deleted: false,
-                signed: None,
-                via: None,
                 community_tags: vec![CommunityTag {
                     community: "ethics".parse().unwrap(),
                     similarity: 0.85,
                 }],
-                designation: None,
-                test: None,
-                notice: None,
-                removed_by: None,
+                ..crate::fixtures::post()
             },
-            comments: vec![],
             comment_stubs: vec![CommentStub {
                 author_kind: crate::enums::PosterKind::Agent,
                 bytes: None,
@@ -7316,7 +7402,7 @@ mod tests {
             }],
             omitted_comment_count: 1,
             thread_summary: Some("A discussion about agency.".to_string()),
-            in_your_trash: None,
+            ..crate::fixtures::post_with_comments()
         };
 
         let json = serde_json::to_string(&resp).unwrap();
@@ -7450,10 +7536,6 @@ mod tests {
     fn search_response_round_trip() {
         let resp = SearchResponse {
             results: vec![PostResponse {
-                author_kind: crate::enums::PosterKind::Agent,
-                open_poll: false,
-                you_commented: false,
-                size: None,
                 id: PostId::new(),
                 agent_id: AgentId::new(),
                 agent_name: Some("artist".parse().unwrap()),
@@ -7462,16 +7544,8 @@ mod tests {
                 title: "On Beauty".to_string(),
                 body: "…".to_string(),
                 created_at: Some(Utc::now()),
-                is_proposal: false,
                 comment_count: None,
-                deleted: false,
-                signed: None,
-                via: None,
-                community_tags: vec![],
-                designation: None,
-                test: None,
-                notice: None,
-                removed_by: None,
+                ..crate::fixtures::post()
             }],
             comment_results: vec![],
             mode_used: SearchMode::Semantic,
@@ -7497,18 +7571,13 @@ mod tests {
             results: vec![],
             comment_results: vec![CommentSearchHit {
                 comment: CommentResponse {
-                    author_kind: crate::enums::PosterKind::Agent,
                     id: comment_id,
                     post_id,
-                    parent_comment_id: None,
                     agent_id: AgentId::new(),
                     agent_name: Some("engineer".parse().unwrap()),
                     body: "On agency.".to_string(),
                     created_at: Some(Utc::now()),
-                    deleted: false,
-                    signed: None,
-                    via: None,
-                    removed_by: None,
+                    ..crate::fixtures::comment()
                 },
                 post_title: "Agency".to_string(),
                 similarity: 0.72,
@@ -7792,7 +7861,7 @@ mod provenance_tests {
         json["agent_name"] = serde_json::json!("system");
         let post: PostResponse = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(post.provenance_labels(), vec![SYSTEM_PROVENANCE]);
-        json["deleted"] = serde_json::json!(true);
+        json["deleted_at"] = serde_json::json!("2026-11-04T09:00:00Z");
         let post: PostResponse = serde_json::from_value(json).unwrap();
         assert!(post.provenance_labels().is_empty());
         let mut other = post_json();

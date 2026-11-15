@@ -2,3 +2,5 @@
 .vscode/
 Cargo.lock
 __pycache__/
+/tools/markdown-parity/target
+!/tools/markdown-parity/Cargo.lock

@@ -35,7 +35,7 @@ fn assert_inert(text: &str) {
 fn the_text_has_no_markup_and_reads_back() {
     for hostile in hostile() {
         let props = vec![hostile];
-        let text = to_script_text(&props).unwrap();
+        let text = encode(&props).unwrap();
         assert_inert(&text);
         let back: Vec<String> = from_script_text(&text).unwrap();
         assert_eq!(back, props, "{text}");
@@ -44,7 +44,7 @@ fn the_text_has_no_markup_and_reads_back() {
 
 #[test]
 fn the_escapes_are_json_unicode_escapes() {
-    let text = to_script_text(&"<>&\u{2028}\u{2029}").unwrap();
+    let text = encode(&"<>&\u{2028}\u{2029}").unwrap();
     let want: String = ["003c", "003e", "0026", "2028", "2029"].map(u).concat();
     assert!(text.contains(&want), "{text}");
 }
@@ -58,14 +58,14 @@ fn hostile_keys_and_controls_are_inert() {
         "v\r\n\0\u{7f}\u{85}".to_string(),
     );
     map.insert("k&amp;".to_string(), "<!--".to_string());
-    let text = to_script_text(&map).unwrap();
+    let text = encode(&map).unwrap();
     assert_inert(&text);
     assert!(!text.contains(['\r', '\n', '\0']), "{text:?}");
     let back: BTreeMap<String, String> = from_script_text(&text).unwrap();
     assert_eq!(back, map);
 
     let controls: String = (0u8..0x20).map(char::from).collect();
-    let text = to_script_text(&controls).unwrap();
+    let text = encode(&controls).unwrap();
     assert!(text.bytes().all(|b| b >= 0x20), "{text:?}");
     assert_eq!(from_script_text::<String>(&text).unwrap(), controls);
 }
@@ -73,7 +73,7 @@ fn hostile_keys_and_controls_are_inert() {
 #[test]
 fn the_element_holds_only_the_escaped_text() {
     let props = hostile().concat();
-    let element = script_element(DATA_ID, &props).unwrap();
+    let element = test_element(DATA_ID, &props).unwrap();
     let open = r#"<script type="application/json" id="agora-app-data">"#;
     let inner = element
         .strip_prefix(open)
@@ -85,7 +85,7 @@ fn the_element_holds_only_the_escaped_text() {
 
 #[test]
 fn another_island_has_its_own_id() {
-    let element = script_element("agora-thread-data", &1u8).unwrap();
+    let element = test_element("agora-thread-data", &1u8).unwrap();
     assert!(
         element.starts_with(
             r#"<script type="application/json" id="agora-thread-data">"#
@@ -97,13 +97,13 @@ fn another_island_has_its_own_id() {
 #[test]
 #[should_panic(expected = "lowercase letters, digits and hyphens")]
 fn an_id_that_could_break_the_tag_is_refused() {
-    let _ = script_element(r#"x"><script>"#, &1u8);
+    let _ = test_element(r#"x"><script>"#, &1u8);
 }
 
 #[test]
 fn a_very_long_string_round_trips() {
     let props = "</script>\u{2028}&".repeat(100_000);
-    let text = to_script_text(&props).unwrap();
+    let text = encode(&props).unwrap();
     assert_inert(&text);
     assert_eq!(from_script_text::<String>(&text).unwrap(), props);
 }
@@ -153,9 +153,7 @@ fn another_agentkits_page_is_refused() {
         .collect();
     parts[2] += 1;
     let other = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
-    let text = to_script_text(&1u8)
-        .unwrap()
-        .replace(AGENTKIT_VERSION, &other);
+    let text = encode(&1u8).unwrap().replace(AGENTKIT_VERSION, &other);
     assert!(matches!(
         from_script_text::<u8>(&text),
         Err(IslandError::Version { .. })
@@ -196,7 +194,7 @@ fn the_version_is_read_before_the_props() {
 /// might add inside it
 #[test]
 fn surrounding_whitespace_reads_and_trailing_text_does_not() {
-    let text = to_script_text(&1u8).unwrap();
+    let text = encode(&1u8).unwrap();
     assert_eq!(from_script_text::<u8>(&format!("\n  {text}\n")).unwrap(), 1);
     assert!(from_script_text::<u8>(&format!("{text} trailing")).is_err());
     let doubled =
@@ -206,9 +204,30 @@ fn surrounding_whitespace_reads_and_trailing_text_does_not() {
 
 #[test]
 fn the_shape_is_version_and_props() {
-    let text = to_script_text(&1u8).unwrap();
+    let text = encode(&1u8).unwrap();
     assert_eq!(
         text,
         format!(r#"{{"agentkit":"{AGENTKIT_VERSION}","props":1}}"#)
     );
+}
+
+/// [`script_element`] for any value, as the tests use it
+fn test_element<P: Serialize>(
+    id: &'static str,
+    props: &P,
+) -> Result<String, serde_json::Error> {
+    #[derive(Serialize)]
+    #[serde(transparent)]
+    struct Any<'a, P: Serialize>(&'a P);
+    impl<P: Serialize> Clone for Any<'_, P> {
+        fn clone(&self) -> Self {
+            Any(self.0)
+        }
+    }
+    impl<P: Serialize> Public for Any<'_, P> {
+        fn public(self) -> Self {
+            self
+        }
+    }
+    script_element(id, &Any(props))
 }

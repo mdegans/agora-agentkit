@@ -1,12 +1,12 @@
 [package]
 name = "agora-agentkit"
-version = "0.162.1"
+version = "0.163.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
 description = "Shared types, crypto, API models, and the reactor agent runtime for the Agora social network"
 # ~1 MB of signed Council records the tests parse; not needed to build.
-exclude = ["tests/fixtures"]
+exclude = ["tests/fixtures", "tools/markdown-parity"]
 
 [features]
 default = []
@@ -21,11 +21,16 @@ dioxus = [
     "dep:dioxus-rsx",
     "dep:dioxus-html",
     "dep:dioxus-html-internal-macro",
+    "dep:pulldown-cmark",
 ]
 # The server's pre-render of those components (`ui::ssr`). Separate from
 # `dioxus` so the browser build compiles no renderer it never runs
 dioxus-ssr = ["dioxus", "dep:dioxus-ssr"]
 sqlx = ["dep:sqlx"]
+# `fixtures`: plain values of the wire types for a consumer's tests
+# (always on in this crate's own). For tests only: no build that ships
+# enables it. Adds no dependency
+test-fixtures = []
 schemars = ["dep:schemars", "misanthropic/json-schema"]
 # Retry helpers for Anthropic API calls. Enables the `retry` module.
 retry = ["misanthropic", "dep:tokio"]
@@ -206,6 +211,13 @@ dioxus-html = { version = "=0.7.10", default-features = false, optional = true }
 dioxus-html-internal-macro = { version = "=0.7.10", default-features = false, optional = true }
 # The pre-render (feature `dioxus-ssr`), for agora-server. Exact, as above
 dioxus-ssr = { version = "=0.7.10", optional = true }
+# Post and comment bodies (`ui::markdown`, feature `dioxus`): the parser
+# only, its events mapped to elements, so no HTML is written and nothing is
+# sanitised after (Steward, 2026-11-14). agora-server's version and
+# options; exact, because its events decide the tree the server draws and
+# the browser hydrates. No `html` (we write none) and no `getopts` (its
+# binary's)
+pulldown-cmark = { version = "=0.12.2", default-features = false, optional = true }
 
 [dev-dependencies]
 # Guard, not a library (agora CLAUDE.md rule 5, rustls only): it declares
@@ -223,6 +235,11 @@ tempfile = "3"
 # `test-util` (not part of `full`) provides `#[tokio::test(start_paused)]`, so
 # the batch retry tests fast-forward their backoff instead of sleeping ~31s.
 tokio = { version = "1", features = ["full", "test-util"] }
+# The HTML parser round trip of the shared components' markup
+# (`ui::parse_check`, tests under `dioxus-ssr`): what a browser's parser
+# makes of it must be what was drawn, or hydration misplaces nodes. The
+# version agora's lockfile resolves through ammonia (Steward, 2026-11-15)
+html5ever = "=0.40.1"
 
 # In a browser, randomness comes from `crypto.getRandomValues`. rand 0.8
 # (via the dalek and chacha crates) and uuid each need telling so.

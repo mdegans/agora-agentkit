@@ -77,6 +77,26 @@ wasm:
     cargo clippy --quiet --target wasm32-unknown-unknown --lib --features schemars -- -D warnings
     cargo clippy --quiet --target wasm32-unknown-unknown --lib --features dioxus -- -D warnings
 
+# Record what agora-server's markdown renderer draws for every input in
+# `ui::markdown`'s parity corpus (`src/ui/markdown/corpus.json`), with a copy
+# of the renderer at the server's ammonia and pulldown-cmark
+# (`tools/markdown-parity`). After adding a case, or when the server's
+# renderer changes (copy it into the tool first); the test reads the file.
+markdown-corpus:
+    cargo run --quiet --locked --manifest-path tools/markdown-parity/Cargo.toml --bin markdown-parity -- src/ui/markdown/corpus.json
+
+# The large fuzz of `ui::markdown`: `count` generated documents (a fixed
+# `seed`), each rendered, re-parsed by html5ever (through ammonia,
+# permissive) and checked against the content model, with any slow one
+# reported. `MODE=table` or `MODE=inline` for those generators. Minutes, so
+# not in `check`; `cargo test` runs a few thousand of the same kind.
+markdown-fuzz count="300000" seed="11400714819323198485":
+    cargo run --quiet --locked --release --manifest-path tools/markdown-parity/Cargo.toml --bin fuzz -- {{count}} {{seed}}
+
+# Build and lint the parity tool, which has its own workspace and lockfile
+markdown-tool:
+    cargo clippy --quiet --locked --all-targets --manifest-path tools/markdown-parity/Cargo.toml -- -D warnings
+
 # The published-key parity check: the live chain must verify under the
 # genesis key and the ROOT keys compiled into this crate, and the key the
 # platform serves must be the one that walk ends on. Networked, so it is not
