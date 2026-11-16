@@ -2,8 +2,8 @@ use super::*;
 
 use serde_json::json;
 
-use crate::display::tests::{ADVERSARIAL, generated, site};
-use crate::display::{AgentDisplayConfig, LinkRule, has_scheme};
+use crate::display::tests::{ADVERSARIAL, fetchable, generated, site};
+use crate::display::{AgentDisplayConfig, LinkRule};
 
 fn view(value: Value, exempt: Exempt<'_>) -> Value {
     let config = AgentDisplayConfig::default();
@@ -248,8 +248,9 @@ fn the_default_leaves_no_scheme_in_any_string_not_exempt() {
             strings(&shown, &mut found);
             assert_eq!(found.len(), 7);
             for out in found {
-                assert!(
-                    !has_scheme(out.as_bytes()),
+                assert_eq!(
+                    fetchable(out).map(String::from),
+                    None,
                     "{out:?} in {shown} from {value}"
                 );
             }

@@ -3,8 +3,10 @@ use super::*;
 use misanthropic::prompt::message::Content;
 use serde_json::json;
 
-use crate::display::tests::{ADVERSARIAL, generated, site};
-use crate::display::{Links, has_scheme};
+use crate::display::Links;
+use crate::display::tests::{
+    ADVERSARIAL, SPELLINGS, fetchable, generated, site,
+};
 
 const URL: &str = "https://evil.example/x";
 const DEFANGED: &str = "hxxps://evil[.]example/x";
@@ -462,13 +464,18 @@ fn the_default_leaves_no_scheme_after_escaping() {
         let cx = DisplayContext::at(&config, site.as_ref());
         for text in ADVERSARIAL
             .iter()
+            .chain(SPELLINGS)
             .copied()
             .chain(texts.iter().map(String::as_str))
         {
             for shown in [cx.in_element(text), cx.on_line(text), cx.body(text)]
             {
-                assert!(
-                    !has_scheme(shown.as_bytes()),
+                // (escaping can put the letters of `&lt;` where a host
+                // would be, which the scanner's own test takes for one)
+                let written = shown.replace("&lt;", "<").replace("&amp;", "&");
+                assert_eq!(
+                    fetchable(&written).map(String::from),
+                    None,
                     "{text:?} gave {shown:?}"
                 );
             }

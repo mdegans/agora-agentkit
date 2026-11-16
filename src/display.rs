@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use url::{Host, Position, Url};
 
 use crate::links::AgoraLink;
+use crate::threads;
 
 mod agent;
 mod json;
@@ -101,24 +102,63 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// In both modes a page URL of Agora's site is written as its `agora://`
 /// link, and a page of the site with no link is treated as any other URL.
 ///
-/// Every URL start is judged on its own, one inside another URL included,
-/// and a URL with another inside it is never left as written: in
-/// `https://allowed.example/?u=https://other.example` both are defanged,
-/// and in `https://other.example/?u=https://allowed.example` the second is
-/// kept. So what is left as written is exactly what was checked.
+/// A URL starts at `http` or `https`, a `:` and any run of `/` and `\`
+/// (`https://x`, `https:/x`, `https:x`, `https:\\x`), in any letter case,
+/// with tabs and line breaks anywhere in it, which URL parsers drop:
+/// whatever a WHATWG parser reads as `http` or `https` with a host. A
+/// line break is any [`threads::is_line_break`], with the whitespace
+/// before it, since [`threads::tidy`] makes `\n` of those after the
+/// policy has run. So `https:` at the end of a line is taken for a URL
+/// with the next line's first word, and its scheme defanged; before a
+/// space and a word it is prose.
 ///
 /// What holds of the result, whatever the text:
 ///
-/// - **`defanged` with no `allow` rule** (the default): it has no `http://`
-///   and no `https://` in it, in any letter case.
-/// - **`raw` with `deny` rules**: no `http://` or `https://` URL in it, read
-///   from its scheme to its end as written, is one a rule denies.
+/// - **`defanged` with no `allow` rule** (the default): no `http` or
+///   `https` URL is left in it. Nowhere in it does a URL parser, given
+///   the text from there to the next space with tabs and line breaks
+///   dropped, read one with a host that has a letter or a digit.
+/// - **`defanged` with `allow` rules**: an `http` or `https` URL left in
+///   it is one a rule allows, under every reading below.
+/// - **`raw` with `deny` rules**: no `http` or `https` URL left in it is
+///   one a rule denies, under every reading below.
+///
+/// **A URL's readings.** Where a URL ends depends on who reads it, and
+/// a rule that passed the URL up to a `'` would say nothing of
+/// `https://allowed.example'@evil.example/`, which a parser reads whole.
+/// So a URL is left as written only if every reading of it passes: the
+/// one that ends as prose does (before whitespace or any of
+/// ``<>"'`()[]{}|``), and each that ends at a later one of those, at a
+/// tab or line break, or at the next other whitespace, with the tabs and
+/// line breaks before its end dropped. Sentence punctuation
+/// (`.,;:!?*_`), brackets and quotes at the end of a reading are not
+/// part of it. Each reading is checked alone: under `allow` each must
+/// be allowed, by any rule.
 ///
 /// A URL is never left as written on the strength of a rule it cannot be
-/// checked against. One with another inside it, one longer than [`MAX_URL_BYTES`], one that does not
-/// parse, and one with a backslash or a control character (which parsers
-/// read differently) match no `allow` rule, and are defanged under `raw`
-/// whenever there is a `deny` rule.
+/// checked against. With rules, each of these is defanged, allowed or
+/// not denied as it may be: a URL with another inside it, before its
+/// first bracket or quote (the one inside is judged on its own, as every
+/// URL start is); one with a reading that does not parse, or that has a
+/// backslash or a control character; one whose scheme is not written
+/// `http://` or `https://`; one longer than [`MAX_URL_BYTES`] to the
+/// next space; and one with more than [`MAX_URL_ENDS`] readings.
+///
+/// The cost falls on a URL that ends where its rule does. Under
+/// `allow = ["https://example.org"]`, `https://example.org` at the end
+/// of a line is defanged when the next line starts with a word (read
+/// with it, the host is `example.orgnext`), and so is
+/// `[x](https://example.org),next`; `https://example.org/` is left in
+/// both.
+///
+/// **Not covered**, in any mode: what no URL parser reads as `http` or
+/// `https`. Other schemes (`ftp://`, `ws://`, `file://`), a
+/// protocol-relative `//host/path`, a bare `host.tld/path` other than
+/// `www.`, a scheme in full-width or look-alike letters, HTML entities
+/// and a percent-encoded scheme are left as written; the server's
+/// scanner left them too. And whitespace other than a tab or a line
+/// break ends every reading: a fetcher handed more than that is not
+/// modelled.
 ///
 /// ```toml
 /// links = { mode = "defanged", allow = ["https://en.wikipedia.org/wiki"] }
@@ -154,23 +194,46 @@ impl Default for Links {
     }
 }
 
-/// The longest URL read as a link or checked against a [`LinkRule`]: a
-/// longer one matches no rule. It bounds the work per URL
+/// The longest URL read as a link or checked against a [`LinkRule`],
+/// from its scheme to the next space: a longer one matches no rule. It
+/// bounds the work per URL
 pub const MAX_URL_BYTES: usize = 2_048;
+
+/// The most readings of one URL that are checked against the rules (see
+/// [`Links`]): one with more is not left as written. With
+/// [`MAX_URL_BYTES`] it bounds the work per URL
+pub const MAX_URL_ENDS: usize = 16;
+
+/// A URL start: a scheme, or a schemeless `www.` host
+#[derive(Debug, Clone, Copy)]
+struct Start {
+    /// The scheme with its `:` and slashes; 0 for a `www.` host
+    len: usize,
+    /// Written `http://` or `https://` and no other way
+    plain: bool,
+}
+
+impl Start {
+    const WWW: Self = Self {
+        len: 0,
+        plain: false,
+    };
+}
 
 impl Links {
     /// `text` under this policy, with page URLs of `site` as their links.
     /// Borrowed when nothing changes.
     ///
-    /// `http://` and `https://`, in any case and wherever they are written
-    /// (`xhttp://`, `a:https://`), become `hxxp://` and `hxxps://` and the
-    /// dots of the authority `[.]`; a schemeless `www.` host at the start
-    /// of a word gets the dots. The path and query are copied.
+    /// A scheme's `http` becomes `hxxp` (lower case), wherever it is
+    /// written (`xhttp://`, `a:https://`), and the dots of the authority
+    /// `[.]`; a schemeless `www.` host at the start of a word gets the
+    /// dots. Everything else is copied: the `:` and slashes as written,
+    /// the path and query.
     ///
-    /// Time is linear in `text`: one pass, and each URL start reads at most
-    /// [`MAX_URL_BYTES`] ahead and is parsed at most once for the site and
-    /// once for the rules. No URL is parsed when there is neither a site
-    /// nor a rule.
+    /// Time is linear in `text`: one pass, and each URL start reads at
+    /// most [`MAX_URL_BYTES`] ahead and is parsed at most once for the
+    /// site and [`MAX_URL_ENDS`] + 1 times for the rules. No URL is
+    /// parsed when there is neither a site nor a rule.
     pub fn rewrite<'a>(
         &self,
         text: &'a str,
@@ -182,25 +245,25 @@ impl Links {
         let mut copied = 0; // everything before this offset is already in `out`
 
         while i < bytes.len() {
-            let (scheme_len, https) = if let Some(scheme) = scheme_at(bytes, i)
-            {
+            let start = if let Some(scheme) = scheme_at(text, i) {
                 scheme
             } else if www_at(bytes, i) {
-                (0, false)
+                Start::WWW
             } else {
                 i += 1;
                 continue;
             };
+            let authority = i + start.len;
 
             // This site's page: its link, which an agent can follow
-            if let Some(site) = site.filter(|s| {
-                scheme_len > 0 && on_site_host(bytes, i + scheme_len, s)
-            }) && let Some(end) = url_end(bytes, i)
+            if let Some(site) = site
+                .filter(|s| start.plain && on_site_host(bytes, authority, s))
+                && let Some(end) = url_end(bytes, i, authority)
                 && let Ok(link) = AgoraLink::parse_at(&text[i..end], Some(site))
                     .map(|link| link.to_string())
                 // (links percent-encode a URL they carry; were one ever
                 // written whole, the page would be any other URL)
-                && !has_scheme(link.as_bytes())
+                && !has_scheme(&link)
             {
                 let buf = out.get_or_insert_with(|| {
                     String::with_capacity(text.len() + 16)
@@ -212,7 +275,7 @@ impl Links {
                 continue;
             }
 
-            if let Some(after) = self.leaves(text, i, scheme_len) {
+            if let Some(after) = self.leaves(text, i, start) {
                 i = after;
                 continue;
             }
@@ -220,14 +283,18 @@ impl Links {
             let buf = out
                 .get_or_insert_with(|| String::with_capacity(text.len() + 16));
             buf.push_str(&text[copied..i]);
-            if scheme_len > 0 {
-                buf.push_str(if https { "hxxps://" } else { "hxxp://" });
-            }
+            // `hxxp`, and what was written between and after its letters
+            buf.extend(text[i..authority].chars().map(|c| {
+                match c.to_ascii_lowercase() {
+                    't' => 'x',
+                    other => other,
+                }
+            }));
 
             // The dots of the rest of the authority (for a `www.` start,
             // its own included)
-            let j = authority_end(bytes, i + scheme_len);
-            for b in &bytes[i + scheme_len..j] {
+            let j = authority_end(text, authority);
+            for b in &bytes[authority..j] {
                 if *b == b'.' {
                     buf.push_str("[.]");
                 } else {
@@ -247,78 +314,307 @@ impl Links {
         }
     }
 
-    /// Where to go on from when the URL written at `start` is left as
-    /// written: its end, so nothing in it is rewritten after it was checked
-    fn leaves(
-        &self,
-        text: &str,
-        start: usize,
-        scheme_len: usize,
-    ) -> Option<usize> {
+    /// Where to go on from when the URL written at `at` is left as
+    /// written: its end as prose, so nothing in it is rewritten after it
+    /// was checked, and a URL start after that is judged on its own
+    fn leaves(&self, text: &str, at: usize, start: Start) -> Option<usize> {
         match self {
             Self::Defanged { allow } => {
-                if allow.is_empty() || scheme_len == 0 {
+                if allow.is_empty() || start.len == 0 {
                     return None;
                 }
-                let (url, end) = written_url(text, start, scheme_len)?;
-                allow.iter().any(|r| r.allows(&url)).then_some(end)
+                every_reading(text, at, start, |url| {
+                    allow.iter().any(|r| r.allows(url))
+                })
             }
             // Nothing to check against, and nothing is ever defanged
             Self::Raw { deny } if deny.is_empty() => {
-                Some(start + scheme_len.max(1))
+                Some(at + start.len.max(1))
             }
-            Self::Raw { deny } => {
-                let (url, end) = written_url(text, start, scheme_len)?;
-                (!deny.iter().any(|r| r.denies(&url))).then_some(end)
-            }
+            Self::Raw { deny } => every_reading(text, at, start, |url| {
+                !deny.iter().any(|r| r.denies(url))
+            }),
         }
     }
 }
 
-/// The URL written at `start`, parsed (`http://` put before a schemeless
-/// one), and its end. `None` when it is too long, has another URL start
-/// inside it, or is one parsers would not agree on
-fn written_url(
+/// The end as prose of the URL written at `at`, when every reading of it
+/// (see [`Links`]) parses and passes (`http://` put before a schemeless
+/// one). `None` too when it has another URL start inside it, is too long
+/// or has too many readings
+fn every_reading(
     text: &str,
-    start: usize,
-    scheme_len: usize,
-) -> Option<(Url, usize)> {
-    let bytes = text.as_bytes();
-    let end = url_end(bytes, start)?;
-    let written = &text[start..end];
-    if written.bytes().any(|b| b == b'\\' || b.is_ascii_control()) {
+    at: usize,
+    start: Start,
+    pass: impl Fn(&Url) -> bool,
+) -> Option<usize> {
+    if start.len > 0 && !start.plain {
         return None;
     }
-    let authority = authority_end(bytes, start + scheme_len);
+    let bytes = text.as_bytes();
+    let from = at + start.len;
+    let passes = |reading: &str| {
+        if reading.bytes().any(|b| b == b'\\' || b.is_ascii_control()) {
+            return false;
+        }
+        let url = if start.len == 0 {
+            Url::parse(&["http://", reading].concat())
+        } else {
+            Url::parse(reading)
+        };
+        url.is_ok_and(|url| pass(&url))
+    };
+    // A reading and, when the dots after it make its last path segment
+    // `.` or `..`, the reading with them: `/wiki/x/..` at a sentence's
+    // end is `/wiki/x/` without its dots and `/wiki/` with them
+    let passes_dotted = |read: &str, rest: &str| {
+        let dots = rest.bytes().take_while(|b| *b == b'.').count().min(2);
+        // (`%2e%2e` is the longest spelling of one)
+        let tail = &read.as_bytes()[read.len().saturating_sub(6)..];
+        let segment = tail.rsplit(|b| *b == b'/').next().unwrap_or(tail);
+        let dotted = dots > 0
+            && segment.len() < tail.len().max(1)
+            && std::str::from_utf8(segment).is_ok_and(|segment| {
+                is_dot_segment(&[segment, &rest[..dots]].concat())
+            });
+        !dotted || passes(&[read, &rest[..dots]].concat())
+    };
+
+    let end = url_end(bytes, at, from)?;
+    let authority = authority_end(text, from);
     if (authority..end)
-        .any(|i| scheme_at(bytes, i).is_some() || www_at(bytes, i))
+        .any(|i| scheme_at(text, i).is_some() || www_at(bytes, i))
     {
         return None;
     }
-    let url = if scheme_len == 0 {
-        Url::parse(&["http://", written].concat())
-    } else {
-        Url::parse(written)
-    };
-    Some((url.ok()?, end))
+    let as_prose = &text[at..end];
+    if !passes(as_prose) || !passes_dotted(as_prose, &text[end..]) {
+        return None;
+    }
+
+    // Each later end: a reading is taken where one could stop, if
+    // anything but closing punctuation was written since the last
+    let run = Run::read(text, at, from)?;
+    let token = run.token.as_bytes();
+    let mut read = run.token.starts_with(as_prose).then_some(as_prose.len());
+    let mut gaps = run.gaps.iter().copied().peekable();
+    let mut ends = 0;
+    // Where the closing punctuation before `stop` starts
+    let mut closed = start.len;
+    for stop in start.len..=token.len() {
+        let here = token.get(stop).copied();
+        let gap = gaps.next_if_eq(&stop).is_some();
+        if gap || here.is_none_or(is_bracket) {
+            let reading = &run.token[..closed];
+            if !passes_dotted(reading, &run.token[closed..stop]) {
+                return None;
+            }
+            if read != Some(closed) {
+                ends += 1;
+                if ends > MAX_URL_ENDS || !passes(reading) {
+                    return None;
+                }
+                read = Some(closed);
+            }
+        }
+        if here.is_some_and(|b| !is_closing(b)) {
+            closed = stop + 1;
+        }
+    }
+    Some(end)
 }
 
-/// `http://` or `https://` at `i`, in any case: its length, and whether it
-/// is `https`. A start wherever it is written
-fn scheme_at(bytes: &[u8], i: usize) -> Option<(usize, bool)> {
-    if !matches_at(bytes, i, b"http") {
-        None
-    } else if matches_at(bytes, i + 4, b"s://") {
-        Some((8, true))
-    } else if matches_at(bytes, i + 4, b"://") {
-        Some((7, false))
-    } else {
-        None
+/// The run without a space that a URL is in, as a parser handed all of
+/// it reads it
+struct Run<'a> {
+    /// Without what is dropped ([`skip_dropped`])
+    token: Cow<'a, str>,
+    /// Where in `token` something was dropped: each an end to some reader
+    gaps: Vec<usize>,
+}
+
+impl<'a> Run<'a> {
+    /// The run of the URL at `at`, whose authority starts at `from`.
+    /// `None` past [`MAX_URL_BYTES`]
+    fn read(text: &'a str, at: usize, from: usize) -> Option<Self> {
+        let mut kept: Option<String> = None;
+        let mut gaps = Vec::new();
+        let mut copied = at;
+        let mut i = from;
+        while let Some(c) = text[i..].chars().next() {
+            if i - at >= MAX_URL_BYTES {
+                return None;
+            }
+            if !is_gap(c) {
+                i += c.len_utf8();
+                continue;
+            }
+            let next = skip_dropped(text, i);
+            if next == i {
+                break;
+            }
+            let kept = kept.get_or_insert_default();
+            kept.push_str(&text[copied..i]);
+            gaps.push(kept.len());
+            copied = next;
+            i = next;
+        }
+        let token = match kept {
+            Some(mut kept) => {
+                kept.push_str(&text[copied..i]);
+                Cow::Owned(kept)
+            }
+            None => Cow::Borrowed(&text[at..i]),
+        };
+        Some(Self { token, gaps })
     }
 }
 
-fn has_scheme(bytes: &[u8]) -> bool {
-    (0..bytes.len()).any(|i| scheme_at(bytes, i).is_some())
+/// Punctuation, a bracket or a quote: at a reading's end, not part of it
+fn is_closing(b: u8) -> bool {
+    is_bracket(b) || is_sentence_punctuation(b)
+}
+
+/// Whitespace, or a line break to any reader
+fn is_gap(c: char) -> bool {
+    c.is_whitespace() || threads::is_line_break(c)
+}
+
+/// The end of what a URL parser, or the reader's view before it, drops
+/// at `at` (a char boundary): a tab or a line break, and the whitespace
+/// before one, which [`threads::tidy`] trims. `at` when nothing is
+/// dropped: a space before a word ends a URL
+fn skip_dropped(text: &str, at: usize) -> usize {
+    let mut end = at;
+    for (offset, c) in text[at..].char_indices() {
+        if !is_gap(c) {
+            break;
+        }
+        if c == '\t' || threads::is_line_break(c) {
+            end = at + offset + c.len_utf8();
+        }
+    }
+    end
+}
+
+/// What ends a URL as written in prose, whitespace aside
+fn is_bracket(b: u8) -> bool {
+    matches!(
+        b,
+        b'<' | b'>'
+            | b'"'
+            | b'\''
+            | b'`'
+            | b'('
+            | b')'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'|'
+    )
+}
+
+/// What is the sentence's and not the URL's, at a URL's end
+fn is_sentence_punctuation(b: u8) -> bool {
+    matches!(b, b'.' | b',' | b';' | b':' | b'!' | b'?' | b'*' | b'_')
+}
+
+/// A scheme at `i`: `http` or `https`, `:`, and any run of `/` and `\`,
+/// in any case, with what is dropped ([`skip_dropped`]) anywhere in it.
+/// A start wherever it is written. Written any way but `http://` and
+/// `https://`, only before a host ([`host_follows`]): `https: ` is prose
+fn scheme_at(text: &str, i: usize) -> Option<Start> {
+    let bytes = text.as_bytes();
+    if matches_at(bytes, i, b"http") {
+        let len = if matches_at(bytes, i + 4, b"s://") {
+            8
+        } else if matches_at(bytes, i + 4, b"://") {
+            7
+        } else {
+            0
+        };
+        if len > 0 {
+            // (a third slash is a parser's to drop: not the one way)
+            let plain = !matches!(bytes.get(i + len), Some(b'/' | b'\\'));
+            return Some(Start { len, plain });
+        }
+    } else if !bytes.get(i)?.eq_ignore_ascii_case(&b'h') {
+        return None;
+    }
+
+    let mut at = i + 1;
+    for letter in b"ttp" {
+        at = skip_dropped(text, at);
+        if !bytes.get(at)?.eq_ignore_ascii_case(letter) {
+            return None;
+        }
+        at += 1;
+    }
+    at = skip_dropped(text, at);
+    if bytes.get(at)?.eq_ignore_ascii_case(&b's') {
+        at = skip_dropped(text, at + 1);
+    }
+    if *bytes.get(at)? != b':' {
+        return None;
+    }
+    // To the last slash: what is dropped after it is not the scheme's
+    let mut end = at + 1;
+    let mut next = skip_dropped(text, end);
+    while let Some(b'/' | b'\\') = bytes.get(next) {
+        end = next + 1;
+        next = skip_dropped(text, end);
+    }
+    host_follows(text, next).then_some(Start {
+        len: end - i,
+        plain: false,
+    })
+}
+
+/// Whether what is written at `at`, after a scheme, is a host to a URL
+/// parser: it has a letter, a digit, `%`, `[` or a non-ASCII byte before
+/// the first `/`, `\`, `?`, `#` or space. After a `:` the parser needs a
+/// host after an `@` (`http::Request` is Rust; `http::@host` is a URL).
+/// Erring towards a host: one it has not found in 256 bytes is there
+fn host_follows(text: &str, at: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut after_colon = false;
+    let mut first = true;
+    let mut i = at;
+    while let Some(b) = bytes.get(i).copied() {
+        if i - at >= 256 {
+            return true;
+        }
+        match b {
+            b'/' | b'\\' | b'?' | b'#' => return false,
+            // (0x0B and 0x1C to 0x1E are line breaks to the reader's view)
+            b' ' | 0x09..=0x0D | 0x1C..=0x1E => {
+                let next = skip_dropped(text, i);
+                if next == i {
+                    return false;
+                }
+                i = next;
+                continue;
+            }
+            b':' if first => after_colon = true,
+            b'@' if after_colon => return true,
+            b if !after_colon
+                && (b.is_ascii_alphanumeric()
+                    || matches!(b, b'%' | b'[')
+                    || !b.is_ascii()) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        first = false;
+        i += 1;
+    }
+    false
+}
+
+fn has_scheme(text: &str) -> bool {
+    (0..text.len()).any(|i| scheme_at(text, i).is_some())
 }
 
 /// A schemeless `www.` host at `i`, at the start of a word
@@ -331,11 +627,12 @@ fn www_at(bytes: &[u8], i: usize) -> bool {
 /// The end of the authority that starts at `from`: the first byte that
 /// cannot be in one, or the start of another URL (`a:https://…`), which
 /// is then seen as one
-fn authority_end(bytes: &[u8], from: usize) -> usize {
+fn authority_end(text: &str, from: usize) -> usize {
+    let bytes = text.as_bytes();
     let mut end = from;
     while end < bytes.len()
         && is_authority_byte(bytes[end])
-        && scheme_at(bytes, end).is_none()
+        && scheme_at(text, end).is_none()
     {
         end += 1;
     }
@@ -365,39 +662,22 @@ fn at_word_boundary(bytes: &[u8], i: usize) -> bool {
     i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'.')
 }
 
-/// The end of the URL starting at `start`: the first byte that cannot be in
-/// one as written in prose, then back over any sentence punctuation before
-/// it. `None` past [`MAX_URL_BYTES`]
-fn url_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut end = start;
+/// The end as prose of the URL starting at `start`, whose authority
+/// starts at `from`: the first byte that cannot be in one as written in
+/// prose, then back over any sentence punctuation before it. `None` past
+/// [`MAX_URL_BYTES`]
+fn url_end(bytes: &[u8], start: usize, from: usize) -> Option<usize> {
+    let mut end = from;
     while end < bytes.len()
         && !bytes[end].is_ascii_whitespace()
-        && !matches!(
-            bytes[end],
-            b'<' | b'>'
-                | b'"'
-                | b'\''
-                | b'`'
-                | b'('
-                | b')'
-                | b'['
-                | b']'
-                | b'{'
-                | b'}'
-                | b'|'
-        )
+        && !is_bracket(bytes[end])
     {
         end += 1;
         if end - start > MAX_URL_BYTES {
             return None;
         }
     }
-    while end > start
-        && matches!(
-            bytes[end - 1],
-            b'.' | b',' | b';' | b':' | b'!' | b'?' | b'*' | b'_'
-        )
-    {
+    while end > from && is_sentence_punctuation(bytes[end - 1]) {
         end -= 1;
     }
     Some(end)
@@ -415,9 +695,10 @@ fn on_site_host(bytes: &[u8], at: usize, site: &Url) -> bool {
             .is_none_or(|b| !is_authority_byte(*b) || *b == b':')
 }
 
-/// One rule of a [`Links`] policy, written as a URL: a scheme (`http` or
-/// `https`), a host, and optionally a port and a path. No user, password,
-/// query or fragment.
+/// One rule of a [`Links`] policy, written as a URL: `http://` or
+/// `https://`, a host, and optionally a port and a path. No user,
+/// password, query or fragment, and nothing a parser would rewrite: a
+/// backslash, a control character, a `.` or `..` path segment.
 ///
 /// A URL is matched on its parsed parts ([`Url`]), never as a string
 /// prefix, so the host's case and an internationalised name's two spellings
@@ -425,8 +706,11 @@ fn on_site_host(bytes: &[u8], at: usize, site: &Url) -> bool {
 ///
 /// - **Host.** Equal, or, for a rule written `*.example.org`, any subdomain
 ///   of `example.org` (`en.example.org`, `a.b.example.org`) and not
-///   `example.org` itself. A leading `*.` before a domain name is the only
-///   wildcard: a `*` anywhere else in a rule is refused.
+///   `example.org` itself. A leading `*.` before a domain name of two
+///   labels or more is the only wildcard: `*.com` and a `*` anywhere else
+///   are refused. A public suffix of more labels (`*.co.uk`) cannot be
+///   told from a domain without a list of them, and is the operator's to
+///   avoid.
 /// - **Path.** The rule's segments are the first of the URL's: `/wiki`
 ///   matches `/wiki` and `/wiki/Rust`, not `/wikipedia`. No path, or `/`,
 ///   matches every path.
@@ -457,8 +741,23 @@ pub enum LinkRuleRefusal {
     #[error("its scheme is {0:?}; only http and https rules are accepted")]
     Scheme(String),
     #[error(
-        "it has a user or a password; a URL with either matches no allow \
-         rule, and every deny rule its host does"
+        "it does not begin `http://` or `https://`; a parser reads it as \
+         if it did, and a rule is written the one way"
+    )]
+    Slashes,
+    #[error(
+        "it has a backslash, which parsers read differently; a rule is \
+         written with `/`"
+    )]
+    Backslash,
+    #[error(
+        "it has a control character (a tab or a line break, perhaps), \
+         which a parser would drop"
+    )]
+    Control,
+    #[error(
+        "it has a user or a password, or the `@` of one; a URL with either \
+         matches no allow rule, and every deny rule its host does"
     )]
     Userinfo,
     #[error(
@@ -474,6 +773,22 @@ pub enum LinkRuleRefusal {
          (https://*.example.org), and nowhere else"
     )]
     Wildcard,
+    #[error(
+        "`*.` is before a single label, so it would match every domain \
+         under that name; a wildcard needs two labels or more after it \
+         (https://*.example.org)"
+    )]
+    WildcardSuffix,
+    #[error(
+        "its host ends in more than one dot; one trailing dot is the most \
+         a host has"
+    )]
+    TrailingDots,
+    #[error(
+        "its path has a `.` or `..` segment (or `%2e` for one), which a \
+         parser would resolve; write the path it resolves to"
+    )]
+    DotSegment,
 }
 
 impl FromStr for LinkRule {
@@ -486,6 +801,12 @@ impl FromStr for LinkRule {
             reason,
         };
         let written = given.trim();
+        if written.contains('\\') {
+            return Err(fail(Why::Backslash));
+        }
+        if written.contains(char::is_control) {
+            return Err(fail(Why::Control));
+        }
         // `*.` is not part of a host: taken off before the parse
         let (wildcard, parsed) = match written.split_once("://*.") {
             Some((scheme, rest))
@@ -499,7 +820,23 @@ impl FromStr for LinkRule {
         if !matches!(url.scheme(), "http" | "https") {
             return Err(fail(Why::Scheme(url.scheme().to_string())));
         }
-        if !url.username().is_empty() || url.password().is_some() {
+        // As written from here: the parser has already normalised `url`
+        let Some(rest) = ["https://", "http://"].iter().find_map(|scheme| {
+            let (head, rest) = written.split_at_checked(scheme.len())?;
+            head.eq_ignore_ascii_case(scheme).then_some(rest)
+        }) else {
+            return Err(fail(Why::Slashes));
+        };
+        let (authority, path) = rest
+            .find(['/', '?', '#'])
+            .map_or((rest, ""), |at| rest.split_at(at));
+        if authority.trim_start_matches("*.").is_empty() {
+            return Err(fail(Why::Slashes));
+        }
+        if authority.contains('@')
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
             return Err(fail(Why::Userinfo));
         }
         if url.query().is_some() {
@@ -515,14 +852,30 @@ impl FromStr for LinkRule {
         if url.as_str().contains('*') || (wildcard && domain.is_none()) {
             return Err(fail(Why::Wildcard));
         }
+        if domain.as_deref().is_some_and(|d| d.ends_with("..")) {
+            return Err(fail(Why::TrailingDots));
+        }
+        if path.split('/').any(is_dot_segment) {
+            return Err(fail(Why::DotSegment));
+        }
         if let Some(absolute) =
             domain.as_deref().and_then(|d| d.strip_suffix('.'))
         {
             url.set_host(Some(absolute))
                 .map_err(|e| fail(Why::NotAUrl(e)))?;
         }
+        if wildcard && url.host_str().is_some_and(|d| d.split('.').count() < 2)
+        {
+            return Err(fail(Why::WildcardSuffix));
+        }
         Ok(Self { url, wildcard })
     }
+}
+
+/// `.` or `..`, with `%2e` for either dot
+fn is_dot_segment(segment: &str) -> bool {
+    let plain = segment.to_ascii_lowercase().replace("%2e", ".");
+    plain == "." || plain == ".."
 }
 
 impl fmt::Display for LinkRule {
@@ -544,8 +897,9 @@ impl LinkRule {
     /// the rule's, and the path is under the rule's as written: an encoded
     /// spelling of it (`/%77iki`) is not. Never a URL with a user or a
     /// password (`https://example.org@evil.example/`), nor, under a rule
-    /// with a path, one with an encoded `/` or `\` in its path, which a
-    /// server may read as leaving it.
+    /// with a path, one whose path has what a server may read as leaving
+    /// it: an encoded `/` or `\`, a `;` (`/wiki/..;/admin`), or an encoded
+    /// `%` (`%252F`).
     pub fn allows(&self, url: &Url) -> bool {
         if !url.username().is_empty() || url.password().is_some() {
             return false;
@@ -564,7 +918,10 @@ impl LinkRule {
             return true;
         }
         let path = url.path().to_ascii_lowercase();
-        if path.contains("%2f") || path.contains("%5c") {
+        if ["%2f", "%5c", "%25", ";"]
+            .iter()
+            .any(|bad| path.contains(bad))
+        {
             return false;
         }
         ours.all(|segment| theirs.next() == Some(segment))
@@ -573,28 +930,42 @@ impl LinkRule {
     /// Whether `url` is defanged under a default of leaving URLs as written.
     ///
     /// Looser than [`allows`](Self::allows), so that a rule is not escaped
-    /// by another spelling: a user or password is ignored, a rule on its
-    /// scheme's own port covers `http` and `https` alike, and paths are
-    /// compared percent-decoded, without their empty segments. Letter case
-    /// in a path still counts, so a rule with no path is the sure one.
+    /// by another spelling:
+    ///
+    /// - a user or password is ignored;
+    /// - a rule with no port (or its scheme's own, which is the same
+    ///   rule) covers every port, `http` and `https` alike, and one with
+    ///   a port covers that port under both;
+    /// - paths are compared percent-decoded, an encoded `/` or `\` a
+    ///   separator like a written one, without their empty segments and
+    ///   without a segment's `;parameters`, and both as written and with
+    ///   their `..` resolved after the decoding.
+    ///
+    /// Letter case in a path still counts, so a rule with no path is the
+    /// sure one.
     pub fn denies(&self, url: &Url) -> bool {
-        let same_origin = url.scheme() == self.url.scheme()
-            && url.port_or_known_default() == self.url.port_or_known_default();
-        let both_default = url.port().is_none() && self.url.port().is_none();
-        if !(same_origin || both_default) || !self.host_matches(url) {
+        let port = self.url.port();
+        if port.is_some_and(|port| url.port_or_known_default() != Some(port))
+            || !self.host_matches(url)
+        {
             return false;
         }
-        let Some(theirs) = url.path_segments() else {
-            return false;
-        };
-        let decoded = |segment| {
-            percent_encoding::percent_decode_str(segment).decode_utf8_lossy()
-        };
-        let mut theirs = theirs.filter(|s| !s.is_empty()).map(decoded);
-        self.segments()
-            .filter(|s| !s.is_empty())
-            .map(decoded)
-            .all(|segment| theirs.next() == Some(segment))
+        let ours = loose_segments(self.url.path());
+        if ours.is_empty() {
+            return true;
+        }
+        let theirs = loose_segments(url.path());
+        let mut resolved = Vec::with_capacity(theirs.len());
+        for segment in &theirs {
+            match segment.as_str() {
+                "." => {}
+                ".." => {
+                    resolved.pop();
+                }
+                _ => resolved.push(segment.clone()),
+            }
+        }
+        theirs.starts_with(&ours) || resolved.starts_with(&ours)
     }
 
     /// The rule's path segments, without the empty last one of `/` and
@@ -622,6 +993,18 @@ impl LinkRule {
             _ => false,
         }
     }
+}
+
+/// A path's segments as the loosest server reads them
+/// ([`LinkRule::denies`])
+fn loose_segments(path: &str) -> Vec<String> {
+    percent_encoding::percent_decode_str(path)
+        .decode_utf8_lossy()
+        .split(['/', '\\'])
+        .map(|segment| segment.split(';').next().unwrap_or(segment))
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 impl Serialize for LinkRule {
