@@ -107,8 +107,9 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// A URL starts at `http` or `https`, a `:` and any run of `/` and `\`
 /// (`https://x`, `https:/x`, `https:x`, `https:\\x`), in any letter case,
 /// with tabs and line breaks anywhere in it, which URL parsers drop:
-/// whatever a WHATWG parser reads as `http` or `https` with a host. A
-/// line break is any [`threads::is_line_break`], with the whitespace
+/// whatever a WHATWG parser reads as `http` or `https` with a host. Here
+/// (where a URL starts, not where it ends) a line break is any
+/// [`threads::is_line_break`], with the whitespace
 /// before it, since [`threads::tidy`] makes `\n` of those after the
 /// policy has run. So `https:` at the end of a line is taken for a URL
 /// with the next line's first word, and its scheme defanged; before a
