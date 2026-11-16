@@ -593,3 +593,185 @@ fn schemas_are_inline_and_say_nothing_is_merged() {
     assert_eq!(selection["anyOf"][0]["type"], "string");
     assert!(selection["anyOf"][1]["properties"]["links"].is_object());
 }
+
+// ── Real TOML, as an operator writes it and the runner reads it ──────────
+
+mod as_toml {
+    use super::*;
+
+    /// A runner's file: the `[display]` section and its models' choices
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct File {
+        #[serde(default)]
+        display: AgentDisplayProfiles,
+        #[serde(default)]
+        model: Vec<Model>,
+    }
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Model {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<DisplaySelection>,
+    }
+
+    fn read<T: serde::de::DeserializeOwned>(text: &str) -> T {
+        toml::from_str(text).unwrap_or_else(|e| panic!("{e}\n{text}"))
+    }
+
+    fn refused<T: serde::de::DeserializeOwned + fmt::Debug>(
+        text: &str,
+    ) -> String {
+        toml::from_str::<T>(text).expect_err(text).to_string()
+    }
+
+    #[test]
+    fn links_inline() {
+        #[derive(Deserialize)]
+        struct One {
+            links: Links,
+        }
+        let one: One = read(
+            r#"links = { mode = "defanged", allow = ["https://*.wikipedia.org", "https://www.bbc.com/news"] }"#,
+        );
+        assert_eq!(
+            one.links,
+            Links::Defanged {
+                allow: vec![
+                    rule("https://*.wikipedia.org"),
+                    rule("https://www.bbc.com/news")
+                ]
+            }
+        );
+        let one: One =
+            read(r#"links = { mode = "raw", deny = ["https://example.org"] }"#);
+        assert_eq!(
+            one.links,
+            Links::Raw {
+                deny: vec![rule("https://example.org")]
+            }
+        );
+        let one: One = read(r#"links = { mode = "defanged" }"#);
+        assert_eq!(one.links, Links::default());
+    }
+
+    const FILE: &str = r#"
+[display]
+links = { mode = "defanged" }
+
+[display.profiles.news]
+links = { mode = "defanged", allow = ["https://*.wikipedia.org", "https://www.bbc.com"] }
+
+[display.profiles.open]
+links = { mode = "raw", deny = ["https://example.org/tracker"] }
+
+[[model]]
+id = "haiku"
+display = "news"
+
+[[model]]
+id = "sonnet"
+display = "default"
+
+[[model]]
+id = "opus"
+display = { links = { mode = "raw" } }
+
+[[model]]
+id = "local"
+"#;
+
+    #[test]
+    fn a_runners_file() {
+        let file: File = read(FILE);
+        assert_eq!(file.display.default, AgentDisplayConfig::default());
+        assert_eq!(
+            file.display
+                .profiles
+                .keys()
+                .map(ProfileName::as_str)
+                .collect::<Vec<_>>(),
+            ["news", "open"]
+        );
+        assert_eq!(
+            file.display.profiles[&name("news")],
+            allowing(&["https://*.wikipedia.org", "https://www.bbc.com"])
+        );
+        let choices: Vec<_> =
+            file.model.iter().map(|m| m.display.clone()).collect();
+        assert_eq!(
+            choices,
+            [
+                Some(DisplaySelection::Profile(name("news"))),
+                Some(DisplaySelection::Default),
+                Some(DisplaySelection::Inline(config(Links::Raw {
+                    deny: Vec::new()
+                }))),
+                None,
+            ]
+        );
+        for model in &file.model {
+            if let Some(choice) = &model.display {
+                file.display.check(choice).unwrap();
+            }
+        }
+        let news = file
+            .display
+            .resolve(file.model[0].display.as_ref(), None)
+            .unwrap();
+        assert_eq!(news.config, &file.display.profiles[&name("news")]);
+    }
+
+    #[test]
+    fn a_file_round_trips() {
+        let file: File = read(FILE);
+        let written = toml::to_string(&file).unwrap();
+        assert_eq!(read::<File>(&written), file, "{written}");
+    }
+
+    /// Every unknown key, at every level, and an unknown profile: refused,
+    /// and the message names it
+    #[test]
+    fn what_is_refused_names_itself() {
+        for (text, named) in [
+            ("[display]\nlnks = { mode = \"raw\" }\n", "lnks"),
+            ("[display]\nlinks = { mode = \"raw\", alow = [] }\n", "alow"),
+            ("[display]\nlinks = { mode = \"open\" }\n", "open"),
+            (
+                "[display.profiles.news]\nlinks = { mode = \"raw\" }\ncolour = 1\n",
+                "colour",
+            ),
+            (
+                "[display.profiles.news]\nlinks = { mode = \"defanged\", allow = [\"ftp://x.org\"] }\n",
+                "ftp",
+            ),
+            ("[display.profiles.Default]\n", "Default"),
+            ("[display.profiles.default]\n", "default"),
+            (
+                "[[model]]\nid = \"x\"\ndisplay = { links = { mode = \"raw\" }, extra = 1 }\n",
+                "extra",
+            ),
+            ("[[model]]\nid = \"x\"\ndisplay = \"News\"\n", "News"),
+        ] {
+            let message = refused::<File>(text);
+            assert!(message.contains(named), "{text}: {message}");
+        }
+        // A profile no one defined is refused when it is checked
+        let file: File = read("[[model]]\nid = \"x\"\ndisplay = \"nwes\"\n");
+        let choice = file.model[0].display.as_ref().unwrap();
+        let message = file.display.check(choice).unwrap_err().to_string();
+        assert!(message.contains("nwes"), "{message}");
+        assert!(message.contains("no profile is defined"), "{message}");
+        let file: File = read(&format!(
+            "{FILE}\n[[model]]\nid = \"x\"\ndisplay = \"nwes\"\n"
+        ));
+        let choice = file.model.last().unwrap().display.as_ref().unwrap();
+        let message = file.display.check(choice).unwrap_err().to_string();
+        assert!(
+            message.contains("`nwes`") && message.contains("`news`, `open`"),
+            "{message}"
+        );
+    }
+}
