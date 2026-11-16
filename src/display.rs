@@ -243,6 +243,17 @@ impl Links {
         text: &'a str,
         site: Option<&Url>,
     ) -> Cow<'a, str> {
+        self.rewrite_noting(text, site).0
+    }
+
+    /// [`rewrite`](Self::rewrite), and whether it defanged anything (a
+    /// site page written as its link is not)
+    pub fn rewrite_noting<'a>(
+        &self,
+        text: &'a str,
+        site: Option<&Url>,
+    ) -> (Cow<'a, str>, bool) {
+        let mut defanged = false;
         let bytes = text.as_bytes();
         let mut out: Option<String> = None;
         let mut i = 0;
@@ -284,6 +295,7 @@ impl Links {
                 continue;
             }
 
+            defanged = true;
             let buf = out
                 .get_or_insert_with(|| String::with_capacity(text.len() + 16));
             buf.push_str(&text[copied..i]);
@@ -309,13 +321,14 @@ impl Links {
             i = j.max(i + 1);
         }
 
-        match out {
+        let out = match out {
             Some(mut buf) => {
                 buf.push_str(&text[copied..]);
                 Cow::Owned(buf)
             }
             None => Cow::Borrowed(text),
-        }
+        };
+        (out, defanged)
     }
 
     /// Where to go on from when the URL written at `at` is left as

@@ -275,6 +275,18 @@ pub(super) fn map_text(content: &mut Content, f: impl Fn(&str) -> String) {
     }
 }
 
+/// `note` as a paragraph after a result's text, in its last text block
+pub(super) fn append_paragraph(content: &mut Content, note: &str) {
+    use misanthropic::prompt::message::Block;
+    match content.0.iter_mut().rev().find_map(|b| match b {
+        Block::Text { text, .. } => Some(text),
+        _ => None,
+    }) {
+        Some(text) => *text = format!("{}\n\n{note}", text.trim_end()).into(),
+        None => content.0.push(Block::from(note.to_string())),
+    }
+}
+
 /// The sentence `tail` after a result's text, in its last text block, the
 /// text before it ended as a sentence (betas of 0.113.0: "count from 1
 /// Refused;")
@@ -604,6 +616,7 @@ impl Agora {
     /// client's site
     fn cx(&self) -> DisplayContext<'_> {
         DisplayContext::at(&self.display, Some(self.client.site()))
+            .noting(self.shown_once.defanged_flag())
     }
 
     /// The agent this tool acts as
@@ -1065,11 +1078,11 @@ impl AgentDisplay for CommunityHeader<'_> {
         writeln!(
             f,
             "## {} ({})",
-            prompt::linked_line(&one_line(&cx.links(&c.display_name))),
+            prompt::linked_line(&one_line(&cx.linked(&c.display_name))),
             c.name.canonical()
         )?;
         if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
-            writeln!(f, "{}", prompt::linked_line(&one_line(&cx.links(d))))?;
+            writeln!(f, "{}", prompt::linked_line(&one_line(&cx.linked(d))))?;
         }
         if let Some(n) = c.member_count {
             writeln!(f, "{n} member(s)")?;
@@ -1427,9 +1440,13 @@ impl Agora {
         };
         // Rendered after the entry, into the same result. Its own copy of
         // the context: the arms below change `self`
-        let (display, site) =
-            (self.display.clone(), self.client.site().clone());
-        let cx = DisplayContext::at(&display, Some(&site));
+        let (display, site, once) = (
+            self.display.clone(),
+            self.client.site().clone(),
+            self.shown_once.clone(),
+        );
+        let cx = DisplayContext::at(&display, Some(&site))
+            .noting(once.defanged_flag());
         let with_history =
             |rendered: String, once: &super::ShownOnce| match &history {
                 Some((h, amendments)) => {

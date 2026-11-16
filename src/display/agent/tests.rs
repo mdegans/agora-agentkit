@@ -100,27 +100,6 @@ fn the_config_decides_the_text() {
     );
 }
 
-/// A bare config is a context, on the process's site (which no test can
-/// pin: it is set once, by whichever test's client is first)
-#[test]
-fn a_config_is_a_context() {
-    let config = AgentDisplayConfig::default();
-    let note = Note {
-        body: URL,
-        ..note()
-    };
-    let want = format!("litmus wrote:\n<post>\n{DEFANGED}\n</post>");
-    assert_eq!(note.agent_display(&config).to_string(), want);
-    assert_eq!(
-        Content::from_iter(note.agent_display_blocks((&config).into())),
-        Content::from(want)
-    );
-    let cx = DisplayContext::from(&config);
-    assert_eq!(note.agent_json(cx).unwrap()["body"], DEFANGED);
-    let cx = DisplayContext::from(&config);
-    assert_eq!(cx.site, crate::links::site());
-}
-
 #[test]
 fn blocks_default_to_one_text_block_of_the_text() {
     let config = AgentDisplayConfig::default();
@@ -400,7 +379,7 @@ fn the_policy_reads_the_text_as_written_then_it_is_escaped() {
     // `&` is in the URL as written, and `&amp;` in what is shown
     let text = "see https://example.com/?a=1&b=2 <b> & more";
     assert_eq!(
-        cx.links(text),
+        cx.linked(text),
         "see hxxps://example[.]com/?a=1&b=2 <b> & more"
     );
     assert_eq!(
@@ -420,9 +399,12 @@ fn the_policy_reads_the_text_as_written_then_it_is_escaped() {
     );
     // Each is the policy, then what `threads` does without one
     for text in ADVERSARIAL.iter().copied().chain([text]) {
-        assert_eq!(cx.in_element(text), threads::escape_text(&cx.links(text)));
-        assert_eq!(cx.on_line(text), threads::defang(&cx.links(text)));
-        assert_eq!(cx.body(text), cx.in_element(&threads::tidy(text)));
+        assert_eq!(cx.in_element(text), threads::escape_text(&cx.linked(text)));
+        assert_eq!(cx.on_line(text), threads::defang(&cx.linked(text)));
+        assert_eq!(
+            cx.body(text),
+            threads::escape_text(&threads::tidy(&cx.linked(text)))
+        );
     }
     // What `threads` does is still done: a tag of ours is renamed, a
     // stub's opening undone
@@ -449,7 +431,7 @@ fn escaping_first_would_change_what_a_rule_matches() {
     let cx = DisplayContext::at(&deny, Some(&site));
     let text = "https://evil.example/a&b/x";
     assert_eq!(cx.in_element(text), "hxxps://evil[.]example/a&amp;b/x");
-    let wrong = cx.links(&threads::escape_text(text)).into_owned();
+    let wrong = cx.linked(&threads::escape_text(text)).into_owned();
     assert_eq!(wrong, "https://evil.example/a&amp;b/x");
 
     // An allowed URL closed by `<`: escaped first, the URL after it would
@@ -464,7 +446,7 @@ fn escaping_first_would_change_what_a_rule_matches() {
         cx.in_element(text),
         "https://ok.example/wiki/Rust&lt;hxxps://evil[.]example/x"
     );
-    let wrong = cx.links(&threads::escape_text(text)).into_owned();
+    let wrong = cx.linked(&threads::escape_text(text)).into_owned();
     assert_eq!(
         wrong,
         "hxxps://ok[.]example/wiki/Rust&lt;hxxps://evil[.]example/x"

@@ -21,6 +21,7 @@
 //! request.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::ids::{ContentId, ContentIdPrefix, GovernanceLogId, PostId};
@@ -172,7 +173,14 @@ pub fn summary_text(text: &str) -> String {
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
 #[derive(Debug, Clone, Default)]
-pub struct ShownOnce(Arc<RwLock<Inner>>);
+pub struct ShownOnce(Arc<RwLock<Inner>>, Arc<AtomicBool>);
+
+/// The note on a defanged link, shown the first time a result defangs one
+/// ([`ShownOnce::defanged_note`])
+pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown like \
+     hxxps://example[.]com unless your operator has allowed the site; the \
+     text is otherwise as written. To have a site allowed, ask your \
+     operator: `send_message` to `operator`.)*";
 
 impl ShownOnce {
     /// A result for `read` (what the pointer will call it: `your read of
@@ -398,6 +406,30 @@ impl ShownOnce {
                 .pending_summaries_at
                 .push(((id, version.unwrap_or("latest")), shown(total)));
         }
+    }
+
+    /// What a [`DisplayContext`](crate::display::DisplayContext) sets when
+    /// it defangs a link ([`noting`](crate::display::DisplayContext::noting))
+    pub fn defanged_flag(&self) -> &AtomicBool {
+        &self.1
+    }
+
+    /// [`DEFANGED_NOTE`], when what was rendered since the last call
+    /// defanged a link and the note is still to be shown this session
+    pub fn defanged_note(&self) -> Option<&'static str> {
+        (self.1.swap(false, Ordering::Relaxed) && self.legend("defanged"))
+            .then_some(DEFANGED_NOTE)
+    }
+
+    /// The session's intro showed [`DEFANGED_NOTE`] if it defanged a link
+    /// (it is seated, so the note counts as shown at once): whether it did
+    pub fn defanged_in_intro(&self) -> bool {
+        let defanged = self.1.swap(false, Ordering::Relaxed);
+        if defanged {
+            let mut inner = self.0.write().expect("shown-once lock");
+            inner.legends.insert("defanged");
+        }
+        defanged
     }
 
     /// Whether the note `legend` was shown this session (or by the result

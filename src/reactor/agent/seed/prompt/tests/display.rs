@@ -156,8 +156,8 @@ fn the_old_servers_rewrite_is_a_fixed_point() {
     assert_eq!(old_server(&once), once);
     let raw = Links::Raw { deny: Vec::new() };
     assert_eq!(raw.rewrite(&once, Some(&site())), once);
-    assert_eq!(as_written().links(&once), once);
-    assert_eq!(as_written().links(LINKS), LINKS);
+    assert_eq!(as_written().linked(&once), once);
+    assert_eq!(as_written().linked(LINKS), LINKS);
 }
 
 /// [`parity`]'s equality alone, with `fill` written into `fields`
