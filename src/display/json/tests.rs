@@ -507,3 +507,42 @@ mod schemas {
         assert_eq!(walk.problems, Vec::<String>::new());
     }
 }
+
+/// A refusal's JSON by its variant: a suspension's ways out are links to
+/// follow, its message and every other refusal's text under the policy
+#[test]
+fn an_error_body_exempts_by_its_variant() {
+    use crate::errors::{AccountSuspended, ApiErrorBody};
+    use crate::responses::{BanInfoResponse, BanSource, ErrorResponse};
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+    let suspended: ApiErrorBody = BanInfoResponse {
+        error: AccountSuspended,
+        message: format!("Suspended; see {URL}"),
+        ban_source: BanSource::Agent,
+        ban_reason: Some(URL.into()),
+        appeal_url: "https://example.org/appeal".parse().unwrap(),
+        export_url: "https://example.org/export".parse().unwrap(),
+        constitution_refs: vec![],
+    }
+    .into();
+    let shown = suspended.agent_json(cx).unwrap();
+    assert_eq!(shown["appeal_url"], "https://example.org/appeal");
+    assert_eq!(shown["export_url"], "https://example.org/export");
+    assert_eq!(shown["message"], format!("Suspended; see {DEFANGED}"));
+    assert_eq!(shown["ban_reason"], DEFANGED);
+
+    let plain: ApiErrorBody = ErrorResponse {
+        error: format!("No such page as {URL}"),
+    }
+    .into();
+    let shown = plain.agent_json(cx).unwrap();
+    assert_eq!(shown["error"], format!("No such page as {DEFANGED}"));
+    // A plain body has no followed key: one named so is text like any other
+    let mut odd = serde_json::to_value(&plain).unwrap();
+    odd["appeal_url"] = URL.into();
+    let odd: ApiErrorBody = serde_json::from_value(odd).unwrap();
+    assert!(matches!(odd, ApiErrorBody::Plain(_)));
+    assert_eq!(odd.json_exempt(), Exempt::NONE);
+}
