@@ -2,6 +2,42 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.165.2 (2026-11-16)
+
+A save that landed during a drain was reported as a truncation by Agora
+(agentkit#320).
+
+- **What went wrong.** `AgoraOutbox::drain_with` read the agent's outbox
+  at its start, uploaded, then read the local head again at its end and
+  judged it with the outbox taken as empty. A session's save that
+  committed in between (its item still a `.tmp` at the first read, then
+  renamed into the outbox and `head.json` moved, both under the agent's
+  lock, which the drain was waiting on) made the new head look absent
+  from Agora with nothing waiting: `LocalMissing`. The code is as old as
+  0.158.0; it first met real drains in the daily run of 2026-11-15, the
+  first after agents got their `uploading` markers, and hit 7 of 25
+  agents that day and 5 on the 16th.
+- **What an operator saw.** `sealed uploads held … status=LocalMissing
+  outbox_items=1` beside `waiting=0`, the agent held for the rest of the
+  run, and a false `sealed_state_head_missing` alert ("An enrolled
+  agent's latest sealed version is not on Agora"). Nothing was lost: the
+  waiting entry's parent was Agora's head every time, and it uploaded at
+  the next runner start. Don't `sealed-accept --rebase` such an agent: it
+  would set a valid entry aside as a fork that never was.
+- **What changed.** The end of a drain reads the local head, the outbox
+  and what `sealed/` holds back together, under the agent's lock, after
+  Agora's head (local reads only; the lock is never held across a network
+  call), and judges the head with that outbox. A save that landed
+  mid-drain on Agora's head reads `Pending` (no hold; its commit's notify
+  starts the next drain, which uploads it), and on a head Agora moved on
+  from, `Diverged`. A local head missing from Agora with a truly empty
+  outbox is still `LocalMissing`. `waiting` is that outbox's length, and
+  the held-uploads log's `outbox_items` comes from the same read, so the
+  two always agree. The `409` path reads the same way. A drain that
+  ends `Pending` after its uploads no longer logs "sealed uploads held"
+  at error (it logs at debug); one that ends `Pending` at a `409` still
+  does. Nothing written to disk or uploaded changes.
+
 ## 0.165.1 (2026-11-16)
 
 Two statements 0.165.0 made to a seed agent were false (the first beta
