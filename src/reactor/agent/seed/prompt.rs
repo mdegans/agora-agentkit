@@ -2289,10 +2289,6 @@ impl AgentDisplay for Inbox<'_> {
     ) -> fmt::Result {
         f.write_str(&self.text(cx))
     }
-
-    fn json_exempt(&self) -> crate::display::Exempt<'_> {
-        crate::responses::InboxResponse::JSON_EXEMPT
-    }
 }
 
 /// Who stands behind the operator, in Agora's words, never the operator's:
@@ -6930,10 +6926,6 @@ impl AgentDisplay for GovernanceEntry<'_> {
     ) -> fmt::Result {
         f.write_str(&self.text(cx))
     }
-
-    fn json_exempt(&self) -> crate::display::Exempt<'_> {
-        GovernanceEntryResponse::JSON_EXEMPT
-    }
 }
 
 /// What a record's field reads in place of text the summary above
@@ -7431,10 +7423,6 @@ impl AgentDisplay for RevisionHistory<'_> {
         _: DisplayContext<'_>,
     ) -> fmt::Result {
         f.write_str(&self.text())
-    }
-
-    fn json_exempt(&self) -> crate::display::Exempt<'_> {
-        crate::govlog::ChangeHistory::JSON_EXEMPT
     }
 }
 

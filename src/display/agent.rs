@@ -5,10 +5,9 @@ use std::borrow::Cow;
 use std::fmt;
 
 use misanthropic::prompt::message::Block;
-use serde::Serialize;
 use url::Url;
 
-use super::{AgentDisplayConfig, DisplayConfig, Exempt, json_view};
+use super::{AgentDisplayConfig, DisplayConfig};
 use crate::threads;
 
 /// What a view is rendered with: the reader's config, and the site whose
@@ -84,12 +83,14 @@ impl<C: AsRef<DisplayConfig>> DisplayContext<'_, C> {
     }
 }
 
-/// What an agent is shown of a value: as text, as content blocks, and as
-/// JSON.
+/// What an agent is shown of a value, as text and as content blocks. Its
+/// JSON is [`AgentJson`](super::AgentJson)'s.
 ///
 /// A rendering that needs more than the value (who reads it, a byte
 /// budget) is implemented on a small struct that borrows the value and
-/// carries the rest, not put in the config.
+/// carries the rest, not put in the config. Such a view may hold state
+/// that rendering changes (the seed runner's legends shown once, its
+/// "already in your context" pointers), so one read is rendered once.
 ///
 /// Usable as a trait object, for the text and the blocks alike: a mixed
 /// list of views is a `Vec<Box<dyn AgentDisplay>>`, and a `&T` or a
@@ -101,13 +102,6 @@ pub trait AgentDisplay {
         f: &mut dyn fmt::Write,
         cx: DisplayContext<'_>,
     ) -> fmt::Result;
-
-    /// What of this value's JSON the link policy leaves as written
-    /// ([`agent_display_json`](Self::agent_display_json)). A method, so an
-    /// enum can answer for the variant it is
-    fn json_exempt(&self) -> Exempt<'_> {
-        Exempt::NONE
-    }
 
     /// The content blocks an agent is shown: one text block of the text,
     /// unless a type has more to show (an image, a document).
@@ -133,20 +127,6 @@ pub trait AgentDisplay {
         Self: Sized,
     {
         AgentText::new(self, cx)
-    }
-
-    /// The JSON an agent is shown: the value's own, through [`json_view`]
-    /// with [`json_exempt`](Self::json_exempt). An error is the
-    /// serializer's
-    fn agent_display_json<'a>(
-        &self,
-        cx: impl Into<DisplayContext<'a>>,
-    ) -> Result<serde_json::Value, serde_json::Error>
-    where
-        Self: Serialize + Sized,
-    {
-        let value = serde_json::to_value(self)?;
-        Ok(json_view(value, self.json_exempt(), cx.into()))
     }
 }
 
@@ -192,10 +172,6 @@ macro_rules! forward {
                 cx: DisplayContext<'_>,
             ) -> fmt::Result {
                 (**self).fmt_agent(f, cx)
-            }
-
-            fn json_exempt(&self) -> Exempt<'_> {
-                (**self).json_exempt()
             }
 
             fn agent_display_blocks<'a>(

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use super::*;
-use crate::display::json_view;
+use crate::display::AgentJson;
 use crate::responses::{
     ContentResponse, DocumentResponse, GitContentResponse, InboxResponse,
 };
@@ -486,18 +486,7 @@ fn an_inbox_shows_each_kind_of_message_by_who_wrote_it() {
 
     // The JSON agrees on the operator's section and the direct message;
     // a broadcast shares the messages' key, so there it is under the policy
-    let view = Inbox {
-        inbox: &inbox,
-        once: &ShownOnce::default(),
-        limit: None,
-    };
-    let json = default_on_site(|cx| {
-        json_view(
-            serde_json::to_value(&inbox).unwrap(),
-            view.json_exempt(),
-            cx,
-        )
-    });
+    let json = default_on_site(|cx| inbox.agent_json(cx).unwrap());
     let plain = serde_json::to_value(&inbox).unwrap();
     assert_eq!(json["operator_messages"], plain["operator_messages"]);
     assert_eq!(json["operator_replies"], plain["operator_replies"]);
@@ -548,50 +537,11 @@ fn a_governance_entry_is_as_written() {
             "{part}: {shown}"
         );
     }
-    let view = GovernanceEntry {
-        entry: &entry,
-        once: &ShownOnce::default(),
-    };
-    let json = default_on_site(|cx| {
-        json_view(
-            serde_json::to_value(&entry).unwrap(),
-            view.json_exempt(),
-            cx,
-        )
-        .to_string()
-    });
-    assert_eq!(json, serde_json::to_value(&entry).unwrap().to_string());
     assert_eq!(
-        default_on_site(|cx| entry.agent_display_json_value(cx)),
+        default_on_site(|cx| entry.agent_json(cx).unwrap()),
         serde_json::to_value(&entry).unwrap()
     );
 }
-
-trait JsonUnder {
-    fn agent_display_json_value(&self, cx: DisplayContext<'_>) -> Value;
-}
-
-/// A wire type's JSON under its own `JSON_EXEMPT`, for the types with no
-/// view of their own
-macro_rules! json_under {
-    ($($t:ty),*) => {$(
-        impl JsonUnder for $t {
-            fn agent_display_json_value(&self, cx: DisplayContext<'_>) -> Value {
-                json_view(
-                    serde_json::to_value(self).unwrap(),
-                    <$t>::JSON_EXEMPT,
-                    cx,
-                )
-            }
-        }
-    )*};
-}
-
-json_under!(
-    GovernanceEntryResponse,
-    DocumentResponse,
-    GitContentResponse
-);
 
 fn data_file_entry() -> GovernanceEntryResponse {
     let mut entry: GovernanceEntryResponse = serde_json::from_value(json!({
@@ -639,7 +589,7 @@ fn a_data_sets_file_is_as_written() {
     });
     assert!(shown.contains(&format!("File {LINKS}")), "{shown}");
     assert_eq!(
-        default_on_site(|cx| entry.agent_display_json_value(cx)),
+        default_on_site(|cx| entry.agent_json(cx).unwrap()),
         serde_json::to_value(&entry).unwrap()
     );
 }
@@ -677,7 +627,7 @@ fn a_git_file_is_as_written() {
     });
     assert!(shown.contains(&format!("File {LINKS}")), "{shown}");
     assert_eq!(
-        default_on_site(|cx| git.agent_display_json_value(cx)),
+        default_on_site(|cx| git.agent_json(cx).unwrap()),
         serde_json::to_value(&git).unwrap()
     );
 }
@@ -695,10 +645,7 @@ fn a_document_is_as_written() {
     )
     .unwrap();
     let plain = serde_json::to_value(&doc).unwrap();
-    assert_eq!(
-        default_on_site(|cx| doc.agent_display_json_value(cx)),
-        plain
-    );
+    assert_eq!(default_on_site(|cx| doc.agent_json(cx).unwrap()), plain);
     assert!(plain["text"].as_str().unwrap().contains(LINKS));
 }
 
@@ -723,13 +670,8 @@ fn a_calendar_is_as_written() {
         shown.contains("\"Owed https://example.com/a?x=1&y="),
         "{shown}"
     );
-    let json = default_on_site(|cx| {
-        json_view(
-            serde_json::to_value(&calendar).unwrap(),
-            CalendarResponse::JSON_EXEMPT,
-            cx,
-        )
-    });
+    // (through the trait: its JSON once rewrote what the const exempts)
+    let json = default_on_site(|cx| calendar.agent_json(cx).unwrap());
     assert_eq!(json, serde_json::to_value(&calendar).unwrap());
 }
 
@@ -970,7 +912,7 @@ fn a_read_that_marks_what_it_shows_is_rendered_once() {
 
 // ── `ContentResponse`, variant by variant ───────────────────────────────
 
-/// Each variant's JSON under [`ContentResponse::json_exempt`]: what is
+/// Each variant's JSON ([`AgentJson`] of a [`ContentResponse`]): what is
 /// verbatim comes through byte for byte, and an author's text is under
 /// the policy. The variant's fields are beside the `type` tag, which the
 /// schema test cannot root, so it is checked on values
@@ -1013,9 +955,8 @@ fn each_content_variant_exempts_what_its_type_does() {
         let plain = serde_json::to_value(&content).unwrap();
         kinds.insert(plain["type"].as_str().unwrap().to_string());
         assert!(plain.to_string().contains("https://example.com/a"));
-        let shown = default_on_site(|cx| {
-            json_view(plain.clone(), content.json_exempt(), cx).to_string()
-        });
+        let shown =
+            default_on_site(|cx| content.agent_json(cx).unwrap().to_string());
         if verbatim {
             assert_eq!(shown, plain.to_string());
         } else {

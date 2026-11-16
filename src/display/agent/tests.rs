@@ -1,12 +1,13 @@
 use super::*;
 
 use misanthropic::prompt::message::Content;
+use serde::Serialize;
 use serde_json::json;
 
-use crate::display::Links;
 use crate::display::tests::{
     ADVERSARIAL, SPELLINGS, fetchable, generated, site,
 };
+use crate::display::{AgentJson, Exempt, Links};
 
 const URL: &str = "https://evil.example/x";
 const DEFANGED: &str = "hxxps://evil[.]example/x";
@@ -34,7 +35,9 @@ impl AgentDisplay for Note {
         writeln!(f, "{} wrote:", cx.on_line(self.author))?;
         write!(f, "<post>\n{}\n</post>", cx.body(self.body))
     }
+}
 
+impl AgentJson for Note {
     fn json_exempt(&self) -> Exempt<'_> {
         Exempt {
             followed: &["receipt_url"],
@@ -112,7 +115,8 @@ fn a_config_is_a_context() {
         Content::from_iter(note.agent_display_blocks((&config).into())),
         Content::from(want)
     );
-    assert_eq!(note.agent_display_json(&config).unwrap()["body"], DEFANGED);
+    let cx = DisplayContext::from(&config);
+    assert_eq!(note.agent_json(cx).unwrap()["body"], DEFANGED);
     let cx = DisplayContext::from(&config);
     assert_eq!(cx.site, crate::links::site());
 }
@@ -185,7 +189,7 @@ fn the_json_is_the_values_own_under_the_policy() {
     let site = site();
     let cx = DisplayContext::at(&config, Some(&site));
     assert_eq!(
-        note().agent_display_json(cx).unwrap(),
+        note().agent_json(cx).unwrap(),
         json!({
             "author": "litmus",
             "body": "Read hxxps://evil[.]example/x?a=1&b=2 <now>\n\n\n\
@@ -196,10 +200,10 @@ fn the_json_is_the_values_own_under_the_policy() {
     );
     // Through a reference and a box: the type's exemptions still
     fn shown(
-        value: impl AgentDisplay + Serialize,
+        value: impl AgentJson,
         cx: DisplayContext<'_>,
     ) -> serde_json::Value {
-        value.agent_display_json(cx).unwrap()
+        value.agent_json(cx).unwrap()
     }
     let note = note();
     let reference = &note;
@@ -210,6 +214,28 @@ fn the_json_is_the_values_own_under_the_policy() {
         assert!(shown["body"].as_str().unwrap().starts_with("Read hxxps"));
     }
     assert_eq!(shown(Box::new(note), cx)["record"]["statement"], URL);
+
+    // A list is each item's own, and nothing is `null`
+    let list = vec![self::note(), self::note()];
+    let shown = list.agent_json(cx).unwrap();
+    assert_eq!(shown[1]["record"]["statement"], URL);
+    assert_eq!(shown[1]["receipt_url"], URL);
+    assert!(shown[0]["body"].as_str().unwrap().starts_with("Read hxxps"));
+    assert_eq!(list[..1].agent_json(cx).unwrap(), json!([shown[0]]));
+    assert_eq!(Some(self::note()).agent_json(cx).unwrap(), shown[0]);
+    assert_eq!(None::<Note>.agent_json(cx).unwrap(), json!(null));
+    assert_eq!(
+        vec![Some(self::note()), None].agent_json(cx).unwrap(),
+        json!([shown[0], null])
+    );
+    // A human's view has the same JSON: the context is generic
+    let common = crate::display::DisplayConfig::default();
+    assert_eq!(
+        self::note()
+            .agent_json(DisplayContext::at(&common, Some(&site)))
+            .unwrap(),
+        shown[0]
+    );
 }
 
 /// What cannot be serialized is an error, not an empty answer
@@ -224,19 +250,12 @@ fn a_json_error_is_returned() {
             Err(serde::ser::Error::custom("no"))
         }
     }
-    impl AgentDisplay for Unserializable {
-        fn fmt_agent(
-            &self,
-            _: &mut dyn fmt::Write,
-            _: DisplayContext<'_>,
-        ) -> fmt::Result {
-            Ok(())
-        }
-    }
+    impl AgentJson for Unserializable {}
     let config = AgentDisplayConfig::default();
-    let error = Unserializable
-        .agent_display_json(DisplayContext::at(&config, None))
-        .unwrap_err();
+    let cx = DisplayContext::at(&config, None);
+    let error = Unserializable.agent_json(cx).unwrap_err();
+    assert_eq!(error.to_string(), "no");
+    let error = vec![Unserializable].agent_json(cx).unwrap_err();
     assert_eq!(error.to_string(), "no");
 }
 
@@ -297,11 +316,10 @@ fn references_boxes_and_trait_objects() {
     let twice: &&Note = &&note;
     assert_eq!(shown(twice, cx), NOTE_TEXT);
 
-    // The trait is object safe: the text, the blocks and the exemptions
+    // The trait is object safe: the text and the blocks
     let object: &dyn AgentDisplay = &note;
     assert_eq!(object.agent_text(cx).to_string(), NOTE_TEXT);
     assert_eq!(AgentText::new(object, cx).to_string(), NOTE_TEXT);
-    assert_eq!(object.json_exempt().verbatim, ["record"]);
     assert_eq!(
         object.agent_display_blocks(cx).collect::<Vec<_>>(),
         [Block::text(NOTE_TEXT)]

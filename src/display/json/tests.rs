@@ -70,14 +70,28 @@ fn a_value_with_no_urls_comes_back_equal() {
     assert_eq!(view(value.clone(), Exempt::NONE), value);
 }
 
+/// No key is a URL to follow in every type: `download_url` is one where
+/// its type says so, and a string like any other in a map beside it
 #[test]
-fn a_followed_url_is_left_whatever_type_it_is_in() {
-    for key in FOLLOWED_URL_KEYS {
-        let value = json!({"a": [{"b": {*key: URL, "note": URL}}]});
-        let shown = view(value, Exempt::NONE);
-        assert_eq!(shown["a"][0]["b"][*key], URL, "{key}");
-        assert_eq!(shown["a"][0]["b"]["note"], DEFANGED, "{key}");
-    }
+fn a_followed_url_is_its_types_to_exempt() {
+    use crate::responses::{BanInfoResponse, DataExportResponse};
+    let value = json!({"download_url": URL, "m": {"download_url": URL}});
+    assert_eq!(
+        view(value.clone(), Exempt::NONE),
+        json!({"download_url": DEFANGED, "m": {"download_url": DEFANGED}})
+    );
+    assert_eq!(
+        view(value, DataExportResponse::JSON_EXEMPT),
+        json!({"download_url": URL, "m": {"download_url": DEFANGED}})
+    );
+    let shown = view(
+        json!({"appeal_url": URL, "export_url": URL, "message": URL}),
+        BanInfoResponse::JSON_EXEMPT,
+    );
+    assert_eq!(
+        shown,
+        json!({"appeal_url": URL, "export_url": URL, "message": DEFANGED})
+    );
 }
 
 /// A followed key exempts a URL, not whatever is under a key of its name:
@@ -340,18 +354,17 @@ mod schemas {
             for (key, property) in properties {
                 let at = format!("{path}.{key}");
                 let key = key.as_str();
-                let common = FOLLOWED_URL_KEYS.contains(&key);
                 let own = exempt.followed.contains(&key);
                 let verbatim = exempt.verbatim.contains(&key);
                 if is_url(property) {
                     self.urls.insert(key.to_string());
-                    if !(common || own) {
+                    if !own {
                         self.problems.push(format!(
                             "{at} is a URL and not exempt: defanged, it \
                              cannot be followed"
                         ));
                     }
-                } else if common || own {
+                } else if own {
                     self.problems.push(format!(
                         "{at} is exempt as a URL to follow, and is not \
                          typed as one"
@@ -395,103 +408,28 @@ mod schemas {
     /// key exists, and no field of any JSON is left where a key in it
     /// could claim an exemption.
     ///
-    /// The roots are listed by hand (the crate has no list of its
-    /// response types): what the client's calls and the tools answer
-    /// with, which hold the rest
+    /// The types are [`AgentJson`]'s own list, with the exemptions each
+    /// impl returns: one macro writes both
     #[test]
     fn exemptions_agree_with_the_schemas() {
-        use crate::responses::*;
-
         let mut walk = Walk::default();
-        macro_rules! roots {
-            ($($t:ty $(: $exempt:expr)?),* $(,)?) => {$(
-                #[allow(unused_mut, unused_assignments)]
-                let mut exempt = Exempt::NONE;
-                $(exempt = $exempt;)?
-                walk.object(
-                    &inline_schema_for::<$t>(),
-                    exempt,
-                    stringify!($t),
-                );
-            )*};
-        }
-        roots![
-            StatusResponse,
-            FriendshipBatchResponse,
-            FeedbackReceipt,
-            ContactRequestReceipt,
-            PostCreated,
-            DesignationCreated,
-            ContentDeleted,
-            TrashPage,
-            TrashRestored,
-            TrashErased,
-            ErrorResponse,
-            ConstitutionResponse: ConstitutionResponse::JSON_EXEMPT,
-            BanInfoResponse,
-            DataExportResponse,
-            DataExportBundle: DataExportBundle::JSON_EXEMPT,
-            SealedStateExport: SealedStateExport::JSON_EXEMPT,
-            ExportedStateBlob: ExportedStateBlob::JSON_EXEMPT,
-            StateHeadResponse,
-            StateProblemsResponse,
-            StateEntryCreated,
-            StateBlobReceipt,
-            StateEntriesPage,
-            StateKeysResponse,
-            KeyRotated,
-            StateAnchorResponse,
-            AnchorProofResponse,
-            AccountStatusResponse,
-            RegisterAgentResponse,
-            OperatorResponse,
-            AgentResponse,
-            PostResponse,
-            CommentedOnResponse,
-            CommentResponse,
-            PostWithCommentsResponse,
-            Vec<CommunityResponse>,
-            FriendsResponse,
-            EncryptionKeyResponse,
-            InboxResponse: InboxResponse::JSON_EXEMPT,
-            NotificationsResponse,
-            SendMessageResponse,
-            VoteResponse,
-            CommentReplyResponse,
-            CommentChainResponse,
-            DocumentResponse: DocumentResponse::JSON_EXEMPT,
-            SearchResponse,
-            DashboardResponse,
-            ConfigResponse,
-            ProposalsResponse,
-            GovernanceLogEntry: GovernanceLogEntry::JSON_EXEMPT,
-            GovernanceLogIndex: GovernanceLogIndex::JSON_EXEMPT,
-            CalendarResponse: CalendarResponse::JSON_EXEMPT,
-            GovernanceEntryResponse: GovernanceEntryResponse::JSON_EXEMPT,
-            DataFileContent: DataFileContent::JSON_EXEMPT,
-            GitContentResponse: GitContentResponse::JSON_EXEMPT,
-            GitFileContent: GitFileContent::JSON_EXEMPT,
-            Vec<CouncilMeetingResponse>,
-            PollView,
-            PollResults,
-            BallotReceipt,
-            crate::moderation::MyModerationRecord,
-            crate::govlog::GovernanceVerification,
-            crate::govlog::ChangeHistory: crate::govlog::ChangeHistory::JSON_EXEMPT,
-            crate::operator::EnrolmentResponse,
-            crate::operator::OperatorAgentsResponse,
-            crate::operator::PortalSessionResponse,
-            crate::operator::OperatorLogEntry,
-        ];
-        for key in FOLLOWED_URL_KEYS {
-            if !walk.urls.contains(*key) {
-                walk.problems.push(format!(
-                    "FOLLOWED_URL_KEYS has `{key}`, which no wire type has \
-                     as a URL any more"
-                ));
-            }
+        let listed = super::super::listed();
+        for (name, schema, exempt) in &listed {
+            walk.object(schema, *exempt, name);
         }
         assert_eq!(walk.problems, Vec::<String>::new());
+        // The URL fields there are, so that one more is noticed here too
+        assert_eq!(
+            walk.urls.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "appeal_url",
+                "approval_url",
+                "download_url",
+                "export_url",
+                "url"
+            ]
+        );
+        assert_eq!(listed.len(), 77);
     }
 
     /// The walk sees what it is for: a URL field left out, a stale key,
@@ -522,7 +460,7 @@ mod schemas {
         walk.object(
             &schema,
             Exempt {
-                followed: &["gone"],
+                followed: &["gone", "download_url"],
                 nested: &[(
                     "inner",
                     Exempt {
