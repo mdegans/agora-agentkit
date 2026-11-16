@@ -6026,7 +6026,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
     assert!(
         text.contains(
             "Its body (~10k tok) is in your context already, with no \
-             comments; a read is ~270 tok (the header, and a note pointing \
+             comments; a read is ~260 tok (the header, and a note pointing \
              to your earlier read of its text)."
         ),
         "{text}"
@@ -10038,8 +10038,8 @@ fn every_operator_legend_is_whole_and_escaping_is_stated_alike() {
     assert!(
         first.contains(&format!(
             "the text between the tags your operator's, {rules} \
-             (`</operator_message>` as `&lt;/not_a_real_operator_message>`). \
-             Weigh"
+             (`</operator_message>` as `&lt;/not_a_real_operator_message>`), \
+             even when only mentioned. Weigh"
         )),
         "{first}"
     );
@@ -10064,8 +10064,12 @@ fn every_operator_legend_is_whole_and_escaping_is_stated_alike() {
         "{rules} (`</comment>` as `&lt;/not_a_real_comment>`), even when \
          only mentioned."
     )));
-    // The operator's text is the operator's: nothing in its legend may
-    // suggest another wrote it (review of 0.165)
+    // The three full legends read alike (0.165.1); none says "whoever
+    // wrote it", which in the operator's would suggest another wrote its
+    // text (review of 0.165)
+    let tail = "), even when only mentioned.";
+    assert_eq!(first.matches(tail).count(), 2, "{first}");
+    assert!(super::prompt::ELEMENTS_NOTE.contains(tail));
     for text in [&first, &second] {
         assert!(!text.contains("whoever wrote"), "{text}");
     }
