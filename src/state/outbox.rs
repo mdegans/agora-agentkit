@@ -159,10 +159,30 @@ impl Local {
             .into_iter()
             .map(|i| i.entry.entry)
             .collect();
-        let held = seal.held().await?;
-        debug_assert_eq!(held.outbox_items, outbox.len());
+        let mut held = seal.held().await?;
+        // One count of the outbox, the one the status is read from
+        held.outbox_items = outbox.len();
         Ok(Self { head, outbox, held })
     }
+}
+
+/// Where a drain ended, for [`finish`](AgoraOutbox::finish)'s log
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// After the uploads, against Agora's head
+    Drained,
+    /// At a `409`: Agora refused an entry
+    Conflict,
+}
+
+/// Whether a drain that ended so logs the agent's uploads as held, at
+/// error. At a drain's end `Pending` is a save that landed during it,
+/// which the next drain uploads; at a `409` it is not
+fn logs_held(status: HeadStatus, ending: Ending) -> bool {
+    !matches!(
+        (status, ending),
+        (HeadStatus::Same, _) | (HeadStatus::Pending, Ending::Drained)
+    )
 }
 
 /// The [`Outbox`] that uploads to Agora. Clone it: one copy goes to
@@ -288,6 +308,7 @@ impl<E: Enrolment> AgoraOutbox<E> {
                         return self
                             .finish(
                                 &seal,
+                                Ending::Conflict,
                                 uploaded,
                                 status,
                                 local,
@@ -365,7 +386,7 @@ impl<E: Enrolment> AgoraOutbox<E> {
                 (status, local, healing)
             }
         };
-        self.finish(&seal, uploaded, status, local, healing)
+        self.finish(&seal, Ending::Drained, uploaded, status, local, healing)
             .await
             .map(Drained::Ran)
     }
@@ -495,6 +516,7 @@ impl<E: Enrolment> AgoraOutbox<E> {
     async fn finish(
         &self,
         seal: &AgentSeal,
+        ending: Ending,
         uploaded: usize,
         status: HeadStatus,
         local: Local,
@@ -502,15 +524,17 @@ impl<E: Enrolment> AgoraOutbox<E> {
     ) -> Result<DrainReport, DrainError> {
         let Local { outbox, held, .. } = local;
         let waiting = outbox.len();
-        if status == HeadStatus::Pending {
-            // A save committed during the drain; its notify starts the
-            // next, which uploads it. Not held
-            tracing::debug!(
-                agent_id = %seal.agent_id(),
-                waiting,
-                "sealed versions saved during the drain wait for the next"
-            );
-        } else if status != HeadStatus::Same {
+        if !logs_held(status, ending) {
+            if status == HeadStatus::Pending {
+                // A save committed during the drain; its notify starts
+                // the next, which uploads it. Not held
+                tracing::debug!(
+                    agent_id = %seal.agent_id(),
+                    waiting,
+                    "sealed versions saved during the drain wait for the next"
+                );
+            }
+        } else {
             tracing::error!(
                 agent_id = %seal.agent_id(),
                 status = ?status,
@@ -1604,7 +1628,14 @@ mod tests {
                         let entry = request.payload.entry;
                         let mut chain = posted.lock().unwrap();
                         let head = chain.last().map(|e| e.entry_hash());
-                        if entry.entry.prev_hash == head {
+                        // A re-post of an entry it holds is taken again,
+                        // as Agora answers one before its compare-and-swap
+                        if chain
+                            .iter()
+                            .any(|e| e.entry_hash() == entry.entry_hash())
+                        {
+                            json_response(200, &head_json())
+                        } else if entry.entry.prev_hash == head {
                             chain.push(entry);
                             json_response(200, &head_json())
                         } else {
@@ -1691,6 +1722,10 @@ mod tests {
         }
         let saves = saver.await.unwrap();
         assert!(drains > 0);
+        assert!(
+            pending > 0,
+            "no drain met a save in flight: {drains} drains"
+        );
         let last = ran(outbox.drain(id).await.unwrap());
         assert_eq!(last.status, HeadStatus::Same, "{last:?}");
         assert_eq!(last.waiting, 0);
@@ -1716,5 +1751,151 @@ mod tests {
             on_agora.last().copied()
         );
         eprintln!("{saves} saves, {drains} drains, {pending} read Pending");
+    }
+
+    /// Only a drain's end reads `Pending` as not held: at a `409` it is
+    /// logged as held, at error, as every other status but `Same`
+    #[test]
+    fn only_a_drains_end_takes_pending_as_not_held() {
+        use HeadStatus::*;
+        for status in [
+            Same,
+            ServerAhead,
+            Diverged,
+            LocalMissing,
+            Pending,
+            Unchecked,
+        ] {
+            assert_eq!(
+                logs_held(status, Ending::Conflict),
+                status != Same,
+                "{status:?}"
+            );
+            assert_eq!(
+                logs_held(status, Ending::Drained),
+                !matches!(status, Same | Pending),
+                "{status:?}"
+            );
+        }
+    }
+
+    /// A `409` whose waiting entry is a child of Agora's head (a `409`
+    /// for another reason, e.g. a key conflict) ends the drain at the
+    /// conflict: `Pending`, and no head read after it, so nothing known
+    /// of damage. Its log (`logs_held`, `Ending::Conflict`) is the held
+    /// one, at error: the crate has no log capture to assert it on
+    #[tokio::test]
+    async fn a_conflict_ending_pending_ends_at_the_conflict() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = drained(&server).await;
+        let chain: Vec<_> = outbox
+            .seal(id)
+            .sent()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.entry)
+            .collect();
+        more(&outbox, id, 1).await;
+        accept_blobs(&server).await;
+        let refused = head_body(chain.last());
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/agora/api/state/entries");
+                then.status(409).json_body(refused);
+            })
+            .await;
+        serve_chain(&server, &chain).await;
+        let head = server
+            .mock_async(|when, then| {
+                when.method(GET).path("/agora/api/state/head");
+                then.status(500);
+            })
+            .await;
+        let report = ran(outbox.drain(id).await.unwrap());
+        assert_eq!(report.status, HeadStatus::Pending);
+        assert_eq!(report.uploaded, 0);
+        assert_eq!(report.waiting, 1);
+        assert_eq!(report.held.outbox_items, 1);
+        assert_eq!(report.healing.damaged, Damage::Unknown, "ended at the 409");
+        head.assert_calls_async(0).await;
+    }
+
+    /// Prepare and commit one snapshot under `lock`, as a session's save
+    /// does
+    async fn save_under(
+        outbox: &AgoraOutbox<One>,
+        id: AgentId,
+        lock: &crate::state::storage::SealLock,
+    ) {
+        use sha2::Digest;
+        let seal = outbox.seal(id);
+        let keys = outbox.enrolment.keys(id).unwrap();
+        let head = seal.head().await.unwrap().unwrap();
+        let plaintext = crate::state::codec::plaintext(
+            &serde_json::json!({ "memory": "saved under the lock" }),
+        );
+        let prepared = seal
+            .prepare(
+                lock,
+                &keys,
+                &KeyframePolicy::default(),
+                crate::state::storage::Append {
+                    kind: StateEntryKind::Snapshot,
+                    plaintext: &plaintext,
+                    plaintext_sha256: Some(Sha256Hex::from(<[u8; 32]>::from(
+                        sha2::Sha256::digest(&plaintext[..]),
+                    ))),
+                    state_at: Utc::now(),
+                    parent: Some(head.head),
+                },
+            )
+            .await
+            .unwrap();
+        seal.commit(lock, &prepared).await.unwrap();
+    }
+
+    /// The interleaving production saw (agentkit#320): a save holds the
+    /// agent's lock, the drain reads an empty outbox and parks on the
+    /// lock (`remove_unnamed_blobs`), the save commits and lets go.
+    /// `Pending`, with it counted. A drain that read its outbox late
+    /// would upload the entry instead, failing `uploaded == 0`: the test
+    /// can't pass by its sleep falling short
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_save_holding_the_lock_through_a_drain_is_pending() {
+        let server = MockServer::start_async().await;
+        let (_dir, outbox, id) = drained(&server).await;
+        let outbox = Arc::new(outbox);
+        let seal = outbox.seal(id);
+        let chain: Vec<_> = seal
+            .sent()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.entry)
+            .collect();
+        serve_chain(&server, &chain).await;
+        serve_head(&server, &outbox, id, None).await;
+        accept_blobs(&server).await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/agora/api/state/entries");
+                then.status(200).json_body(head_json());
+            })
+            .await;
+        let lock = seal.lock().await.unwrap();
+        let drain = tokio::spawn({
+            let outbox = outbox.clone();
+            async move { outbox.drain(id).await }
+        });
+        // The drain reads its outbox, empty, and waits on the lock
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        save_under(&outbox, id, &lock).await;
+        drop(lock);
+        let report = ran(drain.await.unwrap().unwrap());
+        assert_eq!(report.uploaded, 0, "the drain read its outbox first");
+        assert_eq!(report.status, HeadStatus::Pending);
+        assert_eq!(report.waiting, 1);
+        assert_eq!(report.held.outbox_items, 1);
     }
 }

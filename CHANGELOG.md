@@ -33,9 +33,10 @@ A save that landed during a drain was reported as a truncation by Agora
   from, `Diverged`. A local head missing from Agora with a truly empty
   outbox is still `LocalMissing`. `waiting` is that outbox's length, and
   the held-uploads log's `outbox_items` comes from the same read, so the
-  two always agree. The `409` path reads the same way. A `Pending` end
-  no longer logs "sealed uploads held" at error. Nothing written to disk
-  or uploaded changes.
+  two always agree. The `409` path reads the same way. A drain that
+  ends `Pending` after its uploads no longer logs "sealed uploads held"
+  at error (it logs at debug); one that ends `Pending` at a `409` still
+  does. Nothing written to disk or uploaded changes.
 
 ## 0.165.1 (2026-11-16)
 
