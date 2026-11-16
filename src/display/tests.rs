@@ -440,8 +440,6 @@ const PAST_THE_END: &[&str] = &[
     "https://en.wikipedia.org/wiki/x'/../..)/wiki/y",
     "https://allowed.example'@evil.com)@allowed.example/x",
     "https://allowed.example'.evil.com\"/x",
-    // Too many ends to check each
-    "https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m(n)o[p]q{r}s",
 ];
 
 /// What a reader that deletes whitespace or line breaks inside a URL
@@ -507,6 +505,10 @@ fn an_allow_rule_is_not_passed_by_a_longer_reading() {
         "https://en.wikipedia.org/wiki.\n",
         "https://en.wikipedia.org/wiki/x'/y)",
         "see https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m end",
+        // Ends in the path cannot change the host, and those that name no
+        // host cost nothing: neither is counted
+        "https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m(n)o[p]q{r}s",
+        "https://allowed.example(a)b(c)d(e)f(g)h(i)j(k)l(m)n(o)p(q)r(s)t/",
     ]
     .iter()
     .chain(ACROSS_A_BREAK)
@@ -1954,4 +1956,68 @@ fn a_slashless_scheme_needs_a_domain() {
         assert!(matches!(defang(unseen), Cow::Borrowed(_)), "{unseen:?}");
         assert_eq!(fetchable(unseen), None, "{unseen:?}");
     }
+}
+
+// ── Ordinary writing: what the policy must not break ────────────────────
+
+/// `fixtures/ordinary-writing.tsv`, one case a line: `(tag, text)`
+fn ordinary_writing() -> impl Iterator<Item = (&'static str, &'static str)> {
+    include_str!("fixtures/ordinary-writing.tsv")
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            l.split_once('\t')
+                .unwrap_or_else(|| panic!("no tag: {l:?}"))
+        })
+}
+
+/// The allow profile of the ordinary-writing fixture
+fn ordinary_allow() -> Links {
+    allow(&[
+        "https://docs.rs",
+        "https://en.wikipedia.org/wiki",
+        "https://ja.wikipedia.org/wiki",
+        "https://github.com/mdegans",
+        "https://github.com/claudeopusagora",
+        "https://doi.org",
+        "https://example.org",
+    ])
+}
+
+/// Links on allowed sites, written the ways people and models write them,
+/// are left as written; the few that leave a rule are defanged; and what
+/// the policy still breaks (`known`) is pinned, so a fix shows up here
+#[test]
+fn ordinary_writing_is_left() {
+    let links = ordinary_allow();
+    let mut failures = Vec::new();
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for (tag, text) in ordinary_writing().filter(|(tag, _)| *tag != "code") {
+        *counts.entry(tag).or_default() += 1;
+        let out = links.rewrite(text, None);
+        let ok = match tag {
+            "left" => out == text,
+            "defang" | "known" => out != text,
+            other => panic!("unknown tag {other:?}"),
+        };
+        if !ok {
+            failures.push(format!("{tag}\t{text:?}\n  gave\t{out:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(counts["left"] > 300, "{counts:?}");
+}
+
+/// Code and prose that are not links come out of the default config
+/// byte-identical
+#[test]
+fn what_is_not_a_link_is_untouched() {
+    let mut failures = Vec::new();
+    for (_, text) in ordinary_writing().filter(|(tag, _)| *tag == "code") {
+        let out = Links::default().rewrite(text, Some(&site()));
+        if out != text {
+            failures.push(format!("{text:?} gave {out:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

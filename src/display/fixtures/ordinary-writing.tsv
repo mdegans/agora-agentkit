@@ -1,0 +1,468 @@
+# The ordinary-writing fixture: one case a line, `tag<TAB>text`. Tags:
+#   left    - under the allow profile in `ordinary_writing_is_left`, the line comes out byte-identical
+#   defang  - under that profile, the line changes (a URL in it is defanged)
+#   known   - ordinary writing the policy still defangs: asserted as it is, and reported (see the test)
+#   code    - not a link: under the DEFAULT config the line comes out byte-identical
+# Add a line anywhere; `#` lines and blank lines are skipped.
+# 
+# ── Brief item 1: marks after a bare host
+left	“https://docs.rs”
+left	‘https://docs.rs’
+left	«https://docs.rs»
+left	（https://docs.rs）
+left	https://docs.rs、次
+left	https://docs.rs，次
+left	https://docs.rs—the docs site
+left	https://docs.rs–x
+left	https://docs.rs…
+left	https://docs.rs¹
+left	https://docs.rs⁽¹⁾
+left	~~https://docs.rs~~
+left	https://docs.rs~
+# ── Brief item 3: a bracket after a bare host
+left	https://docs.rs[1]
+left	https://docs.rs[^1]
+left	[x](https://docs.rs),[y](https://docs.rs)
+# ── Brief item 4: minified JSON
+left	{"url":"https://docs.rs/serde","k0":"v","k1":"v","k2":"v","k3":"v","k4":"v","k5":"v","k6":"v","k7":"v","k8":"v"}
+left	{"url":"https://docs.rs","k0":"v","k1":"v","k2":"v","k3":"v","k4":"v","k5":"v","k6":"v","k7":"v","k8":"v","k9":"v","k10":"v","k11":"v","k12":"v","k13":"v","k14":"v","k15":"v","k16":"v","k17":"v","k18":"v","k19":"v","k20":"v","k21":"v","k22":"v","k23":"v","k24":"v","k25":"v","k26":"v","k27":"v","k28":"v","k29":"v"}
+left	[{"href":"https://en.wikipedia.org/wiki/Rust_(programming_language)","rel":"wiki"},{"href":"https://docs.rs/tokio/latest/tokio/","rel":"docs"}]
+left	{"a":"https://github.com/mdegans/agora/pull/123","b":"https://github.com/claudeopusagora/x","v":"1.2.3"}
+# ── Brief item 6: titles under a rule with a path
+left	https://en.wikipedia.org/wiki/AC%2FDC
+left	https://en.wikipedia.org/wiki/100%25
+left	https://en.wikipedia.org/wiki/a;b
+defang	https://en.wikipedia.org/wiki/..%2f..%2fw
+defang	https://en.wikipedia.org/wiki/..;/admin
+defang	https://en.wikipedia.org/wiki/%252e%252e/admin
+defang	https://en.wikipedia.org/wiki/x/../../w
+# ── Punctuation after a link, with and without a path
+left	See https://docs.rs. Then more.
+left	See https://docs.rs/serde/latest/serde/. Then more.
+left	See https://en.wikipedia.org/wiki/Rust. Then more.
+left	See https://docs.rs, Then more.
+left	See https://docs.rs/serde/latest/serde/, Then more.
+left	See https://en.wikipedia.org/wiki/Rust, Then more.
+left	See https://docs.rs; Then more.
+left	See https://docs.rs/serde/latest/serde/; Then more.
+left	See https://en.wikipedia.org/wiki/Rust; Then more.
+left	See https://docs.rs: Then more.
+left	See https://docs.rs/serde/latest/serde/: Then more.
+left	See https://en.wikipedia.org/wiki/Rust: Then more.
+left	See https://docs.rs! Then more.
+left	See https://docs.rs/serde/latest/serde/! Then more.
+left	See https://en.wikipedia.org/wiki/Rust! Then more.
+left	See https://docs.rs? Then more.
+left	See https://docs.rs/serde/latest/serde/? Then more.
+left	See https://en.wikipedia.org/wiki/Rust? Then more.
+left	See https://docs.rs* Then more.
+left	See https://docs.rs/serde/latest/serde/* Then more.
+left	See https://en.wikipedia.org/wiki/Rust* Then more.
+left	See https://docs.rs_ Then more.
+left	See https://docs.rs/serde/latest/serde/_ Then more.
+left	See https://en.wikipedia.org/wiki/Rust_ Then more.
+left	See https://docs.rs' Then more.
+left	See https://docs.rs/serde/latest/serde/' Then more.
+left	See https://en.wikipedia.org/wiki/Rust' Then more.
+left	See https://docs.rs" Then more.
+left	See https://docs.rs/serde/latest/serde/" Then more.
+left	See https://en.wikipedia.org/wiki/Rust" Then more.
+left	See https://docs.rs) Then more.
+left	See https://docs.rs/serde/latest/serde/) Then more.
+left	See https://en.wikipedia.org/wiki/Rust) Then more.
+left	See https://docs.rs] Then more.
+left	See https://docs.rs/serde/latest/serde/] Then more.
+left	See https://en.wikipedia.org/wiki/Rust] Then more.
+left	See https://docs.rs} Then more.
+left	See https://docs.rs/serde/latest/serde/} Then more.
+left	See https://en.wikipedia.org/wiki/Rust} Then more.
+left	See https://docs.rs> Then more.
+left	See https://docs.rs/serde/latest/serde/> Then more.
+left	See https://en.wikipedia.org/wiki/Rust> Then more.
+left	See https://docs.rs~ Then more.
+left	See https://docs.rs/serde/latest/serde/~ Then more.
+left	See https://en.wikipedia.org/wiki/Rust~ Then more.
+left	See https://docs.rs… Then more.
+left	See https://docs.rs/serde/latest/serde/… Then more.
+left	See https://en.wikipedia.org/wiki/Rust… Then more.
+left	See https://docs.rs— Then more.
+left	See https://docs.rs/serde/latest/serde/— Then more.
+left	See https://en.wikipedia.org/wiki/Rust— Then more.
+left	See https://docs.rs– Then more.
+left	See https://docs.rs/serde/latest/serde/– Then more.
+left	See https://en.wikipedia.org/wiki/Rust– Then more.
+left	See https://docs.rs” Then more.
+left	See https://docs.rs/serde/latest/serde/” Then more.
+left	See https://en.wikipedia.org/wiki/Rust” Then more.
+left	See https://docs.rs’ Then more.
+left	See https://docs.rs/serde/latest/serde/’ Then more.
+left	See https://en.wikipedia.org/wiki/Rust’ Then more.
+left	See https://docs.rs» Then more.
+left	See https://docs.rs/serde/latest/serde/» Then more.
+left	See https://en.wikipedia.org/wiki/Rust» Then more.
+left	See https://docs.rs） Then more.
+left	See https://docs.rs/serde/latest/serde/） Then more.
+left	See https://en.wikipedia.org/wiki/Rust） Then more.
+left	See https://docs.rs、 Then more.
+left	See https://docs.rs/serde/latest/serde/、 Then more.
+left	See https://en.wikipedia.org/wiki/Rust、 Then more.
+left	See https://docs.rs， Then more.
+left	See https://docs.rs/serde/latest/serde/， Then more.
+left	See https://en.wikipedia.org/wiki/Rust， Then more.
+left	See https://docs.rs。 Then more.
+left	See https://docs.rs/serde/latest/serde/。 Then more.
+left	See https://en.wikipedia.org/wiki/Rust。 Then more.
+left	See https://docs.rs！ Then more.
+left	See https://docs.rs/serde/latest/serde/！ Then more.
+left	See https://en.wikipedia.org/wiki/Rust！ Then more.
+left	See https://docs.rs？ Then more.
+left	See https://docs.rs/serde/latest/serde/？ Then more.
+left	See https://en.wikipedia.org/wiki/Rust？ Then more.
+left	See https://docs.rs： Then more.
+left	See https://docs.rs/serde/latest/serde/： Then more.
+left	See https://en.wikipedia.org/wiki/Rust： Then more.
+left	See https://docs.rs； Then more.
+left	See https://docs.rs/serde/latest/serde/； Then more.
+left	See https://en.wikipedia.org/wiki/Rust； Then more.
+left	See https://docs.rs¹ Then more.
+left	See https://docs.rs/serde/latest/serde/¹ Then more.
+left	See https://en.wikipedia.org/wiki/Rust¹ Then more.
+left	See https://docs.rs² Then more.
+left	See https://docs.rs/serde/latest/serde/² Then more.
+left	See https://en.wikipedia.org/wiki/Rust² Then more.
+left	See https://docs.rs‼ Then more.
+left	See https://docs.rs/serde/latest/serde/‼ Then more.
+left	See https://en.wikipedia.org/wiki/Rust‼ Then more.
+left	See https://docs.rs› Then more.
+left	See https://docs.rs/serde/latest/serde/› Then more.
+left	See https://en.wikipedia.org/wiki/Rust› Then more.
+left	See https://docs.rs」 Then more.
+left	See https://docs.rs/serde/latest/serde/」 Then more.
+left	See https://en.wikipedia.org/wiki/Rust」 Then more.
+left	See https://docs.rs』 Then more.
+left	See https://docs.rs/serde/latest/serde/』 Then more.
+left	See https://en.wikipedia.org/wiki/Rust』 Then more.
+left	See https://docs.rs】 Then more.
+left	See https://docs.rs/serde/latest/serde/】 Then more.
+left	See https://en.wikipedia.org/wiki/Rust】 Then more.
+left	See https://docs.rs〉 Then more.
+left	See https://docs.rs/serde/latest/serde/〉 Then more.
+left	See https://en.wikipedia.org/wiki/Rust〉 Then more.
+left	See https://docs.rs، Then more.
+left	See https://docs.rs/serde/latest/serde/، Then more.
+left	See https://en.wikipedia.org/wiki/Rust، Then more.
+left	See https://docs.rs؟ Then more.
+left	See https://docs.rs/serde/latest/serde/؟ Then more.
+left	See https://en.wikipedia.org/wiki/Rust؟ Then more.
+left	See https://docs.rs। Then more.
+left	See https://docs.rs/serde/latest/serde/। Then more.
+left	See https://en.wikipedia.org/wiki/Rust। Then more.
+# ── Opening marks before, closing after
+left	A link (https://docs.rs) in a sentence.
+left	A link (https://docs.rs/serde) in a sentence.
+left	A link (https://en.wikipedia.org/wiki/Café) in a sentence.
+left	A link [https://docs.rs] in a sentence.
+left	A link [https://docs.rs/serde] in a sentence.
+left	A link [https://en.wikipedia.org/wiki/Café] in a sentence.
+left	A link {https://docs.rs} in a sentence.
+left	A link {https://docs.rs/serde} in a sentence.
+left	A link {https://en.wikipedia.org/wiki/Café} in a sentence.
+left	A link <https://docs.rs> in a sentence.
+left	A link <https://docs.rs/serde> in a sentence.
+left	A link <https://en.wikipedia.org/wiki/Café> in a sentence.
+left	A link "https://docs.rs" in a sentence.
+left	A link "https://docs.rs/serde" in a sentence.
+left	A link "https://en.wikipedia.org/wiki/Café" in a sentence.
+left	A link 'https://docs.rs' in a sentence.
+left	A link 'https://docs.rs/serde' in a sentence.
+left	A link 'https://en.wikipedia.org/wiki/Café' in a sentence.
+left	A link `https://docs.rs` in a sentence.
+left	A link `https://docs.rs/serde` in a sentence.
+left	A link `https://en.wikipedia.org/wiki/Café` in a sentence.
+left	A link “https://docs.rs” in a sentence.
+left	A link “https://docs.rs/serde” in a sentence.
+left	A link “https://en.wikipedia.org/wiki/Café” in a sentence.
+left	A link ‘https://docs.rs’ in a sentence.
+left	A link ‘https://docs.rs/serde’ in a sentence.
+left	A link ‘https://en.wikipedia.org/wiki/Café’ in a sentence.
+left	A link «https://docs.rs» in a sentence.
+left	A link «https://docs.rs/serde» in a sentence.
+left	A link «https://en.wikipedia.org/wiki/Café» in a sentence.
+left	A link ‹https://docs.rs› in a sentence.
+left	A link ‹https://docs.rs/serde› in a sentence.
+left	A link ‹https://en.wikipedia.org/wiki/Café› in a sentence.
+left	A link （https://docs.rs） in a sentence.
+left	A link （https://docs.rs/serde） in a sentence.
+left	A link （https://en.wikipedia.org/wiki/Café） in a sentence.
+left	A link 「https://docs.rs」 in a sentence.
+left	A link 「https://docs.rs/serde」 in a sentence.
+left	A link 「https://en.wikipedia.org/wiki/Café」 in a sentence.
+left	A link 『https://docs.rs』 in a sentence.
+left	A link 『https://docs.rs/serde』 in a sentence.
+left	A link 『https://en.wikipedia.org/wiki/Café』 in a sentence.
+left	A link 【https://docs.rs】 in a sentence.
+left	A link 【https://docs.rs/serde】 in a sentence.
+left	A link 【https://en.wikipedia.org/wiki/Café】 in a sentence.
+left	A link 〈https://docs.rs〉 in a sentence.
+left	A link 〈https://docs.rs/serde〉 in a sentence.
+left	A link 〈https://en.wikipedia.org/wiki/Café〉 in a sentence.
+left	A link „https://docs.rs“ in a sentence.
+left	A link „https://docs.rs/serde“ in a sentence.
+left	A link „https://en.wikipedia.org/wiki/Café“ in a sentence.
+left	A link *https://docs.rs* in a sentence.
+left	A link *https://docs.rs/serde* in a sentence.
+left	A link *https://en.wikipedia.org/wiki/Café* in a sentence.
+left	A link **https://docs.rs** in a sentence.
+left	A link **https://docs.rs/serde** in a sentence.
+left	A link **https://en.wikipedia.org/wiki/Café** in a sentence.
+left	A link _https://docs.rs_ in a sentence.
+left	A link _https://docs.rs/serde_ in a sentence.
+left	A link _https://en.wikipedia.org/wiki/Café_ in a sentence.
+left	A link ~~https://docs.rs~~ in a sentence.
+left	A link ~~https://docs.rs/serde~~ in a sentence.
+left	A link ~~https://en.wikipedia.org/wiki/Café~~ in a sentence.
+# ── Markdown
+left	[the docs](https://docs.rs/serde)
+left	[the docs](https://docs.rs/serde "Serde")
+left	<https://docs.rs/tokio>
+left	[1]: https://docs.rs/serde
+left	[1]: https://docs.rs/serde "title"
+left	![logo](https://docs.rs/logo.png)
+left	**[bold link](https://docs.rs)**
+left	*https://docs.rs/serde*
+left	_https://docs.rs/serde_
+left	`https://docs.rs/serde`
+left	```https://docs.rs/serde```
+left	- https://docs.rs/serde
+left	1. https://docs.rs/serde
+left	> https://docs.rs/serde
+left	> [quote](https://en.wikipedia.org/wiki/Quotation)
+left	| col | https://docs.rs/serde |
+left	|https://docs.rs|https://en.wikipedia.org/wiki/Table|
+left	[x](https://en.wikipedia.org/wiki/Rust_(programming_language))
+left	[x](<https://en.wikipedia.org/wiki/A_(b)>)
+left	See [here](https://docs.rs/serde/latest/serde/#derive).
+left	Footnote.[^1] [^1]: https://docs.rs/serde
+left	<a href="https://docs.rs/serde">serde</a>
+left	<a href='https://docs.rs'>docs</a>
+left	<img src="https://docs.rs/x.png" alt="x">
+# ── Wikipedia titles
+left	Read https://en.wikipedia.org/wiki/Rust_(programming_language) for more.
+left	(https://en.wikipedia.org/wiki/Rust_(programming_language))
+left	Read https://en.wikipedia.org/wiki/Gödel's_incompleteness_theorems for more.
+left	(https://en.wikipedia.org/wiki/Gödel's_incompleteness_theorems)
+left	Read https://en.wikipedia.org/wiki/Hitchhiker’s_Guide for more.
+left	(https://en.wikipedia.org/wiki/Hitchhiker’s_Guide)
+left	Read https://en.wikipedia.org/wiki/C%2B%2B for more.
+left	(https://en.wikipedia.org/wiki/C%2B%2B)
+left	Read https://en.wikipedia.org/wiki/Washington,_D.C. for more.
+left	(https://en.wikipedia.org/wiki/Washington,_D.C.)
+left	Read https://en.wikipedia.org/wiki/Talk:Rust for more.
+left	(https://en.wikipedia.org/wiki/Talk:Rust)
+left	Read https://en.wikipedia.org/wiki/Category:Programming_languages for more.
+left	(https://en.wikipedia.org/wiki/Category:Programming_languages)
+left	Read https://en.wikipedia.org/wiki/Special:Search for more.
+left	(https://en.wikipedia.org/wiki/Special:Search)
+left	Read https://en.wikipedia.org/wiki/São_Paulo for more.
+left	(https://en.wikipedia.org/wiki/São_Paulo)
+left	Read https://en.wikipedia.org/wiki/Москва for more.
+left	(https://en.wikipedia.org/wiki/Москва)
+left	Read https://en.wikipedia.org/wiki/東京都 for more.
+left	(https://en.wikipedia.org/wiki/東京都)
+left	Read https://en.wikipedia.org/wiki/Zürich for more.
+left	(https://en.wikipedia.org/wiki/Zürich)
+left	Read https://en.wikipedia.org/wiki/The_Lord_of_the_Rings:_The_Fellowship_of_the_Ring for more.
+left	(https://en.wikipedia.org/wiki/The_Lord_of_the_Rings:_The_Fellowship_of_the_Ring)
+left	Read https://en.wikipedia.org/wiki/Dot_(.) for more.
+left	(https://en.wikipedia.org/wiki/Dot_(.))
+left	Read https://en.wikipedia.org/wiki/1.2.3_(version) for more.
+left	(https://en.wikipedia.org/wiki/1.2.3_(version))
+left	Read https://en.wikipedia.org/wiki/%C3%89cole_Normale for more.
+left	(https://en.wikipedia.org/wiki/%C3%89cole_Normale)
+left	Read https://en.wikipedia.org/wiki/AT%26T for more.
+left	(https://en.wikipedia.org/wiki/AT%26T)
+left	Read https://en.wikipedia.org/wiki/Q&A for more.
+left	(https://en.wikipedia.org/wiki/Q&A)
+left	Read https://en.wikipedia.org/wiki/E%3Dmc%C2%B2 for more.
+left	(https://en.wikipedia.org/wiki/E%3Dmc%C2%B2)
+left	Read https://en.wikipedia.org/wiki/E=mc² for more.
+left	(https://en.wikipedia.org/wiki/E=mc²)
+left	Read https://en.wikipedia.org/wiki/“Heroes”_(David_Bowie_song) for more.
+left	(https://en.wikipedia.org/wiki/“Heroes”_(David_Bowie_song))
+left	Read https://en.wikipedia.org/wiki/...And_Justice_for_All_(album) for more.
+left	(https://en.wikipedia.org/wiki/...And_Justice_for_All_(album))
+left	Read https://en.wikipedia.org/wiki/A.I._Artificial_Intelligence for more.
+left	(https://en.wikipedia.org/wiki/A.I._Artificial_Intelligence)
+left	Read https://en.wikipedia.org/wiki/Ellipsis_(…) for more.
+left	(https://en.wikipedia.org/wiki/Ellipsis_(…))
+left	Read https://en.wikipedia.org/wiki/Wiki/Sub/Page for more.
+left	(https://en.wikipedia.org/wiki/Wiki/Sub/Page)
+left	Read https://en.wikipedia.org/wiki/Rust#History for more.
+left	(https://en.wikipedia.org/wiki/Rust#History)
+left	Read https://en.wikipedia.org/wiki/Rust?action=history for more.
+left	(https://en.wikipedia.org/wiki/Rust?action=history)
+left	Read https://en.wikipedia.org/wiki/Rust?oldid=12345#Syntax for more.
+left	(https://en.wikipedia.org/wiki/Rust?oldid=12345#Syntax)
+# ── GitHub under the allowed owners
+left	https://github.com/mdegans
+left	See https://github.com/mdegans.
+left	[repo](https://github.com/mdegans)
+left	git clone https://github.com/mdegans
+left	https://github.com/mdegans/agora
+left	See https://github.com/mdegans/agora.
+left	[repo](https://github.com/mdegans/agora)
+left	git clone https://github.com/mdegans/agora
+left	https://github.com/mdegans/agora/blob/main/src/display.rs#L10-L20
+left	See https://github.com/mdegans/agora/blob/main/src/display.rs#L10-L20.
+left	[repo](https://github.com/mdegans/agora/blob/main/src/display.rs#L10-L20)
+left	git clone https://github.com/mdegans/agora/blob/main/src/display.rs#L10-L20
+left	https://github.com/mdegans/agora/pull/123
+left	See https://github.com/mdegans/agora/pull/123.
+left	[repo](https://github.com/mdegans/agora/pull/123)
+left	git clone https://github.com/mdegans/agora/pull/123
+left	https://github.com/mdegans/agora/issues/45#issuecomment-1
+left	See https://github.com/mdegans/agora/issues/45#issuecomment-1.
+left	[repo](https://github.com/mdegans/agora/issues/45#issuecomment-1)
+left	git clone https://github.com/mdegans/agora/issues/45#issuecomment-1
+left	https://github.com/mdegans/agora/tree/feature/x
+left	See https://github.com/mdegans/agora/tree/feature/x.
+left	[repo](https://github.com/mdegans/agora/tree/feature/x)
+left	git clone https://github.com/mdegans/agora/tree/feature/x
+left	https://github.com/mdegans/agora/compare/a...b
+left	See https://github.com/mdegans/agora/compare/a...b.
+left	[repo](https://github.com/mdegans/agora/compare/a...b)
+left	git clone https://github.com/mdegans/agora/compare/a...b
+left	https://github.com/mdegans/agora-agentkit/releases/tag/v0.166.0
+left	See https://github.com/mdegans/agora-agentkit/releases/tag/v0.166.0.
+left	[repo](https://github.com/mdegans/agora-agentkit/releases/tag/v0.166.0)
+left	git clone https://github.com/mdegans/agora-agentkit/releases/tag/v0.166.0
+left	https://github.com/mdegans/agora.git
+left	See https://github.com/mdegans/agora.git.
+left	[repo](https://github.com/mdegans/agora.git)
+left	git clone https://github.com/mdegans/agora.git
+left	https://github.com/claudeopusagora
+left	See https://github.com/claudeopusagora.
+left	[repo](https://github.com/claudeopusagora)
+left	git clone https://github.com/claudeopusagora
+left	https://github.com/claudeopusagora/anthropic-strict-ref-repro
+left	See https://github.com/claudeopusagora/anthropic-strict-ref-repro.
+left	[repo](https://github.com/claudeopusagora/anthropic-strict-ref-repro)
+left	git clone https://github.com/claudeopusagora/anthropic-strict-ref-repro
+left	https://github.com/claudeopusagora/x/blob/main/README.md
+left	See https://github.com/claudeopusagora/x/blob/main/README.md.
+left	[repo](https://github.com/claudeopusagora/x/blob/main/README.md)
+left	git clone https://github.com/claudeopusagora/x/blob/main/README.md
+defang	https://github.com/mdegans-evil/x
+defang	https://github.com/other/mdegans
+defang	https://github.com/mdegansx
+defang	https://github.com/mdegans/../evil/x
+# ── Query strings, fragments, ports, case
+left	https://docs.rs/serde?search=derive
+left	https://docs.rs/serde?a=1&b=2#section
+left	https://docs.rs/serde/#
+left	https://DOCS.RS/serde
+left	HTTPS://docs.rs
+left	https://Docs.Rs/x
+left	https://docs.rs:443/serde
+left	https://doi.org/10.1000/182
+left	https://doi.org/10.1038/nphys1170.
+left	doi: https://doi.org/10.1145/3290380.3290388 (2019)
+left	https://en.wikipedia.org/wiki/Rust?printable=yes
+defang	https://en.wikipedia.org/w/index.php?title=Rust&action=history
+# ── Several links per line
+left	https://docs.rs and https://en.wikipedia.org/wiki/Rust and https://github.com/mdegans/agora
+known	https://docs.rs,https://doi.org/10.1/x;https://example.org/
+defang	https://docs.rs and https://evil.example/x
+defang	See https://example.com/x (not allowed) and https://docs.rs (allowed).
+# ── CJK and RTL around links
+left	詳細は https://docs.rs を参照。
+left	参照：https://docs.rs。
+left	（https://ja.wikipedia.org/wiki/東京都）
+left	「https://docs.rs」を見てください
+left	链接：https://docs.rs，谢谢！
+left	请看 https://docs.rs/serde 。
+left	정보는 https://docs.rs 에서.
+left	انظر https://docs.rs، شكرا
+left	انظر (https://en.wikipedia.org/wiki/Rust) للمزيد
+left	ראו https://docs.rs.
+left	देखें https://docs.rs।
+left	Δείτε https://docs.rs;
+left	‏https://docs.rs‏
+left	⁧https://docs.rs⁩
+known	詳細はhttps://docs.rsを参照
+known	https://docs.rs。次は
+# ── Code snippets containing URLs
+left	let url = "https://docs.rs/serde";
+left	fetch("https://docs.rs/api/x").then(r => r.json())
+left	requests.get(f"https://docs.rs/{name}")
+left	curl -sSL https://docs.rs/serde | head
+left	curl -H "Accept: json" "https://docs.rs/x?y=1"
+left	FROM scratch # https://docs.rs
+left	url: https://docs.rs/serde
+left	- url: "https://en.wikipedia.org/wiki/YAML"
+left	href={"https://docs.rs"}
+left	<link rel="stylesheet" href="https://docs.rs/x.css"/>
+left	println!("see {}", "https://docs.rs");
+left	// https://github.com/mdegans/agora/issues/45
+left	# https://doi.org/10.1000/182
+left	/* https://docs.rs/serde */
+left	[dependencies] # https://docs.rs/serde
+left	"homepage": "https://docs.rs",
+left	export URL=https://docs.rs/serde
+# ── Not links: code and prose that mention http (default config: unchanged)
+code	HTTP:200 OK
+code	x=http:ok
+code	http:Agent
+code	#[http:get]
+code	{http:1.1}
+code	ENV HTTP_PROXY=http:proxy:3128
+code	export https_proxy=https:p
+code	data:text/html,https:x
+code	use http::StatusCode;
+code	let req = http::Request::builder().uri(uri);
+code	impl From<http::Error> for Error {
+code	#[derive(Debug)] struct HttpError;
+code	from http import HTTPStatus
+code	import http.client
+code	conn = http.client.HTTPSConnection(host)
+code	resp.status == http.HTTPStatus.OK
+code	import "net/http"
+code	http.HandleFunc("/", handler)
+code	log.Fatal(http.ListenAndServe(":8080", nil))
+code	const http = require('http');
+code	http.createServer((req, res) => {})
+code	axios.get(url, { proxy: false }) // http: false
+code	EXPOSE 80 443 # http: 80, https: 443
+code	HEALTHCHECK CMD curl -f localhost/health
+code	scheme: http
+code	scheme: https
+code	protocol: "http:"
+code	{"scheme":"https:","port":443}
+code	location.protocol === 'https:'
+code	if (url.protocol !== "http:" && url.protocol !== "https:") return;
+code	match scheme { "http" | "https" => {} }
+code	The http: and https: schemes are special.
+code	Use https: always.
+code	HTTP/1.1 200 OK
+code	GET /index.html HTTP/1.1
+code	Upgrade: h2c
+code	proxy_pass http_backend;
+code	http_proxy=http:3128
+code	https:8443
+code	http:localhost
+code	https:localhost:8443
+code	use https: it
+code	See RFC 9110 (HTTP Semantics).
+code	httpd.conf: Listen 80
+code	ws://localhost:8080/socket
+code	ftp://ftp.example.org/pub
+code	//cdn.example.org/x.js
+code	file:///etc/hosts
+code	mailto:someone@example.org
+code	tel:+15555550100
+code	urn:isbn:0451450523
+code	git@github.com:mdegans/agora.git
+code	sha256:abc123
+code	std::http::StatusCode
+code	the word https alone
+code	h t t p s colon

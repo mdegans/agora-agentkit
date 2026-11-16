@@ -358,7 +358,7 @@ impl Links {
                 if allow.is_empty() || start.len == 0 {
                     return None;
                 }
-                every_reading(text, at, start, depth(allow), |url| {
+                every_reading(text, at, start, allow, |url| {
                     allow.iter().any(|r| r.allows(url))
                 })
             }
@@ -366,20 +366,19 @@ impl Links {
             Self::Raw { deny } if deny.is_empty() => {
                 Some(at + start.len.max(1))
             }
-            Self::Raw { deny } => {
-                every_reading(text, at, start, depth(deny), |url| {
-                    !deny.iter().any(|r| r.denies(url))
-                })
-            }
+            Self::Raw { deny } => every_reading(text, at, start, deny, |url| {
+                !deny.iter().any(|r| r.denies(url))
+            }),
         }
     }
 }
 
-/// The most path segments of any of `rules`: 0 when no rule has a path,
-/// and a URL's path then decides nothing
-fn depth(rules: &[LinkRule]) -> usize {
+/// The most path segments of any of `rules` on `url`'s host: 0 when none
+/// has a path, and the path of a URL there then decides nothing
+fn depth(rules: &[LinkRule], url: &Url) -> usize {
     rules
         .iter()
+        .filter(|r| r.host_matches(url))
         .map(|r| r.segments().count())
         .max()
         .unwrap_or(0)
@@ -390,16 +389,16 @@ fn depth(rules: &[LinkRule]) -> usize {
 /// one). `None` too when it has another URL start inside it, is too long
 /// or has too many readings.
 ///
-/// `depth` is [`depth`] of the rules `pass` checks: a reading that ends
-/// in the path differs from a shorter one in what a rule sees only by
-/// its path, so with no rule that has one it is not parsed again, and
-/// with one it is not where nothing a rule reads has changed
+/// `rules` are those `pass` checks: a reading that ends in the path
+/// differs from a shorter one in what a rule sees only by its path, so
+/// with no rule on its host that has one ([`depth`]) it is not parsed
+/// again, and with one it is not where nothing a rule reads has changed
 /// ([`Settled`])
 fn every_reading(
     text: &str,
     at: usize,
     start: Start,
-    depth: usize,
+    rules: &[LinkRule],
     pass: impl Fn(&Url) -> bool,
 ) -> Option<usize> {
     if start.len > 0 && !start.plain {
@@ -455,6 +454,10 @@ fn every_reading(
         .find(['/', '?', '#'])
         .map_or(token.len(), |o| start.len + o);
     let scan = AuthorityScan::of(token, start.len, path_from);
+    // The path segments a rule on the path-only readings' host reads
+    // (every one, if that does not parse: nothing is skipped)
+    let depth =
+        parse(&token[..path_from]).map_or(usize::MAX, |url| depth(rules, &url));
     // A path-only reading names a host only if the authority does
     let path_no_host = scan.no_host(token, start, path_from, parse);
     // The first backslash or control character: a reading with one is
