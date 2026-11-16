@@ -554,8 +554,9 @@ fn where_the_runner_differs_from_the_server() {
         );
     }
     // Every spelling: the runner leaves none fetchable, and where the
-    // server did, the two differ (`https:///x` and `https://\nx` the
-    // server defanged too)
+    // server did, the two differ (`https:///x`, `https://\nx` and
+    // `https:// \nx` the server defanged too, and of `https://a:https:x.y`
+    // left `https:x[.]y`, a URL to a single label, which is not counted)
     let mut differ = 0;
     for spelling in oracle::SPELLINGS {
         let server = oracle::old_server(spelling, Some(&site));
@@ -566,7 +567,7 @@ fn where_the_runner_differs_from_the_server() {
             differ += 1;
         }
     }
-    assert_eq!(differ, oracle::SPELLINGS.len() - 3);
+    assert_eq!(differ, oracle::SPELLINGS.len() - 4);
 }
 
 // ── What the server never covered: the Steward's decisions ──────────────

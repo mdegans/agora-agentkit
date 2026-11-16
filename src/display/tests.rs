@@ -368,7 +368,7 @@ fn a_scheme_is_seen_however_it_is_spelt() {
         ("http::@evil.example/x", "hxxp::@evil[.]example/x"),
         ("http:\".evil.example/x", "hxxp:\".evil.example/x"),
         // A line that ends in `https:` is read with the next one
-        ("use https:\nit is safer", "use hxxps:\nit is safer"),
+        ("use https:\nevil.example", "use hxxps:\nevil.example"),
     ] {
         assert_eq!(defang(text), want);
         assert_eq!(fetchable(want), None, "{want:?}");
@@ -376,6 +376,8 @@ fn a_scheme_is_seen_however_it_is_spelt() {
     // Prose: nothing a parser reads as a URL with a host
     for prose in [
         "use https: it is safer",
+        // (to a single label, as a parser reads it: not seen)
+        "use https:\nit is safer",
         "the scheme is http:",
         "\"http:\" and `https:` and (http:) and http:, http:; http:.",
         "http::Request::builder() and std::http::StatusCode",
@@ -837,7 +839,24 @@ fn many_urls_are_linear() {
         Links::default(),
         allow(&["https://a", "https://*.example.org/wiki"]),
         deny(&["https://a", "https://*.example.org/wiki"]),
+        // Every path is checked: a rule with one, the host's own
+        allow(&["http://a/x", "https://a/x/y"]),
+        deny(&["http://a/x/y/z"]),
     ];
+    // Lines of minified JSON, quotes and marks after an allowed URL, and
+    // many starts in one run, each with every later end to check
+    let json = [
+        "{\"url\":\"http://a/x/y\"",
+        &",\"k\":\"v\"".repeat(150),
+        &",\"v\":\"1.2\"".repeat(10),
+        "}\n",
+    ]
+    .concat();
+    let quotes = ["http://a/x/", &"'y".repeat(500), " "].concat();
+    let starts = ["http://a/x'".repeat(150), " ".into()].concat();
+    let dotted = ["http://a/x/", &"a.b'".repeat(300), " "].concat();
+    let marks = ["http://a", &"、a".repeat(200), " "].concat();
+    let marked = ["https://a/x/", &"“y”".repeat(150), " "].concat();
     for links in &policies {
         // Many starts in one run without a space, each with every later
         // bracket and line break as an end of its own to check: the
@@ -863,6 +882,12 @@ fn many_urls_are_linear() {
             "http::",
             &ends,
             &spaced,
+            &json,
+            &quotes,
+            &starts,
+            &dotted,
+            &marks,
+            &marked,
         ] {
             let small_text = unit.repeat(8_192 / unit.len());
             let large_text = unit.repeat(65_536 / unit.len());
@@ -880,6 +905,9 @@ fn many_urls_are_linear() {
                 ratio < 24.0,
                 "{links:?} {unit}: 8x the text took {ratio:.1}x the time"
             );
+            if std::env::var_os("DISPLAY_TIMES").is_some() {
+                eprintln!("{large:>12?} {links:?} {:.40?}", unit);
+            }
         }
     }
     assert_eq!(
@@ -1292,9 +1320,20 @@ fn dot_segments_and_percent_encoding() {
         "https://example.org/wiki/..%2Fadmin",
         "https://example.org/wiki/..%2fadmin",
         "https://example.org/wiki/..%5Cadmin",
-        "https://example.org/wiki/AC%2FDC",
+        "https://example.org/wiki/..;/admin",
+        "https://example.org/wiki/%252e%252e/admin",
+        "https://example.org/wiki/..%2f..%2fw",
     ] {
         assert!(!r.allows(&url(written)), "{written}");
+        assert!(r.denies(&url(written)), "{written}");
+    }
+    // With no dot segment, an encoded `/`, a `%25` or a `;` is a title
+    for written in [
+        "https://example.org/wiki/AC%2FDC",
+        "https://example.org/wiki/100%25",
+        "https://example.org/wiki/a;b",
+    ] {
+        assert!(r.allows(&url(written)), "{written}");
         assert!(r.denies(&url(written)), "{written}");
     }
     assert!(
@@ -1311,6 +1350,7 @@ fn dot_segments_and_percent_encoding() {
     assert!(spaced.allows(&url("https://example.org/a%20b/c")));
     // A segment's parameters, and an encoded `%`
     let deep = rule("https://example.org/a/b");
+    // (the rule's segments as written: `b;x=1` is not `b`)
     for written in [
         "https://example.org/a;x/b",
         "https://example.org/a/b;x=1/c",
@@ -1701,5 +1741,217 @@ fn schemas_are_inline() {
             .unwrap();
     for word in ["links", "mode", "defanged", "raw", "allow", "deny"] {
         assert!(text.contains(word), "{word}: {text}");
+    }
+}
+
+// ── Layer 5b: what the review of layer 5 reproduced ─────────────────────
+
+/// Unicode punctuation, a superscript, `~` or a character a parser
+/// ignores after a host ends it, and is not the URL's at its end
+#[test]
+fn a_mark_after_a_host_ends_it() {
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "“https://docs.rs”",
+        "‘https://docs.rs’",
+        "«https://docs.rs»",
+        "（https://docs.rs）",
+        "https://docs.rs、次",
+        "https://docs.rs，次",
+        "https://docs.rs—the docs site",
+        "https://docs.rs–x",
+        "https://docs.rs…",
+        "https://docs.rs¹",
+        "https://docs.rs⁽¹⁾",
+        "~~https://docs.rs~~",
+        "https://docs.rs~",
+        // In a path, a possible end: each reading is checked
+        "https://docs.rs/serde”",
+        "https://docs.rs/“serde”/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+    let links = deny(&["https://evil.com"]);
+    for text in [
+        "“https://evil.com”",
+        "https://evil.com—x",
+        "（https://evil.com）",
+        "https://evil.com、次",
+        "https://evil.com¹",
+        "https://evil.com~",
+        "https://evil.com\u{200b}x",
+        "https://evil.com\u{ad}x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.contains("hxxps://evil[.]com"), "{text:?} gave {out:?}");
+    }
+    // A mark a parser makes a dot of is a dot: what follows is checked
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "https://docs.rs。evil.com/x",
+        "https://docs.rs．evil.com/x",
+        "https://docs.rs”.evil.com/x",
+        "https://docs.rs․evil.com/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    // A letter or a digit is the host's: an internationalised name goes on
+    assert_eq!(
+        links.rewrite("https://docs.rsé", None),
+        "hxxps://docs[.]rsé"
+    );
+}
+
+/// Punctuation no host name has ends an authority, and a host with it is
+/// allowed by no rule
+#[test]
+fn punctuation_in_an_authority_ends_it() {
+    let links = deny(&["https://evil.com"]);
+    for text in ["https://evil.com,b", "https://evil.com),b"] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    let links = allow(&["https://*.allowed.example"]);
+    for text in [
+        "https://evil.com,.allowed.example/x",
+        "https://evil.com!.allowed.example/x",
+        "https://evil.com;.allowed.example/x",
+        "https://evil.com~.allowed.example",
+        "https://evil.com'.allowed.example/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    let wild = rule("https://*.allowed.example");
+    for host in ["evil.com,.allowed.example", "a~b.allowed.example"] {
+        assert!(
+            !wild.allows(&url(&["https://", host, "/"].concat())),
+            "{host}"
+        );
+    }
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "https://docs.rs,b",
+        "https://docs.rs;b",
+        "https://docs.rs!x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+}
+
+/// A `[` after a host is not an IPv6 address or a user's: an end
+#[test]
+fn a_bracket_after_a_host_ends_it() {
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "https://docs.rs[1]",
+        "https://docs.rs[^1]",
+        "[x](https://docs.rs),[y](https://docs.rs)",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+    // An address and a user before one are as they were
+    let v6 = allow(&["https://[::1]"]);
+    assert_eq!(v6.rewrite("https://[::1]/", None), "hxxps://[::1]/");
+    assert_eq!(
+        v6.rewrite("https://user@[::1]/", None),
+        "hxxps://user@[::1]/"
+    );
+    assert_eq!(
+        links.rewrite("https://docs.rs[x@evil.com/", None),
+        "hxxps://docs[.]rs[x@evil.com/"
+    );
+}
+
+/// Readings that cannot change a URL's host are not counted against
+/// `MAX_URL_ENDS`
+#[test]
+fn minified_json_leaves_an_allowed_url() {
+    let pairs = |n: usize| {
+        (0..n)
+            .map(|k| format!(",\"k{k}\":\"v\""))
+            .collect::<String>()
+    };
+    for links in [
+        allow(&["https://docs.rs"]),
+        allow(&["https://docs.rs/serde"]),
+        deny(&["https://evil.com"]),
+        deny(&["https://docs.rs/tokio"]),
+    ] {
+        for url in ["https://docs.rs/serde/latest", "https://docs.rs"] {
+            for n in [6, 9, 40, 120] {
+                if url == "https://docs.rs"
+                    && links == allow(&["https://docs.rs/serde"])
+                {
+                    continue;
+                }
+                let text = format!("{{\"url\":\"{url}\"{}}}", pairs(n));
+                let out = links.rewrite(&text, None);
+                assert!(
+                    matches!(out, Cow::Borrowed(_)),
+                    "{links:?} {n}: {out:?}"
+                );
+            }
+        }
+    }
+    // With dotted values after it, under a rule with a path
+    let text = format!(
+        "{{\"url\":\"https://docs.rs/serde/1.0\"{}}}",
+        (0..40)
+            .map(|k| format!(",\"v{k}\":\"1.{k}.0\""))
+            .collect::<String>()
+    );
+    let out = allow(&["https://docs.rs/serde"]).rewrite(&text, None);
+    assert!(matches!(out, Cow::Borrowed(_)), "{out:?}");
+    // A URL that ends at a rule's last segment, with more after the quote:
+    // read to the next space, its segment is `serde",…`, not the rule's
+    let out = allow(&["https://docs.rs/serde"])
+        .rewrite("{\"u\":\"https://docs.rs/serde\",\"k\":\"v\"}", None);
+    assert!(out.contains("hxxps://"), "{out:?}");
+    // A path that leaves the rule's after the first reading still counts
+    let out = allow(&["https://docs.rs/serde"])
+        .rewrite("{\"u\":\"https://docs.rs/serde\",\"k\":\"/../../x\"}", None);
+    assert!(out.contains("hxxps://"), "{out:?}");
+}
+
+/// A slashless scheme is a URL only before a domain name: code and prose
+/// that are not links are left as written
+#[test]
+fn a_slashless_scheme_needs_a_domain() {
+    for code in [
+        "HTTP:200 OK",
+        "x=http:ok",
+        "http:Agent",
+        "#[http:get]",
+        "{http:1.1}",
+        "ENV HTTP_PROXY=http:proxy:3128",
+        "export https_proxy=https:p",
+        "data:text/html,https:x",
+        "http:\u{a0}x",
+        "https:\u{3000}x",
+        "https:\u{2003}x",
+        "https:/\u{a0}x",
+    ] {
+        let out = defang(code);
+        assert!(matches!(out, Cow::Borrowed(_)), "{code:?} gave {out:?}");
+        assert_eq!(fetchable(code), None, "{code:?}");
+    }
+    for (text, want) in [
+        ("https:evil.com/x", "hxxps:evil[.]com/x"),
+        ("https:a.b.co", "hxxps:a[.]b[.]co"),
+        ("http:u:p@evil.com", "hxxp:u:p@evil[.]com"),
+        ("http:(evil.example)", "hxxp:(evil.example)"),
+        ("http:EVIL.COM:8080/x", "hxxp:EVIL[.]COM:8080/x"),
+    ] {
+        assert_eq!(defang(text), want);
+    }
+    // Not seen: the documented limit
+    for unseen in super::oracle::UNSEEN {
+        assert!(matches!(defang(unseen), Cow::Borrowed(_)), "{unseen:?}");
+        assert_eq!(fetchable(unseen), None, "{unseen:?}");
     }
 }

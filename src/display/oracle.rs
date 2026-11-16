@@ -109,14 +109,40 @@ pub fn readings(
 
 /// A reading as a fetcher's parser has it, when that is `http` or `https`
 /// with a host that could be one (a letter or a digit in it, or an
-/// address)
+/// address).
+///
+/// Not a reading written with no slash after the scheme (`https:x`) whose
+/// host is not a domain name with a dot and a last label of two letters
+/// or more (or `xn--`): a parser reads `http:1.1`, `HTTP:200` and
+/// `https:localhost` as URLs, but they are far likelier code than links,
+/// and the Steward's threat model is bounded (2026-11-17): what is left
+/// of those is a documented limit of [`Links`](super::Links), not a URL
+/// it let through
 pub fn fetched(reading: &str) -> Option<Url> {
     let url = Url::parse(reading).ok()?;
     let real = match url.host()? {
         Host::Domain(name) => name.contains(|c: char| c.is_alphanumeric()),
         Host::Ipv4(_) | Host::Ipv6(_) => true,
     };
-    (matches!(url.scheme(), "http" | "https") && real).then_some(url)
+    let lower = reading.to_ascii_lowercase();
+    let slashless = ["http:", "https:"].iter().any(|scheme| {
+        lower
+            .strip_prefix(scheme)
+            .is_some_and(|rest| !rest.starts_with(['/', '\\']))
+    });
+    let named = match url.host()? {
+        Host::Domain(name) => {
+            let name = name.strip_suffix('.').unwrap_or(name);
+            name.rsplit_once('.').is_some_and(|(_, last)| {
+                last.starts_with("xn--")
+                    || (last.chars().count() >= 2
+                        && last.chars().all(char::is_alphabetic))
+            })
+        }
+        Host::Ipv4(_) | Host::Ipv6(_) => false,
+    };
+    (matches!(url.scheme(), "http" | "https") && real && (!slashless || named))
+        .then_some(url)
 }
 
 /// [`fetched`], when its host could be reached: a domain's last label has
@@ -173,13 +199,22 @@ pub const SPELLINGS: &[&str] = &[
     "http:'@evil.example/x",
     "http:(evil.example)",
     "http:%65vil.example",
-    "http:[::1]/x",
-    "http:[::]/x",
-    "http:2130706433/x",
     "https:\u{fc}ber.example/x",
     "https://a:https:evil.example/x",
     "https://ok.example/x/http:evil.example",
     "www.ok.example/https:evil.example",
+];
+
+/// Slashless spellings a parser reads as a URL to an address or a single
+/// label, which [`Links`](super::Links) does not see (a documented limit:
+/// see [`fetched`]), and which no invariant counts
+pub const UNSEEN: &[&str] = &[
+    "http:[::1]/x",
+    "http:[::]/x",
+    "http:2130706433/x",
+    "http:1.1",
+    "https:localhost/x",
+    "HTTP:200 OK",
 ];
 
 // ── agora-server's scanner, `crates/agora-server/src/urls.rs` as of its
