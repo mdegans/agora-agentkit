@@ -4,6 +4,9 @@ use serde_json::json;
 
 use crate::threads;
 
+pub(in crate::display) use super::oracle::fetchable;
+use super::oracle::{Reader, destination, places, readings};
+
 pub(super) fn site() -> Url {
     Url::parse("https://subliminal.technology").unwrap()
 }
@@ -289,97 +292,6 @@ pub(super) const ADVERSARIAL: &[&str] = &[
     "https://\u{1}https://evil.example/x",
 ];
 
-/// Every place in `text` a URL could start, and each reading of it
-/// ([`Links`]) from there: found by splitting on whitespace and brackets,
-/// with none of the scanner's code, so that it can be held to them
-fn readings(text: &str) -> impl Iterator<Item = String> + '_ {
-    places(text).map(|(_, reading)| reading)
-}
-
-/// [`readings`], each with where it starts
-fn places(text: &str) -> impl Iterator<Item = (usize, String)> + '_ {
-    const BRACKETS: &str = "<>\"'`()[]{}|";
-    const CLOSING: &str = "<>\"'`()[]{}|.,;:!?*_";
-    text.char_indices()
-        .filter(|(_, c)| matches!(c, 'h' | 'H' | 'w' | 'W'))
-        .flat_map(move |(at, _)| {
-            // The run to the next space, without what a parser (a tab, a
-            // line break) or the runner's view (the whitespace before a
-            // line break) drops; `stops` are where something was dropped
-            // and where a bracket is
-            let mut token = String::new();
-            let mut stops = Vec::new();
-            let mut rest = &text[at..];
-            while let Some(c) = rest.chars().next() {
-                if !(c.is_whitespace() || threads::is_line_break(c)) {
-                    if BRACKETS.contains(c) {
-                        stops.push(token.len());
-                    }
-                    token.push(c);
-                    rest = &rest[c.len_utf8()..];
-                    continue;
-                }
-                let gap = rest
-                    .find(|c: char| {
-                        !(c.is_whitespace() || threads::is_line_break(c))
-                    })
-                    .unwrap_or(rest.len());
-                let Some(dropped) = rest[..gap]
-                    .rfind(|c| c == '\t' || threads::is_line_break(c))
-                else {
-                    break;
-                };
-                stops.push(token.len());
-                let dropped = &rest[dropped..];
-                let last = dropped.chars().next().map_or(0, char::len_utf8);
-                rest = &dropped[last..];
-            }
-            stops.push(token.len());
-            stops
-                .into_iter()
-                .flat_map(|stop| {
-                    let read = &token[..stop];
-                    let closed = read.trim_end_matches(|c| CLOSING.contains(c));
-                    // With the dots of a last `.` or `..` segment too
-                    let dots = read[closed.len()..]
-                        .chars()
-                        .take_while(|c| *c == '.')
-                        .count();
-                    let segment = closed.rsplit('/').next().unwrap_or("");
-                    let dotted = closed.contains('/')
-                        && matches!(
-                            segment
-                                .to_ascii_lowercase()
-                                .replace("%2e", ".")
-                                .as_str(),
-                            "" | "."
-                        );
-                    (0..=dots.min(2) * usize::from(dotted))
-                        .map(|n| (at, [closed, &"..."[..n]].concat()))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        })
-}
-
-/// A reading as a fetcher's parser has it, when that is `http` or `https`
-/// with a host that could be one (a letter or a digit in it, or an
-/// address)
-fn fetched(reading: &str) -> Option<Url> {
-    let url = Url::parse(reading).ok()?;
-    let real = match url.host()? {
-        Host::Domain(name) => name.contains(|c: char| c.is_alphanumeric()),
-        Host::Ipv4(_) | Host::Ipv6(_) => true,
-    };
-    (matches!(url.scheme(), "http" | "https") && real).then_some(url)
-}
-
-/// The first URL in `text` that a fetcher could be handed and would
-/// fetch: [`Links`]' default invariant says there is none
-pub(in crate::display) fn fetchable(text: &str) -> Option<Url> {
-    readings(text).find_map(|reading| fetched(&reading))
-}
-
 /// Under the default policy no `http` or `https` URL is left, in any
 /// case or spelling, whatever the text and whatever the site: by the
 /// scanner's own test, and by a URL parser at every place in the result
@@ -560,6 +472,20 @@ const PAST_THE_END: &[&str] = &[
     "https://allowed.example'.evil.com/x",
     "https://allowed.example(.evil.com/x",
     "https://allowed.example).evil.com/x",
+    "https://en.wikipedia.org/wiki/x'/../../w",
+    "https://en.wikipedia.org/wiki/x)/../../w",
+    // Allowed at both ends, and not at a bracket between them
+    "https://en.wikipedia.org/wiki/x'/../..)/wiki/y",
+    "https://allowed.example'@evil.com)@allowed.example/x",
+    "https://allowed.example'.evil.com\"/x",
+    // Too many ends to check each
+    "https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m(n)o[p]q{r}s",
+];
+
+/// What a reader that deletes whitespace or line breaks inside a URL
+/// would read past an allowed one: outside what is guarded (the Steward,
+/// 2026-11-16), and left, since rules judge a URL to its first whitespace
+const ACROSS_A_BREAK: &[&str] = &[
     "https://allowed.example\t.evil.com/x",
     "https://allowed.example\n.evil.com/x",
     "https://allowed.example\r\n.evil.com/x",
@@ -569,19 +495,11 @@ const PAST_THE_END: &[&str] = &[
     "https://allowed.example  \n.evil.com/x",
     "https://allowed.example\u{2028}.evil.com/x",
     "https://allowed.example \u{b}@evil.com/x",
-    "https://en.wikipedia.org/wiki/x'/../../w",
-    "https://en.wikipedia.org/wiki/x)/../../w",
     "https://en.wikipedia.org/wiki/x\n/../../w",
     "https://en.wikipedia.org/wiki/.\n./w",
     "https://en.wikipedia.org/wiki\n/../w",
     "https://en.wikipedia.org/wiki\nleaks/x",
-    // Allowed at both ends, and not at a bracket between them
-    "https://en.wikipedia.org/wiki/x'/../..)/wiki/y",
     "https://en.wikipedia.org/wiki/x'/..\n/..\"/wiki/y",
-    "https://allowed.example'@evil.com)@allowed.example/x",
-    "https://allowed.example'.evil.com\"/x",
-    // Too many ends to check each
-    "https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m(n)o[p]q{r}s",
 ];
 
 #[test]
@@ -596,58 +514,63 @@ fn an_allow_rule_is_not_passed_by_a_longer_reading() {
         assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
         assert_eq!(fetchable(&out), None, "{text:?} gave {out:?}");
     }
-    // What is still left as written: every reading is on the allowed
-    // host and under the rule's path
+    // What is left as written: every reading that names a host is on
+    // the allowed one and under the rule's path
     for text in [
         "[t](https://allowed.example/x)",
         "[t](https://allowed.example/x).",
         "[t](https://allowed.example)",
         "[t](https://allowed.example), then",
         "[t](https://allowed.example/x),[u](https://allowed.example/y)",
+        "[t](https://allowed.example),next",
         "<a href=\"https://allowed.example/x\">t</a>",
+        "<a href=\"https://allowed.example\">t</a>",
         "<https://allowed.example>",
         "\"https://allowed.example\"",
         "('https://allowed.example/'),",
         "{\"url\":\"https://allowed.example/x\",\"n\":1}",
         "|https://allowed.example/x|https://allowed.example/y|",
+        "https://allowed.example\nNext line",
+        "https://allowed.example\n\nNext paragraph",
         "https://allowed.example/x\nNext line",
         "https://allowed.example/\nNext line",
         "https://allowed.example\n\n",
         "https://allowed.example.\n",
         "https://allowed.example\t and",
+        "https://allowed.example\u{2028}next",
         "https://allowed.example/x\u{a0}y",
         "https://en.wikipedia.org/wiki/Rust\nNext line",
+        "https://en.wikipedia.org/wiki\nNext line",
         "(https://en.wikipedia.org/wiki)",
         "https://en.wikipedia.org/wiki.\n",
         "https://en.wikipedia.org/wiki/x'/y)",
         "see https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m end",
-    ] {
+    ]
+    .iter()
+    .chain(ACROSS_A_BREAK)
+    {
         let out = links.rewrite(text, None);
         assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
-        for reading in readings(text) {
-            if let Some(found) = fetched(&reading) {
+        for reading in readings(text, Reader::Whitespace) {
+            if let Some(found) = destination(&reading) {
                 assert!(rules.iter().any(|r| r.allows(&found)), "{found}");
             }
         }
     }
-    // The cost: a URL that ends where its rule does, read with what
-    // follows it
+    // A reading past a bracket that names a host is checked: here the
+    // URL with another host, and a path that leaves the rule's
     for (text, want) in [
         (
-            "https://allowed.example\nNext line",
-            "hxxps://allowed[.]example\nNext line",
+            "[t](https://allowed.example),next.evil.com",
+            "[t](hxxps://allowed[.]example),next.evil.com",
         ),
         (
-            "[t](https://allowed.example),next",
-            "[t](hxxps://allowed[.]example),next",
+            "[t](https://allowed.example)%2eevil.com",
+            "[t](hxxps://allowed[.]example)%2eevil.com",
         ),
         (
-            "<a href=\"https://allowed.example\">t</a>",
-            "<a href=\"hxxps://allowed[.]example\">t</a>",
-        ),
-        (
-            "https://en.wikipedia.org/wiki\nNext line",
-            "hxxps://en[.]wikipedia[.]org/wiki\nNext line",
+            "[t](https://en.wikipedia.org/wiki),next",
+            "[t](hxxps://en[.]wikipedia[.]org/wiki),next",
         ),
         // One left and the one after it not: each is judged on its own
         (
@@ -669,15 +592,8 @@ fn a_deny_rule_is_not_passed_by_a_longer_reading() {
         "https://ok.example\"@denied.example/x",
         "https://ok.example[@denied.example/x",
         "https://ok.example`@denied.example/x",
-        "https://deni\ted.example/",
-        "https://deni\r\ned.example/",
-        "https://denied\n.example/",
-        "https://ok.example\t@denied.example/",
-        "https://ok.example  \n@denied.example/",
-        "https://deni \u{2028}ed.example/",
         // Denied at a bracket between two ends that are not
         "https://ok.example'@denied.example)@ok.example/x",
-        "https://denied.exam\nple)x",
         "https://u'@denied.example\"x/",
         // Spellings a parser reads as the denied host
         "https:/denied.example/x",
@@ -694,7 +610,6 @@ fn a_deny_rule_is_not_passed_by_a_longer_reading() {
     let path = deny(&["https://h.example/a/b"]);
     for text in [
         "https://h.example/a;'/b)zz",
-        "https://h.example/a\n/b)zz",
         "https://h.example/y'/../a/b)/../../y",
     ] {
         let out = path.rewrite(text, None);
@@ -705,19 +620,35 @@ fn a_deny_rule_is_not_passed_by_a_longer_reading() {
         "https://ok.example\nNext line",
         "https://ok.example'x)y",
         "<a href=\"https://ok.example/x\">t</a>",
+        "<a href=\"https://ok.example\">t</a>",
+        // Rules judge a URL to its first whitespace: what a reader that
+        // deletes line breaks inside one would read is not guarded
+        "https://deni\ted.example/",
+        "https://deni\r\ned.example/",
+        "https://ok.example\t@denied.example/",
+        "https://ok.example  \n@denied.example/",
+        "https://deni \u{2028}ed.example/",
+        "https://h.example/a\n/b)zz",
     ] {
         let out = links.rewrite(text, None);
         assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
     }
-    // A reading that does not parse cannot be checked
+    // `https://denied` is not the denied host, and a parser handed
+    // `https://denied\n.example/` whole reads one; but a scheme spelt
+    // across a break is still a start, and never left under rules
     assert_eq!(
-        links.rewrite("<a href=\"https://ok.example\">t</a>", None),
-        "<a href=\"hxxps://ok[.]example\">t</a>"
+        links.rewrite("https:\n//denied.example/", None),
+        "hxxps:\n//denied[.]example/"
     );
 }
 
 /// Under `raw`, no URL left in the result is one a deny rule matches,
-/// under any reading, each found here without the scanner
+/// under any reading, each found here without the scanner.
+///
+/// A reading ends at whitespace of any kind ([`Reader::Whitespace`]): a
+/// reader that deletes line breaks inside a URL is outside what is
+/// guarded, by the Steward's decision (2026-11-16). A reading whose host
+/// no one could reach ([`destination`]) is not one
 #[test]
 fn raw_leaves_no_denied_url() {
     let links = deny(&[
@@ -744,7 +675,7 @@ fn raw_leaves_no_denied_url() {
         for site in &sites {
             let out = links.rewrite(text, site.as_ref());
             for out in [out.to_string(), threads::tidy(&out)] {
-                for (at, reading) in places(&out) {
+                for (at, reading) in places(&out, Reader::Whitespace) {
                     // A schemeless host is one only where a word starts, and
                     // with a host's character written after its `www.`
                     let word = !out[..at].ends_with(|c: char| {
@@ -757,11 +688,10 @@ fn raw_leaves_no_denied_url() {
                         });
                     let found =
                         if reading.to_ascii_lowercase().starts_with("www.") {
-                            Url::parse(&["http://", &reading].concat())
-                                .ok()
+                            destination(&["http://", &reading].concat())
                                 .filter(|_| word)
                         } else {
-                            fetched(&reading)
+                            destination(&reading)
                         };
                     let Some(found) = found else {
                         continue;
@@ -786,7 +716,8 @@ fn raw_leaves_no_denied_url() {
 }
 
 /// Under `defanged` with rules, every URL left in the result is one a
-/// rule allows, under any reading, each found here without the scanner
+/// rule allows, under any reading, each found here without the scanner,
+/// read as in [`raw_leaves_no_denied_url`]
 #[test]
 fn allow_leaves_only_allowed_urls() {
     let links = allow(&[
@@ -817,9 +748,9 @@ fn allow_leaves_only_allowed_urls() {
         for site in &sites {
             let out = links.rewrite(text, site.as_ref());
             let tidied = threads::tidy(&out);
-            for found in readings(&out)
-                .chain(readings(&tidied))
-                .filter_map(|r| fetched(&r))
+            for found in readings(&out, Reader::Whitespace)
+                .chain(readings(&tidied, Reader::Whitespace))
+                .filter_map(|r| destination(&r))
             {
                 left += 1;
                 assert!(

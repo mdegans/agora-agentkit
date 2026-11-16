@@ -22,6 +22,8 @@ use crate::threads;
 
 mod agent;
 mod json;
+#[cfg(test)]
+pub(crate) mod oracle;
 mod profiles;
 
 pub use agent::{AgentDisplay, AgentText, DisplayContext};
@@ -123,17 +125,19 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// - **`raw` with `deny` rules**: no `http` or `https` URL left in it is
 ///   one a rule denies, under every reading below.
 ///
-/// **A URL's readings.** Where a URL ends depends on who reads it, and
-/// a rule that passed the URL up to a `'` would say nothing of
+/// **A URL's readings.** Whitespace of any kind, a tab or a line break
+/// ends a URL. Where before that it ends depends on who reads it, and a
+/// rule that passed the URL up to a `'` would say nothing of
 /// `https://allowed.example'@evil.example/`, which a parser reads whole.
 /// So a URL is left as written only if every reading of it passes: the
-/// one that ends as prose does (before whitespace or any of
-/// ``<>"'`()[]{}|``), and each that ends at a later one of those, at a
-/// tab or line break, or at the next other whitespace, with the tabs and
-/// line breaks before its end dropped. Sentence punctuation
-/// (`.,;:!?*_`), brackets and quotes at the end of a reading are not
-/// part of it. Each reading is checked alone: under `allow` each must
-/// be allowed, by any rule.
+/// one that ends as prose does (before any of ``<>"'`()[]{}|``), and each
+/// that ends at a later one of those or at the whitespace. Sentence
+/// punctuation (`.,;:!?*_`), brackets and quotes at the end of a reading
+/// are not part of it. Each reading is checked alone: under `allow` each
+/// must be allowed, by any rule. A later reading whose host ends in a
+/// label with punctuation no domain name has, as written in ASCII
+/// (`example.org),next`, `example.org">t<`), names nothing to fetch and
+/// is not checked.
 ///
 /// A URL is never left as written on the strength of a rule it cannot be
 /// checked against. With rules, each of these is defanged, allowed or
@@ -144,21 +148,21 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// `http://` or `https://`; one longer than [`MAX_URL_BYTES`] to the
 /// next space; and one with more than [`MAX_URL_ENDS`] readings.
 ///
-/// The cost falls on a URL that ends where its rule does. Under
-/// `allow = ["https://example.org"]`, `https://example.org` at the end
-/// of a line is defanged when the next line starts with a word (read
-/// with it, the host is `example.orgnext`), and so is
-/// `[x](https://example.org),next`; `https://example.org/` is left in
-/// both.
+/// **Not covered**, in any mode:
 ///
-/// **Not covered**, in any mode: what no URL parser reads as `http` or
-/// `https`. Other schemes (`ftp://`, `ws://`, `file://`), a
-/// protocol-relative `//host/path`, a bare `host.tld/path` other than
-/// `www.`, a scheme in full-width or look-alike letters, HTML entities
-/// and a percent-encoded scheme are left as written; the server's
-/// scanner left them too. And whitespace other than a tab or a line
-/// break ends every reading: a fetcher handed more than that is not
-/// modelled.
+/// - What no URL parser reads as `http` or `https`. Other schemes
+///   (`ftp://`, `ws://`, `file://`), a protocol-relative `//host/path`, a
+///   bare `host.tld/path` other than `www.`, a scheme in full-width or
+///   look-alike letters, HTML entities and a percent-encoded scheme are
+///   left as written; the server's scanner left them too.
+/// - A reader that deletes the whitespace or line breaks inside a URL
+///   (`https://allowed.example\n.evil.com`): rules judge a URL to its
+///   first whitespace (the Steward's call, 2026-11-16: what a model can
+///   hand a fetch tool is what is checked).
+/// - A cut made after the policy can make a different URL of one it
+///   judged: `https://denied.example.ok.com/` cut after `denied.example`.
+/// - A deny rule whose path ends in sentence punctuation (`/a.`) does not
+///   match where that character is read as the sentence's.
 ///
 /// ```toml
 /// links = { mode = "defanged", allow = ["https://en.wikipedia.org/wiki"] }
@@ -258,7 +262,7 @@ impl Links {
             // This site's page: its link, which an agent can follow
             if let Some(site) = site
                 .filter(|s| start.plain && on_site_host(bytes, authority, s))
-                && let Some(end) = url_end(bytes, i, authority)
+                && let Some(end) = url_end(text, i, authority)
                 && let Ok(link) = AgoraLink::parse_at(&text[i..end], Some(site))
                     .map(|link| link.to_string())
                 // (links percent-encode a URL they carry; were one ever
@@ -380,7 +384,7 @@ fn every_reading(
         !dotted || passes(&[read, &rest[..dots]].concat())
     };
 
-    let end = url_end(bytes, at, from)?;
+    let end = url_end(text, at, from)?;
     let authority = authority_end(text, from);
     if (authority..end)
         .any(|i| scheme_at(text, i).is_some() || www_at(bytes, i))
@@ -394,24 +398,26 @@ fn every_reading(
 
     // Each later end: a reading is taken where one could stop, if
     // anything but closing punctuation was written since the last
-    let run = Run::read(text, at, from)?;
-    let token = run.token.as_bytes();
-    let mut read = run.token.starts_with(as_prose).then_some(as_prose.len());
-    let mut gaps = run.gaps.iter().copied().peekable();
+    let token = run_at(text, at, from)?;
+    let bytes = token.as_bytes();
+    let mut read = token.starts_with(as_prose).then_some(as_prose.len());
     let mut ends = 0;
     // Where the closing punctuation before `stop` starts
     let mut closed = start.len;
-    for stop in start.len..=token.len() {
-        let here = token.get(stop).copied();
-        let gap = gaps.next_if_eq(&stop).is_some();
-        if gap || here.is_none_or(is_bracket) {
-            let reading = &run.token[..closed];
-            if !passes_dotted(reading, &run.token[closed..stop]) {
+    for stop in start.len..=bytes.len() {
+        let here = bytes.get(stop).copied();
+        if here.is_none_or(is_bracket) {
+            let reading = &token[..closed];
+            if !names_no_host(reading, start)
+                && !passes_dotted(reading, &token[closed..stop])
+            {
                 return None;
             }
             if read != Some(closed) {
                 ends += 1;
-                if ends > MAX_URL_ENDS || !passes(reading) {
+                if ends > MAX_URL_ENDS
+                    || !(names_no_host(reading, start) || passes(reading))
+                {
                     return None;
                 }
                 read = Some(closed);
@@ -424,50 +430,46 @@ fn every_reading(
     Some(end)
 }
 
-/// The run without a space that a URL is in, as a parser handed all of
-/// it reads it
-struct Run<'a> {
-    /// Without what is dropped ([`skip_dropped`])
-    token: Cow<'a, str>,
-    /// Where in `token` something was dropped: each an end to some reader
-    gaps: Vec<usize>,
+/// The text from the URL at `at`, whose authority starts at `from`, to
+/// the next whitespace or line break. `None` past [`MAX_URL_BYTES`]
+fn run_at(text: &str, at: usize, from: usize) -> Option<&str> {
+    let end = bounded_end(text, at, from, is_gap)?;
+    Some(&text[at..end])
 }
 
-impl<'a> Run<'a> {
-    /// The run of the URL at `at`, whose authority starts at `from`.
-    /// `None` past [`MAX_URL_BYTES`]
-    fn read(text: &'a str, at: usize, from: usize) -> Option<Self> {
-        let mut kept: Option<String> = None;
-        let mut gaps = Vec::new();
-        let mut copied = at;
-        let mut i = from;
-        while let Some(c) = text[i..].chars().next() {
-            if i - at >= MAX_URL_BYTES {
-                return None;
-            }
-            if !is_gap(c) {
-                i += c.len_utf8();
-                continue;
-            }
-            let next = skip_dropped(text, i);
-            if next == i {
-                break;
-            }
-            let kept = kept.get_or_insert_default();
-            kept.push_str(&text[copied..i]);
-            gaps.push(kept.len());
-            copied = next;
-            i = next;
+/// The first `stop` in `text` from `from`, or its end; `None` when that is
+/// more than [`MAX_URL_BYTES`] past `start`, having read no further
+fn bounded_end(
+    text: &str,
+    start: usize,
+    from: usize,
+    stop: impl Fn(char) -> bool,
+) -> Option<usize> {
+    for (offset, c) in text[from..].char_indices() {
+        if from + offset - start > MAX_URL_BYTES {
+            return None;
         }
-        let token = match kept {
-            Some(mut kept) => {
-                kept.push_str(&text[copied..i]);
-                Cow::Owned(kept)
-            }
-            None => Cow::Borrowed(&text[at..i]),
-        };
-        Some(Self { token, gaps })
+        if stop(c) {
+            return Some(from + offset);
+        }
     }
+    (text.len() - start <= MAX_URL_BYTES).then_some(text.len())
+}
+
+/// Whether a reading of a URL names no host anyone could reach: the last
+/// label of its authority, as written, has punctuation no domain name has
+/// (`example.org),next`, `example.org">t<`). Only plain ASCII counts, with
+/// nothing a parser decodes or splits on (`%`, `@`, `\`, `[`, `:`, a
+/// non-ASCII dot)
+fn names_no_host(reading: &str, start: Start) -> bool {
+    let rest = &reading[start.len..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let last = authority.rsplit('.').next().unwrap_or(authority);
+    authority.is_ascii()
+        && !authority.contains(['%', '@', '\\', '[', ':'])
+        && last
+            .bytes()
+            .any(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')))
 }
 
 /// Punctuation, a bracket or a quote: at a reading's end, not part of it
@@ -663,20 +665,14 @@ fn at_word_boundary(bytes: &[u8], i: usize) -> bool {
 }
 
 /// The end as prose of the URL starting at `start`, whose authority
-/// starts at `from`: the first byte that cannot be in one as written in
-/// prose, then back over any sentence punctuation before it. `None` past
+/// starts at `from`: the first whitespace, line break or bracket, then
+/// back over any sentence punctuation before it. `None` past
 /// [`MAX_URL_BYTES`]
-fn url_end(bytes: &[u8], start: usize, from: usize) -> Option<usize> {
-    let mut end = from;
-    while end < bytes.len()
-        && !bytes[end].is_ascii_whitespace()
-        && !is_bracket(bytes[end])
-    {
-        end += 1;
-        if end - start > MAX_URL_BYTES {
-            return None;
-        }
-    }
+fn url_end(text: &str, start: usize, from: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut end = bounded_end(text, start, from, |c| {
+        is_gap(c) || c.is_ascii() && is_bracket(c as u8)
+    })?;
     while end > from && is_sentence_punctuation(bytes[end - 1]) {
         end -= 1;
     }
