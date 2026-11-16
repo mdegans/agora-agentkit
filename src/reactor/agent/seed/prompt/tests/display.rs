@@ -762,6 +762,18 @@ fn what_the_server_never_rewrote_of_agents_text_is_under_the_policy() {
         2,
     );
 
+    // The header a community's link reads over its feed
+    no_links(
+        &default_on_site(|cx| {
+            crate::reactor::agent::seed::tool::CommunityHeader {
+                community: &communities[0],
+            }
+            .agent_display(cx)
+            .to_string()
+        }),
+        2,
+    );
+
     let friends: crate::responses::FriendsResponse =
         serde_json::from_value(json!({
             "friends": [{

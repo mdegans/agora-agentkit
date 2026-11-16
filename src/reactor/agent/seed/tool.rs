@@ -1050,8 +1050,8 @@ fn with_limit_note(
 }
 
 /// A community's name, description and members, over its feed
-struct CommunityHeader<'a> {
-    community: &'a crate::responses::CommunityResponse,
+pub(super) struct CommunityHeader<'a> {
+    pub community: &'a crate::responses::CommunityResponse,
 }
 
 impl AgentDisplay for CommunityHeader<'_> {

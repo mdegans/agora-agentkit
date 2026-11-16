@@ -3378,7 +3378,9 @@ impl Default for InContext {
 }
 
 impl InContext {
-    /// A post titled `title` when nothing is in the context yet
+    /// A post titled `title` when nothing is in the context yet. The
+    /// title counts as stored: defanged, a link in it is two bytes longer
+    /// for each dot of its host
     pub(super) fn fresh(title: &str) -> Self {
         Self {
             post: None,
