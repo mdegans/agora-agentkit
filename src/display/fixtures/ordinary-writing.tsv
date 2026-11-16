@@ -466,3 +466,7 @@ code	sha256:abc123
 code	std::http::StatusCode
 code	the word https alone
 code	h t t p s colon
+code	    let slashless = ["http:", "https:"].iter().any(|scheme| {
+code	for s in ["http:", "https:"].iter() {
+code	SCHEMES = ["http:", "https:"]  # [http:...]
+code	if url.startsWith("https:")) { return; }

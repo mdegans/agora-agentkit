@@ -524,11 +524,6 @@ fn where_the_runner_differs_from_the_server() {
         ),
         // Every spelling a parser reads as `http` or `https` (layer 5)
         (
-            "https:evil.example/x",
-            "https:evil.example/x",
-            "hxxps:evil[.]example/x",
-        ),
-        (
             "ht\ttps://evil.example/x",
             "ht\ttps://evil.example/x",
             "hx\txps://evil[.]example/x",
@@ -539,6 +534,30 @@ fn where_the_runner_differs_from_the_server() {
             "https://subliminal.technology/agora/protocol\u{a0}next",
             "hxxps://subliminal[.]technology/agora/protocol\u{a0}next",
             "agora://protocol\u{a0}next",
+        ),
+        // A site page before a closing mark or a footnote is its link: the
+        // server read the mark into it (layer 5b)
+        (
+            "“https://subliminal.technology/agora/protocol”",
+            "“hxxps://subliminal[.]technology/agora/protocol”",
+            "“agora://protocol”",
+        ),
+        (
+            "https://subliminal.technology/agora/protocol¹",
+            "hxxps://subliminal[.]technology/agora/protocol¹",
+            "agora://protocol¹",
+        ),
+        // A slashless scheme before something that is not a domain name
+        // is code, as the server had it; before one, a URL (layer 5b)
+        (
+            "{http:1.1} HTTP:200",
+            "{http:1.1} HTTP:200",
+            "{http:1.1} HTTP:200",
+        ),
+        (
+            "https:evil.example/x",
+            "https:evil.example/x",
+            "hxxps:evil[.]example/x",
         ),
         (
             "https://subliminal.technology/agora/post/7ad26ccd\u{2028}x",

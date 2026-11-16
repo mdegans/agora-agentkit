@@ -1063,7 +1063,8 @@ fn domain_follows(text: &str, at: usize) -> bool {
 
 /// Whether the host in `written` (after its last `@`, before a port,
 /// percent-decoded, what a parser ignores dropped, and without closing
-/// punctuation at its end) is a domain name: see [`domain_follows`]
+/// punctuation at its end) is a domain name: see [`domain_follows`]. Not
+/// one with a character a parser refuses in a host
 fn is_domain(written: &str) -> bool {
     let host = written.rsplit('@').next().unwrap_or(written);
     let host = host.split(':').next().unwrap_or(host);
@@ -1073,6 +1074,10 @@ fn is_domain(written: &str) -> bool {
         .filter(|c| !maps_away(*c))
         .collect();
     let host = host.trim_end_matches(is_closing);
+    // What no parser takes for a host (`["https:"].iter().any`)
+    if host.contains(['<', '>', '[', ']', '^', '|', '\\']) {
+        return false;
+    }
     let Some((_, last)) = host.rsplit_once(is_dot) else {
         return false;
     };
