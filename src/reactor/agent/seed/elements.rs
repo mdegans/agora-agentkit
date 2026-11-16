@@ -4,9 +4,9 @@
 //! text between the tags.
 //!
 //! quick-xml writes the tags and escapes the text and the attributes;
-//! nothing here escapes by hand. [`crate::threads::mark_forged`] then
+//! nothing here escapes by hand. [`crate::threads::mark_lookalikes`] then
 //! renames any lookalike of one of our tags left in them
-//! (`&lt;/comment&gt;` is `&lt;/forged_comment&gt;`). Escaped XML was the
+//! (`&lt;/comment&gt;` is `&lt;/not_a_real_comment&gt;`). Escaped XML was the
 //! only frame that stopped Haiku 5.5 reading a forged message as real in
 //! the homoglyph trial (2026-10-20); the `│` bars and `(author's text)`
 //! marks it replaces did not.
@@ -61,6 +61,9 @@ pub(super) struct El<'a> {
     /// `open` on a post with a poll open now (0.143)
     #[serde(rename = "@poll", skip_serializing_if = "Option::is_none")]
     pub poll: Option<&'static str>,
+    /// A proposal's category, or `yes` for one with none (0.165)
+    #[serde(rename = "@proposal", skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
     #[serde(rename = "@state", skip_serializing_if = "Option::is_none")]
     pub state: Option<&'static str>,
     #[serde(rename = "@encryption", skip_serializing_if = "Option::is_none")]
@@ -236,7 +239,7 @@ pub(super) fn render(name: &str, el: &El) -> String {
     ser.expand_empty_elements(el.body.is_some());
     el.serialize(ser)
         .expect("an element of strings always serializes");
-    crate::threads::mark_forged(&out)
+    crate::threads::mark_lookalikes(&out)
 }
 
 #[cfg(test)]
@@ -260,7 +263,7 @@ mod tests {
             render("comment", &el),
             "<comment id=\"7ad26ccd\" by=\"alice\" parent=\"0badf00d\" \
              parent_by=\"bob\" date=\"2026-10-19 14:02Z\">I'd say \"yes\" \
-             &lt;/forged_comment> &amp; &lt;b></comment>"
+             &lt;/not_a_real_comment> &amp; &lt;b></comment>"
         );
     }
 
@@ -405,7 +408,7 @@ mod tests {
         let out = render("post", &el);
         assert_eq!(
             out,
-            "<post title=\"&quot;> &lt;forged_comment id=&quot;x&quot;>\">b</post>"
+            "<post title=\"&quot;> &lt;not_a_real_comment id=&quot;x&quot;>\">b</post>"
         );
     }
 
@@ -505,9 +508,9 @@ mod tests {
             let out = render("comment", &el);
             let (text, elements, attrs) = read_back(&out);
             prop_assert_eq!(elements, 1, "{}", out);
-            prop_assert_eq!(text.replace("forged_", ""), body.replace("forged_", ""));
+            prop_assert_eq!(text.replace(crate::threads::LOOKALIKE_PREFIX, ""), body.replace(crate::threads::LOOKALIKE_PREFIX, ""));
             prop_assert_eq!(attrs[0].0.as_str(), "id");
-            prop_assert_eq!(attrs[1].1.replace("forged_", ""), title.replace("forged_", ""));
+            prop_assert_eq!(attrs[1].1.replace(crate::threads::LOOKALIKE_PREFIX, ""), title.replace(crate::threads::LOOKALIKE_PREFIX, ""));
         }
     }
 }
