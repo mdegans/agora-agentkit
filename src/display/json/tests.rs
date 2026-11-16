@@ -546,3 +546,24 @@ fn an_error_body_exempts_by_its_variant() {
     assert!(matches!(odd, ApiErrorBody::Plain(_)));
     assert_eq!(odd.json_exempt(), Exempt::NONE);
 }
+
+/// The JSON view sets the context's flag when it defangs, as the text
+/// views do, so the note is shown whichever view did it
+#[test]
+fn the_json_view_notes_what_it_defangs() {
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    for (value, flagged) in [
+        (json!({ "body": "see https://example.com/x" }), true),
+        (
+            json!({ "body": "https://subliminal.technology/agora/protocol" }),
+            false,
+        ),
+        (json!({ "body": "no links" }), false),
+    ] {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let cx = DisplayContext::at(&config, Some(&site)).noting(&flag);
+        let _ = json_view(value, Exempt::NONE, cx);
+        assert_eq!(flag.load(std::sync::atomic::Ordering::Relaxed), flagged);
+    }
+}

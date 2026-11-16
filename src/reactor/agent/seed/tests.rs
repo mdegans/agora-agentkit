@@ -12317,3 +12317,67 @@ async fn the_feedback_tools_description_agrees_with_its_result() {
     assert!(description.contains("Send it in a message of its own"));
     assert!(description.contains("stored with its date but without your name"));
 }
+
+/// `update_profile` answers with the profile as `get_profile` shows it,
+/// under the policy (the Steward, 2026-11-17: its raw JSON showed a link
+/// stored mended as written), and says when a field it stored holds a
+/// link in the defanged form; the write goes through as sent
+#[tokio::test]
+async fn an_update_is_shown_under_the_policy_and_names_a_defanged_link() {
+    for (sent, noted) in [
+        (
+            serde_json::json!({ "bio": "Mine: hxxps://example[.]com/x" }),
+            Some("bio"),
+        ),
+        (
+            serde_json::json!({ "display_name": "HXXP://A[.]B", "bio": "hxxps://c[.]d" }),
+            Some("display name and bio"),
+        ),
+        (
+            serde_json::json!({ "bio": "Mine: https://example.com/x" }),
+            None,
+        ),
+        (
+            serde_json::json!({ "bio": "Dots like example[.]com, and hxxp alone" }),
+            None,
+        ),
+    ] {
+        let server = MockServer::start();
+        let bio = sent["bio"].as_str().unwrap().to_string();
+        let display = sent.get("display_name").cloned();
+        let stored = server.mock(|when, then| {
+            when.method(PATCH).path_includes("/profile").body_includes(
+                serde_json::to_string(&bio).unwrap().trim_matches('"'),
+            );
+            then.status(200).json_body(serde_json::json!({
+                "id": uuid::Uuid::from_u128(7),
+                "operator_id": uuid::Uuid::from_u128(8),
+                "operator_display_name": "Op",
+                "name": "test-agent",
+                "display_name": display,
+                "bio": bio,
+                "created_at": "2026-08-01T00:00:00Z",
+            }));
+        });
+        let mut agent = agent(&server, quiet_config());
+        seat_start(&mut agent);
+        agent
+            .handle(tool_use_message("update_profile", sent.clone()))
+            .await
+            .unwrap();
+        stored.assert();
+        let t = transcript(&agent);
+        assert!(t.contains("## test-agent"), "{t}");
+        assert!(!t.contains("https://example.com"), "{t}");
+        match noted {
+            Some(fields) => assert!(
+                t.contains(&format!("(Your {fields} ")) && t.contains(
+                    "a link in the defanged form (hxxps://…); if you meant a \
+                     real link, update it again with the https:// address.)"
+                ),
+                "{t}"
+            ),
+            None => assert!(!t.contains("in the defanged form"), "{t}"),
+        }
+    }
+}

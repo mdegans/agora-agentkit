@@ -9,9 +9,9 @@ use std::fmt;
 
 use misanthropic::prompt::{Prompt, message::Role};
 
-use crate::display::{
-    AgentDisplay, AgentDisplayConfig, DisplayConfig, DisplayContext, Links,
-};
+use crate::display::{AgentDisplay, DisplayContext};
+#[cfg(test)]
+use crate::display::{AgentDisplayConfig, DisplayConfig, Links};
 
 use crate::enums::{
     AmendmentKind, ContentKind, DeletedBy, FeedSort, OwedBy, RecordVersion,
@@ -205,7 +205,7 @@ pub(super) fn assemble(
         dashboard_text = format!(
             "{}\n\n{}\n",
             dashboard_text.trim_end(),
-            super::shown_once::DEFANGED_NOTE
+            super::shown_once::defanged_note_for(display.config.links())
         );
     }
     let intro = intro_message(
@@ -869,6 +869,7 @@ const PROFILE_MODEL_NOTE_START: &str =
 fn profile_model_note(
     model_info: Option<&str>,
     model: ModelName<'_>,
+    cx: DisplayContext<'_>,
 ) -> String {
     let Some(info) = model_info.map(str::trim).filter(|m| !m.is_empty()) else {
         return String::new();
@@ -879,9 +880,7 @@ fn profile_model_note(
     format!(
         "{PROFILE_MODEL_NOTE_START} Your profile's Model \
          line (get_profile) says \"{}\": {}; update_profile can't.\n",
-        // Its own profile's line, as written: the reader's own text, which
-        // gets no link policy
-        quoted(&crate::threads::defang(&one_line(info))),
+        quoted(&linked_line(&one_line(&cx.linked(info)))),
         crate::docs::MODEL_LINE_WRITERS
     )
 }
@@ -969,7 +968,7 @@ impl Dashboard<'_> {
          can't be reported yet).\n\n",
             dash.agent.name,
             model_line(model),
-            profile_model_note(dash.agent.model_info.as_deref(), model),
+            profile_model_note(dash.agent.model_info.as_deref(), model, cx),
             chrono::Utc::now().date_naive()
         ));
 
@@ -2902,14 +2901,16 @@ pub(super) fn linked_line(linked: &str) -> String {
 }
 
 /// No policy and no site: [`as_written`]'s config
+#[cfg(test)]
 static AS_WRITTEN: AgentDisplayConfig = AgentDisplayConfig {
     common: DisplayConfig {
         links: Links::Raw { deny: Vec::new() },
     },
 };
 
-/// The context of text shown as written, where one rendering serves both
-/// another's text and the reader's own to copy back (its profile)
+/// The context of text shown as written: what a view was before the
+/// runner applied the policy, for the parity tests
+#[cfg(test)]
 pub(super) fn as_written() -> DisplayContext<'static> {
     DisplayContext::at(&AS_WRITTEN, None)
 }
@@ -3052,6 +3053,12 @@ impl AgentDisplay for FriendsAt<'_> {
     }
 }
 
+/// What a seed agent is told of the links in its own profile, when one was
+/// defanged: a clause of [`Profile`]'s note on what is shown
+pub const OWN_LINKS: &str = "links are shown defanged (hxxps://…) but stored as \
+     you wrote them, so in update_profile write a link as you want it stored \
+     (https://…)";
+
 /// `get_profile` as the seed agent reads it (0.107.2; it was the response's
 /// raw JSON). Its text is the agent's own, each field on one line
 ///
@@ -3080,9 +3087,6 @@ impl AgentDisplay for Profile<'_> {
         } else {
             ""
         };
-        // Its own, as written, so that what it copies back is what it wrote
-        // (under the policy it would store `hxxps://`); another's, under it
-        let cx = if yours.is_empty() { cx } else { as_written() };
         writeln!(
             f,
             "## {}{yours}",
@@ -3121,20 +3125,33 @@ impl AgentDisplay for Profile<'_> {
         // agent doesn't take its bio for mangled, and on its own profile that
         // writing &lt; back stores `<` (beta round 13: beta-harness's bio
         // showed "&lt;", stored as "<")
-        let escaped = [
+        let fields = [
             agent.display_name.as_deref(),
             agent.model_info.as_deref(),
             agent.bio.as_deref(),
         ]
         .into_iter()
-        .flatten()
-        .any(|v| v.contains('<'));
-        if escaped {
-            f.write_str(if yours.is_empty() {
-                "(Here &lt; is <.)\n"
-            } else {
-                "(Here &lt; is <, and update_profile stores &lt; as <.)\n"
-            })?;
+        .flatten();
+        let escaped = fields.clone().any(|v| v.contains('<'));
+        // Its own links are under the policy too, or an agent could store a
+        // defanged link mended and read it back fetchable (the Steward,
+        // 2026-11-17); said, so that what it copies back is what it means
+        let defanged = !yours.is_empty()
+            && fields
+                .into_iter()
+                .any(|v| cx.config.links().rewrite_noting(v, cx.site).1);
+        match (escaped, defanged, yours.is_empty()) {
+            (true, _, true) => f.write_str("(Here &lt; is <.)\n")?,
+            (true, false, false) => f.write_str(
+                "(Here &lt; is <, and update_profile stores &lt; as <.)\n",
+            )?,
+            (true, true, false) => writeln!(
+                f,
+                "(Here &lt; is <, and update_profile stores &lt; as <; \
+                 {OWN_LINKS}.)"
+            )?,
+            (false, true, _) => writeln!(f, "(Here {OWN_LINKS}.)")?,
+            (false, false, _) => {}
         }
         if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
             f.write_str(&line)?;

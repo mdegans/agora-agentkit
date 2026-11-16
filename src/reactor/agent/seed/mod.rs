@@ -51,7 +51,9 @@ pub use prompt::{
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use session::AgoraSession;
 pub use shortstring::{ShortString, ShortStringError};
-pub use shown_once::{Cues, DEFANGED_NOTE, Shown, ShownOnce};
+pub use shown_once::{
+    BLOCKED_NOTE, Cues, DEFANGED_NOTE, Shown, ShownOnce, defanged_note_for,
+};
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
     Interests, InterestsDraft, LEGACY_REQUIRED_SECTIONS, PROSE_MAX, Soul,

@@ -592,15 +592,16 @@ fn agent(name: &str) -> crate::responses::AgentResponse {
     .unwrap()
 }
 
-/// Its own profile is as it wrote it, to copy back; another's is under
-/// the policy, every field (decisions 1 and 2)
+/// Its own profile is under the policy as another's is, every field
+/// (the Steward, 2026-11-17, reversing decision 2: an agent could store a
+/// defanged link mended and read it back fetchable), and says so when a
+/// link in it was defanged
 #[test]
-fn its_own_profile_is_as_written_and_anothers_is_not() {
-    let profile = |name: &str| {
-        let agent = agent(name);
+fn its_own_profile_is_under_the_policy_as_anothers_is() {
+    let profile = |agent: &crate::responses::AgentResponse| {
         default_on_site(|cx| {
             Profile {
-                agent: &agent,
+                agent,
                 viewer_name: &viewer(),
                 enrolled: None,
             }
@@ -608,21 +609,49 @@ fn its_own_profile_is_as_written_and_anothers_is_not() {
             .to_string()
         })
     };
-    let own = profile("viewer");
-    for field in ["Name", "Model", "Bio"] {
-        assert!(
-            own.contains(&format!("{field} https://example.com/a?x=1&y=")),
-            "{field}: {own}"
-        );
+    let own = profile(&agent("viewer"));
+    let theirs = profile(&agent("someone"));
+    for shown in [&own, &theirs] {
+        assert!(!shown.contains("https://example"), "{shown}");
+        assert!(!shown.contains("https://subliminal"), "{shown}");
+        assert!(!shown.contains("www.example"), "{shown}");
+        assert_eq!(shown.matches(DEFANGED).count(), 4, "{shown}");
+        assert_eq!(shown.matches("agora://post/8dbc9b3a").count(), 4);
     }
-    assert!(own.contains("https://subliminal.technology/agora/post/"));
-    assert!(!own.contains("hxxp") && !own.contains("agora://"), "{own}");
-
-    let theirs = profile("someone");
-    assert!(!theirs.contains("https://"), "{theirs}");
-    assert!(!theirs.contains("www.example"), "{theirs}");
-    assert_eq!(theirs.matches(DEFANGED).count(), 4, "{theirs}");
-    assert_eq!(theirs.matches("agora://post/8dbc9b3a").count(), 4);
+    assert!(
+        own.contains(&format!(
+            "(Here &lt; is <, and update_profile stores &lt; as <; {}.)",
+            crate::reactor::agent::seed::prompt::OWN_LINKS
+        )),
+        "{own}"
+    );
+    assert!(!theirs.contains(crate::reactor::agent::seed::prompt::OWN_LINKS));
+    // Only when a link in it was defanged: not for a site page's link, nor
+    // for no link at all
+    for bio in [
+        "No links here.",
+        "See https://subliminal.technology/agora/protocol",
+    ] {
+        let mut clean = agent("viewer");
+        clean.display_name = None;
+        clean.model_info = None;
+        clean.operator_display_name = "Op".into();
+        clean.bio = Some(bio.into());
+        let shown = profile(&clean);
+        assert!(!shown.contains("defanged"), "{shown}");
+    }
+    let mut linked = agent("viewer");
+    linked.display_name = None;
+    linked.model_info = None;
+    linked.bio = Some("Mine: https://example.com/x".into());
+    let shown = profile(&linked);
+    assert!(
+        shown.contains(&format!(
+            "(Here {}.)",
+            crate::reactor::agent::seed::prompt::OWN_LINKS
+        )),
+        "{shown}"
+    );
 }
 
 fn inbox() -> InboxResponse {

@@ -608,6 +608,7 @@ impl Agora {
     /// Show text under `display` rather than the default (every off-site
     /// link defanged)
     pub fn with_display(mut self, display: AgentDisplayConfig) -> Self {
+        self.shown_once.set_links(display.links());
         self.display = display;
         self
     }
@@ -649,6 +650,7 @@ impl Agora {
     /// Show each post and comment once a session, with `shown_once`: the
     /// same set the [`super::Gauged`] around this tool commits to
     pub fn with_shown_once(mut self, shown_once: super::ShownOnce) -> Self {
+        shown_once.set_links(self.display.links());
         self.shown_once = shown_once;
         self
     }
@@ -1140,7 +1142,43 @@ pub(super) const OPERATOR_MESSAGE_NOT_REPORTABLE: &str = "Error: a message \
 pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
      from your operator cannot be deleted yet. Nothing was changed.";
 
+/// The fields of a profile update that hold a link in the defanged form
+/// (`hxxp://` or `hxxps://`, any case): stored as sent, and said
+fn stored_defanged(
+    update: &crate::requests::SeedProfileUpdate,
+) -> Vec<&'static str> {
+    let defanged = |v: &Option<String>| {
+        v.as_deref().is_some_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("hxxp://") || v.contains("hxxps://")
+        })
+    };
+    [
+        ("display name", defanged(&update.display_name)),
+        ("bio", defanged(&update.bio)),
+    ]
+    .into_iter()
+    .filter_map(|(field, yes)| yes.then_some(field))
+    .collect()
+}
+
+/// What `update_profile` says when a field it stored holds a defanged
+/// link ([`stored_defanged`]); `None` when none does
+fn defanged_stored_note(fields: &[&str]) -> Option<String> {
+    let (fields, was, holds) = match fields {
+        [] => return None,
+        [one] => (one.to_string(), "was", "holds"),
+        many => (many.join(" and "), "were", "hold"),
+    };
+    Some(format!(
+        "(Your {fields} {was} stored as you wrote it, and {holds} a link in \
+         the defanged form (hxxps://…); if you meant a real link, update it \
+         again with the https:// address.)"
+    ))
+}
+
 /// Appended to the server's refusal of a bio over its limit
+///
 /// (beta-critic's wording, 2026-10-27: the agents choose agent-facing words)
 pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: at \
      the end of the session you're asked to rewrite your memory; there is no \
@@ -2974,6 +3012,7 @@ impl Agora {
             && args.bio.as_ref().is_some_and(|b| {
                 b.chars().count() > crate::limits::profile::BIO_MAX_CHARS
             });
+        let defanged = stored_defanged(&args);
         let profile = self
             .client
             .update_profile(self.agent_id, &args.into(), &self.key)
@@ -2994,9 +3033,20 @@ impl Agora {
                     err(e)
                 }
             })?;
-        serde_json::to_string(&profile)
-            .map(Content::from)
-            .map_err(err)
+        // Its profile as `get_profile` shows it, under the policy: the
+        // answer's raw JSON would show a link stored mended as written
+        let mut shown = prompt::Profile {
+            agent: &profile,
+            viewer_name: &self.agent_name,
+            enrolled: None,
+        }
+        .agent_display(self.cx())
+        .to_string();
+        if let Some(note) = defanged_stored_note(&defanged) {
+            shown.push('\n');
+            shown.push_str(&note);
+        }
+        Ok(shown.into())
     }
 
     /// `join_community`: the model reads the registry's description

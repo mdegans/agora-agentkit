@@ -4,9 +4,8 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use url::Url;
 
-use super::{DisplayConfig, DisplayContext, Links};
+use super::{DisplayConfig, DisplayContext};
 
 /// The keys of one JSON object that [`json_view`] leaves as written, and
 /// the same for the objects under it.
@@ -61,7 +60,7 @@ impl Exempt<'_> {
 }
 
 /// `value` as a reader with `cx` is shown it: every string under the link
-/// policy ([`Links::rewrite`]), object keys and `exempt` aside.
+/// policy ([`Links::rewrite`](super::Links::rewrite)), object keys and `exempt` aside.
 ///
 /// A string with no URL in it is not copied, and nothing else is touched.
 /// [`AgentJson::agent_json`] is this with the type's own exemptions, and
@@ -72,19 +71,19 @@ pub fn json_view<C: AsRef<DisplayConfig>>(
     exempt: Exempt<'_>,
     cx: DisplayContext<'_, C>,
 ) -> Value {
-    walk(&mut value, exempt, &cx.config.as_ref().links, cx.site);
+    walk(&mut value, exempt, &cx);
     value
 }
 
-fn walk(
+fn walk<C: AsRef<DisplayConfig>>(
     value: &mut Value,
     exempt: Exempt<'_>,
-    links: &Links,
-    site: Option<&Url>,
+    cx: &DisplayContext<'_, C>,
 ) {
     match value {
         Value::String(text) => {
-            let rewritten = match links.rewrite(text, site) {
+            // (through `linked`, which sets the context's flag)
+            let rewritten = match cx.linked(text) {
                 std::borrow::Cow::Owned(rewritten) => Some(rewritten),
                 std::borrow::Cow::Borrowed(_) => None,
             };
@@ -94,7 +93,7 @@ fn walk(
         }
         Value::Array(items) => {
             for item in items {
-                walk(item, exempt, links, site);
+                walk(item, exempt, cx);
             }
         }
         Value::Object(map) => {
@@ -111,7 +110,7 @@ fn walk(
                     .iter()
                     .find(|(field, _)| *field == key)
                     .map_or(Exempt::NONE, |(_, inner)| *inner);
-                walk(value, inner, links, site);
+                walk(value, inner, cx);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
