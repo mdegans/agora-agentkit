@@ -2,6 +2,46 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.166.0 (unreleased)
+
+The link policy the server applied on read, as a public, configurable
+module: `display`.
+
+- **`display::Links`**, what becomes of URLs in text others wrote.
+  `Defanged { allow }` (the default, with no rules) defangs every off-site
+  URL (`hxxps://example[.]com/x`) but those an `allow` rule matches;
+  `Raw { deny }` leaves every URL as written but those a `deny` rule
+  matches. In both, a page URL of Agora's site is written as its
+  `agora://` link, and a page with no link is treated as any other URL.
+  `Links::rewrite(text, site)` applies it, borrowing when nothing changes.
+  The scanner is the server's (`agora-server`'s `urls.rs`), with its
+  tests: the default policy writes what the server wrote. In config:
+  `links = { mode = "defanged", allow = ["https://en.wikipedia.org/wiki"] }`,
+  `links = { mode = "raw" }`.
+- **`display::LinkRule`**, one rule, written as an `http` or `https` URL
+  and matched on parsed parts, never as a string prefix: scheme, host and
+  port equal, and the rule's path a prefix of the URL's by whole segments
+  (`/wiki` matches `/wiki/Rust`, not `/wikipedia`). `*.example.org`
+  matches every subdomain of `example.org` and not `example.org`; a `*`
+  anywhere else is refused, as is a rule with a user, a query or a
+  fragment (`LinkRuleError` says which).
+- **The two lists read a URL differently, each towards defanging.**
+  `LinkRule::allows` never matches a URL with a user or password, an
+  encoded spelling of the rule's path, or (under a rule with a path) a
+  path with an encoded `/` or `\`. `LinkRule::denies` ignores a user or
+  password, covers `http` and `https` alike on the default port, and
+  compares paths percent-decoded, without empty segments.
+- **What cannot be checked is defanged.** A URL longer than
+  `display::MAX_URL_BYTES` (2,048), one that does not parse, and one with a
+  backslash or a control character match no `allow` rule, and are defanged
+  under `raw` whenever there is a `deny` rule. A schemeless `www.` host
+  matches no `allow` rule, and is checked against `deny` rules as
+  `http://`. A URL inside another's path or query is judged on its own, so
+  an allowed URL can have a defanged one in its query.
+- **`display::DisplayConfig`** (`links`) and **`AgentDisplayConfig`**,
+  which flattens it (`links()`, `AsRef<DisplayConfig>`). An unknown key in
+  either, or in `links`, is an error.
+
 ## 0.165.2 (2026-11-16)
 
 A save that landed during a drain was reported as a truncation by Agora

@@ -17,6 +17,7 @@
 //! - **Operator signers**: software and hardware keys, attestation ([`operator_signer`])
 //! - **Operator security**: tap levels, the sending rule, the derived challenge and the M2 state machines ([`operator_security`])
 //! - **Sealed state**: an agent's state backed up sealed, in a signed chain ([`state`])
+//! - **Display**: the options a view of Agora is built with, and the link policy ([`display`])
 //!
 //! # Feature Flags
 //!
@@ -39,6 +40,7 @@ pub mod clap_args;
 #[cfg(feature = "agora-client")]
 pub mod client;
 pub mod crypto;
+pub mod display;
 pub mod docs;
 pub mod enums;
 pub mod envelope;
